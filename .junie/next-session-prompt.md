@@ -19,6 +19,18 @@ QEMU runner under `tools/qemu`, the `cargo xtask test --qemu` flag, and
 the two integration test crates under
 `tests/integration/{memory_isolation,scheduler_stress}`.
 
+**Stage 3a (c) — partial.** The first slice of (c) is now on `main`:
+`kernel/arch/x86_64/src/gdt.rs` ships the per-CPU GDT + TSS + IST
+*primitives* (canonical 7-slot layout, `GdtEntry` constructors,
+`tss_descriptor` splitter, SDM-aligned `Tss`, `PerCpuGdt` builder with
+`set_ist` / `set_privilege_stack` / `finalize`, an `unsafe fn
+install(&'static mut self)` gated to `target_os = "none"`). The slice
+has 21 dedicated host unit tests, full rustdoc on every public item,
+and a Stage 3a (c, partial) section in `docs/src/platform/x86_64.md`.
+**Not yet wired** into either the BSP or the APs in
+`tests/integration/scheduler_stress_qemu` — that's part of the remaining
+work below.
+
 **Stage 3a (a)** landed the platform-discovery and interrupt-controller
 layer in `kernel/arch/x86_64` (`multiboot2`, `acpi`, `apic`,
 `apic_timer`, `bootmemory`).
@@ -63,9 +75,12 @@ blocks, tests for every invariant, no `unwrap`/`expect`/`panic!`
 outside tests and documented boot invariants, no ambient authority):
 
 1. **(c) Context-switch primitive + interrupt entry/exit prologue.**
-   - Per-CPU GDT + TSS + IST stacks installed by each AP after entering
-     long mode (today APs run on the trampoline-internal GDT
-     indefinitely; that's a known limitation flagged in `smp.rs`).
+   - **Wire** `kernel::arch::x86_64::gdt::PerCpuGdt::install` from each
+     AP (and the BSP) inside
+     `tests/integration/scheduler_stress_qemu/src/kernel.rs`,
+     replacing the trampoline-internal GDT. The *primitives* are
+     already on `main`; only the wiring + per-AP static storage + IST
+     stack arenas remain.
    - Common ISR prologue / epilogue (save GPRs + FXSAVE area + segment
      swap, RIP/CS/RFLAGS/RSS/RSP from the CPU-pushed frame).
    - Context-switch primitive `extern "C" fn switch(prev: *mut TaskCtx,

@@ -57,6 +57,7 @@ pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
 pub mod bootmemory;
+pub mod gdt;
 pub mod multiboot2;
 pub mod qemu_exit;
 pub mod serial;

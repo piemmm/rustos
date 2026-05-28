@@ -447,8 +447,32 @@ Each sub-stage delivers one architecture. They share the same checklist:
           existing test still passes). 9 new host unit tests cover
           `smp` (ApBootSlot layout, frame install, INIT-SIPI-SIPI
           ordering against a `LapicMmio` mock).
+    - [~] **(c, partial)** Per-CPU GDT + TSS + IST primitives.
+          `kernel/arch/x86_64::gdt` ships the canonical 7-slot GDT
+          layout (`GdtEntry::{kernel_code, kernel_data, user_code,
+          user_data}`), an SDM-aligned `Tss` (offsets pinned via
+          `offset_of!` against SDM Vol 3A §8.7 Figure 8-11 — `RSP0`
+          at +0x04, `IST1` at +0x24, `IOPB` at +0x66, size 0x68), a
+          `PerCpuGdt` builder with validating `set_ist` /
+          `set_privilege_stack` / `finalize` (every input checked;
+          violations surface as `IstError` — no panics), a
+          `tss_descriptor` splitter that scatters base/limit per SDM
+          §8.2.3 Figure 8-4 and clamps misuse-supplied DPL into 2
+          bits, and an `unsafe fn install(&'static mut self)` gated
+          to `target_os = "none"` that issues `lgdt`, reloads
+          DS/ES/FS/GS/SS, far-returns to reload CS, and `ltr`s the
+          TSS selector. 21 dedicated host unit tests cover every
+          non-asm invariant; a `const _` assert pins `TSS_BYTE_LEN`
+          to `size_of::<Tss>()` so a struct edit that desyncs the
+          descriptor limit fails compilation. **Not yet wired**: the
+          BSP and the APs in
+          `tests/integration/scheduler_stress_qemu` still run on the
+          trampoline-internal GDT; calling `PerCpuGdt::install` from
+          `kernel_main` and `ap_entry` is part of the next item.
     - [ ] Context-switch primitive + interrupt entry/exit prologue
-          matching `kernel/sched::SchedulerArch`.
+          matching `kernel/sched::SchedulerArch`, plus wiring
+          `PerCpuGdt::install` from the BSP/AP entry paths and
+          allocating per-CPU IST stack arenas.
     - [ ] x86_64 syscall entry stub bound to
           `kernel/syscall::Dispatcher` (the architecture-neutral
           dispatcher already validates against
