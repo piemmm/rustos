@@ -1050,7 +1050,7 @@ follow-up is its own thread and is now also complete.
 **Dependencies:** Stage 2 + at least one Stage 3 sub-stage.
 
 **Deliverables**
-- `lib/abi/src/driver/` driver traits per class
+- [x] `lib/abi/src/driver/` driver traits per class
   (`Display`, `Filesystem`, `Block`, `Net`, `Input`, `Bus`).
 - Driver host in `userland/` that loads/unloads `.rxe` driver modules,
   enforcing capabilities at load time.
@@ -1070,6 +1070,27 @@ follow-up is its own thread and is now also complete.
 **Docs**
 - `docs/src/drivers/overview.md` and one page per driver class.
 - Each driver crate ships a `README.md` (supported HW, caps, limits).
+
+**Status: in progress.**
+- `lib/abi/src/driver/` trait surface has landed: `DriverHost`,
+  `DriverHandle`, `DriverError`, `DriverKind` (`UserSpace` / `InKernel`),
+  and `DriverManifest` (frozen `abi-v1` wire layout — magic `"DRV1"`,
+  abi version, kind, capability count, syscall-table hash, signer
+  pubkey, Ed25519 signature; signed range excludes the signature
+  tail). Six class trait modules — `display`, `filesystem`, `block`,
+  `net`, `input`, `bus` — each ship the smallest method set required
+  by the Stage 4 first drivers, with `# Errors` and `# Capabilities`
+  rustdoc sections on every public item and `#[non_exhaustive]` enums
+  for forward compatibility (`AGENTS.md` §2.4 / §9). No `unwrap` /
+  `expect` / `panic!` / `unsafe` introduced. 27 new unit tests
+  (driver-mod, display, filesystem, block, net, input, bus); the
+  full `cargo test -p rustos-abi --lib` count is 63 passing, 0
+  ignored. Docs: `docs/src/drivers/overview.md` (lifecycle,
+  capability model, kinds) + `docs/src/abi/driver_traits.md` (ABI
+  reference, frozen `abi-v1`); both wired into `docs/src/SUMMARY.md`
+  under new `# Drivers` and `# ABI` top-level sections.
+- Driver host (`userland/`) and per-class first drivers remain
+  outstanding per the Stage 4 deliverable list above.
 
 ---
 

@@ -33,3 +33,5 @@ cargo install --locked cargo-deny mdbook
 
 Dual-licensed under either of [MIT](./LICENSE-MIT) or
 [Apache 2.0](./LICENSE-APACHE) at your option.
+
+RustOS is an independent, open-source hobby project. It is not affiliated with, endorsed by, or supported by the Rust Project or the Rust Foundation.
