@@ -230,10 +230,26 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `kernel/sec` were promoted to `lib/util::fmt` once
       `kernel/ipc` became a second consumer (`AGENTS.md` §2.2 / §6).
       Architecture documentation in `docs/src/architecture/ipc.md`.
-- [ ] 2.6 — `kernel/syscall` (dispatch table generated from
-      `lib/abi/src/syscalls.rs`).
-- [ ] 2.7 — `kernel/core` (kernel entry, panic handler, boot invariants,
-      global init order).
+- [x] 2.6 — `kernel/core`: architecture-neutral `kernel_main`
+      orchestrating the documented init order
+      `log → mem → sec → sched → ipc` (with Stage 2.7 syscall
+      registration plugged in afterwards); `BootInfo` hand-off type and
+      `KernelArch` trait that Stage 3 arch ports implement; panic helper
+      (`handle_panic`) that logs a structured `KERNEL_PANIC` record
+      through `lib/log` carrying CPU id and source location and halts
+      via `KernelArch::halt` — the kernel never silently resets.
+      Stage 2.6 was renumbered from the original PLAN's 2.7 to match
+      the Stage 2.6 task brief (mirrors the precedent set by Stage 2.4).
+      Audit-event IDs live in the reserved `4_000..5_000` range; per
+      `AGENTS.md` §2 the crate declares zero global mutable statics
+      (per-CPU bootstrap lives in the arch crates). Host-side
+      integration tests in `kernel/core/tests/kernel_main.rs` drive
+      `TestArch + TestSink` and lock the init-order and panic
+      contracts. Architecture documentation in
+      `docs/src/architecture/kernel.md`.
+- [ ] 2.7 — `kernel/syscall` (dispatch table generated from
+      `lib/abi/src/syscalls.rs`). Renumbered from the original PLAN's
+      2.6.
 
 ---
 

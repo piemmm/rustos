@@ -1,6 +1,6 @@
 [package]
 name = "rustos-kernel-core"
-description = "RustOS placeholder: microkernel core: entry, panic handler, init order."
+description = "RustOS microkernel core: architecture-neutral entry point, init sequencing, and panic policy."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,30 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# `test-arch` exposes the host-only `TestArch` mock used by the
+# host-side init-order and panic-behaviour tests. It is intentionally
+# not in the default feature set so production (`no_std`) builds never
+# link the mock (`AGENTS.md` §1 — no hacks). Mirrors the convention
+# established by `kernel/sched`.
+test-arch = ["rustos-kernel-sched/test-arch"]
+
+[dependencies]
+# Stage 2.6 dependency rules (issue brief): kernel/core may depend on
+# every kernel/* crate that has landed (Stages 2.1–2.5) and on the
+# shared lib/* crates `abi`, `caps`, `crypto`, `log`, and `util`.
+# Nothing else.
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
+rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
+
+[dev-dependencies]
+# Mirrors `kernel/sched`'s self-link pattern: integration tests get the
+# host-only `test-arch` feature for free without ever leaking it into a
+# production build.
+rustos-kernel-core = { path = ".", version = "=0.0.0", features = ["test-arch"] }

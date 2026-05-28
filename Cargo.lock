@@ -462,6 +462,16 @@ version = "0.0.0"
 [[package]]
 name = "rustos-kernel-core"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-kernel-core",
+ "rustos-kernel-ipc",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched",
+ "rustos-kernel-sec",
+ "rustos-kernel-sync",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-kernel-ipc"
