@@ -294,15 +294,14 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `tools/xtask/src/commands/qemu_tests.rs`. Documentation:
       new `docs/src/platform/x86_64.md` "Running Stage 2 QEMU
       tests" section (marked "Stage 3a will expand this") plus a
-      cross-link from `docs/src/architecture/kernel.md`. **Stage 2
-      status remains *in progress*** because the Stage-2
-      deliverable text (lines 154–158) requires the scheduler
-      stress test to run *under QEMU on ≥ 4 emulated cores*; that
-      requires Stage-3a SMP (AP startup, APIC timer, IPIs) which
-      is out of scope for this commit. See the Stage 3a sub-
-      checklist in §3.
+      cross-link from `docs/src/architecture/kernel.md`. The
+      Stage-2 deliverable text (lines 154–158) — *scheduler stress
+      test under QEMU on ≥ 4 emulated cores* — was satisfied by
+      Stage 3a (b) (AP startup, APIC bring-up, INIT-SIPI-SIPI) and
+      Stage 3a (c5) (real LAPIC-timer-driven preemption with a
+      `preemption_count(cpu) >= 10`-per-CPU assertion).
 
-**Status: in progress.**
+**Status: complete.**
 - All architecture-neutral sub-stages 2.1–2.7 remain complete with
   the previously-recorded evidence (coverage thresholds, fuzz
   harnesses, loom-gated tests, docs).
@@ -310,17 +309,26 @@ Do **not** begin a stage before all its listed dependencies are complete.
   under QEMU end-to-end. `cargo xtask test --qemu` is green on the
   CI host. Toolchain pinned at `nightly-2026-05-27`
   (rustc 1.98.0-nightly).
-- 2.8 partially delivers `scheduler_stress`: the cross-crate
-  workspace test on ≥ 4 simulated cores passes host-side. The
-  QEMU-on-real-cores variant is blocked on the Stage 3a sub-
-  checklist below and is the only reason Stage 2 cannot yet be
-  declared *complete*.
+- The Stage-2 `scheduler_stress` deliverable text (lines 154–158)
+  is satisfied in two complementary forms:
+    - the cross-crate workspace test on ≥ 4 simulated cores passes
+      host-side (`workspace_stress_four_cores_twenty_thousand_tasks`,
+      ~0.4 s); and
+    - `tests/integration/scheduler_stress_qemu` runs 8 192 tasks
+      across 4 real (emulated) cores under **real LAPIC-timer-driven
+      preemption** — delivered by Stage 3a (b) (AP startup via
+      INIT-SIPI-SIPI) and Stage 3a (c5) (`kernel/arch/x86_64::preempt`).
+      The QEMU run asserts `preemption_count(cpu) >= 10` per CPU and
+      ≥ 2 distinct dispatching CPUs, so a silent revert to cooperative
+      scheduling now fails CI loudly.
 - `cargo xtask ci` evidence tail (toolchain
   `nightly-2026-05-27` / rustc 1.98.0-nightly, QEMU 8.2.2,
-  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (b) added
-  the AP bring-up path and the second QEMU integration test
-  (9 new host unit tests in `kernel/arch/x86_64::smp`, 56 host
-  unit tests total across the arch crate):
+  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (c6)
+  landed the x86_64 syscall entry stub (10 new host unit tests in
+  `kernel/arch/x86_64::syscall_entry`, arch-crate host total: 110)
+  and Stage 3a (d1) split per-arch QEMU defaults into
+  `tools/qemu/src/x86_64.rs` (18 host unit tests in `rustos-qemu`,
+  up from 12):
   ```text
   xtask: [fmt --check]                     cargo fmt --all -- --check
   xtask: [clippy]                          --workspace --all-targets --locked -- -D warnings
@@ -340,10 +348,11 @@ Do **not** begin a stage before all its listed dependencies are complete.
   xtask: [abi-check]                       lib/abi/src/syscalls.rs ↔
                                            kernel/syscall/src/table.rs
   ```
-  All host test crates report `ok. … 0 failed; 0 ignored`. The
-  workspace cross-crate host stress
-  (`workspace_stress_four_cores_twenty_thousand_tasks`) still passes
-  in ~0.4 s; the new QEMU stress
+  All host test crates report `ok. … 0 failed; 0 ignored` (53 ok
+  blocks). Coverage floors per `AGENTS.md` §7 unchanged since
+  Stage 1 (`lib/caps` 98.19 % lines, `lib/crypto` 96.84 % lines,
+  workspace total 98.29 %); no kernel-side `lib/*` crate was
+  touched by (d1)/(d2). The new QEMU stress
   (`rustos-test-scheduler-stress-qemu`) brings 3 APs online via
   INIT-SIPI-SIPI and runs 8 192 tasks across 4 real (emulated) cores
   to completion (`PASS`, "distinct executing CPUs = 4"), inside the
@@ -378,8 +387,10 @@ Each sub-stage delivers one architecture. They share the same checklist:
     - [x] 16550 polled serial console on COM1,
     - [x] QEMU `isa-debug-exit` helper.
 
-  **Remaining for Stage 3a completion** (each blocks Stage 2 from
-  flipping to `Status: complete` and/or unlocks downstream stages):
+  **Remaining for Stage 3a completion** (one item left for the
+  x86_64 sub-stage — see (c7) below). Stage 2 was flipped to
+  `Status: complete` once (b) + (c5) satisfied the
+  `scheduler_stress`-under-QEMU deliverable text.
     - [x] **(a)** UEFI / Multiboot2 memory-map hand-off:
           `kernel/arch/x86_64::multiboot2` parses the Multiboot2 v2
           information structure (tags 4, 6, 14, 15, 17) zero-copy;
@@ -559,15 +570,65 @@ Each sub-stage delivers one architecture. They share the same checklist:
           unit tests in `preempt::tests` cover the vector const,
           LAPIC offsets, callback round-trip, and LAPIC→CpuId
           mapping; the arch-crate host total is now 101.
-    - [ ] x86_64 syscall entry stub bound to
-          `kernel/syscall::Dispatcher` (the architecture-neutral
-          dispatcher already validates against
-          `SYSCALL_TABLE_HASH`).
-    - [ ] Implement `kernel/core::KernelArch` against the above and
-          wire `kernel_main`.
-    - [ ] Per-arch QEMU run script `tools/qemu/x86_64.rs` (today the
-          generic `tools/qemu` runner suffices; Stage 3a will move
-          the x86_64-specific defaults out of `lib.rs::Spec`).
+    - [x] **(c6)** x86_64 syscall entry stub bound to
+          `kernel/syscall::Dispatcher`.
+          `kernel/arch/x86_64::syscall_entry` ships the
+          host-testable MSR-value math (`encode_star`,
+          `efer_with_sce`, `fmask_value`, `pack_raw_args`), the
+          per-CPU `SyscallTls { kernel_rsp0, user_rsp_save }`
+          block addressed via `IA32_KERNEL_GS_BASE`, the naked
+          `syscall_entry_stub` that builds a
+          `[u64; SYSCALL_MAX_ARGS]` argument frame and calls the
+          Rust trampoline, and an `AtomicU64`-stored
+          `SYSCALL_DISPATCH_CALLBACK` (mirroring the (c5) timer
+          callback). The trampoline fail-closes via
+          `qemu_exit::exit_failure` if it fires before a callback
+          is installed, matching the
+          `interrupts::rustos_arch_x86_64_default_interrupt`
+          posture. 10 new host unit tests in
+          `syscall_entry::tests` cover MSR addresses (Intel SDM
+          Vol 4 Table 2-2), STAR encoding bits + selector round-
+          trip, `IA32_EFER.SCE` preservation, the FMASK
+          documented-bit matrix, `RawArgs` ordering, `SyscallTls`
+          layout + 16-byte alignment, and the host-is-None
+          callback assertion. Arch-crate host total: 110. Docs:
+          `docs/src/platform/x86_64.md` Stage-3a-(c6) section +
+          `docs/src/architecture/syscalls.md` "Per-architecture
+          entry stubs" table.
+    - [ ] **(c7)** Implement `kernel/core::KernelArch` against
+          (c1)..(c6) and wire `kernel_main` via a dedicated
+          `rustos-kernel` bin crate that is the single writer of
+          `syscall_entry::set_dispatch_callback`. **Remaining x86_64
+          checklist item.** The two existing QEMU integration tests
+          (`memory_isolation`, `scheduler_stress_qemu`) supply their
+          own `kernel_main`; the new wiring lives in a separate
+          binary so that contract is preserved. Deferred from the
+          (c7)+(d1)+(d2) session because (c7) alone is a new
+          freestanding bootable binary plus a `SchedulerArch` +
+          `KernelArch` impl, larger than one session can land while
+          keeping `cargo xtask ci` (which includes `--qemu` under
+          OVMF + grub-mkrescue) green at every commit head.
+    - [x] **(d1)** Per-arch QEMU run script
+          `tools/qemu/src/x86_64.rs`. The generic
+          `tools/qemu::Spec`/`Runner` are now architecture-neutral;
+          the x86_64 defaults (`DEFAULT_RAM_MIB = 256`,
+          `ISA_DEBUG_EXIT_IOPORT/IOSIZE`, `QEMU_BINARY`, OVMF
+          discovery + UEFI pflash flags, GRUB-EFI ISO build
+          dispatch, full QEMU argv) live in a dedicated module
+          which `Runner::run` enters via a single `match` on
+          `Spec::arch`. The argv contract is asserted by 8 new
+          host unit tests using a pure `build_argv` helper that
+          takes a fake `OvmfPaths`, so the tests run on hosts
+          without the `ovmf` package installed (`rustos-qemu`
+          host total: 18, up from 12). The top-level
+          `ISA_DEBUG_EXIT_IOPORT` / `ISA_DEBUG_EXIT_IOSIZE`
+          remain as re-exports with a drift-guard unit test so the
+          kernel side (`kernel/arch/x86_64::qemu_exit`) cannot
+          silently desync from the host runner. The two existing
+          QEMU integration tests and the `cargo xtask test --qemu`
+          driver continue to pass — the refactor is internal.
+          Docs: `docs/src/platform/x86_64.md` Stage-3a-(d1)
+          section.
 - 3b — `kernel/arch/aarch64` (Raspberry Pi 3/4/5 + QEMU virt; GIC).
 - 3c — `kernel/arch/riscv64` (QEMU virt; PLIC, CLINT).
 - 3d — `kernel/arch/wasm32` (browser sandbox; cooperative scheduling backed
