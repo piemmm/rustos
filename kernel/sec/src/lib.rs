@@ -52,7 +52,7 @@ pub mod identity;
 pub mod manifest;
 
 pub use audit::AuditEvent;
-pub use captable::{TaskCapabilities, TaskId};
+pub use captable::{CapTable, TaskCapabilities, TaskId};
 pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
     MAX_SUPPLEMENTARY_GROUPS,

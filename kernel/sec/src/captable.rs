@@ -19,6 +19,10 @@
 //! attached purely so the audit trail can attribute a record to a
 //! principal; it confers no extra capability.
 
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+
 use rustos_abi::Errno;
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use rustos_crypto::Ed25519PublicKey;
@@ -273,6 +277,109 @@ impl TaskCapabilities {
     }
 }
 
+/// Per-task capability registry — the `TaskId → TaskCapabilities` lookup
+/// the syscall dispatcher consults to recover a caller's effective
+/// capability set after the per-CPU current-task slot
+/// (`Scheduler::current_task`, Stage 2.7 follow-up (f1)) has named the
+/// caller.
+///
+/// The registry owns the per-task records: callers pass a freshly
+/// derived [`TaskCapabilities`] in via [`Self::insert`] (at task
+/// creation, after `TaskCapabilities::derive` has audited the
+/// intersection) and pull it back out via [`Self::remove`] when the
+/// task exits. Lookups go through [`Self::caps_for`].
+///
+/// # Synchronisation
+///
+/// `CapTable` carries no interior mutability. The owning scope —
+/// `KernelState` in `kernel/core::init` — is responsible for whatever
+/// lock policy is appropriate (a reader-preferring `RwLock` mirrors
+/// what `Scheduler::tasks` already uses for the same shape of access
+/// pattern: many concurrent syscall-context readers, occasional
+/// task-creation writers). Pushing the lock outside the type keeps
+/// the borrow `caps_for(&self, _) -> Option<&TaskCapabilities>`
+/// natural and lets `KernelState` compose this registry with the
+/// scheduler under a single lock-ordering policy
+/// (`AGENTS.md` §2.1 / §2.4 — no hidden global state, no interface
+/// creep).
+///
+/// # No ambient authority
+///
+/// Inserts never widen capabilities. The caller-supplied
+/// [`TaskCapabilities`] has already passed through the
+/// intersection-on-derive invariant in [`TaskCapabilities::derive`];
+/// the registry simply stores it. There is no "make this task root"
+/// shortcut and no implicit grant on lookup.
+#[derive(Debug, Default)]
+pub struct CapTable {
+    entries: BTreeMap<TaskId, TaskCapabilities>,
+}
+
+impl CapTable {
+    /// Construct an empty registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// Register a task's capabilities. The [`TaskId`] is taken from the
+    /// record (`caps.task()`); callers do not pass it separately so the
+    /// id and the body cannot diverge.
+    ///
+    /// Returns the previously-registered record, if any. A non-`None`
+    /// return is an unusual condition — task ids are not recycled
+    /// within a single scheduler instance (see
+    /// `kernel/sched::scheduler` invariants) — but is surfaced rather
+    /// than silently dropped so callers can audit / refuse it.
+    pub fn insert(&mut self, caps: TaskCapabilities) -> Option<TaskCapabilities> {
+        self.entries.insert(caps.task(), caps)
+    }
+
+    /// Borrow the registry entry for `task` immutably.
+    ///
+    /// Used by the syscall dispatcher's `cap_query` / `cap_revoke`
+    /// paths: the caller's effective set is read but not mutated.
+    #[must_use]
+    pub fn caps_for(&self, task: TaskId) -> Option<&TaskCapabilities> {
+        self.entries.get(&task)
+    }
+
+    /// Borrow the registry entry for `task` mutably. Used by the
+    /// syscall dispatcher's `cap_delegate` / `cap_revoke` paths,
+    /// which call `TaskCapabilities::{delegate,revoke,apply_token}`
+    /// directly on the borrowed record.
+    pub fn caps_for_mut(&mut self, task: TaskId) -> Option<&mut TaskCapabilities> {
+        self.entries.get_mut(&task)
+    }
+
+    /// Remove the registry entry for `task`, returning it.
+    ///
+    /// Called by the syscall dispatcher's `exit` handler after
+    /// `Scheduler::exit` has flipped the task's state; the returned
+    /// record can be inspected by tests, then dropped. Returning the
+    /// record (instead of swallowing it) lets the caller zero out any
+    /// capability material in line with the kernel allocator's
+    /// "zero-on-free for credential-holding memory" requirement
+    /// (`AGENTS.md` §4).
+    pub fn remove(&mut self, task: TaskId) -> Option<TaskCapabilities> {
+        self.entries.remove(&task)
+    }
+
+    /// Number of tasks currently registered. Primarily for tests.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `true` if no task is currently registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +552,122 @@ mod tests {
             &sink,
         );
         assert!(t.effective().is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // Stage 2.7 follow-up (f2): per-task CapTable registry.
+    // ---------------------------------------------------------------
+
+    fn make_caps(task: u64, caps: &[rustos_abi::CapabilityId]) -> TaskCapabilities {
+        let grant = caps_of(caps);
+        let sink = RecordingSink::new();
+        TaskCapabilities::derive(TaskId(task), UserId(1000), grant, grant, &sink)
+    }
+
+    #[test]
+    fn captable_is_empty_when_constructed() {
+        let table = CapTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+        assert!(table.caps_for(TaskId(1)).is_none());
+    }
+
+    #[test]
+    fn captable_insert_then_lookup_returns_record() {
+        let mut table = CapTable::new();
+        let caps = make_caps(7, &[rustos_abi::CapabilityId::FS_MOUNT]);
+        assert!(table.insert(caps).is_none());
+        assert_eq!(table.len(), 1);
+        let got = table.caps_for(TaskId(7)).expect("registered");
+        assert!(got.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert_eq!(got.task(), TaskId(7));
+    }
+
+    #[test]
+    fn captable_lookup_miss_returns_none() {
+        let mut table = CapTable::new();
+        let caps = make_caps(1, &[rustos_abi::CapabilityId::FS_MOUNT]);
+        table.insert(caps);
+        assert!(table.caps_for(TaskId(2)).is_none());
+    }
+
+    #[test]
+    fn captable_insert_returns_previous_record_on_duplicate_id() {
+        // Task ids are not recycled in `kernel/sched`, so a duplicate
+        // insert is a real anomaly. Surface it via the return value so
+        // a caller can audit / refuse rather than silently lose state.
+        let mut table = CapTable::new();
+        table.insert(make_caps(3, &[rustos_abi::CapabilityId::FS_MOUNT]));
+        let displaced = table.insert(make_caps(3, &[rustos_abi::CapabilityId::NET_RAW]));
+        let prior = displaced.expect("first record returned");
+        assert!(prior.has(rustos_abi::CapabilityId::FS_MOUNT));
+        // The registry now reflects the second insert only.
+        assert_eq!(table.len(), 1);
+        let current = table.caps_for(TaskId(3)).expect("present");
+        assert!(current.has(rustos_abi::CapabilityId::NET_RAW));
+        assert!(!current.has(rustos_abi::CapabilityId::FS_MOUNT));
+    }
+
+    #[test]
+    fn captable_remove_returns_and_evicts_record() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(9, &[rustos_abi::CapabilityId::FS_MOUNT]));
+        let evicted = table.remove(TaskId(9)).expect("present before remove");
+        assert!(evicted.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(table.is_empty());
+        assert!(table.caps_for(TaskId(9)).is_none());
+        // Idempotent: a second remove returns None and leaves the
+        // registry empty.
+        assert!(table.remove(TaskId(9)).is_none());
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn captable_caps_for_mut_supports_revoke_in_place() {
+        // The dispatcher's `cap_revoke` handler reaches `TaskCapabilities`
+        // through `caps_for_mut`; this test exercises that path so the
+        // mutable lookup is covered by the same security-relevant
+        // assertions as `caps_for`.
+        let mut table = CapTable::new();
+        table.insert(make_caps(
+            11,
+            &[
+                rustos_abi::CapabilityId::FS_MOUNT,
+                rustos_abi::CapabilityId::NET_RAW,
+            ],
+        ));
+        let sink = RecordingSink::new();
+        let entry = table.caps_for_mut(TaskId(11)).expect("present");
+        assert!(entry.revoke(rustos_abi::CapabilityId::FS_MOUNT, &sink));
+        let after = table.caps_for(TaskId(11)).expect("still present");
+        assert!(!after.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(after.has(rustos_abi::CapabilityId::NET_RAW));
+    }
+
+    #[test]
+    fn captable_stores_multiple_tasks_independently() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(1, &[rustos_abi::CapabilityId::FS_MOUNT]));
+        table.insert(make_caps(2, &[rustos_abi::CapabilityId::NET_RAW]));
+        table.insert(make_caps(3, &[rustos_abi::CapabilityId::DRV_LOAD]));
+        assert_eq!(table.len(), 3);
+        assert!(table
+            .caps_for(TaskId(1))
+            .expect("1")
+            .has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(table
+            .caps_for(TaskId(2))
+            .expect("2")
+            .has(rustos_abi::CapabilityId::NET_RAW));
+        assert!(table
+            .caps_for(TaskId(3))
+            .expect("3")
+            .has(rustos_abi::CapabilityId::DRV_LOAD));
+        // Removing one leaves the others intact (no aliasing).
+        table.remove(TaskId(2));
+        assert_eq!(table.len(), 2);
+        assert!(table.caps_for(TaskId(2)).is_none());
+        assert!(table.caps_for(TaskId(1)).is_some());
+        assert!(table.caps_for(TaskId(3)).is_some());
     }
 }

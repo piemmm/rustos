@@ -17,6 +17,10 @@
 - [Kernel IPC subsystem](./architecture/ipc.md)
 - [Kernel syscall subsystem](./architecture/syscalls.md)
 
+# Security
+
+- [Per-task capability registry](./security/captable.md)
+
 # Shared libraries
 
 - [Overview](./lib/overview.md)
