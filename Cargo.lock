@@ -466,6 +466,16 @@ version = "0.0.0"
 [[package]]
 name = "rustos-kernel-ipc"
 version = "0.0.0"
+dependencies = [
+ "loom",
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-kernel-sync",
+ "rustos-log",
+ "rustos-util",
+]
 
 [[package]]
 name = "rustos-kernel-mem"
@@ -496,6 +506,7 @@ dependencies = [
  "rustos-caps",
  "rustos-crypto",
  "rustos-log",
+ "rustos-util",
 ]
 
 [[package]]

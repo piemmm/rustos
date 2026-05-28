@@ -206,8 +206,30 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `kernel/sec/tests/proptest_invariants.rs`. Documentation in
       `docs/src/architecture/security.md`. Stage 2.4 was renumbered
       from the original PLAN's 2.5 to match the Stage 2.4 task brief.
-- [ ] 2.5 — `kernel/ipc` (capability-checked ports, shared memory,
-      async notifications).
+- [x] 2.5 — `kernel/ipc`: capability-checked typed message ports
+      with a lock-free closed-state fast path
+      (`kernel/ipc/src/port.rs`), explicit capability-gated
+      shared-memory objects backed by `kernel/mem`'s zero-on-free
+      `SensitiveBuffer` whose revocation atomically invalidates every
+      live mapping (`kernel/ipc/src/shmem.rs`), and lossless
+      OR-accumulating asynchronous notifications gated by the same
+      bind-/send-time capability split as ports
+      (`kernel/ipc/src/notify.rs`). Per-endpoint required-capability
+      declarations are enforced at port creation **and** on every
+      send; receivers do not re-check (`AGENTS.md` §5.2 final bullet).
+      Every rejection path emits one structured audit record via
+      `kernel/ipc/src/audit.rs` against the reserved
+      `3_000..4_000` event-id range. Tests: inline unit tests in each
+      module, integration tests in `kernel/ipc/tests/integration.rs`
+      for the destruction-during-in-flight-send and
+      shared-memory-revocation-racing-mapper scenarios, plus a
+      loom-gated harness for the send fast path in
+      `kernel/ipc/tests/loom.rs`. `Errno::MessageTooLarge`
+      (semantically `EMSGSIZE`) was appended to `lib/abi`. The
+      no-allocation audit-field formatters previously living in
+      `kernel/sec` were promoted to `lib/util::fmt` once
+      `kernel/ipc` became a second consumer (`AGENTS.md` §2.2 / §6).
+      Architecture documentation in `docs/src/architecture/ipc.md`.
 - [ ] 2.6 — `kernel/syscall` (dispatch table generated from
       `lib/abi/src/syscalls.rs`).
 - [ ] 2.7 — `kernel/core` (kernel entry, panic handler, boot invariants,

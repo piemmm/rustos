@@ -275,88 +275,13 @@ impl IdentityTableBuilder {
     }
 }
 
-/// Render `value` into `buf` as decimal text and return the populated
-/// sub-slice. `buf` must be at least 12 bytes so the largest `i32` plus
-/// its sign fits without panicking.
-pub(crate) fn format_i32(value: i32, buf: &mut [u8; 12]) -> &str {
-    // The kernel audit path is `no_std`; we cannot rely on `alloc::format!`.
-    // Render into a stack buffer with a fixed-size inline implementation
-    // that never panics for any `i32` including `i32::MIN`.
-    let negative = value < 0;
-    // Use the `u32` unsigned magnitude so `i32::MIN.abs()` does not
-    // overflow. Two-step widening keeps the bit pattern intact.
-    let mut n: u32 = if negative {
-        // `value as i64` widens losslessly; negating the widened value
-        // and casting back to `u32` yields the absolute magnitude.
-        let widened = -i64::from(value);
-        // The magnitude of any `i32` (including `i32::MIN`) fits in a
-        // `u32` exactly: `-i32::MIN as i64 == 2^31` is representable.
-        // The truncation and sign-loss are therefore provably lossless.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            widened as u32
-        }
-    } else {
-        // A non-negative `i32` fits in `u32` by construction.
-        #[allow(clippy::cast_sign_loss)]
-        {
-            value as u32
-        }
-    };
-    let mut tmp = [0u8; 10];
-    let mut pos = tmp.len();
-    if n == 0 {
-        pos -= 1;
-        tmp[pos] = b'0';
-    } else {
-        while n > 0 {
-            pos -= 1;
-            // `n % 10` is in `0..=9`, the cast to `u8` is lossless.
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                tmp[pos] = b'0' + (n % 10) as u8;
-            }
-            n /= 10;
-        }
-    }
-    let mut out_pos = 0;
-    if negative {
-        buf[out_pos] = b'-';
-        out_pos += 1;
-    }
-    let digits = &tmp[pos..];
-    buf[out_pos..out_pos + digits.len()].copy_from_slice(digits);
-    out_pos += digits.len();
-    // SAFETY-INVARIANT: every byte written above is ASCII (`'-'` or
-    // `b'0'..=b'9'`), so the resulting slice is valid UTF-8 by
-    // construction. Confirmed by the unit test `format_i32_examples`.
-    core::str::from_utf8(&buf[..out_pos]).unwrap_or("?")
-}
-
-fn format_usize(value: usize, buf: &mut [u8; 12]) -> &str {
-    // Counts that exceed `i32::MAX` are impossible for a verified
-    // identity table (bounded by kernel memory and the supplementary
-    // cap), but we saturate defensively rather than panicking.
-    let clamped = i32::try_from(value).unwrap_or(i32::MAX);
-    format_i32(clamped, buf)
-}
-
-/// Render `value` into `buf` as zero-padded hex text and return the
-/// populated sub-slice. Used to attach opaque numeric identifiers (task
-/// ids, signer key fingerprints) to audit records.
-pub(crate) fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
-    for (i, slot) in buf.iter_mut().enumerate() {
-        // `(value >> shift) & 0xF` is in `0..=15`; cast to `u8` is lossless.
-        #[allow(clippy::cast_possible_truncation)]
-        let nibble = ((value >> ((15 - i) * 4)) & 0xF) as u8;
-        *slot = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'a' + (nibble - 10)
-        };
-    }
-    core::str::from_utf8(&buf[..]).unwrap_or("?")
-}
+// The audit-field formatters (`format_i32`, `format_usize`,
+// `format_hex_u64`) used to live here. They were extracted into
+// `lib/util::fmt` in Stage 2.5 once `kernel/ipc` became a second
+// caller (`AGENTS.md` §2.2 / §6). Re-exported under their original
+// crate-local names so the existing call sites and tests are not
+// touched purely for the rename.
+pub(crate) use rustos_util::fmt::{format_hex_u64, format_i32, format_usize};
 
 #[cfg(test)]
 mod tests {

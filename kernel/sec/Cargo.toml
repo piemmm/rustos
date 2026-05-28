@@ -14,14 +14,18 @@ workspace = true
 [dependencies]
 # Stage 2.4 dependency rules (issue brief): kernel/sec may depend only on
 # kernel/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
-# `crypto`, and `log`. Nothing else is needed at this stage — table
-# storage is bounded and `no_std`, no synchronisation primitives are
-# required by the in-memory builder/verifier API. Pulling in kernel/sync
-# or kernel/mem "just in case" would violate AGENTS.md §2.3 (no bloat).
+# `crypto`, `log`, and `util`. Nothing else is needed at this stage —
+# table storage is bounded and `no_std`, no synchronisation primitives
+# are required by the in-memory builder/verifier API. Pulling in
+# kernel/sync or kernel/mem "just in case" would violate AGENTS.md §2.3
+# (no bloat). `lib/util` arrived in Stage 2.5 (`kernel/ipc`) as the
+# extraction target for the audit-field formatters previously duplicated
+# here (`AGENTS.md` §2.2 / §6).
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # Tests need to sign manifests and tokens with real Ed25519 keys. The

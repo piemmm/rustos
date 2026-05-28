@@ -6,13 +6,11 @@
 //! of subsequent stages — adding speculative helpers ahead of demand is
 //! explicitly forbidden.
 //!
-//! As of Stage 1 no utility has yet earned its place here:
+//! Members:
 //!
-//! * The 256-bit bitset that Stage 1 introduced has two future callers
-//!   (`lib/caps` already; `kernel/sched` planned in Stage 2) so it lives
-//!   in [`rustos-collections`](../rustos_collections/index.html), not here.
-//! * Endianness helpers in `lib/abi` are used only by ABI decoders and so
-//!   stay local to that crate.
+//! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
+//!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
+//!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
 //!
 //! Promoting code into this crate requires a `PLAN.md` note documenting
 //! the two-or-more concrete callers.
@@ -20,3 +18,5 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+
+pub mod fmt;

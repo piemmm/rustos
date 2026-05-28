@@ -37,6 +37,13 @@ pub enum Errno {
     SignatureInvalid = 9,
     /// The ABI version stored in a manifest is not supported by this kernel.
     AbiVersionUnsupported = 10,
+    /// A message payload exceeds the maximum the receiver advertised.
+    ///
+    /// Semantically equivalent to POSIX `EMSGSIZE`. Emitted by `kernel/ipc`
+    /// when a sender hands the port a payload larger than the port's
+    /// declared `max_payload`, or larger than the global
+    /// [`crate::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN`] cap.
+    MessageTooLarge = 11,
 }
 
 impl Errno {
@@ -60,6 +67,7 @@ impl fmt::Display for Errno {
             Self::DelegationWiden => "delegation would widen authority",
             Self::SignatureInvalid => "signature invalid",
             Self::AbiVersionUnsupported => "abi version unsupported",
+            Self::MessageTooLarge => "message too large",
         };
         f.write_str(message)
     }
@@ -82,6 +90,7 @@ mod tests {
         assert_eq!(Errno::DelegationWiden.as_i32(), 8);
         assert_eq!(Errno::SignatureInvalid.as_i32(), 9);
         assert_eq!(Errno::AbiVersionUnsupported.as_i32(), 10);
+        assert_eq!(Errno::MessageTooLarge.as_i32(), 11);
     }
 
     #[test]

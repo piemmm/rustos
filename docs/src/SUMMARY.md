@@ -13,6 +13,7 @@
 - [Kernel memory subsystem](./architecture/memory.md)
 - [Kernel scheduler](./architecture/scheduler.md)
 - [Kernel security subsystem](./architecture/security.md)
+- [Kernel IPC subsystem](./architecture/ipc.md)
 
 # Shared libraries
 
