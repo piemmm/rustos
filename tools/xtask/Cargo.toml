@@ -27,3 +27,12 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+# `abi-check` (Stage 2.7) needs to recompute the SHA-256 fingerprint of
+# the frozen `abi-v1` syscall table and compare it with the kernel
+# mirror. The cheapest way to keep the two truly synchronised is to
+# depend on both crates directly and run the comparison as ordinary
+# Rust: a future ABI change cannot pass `cargo build` without breaking
+# the cross-check.
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }

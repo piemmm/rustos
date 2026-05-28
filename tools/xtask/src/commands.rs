@@ -9,6 +9,7 @@ use std::path::Path;
 
 use crate::Context;
 
+mod abi_check;
 mod linkcheck;
 
 /// One sanctioned developer workflow.
@@ -169,35 +170,20 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
-    // The ABI itself is defined in Stage 1. Until `lib/abi/src/syscalls.rs`
-    // exists there is nothing to diff — but we still verify the file is
-    // *absent* rather than silently skipping, so that the day someone adds
-    // it without wiring up code-generation we fail loudly.
-    let syscalls = ctx.workspace_root.join("lib/abi/src/syscalls.rs");
-    let table = ctx.workspace_root.join("kernel/syscall/src/table.rs");
-
-    match (syscalls.exists(), table.exists()) {
-        (false, false) => {
-            eprintln!(
-                "xtask: [abi-check] no syscall ABI table yet \
-                 (the cross-checked pair lands with Stage 2; see PLAN.md)."
-            );
-            Ok(())
-        }
-        (true, false) | (false, true) => Err(format!(
-            "abi-check: `{}` and `{}` must be added together; \
-             see AGENTS.md §9.",
-            relative(&ctx.workspace_root, &syscalls),
-            relative(&ctx.workspace_root, &table),
-        )),
-        (true, true) => {
-            // Real ABI cross-check belongs here once `lib/abi` ships. Until
-            // then refusing to handle the case keeps us honest.
-            Err("abi-check: ABI sources exist but the diff tool is not yet \
-                 implemented; complete Stage 1 before enabling this branch."
-                .to_string())
-        }
-    }
+    // Stage 2.7: real syscall ABI cross-check. `abi_check::check_sync`
+    // enforces both the pair-existence rule (`AGENTS.md` §9) and the
+    // SHA-256 hash equality between the kernel-side table and the
+    // `lib/abi` source of truth. Its unit tests exercise the desync
+    // failure mode against a mutated fixture (see
+    // `tools/xtask/src/commands/abi_check.rs`).
+    let syscalls = ctx.workspace_root.join(abi_check::DEFAULT_SYSCALLS_PATH);
+    let table = ctx.workspace_root.join(abi_check::DEFAULT_TABLE_PATH);
+    eprintln!(
+        "xtask: [abi-check] {} ↔ {}",
+        relative(&ctx.workspace_root, &syscalls),
+        relative(&ctx.workspace_root, &table),
+    );
+    abi_check::check_sync(&ctx.workspace_root, &syscalls, &table)
 }
 
 fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {

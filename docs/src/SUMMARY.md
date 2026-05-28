@@ -15,6 +15,7 @@
 - [Kernel scheduler](./architecture/scheduler.md)
 - [Kernel security subsystem](./architecture/security.md)
 - [Kernel IPC subsystem](./architecture/ipc.md)
+- [Kernel syscall subsystem](./architecture/syscalls.md)
 
 # Shared libraries
 

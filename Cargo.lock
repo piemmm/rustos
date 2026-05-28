@@ -530,6 +530,14 @@ dependencies = [
 [[package]]
 name = "rustos-kernel-syscall"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-kernel-sec",
+ "rustos-log",
+ "rustos-util",
+]
 
 [[package]]
 name = "rustos-log"
@@ -554,6 +562,11 @@ version = "0.0.0"
 [[package]]
 name = "rustos-xtask"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-crypto",
+ "rustos-kernel-syscall",
+]
 
 [[package]]
 name = "rustversion"

@@ -247,9 +247,32 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `TestArch + TestSink` and lock the init-order and panic
       contracts. Architecture documentation in
       `docs/src/architecture/kernel.md`.
-- [ ] 2.7 — `kernel/syscall` (dispatch table generated from
+- [x] 2.7 — `kernel/syscall` (dispatch table generated from
       `lib/abi/src/syscalls.rs`). Renumbered from the original PLAN's
-      2.6.
+      2.6. `lib/abi/src/syscalls.rs` was finalised with the frozen
+      `abi-v1` `SyscallSpec` table (eight syscalls: `yield`, `exit`,
+      `ipc_send`, `ipc_recv`, `cap_query`, `cap_delegate`,
+      `cap_revoke`, `clock_get`) and a fixed-stride `ENCODED_TABLE`
+      whose SHA-256 fingerprint pins the contract. The kernel side
+      (`kernel/syscall/src/table.rs`) owns the architecture-neutral
+      `Dispatcher`, a `SyscallHandlers` trait plugged in by
+      `kernel/core`, type-driven argument validation, and the
+      `SYSCALL_TABLE_HASH` constant the kernel re-checks at boot via
+      `verify_table_hash`; per-architecture entry stubs that build
+      `RawArgs` from syscall registers are deferred to Stage 3 per the
+      task brief. Audit IDs live in the reserved `5_000..6_000` range
+      (`kernel/syscall/src/audit.rs`) with one record per security
+      decision (`AGENTS.md` §5.4.4). `cargo xtask abi-check` was
+      extended in `tools/xtask/src/commands/abi_check.rs` to (a)
+      refuse if either half of the contract is missing and (b)
+      independently recompute `sha256(rustos_abi::ENCODED_TABLE)` and
+      compare it against the on-disk literal **and** the linked
+      kernel constant; a desync negative-test mutates a temp copy of
+      the table to prove the diff tool is not a no-op. A
+      deterministic 100 000-iteration fuzz harness
+      (`kernel/syscall/tests/fuzz_args.rs`) cross-checks the
+      dispatcher's accept/reject decision against an independent
+      mirror. Documentation in `docs/src/architecture/syscalls.md`.
 
 ---
 

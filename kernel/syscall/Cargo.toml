@@ -1,6 +1,6 @@
 [package]
 name = "rustos-kernel-syscall"
-description = "RustOS placeholder: syscall dispatch."
+description = "RustOS kernel syscall dispatch: the generated abi-v1 table and its enforcement layer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,16 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# Stage 2.7 dependency rules (issue brief): kernel/syscall plugs into the
+# already-shipped Stage 2 subsystems through trait objects, so the crate
+# only names the ABI/capability/security/log/crypto libraries directly.
+# Concrete dispatch into kernel/ipc, kernel/sched, and so on lives in
+# `kernel/core` where the wiring is owned (`AGENTS.md` §2.3, no bloat).
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
