@@ -10,11 +10,12 @@
 //!
 //! A *QEMU integration test* is a `no_std`, `no_main` kernel binary built for
 //! one of the Tier-1 bare-metal targets. The binary signals its result back
-//! to the host through the QEMU `isa-debug-exit` device:
+//! to the host through an architecture-specific debug-exit device (today only
+//! x86_64's `isa-debug-exit`; Stage 3b/3c/3d ports will add their own):
 //!
-//! * Writing the byte `SUCCESS_EXIT_CODE` (`0x10`) to the device's I/O port
-//!   causes QEMU to exit with status `(0x10 << 1) | 1 == 0x21` (33). The
-//!   runner treats this — and **only** this — as success.
+//! * Writing the byte `SUCCESS_EXIT_CODE` (`0x10`) to the device causes QEMU
+//!   to exit with status `(0x10 << 1) | 1 == 0x21` (33). The runner treats
+//!   this — and **only** this — as success.
 //! * Writing any other byte causes QEMU to exit with a different status; the
 //!   runner treats every such status as a test failure.
 //!
@@ -34,6 +35,15 @@
 //!   cannot block subsequent tests.
 //! * Inherits QEMU's stdout/stderr through capture so the failure report can
 //!   include the full serial log without interleaving with later tests.
+//!
+//! # Per-architecture surface
+//!
+//! Architecture-specific defaults (RAM size, OVMF/UEFI flags, debug-exit
+//! device) and argv assembly live in dedicated modules (`x86_64` today;
+//! Stage 3b/3c/3d add `aarch64`, `riscv64`, `wasm32`). The generic types in
+//! this file — [`Outcome`], [`Arch`], [`Spec`], [`Runner`] — are
+//! architecture-neutral; [`Runner::run`] dispatches into the per-arch module
+//! through a single `match` on [`Spec::arch`].
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -45,22 +55,29 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub mod iso;
+pub mod x86_64;
 
-/// Byte the kernel writes to the QEMU `isa-debug-exit` device to report
-/// success. The corresponding QEMU process exit status is
+/// Byte the kernel writes to its architecture-specific debug-exit device to
+/// report success. The corresponding QEMU process exit status is
 /// `(SUCCESS_EXIT_CODE << 1) | 1`.
 pub const SUCCESS_EXIT_CODE: u8 = 0x10;
 
-/// Byte the kernel writes to the QEMU `isa-debug-exit` device to report
-/// failure. The runner treats every non-success exit status as failure;
-/// the kernel-side helper uses this value for clarity in logs.
+/// Byte the kernel writes to its architecture-specific debug-exit device to
+/// report failure. The runner treats every non-success exit status as
+/// failure; the kernel-side helper uses this value for clarity in logs.
 pub const FAILURE_EXIT_CODE: u8 = 0x11;
 
 /// I/O port the QEMU `isa-debug-exit` device listens on for x86_64 tests.
-pub const ISA_DEBUG_EXIT_IOPORT: u16 = 0xf4;
+///
+/// Re-exported from [`x86_64::ISA_DEBUG_EXIT_IOPORT`] for callers that
+/// already depend on the top-level module.
+pub const ISA_DEBUG_EXIT_IOPORT: u16 = x86_64::ISA_DEBUG_EXIT_IOPORT;
 
 /// I/O port size the QEMU `isa-debug-exit` device is configured with.
-pub const ISA_DEBUG_EXIT_IOSIZE: u8 = 0x04;
+///
+/// Re-exported from [`x86_64::ISA_DEBUG_EXIT_IOSIZE`] for callers that
+/// already depend on the top-level module.
+pub const ISA_DEBUG_EXIT_IOSIZE: u8 = x86_64::ISA_DEBUG_EXIT_IOSIZE;
 
 /// Outcome of running a QEMU integration test.
 #[derive(Debug)]
@@ -109,12 +126,14 @@ impl Outcome {
     }
 }
 
-/// Per-architecture defaults the runner uses to construct a QEMU invocation.
+/// Tier-1 architecture this runner can target.
 ///
-/// Today only `x86_64` is supported; Stage 3b/3c/3d add their own variants.
+/// Only `X86_64` ships today; Stage 3b/3c/3d add the remaining Tier-1
+/// targets behind their own per-arch modules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Arch {
-    /// `qemu-system-x86_64`, BIOS boot, `isa-debug-exit` on port `0xf4`.
+    /// `qemu-system-x86_64`, UEFI boot via OVMF, `isa-debug-exit` on port
+    /// `0xf4`. See the [`x86_64`] module for the full argv contract.
     X86_64,
 }
 
@@ -123,54 +142,54 @@ impl Arch {
     #[must_use]
     pub fn qemu_binary(self) -> &'static str {
         match self {
-            Arch::X86_64 => "qemu-system-x86_64",
+            Arch::X86_64 => x86_64::QEMU_BINARY,
         }
     }
 }
 
-/// Configuration for a single QEMU test invocation.
+/// Architecture-neutral configuration for a single QEMU test invocation.
 ///
 /// Built by the caller (typically `cargo xtask test --qemu`) and consumed by
-/// [`Runner::run`]. Fields are public so callers can construct one inline
-/// without a builder; defaults appropriate for x86_64 BIOS boot live on
+/// [`Runner::run`]. Fields that are *only* meaningful on one architecture
+/// (RAM size, OVMF flags, debug-exit device, ISO build) live in the
+/// per-arch modules (`x86_64`, etc.) rather than on `Spec` itself, so this
+/// type stays honest as Stage 3b/3c/3d add their own ports.
+///
+/// Defaults appropriate for x86_64 UEFI boot live on
 /// [`Spec::for_x86_64_kernel`].
 #[derive(Debug)]
 pub struct Spec {
     /// Architecture to target.
     pub arch: Arch,
-    /// Path to the kernel ELF that QEMU will load via `-kernel`.
+    /// Path to the kernel ELF that QEMU will load.
     pub kernel: PathBuf,
     /// Number of emulated CPUs (`-smp`). Must be `>= 1`.
     pub cpus: u32,
-    /// RAM size for the guest in mebibytes (`-m`).
-    pub ram_mib: u32,
     /// Hard wall-clock deadline. The runner kills QEMU if this elapses.
     pub timeout: Duration,
-    /// Extra arguments appended verbatim to the QEMU command line. Use
-    /// sparingly — they bypass the runner's input validation.
+    /// Extra arguments appended verbatim to the QEMU command line after the
+    /// per-arch defaults. Use sparingly — they bypass the runner's input
+    /// validation.
     pub extra_args: Vec<OsString>,
 }
 
 impl Spec {
     /// Minimal x86_64 UEFI-boot spec suitable for a Stage-2 QEMU integration
-    /// test. Defaults: single CPU, 256 MiB of RAM, 60 s timeout.
-    ///
-    /// 256 MiB is comfortable headroom for OVMF + GRUB + the test kernel;
-    /// smaller values trip OVMF's own minimum-RAM checks on some
-    /// distributions.
+    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM and
+    /// firmware come from the [`x86_64`] module.
     #[must_use]
     pub fn for_x86_64_kernel(kernel: impl Into<PathBuf>) -> Self {
         Self {
             arch: Arch::X86_64,
             kernel: kernel.into(),
             cpus: 1,
-            ram_mib: 256,
             timeout: Duration::from_secs(60),
             extra_args: Vec::new(),
         }
     }
 
-    /// Override the CPU count.
+    /// Override the CPU count. Clamped at `>= 1` because `-smp 0` is
+    /// rejected by every QEMU we target.
     #[must_use]
     pub fn with_cpus(mut self, cpus: u32) -> Self {
         self.cpus = cpus.max(1);
@@ -210,29 +229,24 @@ impl Runner {
             ));
         }
 
-        // On x86_64 we wrap the kernel ELF in a GRUB BIOS ISO so QEMU's
+        // Build the bootable artifact through the per-arch backend. Today
+        // x86_64 wraps the kernel ELF in a GRUB BIOS ISO so QEMU's
         // multiboot2 loader (via GRUB) can boot it. The ISO is built once
         // per `run` next to the kernel; rebuilds are cheap (a few MiB).
-        let iso = match spec.arch {
-            Arch::X86_64 => {
-                let kernel_dir = spec
-                    .kernel
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf();
-                let stem = spec.kernel.file_stem().unwrap_or_default().to_owned();
-                let staging = kernel_dir.join(format!("{}.grub-staging", stem.to_string_lossy()));
-                let iso_path = kernel_dir.join(format!("{}.iso", stem.to_string_lossy()));
-                Some(iso::build_grub_iso(&spec.kernel, &staging, &iso_path)?)
-            }
+        let boot_artifact = match spec.arch {
+            Arch::X86_64 => x86_64::build_boot_artifact(spec)?,
         };
 
-        let iso_path = iso.as_deref().ok_or_else(|| {
-            io::Error::other("internal invariant: x86_64 ISO was not built before QEMU spawn")
-        })?;
-
         let mut cmd = Command::new(spec.arch.qemu_binary());
-        push_args(&mut cmd, spec, iso_path)?;
+        match spec.arch {
+            Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &boot_artifact)?,
+        }
+        // Caller-supplied extras are appended *after* the per-arch defaults
+        // so a developer can override them ad-hoc (e.g. `-d int,cpu_reset`).
+        for a in &spec.extra_args {
+            cmd.arg(a);
+        }
+
         if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
             eprintln!("rustos-qemu: {cmd:?}");
         }
@@ -269,54 +283,6 @@ impl Runner {
             std::thread::sleep(tick);
         }
     }
-}
-
-fn push_args(cmd: &mut Command, spec: &Spec, iso: &Path) -> io::Result<()> {
-    match spec.arch {
-        Arch::X86_64 => {
-            // OVMF/UEFI boot. Distros increasingly ship *only* `grub-efi`
-            // (not `grub-pc-bin`), so the BIOS path is unreliable. UEFI
-            // boot via OVMF works everywhere the firmware is installed,
-            // including this CI host. The required pair of pflash
-            // images is discovered through [`crate::iso::find_ovmf`].
-            let ovmf = iso::find_ovmf()?;
-
-            // Note: `-nographic` is *not* used because it implicitly
-            // attaches the monitor and serial 0 to stdio, which collides
-            // with our explicit `-serial stdio`. `-display none` gives the
-            // headless behaviour we want without that implicit muxing.
-            cmd.arg("-no-reboot")
-                .arg("-display")
-                .arg("none")
-                .arg("-serial")
-                .arg("stdio")
-                .arg("-m")
-                .arg(format!("{}M", spec.ram_mib))
-                .arg("-smp")
-                .arg(spec.cpus.to_string())
-                .arg("-device")
-                .arg(format!(
-                    "isa-debug-exit,iobase=0x{ISA_DEBUG_EXIT_IOPORT:x},\
-                     iosize=0x{ISA_DEBUG_EXIT_IOSIZE:x}"
-                ))
-                .arg("-drive")
-                .arg(format!(
-                    "if=pflash,format=raw,readonly=on,file={}",
-                    ovmf.code.display()
-                ))
-                .arg("-drive")
-                .arg(format!(
-                    "if=pflash,format=raw,file={}",
-                    ovmf.vars_copy.display()
-                ))
-                .arg("-cdrom")
-                .arg(iso);
-        }
-    }
-    for a in &spec.extra_args {
-        cmd.arg(a);
-    }
-    Ok(())
 }
 
 fn read_to_string(mut s: Option<impl Read>) -> String {
@@ -364,18 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn spec_for_x86_64_defaults() {
+    fn spec_for_x86_64_defaults_are_architecture_neutral() {
+        // The generic Spec carries only architecture-neutral fields; the
+        // x86_64-specific defaults (RAM size, OVMF flags) are owned by
+        // the per-arch module and asserted by its own unit tests.
         let s = Spec::for_x86_64_kernel("/tmp/k");
         assert_eq!(s.arch, Arch::X86_64);
         assert_eq!(s.cpus, 1);
-        assert_eq!(s.ram_mib, 256);
         assert_eq!(s.timeout, Duration::from_secs(60));
+        assert!(s.extra_args.is_empty());
     }
 
     #[test]
     fn spec_with_cpus_clamps_to_at_least_one() {
         let s = Spec::for_x86_64_kernel("/tmp/k").with_cpus(0);
         assert_eq!(s.cpus, 1);
+    }
+
+    #[test]
+    fn spec_with_timeout_overrides_the_default() {
+        let s = Spec::for_x86_64_kernel("/tmp/k").with_timeout(Duration::from_secs(7));
+        assert_eq!(s.timeout, Duration::from_secs(7));
     }
 
     #[test]
@@ -388,5 +363,15 @@ mod tests {
     #[test]
     fn qemu_binary_name_is_arch_specific() {
         assert_eq!(Arch::X86_64.qemu_binary(), "qemu-system-x86_64");
+    }
+
+    #[test]
+    fn isa_debug_exit_constants_match_x86_64_module() {
+        // `crate::ISA_DEBUG_EXIT_IOPORT` is a re-export of the canonical
+        // value in the per-arch module; the kernel side reaches for the
+        // top-level path. A drift between the two halves would silently
+        // break the test-result protocol.
+        assert_eq!(ISA_DEBUG_EXIT_IOPORT, x86_64::ISA_DEBUG_EXIT_IOPORT);
+        assert_eq!(ISA_DEBUG_EXIT_IOSIZE, x86_64::ISA_DEBUG_EXIT_IOSIZE);
     }
 }
