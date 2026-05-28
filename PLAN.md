@@ -941,27 +941,52 @@ one logical change per commit with the `Co-authored-by` trailer.
       callback" section + `docs/src/platform/x86_64.md` (c7-bin)
       "Stage 2.7 follow-up" tail.
 
-- [ ] **(f6)** **QEMU integration test** — extend
-      `tests/integration/kernel_arch_boot/` (or add a sibling)
-      that spawns a single kernel task whose first instruction is
-      `syscall NR_CAP_QUERY, CAP_TIME_SET`, then `syscall NR_EXIT, 0`.
-      The audit-observer sink flips `qemu_exit::exit_success`
-      after observing one `AuditEvent::SyscallInvoked` for
-      `cap_query` *and* one `AuditEvent::SyscallInvoked` for
-      `exit`. Spawning the task does **not** require user-space
-      ELF loading: a kernel thread that issues `syscall` from
-      kernel CPL=0 is rejected by the trampoline (AGENTS.md §5.4
-      fail-closed), so this test instead invokes
-      `Dispatcher::dispatch` directly through a dedicated
-      `test-hook` entry exposed only when the bin crate is built
-      with the `test-hooks` Cargo feature. The hook is gated off
-      by default and `cargo deny check` rejects accidental
-      release builds that enable it.
+- [x] **(f6)** **QEMU integration test** (commit `ce06634`). New
+      sibling bin `tests/integration/syscall_dispatch_qemu`
+      (`rustos-test-syscall-dispatch-qemu`) reuses
+      `rustos_kernel::boot` and replaces only the audit Sink. On
+      observing `AuditEvent::BootCompleted` the sink synthesises a
+      `Scheduler<BinArch>` / `RwLock<CapTable>` /
+      `KernelSyscallHandlers` / `Dispatcher` quartet on the stack,
+      spawns a no-op task, registers its capability record with
+      `CAP_TIME_SET`, and drives `Dispatcher::dispatch` twice:
+      `(cap_query, CAP_TIME_SET)` (observed via the dispatcher's
+      `Ok(1)` return value, since `cap_query` is `audit: false`
+      in `abi-v1` — capability probes must not drown the audit
+      log) and `(exit, 0)` (observed via exactly one
+      `AuditEvent::SyscallInvoked` `EventId(5000)` record through
+      the synthesised inner audit sink). Any other outcome on
+      either leg trips `qemu_exit::exit_failure`. The bin's
+      `test-hooks` Cargo feature is on by default; a `compile_error!`
+      guard rejects `cargo build --release --features test-hooks`,
+      and a defensive `[[bans.features]]` rule in `deny.toml`
+      forbids the production `rustos-kernel` crate from ever
+      growing the same feature (AGENTS.md §1, §5.4.5, §15).
+      Enrolled in `cargo xtask test --qemu` with a 60-second
+      budget matching `kernel_arch_boot`. Docs:
+      `docs/src/platform/x86_64.md` Stage 2.7 follow-up (f6)
+      section landed in the same commit (AGENTS.md §13).
 
-- [ ] **(f7)** PLAN.md update: tick (f1)..(f6), refresh the
-      Stage 3a status block to note Stage 2.7 follow-up is
-      `complete`, and refresh the Stage 2 evidence tail with a
-      fresh `cargo xtask ci` quote.
+      *Departure from the prompt:* the prompt called for two
+      `SyscallInvoked` records (one per dispatched syscall);
+      `cap_query` is `audit: false` in the immutable `abi-v1`
+      table (AGENTS.md §9) and the dispatcher therefore emits no
+      audit record for a successful invocation. The synthesised
+      entry point still observes the cap_query leg — via the
+      `SyscallResult` return value, which AGENTS.md §5.4.4
+      explicitly recognises as the evidence path for an unaudited
+      decision — and observes the `exit` leg via its
+      `SyscallInvoked` audit record exactly as the prompt
+      mandated. Flipping `cap_query` to `audit: true` would have
+      regressed the documented "pure observer" carve-out in
+      `lib/abi/src/syscalls.rs` and is a deliberately rejected
+      design alternative.
+
+- [x] **(f7)** PLAN.md update (this commit). Sub-checklist
+      (f1)..(f6) all ticked; the Stage 2.7 follow-up status block
+      below flips from `partial` to `complete`; Stage 2 evidence
+      tail refreshed with a fresh `cargo xtask ci` quote at HEAD
+      of (f7).
 
 ### Definition of done
 
@@ -978,10 +1003,9 @@ one logical change per commit with the `Co-authored-by` trailer.
   are deferred to later stages and called out explicitly here
   rather than stubbed (AGENTS.md §15.1).
 
-### Stage 2.7 follow-up status — partial
+### Stage 2.7 follow-up status — complete
 
-Sub-items (f1)..(f5) have landed; (f6)..(f7) remain. Commits on
-`master`:
+All sub-items (f1)..(f7) have landed. Commits on `master`:
 
 - `c93e823` — kernel/sched: per-CPU current-task slot (f1).
 - `fcfb5fc` — kernel/sec: TaskId→TaskCapabilities CapTable
@@ -992,18 +1016,32 @@ Sub-items (f1)..(f5) have landed; (f6)..(f7) remain. Commits on
   + `KernelDispatchHook` + `KernelState` wiring (f4).
 - `45c21c3` — kernel/rustos-kernel: `production_dispatch` swap +
   `encode_result` + `DISPATCH_SLOT` install through `BootInfo` (f5).
+- `ce06634` — tests: `rustos-test-syscall-dispatch-qemu` QEMU
+  integration test that synthesises the Scheduler / CapTable /
+  KernelSyscallHandlers / Dispatcher quartet on `BootCompleted`
+  and drives `(cap_query, CAP_TIME_SET)` + `(exit, 0)` through
+  it; observes the `exit` leg's `AuditEvent::SyscallInvoked`
+  record via the synthesised inner audit sink before flipping
+  `qemu_exit::exit_success` (f6).
+- *(this commit)* — PLAN.md: tick (f6)..(f7), flip the Stage 2.7
+  follow-up status block to `complete`, refresh the Stage 2
+  evidence tail with the fresh `cargo xtask ci` quote (f7).
 
-`cargo xtask ci` is green at HEAD (`45c21c3`), running through the
-Stage 2 evidence pipeline above unchanged. The next session picks
-up at (f6): the `test-hooks`-gated QEMU integration test that
-drives `Dispatcher::dispatch` directly for `cap_query` + `exit`
-and observes the resulting `SyscallInvoked` audit records.
-Detailed continuation prompt remains at
-[`.junie/next-session-prompt.md`](./.junie/next-session-prompt.md).
+`cargo xtask ci` tail at HEAD of (f7):
+
+```
+xtask: [test --qemu] 4 test(s) enrolled
+xtask: [test --qemu (run rustos-test-memory-isolation)] kernel=… cpus=1 timeout=60s
+xtask: [test --qemu (run rustos-test-scheduler-stress-qemu)] kernel=… cpus=4 timeout=120s
+xtask: [test --qemu (run rustos-test-kernel-arch-boot)] kernel=… cpus=1 timeout=60s
+xtask: [test --qemu (run rustos-test-syscall-dispatch-qemu)] kernel=… cpus=1 timeout=60s
+advisories ok, bans ok, licenses ok, sources ok
+xtask: [abi-check] lib/abi/src/syscalls.rs ↔ kernel/syscall/src/table.rs
+```
 
 The Stage 3a status block above (`Status: complete`) is unchanged
-— Stage 3a's (a)..(d1) deliverables are done; Stage 2.7 follow-up
-is its own thread and is tracked here, not by re-opening Stage 3a.
+— Stage 3a's (a)..(d1) deliverables are done; the Stage 2.7
+follow-up is its own thread and is now also complete.
 
 ---
 
