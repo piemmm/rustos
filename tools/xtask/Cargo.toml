@@ -36,3 +36,8 @@ path = "src/main.rs"
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# `test --qemu` (Stage 2 deliverable) drives the bare-metal integration
+# tests through the audited `tools/qemu` runner. Sharing the runner
+# crate keeps the test-execution contract (`isa-debug-exit`, strict
+# timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
+rustos-qemu = { path = "../qemu", version = "=0.0.0" }

@@ -50,6 +50,14 @@ members = [
 
     # Tooling
     "tools/xtask",
+    "tools/qemu",
+
+    # QEMU integration tests (Stage 2 deliverable; each is a freestanding
+    # kernel binary built for `x86_64-unknown-none` and launched through
+    # `tools/qemu` by `cargo xtask test --qemu`). Stage 3b/3c/3d add their
+    # own per-arch trees alongside this one.
+    "tests/integration/memory_isolation",
+    "tests/integration/scheduler_stress",
 ]
 
 # Settings that apply to every crate in the workspace.

@@ -26,3 +26,7 @@
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-log`](./lib/log.md)
   - [`rustos-util`](./lib/util.md)
+
+# Platforms
+
+- [x86_64](./platform/x86_64.md)

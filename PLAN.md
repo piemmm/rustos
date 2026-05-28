@@ -273,6 +273,68 @@ Do **not** begin a stage before all its listed dependencies are complete.
       (`kernel/syscall/tests/fuzz_args.rs`) cross-checks the
       dispatcher's accept/reject decision against an independent
       mirror. Documentation in `docs/src/architecture/syscalls.md`.
+- [x] 2.8 — Stage-2 cross-crate / QEMU integration tests +
+      `tools/qemu` runner + `cargo xtask test --qemu` flag. Files
+      added: `tools/qemu` (audited host-side runner: `grub-mkrescue`
+      ISO build wrapper, OVMF discovery across Debian/Ubuntu/Fedora/
+      Arch standard paths, `isa-debug-exit` decoding, strict
+      per-test wall-clock budget — no retries per `AGENTS.md` §7);
+      `tests/integration/memory_isolation/` (freestanding
+      `x86_64-unknown-none` kernel binary that builds two distinct
+      page-table hierarchies via the partial Stage-3a baseline in
+      `kernel/arch/x86_64`, switches CR3 between them, and asserts
+      attacker `#PF` with `error_code == 0` + `CR2 == SECRET_VADDR`
+      while the victim's frame remains intact);
+      `tests/integration/scheduler_stress/` (workspace-level
+      cross-crate test: 20 000 tasks across 4 simulated cores
+      through `rustos-kernel-sched`'s `TestArch`, asserting
+      deadlock-freedom, exact execution count, and bounded
+      first-run latency); the `--qemu` opt-in flag in
+      `tools/xtask/src/commands.rs` and the driver in
+      `tools/xtask/src/commands/qemu_tests.rs`. Documentation:
+      new `docs/src/platform/x86_64.md` "Running Stage 2 QEMU
+      tests" section (marked "Stage 3a will expand this") plus a
+      cross-link from `docs/src/architecture/kernel.md`. **Stage 2
+      status remains *in progress*** because the Stage-2
+      deliverable text (lines 154–158) requires the scheduler
+      stress test to run *under QEMU on ≥ 4 emulated cores*; that
+      requires Stage-3a SMP (AP startup, APIC timer, IPIs) which
+      is out of scope for this commit. See the Stage 3a sub-
+      checklist in §3.
+
+**Status: in progress.**
+- All architecture-neutral sub-stages 2.1–2.7 remain complete with
+  the previously-recorded evidence (coverage thresholds, fuzz
+  harnesses, loom-gated tests, docs).
+- 2.8 delivers the QEMU runner + memory-isolation deliverable
+  under QEMU end-to-end. `cargo xtask test --qemu` is green on the
+  CI host. Toolchain pinned at `nightly-2026-05-27`
+  (rustc 1.98.0-nightly).
+- 2.8 partially delivers `scheduler_stress`: the cross-crate
+  workspace test on ≥ 4 simulated cores passes host-side. The
+  QEMU-on-real-cores variant is blocked on the Stage 3a sub-
+  checklist below and is the only reason Stage 2 cannot yet be
+  declared *complete*.
+- `cargo xtask ci` evidence tail (toolchain
+  `nightly-2026-05-27` / rustc 1.98.0-nightly, QEMU 8.2.2,
+  GRUB-EFI 2.12, OVMF 2024.02):
+  ```text
+  xtask: [test --qemu] 1 test(s) enrolled
+  xtask: [test --qemu (build rustos-test-memory-isolation)]
+  xtask: [test --qemu (run  rustos-test-memory-isolation)]
+      kernel=…/rustos-test-memory-isolation cpus=1 timeout=60s
+  xtask: [docs-check (rustdoc)]            -D warnings
+  xtask: [docs-check (mdbook)]
+  xtask: [docs-check (linkcheck)]          docs/src
+  xtask: [deny]                            advisories ok, bans ok,
+                                           licenses ok, sources ok
+  xtask: [abi-check]                       lib/abi/src/syscalls.rs ↔
+                                           kernel/syscall/src/table.rs
+  ```
+  All host test crates report `ok. … 0 failed; 0 ignored`. The
+  workspace cross-crate stress (`workspace_stress_four_cores_
+  twenty_thousand_tasks`) is the `1 passed` entry that takes
+  ~0.4 s.
 
 ---
 
@@ -293,6 +355,38 @@ Each sub-stage delivers one architecture. They share the same checklist:
 
 **Sub-stages**
 - 3a — `kernel/arch/x86_64` (BIOS + UEFI boot, APIC, ACPI minimal).
+  **Partial baseline already in tree** (delivered by Stage 2.8 to
+  unblock the QEMU `memory_isolation` test):
+    - [x] multiboot2 header, 32→64 long-mode trampoline (`boot.s`,
+          fully annotated `SAFETY-INVARIANT` block),
+    - [x] identity-mapped bootstrap paging covering first 32 MiB,
+    - [x] minimal IDT (`#PF`/`#GP`/`#DF` + closed-fail thunk on every
+          other vector),
+    - [x] 16550 polled serial console on COM1,
+    - [x] QEMU `isa-debug-exit` helper.
+
+  **Remaining for Stage 3a completion** (each blocks Stage 2 from
+  flipping to `Status: complete` and/or unlocks downstream stages):
+    - [ ] Full UEFI hand-off (parse OVMF memory map, hand it to
+          `kernel/mem`'s `BootMemoryMap`; today the trampoline only
+          installs a static identity map).
+    - [ ] ACPI MADT parse → LAPIC IDs.
+    - [ ] APIC bring-up (LAPIC + IO-APIC), per-CPU LAPIC timer
+          calibration for `kernel/sched` preemption.
+    - [ ] AP startup via INIT-SIPI-SIPI trampoline at 4 KiB-aligned
+          low physical memory; promote Stage 2.8's
+          `scheduler_stress` to QEMU on `-smp 4`.
+    - [ ] Context-switch primitive + interrupt entry/exit prologue
+          matching `kernel/sched::SchedulerArch`.
+    - [ ] x86_64 syscall entry stub bound to
+          `kernel/syscall::Dispatcher` (the architecture-neutral
+          dispatcher already validates against
+          `SYSCALL_TABLE_HASH`).
+    - [ ] Implement `kernel/core::KernelArch` against the above and
+          wire `kernel_main`.
+    - [ ] Per-arch QEMU run script `tools/qemu/x86_64.rs` (today the
+          generic `tools/qemu` runner suffices; Stage 3a will move
+          the x86_64-specific defaults out of `lib.rs::Spec`).
 - 3b — `kernel/arch/aarch64` (Raspberry Pi 3/4/5 + QEMU virt; GIC).
 - 3c — `kernel/arch/riscv64` (QEMU virt; PLIC, CLINT).
 - 3d — `kernel/arch/wasm32` (browser sandbox; cooperative scheduling backed

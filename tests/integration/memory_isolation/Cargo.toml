@@ -1,0 +1,32 @@
+[package]
+name = "rustos-test-memory-isolation"
+description = "Stage 2 QEMU integration test: a process cannot read another process's memory."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This crate produces a freestanding kernel ELF that QEMU loads via
+# multiboot1 (`tools/qemu`). It links the partial Stage-3a x86_64 port
+# (`rustos-arch-x86_64`) for boot + IDT + paging + isa-debug-exit
+# primitives, builds two distinct address spaces, switches between them,
+# and asserts that the attacker context faults while the victim context
+# remains coherent (`AGENTS.md` §4: memory isolation is enforced by
+# hardware).
+#
+# Because the binary is freestanding it is built **only** for
+# `x86_64-unknown-none`. On the host target the crate has no test source
+# and contributes nothing to `cargo test`; the orchestrator that runs the
+# QEMU binary is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "rustos-test-memory-isolation"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }

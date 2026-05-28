@@ -1,6 +1,6 @@
 [package]
 name = "rustos-arch-x86_64"
-description = "RustOS placeholder: x86_64 architecture port."
+description = "RustOS architecture port: x86_64 (Stage 3a — partial, scoped to Stage-2 QEMU integration tests)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,18 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# This crate is the **partial** Stage 3a baseline. It exists so the two
+# Stage-2 deliverable integration tests in `tests/integration/*` have an
+# x86_64 boot path: multiboot1 entry, 32→64 trampoline, identity-mapped
+# bootstrap paging, a minimal IDT (#PF, #GP, #DF, double fault), a 16550
+# serial console, and the QEMU `isa-debug-exit` helper.
+#
+# The full Stage 3a deliverables (UEFI, ACPI, APIC, SMP/AP bring-up,
+# context switch, syscall entry) are explicitly out of scope here and
+# tracked in `PLAN.md`'s Stage 3a sub-checklist. The crate compiles only
+# for `x86_64-unknown-none`; using it from a host-target build is a
+# compile error by design (see `src/lib.rs`).

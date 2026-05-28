@@ -1,0 +1,164 @@
+// Multiboot2 entry + 32→64 long-mode trampoline.
+//
+// We use multiboot2 (not multiboot1) because QEMU's `-kernel` multiboot1
+// loader refuses to load ELF64, whereas GRUB's multiboot2 loader accepts
+// ELF64 and enters the kernel in 32-bit protected mode at the e_entry
+// symbol. The kernel is therefore booted via `grub-mkrescue` ISO and
+// QEMU `-cdrom`, not `-kernel`.
+//
+// SAFETY-INVARIANTS (audited per AGENTS.md §10):
+//
+//  1. The multiboot2 header sits in `.multiboot_header`, placed by the
+//     linker script (`linker.ld`) within the first 32 KiB of the kernel
+//     ELF — required by the multiboot2 spec for the loader to find it.
+//  2. `_start` runs in 32-bit protected mode with CR0.PE=1, paging off,
+//     EAX=multiboot2 magic (0x36D76289), EBX=multiboot info pointer,
+//     and a flat 4 GiB code/data segmentation set up by GRUB.
+//  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pd` tables sit in
+//     `.bss` and are zero-initialised by the multiboot loader (BSS bytes
+//     are zero per the multiboot spec).
+//  4. We identity-map the first 32 MiB of physical memory via sixteen
+//     2 MiB huge pages. This is sufficient for the Stage-2 QEMU tests
+//     (kernel + tables + stack + test data fit comfortably in 32 MiB).
+//  5. The long-mode GDT below has a single 64-bit code segment at
+//     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
+//     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
+//  6. On entry to `long_mode_start` interrupts are disabled (CLI is the
+//     bootloader default) and the IDTR is invalid; the Rust side must
+//     install an IDT before enabling interrupts (`AGENTS.md` §10).
+//  7. `rustos_arch_x86_64_main` receives the multiboot magic in `%rdi`
+//     and the multiboot info pointer in `%rsi` (System V AMD64 ABI).
+//     The Rust prologue re-validates the magic before touching the info
+//     blob (`AGENTS.md` §5.4.3 — validate every input).
+//  8. If `rustos_arch_x86_64_main` ever returns we halt the CPU with
+//     interrupts masked. The Rust contract (`-> !`) makes this branch
+//     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback
+//     `AGENTS.md` §2.9 requires.
+
+.section .multiboot_header, "a"
+.align 8
+multiboot_header_start:
+    // Multiboot2 header (multiboot2 spec §3.1):
+    .long 0xE85250D6                                // magic
+    .long 0                                         // architecture: i386 32-bit protected mode
+    .long multiboot_header_end - multiboot_header_start            // header_length
+    // Checksum: -(magic + architecture + header_length), mod 2^32
+    .long -(0xE85250D6 + 0 + (multiboot_header_end - multiboot_header_start))
+
+    // End tag (type=0, flags=0, size=8). Required terminator.
+    .align 8
+    .short 0
+    .short 0
+    .long 8
+multiboot_header_end:
+
+.section .boot.text, "ax"
+.code32
+.global _start
+.type _start, @function
+_start:
+    cli
+    movl %eax, %edi                                 // multiboot magic (preserved via %edi -> %rdi)
+    movl %ebx, %esi                                 // multiboot info pointer
+
+    movl $boot_stack_top, %esp
+    xorl %ebp, %ebp
+
+    // PML4[0] -> PDPT
+    movl $boot_pdpt, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pml4
+
+    // PDPT[0] -> PD
+    movl $boot_pd, %eax
+    orl  $0x3, %eax
+    movl %eax, boot_pdpt
+
+    // PD[i] = i*2 MiB | P|RW|PS, for i in 0..16  (identity-map first 32 MiB)
+    xorl %ecx, %ecx
+1:
+    movl %ecx, %eax
+    shll $21, %eax                                  // ecx * 2 MiB
+    orl  $0x83, %eax                                // P|RW|PS
+    movl %eax, boot_pd(,%ecx,8)
+    movl $0, boot_pd+4(,%ecx,8)
+    incl %ecx
+    cmpl $16, %ecx
+    jl   1b
+
+    // CR3 <- PML4
+    movl $boot_pml4, %eax
+    movl %eax, %cr3
+
+    // CR4.PAE = 1
+    movl %cr4, %eax
+    orl  $(1 << 5), %eax
+    movl %eax, %cr4
+
+    // EFER.LME = 1
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl  $(1 << 8), %eax
+    wrmsr
+
+    // CR0.PG = 1 (paging on); we're now in compatibility mode.
+    movl %cr0, %eax
+    orl  $(1 << 31), %eax
+    movl %eax, %cr0
+
+    // Load 64-bit GDT, far-jump to 64-bit code segment.
+    lgdt gdt64_ptr
+    ljmp $0x08, $long_mode_start
+
+.size _start, . - _start
+
+.code64
+long_mode_start:
+    // Long mode ignores data segment bases/limits but the selectors must
+    // be non-NULL writable; load our flat data selector everywhere.
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+    movw %ax, %ss
+
+    // rdi/rsi already hold the multiboot magic / info pointer thanks to
+    // the 32-bit `movl %eax,%edi` and `movl %ebx,%esi` above zero-
+    // extending into the 64-bit registers.
+    call rustos_arch_x86_64_main
+
+    // `rustos_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.
+    cli
+.Lhang:
+    hlt
+    jmp .Lhang
+
+// -- BSS-allocated bootstrap page tables and stack. The multiboot1 spec
+//    guarantees BSS is zero-initialised before `_start` runs.
+.section .bss, "aw", @nobits
+.align 4096
+.global boot_pml4
+boot_pml4:
+    .skip 4096
+boot_pdpt:
+    .skip 4096
+boot_pd:
+    .skip 4096
+
+.align 16
+boot_stack_bottom:
+    .skip 16384
+boot_stack_top:
+
+// -- Long-mode GDT.
+.section .rodata
+.align 8
+gdt64:
+    .quad 0                                         // 0x00: null
+    .quad 0x00AF9A000000FFFF                        // 0x08: 64-bit code (L=1)
+    .quad 0x00AF92000000FFFF                        // 0x10: data
+gdt64_end:
+gdt64_ptr:
+    .word gdt64_end - gdt64 - 1
+    .quad gdt64

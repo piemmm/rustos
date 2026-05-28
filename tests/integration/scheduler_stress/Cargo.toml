@@ -1,0 +1,37 @@
+[package]
+name = "rustos-test-scheduler-stress"
+description = "Stage 2 integration test: ≥ 4-core scheduler stress, deadlock-free, bounded latency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Workspace-level integration test that exercises the kernel scheduler on
+# ≥ 4 simulated cores with a large task population, asserting deadlock-
+# freedom and bounded first-run latency end-to-end across the
+# `rustos-kernel-sched` crate boundary (`AGENTS.md` §7 — cross-crate /
+# end-to-end tests live in the top-level `tests/`).
+#
+# The kernel/sched stress test in `kernel/sched/tests/stress.rs`
+# satisfies the requirement at the *unit*-crate scope. This crate adds
+# the cross-crate (workspace) scope the issue and Stage-2 deliverables
+# call out.
+#
+# The Stage-2 deliverable text mentions "Runs under QEMU"; doing that
+# requires Stage-3a SMP (AP startup + APIC timer + per-CPU IPIs), which
+# is explicitly out of scope. The Stage 3a sub-checklist in `PLAN.md`
+# captures the work that will move this test under QEMU.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rustos-kernel-sched = { path = "../../../kernel/sched", version = "=0.0.0", features = ["test-arch"] }
+
+[dev-dependencies]
+rustos-kernel-sched = { path = "../../../kernel/sched", version = "=0.0.0", features = ["test-arch"] }

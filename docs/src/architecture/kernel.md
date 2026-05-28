@@ -143,3 +143,27 @@ The mock `TestArch::halt` panics with a sentinel message so
 `std::panic::catch_unwind` can observe the halt without blocking the
 test runner; this scaffold is gated behind the `test-arch` Cargo
 feature and never links into a production build.
+
+## Stage 2 integration tests
+
+`AGENTS.md` §7 routes cross-crate / end-to-end tests to the top-level
+`tests/` tree. Stage 2 enrols two:
+
+- `tests/integration/memory_isolation/src/main.rs` — a freestanding
+  x86_64 kernel binary that builds two distinct page tables, switches
+  CR3 between them, and asserts that the attacker context faults
+  (`#PF`, error code 0, CR2 == target VA) while the victim's frame
+  remains intact. Executes under QEMU through
+  `cargo xtask test --qemu`. See
+  [`platform/x86_64.md`](../platform/x86_64.md).
+- `tests/integration/scheduler_stress/tests/stress.rs` — a 20 000-task
+  / 4-simulated-core deadlock-free, bounded-latency stress over the
+  `rustos-kernel-sched` public surface. Runs as part of the host-side
+  `cargo xtask test` pass today. Promoting it to QEMU is on the
+  Stage 3a sub-checklist in `PLAN.md` (depends on SMP + APIC timer +
+  IPI).
+
+`tools/qemu` is the audited gateway between the host build and any
+QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
+`isa-debug-exit` device, strict per-test timeouts, no retries —
+`AGENTS.md` §7).

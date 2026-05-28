@@ -11,6 +11,7 @@ use crate::Context;
 
 mod abi_check;
 mod linkcheck;
+mod qemu_tests;
 
 /// One sanctioned developer workflow.
 #[derive(Copy, Clone, Debug)]
@@ -106,10 +107,30 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // `--qemu` opts in to the bare-metal QEMU integration tests in
+    // `tests/integration/*`. Per AGENTS.md §7 they share the test
+    // entry point (`cargo xtask test`) so a single command runs the
+    // whole matrix; per the same section we never retry on failure
+    // and every run has a strict, finite timeout.
+    let mut forward = Vec::with_capacity(args.len());
+    let mut run_qemu = false;
+    for a in args {
+        if a == "--qemu" {
+            run_qemu = true;
+        } else {
+            forward.push(a.clone());
+        }
+    }
+
     let mut cmd = ctx.cargo();
     cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
-    cmd.args(args);
-    ctx.run("test", cmd)
+    cmd.args(&forward);
+    ctx.run("test", cmd)?;
+
+    if run_qemu {
+        qemu_tests::run_all(ctx)?;
+    }
+    Ok(())
 }
 
 fn run_clippy(ctx: &Context, args: &[OsString]) -> Result<(), String> {
@@ -201,10 +222,14 @@ fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
-    // first so a failing PR fails fast.
+    // first so a failing PR fails fast. The test phase opts in to `--qemu`
+    // so the Stage-2 QEMU integration tests run as part of every PR per
+    // `AGENTS.md` §7; CI hosts therefore need QEMU, `grub-mkrescue`,
+    // `xorriso`, and OVMF, all documented under
+    // `docs/src/platform/x86_64.md`.
     run_fmt(ctx, &[])?;
     run_clippy(ctx, &[])?;
-    run_test(ctx, &[])?;
+    run_test(ctx, &[OsString::from("--qemu")])?;
     run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
     run_abi_check(ctx, &[])?;
