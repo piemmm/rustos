@@ -317,8 +317,13 @@ Do **not** begin a stage before all its listed dependencies are complete.
   declared *complete*.
 - `cargo xtask ci` evidence tail (toolchain
   `nightly-2026-05-27` / rustc 1.98.0-nightly, QEMU 8.2.2,
-  GRUB-EFI 2.12, OVMF 2024.02):
+  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (a) landed
+  the multiboot2 / ACPI / APIC / APIC-timer / bootmemory parsers
+  (47 new host unit tests across `kernel/arch/x86_64`):
   ```text
+  xtask: [fmt --check]
+  xtask: [clippy]                          -D warnings
+  xtask: [test]                            --workspace --all-targets
   xtask: [test --qemu] 1 test(s) enrolled
   xtask: [test --qemu (build rustos-test-memory-isolation)]
   xtask: [test --qemu (run  rustos-test-memory-isolation)]
@@ -367,14 +372,48 @@ Each sub-stage delivers one architecture. They share the same checklist:
 
   **Remaining for Stage 3a completion** (each blocks Stage 2 from
   flipping to `Status: complete` and/or unlocks downstream stages):
-    - [ ] Full UEFI hand-off (parse OVMF memory map, hand it to
-          `kernel/mem`'s `BootMemoryMap`; today the trampoline only
-          installs a static identity map).
-    - [ ] ACPI MADT parse → LAPIC IDs.
-    - [ ] APIC bring-up (LAPIC + IO-APIC), per-CPU LAPIC timer
-          calibration for `kernel/sched` preemption.
-    - [ ] AP startup via INIT-SIPI-SIPI trampoline at 4 KiB-aligned
-          low physical memory; promote Stage 2.8's
+    - [x] **(a)** UEFI / Multiboot2 memory-map hand-off:
+          `kernel/arch/x86_64::multiboot2` parses the Multiboot2 v2
+          information structure (tags 4, 6, 14, 15, 17) zero-copy;
+          `kernel/arch/x86_64::bootmemory` bridges Multiboot2 BIOS
+          mmap and UEFI EFI memory-map entries to
+          `MemoryRegionDescriptor`s whose `RegionKind` is locked to
+          `rustos_kernel_mem::RegionKind` by a host-side dev-dep
+          round-trip test (AGENTS.md §2.2). The descriptors are
+          drained into a `BootMemoryMap` by the kernel binary; the
+          arch crate stays `alloc`-free in production so the
+          Stage-2 freestanding test binaries still link. Static
+          identity-mapped paging from boot.s still installs the
+          first 32 MiB until the AP-bring-up commit (b) replaces it
+          with the parsed map.
+    - [x] **(a)** ACPI MADT parse → LAPIC IDs:
+          `kernel/arch/x86_64::acpi` implements RSDP v1/v2 validation
+          (signature + one-byte modular checksum + extended checksum),
+          a generic SDT header validator, and a typed MADT iterator
+          covering Local APIC, IO-APIC, Interrupt Source Override,
+          Local APIC NMI, and Local APIC Address Override entries
+          (ACPI 6.5 §5.2.5 / §5.2.12). All paths are `no_alloc` and
+          host-unit-tested with hand-crafted byte buffers (12 tests).
+    - [x] **(a)** APIC bring-up + LAPIC-timer calibration:
+          `kernel/arch/x86_64::apic` exposes `Lapic` / `IoApic`
+          drivers behind `LapicMmio` / `IoApicMmio` traits with a
+          volatile-MMIO production impl gated on `target_os = "none"`
+          and host-side mocks driving the unit tests. Covered:
+          software-enable + SVR, EOI, INIT/SIPI/INIT-deassert IPI
+          sequence (consumed by Stage 3a (b)), IO-APIC
+          redirection-entry programming.
+          `kernel/arch/x86_64::apic_timer` performs PIT-channel-2
+          calibration into a `Calibration { ticks_per_second,
+          initial_count, period_micros }` value and programs the
+          LAPIC timer in periodic mode; the pure
+          ticks/sec → initial-count math is split out for
+          independent host testing. The wiring to
+          `kernel/sched`'s preemption hook lives in Stage 3a (c)
+          alongside the interrupt prologue, because no
+          `SchedulerArch` preemption surface exists today
+          (`AGENTS.md` §15.2 — no invented APIs).
+    - [ ] **(b)** AP startup via INIT-SIPI-SIPI trampoline at
+          4 KiB-aligned low physical memory; promote Stage 2.8's
           `scheduler_stress` to QEMU on `-smp 4`.
     - [ ] Context-switch primitive + interrupt entry/exit prologue
           matching `kernel/sched::SchedulerArch`.

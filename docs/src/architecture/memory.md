@@ -139,6 +139,26 @@ math through them. Every `unsafe` block carries a `// SAFETY:`
 rationale per `AGENTS.md` §2.10, encapsulated behind a safe public
 API; no `unsafe` leaks across crate boundaries.
 
+## 6a. Platform memory-map sources
+
+The `BootMemoryMap` is *fed* by the architecture port, not constructed
+by `kernel/mem`. On x86_64 (Stage 3a (a)) the discovery surface lives
+in `kernel/arch/x86_64`:
+
+- `multiboot2` parses the BIOS-derived memory-map tag (Multiboot2
+  type 6) and the EFI memory-map tag (type 17) handed in by GRUB-EFI
+  + OVMF. Both parsers are zero-copy and `no_alloc`.
+- `bootmemory` bridges those typed entries into
+  `MemoryRegionDescriptor`s with a `RegionKind` mirror that is locked
+  to `rustos_kernel_mem::RegionKind` by a host-side dev-dep
+  round-trip test (`AGENTS.md` §2.2 — no duplication).
+
+The kernel binary (which links against `kernel/mem`) is responsible
+for draining the descriptor stream into a `BootMemoryMap` via
+`BootMemoryMap::push`. This split keeps `kernel/arch/x86_64` free of
+`alloc` so it can be linked into the freestanding Stage-2 QEMU test
+binaries that do not yet provide a `#[global_allocator]`.
+
 ## 7. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

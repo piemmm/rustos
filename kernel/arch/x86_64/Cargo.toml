@@ -14,6 +14,20 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
+# Production dependencies: none. The arch crate is intentionally
+# leaf-level so it can be linked into freestanding kernel binaries that
+# do not yet provide a `#[global_allocator]` (the memory-isolation QEMU
+# test binary is the canonical example). New parsers added in the
+# Stage-3a (a) commit — multiboot2 info, ACPI tables, LAPIC/IO-APIC
+# drivers, PIT-calibrated LAPIC timer — are deliberately `no_alloc`.
+#
+# `kernel/mem` is a **dev-dependency** so the host-side unit tests can
+# round-trip our `bootmemory::RegionKind` mirror against the canonical
+# `rustos_kernel_mem::RegionKind` and refuse to compile if the two
+# enums ever drift (AGENTS.md §2.2 — no duplication).
+[dev-dependencies]
+rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
+
 # This crate is the **partial** Stage 3a baseline. It exists so the two
 # Stage-2 deliverable integration tests in `tests/integration/*` have an
 # x86_64 boot path: multiboot1 entry, 32→64 trampoline, identity-mapped

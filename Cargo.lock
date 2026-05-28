@@ -384,6 +384,9 @@ version = "0.0.0"
 [[package]]
 name = "rustos-arch-x86_64"
 version = "0.0.0"
+dependencies = [
+ "rustos-kernel-mem",
+]
 
 [[package]]
 name = "rustos-caps"
