@@ -66,6 +66,7 @@ members = [
     "tests/integration/scheduler_stress",
     "tests/integration/scheduler_stress_qemu",
     "tests/integration/kernel_arch_boot",
+    "tests/integration/syscall_dispatch_qemu",
 ]
 
 # Settings that apply to every crate in the workspace.

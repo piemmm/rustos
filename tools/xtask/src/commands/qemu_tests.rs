@@ -63,6 +63,26 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
     },
+    // Stage 2.7 follow-up (f6) deliverable: boot the production
+    // `rustos-kernel` boot pipeline and, on observing
+    // `AuditEvent::BootCompleted`, synthesise a Scheduler / CapTable /
+    // KernelSyscallHandlers / Dispatcher quartet locally and drive
+    // `Dispatcher::dispatch` with `(cap_query, CAP_TIME_SET)` then
+    // `(exit, 0)`. The synthesised inner audit sink counts the
+    // `SyscallInvoked` (`EventId(5000)`) record emitted by the
+    // `exit` dispatch (the `cap_query` half is `audit: false` per
+    // the abi-v1 table — observed via the dispatcher's return value
+    // instead). The test bin flips `qemu_exit::exit_success` only
+    // when both halves complete cleanly; anything else trips
+    // `qemu_exit::exit_failure`. Single CPU suffices and the
+    // 60-second budget matches `kernel_arch_boot`'s — same boot
+    // pipeline plus a fixed-size dispatcher exercise.
+    QemuTest {
+        package: "rustos-test-syscall-dispatch-qemu",
+        binary: "rustos-test-syscall-dispatch-qemu",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+    },
 ];
 
 const TARGET: &str = "x86_64-unknown-none";

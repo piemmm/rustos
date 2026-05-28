@@ -610,6 +610,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-syscall-dispatch-qemu"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-sched",
+ "rustos-kernel-sec",
+ "rustos-kernel-sync",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-util"
 version = "0.0.0"
 

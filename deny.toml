@@ -40,6 +40,21 @@ deny = []
 skip = []
 skip-tree = []
 
+# Stage 2.7 follow-up (f6): the production `rustos-kernel` crate must
+# **never** grow a `test-hooks` (or similarly-named) Cargo feature.
+# Test affordances live in sibling integration-test crates under
+# `tests/integration/*` — see
+# `tests/integration/syscall_dispatch_qemu/Cargo.toml` for the
+# canonical example — so that `cargo build --workspace`'s feature
+# unification cannot leak QEMU-exit behaviour or any other test-only
+# branch into the shipping kernel image. This rule is the
+# cargo-deny half of the compile-time `compile_error!` guard the
+# test bin carries (`AGENTS.md` §1 — no hacks; §5.4.5 — fail
+# closed; §15 — test affordances stay in test crates).
+[[bans.features]]
+crate = "rustos-kernel"
+deny = ["test-hooks"]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
