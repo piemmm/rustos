@@ -696,11 +696,15 @@ Each sub-stage delivers one architecture. They share the same checklist:
               `docs/src/platform/x86_64.md` (c7-bin) section,
               `docs/src/architecture/kernel.md` updated to reflect
               the now-shipped impl. **Stage 2.7 follow-up**: the
-              dispatch callback is fail-closed (`halts` if reached);
-              when Stage 2.7 lands `SyscallHandlers` + per-CPU
-              `CallerContext` plumbing the body is replaced with a
-              forwarder to `Dispatcher::dispatch` — body-only swap,
-              ABI pinned at compile time.
+              dispatch callback is fail-closed (`halts` if reached).
+              The body swap is **not** the only missing piece — see
+              the dedicated "Stage 2.7 follow-up — Production
+              syscall wiring" section below for the full (f1)..(f7)
+              sub-checklist (per-CPU current-task slot, `CapTable`,
+              production `SyscallHandlers`, registration hook,
+              QEMU test). The `_DISPATCH_SIGNATURE_PINNED` const-
+              assert pins the callback ABI so the eventual swap
+              cannot drift unobserved.
     - [x] **(d1)** Per-arch QEMU run script
           `tools/qemu/src/x86_64.rs`. The generic
           `tools/qemu::Spec`/`Runner` are now architecture-neutral;
@@ -750,14 +754,200 @@ Each sub-stage delivers one architecture. They share the same checklist:
   bin flips `qemu_exit::exit_success` on observing that event, so
   `cargo xtask test --qemu` reports `Outcome::Pass`.
 - The Stage 2.7 follow-up is the only remaining (c7) thread: the
-  bin crate's syscall-dispatch callback is fail-closed pending
-  `SyscallHandlers` / per-CPU `CallerContext` plumbing. The ABI is
-  pinned at compile time (`_DISPATCH_SIGNATURE_PINNED`), so the
-  swap to a `Dispatcher::dispatch` forwarder is a body-only change
-  with no public-surface impact.
+  bin crate's syscall-dispatch callback is fail-closed pending the
+  production `SyscallHandlers` impl and the per-CPU current-task
+  plumbing it consumes. A first inspection during the (c7-bin)
+  follow-up session showed the work is **larger than a body-only
+  swap** — neither the production `SyscallHandlers` impl, nor the
+  per-CPU current-task slot, nor a kernel-side registration hook
+  exist in tree. The full breakdown is captured in the dedicated
+  "Stage 2.7 follow-up — Production syscall wiring" section below
+  as sub-items (f1)..(f7). The `_DISPATCH_SIGNATURE_PINNED`
+  const-assert in `kernel/rustos-kernel::dispatch` still pins the
+  callback ABI so the eventual swap cannot silently drift.
 - Stage 3b/3c/3d (aarch64 / riscv64 / wasm32) remain outstanding
   per their own checklists; each follows the same per-arch
   template (a)..(d) the x86_64 sub-stage just completed.
+
+---
+
+## Stage 2.7 follow-up — Production syscall wiring
+
+**Dependencies:** Stage 2.7 (`kernel/syscall::Dispatcher`), Stage 3a
+(`kernel/rustos-kernel` bin with fail-closed dispatch callback
+installed before `syscall` is enabled).
+
+**Why this is its own thread.** Stage 2.7 landed the architecture-
+neutral `Dispatcher`, the `SyscallHandlers` trait, the audit-event
+catalogue, the ABI hash cross-check, and a 100 000-iteration fuzz
+harness. Stage 3a (c7-bin) installed a fail-closed callback in the
+production `rustos-kernel` binary that *halts* on first syscall.
+The earlier PLAN.md note that the swap is "body-only" understated
+the work: the tree has neither a production `SyscallHandlers` impl,
+nor per-CPU current-task plumbing, nor a registration hook on
+`kernel_main`. This section enumerates the missing pieces so the
+next session lands them as a coherent, AGENTS.md-compliant change
+set instead of a single oversized commit.
+
+**Hard constraints (AGENTS.md).** §2 no hacks / no bloat / no
+interface creep; §5.4 the five-step privileged-entry sequence; §7
+coverage floors stay green (`kernel/sec`/`kernel/ipc`/`lib/caps`/
+`lib/crypto` ≥ 95 %, other kernel ≥ 85 %); §10 every `unsafe`
+carries `// SAFETY:` and a test; §13 docs in the same commit; §14
+one logical change per commit with the `Co-authored-by` trailer.
+
+### Sub-checklist
+
+- [ ] **(f1)** Per-CPU **current-task slot** in `kernel/sched`.
+      Add a `pub fn current_task(&self, cpu_id: CpuId) -> Option<TaskId>`
+      to `Scheduler<A>` whose value is updated by `Scheduler::step`
+      on dispatch and cleared on `park` / `exit`. The slot is
+      per-CPU, never global, and is read by syscall entry on the
+      issuing CPU only — process-context per AGENTS.md §1 and the
+      `kernel/sync` interrupt-context rule. No new
+      `SchedulerArch` method (no interface creep). Inline host unit
+      tests in `kernel/sched/src/scheduler.rs` (or a sibling
+      `current_task.rs` if the file would exceed 500 lines per §7).
+      Docs: `docs/src/architecture/scheduler.md` gains a
+      "Current-task slot" section.
+
+- [ ] **(f2)** `TaskId → &TaskCapabilities` lookup in
+      `kernel/sec`. Today `TaskCapabilities` is owned by the
+      caller; the dispatcher needs to borrow it given only the
+      `TaskId` from (f1). Add a `pub struct CapTable` to
+      `kernel/sec::captable` that owns the registry and a
+      `pub fn caps_for(&self, task: TaskId) -> Option<&TaskCapabilities>`.
+      Inserts happen at task creation (Stage 2.7 follow-up does not
+      add user-space task creation; an `insert` API is sufficient
+      for tests + the future init(1) loader). Removal happens on
+      `Scheduler::exit`. No global mutable state — `CapTable`
+      lives inside `KernelState` (`kernel/core::init`). 95 %
+      coverage floor enforced. Docs: `docs/src/security/captable.md`
+      gains a "Per-task registry" section.
+
+- [ ] **(f3)** Production **`SyscallHandlers` impl** in
+      `kernel/core::syscalls` (new module). One concrete struct
+      `KernelSyscallHandlers<'a, A: KernelArch>` that borrows
+      `&'a Scheduler<A>`, `&'a CapTable`, and (later) the
+      `kernel/ipc` ports registry. Each method translates the
+      already-validated arguments into the owning subsystem call:
+        - `yield_now` → `Scheduler::yield_current(caller.task_id)`
+          (new method on `Scheduler<A>`; see (f1)).
+        - `exit(code)` → `Scheduler::exit(caller.task_id)` +
+          `CapTable::remove(caller.task_id)`. The `code` is
+          recorded in the audit field, not stored on the task
+          struct (no new field invented).
+        - `ipc_send` / `ipc_recv` — out of scope **for this
+          follow-up**: the kernel has no named-port registry yet
+          (see `kernel/ipc/src/lib.rs` rustdoc). The handler
+          returns `Errno::NotFound` and emits an audit record
+          flagging "named-port registry not landed". The follow-up
+          to the follow-up (Stage 5 prerequisite) lands the
+          registry.
+        - `cap_query` → `caller.caps.contains(cap)` mapped to
+          `0 | 1`.
+        - `cap_delegate` / `cap_revoke` — call into existing
+          `TaskCapabilities::{delegate,revoke}` plus
+          `CapTable::caps_for(target)`. The `set_ptr` argument is
+          a user pointer; **user-memory copy-in is out of scope**
+          here — the handler returns `Errno::NotImplemented` with
+          an audit record and Stage 5 / Stage 6 (user memory
+          plumbing) lands it. The argument validator at the
+          dispatcher level still rejects null + un-aligned pointers
+          before we ever see them.
+        - `clock_get` → `KernelArch::monotonic_ns(cpu_id)`. **New
+          `KernelArch` method**, justified because no existing
+          method exposes a monotonic clock; arch ports already
+          read RDTSC / CNTVCT_EL0 / `rdtime` for the scheduler so
+          there is no duplication. Default impl is **not** provided
+          (every arch must opt in — fail-closed). x86_64 wires
+          through `apic_timer::Calibration`.
+
+      Tests: host unit tests in `kernel/core/tests/syscalls.rs`
+      exercising each handler against `TestArch` + a stub
+      `CapTable`; one negative test per `Errno` variant the
+      handler can produce. Coverage: `kernel/core` ≥ 85 %.
+      Docs: `docs/src/architecture/syscalls.md` "Handler wiring"
+      section.
+
+- [ ] **(f4)** **Registration hook** on `kernel_main`. Extend
+      `BootInfo` with one new field, `dispatcher_callback_slot:
+      &'static DispatchCallbackSlot`, whose `install_dispatcher`
+      method is called by `kernel_main` *between* the `Sched` phase
+      and the `Ipc` phase, after `KernelState` is built. The slot
+      is owned by the bin crate (it must outlive the kernel) and
+      shipped to `kernel_core` through `BootInfo`. The arch port's
+      `set_dispatch_callback` is **still** invoked before `syscall`
+      is enabled — the new slot is the *kernel-side* publication
+      point, not the trampoline. No global mutable static; the
+      `&'static` reference is to memory the bin crate's
+      `#[link_section]` reserves at compile time. Tests:
+      `kernel/core/tests/kernel_main.rs` gains a registration-
+      ordering test that fails if `BootCompleted` fires without
+      `install_dispatcher` being called. Docs:
+      `docs/src/architecture/kernel.md` "Syscall registration
+      phase" section.
+
+- [ ] **(f5)** `kernel/rustos-kernel::dispatch` body swap.
+      Replace `fail_closed_dispatch` with `production_dispatch`
+      that:
+        - reads `RawArgs` via the existing `read_raw_args` helper,
+        - reads `current_cpu()` from the arch crate,
+        - looks up `current_task(cpu_id)` from the scheduler
+          (published via the registration hook from (f4)),
+        - looks up `&TaskCapabilities` from the `CapTable`,
+        - builds `CallerContext { task_id, caps }`,
+        - calls `Dispatcher::dispatch(&caller, number, args)`,
+        - maps `Errno` → the ABI-encoded negative integer.
+
+      If `current_task` returns `None` (no task running on this
+      CPU — should be impossible once the scheduler is live but
+      AGENTS.md §5.4.5 *fail closed*), the callback emits an
+      audit record and halts the CPU exactly as the fail-closed
+      version does. Compile-time `_DISPATCH_SIGNATURE_PINNED`
+      stays. New host unit tests cover the no-task and
+      happy-path branches via the `extern "C"` shim already in
+      `dispatch.rs::tests`. Docs:
+      `kernel/rustos-kernel/README.md` "Production dispatch
+      callback" section + `docs/src/platform/x86_64.md` (c7-bin)
+      "Stage 2.7 follow-up" tail.
+
+- [ ] **(f6)** **QEMU integration test** — extend
+      `tests/integration/kernel_arch_boot/` (or add a sibling)
+      that spawns a single kernel task whose first instruction is
+      `syscall NR_CAP_QUERY, CAP_TIME_SET`, then `syscall NR_EXIT, 0`.
+      The audit-observer sink flips `qemu_exit::exit_success`
+      after observing one `AuditEvent::SyscallInvoked` for
+      `cap_query` *and* one `AuditEvent::SyscallInvoked` for
+      `exit`. Spawning the task does **not** require user-space
+      ELF loading: a kernel thread that issues `syscall` from
+      kernel CPL=0 is rejected by the trampoline (AGENTS.md §5.4
+      fail-closed), so this test instead invokes
+      `Dispatcher::dispatch` directly through a dedicated
+      `test-hook` entry exposed only when the bin crate is built
+      with the `test-hooks` Cargo feature. The hook is gated off
+      by default and `cargo deny check` rejects accidental
+      release builds that enable it.
+
+- [ ] **(f7)** PLAN.md update: tick (f1)..(f6), refresh the
+      Stage 3a status block to note Stage 2.7 follow-up is
+      `complete`, and refresh the Stage 2 evidence tail with a
+      fresh `cargo xtask ci` quote.
+
+### Definition of done
+
+- Real `SyscallHandlers` impl wired through `kernel_main`'s
+  registration phase.
+- Per-CPU current-task slot and `TaskId → &TaskCapabilities`
+  registry land with ≥ 95 % coverage in `kernel/sec` and ≥ 85 %
+  in `kernel/sched` / `kernel/core`.
+- New QEMU integration test boots to a kernel-thread `syscall`
+  pair (cap_query + exit) observed via audit-event sink.
+- `cargo xtask ci` green at HEAD of every commit; tail quoted in
+  PLAN.md.
+- `ipc_send`/`ipc_recv` and `cap_delegate`'s `set_ptr` copy-in
+  are deferred to later stages and called out explicitly here
+  rather than stubbed (AGENTS.md §15.1).
 
 ---
 
