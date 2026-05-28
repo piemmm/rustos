@@ -19,9 +19,11 @@
       <sourceFolder url="file://$MODULE_DIR$/kernel/core/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/ipc/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/mem/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/mem/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/sched/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/sec/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/sync/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/sync/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/syscall/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/abi/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/abi/tests" isTestSource="true" />
