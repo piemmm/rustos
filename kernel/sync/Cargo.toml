@@ -1,6 +1,6 @@
 [package]
 name = "rustos-kernel-sync"
-description = "RustOS placeholder: kernel synchronisation primitives."
+description = "RustOS kernel synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,14 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+
+# Loom is only pulled in when the consumer explicitly opts in with
+# `RUSTFLAGS="--cfg loom" cargo test ...`. It is *not* a runtime dependency.
+# See `tests/loom.rs` for the model-checking harness and AGENTS.md §7.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

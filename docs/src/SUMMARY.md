@@ -9,6 +9,7 @@
 # Architecture
 
 - [System overview](./architecture/overview.md)
+- [Kernel synchronisation primitives](./architecture/sync.md)
 
 # Shared libraries
 

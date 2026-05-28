@@ -161,6 +161,24 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `docs/src/architecture/kernel.md`, `…/memory.md`, `…/scheduler.md`,
   `…/ipc.md`, `…/security.md`, `…/syscalls.md`.
 
+**Sub-stages**
+- [x] 2.1 — `kernel/sync`: spinlocks, IRQ-safe spinlock, writer-preference
+      RwLock, MCS queue lock, SeqLock, epoch-based reclamation, `Once`/
+      `OnceCell`. Loom-gated concurrency tests in `kernel/sync/tests/loom.rs`,
+      proptest fairness test in `kernel/sync/tests/rwlock_fairness.rs`,
+      decision tree in `docs/src/architecture/sync.md`.
+- [ ] 2.2 — `kernel/mem` (buddy/bitmap frame allocator, per-process VM,
+      kernel slab with guard pages, zero-on-free, `Result`-returning OOM).
+- [ ] 2.3 — `kernel/sched` (SMP scheduler).
+- [ ] 2.4 — `kernel/ipc` (capability-checked ports, shared memory,
+      async notifications).
+- [ ] 2.5 — `kernel/sec` (user/group/cap tables, manifest verification,
+      audit log writer).
+- [ ] 2.6 — `kernel/syscall` (dispatch table generated from
+      `lib/abi/src/syscalls.rs`).
+- [ ] 2.7 — `kernel/core` (kernel entry, panic handler, boot invariants,
+      global init order).
+
 ---
 
 ## Stage 3 — Architecture Ports
