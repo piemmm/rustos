@@ -489,6 +489,14 @@ dependencies = [
 [[package]]
 name = "rustos-kernel-sec"
 version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "proptest",
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-kernel-sync"

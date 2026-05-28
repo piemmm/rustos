@@ -189,10 +189,25 @@ Do **not** begin a stage before all its listed dependencies are complete.
       (`kernel/sched/tests/stress.rs`), loom-gated concurrency test for
       the run-queue's lock-free fast path (`kernel/sched/tests/loom.rs`).
       Architecture documentation in `docs/src/architecture/scheduler.md`.
-- [ ] 2.4 — `kernel/ipc` (capability-checked ports, shared memory,
+- [x] 2.4 — `kernel/sec`: in-memory `IdentityTable` builder/verifier
+      (`kernel/sec/src/identity.rs`) covering users, groups, and
+      supplementary-group sets with bounded sizes; per-task
+      `TaskCapabilities` (`kernel/sec/src/captable.rs`) whose effective
+      set is the intersection of the user grant and the manifest
+      request, with delegation/revocation routed through `lib/caps`
+      and signed `CapabilityToken` application; Ed25519 manifest
+      verification (`kernel/sec/src/manifest.rs`) refusing on bad
+      signature, ABI mismatch, or unknown capability; audit log writer
+      with stable event IDs `1_000..2_000` (`kernel/sec/src/audit.rs`)
+      emitting exactly one record per security decision per
+      `AGENTS.md` §5.4.4; "no ambient authority" locked in by unit
+      tests against `uid == 0`. Property tests for the task-level
+      subset invariant live in
+      `kernel/sec/tests/proptest_invariants.rs`. Documentation in
+      `docs/src/architecture/security.md`. Stage 2.4 was renumbered
+      from the original PLAN's 2.5 to match the Stage 2.4 task brief.
+- [ ] 2.5 — `kernel/ipc` (capability-checked ports, shared memory,
       async notifications).
-- [ ] 2.5 — `kernel/sec` (user/group/cap tables, manifest verification,
-      audit log writer).
 - [ ] 2.6 — `kernel/syscall` (dispatch table generated from
       `lib/abi/src/syscalls.rs`).
 - [ ] 2.7 — `kernel/core` (kernel entry, panic handler, boot invariants,
