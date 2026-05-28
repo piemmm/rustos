@@ -693,11 +693,11 @@ fn discover_aps(multiboot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> O
     );
 
     // Locate the MADT via XSDT (preferred) or RSDT.
-    let madt_bytes = if rsdp.xsdt_address != 0 {
-        find_madt_via_xsdt(rsdp.xsdt_address)?
-    } else {
-        find_madt_via_rsdt(u64::from(rsdp.rsdt_address))?
-    };
+    //
+    // SAFETY: `rsdp.xsdt_address` / `rsdp.rsdt_address` came from a
+    // firmware-validated RSDP and sit inside the boot trampoline's
+    // 0..4 GiB identity-mapped window (`boot.s` SAFETY-INVARIANT 4).
+    let madt_bytes = unsafe { acpi::locate_madt(&rsdp) }?;
     let madt = acpi::Madt::parse(madt_bytes).ok()?;
 
     let mut list = ApList {
@@ -722,61 +722,11 @@ fn discover_aps(multiboot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> O
     Some(list)
 }
 
-/// Read a 4-byte little-endian u32 from a physical address. SAFETY: the
-/// address must lie within the boot-time identity-mapped 0..4 GiB.
-unsafe fn read_u32(phys: u64) -> u32 {
-    // SAFETY: caller's contract.
-    unsafe { core::ptr::read_unaligned(phys as *const u32) }
-}
-unsafe fn read_u64(phys: u64) -> u64 {
-    // SAFETY: caller's contract.
-    unsafe { core::ptr::read_unaligned(phys as *const u64) }
-}
-
-fn find_madt_via_xsdt(xsdt_phys: u64) -> Option<&'static [u8]> {
-    // SAFETY: xsdt_phys < 4 GiB (firmware-reserved tables placed by OVMF).
-    let header_len = 36usize;
-    let len = unsafe { read_u32(xsdt_phys + 4) } as usize;
-    if len < header_len {
-        return None;
-    }
-    let n_entries = (len - header_len) / 8;
-    for i in 0..n_entries {
-        let entry = unsafe { read_u64(xsdt_phys + header_len as u64 + (i as u64) * 8) };
-        if let Some(bytes) = try_madt(entry) {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-fn find_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
-    let header_len = 36usize;
-    let len = unsafe { read_u32(rsdt_phys + 4) } as usize;
-    if len < header_len {
-        return None;
-    }
-    let n_entries = (len - header_len) / 4;
-    for i in 0..n_entries {
-        let entry = unsafe { read_u32(rsdt_phys + header_len as u64 + (i as u64) * 4) } as u64;
-        if let Some(bytes) = try_madt(entry) {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-fn try_madt(phys: u64) -> Option<&'static [u8]> {
-    // SAFETY: identity-mapped 0..4 GiB.
-    let sig = unsafe { core::slice::from_raw_parts(phys as *const u8, 4) };
-    if sig != b"APIC" {
-        return None;
-    }
-    let len = unsafe { read_u32(phys + 4) } as usize;
-    // SAFETY: same as above; length validated by `Madt::parse`.
-    let bytes = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
-    Some(bytes)
-}
+// MADT discovery moved to `rustos_arch_x86_64::acpi::locate_madt`
+// in Stage 3a (c7-bin). The previous open-coded `find_madt_via_*` /
+// `try_madt` / `read_phys_*` helpers are gone — `AGENTS.md` §2.2
+// (no duplication). The `discover_aps` helper above now calls the
+// shared, audited implementation.
 
 // --- Per-AP stack pool --------------------------------------------
 

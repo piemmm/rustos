@@ -595,11 +595,11 @@ Each sub-stage delivers one architecture. They share the same checklist:
           `docs/src/platform/x86_64.md` Stage-3a-(c6) section +
           `docs/src/architecture/syscalls.md` "Per-architecture
           entry stubs" table.
-    - [~] **(c7)** Implement `kernel/core::KernelArch` against
+    - [x] **(c7)** Implement `kernel/core::KernelArch` against
           (c1)..(c6) and wire `kernel_main` via a dedicated
           `rustos-kernel` bin crate that is the single writer of
           `syscall_entry::set_dispatch_callback`. **Split into
-          (c7-arch) (landed) and (c7-bin) (next session).**
+          (c7-arch) (landed) and (c7-bin) (landed).**
         - [x] **(c7-arch)** `kernel/arch/x86_64::kernel_arch` —
               `X86_64Arch` (`SchedulerArch` impl + `ArchInitError`
               + `lapic_id_of` accessor) and the free `halt() -> !`
@@ -631,20 +631,69 @@ Each sub-stage delivers one architecture. They share the same checklist:
               total to 118. Docs:
               `docs/src/platform/x86_64.md` (c7-arch) section +
               note in `docs/src/architecture/kernel.md`.
-        - [ ] **(c7-bin)** New freestanding `rustos-kernel` bin
-              crate (`x86_64-unknown-none`) that constructs an
-              `Arc<X86_64Arch>` from the ACPI MADT, implements
+        - [x] **(c7-bin)** New freestanding `rustos-kernel` bin
+              crate (`x86_64-unknown-none`) at
+              `kernel/rustos-kernel/` — a hybrid `[lib]` + `[[bin]]`
+              whose library half ships the boot pipeline reused by
+              both the production binary and the new QEMU
+              integration test. `boot(multiboot_info, log_sink,
+              audit_sink) -> !` runs `percpu::init(0)` → LAPIC
+              software-enable + PIT-calibrated 1 ms LAPIC timer →
+              Multiboot2 → `BootMemoryMap` →
+              `acpi::locate_madt` (newly extracted from
+              `scheduler_stress_qemu`; AGENTS.md §2.2) → BSP-LAPIC
+              verification → `X86_64Arch::new` →
+              `syscall_entry::set_dispatch_callback` (the
+              fail-closed callback in `dispatch.rs`, installed
+              **before** `syscall` is enabled) →
+              `preempt::init_local_preempt` →
+              `preempt::set_cpu_id_for_lapic` →
+              `syscall_entry::init_local_syscalls` (using
+              `PerCpuGdt::selectors()` and the bin's 16 KiB per-CPU
+              kernel-stack pool for `kernel_rsp0`) → `BootInfo::new`
+              + forward to `rustos_kernel_core::kernel_main`. The
+              orphan-rule wrapper `BinArch(X86_64Arch)` implements
               `KernelArch::halt` by forwarding to
-              `kernel_arch::halt()`, builds a `BootInfo`, installs
-              `syscall_entry::set_dispatch_callback` **before**
-              enabling `syscall` on any CPU, drives per-CPU
-              `percpu::init` / `preempt::init_local_preempt` /
-              `syscall_entry::init_local_syscalls`, and forwards
-              to `rustos_kernel_core::kernel_main`. A new QEMU
-              integration test boots the binary all the way to
-              `AuditEvent::BootCompleted`. The bin crate enables
-              the new `rustos-arch-x86_64/sched-arch` feature and
-              brings the global allocator.
+              `kernel_arch::halt()`; the `-> !` return type is
+              pinned at compile time by
+              `_BIN_ARCH_HALT_RETURNS_NEVER`. The `#[panic_handler]`
+              in each bin is a one-liner that calls
+              `panic_ctx::handle_panic_via_kernel_core`, which loads
+              the `Arc<BinArch>` pointer that `boot()` publishes
+              into `PANIC_ARCH_PTR` and forwards through
+              `kernel_core::handle_panic` with a `PanicContext { arch,
+              audit_sink: &SERIAL_SINK }`; a pre-init panic emits
+              one COM1 record and halts. A new QEMU integration
+              test crate `tests/integration/kernel_arch_boot/`
+              brings its own audit-observer Sink that flips
+              `qemu_exit::exit_success` on
+              `AuditEvent::BootCompleted` (`EventId(4004)`) — the
+              test is enrolled in
+              `tools/xtask/src/commands/qemu_tests.rs` with a 60 s
+              budget. The bin crate enables
+              `rustos-arch-x86_64/sched-arch`, ships a 16 MiB
+              CAS-driven bump allocator with documented limits
+              (`README.md`), and adds
+              `--cfg curve25519_dalek_backend="serial"` to
+              `.cargo/config.toml`'s `x86_64-unknown-none`
+              rustflags to side-step a curve25519-dalek SIMD-backend
+              LLVM error on the freestanding target. 11 new host
+              unit tests (5 bumpalloc, 3 arch_wrapper, 3 dispatch)
+              plus 4 compile-time `const _` assertions
+              (`_BIN_ARCH_HALT_RETURNS_NEVER`,
+              `_BIN_ARCH_IS_SCHED_ARCH`,
+              `_DISPATCH_SIGNATURE_PINNED`,
+              `_DISPATCH_CALLBACK_INSTALLABLE`,
+              `_KERNEL_STACK_FITS_AT_LEAST_ONE_FRAME`). Docs:
+              `kernel/rustos-kernel/README.md`,
+              `docs/src/platform/x86_64.md` (c7-bin) section,
+              `docs/src/architecture/kernel.md` updated to reflect
+              the now-shipped impl. **Stage 2.7 follow-up**: the
+              dispatch callback is fail-closed (`halts` if reached);
+              when Stage 2.7 lands `SyscallHandlers` + per-CPU
+              `CallerContext` plumbing the body is replaced with a
+              forwarder to `Dispatcher::dispatch` — body-only swap,
+              ABI pinned at compile time.
     - [x] **(d1)** Per-arch QEMU run script
           `tools/qemu/src/x86_64.rs`. The generic
           `tools/qemu::Spec`/`Runner` are now architecture-neutral;
@@ -679,6 +728,29 @@ Each sub-stage delivers one architecture. They share the same checklist:
 
 **Docs**
 - `docs/src/platform/<arch>.md` with build, run, and debug instructions.
+
+**Stage 3a status: complete.**
+- All x86_64 sub-stage items (a)..(c7), (d1) are `[x]`. (c7) is
+  delivered in two commits — (c7-arch) on the arch crate, and
+  (c7-bin) on the new `kernel/rustos-kernel` bin crate plus the
+  companion `tests/integration/kernel_arch_boot` QEMU integration
+  test enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
+- The architecture-neutral kernel core (`kernel/core::kernel_main`)
+  is now reachable end-to-end from the x86_64 boot trampoline: a
+  production `rustos-kernel` binary boots to
+  `AuditEvent::BootCompleted` (`EventId(4004)`) under QEMU on the
+  QEMU CI runner; the audit-observer sink in the integration test
+  bin flips `qemu_exit::exit_success` on observing that event, so
+  `cargo xtask test --qemu` reports `Outcome::Pass`.
+- The Stage 2.7 follow-up is the only remaining (c7) thread: the
+  bin crate's syscall-dispatch callback is fail-closed pending
+  `SyscallHandlers` / per-CPU `CallerContext` plumbing. The ABI is
+  pinned at compile time (`_DISPATCH_SIGNATURE_PINNED`), so the
+  swap to a `Dispatcher::dispatch` forwarder is a body-only change
+  with no public-surface impact.
+- Stage 3b/3c/3d (aarch64 / riscv64 / wasm32) remain outstanding
+  per their own checklists; each follows the same per-arch
+  template (a)..(d) the x86_64 sub-stage just completed.
 
 ---
 

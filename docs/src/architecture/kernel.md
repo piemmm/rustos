@@ -115,14 +115,24 @@ record under the `log` phase and halts.
 
 `kernel/core` owns the `4_000..5_000` event-id range:
 
-| ID   | Level | Name                  |
-|-----:|-------|-----------------------|
-| 4000 | Info  | `KERNEL_BOOT_STARTED` |
-| 4001 | Info  | `KERNEL_PHASE_STARTED`|
-| 4002 | Info  | `KERNEL_PHASE_READY`  |
-| 4003 | Error | `KERNEL_PHASE_FAILED` |
-| 4004 | Info  | `KERNEL_BOOT_COMPLETED` |
-| 4010 | Error | `KERNEL_PANIC`        |
+| ID   | Level | Name                    | Sink   |
+|-----:|-------|-------------------------|--------|
+| 4000 | Info  | `KERNEL_BOOT_STARTED`   | audit  |
+| 4001 | Info  | `KERNEL_PHASE_STARTED`  | log    |
+| 4002 | Info  | `KERNEL_PHASE_READY`    | log    |
+| 4003 | Error | `KERNEL_PHASE_FAILED`   | audit  |
+| 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
+| 4010 | Error | `KERNEL_PANIC`          | audit  |
+
+The **Sink** column names the `BootInfo`-supplied channel each record
+is emitted on. Audit-class boot lifecycle events
+(`AGENTS.md` §5.4.4 — security-relevant decisions) route through
+`audit_sink`; phase-timeline events route through the diagnostic
+`log_sink`. Production kernels typically wire both sinks to the same
+COM1 backend; the QEMU integration test bin
+(`tests/integration/kernel_arch_boot`) intercepts the audit channel
+only, observing `KERNEL_BOOT_COMPLETED` to flip the QEMU
+`isa-debug-exit` device.
 
 New events take the next free identifier and require an update to this
 table and the event catalogue in `kernel/core/src/audit.rs`.
@@ -168,7 +178,7 @@ QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
 `isa-debug-exit` device, strict per-test timeouts, no retries —
 `AGENTS.md` §7).
 
-## Stage 3a (c7-arch) — first production `SchedulerArch` impl
+## Stage 3a (c7) — first production `KernelArch` impl
 
 `kernel/arch/x86_64::kernel_arch::X86_64Arch` (Stage 3a (c7-arch),
 PLAN.md) is the first production implementation of
@@ -177,8 +187,33 @@ feature-gated behind `rustos-arch-x86_64`'s opt-in `sched-arch`
 feature — see
 [`platform/x86_64.md`](../platform/x86_64.md#stage-3a-c7-arch--schedulerarch-impl-for-x86_64)
 for the bare-metal / host semantics and the dependency rationale.
-The companion `KernelArch::halt` impl, the `kernel_main(multiboot_info)`
-body, and the `rustos-kernel` bin crate land in (c7-bin). Until then
-the arch crate ships a free `kernel_arch::halt() -> !` function with
-a compile-time signature assertion; the bin crate's `KernelArch::halt`
-forwards there.
+
+The matching `rustos_kernel_core::KernelArch::halt` impl now ships in
+the Stage 3a (c7-bin) `rustos-kernel` binary at
+`kernel/rustos-kernel/` — see
+[`platform/x86_64.md`](../platform/x86_64.md#stage-3a-c7-bin--rustos-kernel-binary)
+for the boot pipeline. The bin crate's `BinArch(X86_64Arch)` newtype
+satisfies Rust's orphan rules; `BinArch::halt` forwards to the free
+function `kernel_arch::halt()` and is compile-time-pinned to the
+`-> !` signature by `_BIN_ARCH_HALT_RETURNS_NEVER`. The bin's
+`kernel_main(multiboot_info)` body composes everything: Multiboot2 →
+ACPI/MADT → `BootMemoryMap`; `X86_64Arch::new`; per-CPU init; the
+fail-closed syscall-dispatch callback installed *before* `syscall` is
+enabled on any CPU; finally `BootInfo::new` + forward to
+`rustos_kernel_core::kernel_main`.
+
+The companion QEMU integration test
+`tests/integration/kernel_arch_boot` boots the binary end-to-end
+under QEMU on `-smp 1` and exits successfully on observing
+`AuditEvent::BootCompleted` (`EventId(4004)`).
+
+### Stage 2.7 follow-up
+
+The (c7-bin) dispatch callback is **fail-closed**: it parks the CPU
+forever if any `syscall` ever reaches it (none does at this stage —
+there is no user space yet). When Stage 2.7 lands a
+`SyscallHandlers` impl and per-CPU `CallerContext` plumbing, the
+callback body is replaced with a forwarder to
+`rustos_kernel_syscall::Dispatcher::dispatch`. The ABI is pinned at
+compile time by `_DISPATCH_SIGNATURE_PINNED`, so the swap is a
+body-only change with no public-surface impact.

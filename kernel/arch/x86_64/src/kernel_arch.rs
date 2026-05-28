@@ -1,32 +1,33 @@
-//! Stage 3a (c7-arch): the x86_64 [`SchedulerArch`] implementation.
+//! Stage 3a (c7-arch): the x86_64 `SchedulerArch` implementation.
 //!
-//! [`X86_64Arch`] is the concrete handle the architecture-neutral
-//! kernel reaches for through [`SchedulerArch`]. It is the only
-//! production implementation of that trait inside the workspace
-//! (the host-side `TestArch` shipped by `kernel/sched` is feature-
-//! gated to `test-arch` per `AGENTS.md` §1).
+//! `X86_64Arch` is the concrete handle the architecture-neutral
+//! kernel reaches for through `rustos_kernel_sched::SchedulerArch`.
+//! It is the only production implementation of that trait inside
+//! the workspace (the host-side `TestArch` shipped by
+//! `kernel/sched` is feature-gated to `test-arch` per
+//! `AGENTS.md` §1).
 //!
 //! # Surface
 //!
-//! - [`X86_64Arch::new`] — validates a `(boot_cpu_id, boot_apic_id,
+//! - `X86_64Arch::new` — validates a `(boot_cpu_id, boot_apic_id,
 //!   cpu_to_lapic)` triple parsed from the ACPI MADT and returns the
 //!   handle ready to be wrapped in `Arc`.
-//! - [`SchedulerArch::current_cpu`] — on bare metal, reads the LAPIC
+//! - `SchedulerArch::current_cpu` — on bare metal, reads the LAPIC
 //!   ID register and consults
 //!   [`crate::preempt::cpu_id_for_lapic`]; on host builds, returns the
 //!   boot CPU's dense `CpuId` so host tests of the scheduler remain
 //!   deterministic (`AGENTS.md` §7 — no flaky tests).
-//! - [`SchedulerArch::ticks_now`] — on bare metal, reads `RDTSC` (the
+//! - `SchedulerArch::ticks_now` — on bare metal, reads `RDTSC` (the
 //!   invariant TSC modern x86_64 CPUs expose; QEMU advertises it); on
 //!   host builds, returns a monotonically-increasing per-instance
-//!   counter so [`SchedulerArch`]'s "monotonically non-decreasing"
+//!   counter so `SchedulerArch`'s "monotonically non-decreasing"
 //!   contract holds in tests too.
-//! - [`SchedulerArch::send_ipi`] — on bare metal, issues a directed
+//! - `SchedulerArch::send_ipi` — on bare metal, issues a directed
 //!   IPI through an ephemeral [`crate::apic::Lapic`] over
 //!   [`crate::apic::VolatileLapicMmio`] at [`crate::preempt::LAPIC_BASE_PHYS`];
 //!   on host builds, records the IPI in an in-instance counter so
 //!   host tests can assert preemption was requested.
-//! - [`halt`] — a free function that masks interrupts and parks the
+//! - `halt` — a free function that masks interrupts and parks the
 //!   CPU forever on `hlt`. The companion `rustos-kernel` bin crate
 //!   (Stage 3a (c7-bin)) uses it to satisfy
 //!   `rustos_kernel_core::KernelArch::halt`. The trait impl lives in

@@ -85,7 +85,7 @@ where
 
 #[test]
 fn happy_path_runs_documented_init_order_and_halts() {
-    let (arch, log_sink, _audit) = drive_kernel_main(|_| {});
+    let (arch, log_sink, audit_sink) = drive_kernel_main(|_| {});
 
     // The boot CPU halts exactly once (success path → trailing halt
     // documented in init.rs; Stage 2.7 will replace it).
@@ -95,18 +95,34 @@ fn happy_path_runs_documented_init_order_and_halts() {
         "kernel_main must call halt exactly once"
     );
 
-    let ids: Vec<u32> = log_sink.event_ids();
-    // First record is BootStarted, last is BootCompleted; no
-    // PhaseFailed in between.
-    assert_eq!(ids.first().copied(), Some(AuditEvent::BootStarted.id().0));
-    assert_eq!(ids.last().copied(), Some(AuditEvent::BootCompleted.id().0));
+    // Audit-channel events: BootStarted then BootCompleted, with no
+    // intervening PhaseFailed. Sink routing is documented in
+    // `kernel/core/src/audit.rs`.
+    let audit_ids: Vec<u32> = audit_sink.event_ids();
+    assert_eq!(
+        audit_ids.first().copied(),
+        Some(AuditEvent::BootStarted.id().0),
+    );
+    assert_eq!(
+        audit_ids.last().copied(),
+        Some(AuditEvent::BootCompleted.id().0),
+    );
     assert!(
-        !ids.contains(&AuditEvent::PhaseFailed.id().0),
-        "happy path must not log PhaseFailed"
+        !audit_ids.contains(&AuditEvent::PhaseFailed.id().0),
+        "happy path must not emit PhaseFailed on the audit sink",
     );
 
-    // Documented order: phase strings appear as the values of every
-    // PhaseStarted record in this exact sequence.
+    // Log-channel events: every PhaseStarted in the documented order,
+    // each followed by exactly one PhaseReady, and no audit-class
+    // lifecycle events leaking onto the diagnostic channel.
+    let log_ids: Vec<u32> = log_sink.event_ids();
+    assert!(
+        !log_ids.contains(&AuditEvent::BootStarted.id().0)
+            && !log_ids.contains(&AuditEvent::BootCompleted.id().0)
+            && !log_ids.contains(&AuditEvent::PhaseFailed.id().0),
+        "audit-class events must not appear on the log sink",
+    );
+
     let phases: Vec<String> = log_sink
         .snapshot()
         .into_iter()
@@ -116,7 +132,6 @@ fn happy_path_runs_documented_init_order_and_halts() {
     let expected: Vec<&str> = Phase::ORDER.iter().map(|p| p.as_str()).collect();
     assert_eq!(phases, expected);
 
-    // Each phase is followed by exactly one Ready.
     let ready_count = log_sink
         .snapshot()
         .into_iter()
@@ -127,18 +142,18 @@ fn happy_path_runs_documented_init_order_and_halts() {
 
 #[test]
 fn mem_phase_failure_logs_phase_failed_and_halts() {
-    let (arch, log_sink, _audit) = drive_kernel_main(|boot| {
+    let (arch, _log, audit_sink) = drive_kernel_main(|boot| {
         // Empty memory map → FrameAllocator::new returns OutOfMemory.
         boot.memory_map = BootMemoryMap::new();
     });
 
     assert_eq!(arch.halt_count(), 1, "failure path must halt exactly once");
 
-    let snapshot = log_sink.snapshot();
+    let snapshot = audit_sink.snapshot();
     let failed = snapshot
         .iter()
         .find(|e| e.id == AuditEvent::PhaseFailed.id())
-        .expect("PhaseFailed must be logged");
+        .expect("PhaseFailed must be emitted on the audit sink");
     let field = |key: &str| {
         failed
             .fields
@@ -157,16 +172,16 @@ fn mem_phase_failure_logs_phase_failed_and_halts() {
 
 #[test]
 fn bad_bootinfo_fails_under_log_phase() {
-    let (arch, log_sink, _audit) = drive_kernel_main(|boot| {
+    let (arch, _log, audit_sink) = drive_kernel_main(|boot| {
         boot.boot_cpu = 99; // out of range vs cpu_count = 1.
     });
 
     assert_eq!(arch.halt_count(), 1);
-    let failed = log_sink
+    let failed = audit_sink
         .snapshot()
         .into_iter()
         .find(|e| e.id == AuditEvent::PhaseFailed.id())
-        .expect("PhaseFailed must be logged");
+        .expect("PhaseFailed must be emitted on the audit sink");
     let field = |key: &str| {
         failed
             .fields

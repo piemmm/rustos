@@ -15,14 +15,21 @@
 //!
 //! # Event catalogue
 //!
-//! | ID   | Level | Name                          | When |
-//! |-----:|-------|-------------------------------|------|
-//! | 4000 | Info  | `KERNEL_BOOT_STARTED`         | `kernel_main` entered, before any subsystem init. |
-//! | 4001 | Info  | `KERNEL_PHASE_STARTED`        | An init phase began. The `phase` field names it. |
-//! | 4002 | Info  | `KERNEL_PHASE_READY`          | An init phase completed successfully. |
-//! | 4003 | Error | `KERNEL_PHASE_FAILED`         | An init phase failed; the kernel will halt. |
-//! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | Every init phase finished; control passes to the scheduler. |
-//! | 4010 | Error | `KERNEL_PANIC`                | The kernel panicked; the handler logged context and is about to halt. |
+//! | ID   | Level | Name                          | Sink   | When |
+//! |-----:|-------|-------------------------------|--------|------|
+//! | 4000 | Info  | `KERNEL_BOOT_STARTED`         | audit  | `kernel_main` entered, before any subsystem init. |
+//! | 4001 | Info  | `KERNEL_PHASE_STARTED`        | log    | An init phase began. The `phase` field names it. |
+//! | 4002 | Info  | `KERNEL_PHASE_READY`          | log    | An init phase completed successfully. |
+//! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
+//! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
+//! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
+//!
+//! "audit" events route through the `audit_sink` channel
+//! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
+//! route through the diagnostic `log_sink` channel. Production
+//! kernels typically wire both sinks to the same COM1 backend, so
+//! both channels are visible on the boot console; QEMU integration
+//! tests intercept the audit channel only.
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and updating the table in

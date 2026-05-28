@@ -1,0 +1,58 @@
+[package]
+name = "rustos-kernel"
+description = "RustOS microkernel binary (Stage 3a (c7-bin)): wires the x86_64 architecture port to the architecture-neutral kernel/core entry point."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The crate is a hybrid `[lib]` + `[[bin]]`:
+#
+# * The library half (`src/lib.rs`) carries the architecture-neutral
+#   boot pipeline: bump allocator type, the [`BinArch`] wrapper that
+#   implements `rustos_kernel_core::KernelArch` over
+#   `rustos_arch_x86_64::kernel_arch::X86_64Arch`, the fail-closed
+#   syscall-dispatch callback, the Multiboot2 → ACPI/MADT →
+#   `BootMemoryMap` plumbing, and the `boot` entry point that builds a
+#   `kernel_core::BootInfo` and hands it to `kernel_core::kernel_main`.
+#   This half is `no_std` and is consumed by both the production bin
+#   below and the QEMU integration test
+#   (`tests/integration/kernel_arch_boot`).
+#
+# * The binary half (`src/main.rs`) is the freestanding production
+#   kernel for `x86_64-unknown-none`. It owns the `#[global_allocator]`
+#   static, the `#[panic_handler]`, the production COM1-backed log/audit
+#   sinks, and the `extern "C" fn kernel_main(multiboot_info: u64)`
+#   symbol the arch crate's boot stub calls. The integration test
+#   crate brings its own copies of all four so that the audit sink can
+#   observe `AuditEvent::BootCompleted` and exit QEMU successfully
+#   without leaking that behaviour into the production binary
+#   (`AGENTS.md` §5.4.5 — fail closed, no harness-driven shortcuts in
+#   production).
+#
+# Pulling the boot pipeline into the library half is the only way to
+# satisfy `AGENTS.md` §2.2 (no duplication) without exposing the audit
+# sink through a Cargo feature, which would risk feature-unification
+# leaking the QEMU-exit behaviour into the production bin during a
+# `cargo build --workspace`.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustos-kernel"
+path = "src/main.rs"
+
+[dependencies]
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-kernel-core = { path = "../core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }

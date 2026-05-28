@@ -19,6 +19,16 @@ rustflags = [
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
+    # `curve25519-dalek` (pulled in transitively through
+    # `rustos-crypto` → `ed25519-dalek`) auto-selects the `simd`
+    # backend on nightly toolchains that advertise AVX2, but the
+    # generated SIMD code depends on host-only LLVM intrinsics that
+    # `x86_64-unknown-none` cannot lower (`rustc-LLVM ERROR: Do not
+    # know how to split the result of this operator!`). The `serial`
+    # backend is what the upstream crate ships for freestanding
+    # targets, so pin it explicitly here. `AGENTS.md` §15.10 — every
+    # `--cfg` carries a justifying comment.
+    "--cfg", "curve25519_dalek_backend=\"serial\"",
 ]
 
 [target.aarch64-unknown-none]

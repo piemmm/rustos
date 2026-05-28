@@ -175,8 +175,14 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     let audit_sink: &(dyn Sink + Sync) = boot.audit_sink;
     let arch_for_halt = Arc::clone(&boot.arch);
 
+    // `BootStarted` / `BootCompleted` / `PhaseFailed` are audit
+    // lifecycle events (`AGENTS.md` §5.4.4 — security-relevant
+    // decisions). They route through `audit_sink`. `PhaseStarted` /
+    // `PhaseReady` remain on `log_sink` as diagnostic timeline
+    // markers. Production wires both sinks to the same backend; the
+    // QEMU integration test bin intercepts `audit_sink` only.
     emit(
-        log_sink,
+        audit_sink,
         Level::Info,
         AuditEvent::BootStarted,
         &[Field {
@@ -207,7 +213,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         let phase = err.phase();
         let cause = err.cause();
         emit(
-            log_sink,
+            audit_sink,
             Level::Error,
             AuditEvent::PhaseFailed,
             &[
@@ -225,7 +231,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     }
 
     emit(
-        log_sink,
+        audit_sink,
         Level::Info,
         AuditEvent::BootCompleted,
         &[Field {

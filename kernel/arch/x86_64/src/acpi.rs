@@ -347,6 +347,156 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
     }
 }
 
+// --- MADT discovery via (X|R)SDT walk (bare-metal only) --------------
+//
+// The following helpers walk the firmware-supplied XSDT (preferred) or
+// RSDT to find the Multiple APIC Description Table. They read raw
+// physical addresses through the boot trampoline's identity-mapped
+// 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4) and are therefore
+// gated to the freestanding x86_64 target.
+//
+// AGENTS.md §2.2 — both the `tests/integration/kernel_arch_boot`
+// boot test (Stage 3a (c7-bin)) and the existing `scheduler_stress_qemu`
+// integration test need to find the MADT this way. Centralising the
+// logic here removes the duplication that would otherwise grow with
+// every new bin.
+
+/// Length of a single ACPI SDT header (the per-table preamble).
+///
+/// Re-exported as a `const` (rather than `size_of::<SdtHeader>()`) so
+/// host code can index into raw byte slices without depending on the
+/// internal type layout (`AGENTS.md` §2.4 — no leaking representation
+/// details across an API).
+pub const ACPI_SDT_HEADER_LEN: usize = SDT_HEADER_LEN;
+
+/// Locate the MADT by walking the firmware (X|R)SDT pointed at by
+/// `rsdp`.
+///
+/// Returns the MADT bytes (header + body, exactly `length` bytes long)
+/// as a `'static` slice if found. The caller is expected to hand the
+/// bytes to [`Madt::parse`].
+///
+/// # Safety
+///
+/// * `rsdp.xsdt_address` (or `rsdp.rsdt_address` when `xsdt_address`
+///   is zero) must point at a complete, well-formed ACPI SDT inside
+///   the boot trampoline's 0..4 GiB identity-mapped physical window.
+/// * The firmware tables must remain unmodified for the duration of
+///   the returned slice's `'static` lifetime. The ACPI specification
+///   guarantees this for the boot-time tables.
+///
+/// Returns `None` if no entry of the (X|R)SDT advertises the
+/// [`MADT_SIGNATURE`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    if rsdp.xsdt_address != 0 {
+        // SAFETY: forwarded — caller's contract pins the address into
+        // the identity-mapped window.
+        unsafe { locate_madt_via_xsdt(rsdp.xsdt_address) }
+    } else {
+        // SAFETY: forwarded.
+        unsafe { locate_madt_via_rsdt(u64::from(rsdp.rsdt_address)) }
+    }
+}
+
+/// Walk an XSDT (64-bit entry pointers) for the MADT.
+///
+/// # Safety
+///
+/// See [`locate_madt`]. `xsdt_phys` must point at a valid XSDT in the
+/// identity-mapped 0..4 GiB window.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_madt_via_xsdt(xsdt_phys: u64) -> Option<&'static [u8]> {
+    // SAFETY: caller's contract — `xsdt_phys` is identity-mapped.
+    let len = unsafe { read_phys_u32(xsdt_phys + 4) } as usize;
+    if len < ACPI_SDT_HEADER_LEN {
+        return None;
+    }
+    let n_entries = (len - ACPI_SDT_HEADER_LEN) / 8;
+    for i in 0..n_entries {
+        // SAFETY: caller's contract.
+        let entry =
+            unsafe { read_phys_u64(xsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 8) };
+        // SAFETY: caller's contract.
+        if let Some(bytes) = unsafe { try_madt_at(entry) } {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Walk an RSDT (32-bit entry pointers) for the MADT.
+///
+/// # Safety
+///
+/// See [`locate_madt`]. `rsdt_phys` must point at a valid RSDT in the
+/// identity-mapped 0..4 GiB window.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
+    // SAFETY: caller's contract.
+    let len = unsafe { read_phys_u32(rsdt_phys + 4) } as usize;
+    if len < ACPI_SDT_HEADER_LEN {
+        return None;
+    }
+    let n_entries = (len - ACPI_SDT_HEADER_LEN) / 4;
+    for i in 0..n_entries {
+        // SAFETY: caller's contract.
+        let entry =
+            unsafe { read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4) }
+                as u64;
+        // SAFETY: caller's contract.
+        if let Some(bytes) = unsafe { try_madt_at(entry) } {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Inspect a candidate SDT at `phys` and return the byte slice if its
+/// signature is [`MADT_SIGNATURE`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn try_madt_at(phys: u64) -> Option<&'static [u8]> {
+    // SAFETY: caller's contract pins `phys` into the identity-mapped
+    // window. We only deref the first four bytes (signature) before
+    // sizing the rest of the slice.
+    let sig = unsafe { core::slice::from_raw_parts(phys as *const u8, 4) };
+    if sig != MADT_SIGNATURE {
+        return None;
+    }
+    // SAFETY: caller's contract; the length is bounded by the
+    // length field which `Madt::parse` re-validates.
+    let len = unsafe { read_phys_u32(phys + 4) } as usize;
+    // SAFETY: caller's contract.
+    Some(unsafe { core::slice::from_raw_parts(phys as *const u8, len) })
+}
+
+/// Read a 4-byte little-endian `u32` from a physical address.
+///
+/// # Safety
+///
+/// `phys` must be inside the boot trampoline's 0..4 GiB identity map.
+/// The four bytes at `phys..phys+4` must be a valid `u32`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn read_phys_u32(phys: u64) -> u32 {
+    // SAFETY: caller's contract.
+    unsafe { core::ptr::read_unaligned(phys as *const u32) }
+}
+
+/// Read an 8-byte little-endian `u64` from a physical address.
+///
+/// # Safety
+///
+/// `phys` must be inside the boot trampoline's 0..4 GiB identity map.
+/// The eight bytes at `phys..phys+8` must be a valid `u64`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe fn read_phys_u64(phys: u64) -> u64 {
+    // SAFETY: caller's contract.
+    unsafe { core::ptr::read_unaligned(phys as *const u64) }
+}
+
 // --- Compile-time sanity check ---------------------------------------
 
 const _: () = {
@@ -354,6 +504,10 @@ const _: () = {
     assert!(SDT_HEADER_LEN == 36);
     // RSDP signature is 8 bytes by ACPI spec.
     assert!(size_of::<[u8; 8]>() == 8);
+    // The public `ACPI_SDT_HEADER_LEN` and the module-private
+    // `SDT_HEADER_LEN` must agree exactly. `AGENTS.md` §2.2 — no
+    // duplicate-source-of-truth constants.
+    assert!(ACPI_SDT_HEADER_LEN == SDT_HEADER_LEN);
 };
 
 #[cfg(test)]

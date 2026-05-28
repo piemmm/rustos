@@ -16,6 +16,12 @@ members = [
     "kernel/arch/riscv64",
     "kernel/arch/wasm32",
 
+    # Kernel — production binary (Stage 3a (c7-bin)). Hybrid `[lib]` +
+    # `[[bin]]`: the library half ships the architecture-neutral boot
+    # pipeline reused by both the production binary and the QEMU
+    # integration test (`tests/integration/kernel_arch_boot`).
+    "kernel/rustos-kernel",
+
     # Shared libraries
     "lib/abi",
     "lib/caps",
