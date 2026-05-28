@@ -176,7 +176,19 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `kernel/mem/tests/proptest_frame.rs`, loom-gated concurrency tests in
       `kernel/mem/tests/loom.rs`, architecture documentation in
       `docs/src/architecture/memory.md`.
-- [ ] 2.3 — `kernel/sched` (SMP scheduler).
+- [x] 2.3 — `kernel/sched`: SMP-from-day-one scheduler. Per-CPU bounded
+      Chase–Lev style work-stealing queues (`kernel/sched/src/runqueue.rs`),
+      MLFQ priority + fairness with periodic boost
+      (`kernel/sched/src/scheduler.rs`, citing Arpaci-Dusseau OSTEP ch. 8),
+      IPI-based preemption hook behind the `SchedulerArch` trait, and
+      cancellation-safe `spawn`/`park`/`unpark`/`exit` lifecycle. Host-only
+      `TestArch` is gated behind the `test-arch` Cargo feature and never
+      links into production builds. Tests: deterministic integration tests
+      on ≥ 4 simulated cores (`kernel/sched/tests/scheduler.rs`),
+      10 000-task stress test asserting no deadlock and bounded latency
+      (`kernel/sched/tests/stress.rs`), loom-gated concurrency test for
+      the run-queue's lock-free fast path (`kernel/sched/tests/loom.rs`).
+      Architecture documentation in `docs/src/architecture/scheduler.md`.
 - [ ] 2.4 — `kernel/ipc` (capability-checked ports, shared memory,
       async notifications).
 - [ ] 2.5 — `kernel/sec` (user/group/cap tables, manifest verification,

@@ -11,6 +11,7 @@
 - [System overview](./architecture/overview.md)
 - [Kernel synchronisation primitives](./architecture/sync.md)
 - [Kernel memory subsystem](./architecture/memory.md)
+- [Kernel scheduler](./architecture/scheduler.md)
 
 # Shared libraries
 
