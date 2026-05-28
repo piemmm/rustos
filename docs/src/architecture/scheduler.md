@@ -143,6 +143,75 @@ direction, and the ISR-into-scheduler call is, by construction, a
 method on the scheduler itself rather than on the arch trait
 (`AGENTS.md` §2.4 — no interface creep).
 
+## Current-task slot
+
+`Scheduler<A>` owns a per-CPU **current-task slot** — one
+`AtomicU64` per CPU, sentinel `0` meaning "no task currently
+running on this CPU". The slot is the publication point the
+syscall entry path reads to recover the caller's `TaskId`
+without trusting any caller-supplied value
+(`AGENTS.md` §5.4 step 1 — identify the caller; kernel-provided,
+not caller-supplied).
+
+### Lifecycle
+
+| event                            | slot effect                              |
+| -------------------------------- | ---------------------------------------- |
+| `Scheduler::dispatch` (entry)    | publishes the about-to-run task's id     |
+| `Scheduler::dispatch` (exit)     | clears the slot, every branch            |
+| `Scheduler::park(id)`            | clears every CPU's slot whose entry == id|
+| `Scheduler::exit(id)`            | clears every CPU's slot whose entry == id|
+| `Scheduler::yield_current(id)`   | re-enqueues `id` Ready, then clears slot |
+
+The slot is exposed read-only through
+`Scheduler::current_task(cpu) -> Option<TaskId>`. The setter and
+the clear-by-id helpers are private: only the scheduler itself
+mutates the slot, so the lifecycle table above is the entire
+ground truth.
+
+### Concurrency rules
+
+* The slot is read in **process context** on the issuing CPU only.
+  Interrupt-context reads are forbidden — they would race with a
+  same-CPU `dispatch` set/clear pair under
+  `kernel/sync::RwLock`'s process-only contract
+  (`AGENTS.md` §1).
+* The clear-by-id helper used by `park` / `exit` /
+  `yield_current` is a per-slot compare-exchange; a concurrent
+  `dispatch` of a *different* task on a sibling CPU is therefore
+  untouched.
+* `current_task(cpu)` returns `None` for an out-of-range `cpu`,
+  not an error. This matches the policy that an unknown CPU has,
+  by definition, no current task — and lets the syscall entry
+  path probe the slot without having to validate
+  `current_cpu()` first (the syscall trampoline always supplies
+  a valid CPU id; the `None` return is the defence-in-depth
+  fail-closed branch).
+
+### Why this lives on `Scheduler<A>` and not on `SchedulerArch`
+
+Adding a method on the arch trait would create both a duplicate
+storage site (every arch port would have to hold a copy) and an
+interface widening for a value the scheduler already publishes
+internally (`AGENTS.md` §2.4 — no interface creep). The slot is
+mutated only by the scheduler's own `dispatch` path, so the
+authoritative copy lives where the writer lives.
+
+### `yield_current` vs body-returned `TaskAction::Yield`
+
+`Scheduler::yield_current(task_id)` models a **voluntary syscall
+yield**: the task is currently in `TaskState::Running` on its
+CPU, the syscall handler wants to relinquish the rest of its
+quantum, and the scheduler must re-Ready the task and clear the
+slot before the syscall returns to user space.
+
+`TaskAction::Yield` returned by a task body is the
+**body-loop yield**: it is processed by `dispatch` along with
+MLFQ demotion bookkeeping (`yields_at_band` /
+`yields_before_demotion`). The two notions are deliberately
+distinct so the syscall handler is not on the hook for demotion
+policy, which would be interface creep into the syscall layer.
+
 ## Invariants
 
 These hold at every API boundary:

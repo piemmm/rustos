@@ -166,6 +166,25 @@ pub struct Scheduler<A: SchedulerArch> {
     /// (`AGENTS.md` §5: a runaway task on one CPU must not be able to
     /// indefinitely block another).
     preemptions: Box<[AtomicU64]>,
+    /// Per-CPU **current-task** slot.
+    ///
+    /// Holds the [`TaskId`] of the task whose body is currently being
+    /// invoked on the corresponding CPU. The sentinel value `0` means
+    /// "no task currently running on this CPU". The slot is updated
+    /// exclusively by [`Self::dispatch`] (set immediately before the
+    /// body is invoked, cleared as soon as the body returns) and
+    /// defensively by [`Self::park`] / [`Self::exit`] when their
+    /// argument matches an entry — that covers the case where a task
+    /// running on one CPU is parked or exited by another CPU.
+    ///
+    /// The slot is the publication point read by the syscall entry
+    /// path (`kernel/rustos-kernel::dispatch::production_dispatch`,
+    /// Stage 2.7 follow-up (f5)). Per the `kernel/sync::RwLock`
+    /// process-context rule (`AGENTS.md` §1), readers must run in
+    /// process context on the issuing CPU — which is how syscall
+    /// entry is reached on every architecture. There is no global
+    /// mutable state: every CPU has its own atomic word.
+    current: Box<[AtomicU64]>,
 }
 
 impl<A: SchedulerArch> Scheduler<A> {
@@ -188,6 +207,10 @@ impl<A: SchedulerArch> Scheduler<A> {
         for _ in 0..config.cpus {
             preemptions.push(AtomicU64::new(0));
         }
+        let mut current = Vec::with_capacity(config.cpus as usize);
+        for _ in 0..config.cpus {
+            current.push(AtomicU64::new(0));
+        }
         Ok(Self {
             arch,
             cpus: cpus.into_boxed_slice(),
@@ -198,6 +221,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             victim_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
+            current: current.into_boxed_slice(),
         })
     }
 
@@ -260,6 +284,11 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// Park a task. Cancellation-safe: the call is a no-op if the task
     /// has already exited.
     ///
+    /// Also clears any per-CPU current-task slot whose entry equals
+    /// `id` so the slot does not outlive the task's run
+    /// (`AGENTS.md` §5.4 fail-closed: no syscall must reach a parked
+    /// task as its caller).
+    ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if no task ever held that id.
     /// * [`SchedError::InvalidState`] if the task is in a terminal state.
@@ -273,9 +302,13 @@ impl<A: SchedulerArch> Scheduler<A> {
         loop {
             match task.load_state() {
                 TaskState::Exited => return Err(SchedError::InvalidState),
-                TaskState::Parked => return Ok(()),
+                TaskState::Parked => {
+                    self.clear_current_matching(id);
+                    return Ok(());
+                }
                 cur @ (TaskState::Ready | TaskState::Running) => {
                     if task.cas_state(cur, TaskState::Parked).is_ok() {
+                        self.clear_current_matching(id);
                         return Ok(());
                     }
                 }
@@ -315,6 +348,10 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Terminate a task. Cancellation-safe; idempotent.
     ///
+    /// Also clears any per-CPU current-task slot whose entry equals
+    /// `id`, so the slot cannot point at an exited task by the time the
+    /// next syscall is issued on the affected CPU.
+    ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if the id was never spawned.
     pub fn exit(&self, id: TaskId) -> SchedResult<()> {
@@ -331,6 +368,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         if let Some(mut guard) = task.body.try_lock() {
             *guard = None;
         }
+        self.clear_current_matching(id);
         Ok(())
     }
 
@@ -559,6 +597,10 @@ impl<A: SchedulerArch> Scheduler<A> {
         {
             return StepOutcome::Idle;
         }
+        // Publish the current-task slot for this CPU **before** invoking
+        // the body: a syscall issued from inside the body must observe
+        // the running task on its own CPU. See `Self::current_task`.
+        self.set_current(cpu, id);
         let tick = self.arch.ticks_now();
         task.last_started.store(tick, Ordering::Release);
         task.home_cpu.store(cpu, Ordering::Release);
@@ -589,6 +631,9 @@ impl<A: SchedulerArch> Scheduler<A> {
             _ => TaskAction::Yield,
         };
 
+        // Body has returned; the task is no longer the current task on
+        // this CPU regardless of which branch we take below.
+        self.clear_current(cpu);
         match effective {
             TaskAction::Exit => {
                 task.store_state(TaskState::Exited);
@@ -661,6 +706,107 @@ impl<A: SchedulerArch> Scheduler<A> {
             .values()
             .filter(|t| t.load_state() != TaskState::Exited)
             .count()
+    }
+
+    /// Returns the [`TaskId`] of the task currently dispatching on
+    /// `cpu`, or `None` if no task is currently running there.
+    ///
+    /// The slot is published exclusively by the scheduler's internal
+    /// `dispatch` path (set immediately before the task body is
+    /// invoked, cleared as soon as the body returns). [`Self::park`]
+    /// and [`Self::exit`] also clear
+    /// matching entries so a parked or exited task can never be the
+    /// current task on any CPU.
+    ///
+    /// This is the lookup the syscall entry path uses to recover the
+    /// caller's [`TaskId`] before consulting the capability table
+    /// (`AGENTS.md` §5.4 step 1: identify the caller — kernel-provided,
+    /// not caller-supplied). Per the `kernel/sync::RwLock`
+    /// process-context rule (`AGENTS.md` §1), this method must be
+    /// called only in process context on the issuing CPU; it must not
+    /// be invoked from an interrupt handler.
+    ///
+    /// Returns `None` if `cpu` is out of range, mirroring the policy
+    /// that an unknown CPU has, by definition, no current task.
+    #[must_use]
+    pub fn current_task(&self, cpu: CpuId) -> Option<TaskId> {
+        let slot = self.current.get(cpu as usize)?;
+        let v = slot.load(Ordering::Acquire);
+        if v == 0 {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// Cooperatively yield the currently dispatching task on its CPU.
+    ///
+    /// Intended to be called from inside a syscall handler
+    /// (`yield_now`) where the issuing task's [`TaskId`] has just been
+    /// looked up via [`Self::current_task`]. The task is required to be
+    /// in [`TaskState::Running`]; on success its state is flipped back
+    /// to [`TaskState::Ready`], it is re-enqueued at its current
+    /// priority on its home CPU, and the per-CPU current-task slot is
+    /// cleared so the next dispatch is free to pick a different task.
+    ///
+    /// Demotion is **not** applied here: `yield_current` models a
+    /// voluntary syscall yield, not a quantum-expiry. The MLFQ demotion
+    /// path lives in the scheduler's internal `dispatch` routine and is
+    /// reached when the task body itself returns
+    /// [`crate::task::TaskAction::Yield`]; that keeps the two yield
+    /// notions distinct, avoiding the interface creep `AGENTS.md` §2.4
+    /// forbids.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if the id is unknown.
+    /// * [`SchedError::InvalidState`] if the task is not [`TaskState::Running`].
+    pub fn yield_current(&self, id: TaskId) -> SchedResult<()> {
+        let task = self
+            .tasks
+            .read()
+            .get(&id)
+            .cloned()
+            .ok_or(SchedError::NoSuchTask)?;
+        task.cas_state(TaskState::Running, TaskState::Ready)
+            .map_err(|_| SchedError::InvalidState)?;
+        let prio = task.load_priority();
+        let home = task.home_cpu.load(Ordering::Acquire);
+        let cpu = self.cpu_state(home)?;
+        if cpu.push_priority(prio, id).is_err() {
+            self.overflow.lock().push(id);
+        }
+        self.clear_current_matching(id);
+        Ok(())
+    }
+
+    /// Publish `id` as the current task on `cpu`. Out-of-range `cpu`
+    /// is a silent no-op: the only writer is [`Self::dispatch`], which
+    /// already validated `cpu` via [`Self::cpu_state`] before invoking
+    /// this helper.
+    fn set_current(&self, cpu: CpuId, id: TaskId) {
+        if let Some(slot) = self.current.get(cpu as usize) {
+            slot.store(id, Ordering::Release);
+        }
+    }
+
+    /// Clear the current-task slot for `cpu`. Out-of-range `cpu` is a
+    /// silent no-op for the same reason `set_current` is.
+    fn clear_current(&self, cpu: CpuId) {
+        if let Some(slot) = self.current.get(cpu as usize) {
+            slot.store(0, Ordering::Release);
+        }
+    }
+
+    /// Defensively clear every per-CPU current-task slot whose entry
+    /// equals `id`. Used by [`Self::park`], [`Self::exit`], and
+    /// [`Self::yield_current`] so a task that just transitioned out of
+    /// [`TaskState::Running`] cannot remain the current task on any
+    /// CPU. The CAS is per-slot, so a concurrent `dispatch` of a
+    /// *different* task on a sibling CPU is untouched.
+    fn clear_current_matching(&self, id: TaskId) {
+        for slot in self.current.iter() {
+            let _ = slot.compare_exchange(id, 0, Ordering::AcqRel, Ordering::Relaxed);
+        }
     }
 }
 
@@ -866,5 +1012,137 @@ mod tests {
         assert_eq!(sched.preemption_count(2), Ok(3));
         assert_eq!(sched.preemption_count(3), Ok(0));
         assert_eq!(sched.total_preemption_count(), 4);
+    }
+
+    // ---------------------------------------------------------------
+    // Stage 2.7 follow-up (f1): per-CPU current-task slot.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn current_task_is_none_before_any_dispatch() {
+        let (_arch, sched) = mk(2);
+        assert_eq!(sched.current_task(0), None);
+        assert_eq!(sched.current_task(1), None);
+    }
+
+    #[test]
+    fn current_task_returns_none_for_unknown_cpu() {
+        let (_arch, sched) = mk(2);
+        // Out-of-range cpu has, by definition, no current task — and
+        // the lookup must not panic. This is the contract the syscall
+        // entry path depends on (`production_dispatch` is allowed to
+        // probe `current_task` without first validating `current_cpu`).
+        assert_eq!(sched.current_task(99), None);
+    }
+
+    #[test]
+    fn current_task_is_set_during_body_invocation() {
+        // Drive a body that calls back into the scheduler to read its
+        // own current-task slot, then exits. This proves the slot is
+        // published **before** the body starts running, as documented.
+        let arch = Arc::new(TestArch::new(1).expect("arch"));
+        let cfg = SchedulerConfig {
+            cpus: 1,
+            queue_capacity_per_band: 64,
+            yields_before_demotion: 1,
+            boost_interval_ticks: 1024,
+        };
+        let sched = Arc::new(Scheduler::new(cfg, arch.clone()).expect("sched"));
+        let observed = Arc::new(AtomicU64::new(0));
+        let o2 = observed.clone();
+        let sched_for_body = sched.clone();
+        let id = sched
+            .spawn(0, Priority::Normal, move |ctx| {
+                let cur = sched_for_body.current_task(ctx.cpu).unwrap_or(0);
+                o2.store(cur, Ordering::Release);
+                TaskAction::Exit
+            })
+            .expect("spawn");
+        arch.set_current_cpu(0);
+        let outcome = sched.step(0).expect("step");
+        assert_eq!(outcome, StepOutcome::Ran(id));
+        assert_eq!(observed.load(Ordering::Acquire), id);
+        // And cleared once the body returned.
+        assert_eq!(sched.current_task(0), None);
+    }
+
+    #[test]
+    fn park_clears_matching_current_task_slot() {
+        // Simulate a state where the slot has been published by a
+        // dispatch in flight and then the task is externally parked
+        // before dispatch returns. The public contract of `park` is
+        // that, after it returns Ok, no per-CPU slot still points at
+        // the parked task.
+        let (_arch, sched) = mk(2);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn");
+        // Publish the slot by hand to mimic an in-flight dispatch on
+        // CPU 1 (a sibling); we then park the task and assert the slot
+        // is cleared. We do not use a private helper here on purpose
+        // — the assertion goes through the public `current_task`.
+        sched.set_current(1, id);
+        assert_eq!(sched.current_task(1), Some(id));
+        sched.park(id).expect("park");
+        assert_eq!(sched.current_task(1), None);
+    }
+
+    #[test]
+    fn exit_clears_matching_current_task_slot() {
+        let (_arch, sched) = mk(2);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        sched.set_current(0, id);
+        sched.set_current(1, id);
+        assert_eq!(sched.current_task(0), Some(id));
+        assert_eq!(sched.current_task(1), Some(id));
+        sched.exit(id).expect("exit");
+        assert_eq!(sched.current_task(0), None);
+        assert_eq!(sched.current_task(1), None);
+    }
+
+    #[test]
+    fn yield_current_requeues_and_clears_slot() {
+        let (arch, sched) = mk(1);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("spawn");
+        arch.set_current_cpu(0);
+        // Mimic the state mid-dispatch: task running, slot published.
+        sched
+            .tasks
+            .read()
+            .get(&id)
+            .cloned()
+            .expect("task")
+            .store_state(TaskState::Running);
+        sched.set_current(0, id);
+        assert_eq!(sched.current_task(0), Some(id));
+        sched.yield_current(id).expect("yield");
+        // Slot cleared.
+        assert_eq!(sched.current_task(0), None);
+        // Task is Ready and on a run queue: the next step dispatches it.
+        assert_eq!(sched.state_of(id), TaskState::Ready);
+        let outcome = sched.step(0).expect("step");
+        assert_eq!(outcome, StepOutcome::Ran(id));
+    }
+
+    #[test]
+    fn yield_current_rejects_non_running_task() {
+        let (_arch, sched) = mk(1);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        // Freshly-spawned task is Ready, not Running — `yield_current`
+        // models an in-flight syscall yield and must reject anything
+        // else (`AGENTS.md` §5.4 fail-closed).
+        assert_eq!(sched.yield_current(id), Err(SchedError::InvalidState));
+    }
+
+    #[test]
+    fn yield_current_rejects_unknown_task() {
+        let (_arch, sched) = mk(1);
+        assert_eq!(sched.yield_current(424_242), Err(SchedError::NoSuchTask));
     }
 }
