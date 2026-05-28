@@ -2,7 +2,41 @@
 <module type="EMPTY_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/drivers/bus/mmio/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/bus/pci/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/bus/usb/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/bus/virtio/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/display/framebuffer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/display/gpu_virtio/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/display/vesa/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/filesystem/ext4/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/filesystem/fat32/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/filesystem/rustfs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/aarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/riscv64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/wasm32/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/x86_64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/ipc/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/mem/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/sched/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/sec/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/sync/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/syscall/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/abi/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/caps/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/collections/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/crypto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/log/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/util/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/xtask/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/iconbar/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/init/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/installer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/login/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/shell/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/wm/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

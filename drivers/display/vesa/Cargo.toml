@@ -1,0 +1,12 @@
+[package]
+name = "rustos-drv-display-vesa"
+description = "RustOS placeholder: VESA framebuffer driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[book]
+title = "RustOS"
+description = "Architecture, security model, and platform reference for RustOS."
+authors = ["The RustOS Authors"]
+src = "src"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/rustos-project/rustos"
+edit-url-template = "https://github.com/rustos-project/rustos/edit/main/docs/{path}"
+mathjax-support = false
+
+# Link checking is performed by `cargo xtask docs-check` itself rather than
+# via a preprocessor: the preprocessor ecosystem lags the mdBook release
+# schedule, which would otherwise force us to pin a moving target. The
+# in-tree checker scans the rendered source tree for broken relative links.

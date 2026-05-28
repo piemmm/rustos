@@ -1,6 +1,92 @@
-[package]
-name = "rustos"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    # Kernel — architecture-neutral subsystems
+    "kernel/core",
+    "kernel/mem",
+    "kernel/sched",
+    "kernel/sync",
+    "kernel/ipc",
+    "kernel/sec",
+    "kernel/syscall",
 
-[dependencies]
+    # Kernel — architecture ports
+    "kernel/arch/x86_64",
+    "kernel/arch/aarch64",
+    "kernel/arch/riscv64",
+    "kernel/arch/wasm32",
+
+    # Shared libraries
+    "lib/abi",
+    "lib/caps",
+    "lib/collections",
+    "lib/crypto",
+    "lib/log",
+    "lib/util",
+
+    # Drivers — display
+    "drivers/display/vesa",
+    "drivers/display/framebuffer",
+    "drivers/display/gpu_virtio",
+
+    # Drivers — filesystem
+    "drivers/filesystem/ext4",
+    "drivers/filesystem/fat32",
+    "drivers/filesystem/rustfs",
+
+    # Drivers — bus
+    "drivers/bus/pci",
+    "drivers/bus/usb",
+    "drivers/bus/virtio",
+    "drivers/bus/mmio",
+
+    # Userland
+    "userland/init",
+    "userland/login",
+    "userland/shell",
+    "userland/wm",
+    "userland/iconbar",
+    "userland/installer",
+
+    # Tooling
+    "tools/xtask",
+]
+
+# Settings that apply to every crate in the workspace.
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustos-project/rustos"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Acceptable noise from `pedantic` for placeholder crates.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+panic = "abort"
+overflow-checks = true
+
+[profile.dev]
+opt-level = 1
+overflow-checks = true
+panic = "abort"
+
+# `panic = "abort"` collides with the test harness on host targets. Cargo
+# always uses `panic = "unwind"` for the `test` and `bench` profiles
+# regardless of the dev/release settings, so no override is required here.

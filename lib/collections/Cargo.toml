@@ -1,0 +1,12 @@
+[package]
+name = "rustos-collections"
+description = "RustOS placeholder: no_std collections shared by RustOS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

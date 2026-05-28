@@ -1,0 +1,19 @@
+# Pinned toolchain for RustOS.
+#
+# The workspace is built and tested with the nightly toolchain pinned below so
+# that `-Z build-std`, inline assembly stabilisation deltas, and unstable
+# features used by `kernel/arch/*` remain reproducible. Contributors using
+# `rustup` will have this toolchain installed automatically.
+#
+# Bumping this pin is a deliberate change: update the value, run the full
+# `cargo xtask ci`, and note the bump in the commit message.
+[toolchain]
+channel = "nightly-2024-09-01"
+components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt"]
+targets = [
+    "x86_64-unknown-none",
+    "aarch64-unknown-none",
+    "riscv64gc-unknown-none-elf",
+    "wasm32-unknown-unknown",
+]
+profile = "minimal"

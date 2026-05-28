@@ -1,0 +1,45 @@
+# Clippy configuration for RustOS.
+#
+# Lint *selection* lives in the workspace `Cargo.toml` (`[workspace.lints]`).
+# This file only tunes thresholds for lints that are kept enabled.
+
+cognitive-complexity-threshold = 20
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
+avoid-breaking-exported-api = true
+disallowed-methods = []
+disallowed-types = []
+
+# Project-specific names that legitimately appear in docs without backticks.
+# `doc-valid-idents` *extends* clippy's built-in allowlist (which already
+# covers Rust, LLVM, x86, etc.); we add domain terms that belong to RustOS.
+doc-valid-idents = [
+    "..",
+    "RustOS",
+    "RISC",
+    "RISC-V",
+    "POSIX",
+    "VESA",
+    "MMIO",
+    "BIOS",
+    "UEFI",
+    "ACPI",
+    "APIC",
+    "GIC",
+    "PLIC",
+    "CLINT",
+    "QEMU",
+    "PID",
+    "ABI",
+    "ABIs",
+    "IPC",
+    "MMU",
+    "TLB",
+    "WASM",
+    "OS",
+    "x86_64",
+    "aarch64",
+    "riscv64",
+    "wasm32",
+    "no_std",
+]

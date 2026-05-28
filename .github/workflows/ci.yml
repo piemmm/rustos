@@ -1,0 +1,64 @@
+name: ci
+
+# Run on every push and PR. The workflow's sole job is to execute the same
+# `cargo xtask ci` pipeline contributors run locally, so a green CI run and a
+# green local run are equivalent by construction.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  xtask-ci:
+    name: cargo xtask ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the channel, components, and cross targets;
+      # rustup picks them up automatically on first invocation.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rustfmt rust-src llvm-tools-preview
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry, git index and target directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache xtask helper tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-xtask-tools-v1
+
+      - name: Install xtask helper tools
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked cargo-deny
+          cargo install --locked mdbook
+
+      - name: cargo xtask ci
+        run: cargo xtask ci

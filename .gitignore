@@ -1,5 +1,21 @@
-/target
-/images
-Cargo.lock.bak
+# Cargo build output.
+/target/
+**/target/
+
+# IDE / editor scratch.
+/.idea/
+/.vscode/
 *.swp
-.DS_Store
+*~
+
+# Image artefacts. The repository ships only sources; built images live here
+# and are uploaded as release assets.
+/images/
+
+# mdBook output.
+/docs/book/
+
+# Local environment overrides — never commit secrets.
+.env
+.env.*
+!/.env.example

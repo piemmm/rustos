@@ -1,0 +1,266 @@
+//! Subcommand implementations for `cargo xtask`.
+//!
+//! Each variant of [`Command`] corresponds to a single, named developer
+//! workflow. Adding a new pipeline step means adding a new variant here —
+//! never appending hidden behaviour to `ci`.
+
+use std::ffi::OsString;
+use std::path::Path;
+
+use crate::Context;
+
+mod linkcheck;
+
+/// One sanctioned developer workflow.
+#[derive(Copy, Clone, Debug)]
+pub enum Command {
+    Build,
+    Test,
+    Clippy,
+    Fmt,
+    DocsCheck,
+    AbiCheck,
+    Coverage,
+    Ci,
+    Image,
+}
+
+impl Command {
+    /// The full set of subcommands, in the order presented to users.
+    pub const ALL: &'static [Command] = &[
+        Command::Build,
+        Command::Test,
+        Command::Clippy,
+        Command::Fmt,
+        Command::DocsCheck,
+        Command::AbiCheck,
+        Command::Coverage,
+        Command::Ci,
+        Command::Image,
+    ];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "build" => Command::Build,
+            "test" => Command::Test,
+            "clippy" => Command::Clippy,
+            "fmt" => Command::Fmt,
+            "docs-check" => Command::DocsCheck,
+            "abi-check" => Command::AbiCheck,
+            "coverage" => Command::Coverage,
+            "ci" => Command::Ci,
+            "image" => Command::Image,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Command::Build => "build",
+            Command::Test => "test",
+            Command::Clippy => "clippy",
+            Command::Fmt => "fmt",
+            Command::DocsCheck => "docs-check",
+            Command::AbiCheck => "abi-check",
+            Command::Coverage => "coverage",
+            Command::Ci => "ci",
+            Command::Image => "image",
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            Command::Build => "Compile every workspace crate for the host target.",
+            Command::Test => "Run host-side unit and integration tests.",
+            Command::Clippy => "Run clippy across the workspace with warnings denied.",
+            Command::Fmt => "Check formatting (`--fix` to apply).",
+            Command::DocsCheck => "Build rustdoc and the mdBook with link checking.",
+            Command::AbiCheck => "Verify generated ABI artefacts match their source of truth.",
+            Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
+            Command::Ci => "Run the full pipeline a pull request must pass.",
+            Command::Image => "Build platform images via tools/mkimage.",
+        }
+    }
+
+    pub fn run(self, ctx: &Context, args: &[OsString]) -> Result<(), String> {
+        match self {
+            Command::Build => run_build(ctx, args),
+            Command::Test => run_test(ctx, args),
+            Command::Clippy => run_clippy(ctx, args),
+            Command::Fmt => run_fmt(ctx, args),
+            Command::DocsCheck => run_docs_check(ctx, args),
+            Command::AbiCheck => run_abi_check(ctx, args),
+            Command::Coverage => run_coverage(ctx, args),
+            Command::Ci => run_ci(ctx),
+            Command::Image => run_image(ctx, args),
+        }
+    }
+}
+
+fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let mut cmd = ctx.cargo();
+    cmd.args(["build", "--workspace", "--all-targets", "--locked"]);
+    cmd.args(args);
+    ctx.run("build", cmd)
+}
+
+fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let mut cmd = ctx.cargo();
+    cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+    cmd.args(args);
+    ctx.run("test", cmd)
+}
+
+fn run_clippy(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let mut cmd = ctx.cargo();
+    cmd.args([
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    cmd.args(args);
+    ctx.run("clippy", cmd)
+}
+
+fn run_fmt(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let apply = args.iter().any(|a| a == "--fix" || a == "--apply");
+    let mut cmd = ctx.cargo();
+    cmd.args(["fmt", "--all"]);
+    if !apply {
+        cmd.args(["--", "--check"]);
+    }
+    ctx.run(if apply { "fmt --fix" } else { "fmt --check" }, cmd)
+}
+
+fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
+    // rustdoc with warnings denied — broken intra-doc links fail the build.
+    let mut doc = ctx.cargo();
+    doc.args([
+        "doc",
+        "--workspace",
+        "--no-deps",
+        "--locked",
+        "--document-private-items",
+    ])
+    .env("RUSTDOCFLAGS", "-D warnings");
+    ctx.run("docs-check (rustdoc)", doc)?;
+
+    // mdBook build. The book lives in `docs/`.
+    if !mdbook_available() {
+        return Err(
+            "mdbook is not on PATH; install it with `cargo install --locked mdbook`".to_string(),
+        );
+    }
+    let mut book = std::process::Command::new("mdbook");
+    book.current_dir(ctx.workspace_root.join("docs"));
+    book.args(["build"]);
+    ctx.run("docs-check (mdbook)", book)?;
+
+    // In-tree relative-link checker; see `commands/linkcheck.rs` for the
+    // rationale for owning this rather than delegating to a preprocessor.
+    let book_src = ctx.workspace_root.join("docs/src");
+    eprintln!("xtask: [docs-check (linkcheck)] {}", book_src.display());
+    linkcheck::run(&book_src)?;
+    Ok(())
+}
+
+fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
+    // The ABI itself is defined in Stage 1. Until `lib/abi/src/syscalls.rs`
+    // exists there is nothing to diff — but we still verify the file is
+    // *absent* rather than silently skipping, so that the day someone adds
+    // it without wiring up code-generation we fail loudly.
+    let syscalls = ctx.workspace_root.join("lib/abi/src/syscalls.rs");
+    let table = ctx.workspace_root.join("kernel/syscall/src/table.rs");
+
+    match (syscalls.exists(), table.exists()) {
+        (false, false) => {
+            eprintln!("xtask: [abi-check] no ABI definitions yet (Stage 1 will introduce them).");
+            Ok(())
+        }
+        (true, false) | (false, true) => Err(format!(
+            "abi-check: `{}` and `{}` must be added together; \
+             see AGENTS.md §9.",
+            relative(&ctx.workspace_root, &syscalls),
+            relative(&ctx.workspace_root, &table),
+        )),
+        (true, true) => {
+            // Real ABI cross-check belongs here once `lib/abi` ships. Until
+            // then refusing to handle the case keeps us honest.
+            Err("abi-check: ABI sources exist but the diff tool is not yet \
+                 implemented; complete Stage 1 before enabling this branch."
+                .to_string())
+        }
+    }
+}
+
+fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    if !tool_available("cargo-llvm-cov") {
+        return Err(
+            "cargo-llvm-cov is not installed; run `cargo install cargo-llvm-cov --locked`"
+                .to_string(),
+        );
+    }
+    let mut cmd = ctx.cargo();
+    cmd.args(["llvm-cov", "--workspace", "--locked", "--summary-only"]);
+    cmd.args(args);
+    ctx.run("coverage", cmd)
+}
+
+fn run_ci(ctx: &Context) -> Result<(), String> {
+    // The pipeline order is deliberate: cheap and deterministic checks run
+    // first so a failing PR fails fast.
+    run_fmt(ctx, &[])?;
+    run_clippy(ctx, &[])?;
+    run_test(ctx, &[])?;
+    run_docs_check(ctx, &[])?;
+    run_deny(ctx)?;
+    run_abi_check(ctx, &[])?;
+    Ok(())
+}
+
+fn run_deny(ctx: &Context) -> Result<(), String> {
+    if !tool_available("cargo-deny") {
+        return Err(
+            "cargo-deny is not installed; run `cargo install cargo-deny --locked`".to_string(),
+        );
+    }
+    let mut cmd = ctx.cargo();
+    cmd.args(["deny", "--all-features", "check"]);
+    ctx.run("deny", cmd)
+}
+
+fn run_image(_ctx: &Context, _args: &[OsString]) -> Result<(), String> {
+    // Image builders live under `tools/mkimage` and are introduced by
+    // Stage 8 of `PLAN.md`. Refusing to silently succeed prevents Stage 0
+    // from shipping a no-op that masks the work still to come.
+    Err(
+        "image: `tools/mkimage` is delivered by Stage 8; no images can be \
+         built yet. See PLAN.md."
+            .to_string(),
+    )
+}
+
+fn mdbook_available() -> bool {
+    tool_available("mdbook")
+}
+
+fn tool_available(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn relative(base: &Path, path: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}

@@ -1,0 +1,47 @@
+# `cargo deny` policy for RustOS.
+#
+# This file is consumed by `cargo deny check` (invoked by `cargo xtask ci`).
+# It enforces the project's license, advisory, source, and ban policy.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Only OSI-approved licences compatible with the RustOS dual licence.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.92
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Crates explicitly forbidden by `AGENTS.md` §1: hand-rolled crypto and
+# unaudited globals. Extend this list when a problem dependency is found.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

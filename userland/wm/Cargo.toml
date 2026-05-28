@@ -1,0 +1,12 @@
+[package]
+name = "rustos-wm"
+description = "RustOS placeholder: compositing window manager."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

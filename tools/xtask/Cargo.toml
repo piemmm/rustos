@@ -1,0 +1,29 @@
+[package]
+name = "rustos-xtask"
+description = "Build orchestration for the RustOS workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# xtask is a host-side build tool. Its lints are kept as the workspace defaults
+# but it deliberately does not inherit `missing_docs` strictness: command line
+# enums and dispatch tables are exhaustively named, not documented.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
