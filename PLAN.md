@@ -469,10 +469,43 @@ Each sub-stage delivers one architecture. They share the same checklist:
           `tests/integration/scheduler_stress_qemu` still run on the
           trampoline-internal GDT; calling `PerCpuGdt::install` from
           `kernel_main` and `ap_entry` is part of the next item.
-    - [ ] Context-switch primitive + interrupt entry/exit prologue
-          matching `kernel/sched::SchedulerArch`, plus wiring
-          `PerCpuGdt::install` from the BSP/AP entry paths and
-          allocating per-CPU IST stack arenas.
+    - [~] **(c1/c2/c3, partial)** Context-switch primitive, common
+          ISR prologue, and per-CPU GDT/IDT bring-up wired into
+          `tests/integration/scheduler_stress_qemu`.
+          `kernel/arch/x86_64::context` exposes `TaskCtx { rsp: u64 }`
+          with a layout-pinning const-assert, `TaskCtx::prepare` for
+          first-run frame synthesis (rejects null / misaligned /
+          too-small stacks via `PrepareError`), and an
+          `extern "C" fn rustos_arch_x86_64_switch` whose `context.s`
+          body saves the six callee-saves + `rdi` on the outgoing
+          kernel stack, swaps `rsp` through `TaskCtx`, and pops
+          symmetrically.
+          `kernel/arch/x86_64::interrupts` ships `InterruptStackFrame`
+          / `SavedRegs` (both `#[repr(C)]` with `offset_of!` pins
+          against Intel SDM Vol 3A §6.14), `IdtEntry::interrupt_gate`
+          (masks `ist` to 3 bits so an attacker-controlled IST index
+          cannot smear into `type_attr`), `Idt::with_default_handler`
+          covering all 256 slots, and `unsafe fn Idt::load`.
+          `interrupts.s` provides the common ISR prologue (15 GPR
+          pushes, System V AMD64 §3.2.2 stack-alignment pad,
+          dispatch into a fail-closed Rust callback per AGENTS.md
+          §10).
+          `kernel/arch/x86_64::percpu` owns the static
+          `[PerCpu; MAX_CPUS]` arena (no allocator), wires `#DF` to
+          IST 1 and `#NMI` to IST 2 with 16 KiB stacks, and exposes
+          `unsafe fn init(cpu_index)` that finalises the per-CPU
+          GDT, `lgdt`-installs it, and `lidt`-installs the per-CPU
+          IDT. `scheduler_stress_qemu` calls `percpu::init(0)` at
+          the top of `kernel_main` and `percpu::init(cpu_id)` at the
+          top of each `ap_entry`, retiring the trampoline-internal
+          GDT for steady-state. 21 new host unit tests (context: 5,
+          interrupts: 8, percpu: 6, plus 2 layout const-asserts) sit
+          on top of the existing 76 in the arch crate, taking the
+          host total to 97.
+    - [ ] LAPIC-timer-driven preemption and a clean
+          `SchedulerArch::preempt_to` (or equivalent) extension to
+          `kernel/sched`, plus the IDT timer-vector ISR that
+          consumes the (c1/c2/c3) common prologue.
     - [ ] x86_64 syscall entry stub bound to
           `kernel/syscall::Dispatcher` (the architecture-neutral
           dispatcher already validates against

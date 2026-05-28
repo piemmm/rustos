@@ -53,12 +53,25 @@ core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("ap_trampoline.s"), options(att_syntax));
 
+// Stage 3a (c1) context-switch primitive. The Rust side
+// (`context::switch`) is host-test-compilable; the bare-metal half is
+// only meaningful on the freestanding target.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+core::arch::global_asm!(include_str!("context.s"), options(att_syntax));
+
+// Stage 3a (c2) common ISR prologue. Same gating as `context.s`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+core::arch::global_asm!(include_str!("interrupts.s"), options(att_syntax));
+
 pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
 pub mod bootmemory;
+pub mod context;
 pub mod gdt;
+pub mod interrupts;
 pub mod multiboot2;
+pub mod percpu;
 pub mod qemu_exit;
 pub mod serial;
 pub mod smp;
@@ -70,6 +83,20 @@ pub mod paging;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod entry;
+
+/// Linear address of the default ISR thunk exported by `interrupts.s`.
+///
+/// Returned as a `u64` so callers can populate
+/// [`interrupts::IdtEntry::interrupt_gate`] without an additional cast.
+/// Only meaningful on the freestanding target — the symbol is provided
+/// by the bundled assembly.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) fn interrupts_default_isr_addr() -> u64 {
+    extern "C" {
+        fn rustos_arch_x86_64_isr_default();
+    }
+    rustos_arch_x86_64_isr_default as usize as u64
+}
 
 /// Multiboot2 magic the bootloader passes in `%eax` to `_start`
 /// (multiboot2 spec §3.1.2).

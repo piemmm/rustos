@@ -11,6 +11,7 @@ use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
 use rustos_arch_x86_64::apic_timer::{PolledPit, PortIo};
 use rustos_arch_x86_64::multiboot2::BootInfo;
+use rustos_arch_x86_64::percpu;
 use rustos_arch_x86_64::smp::{
     self, init_sipi_sipi, ApBootSlot, Delay, TrampolineFrame, AP_BOOT_SLOT_OFFSET,
     AP_TRAMPOLINE_PHYS,
@@ -48,7 +49,15 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Per-CPU execution counter (debug aid; verifies tasks ran on multiple
 /// physical cores). Sized to the maximum supported CPU count.
+///
+/// Must not exceed `rustos_arch_x86_64::percpu::MAX_CPUS` — the arch
+/// crate's per-CPU arena is the source of truth for the bound. The
+/// const-assert immediately below makes a future divergence a
+/// compile-time error.
 const MAX_CPUS: usize = 16;
+
+#[allow(dead_code)] // const-assert; not referenced at runtime.
+const MAX_CPUS_FITS_PERCPU_ARENA: () = assert!(MAX_CPUS <= rustos_arch_x86_64::percpu::MAX_CPUS);
 static PER_CPU_EXEC: [AtomicU64; MAX_CPUS] = {
     // `AtomicU64::new` is `const`. Hand-roll the array; the
     // `[AtomicU64::new(0); MAX_CPUS]` syntax requires `Copy`.
@@ -206,6 +215,22 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[scheduler_stress_qemu] BSP boot");
 
+    // Stage 3a (c1/c2): replace the boot-time GDT (`boot.s`) and the
+    // not-yet-installed IDT with the BSP's per-CPU GDT + IDT. After
+    // this call the kernel is on its real long-mode descriptor tables
+    // for cpu_index 0; `#DF` and `#NMI` land on dedicated IST stacks.
+    //
+    // SAFETY: this is the BSP, called exactly once before any
+    // interrupts are enabled. The boot trampoline (`boot.s` SAFETY-
+    // INVARIANT 6) guarantees the IDTR is invalid on entry; replacing
+    // it now is the documented sequencing.
+    unsafe {
+        if percpu::init(0).is_err() {
+            let _ = writeln!(com1, "[scheduler_stress_qemu] FAIL: percpu::init(BSP)");
+            qemu_exit::exit_failure();
+        }
+    }
+
     // Software-enable the BSP's LAPIC so we can drive IPIs.
     let mut lapic = make_lapic();
     lapic.software_enable(0xFF);
@@ -348,6 +373,26 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
 // --- AP entry -----------------------------------------------------
 
 extern "C" fn ap_entry(cpu_id: u32) -> ! {
+    // Stage 3a (c1/c2): install this AP's per-CPU GDT + IDT before
+    // touching any further shared state. The AP trampoline left us on
+    // the trampoline-internal GDT (`ap_trampoline.s` SAFETY-INVARIANT 5)
+    // with the IDTR still invalid (SAFETY-INVARIANT 8); `percpu::init`
+    // moves us to the real per-CPU tables.
+    //
+    // SAFETY: called exactly once per AP, on that AP, before
+    // interrupts are enabled.
+    unsafe {
+        if percpu::init(cpu_id as usize).is_err() {
+            // We cannot signal the BSP cleanly from here (the BSP is
+            // spinning on `ready` in the trampoline frame, which has
+            // already been set). Halt the AP; the BSP's watchdog
+            // budget will eventually catch the missing dispatch.
+            loop {
+                core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
     // Wait for the BSP to publish the scheduler pointer.
     while SCHED_PTR.load(Ordering::Acquire).is_null() {
         core::hint::spin_loop();
