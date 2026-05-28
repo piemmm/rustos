@@ -1,6 +1,6 @@
 [package]
 name = "rustos-crypto"
-description = "RustOS placeholder: audited cryptographic wrappers."
+description = "Audited cryptographic primitives for RustOS — thin wrappers around vetted upstream crates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,19 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `AGENTS.md` §1 forbids hand-rolled cryptography. The only crates pulled in
+# here are the vetted RustCrypto SHA-2 and dalek-cryptography Ed25519
+# implementations. Versions are pinned; bumping a pin requires an audit pass.
+sha2 = { version = "=0.10.9", default-features = false }
+# The `zeroize` feature wires `ed25519-dalek`'s own internal key material
+# into `zeroize::Zeroize` on drop. `lib/crypto` itself never names the
+# `zeroize` crate (we expose verification only, no private-key handling),
+# so it is *not* a direct dependency here — adding one would violate
+# `AGENTS.md` §2.3.
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+[dev-dependencies]
+# `hex` is intentionally not depended on: doc/unit tests construct fixtures
+# from byte literals so the audit surface stays minimal.

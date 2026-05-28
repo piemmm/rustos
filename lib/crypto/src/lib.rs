@@ -1,6 +1,22 @@
-//! RustOS placeholder crate: audited cryptographic wrappers.
+//! Audited cryptographic primitives for RustOS.
 //!
-//! Stage 0 reserves this crate so the workspace builds end-to-end. The real
-//! implementation is delivered by **Stage 1** of `PLAN.md`; until then the
-//! crate intentionally exposes no public items.
+//! This crate exists for one purpose: to keep cryptography out of the rest
+//! of the codebase. Per `AGENTS.md` §1 no hand-rolled primitives are allowed;
+//! everything here is a thin wrapper over a vetted upstream implementation
+//! ([`sha2`] and [`ed25519_dalek`]) selected so that the audit footprint
+//! never exceeds a handful of crates.
+//!
+//! The wrappers intentionally expose a *narrower* API than the upstream
+//! crates: callers receive fixed-size byte arrays, not opaque types whose
+//! lifetimes they would have to manage. This makes the boundary between
+//! `lib/crypto` and the rest of the system straightforward to audit.
+
 #![no_std]
+#![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(missing_docs)]
+
+pub mod hash;
+pub mod sign;
+
+pub use hash::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+pub use sign::{Ed25519PublicKey, Ed25519Signature, SignatureError};

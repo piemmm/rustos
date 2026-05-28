@@ -1,6 +1,21 @@
-//! RustOS placeholder crate: no_std collections shared by RustOS.
+//! Shared `no_std` collections that are not in `core` or `alloc`.
 //!
-//! Stage 0 reserves this crate so the workspace builds end-to-end. The real
-//! implementation is delivered by **Stage 1** of `PLAN.md`; until then the
-//! crate intentionally exposes no public items.
+//! Per `AGENTS.md` §2.3 this crate is gated on the "used by at least two
+//! places" rule: every type here must justify its existence by serving a
+//! concrete caller outside this crate. Adding speculative collections is
+//! forbidden.
+//!
+//! ## Inventory (Stage 1)
+//!
+//! * [`BitSet256`] — fixed-size bitmap over identifiers in `0..=255`.
+//!   Used by `rustos-caps` to represent a process's `CapabilityId`
+//!   membership, and reserved (and documented) for the kernel scheduler's
+//!   per-CPU ready bitmap landing in Stage 2.
+
 #![no_std]
+#![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(missing_docs)]
+
+pub mod bitset;
+
+pub use bitset::{BitSet256, BitSet256Iter};

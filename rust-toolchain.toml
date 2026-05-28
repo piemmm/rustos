@@ -8,7 +8,7 @@
 # Bumping this pin is a deliberate change: update the value, run the full
 # `cargo xtask ci`, and note the bump in the commit message.
 [toolchain]
-channel = "nightly-2024-09-01"
+channel = "nightly-2026-05-27"
 components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt"]
 targets = [
     "x86_64-unknown-none",

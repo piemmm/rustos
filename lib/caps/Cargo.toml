@@ -1,6 +1,6 @@
 [package]
 name = "rustos-caps"
-description = "RustOS placeholder: capability primitives."
+description = "RustOS capability primitives: `Capability`, `CapabilitySet`, delegation, and signed tokens."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,14 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+rustos-collections = { path = "../collections", version = "=0.0.0" }
+rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+
+[dev-dependencies]
+# Tests need a signing key to produce real Ed25519 tokens; production callers
+# never sign — they only verify via `rustos-crypto`. The dev-only dependency
+# keeps the signing surface out of the audited build.
+ed25519-dalek = { version = "=2.1.1", default-features = false }

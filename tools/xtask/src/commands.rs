@@ -178,7 +178,10 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
 
     match (syscalls.exists(), table.exists()) {
         (false, false) => {
-            eprintln!("xtask: [abi-check] no ABI definitions yet (Stage 1 will introduce them).");
+            eprintln!(
+                "xtask: [abi-check] no syscall ABI table yet \
+                 (the cross-checked pair lands with Stage 2; see PLAN.md)."
+            );
             Ok(())
         }
         (true, false) | (false, true) => Err(format!(
@@ -254,8 +257,7 @@ fn tool_available(name: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 fn relative(base: &Path, path: &Path) -> String {

@@ -14,10 +14,10 @@
 //! - `fmt`          — `cargo fmt --all -- --check` (pass `--fix` to apply)
 //! - `docs-check`   — rustdoc (deny warnings) + mdBook build + link check
 //! - `abi-check`    — verifies the generated kernel syscall table matches
-//!                    its source of truth in `lib/abi`
+//!   its source of truth in `lib/abi`
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
-//!                    `clippy`, `test`, `docs-check`, `cargo deny check`
+//!   `clippy`, `test`, `docs-check`, `cargo deny check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
@@ -26,6 +26,7 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -75,7 +76,8 @@ fn main() -> ExitCode {
 fn usage() -> String {
     let mut out = String::from("usage: cargo xtask <command> [args]\n\ncommands:\n");
     for cmd in Subcommand::ALL {
-        out.push_str(&format!("  {:<12} {}\n", cmd.name(), cmd.summary()));
+        // `write!` into a `String` is infallible; the result is discarded.
+        let _ = writeln!(out, "  {:<12} {}", cmd.name(), cmd.summary());
     }
     out
 }

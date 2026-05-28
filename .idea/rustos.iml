@@ -24,6 +24,7 @@
       <sourceFolder url="file://$MODULE_DIR$/kernel/sync/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/syscall/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/abi/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/abi/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/lib/caps/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/collections/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/crypto/src" isTestSource="false" />

@@ -40,6 +40,34 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `docs/src/architecture/overview.md` — one-page system map.
 - `docs/src/contributing.md` — points to `AGENTS.md`.
 
+**Status: complete.**
+- Workspace `Cargo.toml` lists every planned crate; the empty placeholders
+  all build under `cargo build --workspace --all-targets --locked`.
+- `rust-toolchain.toml` pins `nightly-2026-05-27` (rustc 1.98.0-nightly)
+  with `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt` and all four
+  Tier-1 cross targets. The original `nightly-2024-09-01` pin (rustc 1.82)
+  was bumped here so that `cargo-deny ≥ 0.19` — which is required to parse
+  RUSTSEC entries using CVSS 4.0 — can be installed and run; the older pin
+  blocked the full `cargo deny check`.
+- `.cargo/config.toml` declares the `xtask` alias plus per-target rustflags
+  for `x86_64-unknown-none`, `aarch64-unknown-none`,
+  `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown`.
+- `rustfmt.toml`, `clippy.toml`, `deny.toml` are in place and enforced via
+  `cargo xtask ci`; the deny policy passes `advisories + bans + licenses +
+  sources` on the bumped toolchain.
+- `tools/xtask` exposes the closed set of subcommands required by
+  `AGENTS.md` §7 / §14: `build`, `test`, `clippy`, `fmt`, `docs-check`,
+  `abi-check`, `coverage`, `ci`, `image`. `abi-check` deliberately fails
+  loudly if only one half of the `lib/abi/src/syscalls.rs` ↔
+  `kernel/syscall/src/table.rs` pair appears.
+- `docs/` ships a mdBook scaffold (`book.toml`, `src/SUMMARY.md`,
+  `introduction.md`, `contributing.md`, `architecture/overview.md`) and the
+  Stage 1 per-crate `lib/*` pages.
+- CI definition `.github/workflows/ci.yml` runs `cargo xtask ci` on every
+  push and pull request, with cargo + xtask-helper-tool caches.
+- `LICENSE-APACHE`, `LICENSE-MIT`, `README.md`, `AGENTS.md`, `PLAN.md` are
+  all present at the repository root.
+
 ---
 
 ## Stage 1 — Shared Libraries (`lib/`)
@@ -67,6 +95,36 @@ Do **not** begin a stage before all its listed dependencies are complete.
 **Docs**
 - One page per crate under `docs/src/`.
 - Rustdoc on every public item.
+
+**Status: complete.**
+- All six `lib/*` crates implemented (`abi`, `caps`, `collections`, `crypto`,
+  `log`, `util`), `no_std`, with rustdoc on every public item and unit tests
+  alongside the code per §7.
+- `lib/abi` ships frozen `abi-v1` types (`Errno`, `CapabilityId`,
+  `SyscallNumber`, `IpcMessageHeader`, `ManifestHeader`) plus a deterministic
+  100 000-input fuzz harness in `lib/abi/tests/fuzz_decode.rs`.
+- `lib/caps` enforces the subset-only delegation invariant; an exhaustive
+  property test exercises every 2⁸ subset of the well-known capabilities.
+- `lib/crypto` exposes audited SHA-256 and Ed25519 verification only;
+  upstream crates are pinned exactly (`sha2 = =0.10.9`,
+  `ed25519-dalek = =2.1.1`, with the `zeroize` feature enabled so the
+  dalek crate's own internal key material is wiped on drop; `lib/crypto`
+  does not take `zeroize` as a direct dependency because it exposes
+  verification only).
+- `lib/util` is intentionally empty per `AGENTS.md` §2.3; no item yet
+  satisfies the ≥ 2-use rule.
+- The syscall ABI lives in `lib/abi/src/syscall.rs` (singular); the
+  cross-checked `lib/abi/src/syscalls.rs` and `kernel/syscall/src/table.rs`
+  pair is reserved for Stage 2 so `cargo xtask abi-check` always sees both
+  halves.
+- `cargo xtask ci` is fully green: fmt, clippy (`-D warnings`), tests,
+  rustdoc (`-D warnings`), mdbook, in-tree link check, and the full
+  `cargo deny check` (advisories + bans + licenses + sources) all pass on
+  the bumped toolchain (`nightly-2026-05-27`, rustc 1.98.0-nightly).
+- Coverage measured with `cargo llvm-cov` clears `AGENTS.md` §7 thresholds:
+  `lib/caps` 98.19 % lines, `lib/crypto` 96.84 % lines (≥ 95 % floor);
+  `lib/abi`, `lib/collections`, `lib/log` all ≥ 95 % (≥ 85 % floor);
+  workspace total 98.29 %.
 
 ---
 
