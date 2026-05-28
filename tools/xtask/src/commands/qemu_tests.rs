@@ -26,12 +26,25 @@ struct QemuTest {
     timeout: Duration,
 }
 
-const TESTS: &[QemuTest] = &[QemuTest {
-    package: "rustos-test-memory-isolation",
-    binary: "rustos-test-memory-isolation",
-    cpus: 1,
-    timeout: Duration::from_secs(60),
-}];
+const TESTS: &[QemuTest] = &[
+    QemuTest {
+        package: "rustos-test-memory-isolation",
+        binary: "rustos-test-memory-isolation",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+    },
+    // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
+    // (emulated) cores. The host-side `rustos-test-scheduler-stress`
+    // workspace test continues to satisfy the AGENTS.md §7 unit / cross-
+    // crate contract; this enrolment is the QEMU-on-real-cores half of
+    // the same Stage-2 deliverable mandated by `PLAN.md` lines 154-158.
+    QemuTest {
+        package: "rustos-test-scheduler-stress-qemu",
+        binary: "rustos-test-scheduler-stress-qemu",
+        cpus: 4,
+        timeout: Duration::from_secs(120),
+    },
+];
 
 const TARGET: &str = "x86_64-unknown-none";
 

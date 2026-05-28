@@ -317,18 +317,22 @@ Do **not** begin a stage before all its listed dependencies are complete.
   declared *complete*.
 - `cargo xtask ci` evidence tail (toolchain
   `nightly-2026-05-27` / rustc 1.98.0-nightly, QEMU 8.2.2,
-  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (a) landed
-  the multiboot2 / ACPI / APIC / APIC-timer / bootmemory parsers
-  (47 new host unit tests across `kernel/arch/x86_64`):
+  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (b) added
+  the AP bring-up path and the second QEMU integration test
+  (9 new host unit tests in `kernel/arch/x86_64::smp`, 56 host
+  unit tests total across the arch crate):
   ```text
-  xtask: [fmt --check]
-  xtask: [clippy]                          -D warnings
-  xtask: [test]                            --workspace --all-targets
-  xtask: [test --qemu] 1 test(s) enrolled
+  xtask: [fmt --check]                     cargo fmt --all -- --check
+  xtask: [clippy]                          --workspace --all-targets --locked -- -D warnings
+  xtask: [test]                            --workspace --all-targets --locked
+  xtask: [test --qemu] 2 test(s) enrolled
   xtask: [test --qemu (build rustos-test-memory-isolation)]
   xtask: [test --qemu (run  rustos-test-memory-isolation)]
       kernel=…/rustos-test-memory-isolation cpus=1 timeout=60s
-  xtask: [docs-check (rustdoc)]            -D warnings
+  xtask: [test --qemu (build rustos-test-scheduler-stress-qemu)]
+  xtask: [test --qemu (run  rustos-test-scheduler-stress-qemu)]
+      kernel=…/rustos-test-scheduler-stress-qemu cpus=4 timeout=120s
+  xtask: [docs-check (rustdoc)]            -D warnings --document-private-items
   xtask: [docs-check (mdbook)]
   xtask: [docs-check (linkcheck)]          docs/src
   xtask: [deny]                            advisories ok, bans ok,
@@ -337,9 +341,13 @@ Do **not** begin a stage before all its listed dependencies are complete.
                                            kernel/syscall/src/table.rs
   ```
   All host test crates report `ok. … 0 failed; 0 ignored`. The
-  workspace cross-crate stress (`workspace_stress_four_cores_
-  twenty_thousand_tasks`) is the `1 passed` entry that takes
-  ~0.4 s.
+  workspace cross-crate host stress
+  (`workspace_stress_four_cores_twenty_thousand_tasks`) still passes
+  in ~0.4 s; the new QEMU stress
+  (`rustos-test-scheduler-stress-qemu`) brings 3 APs online via
+  INIT-SIPI-SIPI and runs 8 192 tasks across 4 real (emulated) cores
+  to completion (`PASS`, "distinct executing CPUs = 4"), inside the
+  120 s budget.
 
 ---
 
@@ -412,9 +420,33 @@ Each sub-stage delivers one architecture. They share the same checklist:
           alongside the interrupt prologue, because no
           `SchedulerArch` preemption surface exists today
           (`AGENTS.md` §15.2 — no invented APIs).
-    - [ ] **(b)** AP startup via INIT-SIPI-SIPI trampoline at
-          4 KiB-aligned low physical memory; promote Stage 2.8's
-          `scheduler_stress` to QEMU on `-smp 4`.
+    - [x] **(b)** AP startup via INIT-SIPI-SIPI trampoline at
+          `AP_TRAMPOLINE_PHYS = 0x8000` (SIPI vector `0x08`).
+          `kernel/arch/x86_64::smp` ships a position-independent
+          real-mode → long-mode payload (`ap_trampoline.s`,
+          `// SAFETY:`-annotated end-to-end), a typed
+          `TrampolineFrame` installer, an `ApBootSlot` whose layout is
+          locked by a host unit test against the assembler-side
+          `_ap_trampoline_boot_slot_offset` symbol, and an
+          `init_sipi_sipi` sequencer that reuses the existing
+          `Lapic::send_ipi` / `send_init_deassert` primitives (no new
+          architecture-neutral surface — AGENTS.md §2.4 / §15.5).
+          `boot.s` was broadened to identity-map the full 0..4 GiB
+          window so the LAPIC MMIO frame (`0xFEE00000`), IO-APIC frame
+          (`0xFEC00000`), and any ACPI table OVMF places in high
+          memory below 4 GiB are reachable. The Stage-2 deliverable
+          on `scheduler_stress` is satisfied by the new sibling crate
+          `tests/integration/scheduler_stress_qemu`: a freestanding
+          x86_64 kernel that parses Multiboot2 → RSDP → XSDT/RSDT →
+          MADT, brings up 3 APs via the new sequencer, runs 8 192
+          tasks across 4 real (emulated) cores in a cooperative
+          step-loop, and asserts deadlock-freedom, exact execution
+          count, and ≥ 2 distinct dispatching CPUs. The original
+          host-side `tests/integration/scheduler_stress` workspace
+          test is untouched and stays green (`AGENTS.md` §7 — every
+          existing test still passes). 9 new host unit tests cover
+          `smp` (ApBootSlot layout, frame install, INIT-SIPI-SIPI
+          ordering against a `LapicMmio` mock).
     - [ ] Context-switch primitive + interrupt entry/exit prologue
           matching `kernel/sched::SchedulerArch`.
     - [ ] x86_64 syscall entry stub bound to

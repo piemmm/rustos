@@ -1,0 +1,38 @@
+[package]
+name = "rustos-test-scheduler-stress-qemu"
+description = "Stage 3a (b) QEMU integration test: scheduler stress on ≥ 4 real (emulated) cores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This crate is the *QEMU-on-real-cores* sibling of
+# `tests/integration/scheduler_stress`. The host-side crate already
+# satisfies the AGENTS.md §7 unit/workspace contract by simulating
+# 4 cores through `TestArch`; this crate satisfies the Stage-2
+# deliverable that mandates the same workload run under QEMU on
+# `-smp 4` with the actual x86_64 AP-bring-up code from
+# `kernel/arch/x86_64::smp` exercised end-to-end.
+#
+# The two crates are kept separate (rather than merged into one) because
+# a freestanding `[[bin]]` linking `rustos-arch-x86_64` cannot coexist
+# with a `[lib] + tests/` integration test in the same package: the
+# former requires `#![no_std]`/`#![no_main]` and only builds for
+# `x86_64-unknown-none`, while the latter must compile for the host
+# triple under `cargo test --workspace`. AGENTS.md §2.2 forbids
+# duplicating the workload itself; the actual task body and assertions
+# live in shared constants on `rustos-test-scheduler-stress`, which this
+# crate depends on.
+
+[[bin]]
+name = "rustos-test-scheduler-stress-qemu"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+rustos-kernel-sched = { path = "../../../kernel/sched", version = "=0.0.0" }

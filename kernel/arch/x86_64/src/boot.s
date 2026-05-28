@@ -17,9 +17,16 @@
 //  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pd` tables sit in
 //     `.bss` and are zero-initialised by the multiboot loader (BSS bytes
 //     are zero per the multiboot spec).
-//  4. We identity-map the first 32 MiB of physical memory via sixteen
-//     2 MiB huge pages. This is sufficient for the Stage-2 QEMU tests
-//     (kernel + tables + stack + test data fit comfortably in 32 MiB).
+//  4. We identity-map the full 0..4 GiB physical address window via four
+//     page directories chained from PDPT[0..4], each populated with the
+//     512 2 MiB huge-page entries that cover its 1 GiB slot. This is
+//     deliberately broader than the original 32 MiB bootstrap map: it
+//     guarantees that the LAPIC MMIO frame at 0xFEE00000 and the IO-APIC
+//     frame at 0xFEC00000 — both architecturally fixed by Intel — are
+//     reachable, and likewise that any ACPI table OVMF/GRUB placed in
+//     high memory below 4 GiB is reachable. Going beyond 4 GiB is not
+//     needed for the Stage-2 QEMU tests (the runner allocates 256 MiB of
+//     guest RAM and no MMIO RustOS uses today sits above 4 GiB).
 //  5. The long-mode GDT below has a single 64-bit code segment at
 //     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
@@ -69,22 +76,33 @@ _start:
     orl  $0x3, %eax                                 // P|RW
     movl %eax, boot_pml4
 
-    // PDPT[0] -> PD
-    movl $boot_pd, %eax
-    orl  $0x3, %eax
-    movl %eax, boot_pdpt
-
-    // PD[i] = i*2 MiB | P|RW|PS, for i in 0..16  (identity-map first 32 MiB)
+    // PDPT[i] -> boot_pds + i*4096 | P|RW, for i in 0..4  (one PD per GiB).
     xorl %ecx, %ecx
 1:
-    movl %ecx, %eax
-    shll $21, %eax                                  // ecx * 2 MiB
-    orl  $0x83, %eax                                // P|RW|PS
-    movl %eax, boot_pd(,%ecx,8)
-    movl $0, boot_pd+4(,%ecx,8)
+    movl $boot_pds, %eax
+    movl %ecx, %edx
+    shll $12, %edx                                  // ecx * 4096
+    addl %edx, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pdpt(,%ecx,8)
+    movl $0, boot_pdpt+4(,%ecx,8)
     incl %ecx
-    cmpl $16, %ecx
+    cmpl $4, %ecx
     jl   1b
+
+    // PDS[k] = k*2 MiB | P|RW|PS, for k in 0..2048
+    // (identity-map the full 0..4 GiB window; high 32 bits of the PDE
+    //  are always zero because k * 2 MiB < 2^32).
+    xorl %ecx, %ecx
+2:
+    movl %ecx, %eax
+    shll $21, %eax                                  // ecx * 2 MiB (low 32 bits)
+    orl  $0x83, %eax                                // P|RW|PS
+    movl %eax, boot_pds(,%ecx,8)
+    movl $0, boot_pds+4(,%ecx,8)
+    incl %ecx
+    cmpl $2048, %ecx
+    jl   2b
 
     // CR3 <- PML4
     movl $boot_pml4, %eax
@@ -143,8 +161,12 @@ boot_pml4:
     .skip 4096
 boot_pdpt:
     .skip 4096
-boot_pd:
-    .skip 4096
+// Four contiguous PDs, one per GiB of the identity-mapped 0..4 GiB window.
+// See SAFETY-INVARIANT 4. Symbol exposed so the AP bring-up code in
+// `smp.rs` can pass the bootstrap PML4 to APs unchanged.
+.global boot_pds
+boot_pds:
+    .skip 4096 * 4
 
 .align 16
 boot_stack_bottom:

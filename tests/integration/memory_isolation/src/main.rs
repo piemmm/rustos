@@ -91,7 +91,7 @@ static SECRET_PHYS: AtomicU64 = AtomicU64::new(0);
 /// has been validated.
 #[no_mangle]
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub extern "C" fn kernel_main() -> ! {
+pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[memory_isolation] booted on x86_64");
 

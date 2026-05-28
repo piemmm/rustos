@@ -58,6 +58,7 @@ members = [
     # own per-arch trees alongside this one.
     "tests/integration/memory_isolation",
     "tests/integration/scheduler_stress",
+    "tests/integration/scheduler_stress_qemu",
 ]
 
 # Settings that apply to every crate in the workspace.

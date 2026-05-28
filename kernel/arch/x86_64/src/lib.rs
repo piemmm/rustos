@@ -46,6 +46,13 @@
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 
+// AP startup trampoline (Stage 3a (b)). Embedded as a dedicated
+// `.ap_trampoline` section of the kernel image; the BSP-side installer
+// in `smp::install_trampoline` copies the bytes to the chosen low
+// physical frame at runtime.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+core::arch::global_asm!(include_str!("ap_trampoline.s"), options(att_syntax));
+
 pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
@@ -53,6 +60,7 @@ pub mod bootmemory;
 pub mod multiboot2;
 pub mod qemu_exit;
 pub mod serial;
+pub mod smp;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod idt;

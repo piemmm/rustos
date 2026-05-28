@@ -14,7 +14,17 @@ use crate::{qemu_exit, MULTIBOOT2_BOOTLOADER_MAGIC};
 
 extern "C" {
     /// Provided by the test binary. Must not return.
-    fn kernel_main() -> !;
+    ///
+    /// The single `multiboot_info` parameter carries the verbatim 64-bit
+    /// pointer GRUB/OVMF passed in `%ebx`. A binary that does not need
+    /// to inspect the boot info (e.g.
+    /// `tests/integration/memory_isolation`) can simply ignore it; a
+    /// binary that does need it (e.g.
+    /// `tests/integration/scheduler_stress_qemu`) parses it via
+    /// `crate::multiboot2::BootInfo::parse` once it has identity-mapped
+    /// access to that address — `boot.s` SAFETY-INVARIANT 4 guarantees
+    /// the first 4 GiB of physical memory are reachable.
+    fn kernel_main(multiboot_info: u64) -> !;
 }
 
 /// The trampoline jumps here. Called *exactly once* on the boot CPU.
@@ -36,14 +46,14 @@ extern "C" {
 /// invariants in `boot.s` are upheld. Calling from anywhere else is a
 /// kernel bug.
 #[no_mangle]
-pub extern "C" fn rustos_arch_x86_64_main(magic: u64, _multiboot_info: u64) -> ! {
+pub extern "C" fn rustos_arch_x86_64_main(magic: u64, multiboot_info: u64) -> ! {
     if (magic as u32) != MULTIBOOT2_BOOTLOADER_MAGIC {
         // Mismatched multiboot magic means we were entered by something
         // other than a multiboot2 loader; fail closed.
         qemu_exit::exit_failure();
     }
     // SAFETY: `kernel_main` is provided by the linked test binary and is
-    // documented as `-> !` (see `extern` block above). Calling it once is
-    // the entire contract.
-    unsafe { kernel_main() }
+    // documented as `-> !` (see `extern` block above). Calling it once
+    // with the verbatim multiboot info pointer is the entire contract.
+    unsafe { kernel_main(multiboot_info) }
 }

@@ -35,6 +35,16 @@ SECTIONS
         *(.text .text.*)
     }
 
+    /* AP startup payload (Stage 3a (b)). Embedded into the kernel image
+     * as opaque bytes; the BSP copies `[_ap_trampoline_start,
+     * _ap_trampoline_end)` to the chosen 4 KiB-aligned low physical
+     * frame before INIT-SIPI-SIPI. Kept readable (no execute from the
+     * kernel-image VA — APs execute from the low-memory copy). */
+    .ap_trampoline ALIGN(4K) :
+    {
+        KEEP(*(.ap_trampoline))
+    }
+
     .rodata ALIGN(4K) :
     {
         *(.rodata .rodata.*)
