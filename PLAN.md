@@ -798,32 +798,61 @@ one logical change per commit with the `Co-authored-by` trailer.
 
 ### Sub-checklist
 
-- [ ] **(f1)** Per-CPU **current-task slot** in `kernel/sched`.
-      Add a `pub fn current_task(&self, cpu_id: CpuId) -> Option<TaskId>`
-      to `Scheduler<A>` whose value is updated by `Scheduler::step`
-      on dispatch and cleared on `park` / `exit`. The slot is
-      per-CPU, never global, and is read by syscall entry on the
-      issuing CPU only — process-context per AGENTS.md §1 and the
-      `kernel/sync` interrupt-context rule. No new
-      `SchedulerArch` method (no interface creep). Inline host unit
-      tests in `kernel/sched/src/scheduler.rs` (or a sibling
-      `current_task.rs` if the file would exceed 500 lines per §7).
-      Docs: `docs/src/architecture/scheduler.md` gains a
-      "Current-task slot" section.
+- [x] **(f1)** Per-CPU **current-task slot** in `kernel/sched`
+      (commit `c93e823`). `Scheduler<A>` gained a
+      `Box<[AtomicU64]>` slot array (sentinel `0` = no task),
+      `pub fn current_task(cpu) -> Option<TaskId>` (read-only), and
+      `pub fn yield_current(task_id) -> SchedResult<()>` for the
+      future `yield_now` handler. Slot is published by `dispatch`
+      immediately before the body runs, cleared as soon as it
+      returns; `park` / `exit` / `yield_current` defensively clear
+      matching entries. No new `SchedulerArch` method. 8 new host
+      unit tests in `scheduler::tests`; `docs/src/architecture/
+      scheduler.md` gained the "Current-task slot" section
+      (lifecycle table, concurrency rules,
+      `yield_current` vs body-returned `TaskAction::Yield`
+      distinction). `cargo test -p rustos-kernel-sched` 36/36 lib +
+      28/28 integ + 1/1 stress, clippy `-D warnings` clean, fmt
+      clean, full `cargo xtask ci` green at HEAD of this commit.
 
-- [ ] **(f2)** `TaskId → &TaskCapabilities` lookup in
-      `kernel/sec`. Today `TaskCapabilities` is owned by the
-      caller; the dispatcher needs to borrow it given only the
-      `TaskId` from (f1). Add a `pub struct CapTable` to
-      `kernel/sec::captable` that owns the registry and a
-      `pub fn caps_for(&self, task: TaskId) -> Option<&TaskCapabilities>`.
-      Inserts happen at task creation (Stage 2.7 follow-up does not
-      add user-space task creation; an `insert` API is sufficient
-      for tests + the future init(1) loader). Removal happens on
-      `Scheduler::exit`. No global mutable state — `CapTable`
-      lives inside `KernelState` (`kernel/core::init`). 95 %
-      coverage floor enforced. Docs: `docs/src/security/captable.md`
-      gains a "Per-task registry" section.
+      *Carry-over:* the `kernel/sync::RwLock` process-context rule
+      is documented at the new public API — syscall callers must
+      read `current_task` from process context on the issuing CPU,
+      never from an interrupt handler.
+
+- [x] **(f2)** `TaskId → &TaskCapabilities` lookup in `kernel/sec`
+      (commit `fcfb5fc`). `pub struct CapTable` in
+      `kernel/sec::captable` owns a flat
+      `BTreeMap<TaskId, TaskCapabilities>` and exposes the minimum
+      surface the dispatcher needs: `new` / `Default`, `insert`
+      (returns the displaced record on duplicate `TaskId` rather
+      than silently overwriting), `caps_for` (immutable borrow for
+      `cap_query` and IPC capability checks), `caps_for_mut`
+      (mutable borrow for `cap_delegate` / `cap_revoke` /
+      `apply_token`), `remove` (returns evicted record so callers
+      can zero out credential-holding memory per AGENTS.md §4),
+      plus `len` / `is_empty` for tests. Re-exported from
+      `kernel/sec` as `rustos_kernel_sec::CapTable`.
+
+      No interior mutability — the synchronisation policy lives
+      with `KernelState` in `kernel/core::init` (f4), mirroring how
+      `Scheduler::tasks` already composes with the scheduler under
+      a single lock-ordering policy. No ambient authority on
+      lookup: `TaskCapabilities::derive`'s intersection invariant
+      is the only widening site, and the registry simply stores its
+      output.
+
+      7 new host unit tests in `captable::tests`
+      (`captable_*`). New page `docs/src/security/captable.md` with
+      a "Per-task registry" section; listed in `docs/src/SUMMARY.md`
+      under a new "Security" top-level so the link checker has no
+      orphan. `cargo test -p rustos-kernel-sec --lib` 39/39, clippy
+      `-D warnings` clean, fmt clean, `mdbook build` clean.
+
+      *Out of scope for (f2), deferred to (f4):* `CapTable` is not
+      yet wired into `KernelState` — (f4)'s registration hook is the
+      step that adds it next to `Scheduler` under the new
+      lock-ordering policy.
 
 - [ ] **(f3)** Production **`SyscallHandlers` impl** in
       `kernel/core::syscalls` (new module). One concrete struct
@@ -948,6 +977,26 @@ one logical change per commit with the `Co-authored-by` trailer.
 - `ipc_send`/`ipc_recv` and `cap_delegate`'s `set_ptr` copy-in
   are deferred to later stages and called out explicitly here
   rather than stubbed (AGENTS.md §15.1).
+
+### Stage 2.7 follow-up status — partial
+
+Sub-items (f1) and (f2) have landed; (f3)..(f7) remain. Commits
+on `master`:
+
+- `c93e823` — kernel/sched: per-CPU current-task slot (f1).
+- `fcfb5fc` — kernel/sec: TaskId→TaskCapabilities CapTable
+  registry (f2).
+
+`cargo xtask ci` is green at HEAD (`fcfb5fc`), running through the
+Stage 2 evidence pipeline above unchanged. The next session
+picks up at (f3): production `SyscallHandlers` impl in
+`kernel/core::syscalls` plus `KernelArch::monotonic_ns`. Detailed
+continuation prompt is checked in at
+[`.junie/next-session-prompt.md`](./.junie/next-session-prompt.md).
+
+The Stage 3a status block above (`Status: complete`) is unchanged
+— Stage 3a's (a)..(d1) deliverables are done; Stage 2.7 follow-up
+is its own thread and is tracked here, not by re-opening Stage 3a.
 
 ---
 
