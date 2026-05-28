@@ -167,3 +167,18 @@ feature and never links into a production build.
 QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
 `isa-debug-exit` device, strict per-test timeouts, no retries —
 `AGENTS.md` §7).
+
+## Stage 3a (c7-arch) — first production `SchedulerArch` impl
+
+`kernel/arch/x86_64::kernel_arch::X86_64Arch` (Stage 3a (c7-arch),
+PLAN.md) is the first production implementation of
+`rustos_kernel_sched::SchedulerArch` in tree. The trait impl is
+feature-gated behind `rustos-arch-x86_64`'s opt-in `sched-arch`
+feature — see
+[`platform/x86_64.md`](../platform/x86_64.md#stage-3a-c7-arch--schedulerarch-impl-for-x86_64)
+for the bare-metal / host semantics and the dependency rationale.
+The companion `KernelArch::halt` impl, the `kernel_main(multiboot_info)`
+body, and the `rustos-kernel` bin crate land in (c7-bin). Until then
+the arch crate ships a free `kernel_arch::halt() -> !` function with
+a compile-time signature assertion; the bin crate's `KernelArch::halt`
+forwards there.

@@ -595,19 +595,56 @@ Each sub-stage delivers one architecture. They share the same checklist:
           `docs/src/platform/x86_64.md` Stage-3a-(c6) section +
           `docs/src/architecture/syscalls.md` "Per-architecture
           entry stubs" table.
-    - [ ] **(c7)** Implement `kernel/core::KernelArch` against
+    - [~] **(c7)** Implement `kernel/core::KernelArch` against
           (c1)..(c6) and wire `kernel_main` via a dedicated
           `rustos-kernel` bin crate that is the single writer of
-          `syscall_entry::set_dispatch_callback`. **Remaining x86_64
-          checklist item.** The two existing QEMU integration tests
-          (`memory_isolation`, `scheduler_stress_qemu`) supply their
-          own `kernel_main`; the new wiring lives in a separate
-          binary so that contract is preserved. Deferred from the
-          (c7)+(d1)+(d2) session because (c7) alone is a new
-          freestanding bootable binary plus a `SchedulerArch` +
-          `KernelArch` impl, larger than one session can land while
-          keeping `cargo xtask ci` (which includes `--qemu` under
-          OVMF + grub-mkrescue) green at every commit head.
+          `syscall_entry::set_dispatch_callback`. **Split into
+          (c7-arch) (landed) and (c7-bin) (next session).**
+        - [x] **(c7-arch)** `kernel/arch/x86_64::kernel_arch` —
+              `X86_64Arch` (`SchedulerArch` impl + `ArchInitError`
+              + `lapic_id_of` accessor) and the free `halt() -> !`
+              function the bin crate's `KernelArch::halt` will
+              forward to. On bare metal, `current_cpu` reads the
+              LAPIC ID register and consults
+              `preempt::cpu_id_for_lapic`; `ticks_now` reads
+              `RDTSC`; `send_ipi` issues a directed IPI through an
+              ephemeral `apic::Lapic` over `VolatileLapicMmio` at
+              `preempt::LAPIC_BASE_PHYS` on the `preempt::TIMER_VECTOR`;
+              `halt` issues `cli; hlt` in a loop with the
+              compile-checked `-> !` return type. On host, the
+              impl is exercised end-to-end through per-instance
+              monotonic / IPI-accounting counters (no global
+              statics, no `#[ignore]`). The arch crate now exposes
+              an optional `sched-arch` Cargo feature that pulls
+              `rustos-kernel-sched` only when downstream binaries
+              opt in — the pre-existing freestanding QEMU bins
+              (`memory_isolation`, `scheduler_stress_qemu`)
+              continue to link without a `#[global_allocator]`.
+              `kernel/syscall::table` gained a compile-time
+              `const _RAW_ARGS_LAYOUT_MATCHES_ARRAY` assertion
+              locking `RawArgs`'s `#[repr(transparent)]` over
+              `[u64; SYSCALL_MAX_ARGS]` — the contract the bin
+              crate's dispatch callback will rely on. 8 new host
+              unit tests + 2 compile-time `const _` assertions
+              (one for `halt`'s `-> !` signature, one for the
+              `SchedulerArch` impl) bring the arch-crate host
+              total to 118. Docs:
+              `docs/src/platform/x86_64.md` (c7-arch) section +
+              note in `docs/src/architecture/kernel.md`.
+        - [ ] **(c7-bin)** New freestanding `rustos-kernel` bin
+              crate (`x86_64-unknown-none`) that constructs an
+              `Arc<X86_64Arch>` from the ACPI MADT, implements
+              `KernelArch::halt` by forwarding to
+              `kernel_arch::halt()`, builds a `BootInfo`, installs
+              `syscall_entry::set_dispatch_callback` **before**
+              enabling `syscall` on any CPU, drives per-CPU
+              `percpu::init` / `preempt::init_local_preempt` /
+              `syscall_entry::init_local_syscalls`, and forwards
+              to `rustos_kernel_core::kernel_main`. A new QEMU
+              integration test boots the binary all the way to
+              `AuditEvent::BootCompleted`. The bin crate enables
+              the new `rustos-arch-x86_64/sched-arch` feature and
+              brings the global allocator.
     - [x] **(d1)** Per-arch QEMU run script
           `tools/qemu/src/x86_64.rs`. The generic
           `tools/qemu::Spec`/`Runner` are now architecture-neutral;

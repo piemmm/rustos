@@ -386,7 +386,9 @@ name = "rustos-arch-x86_64"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-arch-x86_64",
  "rustos-kernel-mem",
+ "rustos-kernel-sched",
 ]
 
 [[package]]

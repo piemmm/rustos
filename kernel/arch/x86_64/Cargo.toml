@@ -14,28 +14,66 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Production dependencies: kept to `rustos-abi` only. The arch crate is
-# intentionally leaf-level so it can be linked into freestanding kernel
-# binaries that do not yet provide a `#[global_allocator]` (the
-# memory-isolation QEMU test binary is the canonical example). New
-# parsers added in the Stage-3a (a) commit — multiboot2 info, ACPI
-# tables, LAPIC/IO-APIC drivers, PIT-calibrated LAPIC timer — are
-# deliberately `no_alloc`. `rustos-abi` is `no_std` and dependency-free,
-# so depending on it does not change those properties.
+# Production dependencies.
 #
-# `rustos-abi` is the **only** production dep, and only for the frozen
-# `SYSCALL_MAX_ARGS = 6` constant — re-declaring it locally would
-# violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
-# truth). See `syscall_entry.rs`.
+# - `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant
+#   consumed by `syscall_entry.rs`. Re-declaring it locally would
+#   violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
+#   truth).
+# - `rustos-kernel-sched` provides the `SchedulerArch` / `CpuId`
+#   trait surface that Stage 3a (c7-arch) implements in
+#   `kernel_arch.rs`. The scheduler crate's own dependency tree is
+#   `kernel/sync` only and is alloc-free, so depending on it does
+#   **not** pull a `#[global_allocator]` requirement into the arch
+#   crate. This is load-bearing for the two pre-existing freestanding
+#   Stage-2 QEMU bins (`tests/integration/memory_isolation` and
+#   `tests/integration/scheduler_stress_qemu`), which link the arch
+#   crate without providing an allocator.
+#
+# The `kernel/core::KernelArch` super-trait (`SchedulerArch + halt()`)
+# is **not** implemented inside the arch crate — pulling
+# `rustos-kernel-core` would transitively drag in `kernel/mem`,
+# `kernel/sec`, `kernel/ipc`, all of which use `extern crate alloc`
+# and would force the existing freestanding test bins to ship a
+# `#[global_allocator]` they do not currently need. Instead, the arch
+# crate exports a free `halt() -> !` function on this side of the
+# boundary and the downstream `rustos-kernel` bin crate (landed in
+# Stage 3a (c7-bin), a companion commit) brings the allocator,
+# implements `KernelArch` for `X86_64Arch`, and wires both halves
+# together. AGENTS.md §3 / §6 — drivers, kernel/mem, kernel/sec,
+# kernel/ipc remain forbidden as arch-crate deps.
+[features]
+# `sched-arch` opts the crate into providing the
+# `rustos_kernel_sched::SchedulerArch` impl for [`X86_64Arch`] and
+# pulls `rustos-kernel-sched` into the dependency graph. It is gated
+# because `rustos-kernel-sched` (and its `rustos-kernel-sync`
+# transitive dep) use `extern crate alloc`, and the two pre-existing
+# freestanding Stage-2 QEMU test bins
+# (`tests/integration/memory_isolation`,
+# `tests/integration/scheduler_stress_qemu`) link this crate without
+# providing a `#[global_allocator]`. Keeping the dep optional means
+# those bins continue to link with the default (alloc-free) feature
+# set, while the Stage 3a (c7-bin) `rustos-kernel` bin opts in
+# explicitly. AGENTS.md §2.3 (no bloat) — pay only for what you use.
+default = []
+sched-arch = ["dep:rustos-kernel-sched"]
+
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-kernel-sched = { path = "../../sched", version = "=0.0.0", optional = true }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical
 # `rustos_kernel_mem::RegionKind` and refuse to compile if the two
 # enums ever drift (AGENTS.md §2.2 — no duplication).
+#
+# The crate self-references with `sched-arch` so `cargo test` always
+# exercises the (c7-arch) `kernel_arch` module — mirrors the
+# `test-arch` self-link convention used by `kernel/sched` and
+# `kernel/core`.
 [dev-dependencies]
 rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = ".", version = "=0.0.0", features = ["sched-arch"] }
 
 # This crate is the **partial** Stage 3a baseline. It exists so the two
 # Stage-2 deliverable integration tests in `tests/integration/*` have an

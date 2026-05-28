@@ -58,6 +58,22 @@ pub fn verify_table_hash() -> Result<(), Errno> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RawArgs(pub [u64; SYSCALL_MAX_ARGS]);
 
+// SAFETY-INVARIANT: `RawArgs` is `#[repr(transparent)]` over
+// `[u64; SYSCALL_MAX_ARGS]`. The x86_64 syscall trampoline
+// (`kernel/arch/x86_64::syscall_entry`) builds the argument frame as a
+// raw `[u64; SYSCALL_MAX_ARGS]` on the kernel stack and the binding
+// kernel binary reinterprets that frame as a `RawArgs` via the public
+// tuple-struct constructor `RawArgs(arr)`. Locking the layout here
+// keeps that bridge sound under future field additions: any change
+// that breaks size, alignment, or representation will fail the build
+// at the call site rather than silently desync the ABI. `AGENTS.md`
+// §2.4 (no interface creep) — this is a compile-time invariant
+// assertion, not a new public surface.
+const _RAW_ARGS_LAYOUT_MATCHES_ARRAY: () = {
+    assert!(core::mem::size_of::<RawArgs>() == core::mem::size_of::<[u64; SYSCALL_MAX_ARGS]>());
+    assert!(core::mem::align_of::<RawArgs>() == core::mem::align_of::<[u64; SYSCALL_MAX_ARGS]>());
+};
+
 impl RawArgs {
     /// All-zero argument tuple. Used by argument-less syscalls and as
     /// the default in tests.

@@ -70,6 +70,17 @@ pub mod bootmemory;
 pub mod context;
 pub mod gdt;
 pub mod interrupts;
+/// Stage 3a (c7-arch): `SchedulerArch` implementation for x86_64.
+///
+/// Feature-gated on `sched-arch` because pulling `rustos-kernel-sched`
+/// into the production dep graph would transitively require a
+/// `#[global_allocator]` from every freestanding consumer. The
+/// pre-existing Stage-2 QEMU bin `tests/integration/memory_isolation`
+/// has no allocator and links this crate, so the impl is opt-in. The
+/// Stage 3a (c7-bin) `rustos-kernel` bin enables the feature; see
+/// the `kernel/arch/x86_64/Cargo.toml` comment for the rationale.
+#[cfg(feature = "sched-arch")]
+pub mod kernel_arch;
 pub mod multiboot2;
 pub mod percpu;
 pub mod preempt;
