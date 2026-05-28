@@ -69,6 +69,52 @@ preserve the subset-only delegation invariant in `lib/caps` and emit
 the appropriate audit events; the registry itself never widens or
 synthesises capability state.
 
+## Wiring / Lifecycle
+
+Stage 2.7 follow-up (f4) wires `CapTable` into `KernelState`, the
+in-memory record `kernel_main` builds during the init phases. The
+table is placed under a reader-preferring `kernel/sync::RwLock`, the
+same primitive `Scheduler::tasks` uses, so the syscall dispatcher's
+hot path (the `cap_query` predicate and the IPC capability checks)
+takes only a shared lock:
+
+```text
+KernelState {
+    scheduler:  Scheduler<A>,
+    caps:       RwLock<CapTable>,   // (f4) — composed under the same lock-ordering policy
+    arch:       Arc<A>,
+    audit_sink: &'static (dyn Sink + Sync),
+    // ...
+}
+```
+
+Lock-ordering policy: every dispatcher entry point identifies the
+caller through the per-CPU current-task slot **first**, then takes
+either `caps.read()` (for `cap_query` and the IPC capability checks)
+or `caps.write()` (for `cap_delegate` / `cap_revoke`). The lock is
+held only for the duration of the in-registry mutation; the
+`TaskCapabilities` reference handed to `CallerContext` lives inside
+the read-guard, so a concurrent `cap_revoke` waits until the active
+syscall returns. `AGENTS.md` §5.4 step 1 ("identify the caller")
+explicitly forbids re-locking mid-dispatch: the registry is consulted
+exactly once per syscall.
+
+`KernelState` is one-shot `Box::leak`'d during the `Syscall` init
+phase so the `KernelDispatchHook` published into the
+[`DispatchCallbackSlot`](../architecture/kernel.md#syscall-registration-phase)
+can borrow `&state.caps` for the lifetime of the running kernel. The
+leak is immutable after publish and is therefore **not** a global
+mutable static (`AGENTS.md` §2.1); the interior `RwLock` is the only
+sanctioned mutation site. The kernel never returns from
+`kernel_main`'s halt, so the leak is a one-shot publish, not a
+resource leak in any operational sense.
+
+A boot path that finds the slot already holding a hook (programmer
+error: double `kernel_main` entry; test harness pre-population)
+surfaces `InitError::DispatcherAlreadyInstalled` under
+`phase = "syscall"`, `cause = "syscall_dispatcher_already_installed"`,
+and halts. No silent recovery — `AGENTS.md` §5.4.5.
+
 ## Out of scope for Stage 2.7 follow-up (f2)
 
 * User-space task creation. The follow-up does not add a user-space

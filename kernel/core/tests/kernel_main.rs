@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use rustos_kernel_core::test_arch::{TestArch, HALT_SENTINEL};
 use rustos_kernel_core::test_sink::TestSink;
-use rustos_kernel_core::{kernel_main, panic_dump, AuditEvent, BootInfo, PanicContext, Phase};
+use rustos_kernel_core::{
+    kernel_main, panic_dump, AuditEvent, BootInfo, DispatchCallbackSlot, PanicContext, Phase,
+};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
@@ -43,13 +45,29 @@ fn leak_sink() -> &'static TestSink {
     Box::leak(Box::new(TestSink::new()))
 }
 
-fn drive_kernel_main<F>(setup: F) -> (Arc<TestArch>, &'static TestSink, &'static TestSink)
+fn leak_dispatch_slot() -> &'static DispatchCallbackSlot {
+    // Box::leak mirrors the bin-crate `static DISPATCH_SLOT`
+    // convention while satisfying the `&'static` invariant
+    // `BootInfo::new` requires (`AGENTS.md` §2.9 — permitted in
+    // tests).
+    Box::leak(Box::new(DispatchCallbackSlot::new()))
+}
+
+fn drive_kernel_main<F>(
+    setup: F,
+) -> (
+    Arc<TestArch>,
+    &'static TestSink,
+    &'static TestSink,
+    &'static DispatchCallbackSlot,
+)
 where
     F: FnOnce(&mut BootInfo<'static, TestArch>),
 {
     let arch = Arc::new(TestArch::with_cpus(1));
     let log_sink = leak_sink();
     let audit_sink = leak_sink();
+    let slot = leak_dispatch_slot();
 
     let mut boot = BootInfo::new(
         0,
@@ -62,6 +80,7 @@ where
         log_sink,
         audit_sink,
         Level::Info,
+        slot,
     );
     setup(&mut boot);
 
@@ -80,12 +99,12 @@ where
         "kernel_main must reach halt, got panic: {msg}"
     );
 
-    (arch_for_halt, log_sink, audit_sink)
+    (arch_for_halt, log_sink, audit_sink, slot)
 }
 
 #[test]
 fn happy_path_runs_documented_init_order_and_halts() {
-    let (arch, log_sink, audit_sink) = drive_kernel_main(|_| {});
+    let (arch, log_sink, audit_sink, _slot) = drive_kernel_main(|_| {});
 
     // The boot CPU halts exactly once (success path → trailing halt
     // documented in init.rs; Stage 2.7 will replace it).
@@ -142,7 +161,7 @@ fn happy_path_runs_documented_init_order_and_halts() {
 
 #[test]
 fn mem_phase_failure_logs_phase_failed_and_halts() {
-    let (arch, _log, audit_sink) = drive_kernel_main(|boot| {
+    let (arch, _log, audit_sink, _slot) = drive_kernel_main(|boot| {
         // Empty memory map → FrameAllocator::new returns OutOfMemory.
         boot.memory_map = BootMemoryMap::new();
     });
@@ -172,7 +191,7 @@ fn mem_phase_failure_logs_phase_failed_and_halts() {
 
 #[test]
 fn bad_bootinfo_fails_under_log_phase() {
-    let (arch, _log, audit_sink) = drive_kernel_main(|boot| {
+    let (arch, _log, audit_sink, _slot) = drive_kernel_main(|boot| {
         boot.boot_cpu = 99; // out of range vs cpu_count = 1.
     });
 
@@ -235,4 +254,38 @@ fn panic_helper_logs_documented_fields_and_halts() {
     assert!(field("column").is_some_and(|s| s.parse::<u32>().is_ok()));
 
     assert_eq!(arch.halt_count(), 1);
+}
+
+/// (f4) registration-ordering invariant.
+///
+/// `BootCompleted` cannot fire before `install_dispatcher` has
+/// succeeded — verified directly by inspecting the slot's
+/// `is_installed()` after `kernel_main` returns (the test arch
+/// `halt` unwinds, leaving the leaked `KernelState` alive). The
+/// stronger ordering (`Syscall` ready precedes `Ipc` started) is
+/// covered by the in-crate `init::tests` module; this test exists at
+/// the public boundary so an external Stage-3 arch port that misuses
+/// `BootInfo` (e.g., omits the slot) cannot regress the contract
+/// without breaking this assertion.
+#[test]
+fn dispatcher_slot_is_installed_before_boot_completed() {
+    let (_arch, log_sink, audit_sink, slot) = drive_kernel_main(|_| {});
+
+    assert!(
+        slot.is_installed(),
+        "kernel_main must install the dispatcher hook before halting",
+    );
+
+    // `Syscall` phase ready precedes `BootCompleted` on the
+    // combined event stream.
+    let log_events = log_sink.snapshot();
+    let audit_events = audit_sink.snapshot();
+    let boot_completed_seen = audit_events
+        .iter()
+        .any(|e| e.id == AuditEvent::BootCompleted.id());
+    assert!(boot_completed_seen, "BootCompleted must fire");
+    let syscall_ready_seen = log_events
+        .iter()
+        .any(|e| e.id == AuditEvent::PhaseReady.id() && e.fields[0].1 == "syscall");
+    assert!(syscall_ready_seen, "Syscall phase must complete");
 }

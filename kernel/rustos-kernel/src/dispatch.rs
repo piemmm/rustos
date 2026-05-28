@@ -35,7 +35,29 @@
 
 use rustos_abi::SYSCALL_MAX_ARGS;
 use rustos_arch_x86_64::syscall_entry::SyscallDispatchFn;
+use rustos_kernel_core::DispatchCallbackSlot;
 use rustos_kernel_syscall::RawArgs;
+
+/// Bin-crate-owned [`DispatchCallbackSlot`] published into the
+/// [`rustos_kernel_core::BootInfo`] hand-off.
+///
+/// Stage 2.7 follow-up (f4) of `PLAN.md`. The slot is a `static`
+/// (not `static mut`): its set-once publication path is protected by
+/// the internal `OnceCell` (`AGENTS.md` §2.1 — the only sanctioned
+/// global mutable state in the kernel is the per-CPU bootstrap area).
+/// `kernel_core::kernel_main` calls
+/// [`DispatchCallbackSlot::install_dispatcher`] exactly once during
+/// the `Syscall` init phase; (f5)'s production dispatch callback
+/// reads through [`DispatchCallbackSlot::get`] on every syscall.
+///
+/// Why a `static` (not a `#[link_section]`-anchored byte arena): the
+/// only invariant the prompt for (f4) demands is that the slot
+/// outlives every syscall and is referenced as `'static` from
+/// `BootInfo`. A plain `static DispatchCallbackSlot` already
+/// satisfies both. Adding a custom `#[link_section]` would be
+/// `AGENTS.md` §2.3 bloat (a non-default linker placement with no
+/// observable benefit over the default `.bss`/`.data` arrangement).
+pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 
 /// Bridge the kernel-stack `[u64; SYSCALL_MAX_ARGS]` frame to a
 /// [`RawArgs`] value.

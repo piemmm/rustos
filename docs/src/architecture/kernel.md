@@ -45,7 +45,8 @@ break the boot-timeline they key off (`AGENTS.md` §5.4, §2.4).
 | 2 | `mem`   | `rustos_kernel_mem::FrameAllocator::new(&boot.memory_map)`.                           |
 | 3 | `sec`   | `boot.identity.verify(boot.audit_sink)` → `IdentityTable`.                            |
 | 4 | `sched` | `rustos_kernel_sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))`. |
-| 5 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
+| 5 | `syscall` | Production `DispatchHook` published into `boot.dispatcher_callback_slot` (see [Syscall registration phase](#syscall-registration-phase)). |
+| 6 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
 | ∞ | —       | `BootCompleted` event emitted; `arch.halt()` parks the CPU.                           |
 
 Each phase emits exactly:
@@ -58,6 +59,55 @@ Each phase emits exactly:
 
 The set of stable `cause` strings is enumerated in
 `kernel/core/src/init.rs::InitError::cause`.
+
+## Syscall registration phase
+
+Stage 2.7 follow-up (f4) wires the production syscall dispatcher into
+`kernel_main`. The phase is the kernel-side publication point for the
+callback the arch-port installed before `syscall` was enabled
+(`set_dispatch_callback`, `AGENTS.md` §5.4.5 — fail-closed ordering).
+
+```text
+            kernel/core                            kernel/rustos-kernel (bin)
+            ────────────────────────────────────────────────────────────────────────
+  sched ready                                       static DISPATCH_SLOT:
+   │                                                DispatchCallbackSlot = new();
+   ▼                                                   ▲
+  KernelDispatchHook::new(&sched,&caps,arch,audit)     │ (referenced from BootInfo)
+  Box::leak(hook)                                       │
+  slot.install_dispatcher(hook)  ──publishes──────────┘ ───> production_dispatch (f5)
+   │                                                   reads slot.get(),
+   ▼                                                   forwards every syscall.
+  syscall ready  →  ipc started
+```
+
+The `Phase::Syscall` step:
+
+1. Builds a `KernelDispatchHook<A>` around `KernelState`'s scheduler,
+   capability table, arch port, and audit sink.
+2. Lifts both the `KernelState` and the hook to `'static` lifetimes
+   via `Box::leak` (one-shot publish; the kernel never returns from
+   `kernel_main`'s halt). The leak is immutable after publish — not
+   a global mutable static; every interior field carries its own
+   synchronisation primitive (`Scheduler::tasks`, `RwLock<CapTable>`).
+3. Calls `boot.dispatcher_callback_slot.install_dispatcher(&hook)`.
+4. On `Err(AlreadyInstalledError)` (slot already published; programmer
+   error), surfaces `InitError::DispatcherAlreadyInstalled`, which the
+   standard `PhaseFailed` audit-record path reports under
+   `phase = "syscall"`, `cause = "syscall_dispatcher_already_installed"`,
+   and halts — no silent recovery.
+
+The arch-level `set_dispatch_callback` is **still** invoked before
+`syscall` is enabled on any CPU; this phase is the *kernel-side*
+publication point for the hook the eventual production callback (f5)
+will read from the slot, not the trampoline.
+
+The slot itself is `pub static DISPATCH_SLOT: DispatchCallbackSlot`
+in `kernel/rustos-kernel/src/dispatch.rs`: a normal `static` (not
+`static mut`) whose set-once publication is protected by an internal
+[`OnceCell`](./sync.md). The QEMU integration test
+`rustos-test-kernel-arch-boot` reuses the same slot through
+`rustos_kernel::boot`.
 
 ## Panic policy
 
@@ -106,6 +156,7 @@ stack-resident, so the panic path survives a wedged heap.
 | `log_sink`         | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `audit_sink`       | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `log_level`        | `rustos_log::Level`               | Installed before the first `PhaseStarted`.    |
+| `dispatcher_callback_slot` | `&'static DispatchCallbackSlot`   | Bin-crate-owned slot; receives the production `DispatchHook` during the `syscall` phase. See below. |
 
 `BootInfo::validate()` runs at the top of `kernel_main` and reports any
 violation as a `BootInfoError`; the kernel then logs a `PhaseFailed`
@@ -124,6 +175,7 @@ record under the `log` phase and halts.
 | 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
 | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
+| 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  |
 
 The **Sink** column names the `BootInfo`-supplied channel each record
 is emitted on. Audit-class boot lifecycle events

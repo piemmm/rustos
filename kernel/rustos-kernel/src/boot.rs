@@ -61,7 +61,7 @@ use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
 
 use crate::arch_wrapper::BinArch;
-use crate::dispatch::fail_closed_dispatch;
+use crate::dispatch::{fail_closed_dispatch, DISPATCH_SLOT};
 
 // --- BSP boot configuration ----------------------------------------
 
@@ -380,6 +380,12 @@ fn try_boot(
         log_sink,
         audit_sink,
         Level::Info,
+        // Stage 2.7 follow-up (f4): hand the bin-crate-owned slot to
+        // `kernel_main`'s `Syscall` phase. The arch-level
+        // `set_dispatch_callback` (step 7 above) is unchanged; this
+        // is the *kernel-side* publication point for the eventual
+        // production dispatch hook.
+        &DISPATCH_SLOT,
     );
     boot_info
         .validate()

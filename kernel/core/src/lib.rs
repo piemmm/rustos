@@ -70,6 +70,7 @@ extern crate std;
 
 pub mod audit;
 pub mod bootinfo;
+pub mod dispatch_slot;
 pub mod init;
 pub mod panic;
 pub mod syscalls;
@@ -81,6 +82,7 @@ pub mod test_sink;
 
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, KernelArch, MAX_COMMAND_LINE_BYTES};
+pub use dispatch_slot::{AlreadyInstalledError, DispatchCallbackSlot, DispatchHook};
 pub use init::{kernel_main, InitError, Phase};
 pub use panic::{handle_panic, panic_dump, PanicContext};
-pub use syscalls::KernelSyscallHandlers;
+pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};

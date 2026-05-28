@@ -23,15 +23,19 @@
 //! emitted by every phase event carry [`Phase::as_str`], and tests
 //! assert against those strings rather than line-counting log records.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use rustos_kernel_mem::{AllocError, FrameAllocator};
 use rustos_kernel_sched::{SchedError, Scheduler};
-use rustos_kernel_sec::IdentityTable;
+use rustos_kernel_sec::{CapTable, IdentityTable};
+use rustos_kernel_sync::RwLock;
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
 
 use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, KernelArch};
+use crate::dispatch_slot::AlreadyInstalledError;
+use crate::syscalls::KernelDispatchHook;
 
 /// Ordered identifier of every subsystem init phase orchestrated by
 /// [`kernel_main`].
@@ -50,6 +54,17 @@ pub enum Phase {
     Sec,
     /// Build the SMP scheduler.
     Sched,
+    /// Register the production syscall dispatcher.
+    ///
+    /// Stage 2.7 follow-up (f4). Between `Sched` and `Ipc`,
+    /// [`kernel_main`] publishes a [`crate::DispatchHook`] (built
+    /// from `KernelState`'s scheduler, capability table, arch port,
+    /// and audit sink) into the bin-crate-owned
+    /// [`crate::DispatchCallbackSlot`]. The arch-level
+    /// `set_dispatch_callback` is still invoked before `syscall` is
+    /// enabled — this phase is the *kernel-side* publication point,
+    /// not the trampoline.
+    Syscall,
     /// Prepare the IPC subsystem (currently a no-op — `kernel/ipc`
     /// holds no global state; the phase event still fires so external
     /// log consumers can rely on a consistent boot timeline).
@@ -58,7 +73,14 @@ pub enum Phase {
 
 impl Phase {
     /// Iteration order used by [`kernel_main`].
-    pub const ORDER: [Phase; 5] = [Phase::Log, Phase::Mem, Phase::Sec, Phase::Sched, Phase::Ipc];
+    pub const ORDER: [Phase; 6] = [
+        Phase::Log,
+        Phase::Mem,
+        Phase::Sec,
+        Phase::Sched,
+        Phase::Syscall,
+        Phase::Ipc,
+    ];
 
     /// Short, fixed name suitable for inclusion as the `phase` field of
     /// an [`AuditEvent::PhaseStarted`] / [`AuditEvent::PhaseReady`] /
@@ -70,6 +92,7 @@ impl Phase {
             Phase::Mem => "mem",
             Phase::Sec => "sec",
             Phase::Sched => "sched",
+            Phase::Syscall => "syscall",
             Phase::Ipc => "ipc",
         }
     }
@@ -92,6 +115,14 @@ pub enum InitError {
     Sec(rustos_abi::Errno),
     /// `kernel/sched` rejected the scheduler configuration.
     Sched(SchedError),
+    /// The bin-crate [`crate::DispatchCallbackSlot`] already held a
+    /// hook when the `Syscall` phase attempted to publish ours.
+    ///
+    /// The slot is set-once per boot; a second publish indicates a
+    /// programmer error (e.g. a test harness pre-installed a hook,
+    /// or `kernel_main` was re-entered). `AGENTS.md` §5.4.5 — fail
+    /// closed: report and halt, no silent recovery.
+    DispatcherAlreadyInstalled(AlreadyInstalledError),
 }
 
 impl InitError {
@@ -106,6 +137,7 @@ impl InitError {
             InitError::Mem(_) => Phase::Mem,
             InitError::Sec(_) => Phase::Sec,
             InitError::Sched(_) => Phase::Sched,
+            InitError::DispatcherAlreadyInstalled(_) => Phase::Syscall,
         }
     }
 
@@ -123,6 +155,7 @@ impl InitError {
             InitError::Mem(_) => "mem_unknown",
             InitError::Sec(_) => "sec_identity_rejected",
             InitError::Sched(_) => "sched_construction_failed",
+            InitError::DispatcherAlreadyInstalled(_) => "syscall_dispatcher_already_installed",
         }
     }
 }
@@ -171,8 +204,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
 
     // Capture the references we use later before destructuring `boot`
     // into the phases (each phase consumes its piece of the handover).
-    let log_sink: &(dyn Sink + Sync) = boot.log_sink;
-    let audit_sink: &(dyn Sink + Sync) = boot.audit_sink;
+    let log_sink: &'static (dyn Sink + Sync) = boot.log_sink;
+    let audit_sink: &'static (dyn Sink + Sync) = boot.audit_sink;
     let arch_for_halt = Arc::clone(&boot.arch);
 
     // `BootStarted` / `BootCompleted` / `PhaseFailed` are audit
@@ -257,8 +290,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
 fn run_phases<A: KernelArch>(
     boot: BootInfo<'_, A>,
     log_sink: &(dyn Sink + Sync),
-    audit_sink: &(dyn Sink + Sync),
-) -> Result<KernelState<A>, InitError> {
+    audit_sink: &'static (dyn Sink + Sync),
+) -> Result<&'static KernelState<A>, InitError> {
     // Pre-flight: re-validate the handover before logging Phase::Log
     // started — a malformed BootInfo means we cannot even trust the
     // log_level we just installed.
@@ -269,6 +302,7 @@ fn run_phases<A: KernelArch>(
         identity,
         scheduler_config,
         arch,
+        dispatcher_callback_slot,
         ..
     } = boot;
 
@@ -296,37 +330,81 @@ fn run_phases<A: KernelArch>(
         Scheduler::new(scheduler_config, Arc::clone(&arch)).map_err(InitError::Sched)?;
     phase_ready(log_sink, Phase::Sched);
 
-    // Phase 5 — Ipc. `kernel/ipc` holds no global state at this stage
+    // Assemble `KernelState` and lift it to `'static` so the
+    // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
+    // referencing its fields. The `Box::leak` is intentional: the
+    // kernel never returns, so the leak is a one-shot publish into a
+    // `'static` slot, not a global *mutable* static (`AGENTS.md`
+    // §2.1 — the per-CPU bootstrap area is the only sanctioned
+    // mutable static; this allocation is immutable after creation
+    // because every interior field carries its own synchronisation
+    // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
+    let state: &'static KernelState<A> = Box::leak(Box::new(KernelState {
+        frame_allocator,
+        identity_table,
+        scheduler,
+        caps: RwLock::new(CapTable::new()),
+        arch,
+        audit_sink,
+    }));
+
+    // Phase 5 — Syscall. Publish the production `DispatchHook` into
+    // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
+    // the same reason as `KernelState`: its borrows reference
+    // `KernelState` fields and must therefore be `'static`.
+    phase_started(log_sink, Phase::Syscall);
+    let hook: &'static KernelDispatchHook<'static, A> =
+        Box::leak(Box::new(KernelDispatchHook::new(
+            &state.scheduler,
+            &state.caps,
+            state.arch.as_ref(),
+            audit_sink,
+        )));
+    dispatcher_callback_slot
+        .install_dispatcher(hook)
+        .map_err(InitError::DispatcherAlreadyInstalled)?;
+    phase_ready(log_sink, Phase::Syscall);
+
+    // Phase 6 — Ipc. `kernel/ipc` holds no global state at this stage
     // (Stage 2.5 deliberately keeps ports per-process); the phase
     // event still fires so the boot timeline is uniform.
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
 
-    Ok(KernelState {
-        frame_allocator,
-        identity_table,
-        scheduler,
-        arch,
-    })
+    Ok(state)
 }
 
 /// In-memory record of the live kernel subsystems built by
 /// [`run_phases`].
 ///
-/// Stage 2.7 will pass this to the syscall registrar and then enter
-/// the scheduler dispatch loop. Until then it is consumed inside
-/// [`kernel_main`] and dropped at halt — that is intentional and
-/// documented; no global mutable static escapes (`AGENTS.md` §2 final
-/// rule).
-struct KernelState<A: KernelArch> {
-    #[allow(dead_code)] // Stage 2.7 will wire these to the syscall layer.
-    frame_allocator: FrameAllocator,
+/// Lives for the lifetime of the running kernel: `kernel_main`
+/// `Box::leak`s the value so the `Phase::Syscall` step can publish a
+/// `'static dyn DispatchHook` referencing its fields. The kernel
+/// never returns from `kernel_main`'s halt, so the leak is a
+/// one-shot publish, not a global mutable static (`AGENTS.md` §2.1).
+///
+/// `kernel_main` keeps the `'static` reference around for the
+/// duration of the audit/halt sequence; future stages will hand it to
+/// the scheduler dispatch loop.
+pub(crate) struct KernelState<A: KernelArch> {
+    #[allow(dead_code)] // Stage 4 will wire the allocator into the driver host.
+    pub(crate) frame_allocator: FrameAllocator,
+    #[allow(dead_code)] // Stage 5 will wire the table into the VFS.
+    pub(crate) identity_table: IdentityTable,
+    pub(crate) scheduler: Scheduler<A>,
+    /// Per-task capability registry. The `KernelDispatchHook` reads
+    /// this on every syscall; future `cap_delegate` / `cap_revoke`
+    /// handlers write to it. Wrapped in a reader-preferring
+    /// `RwLock` so the syscall hot path takes only a shared lock
+    /// (mirrors `Scheduler::tasks`'s composition strategy).
+    pub(crate) caps: RwLock<CapTable>,
+    pub(crate) arch: Arc<A>,
+    /// Audit sink the dispatch hook emits security-relevant records
+    /// through. Held here so the hook borrows it for the lifetime of
+    /// `KernelState` rather than re-discovering it at syscall time.
     #[allow(dead_code)]
-    identity_table: IdentityTable,
-    #[allow(dead_code)]
-    scheduler: Scheduler<A>,
-    #[allow(dead_code)]
-    arch: Arc<A>,
+    // Borrowed by the leaked `KernelDispatchHook`; tests assert through observers.
+    pub(crate) audit_sink: &'static (dyn Sink + Sync),
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
@@ -375,10 +453,25 @@ mod tests {
         map
     }
 
+    fn leak_dispatch_slot() -> &'static crate::DispatchCallbackSlot {
+        // Mirrors the bin-crate `static DISPATCH_SLOT` convention but
+        // with `Box::leak` (`AGENTS.md` §2.9 — permitted in tests).
+        Box::leak(Box::new(crate::DispatchCallbackSlot::new()))
+    }
+
     fn bootinfo_with(
         log_sink: &'static TestSink,
         audit_sink: &'static TestSink,
         memory_map: BootMemoryMap,
+    ) -> BootInfo<'static, TestArch> {
+        bootinfo_with_slot(log_sink, audit_sink, memory_map, leak_dispatch_slot())
+    }
+
+    fn bootinfo_with_slot(
+        log_sink: &'static TestSink,
+        audit_sink: &'static TestSink,
+        memory_map: BootMemoryMap,
+        slot: &'static crate::DispatchCallbackSlot,
     ) -> BootInfo<'static, TestArch> {
         let arch = Arc::new(TestArch::with_cpus(1));
         BootInfo::new(
@@ -392,6 +485,7 @@ mod tests {
             log_sink,
             audit_sink,
             Level::Info,
+            slot,
         )
     }
 
@@ -457,5 +551,109 @@ mod tests {
                 assert_eq!(err.cause(), "boot_cpu_out_of_range");
             }
         }
+    }
+
+    /// (f4) — the `Syscall` init phase publishes a hook into the
+    /// supplied `DispatchCallbackSlot` strictly between the
+    /// `PhaseReady{phase=sched}` and the `PhaseStarted{phase=ipc}`
+    /// records on the diagnostic log.
+    ///
+    /// This is the "registration-ordering" invariant the prompt for
+    /// (f4) demands: `BootCompleted` cannot fire without
+    /// `install_dispatcher` having been called.
+    #[test]
+    fn syscall_phase_installs_dispatcher_between_sched_and_ipc() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let slot = leak_dispatch_slot();
+        let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
+
+        // Slot is empty up to entry.
+        assert!(!slot.is_installed());
+        run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        // Hook published.
+        assert!(
+            slot.is_installed(),
+            "Syscall phase must install the dispatch hook"
+        );
+
+        // Phase ordering: `sched` ready precedes `syscall` started
+        // precedes `ipc` started on the diagnostic log.
+        let phase_started_id = AuditEvent::PhaseStarted.id();
+        let phase_ready_id = AuditEvent::PhaseReady.id();
+        let events = log_sink.snapshot();
+        let sched_ready_pos = events
+            .iter()
+            .position(|e| e.id == phase_ready_id && e.fields[0].1 == "sched")
+            .expect("sched ready present");
+        let syscall_started_pos = events
+            .iter()
+            .position(|e| e.id == phase_started_id && e.fields[0].1 == "syscall")
+            .expect("syscall started present");
+        let syscall_ready_pos = events
+            .iter()
+            .position(|e| e.id == phase_ready_id && e.fields[0].1 == "syscall")
+            .expect("syscall ready present");
+        let ipc_started_pos = events
+            .iter()
+            .position(|e| e.id == phase_started_id && e.fields[0].1 == "ipc")
+            .expect("ipc started present");
+        assert!(sched_ready_pos < syscall_started_pos);
+        assert!(syscall_started_pos < syscall_ready_pos);
+        assert!(syscall_ready_pos < ipc_started_pos);
+    }
+
+    /// (f4) — installing into a slot that already holds a hook
+    /// surfaces [`InitError::DispatcherAlreadyInstalled`] under
+    /// `Phase::Syscall`, **not** silently overwriting (`AGENTS.md`
+    /// §5.4.5 — fail closed).
+    #[test]
+    fn run_phases_fails_under_syscall_when_slot_already_installed() {
+        use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
+        use rustos_kernel_syscall::RawArgs;
+
+        struct Dummy;
+        impl DispatchHook for Dummy {
+            fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
+                DispatchOutcome::NoCallerContext
+            }
+        }
+
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let slot = leak_dispatch_slot();
+        // Pre-install a hook so `run_phases` collides.
+        let pre: &'static Dummy = Box::leak(Box::new(Dummy));
+        slot.install_dispatcher(pre as &'static dyn DispatchHook)
+            .expect("pre-install succeeds");
+
+        let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
+        match run_phases(boot, log_sink, audit_sink) {
+            Ok(_) => panic!("must fail when slot is pre-installed"),
+            Err(err) => {
+                assert_eq!(err.phase(), Phase::Syscall);
+                assert_eq!(err.cause(), "syscall_dispatcher_already_installed");
+            }
+        }
+
+        // The `Syscall` phase emitted a `PhaseStarted` (to mark the
+        // attempt) but **not** a `PhaseReady`, and `Ipc` was never
+        // reached.
+        let events = log_sink.snapshot();
+        let syscall_started = events
+            .iter()
+            .filter(|e| e.id == AuditEvent::PhaseStarted.id() && e.fields[0].1 == "syscall")
+            .count();
+        let syscall_ready = events
+            .iter()
+            .filter(|e| e.id == AuditEvent::PhaseReady.id() && e.fields[0].1 == "syscall")
+            .count();
+        let ipc_started = events
+            .iter()
+            .filter(|e| e.id == AuditEvent::PhaseStarted.id() && e.fields[0].1 == "ipc")
+            .count();
+        assert_eq!(syscall_started, 1);
+        assert_eq!(syscall_ready, 0);
+        assert_eq!(ipc_started, 0);
     }
 }

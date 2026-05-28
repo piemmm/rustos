@@ -24,6 +24,7 @@
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
+//! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU (`AGENTS.md` §5.4.5). |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -69,6 +70,18 @@ pub enum AuditEvent {
     /// kernel-side deferral. See `AGENTS.md` §15.1 — the spec is
     /// stable, the impl is announced as inert.
     SyscallFeatureUnavailable,
+    /// A syscall fired on a CPU with no identifiable caller.
+    ///
+    /// Emitted by `KernelDispatchHook` (Stage 2.7 follow-up (f4))
+    /// when either `Scheduler::current_task` returns `None` for the
+    /// issuing CPU or the per-task capability registry has no record
+    /// for the running task. Both conditions are "should be impossible
+    /// once the scheduler is live", but `AGENTS.md` §5.4.5 mandates
+    /// fail-closed behaviour anyway: the audit record names the
+    /// failing case (`cause` field) and the bin-crate dispatch
+    /// callback halts the CPU exactly as the pre-(f5)
+    /// `fail_closed_dispatch` did.
+    SyscallNoCallerContext,
 }
 
 impl AuditEvent {
@@ -83,6 +96,7 @@ impl AuditEvent {
             Self::BootCompleted => 4004,
             Self::Panic => 4010,
             Self::SyscallFeatureUnavailable => 4020,
+            Self::SyscallNoCallerContext => 4021,
         })
     }
 
@@ -99,6 +113,7 @@ impl AuditEvent {
             Self::BootCompleted => "kernel boot completed",
             Self::Panic => "kernel panic",
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
+            Self::SyscallNoCallerContext => "syscall has no caller context",
         }
     }
 }
@@ -117,6 +132,7 @@ mod tests {
             AuditEvent::BootCompleted,
             AuditEvent::Panic,
             AuditEvent::SyscallFeatureUnavailable,
+            AuditEvent::SyscallNoCallerContext,
         ] {
             let id = ev.id().0;
             assert!(
@@ -136,6 +152,7 @@ mod tests {
             AuditEvent::BootCompleted.id().0,
             AuditEvent::Panic.id().0,
             AuditEvent::SyscallFeatureUnavailable.id().0,
+            AuditEvent::SyscallNoCallerContext.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

@@ -29,6 +29,8 @@ use rustos_kernel_sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Level, Sink};
 
+use crate::dispatch_slot::DispatchCallbackSlot;
+
 /// Architecture-neutral hook the kernel core needs from a Stage 3
 /// arch port.
 ///
@@ -182,6 +184,25 @@ where
     /// phase event is emitted.
     pub log_level: Level,
 
+    /// Bin-crate-owned slot through which [`crate::kernel_main`]
+    /// publishes the production syscall [`crate::DispatchHook`]
+    /// during the `Phase::Syscall` init step.
+    ///
+    /// Stage 2.7 follow-up (f4). The slot is a `'static` reference
+    /// because the bin crate owns the underlying
+    /// [`DispatchCallbackSlot`] for the lifetime of the running
+    /// kernel (typically as a `static` in the binary crate, anchored
+    /// at compile time — no global *mutable* static; the
+    /// [`DispatchCallbackSlot`]'s internal `OnceCell` is set-once,
+    /// see `kernel/sync::once`).
+    ///
+    /// The arch-port's `set_dispatch_callback` is **still** invoked
+    /// before `syscall` is enabled — this field is the *kernel-side*
+    /// publication point only, not the trampoline. The two channels
+    /// are documented in `docs/src/architecture/kernel.md`'s
+    /// "Syscall registration phase" section.
+    pub dispatcher_callback_slot: &'static DispatchCallbackSlot,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -212,6 +233,7 @@ where
         log_sink: &'static (dyn Sink + Sync),
         audit_sink: &'static (dyn Sink + Sync),
         log_level: Level,
+        dispatcher_callback_slot: &'static DispatchCallbackSlot,
     ) -> Self {
         Self {
             boot_cpu,
@@ -224,6 +246,7 @@ where
             log_sink,
             audit_sink,
             log_level,
+            dispatcher_callback_slot,
             _marker: core::marker::PhantomData,
         }
     }
@@ -320,6 +343,14 @@ mod tests {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::test_sink::TestSink::new()))
     }
 
+    fn leak_dispatch_slot() -> &'static DispatchCallbackSlot {
+        // `Box::leak` mirrors the bin-crate convention: the slot
+        // outlives every test, matching the `&'static` invariant the
+        // production binary upholds with a `static`. `AGENTS.md` §2.9
+        // permits `Box::leak` in tests.
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(DispatchCallbackSlot::new()))
+    }
+
     fn fresh_boot_info() -> BootInfo<'static, TestArch> {
         let arch = Arc::new(TestArch::with_cpus(1));
         BootInfo::new(
@@ -333,6 +364,7 @@ mod tests {
             empty_sink(),
             empty_sink(),
             Level::Info,
+            leak_dispatch_slot(),
         )
     }
 

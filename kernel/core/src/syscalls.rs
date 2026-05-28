@@ -48,15 +48,16 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use rustos_abi::{CapabilityId, Errno};
-use rustos_kernel_sched::Scheduler;
+use rustos_kernel_sched::{Scheduler, SchedulerArch};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_sync::RwLock;
-use rustos_kernel_syscall::{CallerContext, SyscallHandlers, SyscallResult};
+use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Field, Sink};
 use rustos_util::fmt::format_hex_u64;
 
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
+use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
 
 /// Production [`SyscallHandlers`] implementation.
 ///
@@ -265,6 +266,147 @@ where
         // sanctioned source.
         let cpu = rustos_kernel_sched::SchedulerArch::current_cpu(self.arch);
         Ok(self.arch.monotonic_ns(cpu))
+    }
+}
+
+/// Production [`DispatchHook`] wiring `KernelSyscallHandlers` to the
+/// bin-crate dispatch callback.
+///
+/// Owns the same borrows as [`KernelSyscallHandlers`] plus a
+/// [`Dispatcher`] cell built on top of them. The bin-crate
+/// `extern "C"` syscall-dispatch callback ((f5)) calls
+/// [`Self::dispatch`] once per syscall; this method runs the §5.4
+/// sequence (identify caller → forward to [`Dispatcher::dispatch`] →
+/// translate result) and returns a [`DispatchOutcome`] the bin crate
+/// can encode back into the architecture's syscall-return register
+/// or, on caller-identification failure, fail-close by halting the
+/// CPU.
+///
+/// # Caller identification
+///
+/// The hook reads the per-CPU current-task slot from
+/// `Scheduler::current_task` ((f1)) and looks up the per-task
+/// capability record through the `CapTable` ((f2)). Both lookups are
+/// fallible:
+///
+/// * `current_task` returns `None` when no task is currently running
+///   on the issuing CPU. That cannot happen once the scheduler is
+///   live, but the trampoline must not assume so (`AGENTS.md` §5.4.5).
+/// * `caps_for` returns `None` when the running task has no
+///   capability record — also impossible during normal operation
+///   (`KernelState` populates the record before scheduling any task),
+///   but treated as a security failure on the same grounds.
+///
+/// Either failure emits one [`AuditEvent::SyscallNoCallerContext`]
+/// record (carrying a stable `cause` field naming which lookup
+/// failed) and returns [`DispatchOutcome::NoCallerContext`]; the
+/// bin-crate callback halts the CPU forever in response.
+pub struct KernelDispatchHook<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    handlers: KernelSyscallHandlers<'a, A>,
+    sched: &'a Scheduler<A>,
+    caps: &'a RwLock<CapTable>,
+    arch: &'a A,
+    audit: &'a (dyn Sink + Sync),
+}
+
+impl<'a, A> KernelDispatchHook<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    /// Build a new dispatch hook bound to the supplied kernel state.
+    ///
+    /// All borrows must outlive the slot the hook is published into.
+    /// `KernelState` (constructed by [`crate::kernel_main`]) holds the
+    /// targets for the lifetime of the running kernel; the hook is
+    /// `Box::leak`'d alongside it so the published `'static dyn
+    /// DispatchHook` is sound (`AGENTS.md` §2.1 — no global mutable
+    /// static; the leak is a one-shot, immutable publish).
+    #[must_use]
+    pub fn new(
+        sched: &'a Scheduler<A>,
+        caps: &'a RwLock<CapTable>,
+        arch: &'a A,
+        audit: &'a (dyn Sink + Sync),
+    ) -> Self {
+        Self {
+            handlers: KernelSyscallHandlers::new(sched, caps, arch, audit),
+            sched,
+            caps,
+            arch,
+            audit,
+        }
+    }
+
+    /// Emit one [`AuditEvent::SyscallNoCallerContext`] record.
+    fn audit_no_caller_context(&self, cpu: u32, cause: &'static str) {
+        let mut cpu_buf = [0u8; 16];
+        let ev = AuditEvent::SyscallNoCallerContext;
+        rustos_log::log(
+            self.audit,
+            &rustos_log::Event {
+                level: rustos_log::Level::Error,
+                id: ev.id(),
+                message: ev.message(),
+                fields: &[
+                    Field {
+                        key: "cpu",
+                        value: format_hex_u64(u64::from(cpu), &mut cpu_buf),
+                    },
+                    Field {
+                        key: "cause",
+                        value: cause,
+                    },
+                ],
+            },
+        );
+    }
+}
+
+impl<A> DispatchHook for KernelDispatchHook<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome {
+        // Step 1 (AGENTS.md §5.4.1) — identify the caller. The
+        // scheduler's per-CPU current-task slot is the only sanctioned
+        // source; no caller-supplied identity is accepted.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let Some(sched_task_id) = self.sched.current_task(cpu) else {
+            self.audit_no_caller_context(cpu, "no_current_task");
+            return DispatchOutcome::NoCallerContext;
+        };
+
+        // The capability registry is read-locked for the entire
+        // dispatch so the `&TaskCapabilities` we hand to
+        // `CallerContext` remains valid for the duration of the call.
+        // The lock is reader-preferring (`kernel/sync::RwLock`); a
+        // concurrent `cap_revoke` waits behind us. AGENTS.md §5.4
+        // step 1 ("Identify the caller") explicitly forbids
+        // re-locking mid-flight to avoid a TOCTOU window between
+        // capability check and use.
+        let guard = self.caps.read();
+        let task_id = SecTaskId(sched_task_id);
+        let Some(caps_record) = guard.caps_for(task_id) else {
+            // Drop the guard before emitting the audit record so the
+            // sink write does not hold the read lock unnecessarily.
+            drop(guard);
+            self.audit_no_caller_context(cpu, "no_capability_record");
+            return DispatchOutcome::NoCallerContext;
+        };
+
+        let caller = CallerContext {
+            task_id,
+            caps: caps_record,
+        };
+
+        // Steps 2–5: hand off to the dispatcher, which performs the
+        // capability check, argument validation, handler dispatch,
+        // and audit emission.
+        let dispatcher = Dispatcher::new(&self.handlers, self.audit);
+        DispatchOutcome::Returned(dispatcher.dispatch(&caller, raw_number, args))
     }
 }
 
