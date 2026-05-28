@@ -14,13 +14,22 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Production dependencies: none. The arch crate is intentionally
-# leaf-level so it can be linked into freestanding kernel binaries that
-# do not yet provide a `#[global_allocator]` (the memory-isolation QEMU
-# test binary is the canonical example). New parsers added in the
-# Stage-3a (a) commit — multiboot2 info, ACPI tables, LAPIC/IO-APIC
-# drivers, PIT-calibrated LAPIC timer — are deliberately `no_alloc`.
+# Production dependencies: kept to `rustos-abi` only. The arch crate is
+# intentionally leaf-level so it can be linked into freestanding kernel
+# binaries that do not yet provide a `#[global_allocator]` (the
+# memory-isolation QEMU test binary is the canonical example). New
+# parsers added in the Stage-3a (a) commit — multiboot2 info, ACPI
+# tables, LAPIC/IO-APIC drivers, PIT-calibrated LAPIC timer — are
+# deliberately `no_alloc`. `rustos-abi` is `no_std` and dependency-free,
+# so depending on it does not change those properties.
 #
+# `rustos-abi` is the **only** production dep, and only for the frozen
+# `SYSCALL_MAX_ARGS = 6` constant — re-declaring it locally would
+# violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
+# truth). See `syscall_entry.rs`.
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical
 # `rustos_kernel_mem::RegionKind` and refuse to compile if the two

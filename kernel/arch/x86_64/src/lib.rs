@@ -76,6 +76,7 @@ pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;
 pub mod smp;
+pub mod syscall_entry;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod idt;

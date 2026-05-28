@@ -135,10 +135,31 @@ following sequence — the order matches `AGENTS.md` §5.4 step for step:
 5. Audit emission via the structured sink — exactly one record per
    security-relevant decision.
 
+## Per-architecture entry stubs
+
+The architecture-neutral dispatcher above is reached through a thin
+per-target stub that marshals the platform's syscall-instruction
+registers into a `RawArgs` tuple. Stage 3a (c6) landed the x86_64
+stub; Stage 3b/3c/3d will add the remaining Tier-1 ports.
+
+| Arch | Module | Instruction | Argument registers |
+| --- | --- | --- | --- |
+| x86_64 | `rustos_arch_x86_64::syscall_entry` | `syscall` / `sysretq` (`IA32_LSTAR`) | `%rdi`, `%rsi`, `%rdx`, `%r10`, `%r8`, `%r9` (number in `%rax`) |
+| aarch64 | — (Stage 3b) | `svc #0` | `x0`..=`x5` (number in `x8`) |
+| riscv64 | — (Stage 3c) | `ecall` | `a0`..=`a5` (number in `a7`) |
+| wasm32 | — (Stage 3d) | host-imported function | first six i64 arguments |
+
+The stub never duplicates the validation surface in
+`kernel/syscall::table`: it builds a `[u64; SYSCALL_MAX_ARGS]` in
+the canonical order (matching `RawArgs`'s `#[repr(transparent)]`
+layout) and hands it to a binary-installed callback that forwards
+to `Dispatcher::dispatch`. The full description of the x86_64 stub
+— MSR programming, `SyscallTls` layout, and the naked entry
+sequence — lives in
+[the x86_64 platform page](../platform/x86_64.md#stage-3a-c6--syscallsysret-entry).
+
 ## Out of scope (Stage 2.7)
 
-* Per-arch entry stubs that build `RawArgs` from syscall registers.
-  Stage 3.x ports each Tier-1 target.
 * New syscalls beyond what Stages 2.1–2.6 require. Adding a syscall
   takes a new `SyscallSpec` row, a new `SyscallHandlers` method, and
   an entry in this document — all in the same commit.
