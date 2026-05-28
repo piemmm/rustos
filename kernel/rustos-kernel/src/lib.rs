@@ -75,7 +75,7 @@ pub mod serial_sink;
 
 pub use arch_wrapper::BinArch;
 pub use bumpalloc::BumpAllocator;
-pub use dispatch::fail_closed_dispatch;
+pub use dispatch::{production_dispatch, DISPATCH_SLOT};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use boot::{boot, BootError};

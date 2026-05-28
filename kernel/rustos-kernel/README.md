@@ -15,7 +15,7 @@ The crate ships a hybrid `[lib]` + `[[bin]]`:
 | `src/main.rs`         | Production `rustos-kernel` binary.                                |
 | `src/bumpalloc.rs`    | Forward-only bump allocator + `GlobalAlloc` impl.                 |
 | `src/arch_wrapper.rs` | `BinArch` — local `KernelArch` impl around `X86_64Arch`.          |
-| `src/dispatch.rs`     | Fail-closed syscall-dispatch callback (Stage 2.7 will replace).   |
+| `src/dispatch.rs`     | Production syscall-dispatch callback + `DISPATCH_SLOT` (Stage 2.7 (f5)). |
 | `src/serial_sink.rs`  | COM1-backed `rustos_log::Sink`.                                   |
 | `src/panic_ctx.rs`    | Bridge between `#[panic_handler]` and `kernel_core::handle_panic`. |
 | `src/boot.rs`         | `boot(multiboot_info, log_sink, audit_sink) -> !`.                |
@@ -47,20 +47,48 @@ Documented limits:
   `static mut` for the per-CPU bootstrap area; the boot heap is the
   documented exception until the production allocator lands.
 
-## Syscall-dispatch callback
+## Production dispatch callback
 
-`src/dispatch.rs` installs a **fail-closed** dispatch callback via
+`src/dispatch.rs::production_dispatch` is installed via
 `syscall_entry::set_dispatch_callback` before `init_local_syscalls`
-enables `syscall` on any CPU. If the trampoline ever forwards a real
-syscall to the callback (which the (c7-bin) boot path never does —
-there is no user space yet), the callback parks the CPU forever via
-`kernel_arch::halt`.
+enables `syscall` on any CPU — the arch-level fail-closed ordering
+contract (see `rustos_arch_x86_64::syscall_entry` rustdoc and
+`AGENTS.md` §5.4.5).
 
-Stage 2.7 will replace the body with a forwarder to
-`rustos_kernel_syscall::Dispatcher::dispatch` once
-`kernel/core::kernel_main` gains the syscall-registration phase. The
-signature is locked at compile time by `_DISPATCH_SIGNATURE_PINNED`,
-so the swap is a body-only change.
+The callback's job is split into two stages (Stage 2.7 follow-up
+(f4)+(f5)):
+
+1. **Stage A — arch publication.** `boot.rs::try_boot` installs
+   `production_dispatch` so the trampoline has a callback before any
+   syscall can fire. `production_dispatch` is `extern "C" fn(u64,
+   *const [u64; SYSCALL_MAX_ARGS]) -> u64` and its ABI is pinned at
+   compile time by `_DISPATCH_SIGNATURE_PINNED`.
+2. **Stage B — kernel publication.** `kernel_main` runs a new
+   `Phase::Syscall` step between Sched and Ipc, building a
+   `KernelDispatchHook` around `KernelState` (scheduler + capability
+   table + arch + audit) and calling
+   `DISPATCH_SLOT.install_dispatcher(&hook)`. `production_dispatch`
+   reads the slot via `DISPATCH_SLOT.get()` on every syscall and
+   forwards.
+
+`production_dispatch` halts the CPU forever via
+`kernel_arch::halt` in exactly two situations — the same fail-closed
+posture the pre-(f5) `fail_closed_dispatch` shipped:
+
+* **Empty slot**: a syscall fired before `kernel_main` ran the
+  `Syscall` phase. Impossible if BSP boot ordering is correct, but
+  the callback must not assume so.
+* **`DispatchOutcome::NoCallerContext`**: `Scheduler::current_task`
+  returned `None` for the issuing CPU, or no `TaskCapabilities`
+  record exists for the running task. The hook has already emitted
+  `AuditEvent::SyscallNoCallerContext` (id 4021) by the time we
+  halt.
+
+Normal `Errno` returns are encoded back into `%rax` via
+`encode_result`: `Ok(v) → v`; `Err(e) → (-(e.as_i32() as i64)) as
+u64`, the conventional Linux-style negation that userland recovers
+with `(rax as i64) < 0` → `(-(rax as i64)) as i32`. The encoding is
+covered by `encode_result_err_encodes_as_negative_i64`.
 
 ## `KernelArch::halt` proof
 
@@ -88,7 +116,9 @@ record on COM1 and halts.
 * **Host unit tests** (`cargo test -p rustos-kernel --lib`):
   bump-allocator semantics, `BinArch` delegation to `X86_64Arch`'s
   host counters, `RawArgs` reinterpretation through the `extern "C"`
-  shim, fail-closed dispatch signature pin.
+  shim, `production_dispatch` signature pin, `encode_result` Ok/Errno
+  round-trips, and `dispatch_via_slot` happy-path / no-task /
+  empty-slot branches.
 * **QEMU integration test** (`cargo xtask test --qemu` →
   `rustos-test-kernel-arch-boot`): boot the kernel image under
   QEMU on `-smp 1`; the audit-observer sink flips
@@ -97,9 +127,9 @@ record on COM1 and halts.
 
 ## Stage 2.7 follow-up
 
-The fail-closed syscall-dispatch callback in `src/dispatch.rs` is the
-documented Stage 2.7 hook. When `kernel_core::kernel_main` gains the
-syscall-registration phase, the callback body is replaced with a
-forwarder to `Dispatcher::dispatch` built against the then-available
-`SyscallHandlers` impl and per-CPU `CallerContext` plumbing. No
-other piece of this crate is intended to change.
+Stage 2.7 follow-up (f4)+(f5) are now landed. `src/dispatch.rs`
+ships `production_dispatch`, `DISPATCH_SLOT`, and `encode_result`;
+`boot.rs` installs `production_dispatch` (not `fail_closed_dispatch`)
+and hands `&DISPATCH_SLOT` to `BootInfo::new`. The slot itself
+remains a `static` (not `static mut`); its set-once publication is
+protected by `kernel/sync::OnceCell` (`AGENTS.md` §2.1).

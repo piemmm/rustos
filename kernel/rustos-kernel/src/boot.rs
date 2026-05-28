@@ -61,7 +61,7 @@ use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
 
 use crate::arch_wrapper::BinArch;
-use crate::dispatch::{fail_closed_dispatch, DISPATCH_SLOT};
+use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
 
 // --- BSP boot configuration ----------------------------------------
 
@@ -313,11 +313,20 @@ fn try_boot(
 
     let arch = X86_64Arch::new(0, bsp_lapic_id, cpu_to_lapic).map_err(|_| BootError::ArchInit)?;
 
-    // 7. Install the fail-closed syscall-dispatch callback **before**
+    // 7. Install the production syscall-dispatch callback **before**
     //    `init_local_syscalls` enables `syscall` on any CPU. The
     //    ordering matters per `syscall_entry` rustdoc — the trampoline
     //    fail-closes if it fires with no callback installed.
-    syscall_entry::set_dispatch_callback(fail_closed_dispatch);
+    //
+    //    Stage 2.7 follow-up (f5). `production_dispatch` reads the
+    //    `DISPATCH_SLOT` static (whose hook `kernel_main` publishes
+    //    during the `Syscall` init phase between Sched and Ipc) and
+    //    forwards every syscall through the resident `DispatchHook`.
+    //    If a syscall fires before the slot is published, or if the
+    //    hook signals `NoCallerContext`, the callback halts the CPU
+    //    forever — the same fail-closed posture the (c7-bin) commit
+    //    shipped, now coexisting with the live dispatcher.
+    syscall_entry::set_dispatch_callback(production_dispatch);
 
     // 8. Install the LAPIC timer ISR + program the period. No timer
     //    callback is registered: the timer ISR's null-callback branch
@@ -474,13 +483,13 @@ fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), Boo
 
 // --- Compile-time invariants ---------------------------------------
 
-// SAFETY-INVARIANT: the fail-closed dispatch callback exposes the
+// SAFETY-INVARIANT: the production dispatch callback exposes the
 // type `syscall_entry::SyscallDispatchFn` expects. The dispatch
 // module already pins this at compile time; we re-coerce here at the
 // call-site to catch a regression at the `set_dispatch_callback`
 // install rather than only in the dispatch module's own tests.
 // AGENTS.md §2.4 — encode the contract in the type system.
-const _DISPATCH_CALLBACK_INSTALLABLE: syscall_entry::SyscallDispatchFn = fail_closed_dispatch;
+const _DISPATCH_CALLBACK_INSTALLABLE: syscall_entry::SyscallDispatchFn = production_dispatch;
 
 // SAFETY-INVARIANT: a 16-KiB per-CPU stack is sufficient to hold a
 // `[u64; SYSCALL_MAX_ARGS]` frame plus the kernel-side trampoline's
