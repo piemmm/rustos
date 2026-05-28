@@ -1,4 +1,4 @@
-# Continuation Prompt — RustOS Stage 2.7 follow-up resume (Production syscall wiring, (f3)..(f7))
+# Continuation Prompt — RustOS Stage 2.7 follow-up resume (Production syscall wiring, (f4)..(f7))
 
 Copy the text below verbatim into the next agent session as the
 `<issue_description>`.
@@ -14,24 +14,38 @@ safe encapsulation), §13 (docs in the same commit), §14 (commit
 format, one logical change per commit), §15 (no stubs, no silenced
 lints, no weakened security, no invented APIs).
 
-## Context (already on `main`)
+## Context (already on `master`)
 
 Stages 0..2 are complete. Stage 3a is **complete** for x86_64.
 The Stage 2.7 follow-up is **partially landed**:
 
 - `c93e823` — kernel/sched: per-CPU current-task slot **(f1)**.
-  `Scheduler<A>` exposes `current_task(cpu) -> Option<TaskId>` and
-  `yield_current(task_id) -> SchedResult<()>`. Slot is published
-  by `dispatch` (set before body, cleared on return) and defensively
-  cleared by `park` / `exit` / `yield_current` on matching ids.
-  No new `SchedulerArch` method.
-- `fcfb5fc` — kernel/sec: `CapTable` registry **(f2)**. A flat
-  `BTreeMap<TaskId, TaskCapabilities>` with `insert`, `caps_for`,
-  `caps_for_mut`, `remove`, and `len`/`is_empty`. No interior
-  mutability — synchronisation policy is the owning scope's
-  (`KernelState`) responsibility, to be wired in (f4).
+- `fcfb5fc` — kernel/sec: `CapTable` registry **(f2)**.
+- `4497106` — kernel/core: production `SyscallHandlers` impl **(f3)**.
+  New module `kernel/core::syscalls` ships
+  `KernelSyscallHandlers<'a, A: KernelArch>` borrowing
+  `&'a Scheduler<A>`, `&'a RwLock<CapTable>`, `&'a A`, and
+  `&'a (dyn Sink + Sync)`. Every handler is wired:
+  `yield_now → Scheduler::yield_current`,
+  `exit → CapTable::remove + Scheduler::exit`,
+  `cap_query → caller.caps.has(cap)` mapped to `0|1`,
+  `cap_revoke → CapTable::caps_for_mut(target).revoke(cap, audit)`,
+  `clock_get → KernelArch::monotonic_ns(arch.current_cpu())`. The
+  deferred branches return stable errnos plus a new
+  `AuditEvent::SyscallFeatureUnavailable` (id 4020) record:
+  `ipc_send`/`ipc_recv` → `NotFound` (named-port registry not
+  landed); `cap_delegate` → `NotImplemented` (user-memory copy-in
+  not landed). `KernelArch::monotonic_ns(cpu) -> u64` is a new
+  trait method with **no default impl**; the x86_64 port wires it
+  through `apic_timer::Calibration::tsc_per_second` (sampled across
+  the same PIT calibration window via the new `TscReader`/`Rdtsc`
+  injection) and a saturating `Calibration::tsc_ticks_to_ns`
+  helper. `lib/abi::Errno` appended `NotImplemented = 12`
+  (`SYSCALL_TABLE_HASH` is unaffected — the encoded table covers
+  syscall specs, not `Errno` variants). `cargo xtask ci` green at
+  HEAD.
 
-`(c7-bin)` dispatch callback is still the fail-closed
+`(c7-bin)` dispatch callback is **still** the fail-closed
 `halt`-on-first-syscall version
 (`kernel/rustos-kernel/src/dispatch.rs::fail_closed_dispatch`); its
 `extern "C"` ABI is pinned at compile time by
@@ -39,71 +53,75 @@ The Stage 2.7 follow-up is **partially landed**:
 
 ## Goal of this session
 
-Land **(f3) through (f7)** to AGENTS.md quality, item by item, then
+Land **(f4) through (f7)** to AGENTS.md quality, item by item, then
 tick them in PLAN.md (Stage 2.7 follow-up sub-checklist) and flip
 the Stage 2.7 follow-up status block from `partial` to `complete`.
-The detailed (f3)..(f7) descriptions live in PLAN.md "Stage 2.7
+The detailed (f4)..(f7) descriptions live in PLAN.md "Stage 2.7
 follow-up" — read them first. The short form is:
 
-- **(f3)** Production `SyscallHandlers` impl in a new
-  `kernel/core::syscalls` module: `KernelSyscallHandlers<'a, A>`
-  borrowing `&'a Scheduler<A>` and `&'a CapTable`, wiring
-  `yield_now` → `Scheduler::yield_current`,
-  `exit` → `Scheduler::exit` + `CapTable::remove`,
-  `cap_query` → `caps.has(cap)` mapped to `0|1`,
-  `cap_delegate` / `cap_revoke` calling into the existing
-  `TaskCapabilities::{delegate,revoke}` via `CapTable::caps_for_mut`,
-  `clock_get` → new `KernelArch::monotonic_ns(cpu_id) -> u64`.
-  `ipc_send` / `ipc_recv` and `cap_delegate`'s `set_ptr` copy-in
-  return stable `Errno` (`NotFound` / `NotImplemented`) with one
-  audit record each per AGENTS.md §15.1.
-  `KernelArch::monotonic_ns` has **no default impl** — every arch
-  must opt in; x86_64 wires through `apic_timer::Calibration`.
 - **(f4)** Registration hook on `kernel_main`. Extend `BootInfo`
   with `dispatcher_callback_slot: &'static DispatchCallbackSlot`,
   whose `install_dispatcher` is called between the `Sched` phase
-  and the `Ipc` phase, after `KernelState` is built. `CapTable`
-  is wired into `KernelState` here. The arch port's
+  and the `Ipc` phase, after `KernelState` is built. `CapTable` is
+  wired into `KernelState` here under the same reader-preferring
+  `RwLock` pattern `Scheduler::tasks` already uses (mirror the
+  carry-over note in (f2)). The arch port's
   `set_dispatch_callback` is still invoked before `syscall` is
-  enabled — the new slot is the kernel-side publication point,
-  not the trampoline.
-- **(f5)** `kernel/rustos-kernel::dispatch` body swap to
-  `production_dispatch` that builds a `CallerContext` from
-  `current_cpu` → `current_task` → `caps_for`, then forwards to
-  `Dispatcher::dispatch`. No-task branch halts the CPU after
-  emitting one audit record (AGENTS.md §5.4.5 fail-closed).
-  `_DISPATCH_SIGNATURE_PINNED` stays.
-- **(f6)** QEMU integration test: a `test-hooks`-gated entry
-  point invokes `Dispatcher::dispatch` directly with
-  (`cap_query`, `CAP_TIME_SET`) and (`exit`, 0); the audit-observer
-  sink flips `qemu_exit::exit_success` on observing both
-  `SyscallInvoked` records.
-- **(f7)** PLAN.md tick of (f3)..(f7); flip the Stage 2.7
-  follow-up status block to `complete`; refresh the Stage 2
-  evidence tail with a fresh `cargo xtask ci` quote.
+  enabled — the new slot is the *kernel-side publication* point,
+  not the trampoline. No global mutable static; the `&'static`
+  reference is to memory the bin crate's `#[link_section]`
+  reserves at compile time. Tests:
+  `kernel/core/tests/kernel_main.rs` gains a registration-ordering
+  test that fails if `BootCompleted` fires without
+  `install_dispatcher` being called. Docs:
+  `docs/src/architecture/kernel.md` "Syscall registration phase" +
+  `docs/src/security/captable.md` "Wiring / Lifecycle" section.
+
+- **(f5)** `kernel/rustos-kernel::dispatch` body swap. Replace
+  `fail_closed_dispatch` with `production_dispatch` that builds a
+  `CallerContext` from `current_cpu` → `current_task` →
+  `caps_for`, then forwards to `Dispatcher::dispatch`. If
+  `current_task` returns `None` (no task running on this CPU —
+  should be impossible once the scheduler is live but AGENTS.md
+  §5.4.5 *fail closed*), the callback emits one
+  `SyscallHandlerRejected`-equivalent audit record and halts the
+  CPU exactly as the fail-closed version does. Compile-time
+  `_DISPATCH_SIGNATURE_PINNED` stays. New host unit tests cover
+  the no-task and happy-path branches via the `extern "C"` shim
+  already in `dispatch.rs::tests`. Docs:
+  `kernel/rustos-kernel/README.md` "Production dispatch callback"
+  + `docs/src/platform/x86_64.md` "(c7-bin) Stage 2.7 follow-up"
+  tail.
+
+- **(f6)** QEMU integration test. A `test-hooks`-gated entry point
+  invokes `Dispatcher::dispatch` directly with
+  (`cap_query`, `CAP_TIME_SET`) and (`exit`, 0); the
+  audit-observer sink flips `qemu_exit::exit_success` on observing
+  both `SyscallInvoked` records. The hook is gated off by default
+  and `cargo deny check` rejects accidental release builds that
+  enable it. Joins the `cargo xtask test --qemu` enrolment list.
+
+- **(f7)** PLAN.md tick of (f3)..(f6) (note: (f3) was landed in a
+  previous session, **but its checkbox has not been ticked yet** —
+  the (f1)+(f2) tick commit predates (f3)); add the entry for
+  (f7) itself; flip the Stage 2.7 follow-up status block to
+  `complete`; refresh the Stage 2 evidence tail with a fresh
+  `cargo xtask ci` quote.
 
 ## Hard constraints
 
 - One logical change per commit per AGENTS.md §14. Each commit
   carries `Co-authored-by: Junie <junie@jetbrains.com>`.
-  Suggested split: one commit per (f3), (f4), (f5), (f6), then
-  (f7) PLAN.md update.
+  Suggested split: one commit per (f4), (f5), (f6), then (f7)
+  PLAN.md update.
 - `cargo xtask ci` green at HEAD of every commit. Quote the tail
-  in the final summary. The new QEMU integration test joins the
-  `cargo xtask test --qemu` enrolment list.
+  in the final summary.
 - No `unwrap` / `expect` / `panic!` in production paths.
 - `unsafe` paired with `// SAFETY:` and a test or model.
 - No `#[allow(...)]` without a justifying comment (AGENTS.md
   §15.10).
 - Docs land in the same commit as the code they describe
-  (AGENTS.md §13). Touched docs include
-  `docs/src/architecture/syscalls.md`,
-  `docs/src/architecture/kernel.md`,
-  `docs/src/platform/x86_64.md`,
-  `docs/src/security/captable.md` (gain a "Wiring" / "Lifecycle"
-  section that records the (f4) registration step now that the
-  registry is composed with `KernelState`),
-  `kernel/rustos-kernel/README.md`.
+  (AGENTS.md §13).
 - `rustdoc` on `pub` items must not link to private items
   (`-D rustdoc::private-intra-doc-links` is implied by
   `RUSTDOCFLAGS=-D warnings` in `cargo xtask docs-check`). When a
@@ -130,10 +148,19 @@ follow-up" — read them first. The short form is:
 - `_DISPATCH_SIGNATURE_PINNED` in
   `kernel/rustos-kernel::dispatch` pins the callback ABI; keep
   it green across the swap.
-- `CapTable` has no interior mutability. (f4) is the step that
-  composes it with `Scheduler` under a single lock-ordering
-  policy in `KernelState` (mirror `Scheduler::tasks`'s
-  reader-preferring `RwLock` pattern).
+- `CapTable` has no interior mutability of its own. (f3) wraps it
+  in `kernel/sync::RwLock` at the *handler* layer; (f4) is the
+  step that composes that lock into `KernelState`'s
+  lock-ordering policy alongside `Scheduler::tasks`.
+- `KernelSyscallHandlers::new(sched, caps, arch, audit)` is the
+  one entry point into the (f3) wiring. `KernelState` constructs
+  one and hands its `&dyn SyscallHandlers` to a `Dispatcher`
+  cell published through the new `DispatchCallbackSlot`.
+- `KernelArch::monotonic_ns(cpu) -> u64` is **required** on every
+  arch port. aarch64/riscv64/wasm32 ports added later must opt
+  in (CNTVCT_EL0 / `rdtime` / `performance.now()` are the
+  natural sources); the x86_64 wiring (`apic_timer::Calibration`
+  + RDTSC) is the reference.
 
 ## Toolchain & host requirements (already installed on the workbench)
 
@@ -148,7 +175,7 @@ follow-up" — read them first. The short form is:
 
 ## Definition of done
 
-- (f3)..(f7) implemented to AGENTS.md quality.
+- (f4)..(f7) implemented to AGENTS.md quality.
 - New host unit tests cover every new public API with the
   coverage floors in AGENTS.md §7 (`kernel/sec`,
   `kernel/ipc`, `lib/caps`, `lib/crypto` ≥ 95 %; other kernel
