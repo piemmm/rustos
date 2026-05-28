@@ -502,10 +502,63 @@ Each sub-stage delivers one architecture. They share the same checklist:
           interrupts: 8, percpu: 6, plus 2 layout const-asserts) sit
           on top of the existing 76 in the arch crate, taking the
           host total to 97.
-    - [ ] LAPIC-timer-driven preemption and a clean
-          `SchedulerArch::preempt_to` (or equivalent) extension to
-          `kernel/sched`, plus the IDT timer-vector ISR that
-          consumes the (c1/c2/c3) common prologue.
+    - [x] **(c4)** Scheduler preemption observation point.
+          `kernel/sched::Scheduler` gained
+          `on_timer_tick(cpu) -> SchedResult<()>` plus the
+          observable `preemption_count(cpu)` /
+          `total_preemption_count()` counters. The entry point is
+          *counter-only* — it bumps a `Relaxed` per-CPU `AtomicU64`
+          and returns. It does **not** call `Scheduler::step`: the
+          task registry `RwLock` and the overflow `SpinLock` are
+          explicitly forbidden from interrupt context by
+          `kernel/sync` (`rwlock.rs` module docs: "Process /
+          kernel-thread context only. Never from an interrupt
+          handler."), and an ISR-driven `step` would deadlock
+          against the same CPU's in-progress `spawn` or mid-
+          `drain_overflow_to`. The cooperative `step` loop driven
+          from kernel-thread context remains the only writer of
+          run-queue state. The `SchedulerArch` trait is deliberately
+          not extended: `send_ipi` already documents the
+          scheduler-asks-arch direction, and the inverse arch-into-
+          scheduler timer path is, by construction, a method on the
+          scheduler type (AGENTS.md §2.4 — no interface creep,
+          §15.5 — no parallel "convenience" surface). 5 new host
+          unit tests in `scheduler::tests` cover the counter, the
+          no-dispatch contract, the idle-still-counts behaviour, the
+          error surface, and per-CPU isolation; the new
+          `architecture/scheduler.md#timer-driven-preemption-entry-point`
+          section is the long-form prose contract.
+    - [x] **(c5)** LAPIC-timer-driven preemption on x86_64.
+          `kernel/arch/x86_64::interrupts` gained a `define_isr!`
+          macro that emits a `#[naked]` `extern "C"` ISR stub per
+          vector, sharing the same 15-GPR push / 16-byte stack
+          align / call / 15-GPR pop / `iretq` sequence as the
+          default thunk in `interrupts.s` but parameterised on the
+          dispatcher symbol via `sym`. The new
+          `kernel/arch/x86_64::preempt` module owns
+          `TIMER_VECTOR = 0x20`, a 256-entry
+          `LAPIC_TO_CPU_ID` mapping populated at bring-up, a
+          `set_timer_callback` storage (round-tripped through an
+          `AtomicU64`-packed `fn` pointer), a fail-closed
+          dispatcher (`rustos_arch_x86_64_timer_dispatch`) that
+          looks up the CPU ID, invokes the callback, then writes
+          `0` to LAPIC EOI, and a per-CPU
+          `init_local_preempt(cpu_index, &mut lapic, calibration)`
+          entry that installs the ISR via the new
+          `percpu::install_vector` (volatile raw-pointer write
+          through a freshly-derived `&mut PerCpu` slot) and
+          programs the LAPIC timer in periodic mode.
+          `scheduler_stress_qemu` now calibrates the LAPIC timer
+          once on the BSP against PIT channel 2, publishes the
+          `Calibration` for APs, installs the scheduler-tick
+          callback, registers LAPIC→CpuId mappings, calls
+          `init_local_preempt` on every CPU after `percpu::init`,
+          `sti`s, and asserts `preemption_count(cpu) >= 10` per
+          CPU at the end of the workload — a silent revert to
+          cooperative scheduling now fails CI loudly. 4 new host
+          unit tests in `preempt::tests` cover the vector const,
+          LAPIC offsets, callback round-trip, and LAPIC→CpuId
+          mapping; the arch-crate host total is now 101.
     - [ ] x86_64 syscall entry stub bound to
           `kernel/syscall::Dispatcher` (the architecture-neutral
           dispatcher already validates against

@@ -156,6 +156,16 @@ pub struct Scheduler<A: SchedulerArch> {
     /// queues; this is the back-pressure path described in
     /// `docs/src/architecture/scheduler.md` §"Overflow".
     overflow: SpinLock<Vec<TaskId>>,
+    /// Per-CPU count of timer-driven preemptions ever observed.
+    ///
+    /// Incremented exactly once per [`Self::on_timer_tick`] call. The
+    /// counter exists so integration tests (and future audit code) can
+    /// assert that preemption is actually firing — a silent regression
+    /// to cooperative scheduling would otherwise pass the workload-
+    /// correctness checks while breaking the security model
+    /// (`AGENTS.md` §5: a runaway task on one CPU must not be able to
+    /// indefinitely block another).
+    preemptions: Box<[AtomicU64]>,
 }
 
 impl<A: SchedulerArch> Scheduler<A> {
@@ -174,6 +184,10 @@ impl<A: SchedulerArch> Scheduler<A> {
             let s = CpuState::new(config.queue_capacity_per_band).ok_or(SchedError::QueueFull)?;
             cpus.push(s);
         }
+        let mut preemptions = Vec::with_capacity(config.cpus as usize);
+        for _ in 0..config.cpus {
+            preemptions.push(AtomicU64::new(0));
+        }
         Ok(Self {
             arch,
             cpus: cpus.into_boxed_slice(),
@@ -183,6 +197,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             last_boost_tick: AtomicU64::new(0),
             victim_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
             overflow: SpinLock::new(Vec::new()),
+            preemptions: preemptions.into_boxed_slice(),
         })
     }
 
@@ -317,6 +332,90 @@ impl<A: SchedulerArch> Scheduler<A> {
             *guard = None;
         }
         Ok(())
+    }
+
+    /// Architecture-driven preemption entry point.
+    ///
+    /// The architecture port's timer interrupt service routine — the
+    /// LAPIC-timer ISR on x86_64, the CNTV/EL1 handler on aarch64, the
+    /// CLINT trap on riscv64, the host worker's quantum tick on wasm32
+    /// — calls this once per tick after acknowledging the device-level
+    /// interrupt source (EOI on the LAPIC, etc.). The scheduler
+    /// itself never reads a timer register; the arch port owns that.
+    ///
+    /// On every call the per-CPU preemption counter is incremented.
+    /// The counter is exposed via [`Self::preemption_count`] /
+    /// [`Self::total_preemption_count`] so integration tests can
+    /// assert that preemption fires (`AGENTS.md` §7: a silent
+    /// regression to cooperative scheduling must fail loudly, not
+    /// pass).
+    ///
+    /// # Why this entry point does *not* call [`Self::step`]
+    ///
+    /// `step` takes a reader lock on the task registry
+    /// (`RwLock<BTreeMap<TaskId, _>>`) and a `SpinLock` on the
+    /// overflow list. Both are forbidden from interrupt context by
+    /// `kernel/sync` (see `rwlock.rs` module docs: "Process /
+    /// kernel-thread context only. Never from an interrupt handler.").
+    /// An ISR-driven `step` would deadlock against the same CPU's
+    /// in-progress `spawn` (writer-held registry lock) or a mid-
+    /// `drain_overflow_to` (held overflow `SpinLock`). The arch port's
+    /// timer ISR therefore restricts itself to bumping the observable
+    /// counter; the cooperative `step` loop driven by the kernel-
+    /// thread context is the only writer of run-queue state. A future
+    /// commit that lands IRQ-safe locks (e.g. `irq::SpinLock` from
+    /// `kernel/sync`) can extend this entry point to drive a real
+    /// preemption step — the public surface need not change.
+    ///
+    /// # Why this is on `Scheduler<A>` and not on `SchedulerArch`
+    ///
+    /// [`SchedulerArch::send_ipi`] already documents the inverse
+    /// direction — the scheduler asking the arch to nudge a CPU into
+    /// rescheduling. Adding a parallel `preempt_to` trait method
+    /// would be interface creep (`AGENTS.md` §2.4) because the two
+    /// requests have the same downstream effect on a real port. The
+    /// timer-ISR path is *inward*, from arch into scheduler, so it
+    /// belongs on the scheduler type and not on the arch trait.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range. The
+    ///   counter is **not** incremented in that case so a stray ISR
+    ///   does not poison the metric an integration test reads.
+    pub fn on_timer_tick(&self, cpu: CpuId) -> SchedResult<()> {
+        // Validate the CPU id *before* touching the counter so a stray
+        // ISR does not skew the metric an integration test reads.
+        let _ = self.cpu_state(cpu)?;
+        // `Relaxed` is sufficient: the counter is monotonic, observers
+        // only need the eventual value, and the per-tick increment is
+        // not synchronising any other memory. The whole body is
+        // wait-free and ISR-safe (one array bounds check, one
+        // `fetch_add`) — see the rustdoc above for the rationale.
+        self.preemptions[cpu as usize].fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Returns the per-CPU preemption count observed by
+    /// [`Self::on_timer_tick`].
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn preemption_count(&self, cpu: CpuId) -> SchedResult<u64> {
+        let _ = self.cpu_state(cpu)?;
+        Ok(self.preemptions[cpu as usize].load(Ordering::Relaxed))
+    }
+
+    /// Returns the sum of [`Self::preemption_count`] across every CPU.
+    ///
+    /// Intended for tests and audit logging; the sum is computed with
+    /// `Relaxed` loads so a concurrent ISR may make the total
+    /// non-monotonic across two adjacent reads. Both reads remain
+    /// individually consistent.
+    #[must_use]
+    pub fn total_preemption_count(&self) -> u64 {
+        self.preemptions
+            .iter()
+            .map(|p| p.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// One scheduler step on `cpu`: pick a task, run it once, re-enqueue
@@ -707,5 +806,65 @@ mod tests {
         // After the second step the task ran, was promoted to High at the
         // start of the call, then yielded => demoted to Normal.
         assert_eq!(t.load_priority(), Priority::Normal);
+    }
+
+    #[test]
+    fn on_timer_tick_bumps_counter_but_does_not_dispatch() {
+        let (_arch, sched) = mk(2);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        assert_eq!(sched.preemption_count(0), Ok(0));
+        // ISR-safety contract (see rustdoc on `on_timer_tick`): the
+        // entry point only bumps the counter — it must NOT call
+        // `step` (which holds the registry RwLock and the overflow
+        // SpinLock, both forbidden from interrupt context).
+        sched.on_timer_tick(0).expect("tick");
+        assert_eq!(sched.preemption_count(0), Ok(1));
+        assert_eq!(sched.preemption_count(1), Ok(0));
+        assert_eq!(sched.total_preemption_count(), 1);
+        // The task must NOT have been dispatched — the cooperative
+        // `step` loop is the only writer of run-queue state.
+        assert_eq!(sched.state_of(id), TaskState::Ready);
+    }
+
+    #[test]
+    fn on_timer_tick_idle_still_counts() {
+        let (_arch, sched) = mk(1);
+        // Even with no work, a tick must register as a preemption
+        // observation so the integration-test assertion is not gated
+        // on workload presence.
+        assert_eq!(sched.on_timer_tick(0), Ok(()));
+        assert_eq!(sched.preemption_count(0), Ok(1));
+    }
+
+    #[test]
+    fn on_timer_tick_rejects_unknown_cpu_without_bumping() {
+        let (_arch, sched) = mk(2);
+        assert_eq!(sched.on_timer_tick(7), Err(SchedError::NoSuchCpu));
+        // The counter must not be incremented for an out-of-range CPU
+        // (the documented contract — a stray ISR cannot poison the
+        // metric an integration test reads).
+        assert_eq!(sched.total_preemption_count(), 0);
+    }
+
+    #[test]
+    fn preemption_count_rejects_unknown_cpu() {
+        let (_arch, sched) = mk(2);
+        assert_eq!(sched.preemption_count(99), Err(SchedError::NoSuchCpu));
+    }
+
+    #[test]
+    fn on_timer_tick_is_per_cpu() {
+        let (_arch, sched) = mk(4);
+        for _ in 0..3 {
+            sched.on_timer_tick(2).expect("tick");
+        }
+        sched.on_timer_tick(0).expect("tick");
+        assert_eq!(sched.preemption_count(0), Ok(1));
+        assert_eq!(sched.preemption_count(1), Ok(0));
+        assert_eq!(sched.preemption_count(2), Ok(3));
+        assert_eq!(sched.preemption_count(3), Ok(0));
+        assert_eq!(sched.total_preemption_count(), 4);
     }
 }

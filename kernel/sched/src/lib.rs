@@ -33,6 +33,18 @@
 //!   [`Scheduler::unpark`] always notify the home CPU via
 //!   [`SchedulerArch::send_ipi`]; the arch port decides whether that
 //!   triggers an immediate context switch or a deferred reschedule.
+//! * **Timer-driven preemption observation point.** The arch port's
+//!   timer ISR calls [`Scheduler::on_timer_tick`] after
+//!   acknowledging the device-level interrupt source; the scheduler
+//!   bumps a per-CPU preemption counter (observable via
+//!   [`Scheduler::preemption_count`] /
+//!   [`Scheduler::total_preemption_count`]) and returns. It does not
+//!   itself call [`Scheduler::step`] — the registry `RwLock` and the
+//!   overflow `SpinLock` are forbidden from interrupt context by
+//!   `kernel/sync`, so the cooperative `step` loop driven from
+//!   kernel-thread context is the only writer of run-queue state.
+//!   The [`SchedulerArch`] trait is deliberately not extended for
+//!   this path (`AGENTS.md` §2.4 — no interface creep).
 //! * **Cancellation-safe lifecycle.** [`Scheduler::park`],
 //!   [`Scheduler::unpark`], and [`Scheduler::exit`] are safe to call from
 //!   any context, including against tasks currently running on another

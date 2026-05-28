@@ -9,13 +9,13 @@ use alloc::sync::Arc;
 
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{PolledPit, PortIo};
+use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, PortIo};
 use rustos_arch_x86_64::multiboot2::BootInfo;
-use rustos_arch_x86_64::percpu;
 use rustos_arch_x86_64::smp::{
     self, init_sipi_sipi, ApBootSlot, Delay, TrampolineFrame, AP_BOOT_SLOT_OFFSET,
     AP_TRAMPOLINE_PHYS,
 };
+use rustos_arch_x86_64::{percpu, preempt};
 use rustos_arch_x86_64::{qemu_exit, serial};
 use rustos_kernel_sched::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
 
@@ -76,6 +76,93 @@ static EXPECTED_EXECS: AtomicU64 = AtomicU64::new(0);
 
 /// Total tasks actually executed (incremented from every task body).
 static EXECUTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// LAPIC-timer period the BSP calibrates for. 1 ms gives a comfortable
+/// 1 kHz scheduler tick: long enough that the dispatcher's overhead
+/// stays well under 1 % even at QEMU TCG speed, and short enough that
+/// the integration test sees hundreds of ticks per CPU during a
+/// multi-second run (4 cores × O(1 000) tasks × hundreds of µs each).
+const PREEMPT_PERIOD_US: u32 = 1_000;
+
+/// PIT calibration window. 10 ms is the well-known calibration period
+/// (PIT channel-2 reload fits in 16 bits up to ~54 ms, well above).
+const PREEMPT_CALIBRATION_WINDOW_US: u32 = 10_000;
+
+/// Minimum per-CPU preemption count the test asserts at the end of
+/// the workload. The BSP step loop is bounded by
+/// `MAX_STEPS_PER_CPU * O(1 task)`; on QEMU TCG that takes hundreds of
+/// milliseconds, well above 100 timer periods. We pick a *small but
+/// non-zero* lower bound so the assertion stays robust against TCG
+/// jitter while still failing loudly if preemption is silently
+/// disabled (`AGENTS.md` §7 — no flaky tests, no silent regressions).
+const MIN_PREEMPTIONS_PER_CPU: u64 = 10;
+
+/// BSP-computed LAPIC-timer calibration, packed into a `u64` (ticks/s
+/// fit in 32 bits for any LAPIC RustOS targets; `initial_count` is
+/// 32 bits). Zero means "not yet calibrated".
+///
+/// Two fields → one 64-bit atomic: ticks-per-second in the low 32
+/// bits, initial-count in the high 32. The period itself is
+/// `PREEMPT_PERIOD_US` so does not need transporting.
+static BSP_CALIBRATION_PACKED: AtomicU64 = AtomicU64::new(0);
+
+fn pack_calibration(c: Calibration) -> u64 {
+    // `ticks_per_second` is at most `u32::MAX` because `initial_count`
+    // is `u32` and the LAPIC counter is 32-bit. `calibrate` caps it
+    // there; documented in `apic_timer::compute_initial_count`.
+    let tps = c.ticks_per_second.min(u64::from(u32::MAX)) as u32;
+    (u64::from(tps)) | (u64::from(c.initial_count) << 32)
+}
+
+fn unpack_calibration() -> Option<Calibration> {
+    let raw = BSP_CALIBRATION_PACKED.load(Ordering::Acquire);
+    if raw == 0 {
+        return None;
+    }
+    let tps = (raw & 0xFFFF_FFFF) as u32;
+    let initial = (raw >> 32) as u32;
+    Some(Calibration {
+        ticks_per_second: u64::from(tps),
+        initial_count: initial,
+        period_micros: PREEMPT_PERIOD_US,
+    })
+}
+
+/// Raw pointer to the published `Scheduler<SmpArch>` for the timer
+/// ISR's exclusive use. Stored separately from `SCHED_PTR` so the ISR
+/// does **not** need to call `Arc::clone` (which takes a mutex on the
+/// strong count) in interrupt context.
+static SCHED_FOR_TIMER: AtomicPtr<Scheduler<SmpArch>> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Timer-tick callback installed via `preempt::set_timer_callback`.
+///
+/// Runs in ISR context with interrupts disabled. Steps:
+///
+/// 1. Load the scheduler pointer (a raw `*const`, never freed once
+///    published).
+/// 2. Call `Scheduler::on_timer_tick(cpu)`, which bumps the
+///    scheduler's per-CPU preemption counter and drives one
+///    `step(cpu)`.
+///
+/// We deliberately do **not** propagate `on_timer_tick`'s `Result`:
+/// the dispatcher only invokes us with a `CpuId` produced by the
+/// `LAPIC_TO_CPU_ID` table that the BSP/APs populated themselves, so
+/// `Err(NoSuchCpu)` would be a kernel bug, not a recoverable
+/// condition. We let the scheduler-side metric (`preemption_count`)
+/// be the regression catcher: a CPU whose ID was misregistered would
+/// have a flat counter and the post-run assertion would fail loudly.
+extern "C" fn scheduler_tick(cpu: u32) {
+    let raw = SCHED_FOR_TIMER.load(Ordering::Acquire);
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: the BSP publishes `raw` from a leaked `Arc::into_raw`
+    // before any AP comes up and before any timer is armed. The
+    // pointee outlives every timer tick because the leaked `Arc`'s
+    // strong count is never decremented.
+    let sched: &Scheduler<SmpArch> = unsafe { &*raw };
+    let _ = sched.on_timer_tick(cpu);
+}
 
 // --- Allocator -----------------------------------------------------
 
@@ -237,6 +324,35 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     let bsp_id = smp::bsp_lapic_id();
     let _ = writeln!(com1, "[scheduler_stress_qemu] BSP LAPIC id = {bsp_id}");
 
+    // Calibrate the LAPIC timer against the PIT *once*, on the BSP. APs
+    // re-use the result via `BSP_CALIBRATION_PACKED`. See the rustdoc on
+    // `rustos_arch_x86_64::preempt` for why per-CPU re-calibration is
+    // unnecessary on QEMU and on homogeneous Intel SMP, plus the
+    // fail-loud cross-check (the per-CPU preemption count below).
+    let mut pit = PolledPit;
+    let calibration = match apic_timer::calibrate(
+        &mut lapic,
+        &mut pit,
+        PREEMPT_CALIBRATION_WINDOW_US,
+        PREEMPT_PERIOD_US,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(
+                com1,
+                "[scheduler_stress_qemu] FAIL: LAPIC timer calibration: {e:?}"
+            );
+            qemu_exit::exit_failure();
+        }
+    };
+    let _ = writeln!(
+        com1,
+        "[scheduler_stress_qemu] LAPIC calibrated: {} ticks/s, initial_count={} for {}us period",
+        calibration.ticks_per_second, calibration.initial_count, calibration.period_micros
+    );
+    BSP_CALIBRATION_PACKED.store(pack_calibration(calibration), Ordering::Release);
+    preempt::set_cpu_id_for_lapic(bsp_id, 0);
+
     // Discover APs.
     let ap_ids = match discover_aps(multiboot_info, bsp_id, &mut com1) {
         Some(ids) => ids,
@@ -271,6 +387,22 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // Leak one Arc into the global pointer so APs can clone it.
     let raw = Arc::into_raw(sched.clone()) as *mut Scheduler<SmpArch>;
     SCHED_PTR.store(raw, Ordering::Release);
+    // The timer ISR consults `SCHED_FOR_TIMER` directly (so it does
+    // not have to touch `Arc`'s strong count in interrupt context).
+    // Publish before any timer is armed.
+    SCHED_FOR_TIMER.store(raw, Ordering::Release);
+
+    // Register the scheduler-tick callback exactly once, before any
+    // CPU's timer is armed.
+    preempt::set_timer_callback(scheduler_tick);
+
+    // Register every AP's LAPIC ID -> dense CpuId mapping *before*
+    // we bring them up so the first tick that fires on a given AP
+    // (typically right after `sti`) finds the mapping populated.
+    for i in 0..ap_ids.count {
+        let cpu_id = (i + 1) as u32;
+        preempt::set_cpu_id_for_lapic(ap_ids.ids[i], cpu_id);
+    }
 
     // Bring the APs up one at a time.
     let mut pit_delay = PitDelay { pit: PolledPit };
@@ -278,6 +410,28 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         let target = ap_ids.ids[i];
         let cpu_id = (i + 1) as u32; // BSP = 0, APs = 1..N
         bring_up_ap(target, cpu_id, &mut lapic, &mut pit_delay, &mut com1);
+    }
+
+    // Arm the BSP's timer and enable interrupts. This *must* happen
+    // after the scheduler is published and the callback is installed
+    // — see SAFETY-INVARIANT notes on `preempt::init_local_preempt`.
+    //
+    // SAFETY: this is the BSP, `percpu::init(0)` ran above, interrupts
+    // are still disabled (the boot trampoline left IF=0 and nothing
+    // has run `sti`), and `lapic` is the BSP's LAPIC.
+    unsafe {
+        if preempt::init_local_preempt(0, &mut lapic, calibration).is_err() {
+            let _ = writeln!(
+                com1,
+                "[scheduler_stress_qemu] FAIL: preempt::init_local_preempt(BSP)"
+            );
+            qemu_exit::exit_failure();
+        }
+        // SAFETY: every per-CPU prerequisite for accepting interrupts
+        // is now in place — per-CPU IDT installed, timer vector
+        // pointing at the ISR stub, LAPIC software-enabled, callback
+        // registered.
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
 
     // Wait for every AP to reach its step loop.
@@ -366,6 +520,38 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         qemu_exit::exit_failure();
     }
 
+    // Stage 3a (c5): the scheduler must have been driven by the LAPIC
+    // timer ISR — not merely by the cooperative `step()` loop — on
+    // every CPU. A silent regression to cooperative-only scheduling
+    // would preserve the workload-correctness check above but break
+    // the security model (`AGENTS.md` §5: a runaway task must not
+    // indefinitely block another CPU's progress); this is the test
+    // that catches it.
+    let total_preempts = sched.total_preemption_count();
+    let _ = writeln!(
+        com1,
+        "[scheduler_stress_qemu] preemption ticks total = {total_preempts}"
+    );
+    let mut min_observed = u64::MAX;
+    for cpu in 0..cpu_count {
+        let n = sched.preemption_count(cpu).unwrap_or(0);
+        let _ = writeln!(com1, "[scheduler_stress_qemu]   cpu {cpu}: {n} preemptions");
+        if n < min_observed {
+            min_observed = n;
+        }
+        if n < MIN_PREEMPTIONS_PER_CPU {
+            let _ = writeln!(
+                com1,
+                "[scheduler_stress_qemu] FAIL: cpu {cpu} observed {n} preemptions, expected >= {MIN_PREEMPTIONS_PER_CPU}"
+            );
+            qemu_exit::exit_failure();
+        }
+    }
+    let _ = writeln!(
+        com1,
+        "[scheduler_stress_qemu] preemption assertion OK (min per CPU = {min_observed})"
+    );
+
     let _ = writeln!(com1, "[scheduler_stress_qemu] PASS");
     qemu_exit::exit_success();
 }
@@ -404,6 +590,35 @@ extern "C" fn ap_entry(cpu_id: u32) -> ! {
     // here (that would consume the strong count); instead we reach into
     // the scheduler by reference.
     let sched: &Scheduler<SmpArch> = unsafe { &*raw };
+
+    // Software-enable this AP's LAPIC and arm the timer for periodic
+    // preemption. The BSP already published the calibration; if it is
+    // somehow not yet visible the AP halts (the BSP's per-CPU
+    // preemption-count assertion will then trip).
+    let Some(calibration) = unpack_calibration() else {
+        loop {
+            // SAFETY: cli;hlt with IF=0 is well-defined.
+            unsafe {
+                core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    };
+    let mut ap_lapic = make_lapic();
+    ap_lapic.software_enable(0xFF);
+    // SAFETY: this AP, `percpu::init(cpu_id)` ran above, interrupts
+    // are disabled (we haven't `sti`-d yet), `ap_lapic` is this AP's
+    // LAPIC because the LAPIC MMIO is per-CPU.
+    unsafe {
+        if preempt::init_local_preempt(cpu_id as usize, &mut ap_lapic, calibration).is_err() {
+            loop {
+                core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+        // SAFETY: per-CPU IDT installed, timer vector points at the
+        // ISR stub, callback is registered by the BSP. We are ready to
+        // field timer ticks.
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+    }
 
     APS_LIVE.fetch_add(1, Ordering::AcqRel);
 

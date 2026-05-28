@@ -331,6 +331,103 @@ pub struct IdtPointer {
     pub base: u64,
 }
 
+// --- define_isr! macro --------------------------------------------
+
+/// Emit a vector-specific ISR stub.
+///
+/// `define_isr!(my_handler => my_rust_dispatch)` produces a
+/// `pub unsafe extern "C" fn my_handler()` that the IDT can address
+/// directly. On entry the stub:
+///
+/// 1. Saves the 15 architectural GPRs in the exact order pinned by
+///    [`SavedRegs`] (the same order the default thunk in
+///    `interrupts.s` uses; the layout const-assertions in this module
+///    are the cross-check).
+/// 2. Loads `%rdi` with a pointer to the saved-regs block (i.e. the
+///    current `%rsp`).
+/// 3. Subtracts 8 from `%rsp` to satisfy the System V AMD64 `call`
+///    alignment rule (`%rsp ≡ 8 (mod 16)` at the `call` instruction)
+///    so the dispatcher is entered on a 16-byte-aligned stack.
+/// 4. Calls `my_rust_dispatch(*mut SavedRegs)`. The dispatcher must
+///    be `unsafe extern "C" fn(*mut SavedRegs)`.
+/// 5. Restores the GPRs in reverse order and `iretq`s.
+///
+/// The macro is the only sanctioned way to produce a per-vector stub
+/// (`AGENTS.md` §2.5 — no convenience wrappers, §15.5 — no shoe-
+/// horning new logic into the fail-closed default thunk). Vectors
+/// that push a hardware error code (`8`, `10`–`14`, `17`, `21`) are
+/// *not* supported by this macro — they would need an additional
+/// stack adjustment after the GPR pushes; emit a dedicated stub if
+/// you need to handle one.
+///
+/// # Why a macro and not a `#[naked]` template fn
+///
+/// A `#[naked]` template would still need to monomorphise the
+/// dispatcher symbol *inside* the assembly (via `sym`), which only
+/// works through a macro because const-generic symbols are unstable.
+/// The macro form keeps the per-vector stub self-contained, lets
+/// `cargo expand` reveal the exact bytes produced, and prevents the
+/// `sym` argument from accidentally being templated through a
+/// generic function.
+#[macro_export]
+macro_rules! define_isr {
+    ($name:ident => $dispatch:path) => {
+        /// Auto-generated vector-specific ISR stub. The body is fully
+        /// described in [`crate::define_isr`]'s rustdoc.
+        ///
+        /// # Safety
+        ///
+        /// Only the CPU's IDT may invoke this symbol. Calling it
+        /// directly from Rust is undefined behaviour because the
+        /// function expects an [`crate::interrupts::InterruptStackFrame`]
+        /// on top of the stack, not a return address.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        #[unsafe(naked)]
+        #[no_mangle]
+        pub unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                "pushq %rax",
+                "pushq %rcx",
+                "pushq %rdx",
+                "pushq %rbx",
+                "pushq %rbp",
+                "pushq %rsi",
+                "pushq %rdi",
+                "pushq %r8",
+                "pushq %r9",
+                "pushq %r10",
+                "pushq %r11",
+                "pushq %r12",
+                "pushq %r13",
+                "pushq %r14",
+                "pushq %r15",
+                "movq %rsp, %rdi",
+                "subq $8, %rsp",
+                "call {dispatch}",
+                "addq $8, %rsp",
+                "popq %r15",
+                "popq %r14",
+                "popq %r13",
+                "popq %r12",
+                "popq %r11",
+                "popq %r10",
+                "popq %r9",
+                "popq %r8",
+                "popq %rdi",
+                "popq %rsi",
+                "popq %rbp",
+                "popq %rbx",
+                "popq %rdx",
+                "popq %rcx",
+                "popq %rax",
+                "iretq",
+                dispatch = sym $dispatch,
+                options(att_syntax),
+            )
+        }
+    };
+}
+
 // --- Default ISR Rust callback -------------------------------------
 
 /// Rust callback invoked by the assembly thunk

@@ -65,7 +65,7 @@ pub const IST_INDEX_DF: u8 = 1;
 /// IST index used for the `#NMI` (vector 2) gate.
 pub const IST_INDEX_NMI: u8 = 2;
 
-/// Errors returned by `init`.
+/// Errors returned by `init` or `install_vector`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
     /// `cpu_index` was ≥ `MAX_CPUS`.
@@ -75,6 +75,10 @@ pub enum InitError {
     /// One of the IST configurations was rejected by
     /// `PerCpuGdt::set_ist` (alignment / null / index).
     Ist(gdt::IstError),
+    /// `install_vector` was called on a CPU that has not yet
+    /// completed `init`. The per-CPU IDT is not safe to mutate
+    /// until the latch is set, so the call is rejected fail-closed.
+    NotInitialised,
 }
 
 impl From<gdt::IstError> for InitError {
@@ -242,6 +246,63 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
         idt_ref.load();
     }
 
+    Ok(())
+}
+
+/// Install a per-CPU IDT vector after `init` has finalised the CPU.
+///
+/// `cpu_index` selects which per-CPU IDT to mutate; `vector` is the
+/// 0..=255 architecturally-fixed slot to overwrite; `handler` is the
+/// linear address of the ISR entry point (typically the symbol of a
+/// stub emitted by [`crate::define_isr`]). The IDT entry is built as
+/// a 64-bit interrupt gate at DPL 0, IST 0 — vectors that need an IST
+/// stack (NMI, #DF) are already installed by `init` and must not be
+/// overwritten through this entry point.
+///
+/// The CPU re-reads the IDT base on every interrupt delivery, so
+/// overwriting an entry while interrupts are disabled is safe; the
+/// caller must keep interrupts disabled across this call.
+///
+/// # Errors
+///
+/// * `InitError::CpuIndexOutOfRange` if `cpu_index >= MAX_CPUS`.
+/// * `InitError::NotInitialised` if `init` has not run for
+///   `cpu_index`. Fail-closed per `AGENTS.md` §10 — a stray vector
+///   install on an un-bootstrapped CPU is a kernel bug, not a
+///   silent fixup.
+///
+/// # Safety
+///
+/// * Interrupts on the calling CPU must be disabled.
+/// * `handler` must be the address of a valid ISR (either the
+///   default thunk from `interrupts.s` or a stub produced by
+///   [`crate::define_isr`]). Pointing the slot at any other address
+///   makes the CPU jump to invalid code on the next delivery.
+/// * `vector` must not be `2` (`#NMI`) or `8` (`#DF`): those slots
+///   are owned by `init` and route through dedicated IST stacks;
+///   overwriting them with an IST-0 entry would defeat the
+///   double-fault stack-swap guarantee. The function does not
+///   refuse those vectors at runtime — the caller is responsible.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Result<(), InitError> {
+    use crate::interrupts::IdtEntry;
+    if cpu_index >= MAX_CPUS {
+        return Err(InitError::CpuIndexOutOfRange);
+    }
+    if !PER_CPU_INITIALISED[cpu_index].load(Ordering::Acquire) {
+        return Err(InitError::NotInitialised);
+    }
+    // SAFETY: the latch above is `true`, so `init` has finalised this
+    // slot and the only writer from here on is the CPU it belongs to.
+    // The caller's safety contract requires interrupts to be disabled
+    // on the calling CPU, so a delivery cannot race the write.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu;
+        let entry_ptr =
+            core::ptr::addr_of_mut!((*base.add(cpu_index)).idt.entries[vector as usize]);
+        let selector = PerCpuGdt::selectors().kernel_cs;
+        core::ptr::write_volatile(entry_ptr, IdtEntry::interrupt_gate(handler, selector, 0));
+    }
     Ok(())
 }
 

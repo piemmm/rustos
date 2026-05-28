@@ -93,6 +93,56 @@ immediately, schedules a deferred reschedule, or — on
 on the IPI; correctness only requires that the target CPU eventually
 calls [`step`].
 
+### Timer-driven preemption entry point
+
+The inverse direction — *arch driving the scheduler* on every timer
+tick — is `Scheduler::on_timer_tick(cpu)`. The arch port's timer ISR
+(the LAPIC-timer ISR on x86_64; the CNTV/EL1 handler on aarch64; the
+CLINT trap on riscv64; the host worker's quantum tick on wasm32)
+calls this once per fire, *after* it has acknowledged the device-
+level interrupt source (EOI on the LAPIC, etc.). The scheduler
+itself never reaches for a timer register; the arch port owns that.
+
+`on_timer_tick` increments the per-CPU preemption counter and
+returns; it does **not** call `Scheduler::step`. The counter is
+observable from `Scheduler::preemption_count(cpu)` and
+`Scheduler::total_preemption_count()`. These exist so integration
+tests can assert that preemption is actually firing — a silent
+regression to cooperative scheduling would otherwise pass the
+workload-correctness tests while breaking the security model
+(`AGENTS.md` §5: a runaway task on one CPU must not be able to
+indefinitely block another).
+
+#### Why the entry point does *not* dispatch
+
+`step` reads the task registry through an `RwLock` and locks the
+overflow `SpinLock`; `spawn` writes the registry. Both lock kinds
+are explicitly forbidden from interrupt context by `kernel/sync`
+(see `kernel/sync/src/rwlock.rs` module docs: "Process /
+kernel-thread context only. Never from an interrupt handler.").
+An ISR-driven `step` would deadlock against the same CPU's in-
+progress `spawn` (writer-held registry lock) or a mid-
+`drain_overflow_to` (held overflow lock).
+
+The cooperative `step` loop — driven by every CPU's kernel-thread
+context — remains the only writer of run-queue state. The ISR's
+job today is purely observational: bump the counter, return, EOI.
+The integration test's per-CPU `preemption_count >= N` assertion
+is what proves the timer is actually firing on every CPU.
+
+A future commit that lands IRQ-safe locks (an `irq::SpinLock` from
+`kernel/sync`, plus an IRQ-safe `RwLock`) can extend
+`on_timer_tick` to drive a real preemption step without changing
+its public signature.
+
+#### Trait neutrality
+
+The trait `SchedulerArch` deliberately gains *no* new method for
+this path: `send_ipi` already documents the scheduler-asks-arch
+direction, and the ISR-into-scheduler call is, by construction, a
+method on the scheduler itself rather than on the arch trait
+(`AGENTS.md` §2.4 — no interface creep).
+
 ## Invariants
 
 These hold at every API boundary:

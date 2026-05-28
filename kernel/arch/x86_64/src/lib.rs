@@ -72,6 +72,7 @@ pub mod gdt;
 pub mod interrupts;
 pub mod multiboot2;
 pub mod percpu;
+pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;
 pub mod smp;
@@ -95,7 +96,7 @@ pub(crate) fn interrupts_default_isr_addr() -> u64 {
     extern "C" {
         fn rustos_arch_x86_64_isr_default();
     }
-    rustos_arch_x86_64_isr_default as usize as u64
+    rustos_arch_x86_64_isr_default as *const () as usize as u64
 }
 
 /// Multiboot2 magic the bootloader passes in `%eax` to `_start`
