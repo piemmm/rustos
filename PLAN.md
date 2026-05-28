@@ -854,7 +854,7 @@ one logical change per commit with the `Co-authored-by` trailer.
       step that adds it next to `Scheduler` under the new
       lock-ordering policy.
 
-- [ ] **(f3)** Production **`SyscallHandlers` impl** in
+- [x] **(f3)** Production **`SyscallHandlers` impl** in
       `kernel/core::syscalls` (new module). One concrete struct
       `KernelSyscallHandlers<'a, A: KernelArch>` that borrows
       `&'a Scheduler<A>`, `&'a CapTable`, and (later) the
@@ -899,7 +899,7 @@ one logical change per commit with the `Co-authored-by` trailer.
       Docs: `docs/src/architecture/syscalls.md` "Handler wiring"
       section.
 
-- [ ] **(f4)** **Registration hook** on `kernel_main`. Extend
+- [x] **(f4)** **Registration hook** on `kernel_main`. Extend
       `BootInfo` with one new field, `dispatcher_callback_slot:
       &'static DispatchCallbackSlot`, whose `install_dispatcher`
       method is called by `kernel_main` *between* the `Sched` phase
@@ -917,7 +917,7 @@ one logical change per commit with the `Co-authored-by` trailer.
       `docs/src/architecture/kernel.md` "Syscall registration
       phase" section.
 
-- [ ] **(f5)** `kernel/rustos-kernel::dispatch` body swap.
+- [x] **(f5)** `kernel/rustos-kernel::dispatch` body swap.
       Replace `fail_closed_dispatch` with `production_dispatch`
       that:
         - reads `RawArgs` via the existing `read_raw_args` helper,
@@ -980,18 +980,25 @@ one logical change per commit with the `Co-authored-by` trailer.
 
 ### Stage 2.7 follow-up status — partial
 
-Sub-items (f1) and (f2) have landed; (f3)..(f7) remain. Commits
-on `master`:
+Sub-items (f1)..(f5) have landed; (f6)..(f7) remain. Commits on
+`master`:
 
 - `c93e823` — kernel/sched: per-CPU current-task slot (f1).
 - `fcfb5fc` — kernel/sec: TaskId→TaskCapabilities CapTable
   registry (f2).
+- `4497106` — kernel/core: production `SyscallHandlers` impl +
+  `KernelArch::monotonic_ns` (f3).
+- `eca9e89` — kernel/core: `DispatchCallbackSlot` + `Phase::Syscall`
+  + `KernelDispatchHook` + `KernelState` wiring (f4).
+- `45c21c3` — kernel/rustos-kernel: `production_dispatch` swap +
+  `encode_result` + `DISPATCH_SLOT` install through `BootInfo` (f5).
 
-`cargo xtask ci` is green at HEAD (`fcfb5fc`), running through the
-Stage 2 evidence pipeline above unchanged. The next session
-picks up at (f3): production `SyscallHandlers` impl in
-`kernel/core::syscalls` plus `KernelArch::monotonic_ns`. Detailed
-continuation prompt is checked in at
+`cargo xtask ci` is green at HEAD (`45c21c3`), running through the
+Stage 2 evidence pipeline above unchanged. The next session picks
+up at (f6): the `test-hooks`-gated QEMU integration test that
+drives `Dispatcher::dispatch` directly for `cap_query` + `exit`
+and observes the resulting `SyscallInvoked` audit records.
+Detailed continuation prompt remains at
 [`.junie/next-session-prompt.md`](./.junie/next-session-prompt.md).
 
 The Stage 3a status block above (`Status: complete`) is unchanged
