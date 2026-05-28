@@ -44,6 +44,25 @@ const TESTS: &[QemuTest] = &[
         cpus: 4,
         timeout: Duration::from_secs(120),
     },
+    // Stage 3a (c7-bin) deliverable: boot the production
+    // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
+    // `X86_64Arch` → per-CPU init → `BootInfo` →
+    // `kernel_core::kernel_main`) and assert
+    // `AuditEvent::BootCompleted` (`EventId(4004)`) appears on the
+    // audit sink. The test binary `rustos-test-kernel-arch-boot`
+    // wraps the lib half of `rustos-kernel` with an audit-observer
+    // Sink that flips `qemu_exit::exit_success` on observing
+    // `BootCompleted` — see
+    // `tests/integration/kernel_arch_boot/src/main.rs`. Single CPU
+    // suffices: the (c7-bin) scope only brings up the BSP. The
+    // 60-second budget matches `memory_isolation`'s — both are
+    // strictly bring-up tests with no workload.
+    QemuTest {
+        package: "rustos-test-kernel-arch-boot",
+        binary: "rustos-test-kernel-arch-boot",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+    },
 ];
 
 const TARGET: &str = "x86_64-unknown-none";

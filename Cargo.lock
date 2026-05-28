@@ -576,6 +576,15 @@ name = "rustos-shell"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-test-kernel-arch-boot"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-x86_64",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-memory-isolation"
 version = "0.0.0"
 dependencies = [

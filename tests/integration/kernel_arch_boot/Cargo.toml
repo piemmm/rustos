@@ -1,0 +1,37 @@
+[package]
+name = "rustos-test-kernel-arch-boot"
+description = "Stage 3a (c7-bin) QEMU integration test: boot the rustos-kernel pipeline to AuditEvent::BootCompleted under QEMU."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the freestanding "boot the kernel and observe the final
+# `AuditEvent::BootCompleted` audit record" integration test mandated
+# by Stage 3a (c7-bin). It reuses the production boot pipeline through
+# `rustos-kernel`'s library half (see
+# `kernel/rustos-kernel/src/lib.rs`) and only replaces the audit Sink
+# so that observing `EventId(4004)` (`AuditEvent::BootCompleted`)
+# flips `qemu_exit::exit_success` and lets the host-side
+# `tools/qemu::Runner` register the test as `Outcome::Pass`.
+#
+# Keeping the bin separate from the production `rustos-kernel`
+# binary (rather than gating the audit sink behind a Cargo feature)
+# is deliberate: feature unification under `cargo build --workspace`
+# would otherwise leak the QEMU-exit behaviour into the production
+# kernel image. `AGENTS.md` §5.4.5 — fail closed; the harness never
+# decides what the kernel does next.
+
+[[bin]]
+name = "rustos-test-kernel-arch-boot"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

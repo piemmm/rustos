@@ -65,6 +65,7 @@ members = [
     "tests/integration/memory_isolation",
     "tests/integration/scheduler_stress",
     "tests/integration/scheduler_stress_qemu",
+    "tests/integration/kernel_arch_boot",
 ]
 
 # Settings that apply to every crate in the workspace.

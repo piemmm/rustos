@@ -323,23 +323,27 @@ Do **not** begin a stage before all its listed dependencies are complete.
       scheduling now fails CI loudly.
 - `cargo xtask ci` evidence tail (toolchain
   `nightly-2026-05-27` / rustc 1.98.0-nightly, QEMU 8.2.2,
-  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (c6)
-  landed the x86_64 syscall entry stub (10 new host unit tests in
-  `kernel/arch/x86_64::syscall_entry`, arch-crate host total: 110)
-  and Stage 3a (d1) split per-arch QEMU defaults into
-  `tools/qemu/src/x86_64.rs` (18 host unit tests in `rustos-qemu`,
-  up from 12):
+  GRUB-EFI 2.12, OVMF 2024.02). Refreshed after Stage 3a (c7-bin)
+  landed the `rustos-kernel` production bin crate + the
+  `kernel_arch_boot` QEMU integration test, and after the
+  follow-up audit-routing fix that emits `AuditEvent::BootStarted`
+  / `PhaseFailed` / `BootCompleted` on `audit_sink` per
+  `AGENTS.md` §5.4.4 (catalogue table in `kernel/core/src/audit.rs`
+  and `docs/src/architecture/kernel.md` updated in lockstep):
   ```text
   xtask: [fmt --check]                     cargo fmt --all -- --check
   xtask: [clippy]                          --workspace --all-targets --locked -- -D warnings
   xtask: [test]                            --workspace --all-targets --locked
-  xtask: [test --qemu] 2 test(s) enrolled
+  xtask: [test --qemu] 3 test(s) enrolled
   xtask: [test --qemu (build rustos-test-memory-isolation)]
   xtask: [test --qemu (run  rustos-test-memory-isolation)]
       kernel=…/rustos-test-memory-isolation cpus=1 timeout=60s
   xtask: [test --qemu (build rustos-test-scheduler-stress-qemu)]
   xtask: [test --qemu (run  rustos-test-scheduler-stress-qemu)]
       kernel=…/rustos-test-scheduler-stress-qemu cpus=4 timeout=120s
+  xtask: [test --qemu (build rustos-test-kernel-arch-boot)]
+  xtask: [test --qemu (run  rustos-test-kernel-arch-boot)]
+      kernel=…/rustos-test-kernel-arch-boot cpus=1 timeout=60s
   xtask: [docs-check (rustdoc)]            -D warnings --document-private-items
   xtask: [docs-check (mdbook)]
   xtask: [docs-check (linkcheck)]          docs/src
@@ -348,15 +352,18 @@ Do **not** begin a stage before all its listed dependencies are complete.
   xtask: [abi-check]                       lib/abi/src/syscalls.rs ↔
                                            kernel/syscall/src/table.rs
   ```
-  All host test crates report `ok. … 0 failed; 0 ignored` (53 ok
-  blocks). Coverage floors per `AGENTS.md` §7 unchanged since
-  Stage 1 (`lib/caps` 98.19 % lines, `lib/crypto` 96.84 % lines,
-  workspace total 98.29 %); no kernel-side `lib/*` crate was
-  touched by (d1)/(d2). The new QEMU stress
-  (`rustos-test-scheduler-stress-qemu`) brings 3 APs online via
-  INIT-SIPI-SIPI and runs 8 192 tasks across 4 real (emulated) cores
-  to completion (`PASS`, "distinct executing CPUs = 4"), inside the
-  120 s budget.
+  All host test crates report `ok. … 0 failed; 0 ignored`.
+  Coverage floors per `AGENTS.md` §7 unchanged since Stage 1
+  (`lib/caps` 98.19 % lines, `lib/crypto` 96.84 % lines, workspace
+  total 98.29 %); no kernel-side `lib/*` crate was touched by the
+  (c7-bin) finalisation. The new boot QEMU run boots the
+  production `rustos-kernel` pipeline end-to-end, observes
+  `EventId(4004)` on the audit channel, and flips
+  `qemu_exit::exit_success` inside the 60 s budget. The QEMU
+  stress (`rustos-test-scheduler-stress-qemu`) continues to bring
+  3 APs online via INIT-SIPI-SIPI and run 8 192 tasks across 4
+  real (emulated) cores to completion (`PASS`, "distinct
+  executing CPUs = 4"), inside the 120 s budget.
 
 ---
 
