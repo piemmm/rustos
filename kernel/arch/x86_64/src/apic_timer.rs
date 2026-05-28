@@ -78,9 +78,56 @@ pub trait PortIo {
     fn outb(&mut self, port: u16, value: u8);
 }
 
-/// Computed calibration result: LAPIC ticks-per-second and the
-/// `initial_count` to program for a periodic interval of
-/// `period_micros` microseconds.
+/// Time-stamp-counter reader. Production uses [`Rdtsc`]; tests use the
+/// in-memory `MockTsc` (see the `tests` module).
+///
+/// The TSC is sampled across the same PIT calibration window the LAPIC
+/// is measured over, so the resulting `tsc_per_second` is derived from
+/// exactly the same time base as `ticks_per_second`. Wiring the reader
+/// as a trait rather than calling `_rdtsc()` directly inside
+/// [`calibrate`] keeps the calibration deterministic under host unit
+/// tests (`AGENTS.md` §7 — no flaky tests).
+pub trait TscReader {
+    /// Read the current TSC value.
+    fn read(&mut self) -> u64;
+}
+
+/// Production [`TscReader`]: invokes the `rdtsc` instruction.
+///
+/// `rdtsc` is unconditionally available on every x86_64 CPU and on the
+/// host toolchain RustOS builds against; the same impl is therefore
+/// reused on both `target_os = "none"` and `target_os = "linux"`
+/// builds (host unit tests of consumers that drive `calibrate` against
+/// a real CPU).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Rdtsc;
+
+impl TscReader for Rdtsc {
+    fn read(&mut self) -> u64 {
+        // SAFETY: `rdtsc` is unprivileged, has no memory side effects,
+        // and is documented in Intel SDM Vol. 2B. It is unconditionally
+        // available on every x86_64 CPU (it predates the architecture),
+        // and `Rdtsc` is `#[cfg]`-gated to `target_arch = "x86_64"` at
+        // the impl level. The instruction reads the monotonically-
+        // non-decreasing time-stamp counter into EDX:EAX; we recombine
+        // it into a single `u64`.
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            core::arch::asm!(
+                "rdtsc",
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        (u64::from(hi) << 32) | u64::from(lo)
+    }
+}
+
+/// Computed calibration result: LAPIC ticks-per-second, the matching
+/// `initial_count`, and the time-stamp-counter rate sampled across the
+/// same PIT calibration window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Calibration {
     /// LAPIC counter ticks observed per second, with the divisor
@@ -92,6 +139,43 @@ pub struct Calibration {
     pub initial_count: u32,
     /// The period the `initial_count` field above was derived for.
     pub period_micros: u32,
+    /// Time-stamp-counter ticks observed per second, sampled across
+    /// the same PIT window as `ticks_per_second`.
+    ///
+    /// Consumed by `BinArch::monotonic_ns` (Stage 2.7 follow-up (f3))
+    /// to convert an `rdtsc` reading into nanoseconds-since-boot for
+    /// the `clock_get` syscall. The conversion goes through
+    /// [`Self::tsc_ticks_to_ns`]; callers must use that helper instead
+    /// of open-coding the math so saturation behaviour is consistent.
+    pub tsc_per_second: u64,
+}
+
+impl Calibration {
+    /// Convert a TSC-tick count into nanoseconds, saturating on
+    /// overflow.
+    ///
+    /// Computed as `ticks * 1_000_000_000 / tsc_per_second`. The
+    /// numerator overflows above `u64::MAX / 1_000_000_000 ≈ 1.84e10`
+    /// ticks; we promote through `u128` to avoid a panic and saturate
+    /// at `u64::MAX` on the (theoretical) overflow path. A
+    /// `tsc_per_second` of zero (host-only mock; should never appear
+    /// on bare metal because [`calibrate`] returns
+    /// [`CalibrationError::NoLapicTickDetected`] long before we'd
+    /// observe a zero TSC delta) returns `0` to keep the call site
+    /// from panicking — `AGENTS.md` §2.9 (no `unwrap` in production
+    /// paths).
+    #[must_use]
+    pub fn tsc_ticks_to_ns(self, ticks: u64) -> u64 {
+        if self.tsc_per_second == 0 {
+            return 0;
+        }
+        let numerator = u128::from(ticks).saturating_mul(1_000_000_000);
+        let ns = numerator / u128::from(self.tsc_per_second);
+        // `u64::try_from` saturates via `unwrap_or` so the function
+        // never panics on the overflow path; `AGENTS.md` §2.9
+        // (no `expect`/`unwrap` in production paths).
+        u64::try_from(ns).unwrap_or(u64::MAX)
+    }
 }
 
 /// Pure ticks/sec → initial-count math.
@@ -164,9 +248,10 @@ pub fn compute_pit_reload(period_micros: u32) -> Result<u16, CalibrationError> {
 ///
 /// Returns [`CalibrationError`] if the PIT reload would not fit in
 /// 16 bits or the LAPIC counter showed no progress during the window.
-pub fn calibrate<L: LapicMmio, P: PortIo>(
+pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
     lapic: &mut Lapic<L>,
     pit: &mut P,
+    tsc: &mut T,
     calibration_window_us: u32,
     target_period_us: u32,
 ) -> Result<Calibration, CalibrationError> {
@@ -199,6 +284,7 @@ pub fn calibrate<L: LapicMmio, P: PortIo>(
     lapic
         .mmio_mut()
         .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, u32::MAX);
+    let tsc_start = tsc.read();
 
     // Busy-wait until PIT channel 2 OUT goes high (port 0x61 bit 5
     // mirrors channel 2 OUT). The mock advances this bit
@@ -208,6 +294,7 @@ pub fn calibrate<L: LapicMmio, P: PortIo>(
             break;
         }
     }
+    let tsc_end = tsc.read();
 
     // Stop the LAPIC counter by writing 0 to initial-count (SDM
     // §11.5.4: writing 0 to ICR halts the timer).
@@ -229,10 +316,19 @@ pub fn calibrate<L: LapicMmio, P: PortIo>(
 
     let initial_count = compute_initial_count(ticks_per_second, target_period_us)?;
 
+    // TSC sample across the same PIT window. `tsc_end` is observed
+    // after `tsc_start` was sampled, so a monotonically-non-decreasing
+    // TSC guarantees `tsc_end >= tsc_start`; we use `saturating_sub` to
+    // be defensive against an arch port that ever wires up a
+    // non-monotonic mock without violating the calibration contract.
+    let tsc_observed = tsc_end.saturating_sub(tsc_start);
+    let tsc_per_second = tsc_observed.saturating_mul(1_000_000) / u64::from(calibration_window_us);
+
     Ok(Calibration {
         ticks_per_second,
         initial_count,
         period_micros: target_period_us,
+        tsc_per_second,
     })
 }
 
@@ -321,6 +417,35 @@ mod tests {
             }
         }
     }
+    /// Test [`TscReader`] returning a deterministic ramp.
+    ///
+    /// Each call increments `current` by `step` and returns the new
+    /// value, so two consecutive samples in [`calibrate`] differ by
+    /// exactly `step` ticks. Tests pass a known `step` and assert on
+    /// the resulting `tsc_per_second` (`step * 1_000_000 /
+    /// calibration_window_us`), keeping the calibration deterministic
+    /// (`AGENTS.md` §7 — no flaky tests).
+    pub struct MockTsc {
+        current: u64,
+        step: u64,
+    }
+
+    impl MockTsc {
+        pub fn new(start: u64, step: u64) -> Self {
+            Self {
+                current: start,
+                step,
+            }
+        }
+    }
+
+    impl TscReader for MockTsc {
+        fn read(&mut self) -> u64 {
+            self.current = self.current.wrapping_add(self.step);
+            self.current
+        }
+    }
+
     impl PortIo for MockPortIo {
         fn inb(&mut self, port: u16) -> u8 {
             if port == 0x61 {
@@ -386,7 +511,8 @@ mod tests {
         );
         let mut pit = MockPortIo::new(1);
 
-        let cal = calibrate(&mut lapic, &mut pit, 10_000, 1_000).unwrap();
+        let mut tsc = MockTsc::new(0, 250_000); // 250k ticks between two reads
+        let cal = calibrate(&mut lapic, &mut pit, &mut tsc, 10_000, 1_000).unwrap();
         // PIT outs must include the 0xB0 control word and the 11_931
         // reload (low byte 0x9B, high byte 0x2E).
         let cw = pit.outs.iter().any(|(p, v)| *p == 0x43 && *v == 0xB0);
@@ -398,6 +524,10 @@ mod tests {
         assert_eq!(cal.ticks_per_second, 100_000);
         assert_eq!(cal.initial_count, 100);
         assert_eq!(cal.period_micros, 1_000);
+        // The MockTsc advances `step` ticks per read, so the two reads
+        // inside `calibrate` yield a delta of exactly one `step`. Over
+        // a 10 ms window that is `step * 100` ticks/sec.
+        assert_eq!(cal.tsc_per_second, 250_000 * 100);
     }
 
     #[test]
@@ -411,10 +541,38 @@ mod tests {
             .regs
             .insert(Lapic::<MockLapicMmio>::TIMER_CURRENT_COUNT_OFFSET, u32::MAX);
         let mut pit = MockPortIo::new(1);
+        let mut tsc = MockTsc::new(0, 1);
         assert_eq!(
-            calibrate(&mut lapic, &mut pit, 10_000, 1_000).err(),
+            calibrate(&mut lapic, &mut pit, &mut tsc, 10_000, 1_000).err(),
             Some(CalibrationError::NoLapicTickDetected),
         );
+    }
+
+    #[test]
+    fn tsc_ticks_to_ns_is_saturating_and_handles_zero_rate() {
+        let cal = Calibration {
+            ticks_per_second: 100_000,
+            initial_count: 100,
+            period_micros: 1_000,
+            tsc_per_second: 1_000_000_000, // 1 GHz
+        };
+        // 1 tick at 1 GHz -> 1 ns.
+        assert_eq!(cal.tsc_ticks_to_ns(1), 1);
+        // 1_000 ticks at 1 GHz -> 1_000 ns.
+        assert_eq!(cal.tsc_ticks_to_ns(1_000), 1_000);
+        // 1e9 ticks at 1 GHz -> 1e9 ns (exactly 1 s).
+        assert_eq!(cal.tsc_ticks_to_ns(1_000_000_000), 1_000_000_000);
+        // u64::MAX ticks must not panic and must saturate.
+        let _ = cal.tsc_ticks_to_ns(u64::MAX);
+
+        let zero = Calibration {
+            ticks_per_second: 0,
+            initial_count: 0,
+            period_micros: 0,
+            tsc_per_second: 0,
+        };
+        // A zero rate must not panic; `0` is the documented fallback.
+        assert_eq!(zero.tsc_ticks_to_ns(123_456), 0);
     }
 
     #[test]
@@ -424,6 +582,7 @@ mod tests {
             ticks_per_second: 100_000,
             initial_count: 100,
             period_micros: 1_000,
+            tsc_per_second: 0,
         };
         program_periodic(&mut lapic, cal, 0x40);
         let w = &lapic.mmio_mut().writes;

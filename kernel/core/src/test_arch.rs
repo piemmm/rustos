@@ -44,6 +44,12 @@ pub struct TestArch {
     ticks: AtomicU64,
     halts: AtomicU64,
     ipis: AtomicU64,
+    /// Monotonic-ns counter backing [`KernelArch::monotonic_ns`].
+    ///
+    /// Each call increments the counter and returns the new value, so
+    /// host tests of `clock_get` get a deterministic, strictly
+    /// increasing reading without depending on wall-clock time.
+    monotonic_ns: AtomicU64,
 }
 
 impl TestArch {
@@ -60,6 +66,7 @@ impl TestArch {
             ticks: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
+            monotonic_ns: AtomicU64::new(0),
         }
     }
 
@@ -110,5 +117,14 @@ impl KernelArch for TestArch {
         // so the test harness can observe the halt via
         // `std::panic::catch_unwind` without blocking the runner.
         std::panic!("{HALT_SENTINEL}");
+    }
+
+    fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
+        // `fetch_add` returns the previous value; `+ 1` makes the
+        // first call return `1` and every subsequent call return a
+        // strictly larger value, satisfying the
+        // "monotonically-non-decreasing" contract documented on
+        // [`KernelArch::monotonic_ns`].
+        self.monotonic_ns.fetch_add(1, Ordering::Relaxed) + 1
     }
 }

@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, PortIo};
+use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, PortIo, Rdtsc};
 use rustos_arch_x86_64::multiboot2::BootInfo;
 use rustos_arch_x86_64::smp::{
     self, init_sipi_sipi, ApBootSlot, Delay, TrampolineFrame, AP_BOOT_SLOT_OFFSET,
@@ -125,6 +125,14 @@ fn unpack_calibration() -> Option<Calibration> {
         ticks_per_second: u64::from(tps),
         initial_count: initial,
         period_micros: PREEMPT_PERIOD_US,
+        // APs do not consult `tsc_per_second` — only the BSP-side
+        // syscall `clock_get` path (Stage 2.7 follow-up (f3)) does,
+        // and that runs against the BSP's full calibration. Re-using
+        // the packed transport shape would require widening the
+        // transport from `u64` to `u128`; documented here as a
+        // deliberate carry-over rather than silently widening (
+        // `AGENTS.md` §2.4 — no interface creep).
+        tsc_per_second: 0,
     })
 }
 
@@ -330,9 +338,11 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // unnecessary on QEMU and on homogeneous Intel SMP, plus the
     // fail-loud cross-check (the per-CPU preemption count below).
     let mut pit = PolledPit;
+    let mut tsc = Rdtsc;
     let calibration = match apic_timer::calibrate(
         &mut lapic,
         &mut pit,
+        &mut tsc,
         PREEMPT_CALIBRATION_WINDOW_US,
         PREEMPT_PERIOD_US,
     ) {

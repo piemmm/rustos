@@ -44,6 +44,16 @@ pub enum Errno {
     /// declared `max_payload`, or larger than the global
     /// [`crate::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN`] cap.
     MessageTooLarge = 11,
+    /// The requested operation has no implementation in this kernel build.
+    ///
+    /// Reserved for code paths whose contract is stable on the ABI but
+    /// whose backing subsystem is not yet wired in. Issuing a syscall
+    /// that returns this errno is **not** an ABI violation — it is the
+    /// kernel announcing that a stable interface is intentionally inert
+    /// (e.g. `cap_delegate`'s user-pointer copy-in before user-memory
+    /// plumbing lands). The variant is part of `abi-v1` and its
+    /// discriminant is frozen alongside the others.
+    NotImplemented = 12,
 }
 
 impl Errno {
@@ -68,6 +78,7 @@ impl fmt::Display for Errno {
             Self::SignatureInvalid => "signature invalid",
             Self::AbiVersionUnsupported => "abi version unsupported",
             Self::MessageTooLarge => "message too large",
+            Self::NotImplemented => "operation not implemented",
         };
         f.write_str(message)
     }
@@ -91,6 +102,7 @@ mod tests {
         assert_eq!(Errno::SignatureInvalid.as_i32(), 9);
         assert_eq!(Errno::AbiVersionUnsupported.as_i32(), 10);
         assert_eq!(Errno::MessageTooLarge.as_i32(), 11);
+        assert_eq!(Errno::NotImplemented.as_i32(), 12);
     }
 
     #[test]

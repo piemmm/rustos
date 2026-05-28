@@ -23,6 +23,7 @@
 //! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
+//! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -56,6 +57,18 @@ pub enum AuditEvent {
     BootCompleted,
     /// The kernel panicked; the handler logged context and is halting.
     Panic,
+    /// A syscall handler's backing subsystem is intentionally not yet
+    /// wired in.
+    ///
+    /// Emitted by `KernelSyscallHandlers` (Stage 2.7 follow-up (f3))
+    /// when a stable-ABI syscall reaches a handler whose dependency
+    /// (named IPC port registry; user-memory copy-in) has not landed.
+    /// The audit record carries a `feature` field naming the missing
+    /// piece so external consumers can correlate user-visible
+    /// `Errno::NotFound` / `Errno::NotImplemented` returns with the
+    /// kernel-side deferral. See `AGENTS.md` §15.1 — the spec is
+    /// stable, the impl is announced as inert.
+    SyscallFeatureUnavailable,
 }
 
 impl AuditEvent {
@@ -69,6 +82,7 @@ impl AuditEvent {
             Self::PhaseFailed => 4003,
             Self::BootCompleted => 4004,
             Self::Panic => 4010,
+            Self::SyscallFeatureUnavailable => 4020,
         })
     }
 
@@ -84,6 +98,7 @@ impl AuditEvent {
             Self::PhaseFailed => "kernel init phase failed",
             Self::BootCompleted => "kernel boot completed",
             Self::Panic => "kernel panic",
+            Self::SyscallFeatureUnavailable => "syscall feature unavailable",
         }
     }
 }
@@ -101,6 +116,7 @@ mod tests {
             AuditEvent::PhaseFailed,
             AuditEvent::BootCompleted,
             AuditEvent::Panic,
+            AuditEvent::SyscallFeatureUnavailable,
         ] {
             let id = ev.id().0;
             assert!(
@@ -119,6 +135,7 @@ mod tests {
             AuditEvent::PhaseFailed.id().0,
             AuditEvent::BootCompleted.id().0,
             AuditEvent::Panic.id().0,
+            AuditEvent::SyscallFeatureUnavailable.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

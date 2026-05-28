@@ -47,7 +47,7 @@ use alloc::sync::Arc;
 use rustos_abi::SYSCALL_MAX_ARGS;
 use rustos_arch_x86_64::acpi;
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{self, PolledPit};
+use rustos_arch_x86_64::apic_timer::{self, PolledPit, Rdtsc};
 use rustos_arch_x86_64::bootmemory;
 use rustos_arch_x86_64::gdt::PerCpuGdt;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
@@ -273,11 +273,16 @@ fn try_boot(
     lapic.software_enable(0xFF);
     let bsp_lapic_id = smp::bsp_lapic_id();
 
-    // 3. Calibrate the LAPIC timer against the PIT.
+    // 3. Calibrate the LAPIC timer against the PIT. The same window
+    //    samples RDTSC so the resulting `Calibration::tsc_per_second`
+    //    is the unit input to `BinArch::monotonic_ns` (the production
+    //    `clock_get` syscall path, Stage 2.7 follow-up (f3)).
     let mut pit = PolledPit;
+    let mut tsc = Rdtsc;
     let calibration = apic_timer::calibrate(
         &mut lapic,
         &mut pit,
+        &mut tsc,
         PREEMPT_CALIBRATION_WINDOW_US,
         PREEMPT_PERIOD_US,
     )
@@ -356,7 +361,7 @@ fn try_boot(
     // `arch` field (and re-cloned into `kernel_core`'s `KernelState`),
     // so the published pointer remains valid for the lifetime of the
     // running kernel.
-    let arch_arc: Arc<BinArch> = Arc::new(BinArch::new(arch));
+    let arch_arc: Arc<BinArch> = Arc::new(BinArch::new(arch, calibration));
     // SAFETY: `arch_arc` is moved into `BootInfo` immediately below
     // (which `kernel_main` consumes and stores). `Arc::as_ptr` returns
     // a stable pointer for the lifetime of any clone of the `Arc`.

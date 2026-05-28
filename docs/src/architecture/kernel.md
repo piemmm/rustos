@@ -123,6 +123,7 @@ record under the `log` phase and halts.
 | 4003 | Error | `KERNEL_PHASE_FAILED`   | audit  |
 | 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
+| 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
 
 The **Sink** column names the `BootInfo`-supplied channel each record
 is emitted on. Audit-class boot lifecycle events

@@ -31,6 +31,9 @@ rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
 rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 
 [dev-dependencies]
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the

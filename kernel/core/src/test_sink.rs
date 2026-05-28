@@ -63,6 +63,16 @@ impl TestSink {
     pub fn event_ids(&self) -> Vec<u32> {
         self.events.lock().iter().map(|e| e.id.0).collect()
     }
+
+    /// Drop every captured event.
+    ///
+    /// Used by tests that share one sink across multiple assertions and
+    /// need to ignore the events emitted during set-up (e.g. the
+    /// `TaskCapabilitiesDerived` records the per-task fixture builders
+    /// produce). `AGENTS.md` §7 — keep test assertions narrow.
+    pub fn clear(&self) {
+        self.events.lock().clear();
+    }
 }
 
 impl Sink for TestSink {

@@ -119,6 +119,49 @@ emit `SYSCALL_INVOKED`; refusals always emit, regardless of audit flag.
 Adding an event takes the next free identifier and a new row in this
 table.
 
+## Handler wiring (Stage 2.7 follow-up (f3))
+
+The dispatcher trait `SyscallHandlers` is implemented in `kernel/core`
+by `KernelSyscallHandlers<'a, A>` (see
+`rustos_kernel_core::syscalls`). The struct borrows kernel state and
+forwards every call to the owning subsystem; nothing in this layer
+re-validates arguments — the dispatcher does that first.
+
+| Handler         | Forwards to                                                                                                   | Error map                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
+| `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
+| `ipc_send`      | *deferred* — named-port registry not landed                                                                   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = ipc_named_ports`) + `NotFound`. |
+| `ipc_recv`      | *deferred* — same as `ipc_send`                                                                               | Same.                                                                     |
+| `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
+| `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
+| `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
+| `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`                                                                | —                                                                         |
+
+`KernelArch::monotonic_ns` is a new trait method with **no default
+impl**: every architecture port must opt in so an arch that cannot
+ship a monotonic clock cannot silently leak that flaw into the
+`clock_get` syscall (`AGENTS.md` §5.4.5 — fail closed). The x86_64
+port wires it through `apic_timer::Calibration`'s `tsc_per_second`
+field, sampled across the same PIT calibration window the LAPIC is
+measured over; the conversion goes through
+`Calibration::tsc_ticks_to_ns` (saturating).
+
+The two deferred-feature branches return a stable `Errno` and emit
+exactly one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE`
+(id 4020, see `kernel/core::audit`) — so an external consumer can
+tell apart "handler rejected because the call failed" from "handler
+rejected because the backing subsystem is intentionally inert"
+(`AGENTS.md` §15.1 — announce the deferral, never stub). The
+dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is *also*
+emitted for syscalls whose `SyscallSpec::audit == true`
+(`ipc_send`, `cap_delegate`); `ipc_recv` is unaudited so only the
+`SYSCALL_FEATURE_UNAVAILABLE` record reaches the sink.
+
+The Stage 2.7 follow-up tracker in `PLAN.md` records the
+named-port registry and the user-memory copy-in path as the two
+remaining pieces required to lift these deferrals.
+
 ## Dispatcher contract
 
 `Dispatcher::dispatch` is the *only* entry point. Calling it runs the

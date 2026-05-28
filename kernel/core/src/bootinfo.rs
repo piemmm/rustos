@@ -64,6 +64,28 @@ pub trait KernelArch: SchedulerArch {
     /// circumvent it by using `loop {}` followed by `unreachable!()`
     /// — the compiler-enforced bottom type is the contract.
     fn halt(&self) -> !;
+
+    /// Nanoseconds elapsed since the kernel began running, as observed
+    /// by `cpu`.
+    ///
+    /// The contract is **monotonically non-decreasing per CPU**:
+    /// consecutive calls on the same CPU must never produce a smaller
+    /// value than a prior call on that CPU. Cross-CPU drift is
+    /// permitted up to the platform's hardware skew (e.g. RDTSC sync
+    /// across sockets); callers requiring a strictly global ordering
+    /// must funnel reads through one CPU.
+    ///
+    /// There is **no default impl**: every arch port must opt in so an
+    /// arch shipping a non-monotonic clock cannot silently leak that
+    /// flaw into the `clock_get` syscall (`AGENTS.md` §5.4.5 — fail
+    /// closed). x86_64 wires this through `apic_timer::Calibration`'s
+    /// TSC sample.
+    ///
+    /// `cpu` is the calling CPU's identifier — the same value
+    /// [`SchedulerArch::current_cpu`] returns. Arch ports may use it
+    /// to apply per-CPU TSC offset compensation; the contract does
+    /// not require them to.
+    fn monotonic_ns(&self, cpu: CpuId) -> u64;
 }
 
 /// Architecture-neutral kernel handover record.

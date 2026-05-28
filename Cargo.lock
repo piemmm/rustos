@@ -484,13 +484,16 @@ name = "rustos-kernel-core"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-caps",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
  "rustos-kernel-mem",
  "rustos-kernel-sched",
  "rustos-kernel-sec",
  "rustos-kernel-sync",
+ "rustos-kernel-syscall",
  "rustos-log",
+ "rustos-util",
 ]
 
 [[package]]
