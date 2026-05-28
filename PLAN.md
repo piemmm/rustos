@@ -1103,12 +1103,13 @@ follow-up is its own thread and is now also complete.
 **Dependencies:** Stages 2–5 sufficient for at least one platform.
 
 **Deliverables**
-- `userland/init` (PID 1): service manager, dependency-ordered start,
+- `userland/system/init` (PID 1): service manager, dependency-ordered start,
   reaper, capability granting from manifests.
-- `userland/shell`: POSIX-ish shell with job control and a small builtin set.
-- `userland/login`: text login that authenticates against `kernel/sec` and
-  spawns a shell or a graphical session. Always starts in text mode; offers
-  graphical mode only when a display driver and `userland/wm` are available.
+- `userland/shell/shell`: POSIX-ish shell with job control and a small builtin set.
+- `userland/session/login`: text login that authenticates against `kernel/sec`
+  and spawns a shell or a graphical session. Always starts in text mode;
+  offers graphical mode only when a display driver and `userland/gui/wm`
+  are available.
 - Core CLI utilities (`ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`,
   `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`).
   Each utility is its own small crate under `userland/apps/`.
@@ -1127,10 +1128,10 @@ follow-up is its own thread and is now also complete.
 **Dependencies:** Stage 6 + a display driver from Stage 4.
 
 **Deliverables**
-- `userland/wm`: compositing window manager. Per-window surfaces, damage
+- `userland/gui/wm`: compositing window manager. Per-window surfaces, damage
   tracking, GPU acceleration where a driver exposes it, software fallback
   otherwise.
-- `userland/iconbar`: RISC OS-style iconbar with pinned app slots, mounted
+- `userland/gui/iconbar`: RISC OS-style iconbar with pinned app slots, mounted
   filesystem icons, and a status area.
 - Default theme + cursor set.
 - A handful of default apps under `userland/apps/`: filer, text editor,
@@ -1150,7 +1151,7 @@ follow-up is its own thread and is now also complete.
 **Dependencies:** Stages 5, 6 (and 7 for the graphical installer path).
 
 **Deliverables**
-- `userland/installer` with text and graphical front-ends sharing one core
+- `userland/system/installer` with text and graphical front-ends sharing one core
   library. Functions per `AGENTS.md` §11.
 - `tools/mkimage` producing:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI).

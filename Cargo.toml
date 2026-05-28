@@ -46,13 +46,15 @@ members = [
     "drivers/bus/virtio",
     "drivers/bus/mmio",
 
-    # Userland
-    "userland/init",
-    "userland/login",
-    "userland/shell",
-    "userland/wm",
-    "userland/iconbar",
-    "userland/installer",
+    # Userland — grouped by class (system, session, shell, gui, apps),
+    # mirroring the `drivers/<class>/<name>` layout documented in
+    # AGENTS.md §3.
+    "userland/system/init",
+    "userland/system/installer",
+    "userland/session/login",
+    "userland/shell/shell",
+    "userland/gui/wm",
+    "userland/gui/iconbar",
 
     # Tooling
     "tools/xtask",

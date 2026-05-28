@@ -109,13 +109,17 @@ rustos/
 │   ├── log/             # Structured logging.
 │   └── util/            # Strictly justified utilities.
 │
-├── userland/
-│   ├── init/            # PID 1.
-│   ├── login/           # Text + graphical login (graphical falls back to text).
-│   ├── shell/
-│   ├── wm/              # Compositing window manager (RISC OS-style).
-│   ├── iconbar/
-│   ├── installer/       # Image installer (partitioning, user creation, naming).
+├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
+│   ├── system/          # Long-running system services.
+│   │   ├── init/        # PID 1.
+│   │   └── installer/   # Image installer (partitioning, user creation, naming).
+│   ├── session/         # Authentication and session bring-up.
+│   │   └── login/       # Text + graphical login (graphical falls back to text).
+│   ├── shell/           # Command-line shells.
+│   │   └── shell/       # Default POSIX-ish shell with job control.
+│   ├── gui/             # Graphical desktop components.
+│   │   ├── wm/          # Compositing window manager (RISC OS-style).
+│   │   └── iconbar/     # RISC OS-style iconbar.
 │   └── apps/            # Default apps. Each app is its own crate.
 │
 ├── docs/                # Long-form documentation (mdBook).
@@ -285,9 +289,9 @@ an update to this section.
 
 - RISC OS-style: iconbar at the bottom (or configured edge), filer-style file
   manager, third-mouse-button menus, drag-and-drop save model.
-- Compositing window manager (`userland/wm`). All compositing happens in
+- Compositing window manager (`userland/gui/wm`). All compositing happens in
   user space; the kernel only ships framebuffer access through a capability.
-- Login: `userland/login` always starts in text mode and offers to launch the
+- Login: `userland/session/login` always starts in text mode and offers to launch the
   graphical session. If no graphics driver loads, the graphical option is
   hidden — never crashed, never errored.
 
@@ -295,7 +299,7 @@ an update to this section.
 
 ## 11. Installer
 
-- `userland/installer` runs on first boot of any image.
+- `userland/system/installer` runs on first boot of any image.
 - It must:
   1. Prompt for system name (hostname).
   2. Prompt for the first user (username, password, full name, primary group).

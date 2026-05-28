@@ -9,7 +9,8 @@ stages of [`PLAN.md`][plan] that introduce them.
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ userland/                                                          │
-│   init │ login │ shell │ wm │ iconbar │ installer │ apps/…         │
+│   system/ │ session/ │ shell/ │ gui/ │ apps/                       │
+│     init, installer │ login │ shell │ wm, iconbar │ …              │
 ├────────────────────────────────────────────────────────────────────┤
 │ drivers/                                                           │
 │   display/ │ filesystem/ │ bus/ │ input/ │ network/ │ storage/     │

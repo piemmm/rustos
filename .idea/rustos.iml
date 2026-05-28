@@ -45,6 +45,21 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/login/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/shell/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/wm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/rustos-kernel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/scheduler_stress/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/scheduler_stress/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/scheduler_stress_qemu/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/syscall_dispatch_qemu/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/qemu/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/qemu/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/gui/iconbar/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/gui/wm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/session/login/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/shell/shell/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/system/init/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/system/installer/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
