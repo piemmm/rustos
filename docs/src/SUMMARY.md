@@ -10,6 +10,7 @@
 
 - [System overview](./architecture/overview.md)
 - [Kernel synchronisation primitives](./architecture/sync.md)
+- [Kernel memory subsystem](./architecture/memory.md)
 
 # Shared libraries
 

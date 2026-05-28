@@ -1,6 +1,6 @@
 [package]
 name = "rustos-kernel-mem"
-description = "RustOS placeholder: physical and virtual memory management."
+description = "RustOS kernel memory subsystem: frame allocator, per-process virtual memory, slab allocator with guard pages, zero-on-free sensitive regions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,22 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
+rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+
+# Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
+# per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The
+# `derive` feature is intentionally omitted: we use the `Zeroize` trait
+# directly on byte buffers, no macro magic.
+zeroize = { version = "1.8.1", default-features = false }
+
+# `loom` is pulled in only when the consumer opts in with
+# `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors the convention
+# established in `kernel/sync/Cargo.toml`.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

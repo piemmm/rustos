@@ -167,8 +167,15 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `OnceCell`. Loom-gated concurrency tests in `kernel/sync/tests/loom.rs`,
       proptest fairness test in `kernel/sync/tests/rwlock_fairness.rs`,
       decision tree in `docs/src/architecture/sync.md`.
-- [ ] 2.2 — `kernel/mem` (buddy/bitmap frame allocator, per-process VM,
-      kernel slab with guard pages, zero-on-free, `Result`-returning OOM).
+- [x] 2.2 — `kernel/mem`: buddy/bitmap `FrameAllocator` honouring a typed
+      `BootMemoryMap`, per-process `AddressSpace<P: PageTableOps>` with a
+      `HostPageTable` test double behind `#[cfg(test)]`, kernel `Slab`
+      with guard pages on both sides, `alloc_sensitive` / `free_sensitive`
+      zero-on-free backed by `zeroize`, and `Result<_, AllocError>` on every
+      allocation path (no panic on OOM). Property tests in
+      `kernel/mem/tests/proptest_frame.rs`, loom-gated concurrency tests in
+      `kernel/mem/tests/loom.rs`, architecture documentation in
+      `docs/src/architecture/memory.md`.
 - [ ] 2.3 — `kernel/sched` (SMP scheduler).
 - [ ] 2.4 — `kernel/ipc` (capability-checked ports, shared memory,
       async notifications).

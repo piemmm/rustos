@@ -470,6 +470,12 @@ version = "0.0.0"
 [[package]]
 name = "rustos-kernel-mem"
 version = "0.0.0"
+dependencies = [
+ "loom",
+ "proptest",
+ "rustos-kernel-sync",
+ "zeroize",
+]
 
 [[package]]
 name = "rustos-kernel-sched"
