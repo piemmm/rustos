@@ -120,7 +120,7 @@ allocation. Its `Debug` impl deliberately redacts the contents.
 User-space drivers (`drivers/storage/virtio_blk`, `drivers/network/virtio_net`,
 future NVMe / GPU bus-master devices) need page-aligned, contiguous-by-physical
 buffers that a device can address directly. The
-[`DmaPool<P>`](../../rustos_kernel_mem/struct.DmaPool.html) ships that facility,
+[`DmaPool<P>`][DmaPool] ships that facility,
 composing the layers above:
 
 - **Physical contiguity** — frames are taken from the buddy allocator at a
@@ -154,7 +154,7 @@ composing the layers above:
 The pool itself is **capability-agnostic**: it does not consult the calling
 task's capability set. The capability gate is the companion module
 `kernel/sec::dma`, whose `alloc_dma` / `free_dma` entry points verify
-[`CapabilityId::MEM_DMA`](../../rustos_abi/struct.CapabilityId.html#associatedconstant.MEM_DMA)
+[`CapabilityId::MEM_DMA`][CapabilityId::MEM_DMA]
 before dispatching to the pool, and emit
 [`AuditEvent::DmaAllocated`] / [`AuditEvent::DmaAllocDenied`] records on
 every decision (IDs 1030 / 1031, see [Security audit catalogue](./security.md)).
@@ -170,6 +170,8 @@ A future syscall wrapper maps gate failures to `Errno` via
 
 [`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
 [`AuditEvent::DmaAllocDenied`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
+[DmaPool]: ../../rustos_kernel_mem/dma/struct.DmaPool.html
+[CapabilityId::MEM_DMA]: ../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MEM_DMA
 
 ### 5.1 Slab hand-off to user-space drivers
 

@@ -144,8 +144,8 @@ re-validates arguments — the dispatcher does that first.
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`                                                                | —                                                                         |
-| `irq_bind`      | *deferred* — kernel IRQ table + per-handle wait queue not landed                                              | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = irq_subsystem`) + `NotImplemented`. |
-| `irq_wait`      | *deferred* — same as `irq_bind`                                                                               | Same.                                                                     |
+| `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
+| `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot
@@ -166,6 +166,13 @@ dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is *also*
 emitted for syscalls whose `SyscallSpec::audit == true`
 (`ipc_send`, `cap_delegate`); `ipc_recv` is unaudited so only the
 `SYSCALL_FEATURE_UNAVAILABLE` record reaches the sink.
+
+`exit` additionally calls `IrqTable::release_for(caller.task_id)`
+**before** the capability-record / scheduler eviction so no audited
+capability bit survives past the IRQ subsystem's binding release
+(`docs/src/security/irq.md` — the kernel unmasks no lines on exit;
+a freshly created task that wants the same line must re-issue
+`irq_bind`).
 
 The Stage 2.7 follow-up tracker in `PLAN.md` records the
 named-port registry and the user-memory copy-in path as the two

@@ -12,7 +12,7 @@
 //! Per `AGENTS.md` §8 the only public *function* is [`register`].
 //! [`VirtioBlk`] is a public *type* re-exported so the driver host
 //! can instantiate it; the host never reaches into the type beyond
-//! the [`Block`](rustos_abi::driver::block::Block) trait.
+//! the [`Block`] trait.
 //!
 //! # Capabilities
 //!

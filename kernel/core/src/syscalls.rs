@@ -48,7 +48,8 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use rustos_abi::{CapabilityId, Errno, IrqHandle};
-use rustos_kernel_sched::{Scheduler, SchedulerArch};
+use rustos_kernel_irq::{IrqController, IrqTable, WaitStep};
+use rustos_kernel_sched::{SchedError, Scheduler, SchedulerArch};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_sync::RwLock;
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
@@ -74,6 +75,13 @@ where
     caps: &'a RwLock<CapTable>,
     arch: &'a A,
     audit: &'a (dyn Sink + Sync),
+    irq: &'a IrqTable,
+    /// Controller-mask seam consumed by [`IrqTable::fire`] from the
+    /// architecture port's trap path. Held here so the per-trap
+    /// firing code can reach it from inside the dispatch hook; the
+    /// `irq_bind` / `irq_wait` syscall handlers themselves do not
+    /// dereference it (mask happens on `fire`, not on `wait`).
+    irq_controller: &'a (dyn IrqController + Sync),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -97,13 +105,37 @@ where
         caps: &'a RwLock<CapTable>,
         arch: &'a A,
         audit: &'a (dyn Sink + Sync),
+        irq: &'a IrqTable,
+        irq_controller: &'a (dyn IrqController + Sync),
     ) -> Self {
         Self {
             sched,
             caps,
             arch,
             audit,
+            irq,
+            irq_controller,
         }
+    }
+
+    /// Borrow the [`IrqTable`] this handler set wires `irq_bind` /
+    /// `irq_wait` against.
+    ///
+    /// The kernel-binary trap path obtains the table this way so it
+    /// can call [`IrqTable::fire`] from a trap dispatcher without
+    /// having to re-borrow `KernelState`. The `irq_controller`
+    /// argument [`IrqTable::fire`] requires is exposed through
+    /// [`Self::irq_controller`].
+    #[must_use]
+    pub fn irq_table(&self) -> &IrqTable {
+        self.irq
+    }
+
+    /// Borrow the [`IrqController`] this handler set wires
+    /// [`IrqTable::fire`] against.
+    #[must_use]
+    pub fn irq_controller(&self) -> &(dyn IrqController + Sync) {
+        self.irq_controller
     }
 
     /// Emit one [`AuditEvent::SyscallFeatureUnavailable`] record.
@@ -170,17 +202,28 @@ where
         // would be interface creep without a consumer
         // (`AGENTS.md` §2.4).
         //
-        // Order matters: drop the capability record *before* the
-        // scheduler removes the task so a concurrent `cap_query`
-        // racing this `exit` can never observe a task that the
-        // scheduler still believes exists but whose caps have
-        // vanished. The CapTable write lock is held only for the
-        // duration of the `remove` call.
+        // Order matters:
+        //
+        //   1. Release every IRQ binding the exiting task held
+        //      (`docs/src/security/irq.md` — the kernel unmasks no
+        //      lines on exit; a freshly created task that wants the
+        //      same line must re-issue `irq_bind`).
+        //   2. Drop the capability record so a concurrent
+        //      `cap_query` racing this `exit` cannot observe a task
+        //      that the scheduler still believes exists but whose
+        //      caps have vanished.
+        //   3. Mark the task exited in the scheduler.
+        //
+        // Each step is idempotent; the call ordering matters for
+        // the *security* observer (no caller can hold an audited
+        // capability bit after the IRQ subsystem has released the
+        // task's bindings).
         let task = caller.task_id;
+        let _ = self.irq.release_for(task);
         let _ = self.caps.write().remove(task);
         match self.sched.exit(task.0) {
             Ok(()) => Ok(0),
-            Err(rustos_kernel_sched::SchedError::NoSuchTask) => Err(Errno::NotFound),
+            Err(SchedError::NoSuchTask) => Err(Errno::NotFound),
             Err(_) => Err(Errno::OutOfRange),
         }
     }
@@ -268,35 +311,71 @@ where
         Ok(self.arch.monotonic_ns(cpu))
     }
 
-    fn irq_bind(&self, caller: &CallerContext<'_>, _line: u32) -> SyscallResult {
-        // The `abi-v1` syscall + capability surface is frozen
-        // (`docs/src/security/irq.md`); the kernel-side IRQ table,
-        // per-handle wait queue, and controller-level mask/unmask
-        // sequence land in the follow-up session that ships the
-        // `KernelVirtioHost::notify_wait` rewrite. Until then the
-        // handler announces the deferral the same way `cap_delegate`
-        // already does for `user_memory_copyin` — one
-        // `SYSCALL_FEATURE_UNAVAILABLE` audit record and
-        // `Errno::NotImplemented` (`AGENTS.md` §5.4.5 — fail closed).
-        self.audit_feature_unavailable(caller, "irq_subsystem");
-        Err(Errno::NotImplemented)
+    fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult {
+        // Capability gate has already been enforced by the
+        // dispatcher (the syscall spec carries the `CAP_IRQ_BIND`
+        // requirement and the dispatcher's per-call check rejects
+        // any caller without it before reaching this handler —
+        // `kernel/syscall::Dispatcher::dispatch`). We re-bind the
+        // table key against `caller.task_id` (kernel-trusted, not
+        // caller-supplied) so the resulting [`IrqHandle`] is
+        // unforgeable in the strong sense: it can only be waited on
+        // by the task that bound it.
+        match self.irq.bind(line, caller.task_id) {
+            Ok(out) => Ok(out.handle.as_u64()),
+            Err(e) => Err(e.to_errno()),
+        }
     }
 
     fn irq_wait(
         &self,
         caller: &CallerContext<'_>,
-        _handle: IrqHandle,
-        _timeout_ns: u64,
+        handle: IrqHandle,
+        timeout_ns: u64,
     ) -> SyscallResult {
-        // Symmetric with `irq_bind`: no handle can have been minted
-        // (the bind path is itself deferred), so any handle the
-        // caller presents would necessarily be unknown to the
-        // kernel. The handler must still emit the deferral record
-        // rather than `NotFound` because the *subsystem* is missing,
-        // not the *handle* — surface that distinction so the audit
-        // log can be used to drive the follow-up.
-        self.audit_feature_unavailable(caller, "irq_subsystem");
-        Err(Errno::NotImplemented)
+        // Compute the deadline once, against the CPU the handler is
+        // currently executing on. `monotonic_ns` is documented as
+        // non-decreasing per CPU; we never read it on a sibling CPU
+        // so the comparison in `try_wait_step` is sound
+        // (`docs/src/security/irq.md` — "interpreted relative to
+        // the kernel monotonic clock"). `saturating_add` is the
+        // fail-closed bound: a caller passing `u64::MAX` does not
+        // wrap the deadline back to a tiny number
+        // (`AGENTS.md` §5.4.5).
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let start_ns = self.arch.monotonic_ns(cpu);
+        let deadline_ns = start_ns.saturating_add(timeout_ns);
+        loop {
+            let now_ns = self.arch.monotonic_ns(cpu);
+            match self
+                .irq
+                .try_wait_step(handle, caller.task_id, now_ns, deadline_ns)
+            {
+                WaitStep::Ready => return Ok(0),
+                WaitStep::TimedOut => return Err(Errno::TimedOut),
+                WaitStep::NotFound => return Err(Errno::NotFound),
+                WaitStep::Continue => {
+                    // Yield the rest of the quantum back to the
+                    // scheduler. A successful yield re-enters the
+                    // run queue; `InvalidState` happens in tests
+                    // where the calling task is not marked Running
+                    // (e.g. the host-side handler tests that do
+                    // not drive a real dispatch loop) — the loop
+                    // still terminates because `monotonic_ns` is
+                    // strictly monotonic on every supported arch
+                    // port. `NoSuchTask` cannot happen here
+                    // (`CallerContext` is built from the live
+                    // scheduler current-task slot) but is mapped
+                    // to `Errno::NotFound` for symmetry with
+                    // `yield_now` (`AGENTS.md` §5.4.5).
+                    match self.sched.yield_current(caller.task_id.0) {
+                        Ok(()) | Err(SchedError::InvalidState) => {}
+                        Err(SchedError::NoSuchTask) => return Err(Errno::NotFound),
+                        Err(_) => return Err(Errno::OutOfRange),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -361,14 +440,28 @@ where
         caps: &'a RwLock<CapTable>,
         arch: &'a A,
         audit: &'a (dyn Sink + Sync),
+        irq: &'a IrqTable,
+        irq_controller: &'a (dyn IrqController + Sync),
     ) -> Self {
         Self {
-            handlers: KernelSyscallHandlers::new(sched, caps, arch, audit),
+            handlers: KernelSyscallHandlers::new(sched, caps, arch, audit, irq, irq_controller),
             sched,
             caps,
             arch,
             audit,
         }
+    }
+
+    /// Borrow the [`KernelSyscallHandlers`] this hook owns.
+    ///
+    /// Used by the arch-port trap path to reach the [`IrqTable`] +
+    /// [`IrqController`] pair through
+    /// [`KernelSyscallHandlers::irq_table`] /
+    /// [`KernelSyscallHandlers::irq_controller`] without re-borrowing
+    /// `KernelState`.
+    #[must_use]
+    pub fn handlers(&self) -> &KernelSyscallHandlers<'a, A> {
+        &self.handlers
     }
 
     /// Emit one [`AuditEvent::SyscallNoCallerContext`] record.
@@ -450,6 +543,7 @@ mod tests {
     use alloc::sync::Arc;
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
+    use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched::SchedulerConfig;
     use rustos_kernel_sec::{TaskCapabilities, UserId};
     use rustos_log::{set_max_level, Level};
@@ -497,13 +591,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(0xDEAD, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(0xDEAD),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         assert_eq!(h.yield_now(&ctx), Err(Errno::NotFound));
     }
 
@@ -515,6 +611,8 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
 
         // Register a record so we can confirm `exit` evicts it even
         // though the scheduler half fails.
@@ -528,7 +626,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         let r = h.exit(&ctx, 0);
         // Scheduler half returns `NoSuchTask` → `NotFound`.
         assert_eq!(r, Err(Errno::NotFound));
@@ -544,13 +642,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(1, &[CapabilityId::FS_MOUNT], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(1),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         assert_eq!(h.cap_query(&ctx, CapabilityId::FS_MOUNT), Ok(1));
         assert_eq!(h.cap_query(&ctx, CapabilityId::DRV_KERNEL), Ok(0));
     }
@@ -563,13 +663,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotFound));
         // Exactly one SyscallFeatureUnavailable record.
@@ -588,13 +690,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(3, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         sink.clear();
         assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotFound));
         assert_eq!(
@@ -611,13 +715,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(4, &[CapabilityId::FS_MOUNT], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(4),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         sink.clear();
         assert_eq!(h.cap_delegate(&ctx, 5, 0x3000), Err(Errno::NotImplemented));
         assert_eq!(
@@ -635,6 +741,8 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
 
         // Register target task 10 with FS_MOUNT.
         let record = make_caps_record(10, &[CapabilityId::FS_MOUNT], sink);
@@ -646,7 +754,7 @@ mod tests {
             caps: &caller_caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
 
         // Hit: revoke FS_MOUNT from task 10.
         assert_eq!(h.cap_revoke(&ctx, 10, CapabilityId::FS_MOUNT), Ok(0));
@@ -664,57 +772,215 @@ mod tests {
         );
     }
 
-    /// `irq_bind` defers to the (not yet wired) IRQ subsystem. The
-    /// handler must emit one `SYSCALL_FEATURE_UNAVAILABLE` audit
-    /// record carrying `feature = "irq_subsystem"` and return
-    /// `Errno::NotImplemented` — symmetric with `cap_delegate`'s
-    /// `user_memory_copyin` deferral.
+    /// `irq_bind` succeeds for an in-range line, mints a non-zero
+    /// handle, and records the binding against the caller's task id.
+    /// The dispatcher's `SyscallInvoked` audit record is emitted by
+    /// the outer dispatcher and is therefore not asserted here
+    /// (`kernel/syscall::Dispatcher` covers it); this test asserts
+    /// the handler's *behaviour* — a fresh handle returned, the
+    /// table populated, no `SyscallFeatureUnavailable` emission.
     #[test]
-    fn irq_bind_returns_not_implemented_and_audits_feature_unavailable() {
+    fn irq_bind_mints_handle_and_records_owner_against_caller() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(7),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         sink.clear();
-        assert_eq!(h.irq_bind(&ctx, 42), Err(Errno::NotImplemented));
-        assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+        let raw = h.irq_bind(&ctx, 5).expect("bind succeeds");
+        assert_ne!(raw, 0, "fresh handle must not be IrqHandle::INVALID");
+        let entry = irq
+            .lookup(IrqHandle::from_raw(raw))
+            .expect("binding present");
+        assert_eq!(entry.line, 5);
+        assert_eq!(entry.owner, SecTaskId(7));
+        // No `SyscallFeatureUnavailable` audit emission — the
+        // subsystem is now wired (`docs/src/security/irq.md`
+        // failure-mode table: a successful bind is audited by the
+        // dispatcher's `SyscallInvoked`, not by the handler).
+        assert!(
+            !sink
+                .event_ids()
+                .contains(&AuditEvent::SyscallFeatureUnavailable.id().0),
+            "deferred-feature audit must no longer fire"
         );
     }
 
-    /// `irq_wait` mirrors `irq_bind`'s deferral.
+    /// `irq_bind` rejects a line outside the configured `max_line`
+    /// with `Errno::OutOfRange`. The dispatcher emits
+    /// `SyscallHandlerRejected` for the failure; this test focuses
+    /// on the handler's errno mapping.
     #[test]
-    fn irq_wait_returns_not_implemented_and_audits_feature_unavailable() {
+    fn irq_bind_returns_out_of_range_for_line_above_max() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        assert_eq!(h.irq_bind(&ctx, 100), Err(Errno::OutOfRange));
+    }
+
+    /// `irq_bind` rejects a duplicate binding for the same line
+    /// with `Errno::OutOfRange` (the closest stable variant for
+    /// "operation inapplicable to current state").
+    #[test]
+    fn irq_bind_rejects_duplicate_line() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let _ = h.irq_bind(&ctx, 5).expect("first bind ok");
+        assert_eq!(h.irq_bind(&ctx, 5), Err(Errno::OutOfRange));
+    }
+
+    /// `irq_wait` against a forged handle (one not minted for the
+    /// calling task) returns `Errno::NotFound`. The dispatcher
+    /// emits the `SyscallHandlerRejected` audit record.
+    #[test]
+    fn irq_wait_returns_not_found_on_forged_handle() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(8),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
-        sink.clear();
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         assert_eq!(
-            h.irq_wait(&ctx, IrqHandle::from_raw(0xDEAD_BEEF), 1_000_000),
-            Err(Errno::NotImplemented)
+            h.irq_wait(&ctx, IrqHandle::from_raw(0xDEAD_BEEF), 0),
+            Err(Errno::NotFound)
         );
+    }
+
+    /// `irq_wait` with a zero-duration timeout returns
+    /// `Errno::TimedOut` when the bound line has not fired.
+    #[test]
+    fn irq_wait_returns_timed_out_when_no_fire_within_zero_timeout() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let raw = h.irq_bind(&ctx, 5).expect("bind");
         assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+            h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0),
+            Err(Errno::TimedOut)
         );
+    }
+
+    /// Permissive [`rustos_kernel_irq::IrqController`] for the
+    /// pre-fired-ready test below. Accepts every line; the
+    /// in-crate `UnsupportedController` would reject the test's
+    /// `IrqTable::fire` call before the table could set the ready
+    /// flag (`UnsupportedController::mask` always returns
+    /// `MaskError::Unsupported`).
+    struct PermissiveController;
+    impl rustos_kernel_irq::IrqController for PermissiveController {
+        fn mask(&self, _line: u32) -> Result<(), rustos_kernel_irq::MaskError> {
+            Ok(())
+        }
+    }
+
+    /// `irq_wait` returns `Ok(0)` when the binding has been fired
+    /// before the call (the ready flag is set and the handler
+    /// consumes it on the first iteration).
+    #[test]
+    fn irq_wait_returns_ok_when_binding_pre_fired() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController; // syscall handler does not invoke `fire`
+        let permissive = PermissiveController;
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let raw = h.irq_bind(&ctx, 5).expect("bind");
+        // Fire externally against the permissive controller (the
+        // arch-port's trap path uses the controller borrowed by
+        // `KernelSyscallHandlers`; this test exercises the
+        // wait-side handler in isolation).
+        irq.fire(5, &permissive).expect("fire");
+        // Even with `timeout_ns = 0`, the pre-existing ready flag
+        // is consumed on the first iteration (per the
+        // ordering contract: ready beats timeout in a tie).
+        assert_eq!(h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0), Ok(0));
+    }
+
+    /// `exit` releases every IRQ binding the exiting task held.
+    #[test]
+    fn exit_releases_every_irq_binding_owned_by_task() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let _ = h.irq_bind(&ctx, 5).expect("bind 5");
+        let _ = h.irq_bind(&ctx, 6).expect("bind 6");
+        assert_eq!(irq.len(), 2);
+        // `exit` against an unknown scheduler task returns
+        // `Errno::NotFound`, but the IRQ release still happens
+        // (the ordering documented in the handler's source).
+        let _ = h.exit(&ctx, 0);
+        assert!(irq.is_empty(), "exit must drop every binding the task held");
     }
 
     /// `clock_get` reads `KernelArch::monotonic_ns` and returns
@@ -727,13 +993,15 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(6),
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
         let a = h.clock_get(&ctx).expect("first read");
         let b = h.clock_get(&ctx).expect("second read");
         assert!(b > a, "expected b > a, got a={a} b={b}");

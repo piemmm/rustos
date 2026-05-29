@@ -7,6 +7,7 @@ members = [
     "kernel/sched",
     "kernel/sync",
     "kernel/ipc",
+    "kernel/irq",
     "kernel/sec",
     "kernel/syscall",
 

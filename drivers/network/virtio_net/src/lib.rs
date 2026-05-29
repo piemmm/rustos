@@ -24,7 +24,7 @@
 //! Per `AGENTS.md` §8 the only public *function* is [`register`].
 //! [`VirtioNet`] is a public *type* re-exported so the driver host
 //! can instantiate it; the host never reaches the type beyond the
-//! [`Net`](rustos_abi::driver::net::Net) trait.
+//! [`Net`] trait.
 //!
 //! # Capabilities
 //!

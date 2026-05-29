@@ -26,6 +26,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+use rustos_kernel_irq::{IrqTable, UnsupportedController};
 use rustos_kernel_mem::{AllocError, FrameAllocator};
 use rustos_kernel_sched::{SchedError, Scheduler};
 use rustos_kernel_sec::{CapTable, IdentityTable};
@@ -339,6 +340,19 @@ fn run_phases<A: KernelArch>(
     // mutable static; this allocation is immutable after creation
     // because every interior field carries its own synchronisation
     // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
+    // The default kernel/core build ships an [`UnsupportedController`]
+    // so calling [`IrqTable::fire`] before the arch port installs a
+    // real controller fails-closed with `Errno::NotImplemented`. The
+    // kernel binary replaces the controller (and may extend
+    // `max_line`) during its post-`run_phases` wiring phase as part of
+    // the next-session trap-glue work (see
+    // `.junie/next-session-prompt.md`).
+    //
+    // `IrqTable::new(0)` is the conservative default: with `max_line
+    // = 0` only line 0 is accepted by `bind` (and the kernel binary
+    // can widen this once the arch port reports the controller's
+    // `max_redirection_entry`). The kernel binary's startup audit
+    // log records the chosen value.
     let state: &'static KernelState<A> = Box::leak(Box::new(KernelState {
         frame_allocator,
         identity_table,
@@ -346,6 +360,8 @@ fn run_phases<A: KernelArch>(
         caps: RwLock::new(CapTable::new()),
         arch,
         audit_sink,
+        irq: IrqTable::new(0),
+        irq_controller: UnsupportedController,
     }));
 
     // Phase 5 — Syscall. Publish the production `DispatchHook` into
@@ -359,6 +375,8 @@ fn run_phases<A: KernelArch>(
             &state.caps,
             state.arch.as_ref(),
             audit_sink,
+            &state.irq,
+            &state.irq_controller,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
@@ -405,6 +423,20 @@ pub(crate) struct KernelState<A: KernelArch> {
     #[allow(dead_code)]
     // Borrowed by the leaked `KernelDispatchHook`; tests assert through observers.
     pub(crate) audit_sink: &'static (dyn Sink + Sync),
+    /// Kernel IRQ table backing the `irq_bind` / `irq_wait`
+    /// syscalls. The `irq_bind` handler binds against the calling
+    /// task's [`rustos_kernel_sec::TaskId`]; the `irq_wait` handler
+    /// runs a yield-cycle on [`IrqTable::try_wait_step`]; the
+    /// `exit` handler calls [`IrqTable::release_for`] to evict
+    /// every binding the exiting task held.
+    pub(crate) irq: IrqTable,
+    /// Controller-mask seam consumed by [`IrqTable::fire`] from the
+    /// arch port's trap path. The kernel/core default is
+    /// [`UnsupportedController`]; the kernel binary swaps in a
+    /// real implementation (IO-APIC on x86_64) during its
+    /// post-`run_phases` wiring phase
+    /// (see `.junie/next-session-prompt.md`).
+    pub(crate) irq_controller: UnsupportedController,
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {

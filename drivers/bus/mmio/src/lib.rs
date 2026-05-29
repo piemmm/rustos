@@ -12,9 +12,9 @@
 //! Per the issue spec for Stage 4 the driver only enumerates; it
 //! never enables a slot. Reading the small per-slot register window
 //! (`MagicValue` / `Version` / `DeviceID` / `VendorID`) goes through
-//! a [`transport::MmioRead`] trait so the unit tests substitute a
+//! a `transport::MmioRead` trait so the unit tests substitute a
 //! deterministic in-memory fake while the production wiring uses
-//! the volatile reader defined in [`transport::VolatileMmioRead`].
+//! the volatile reader defined in `transport::VolatileMmioRead`.
 //!
 //! # Capabilities
 //!
@@ -27,7 +27,7 @@
 //! # Safety
 //!
 //! The volatile reader is the only `unsafe` site in the crate; it
-//! sits behind the [`transport::MmioRead`] trait so callers above
+//! sits behind the `transport::MmioRead` trait so callers above
 //! receive a safe API. Every `unsafe` block carries a `// SAFETY:`
 //! justification and is exercised by the
 //! `transport::tests::volatile_reader_round_trips_against_fake`

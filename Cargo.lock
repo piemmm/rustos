@@ -529,6 +529,7 @@ dependencies = [
  "rustos-caps",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
+ "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sched",
  "rustos-kernel-sec",
@@ -546,6 +547,17 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-kernel-sync",
+ "rustos-log",
+ "rustos-util",
+]
+
+[[package]]
+name = "rustos-kernel-irq"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
  "rustos-kernel-sec",
  "rustos-kernel-sync",
  "rustos-log",
@@ -675,6 +687,7 @@ dependencies = [
  "rustos-caps",
  "rustos-kernel",
  "rustos-kernel-core",
+ "rustos-kernel-irq",
  "rustos-kernel-sched",
  "rustos-kernel-sec",
  "rustos-kernel-sync",

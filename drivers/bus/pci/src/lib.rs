@@ -12,7 +12,7 @@
 //! `pub fn register(host) -> Result<DriverHandle, DriverError>`.
 //! Everything below is intentionally `pub(crate)` and tested through
 //! the in-crate `#[cfg(test)]` module against a mock
-//! [`ConfigSpace`] fixture that mirrors QEMU's `q35` default PCI
+//! `ConfigSpace` fixture that mirrors QEMU's `q35` default PCI
 //! topology (LPC bridge, `SMBus` controller, plus the virtio-net
 //! function the driver-host integration test will attach later).
 //!
@@ -20,17 +20,17 @@
 //! capabilities are *discovered* but never enabled here — actual
 //! interrupt routing is the responsibility of the `virtio_blk` /
 //! `virtio_net` drivers in Stage 4.D. The BAR walker likewise
-//! produces [`BarDescriptor`] records but never invokes the kernel
+//! produces `BarDescriptor` records but never invokes the kernel
 //! memory capability: callers route the mapping request through the
 //! driver host once 4.D wires up the host-side memory facility.
 //!
 //! # Safety
 //!
-//! The real-hardware [`ConfigSpace`] implementation
-//! ([`mech_one::PortIoConfigSpace`]) issues `in`/`out` instructions
+//! The real-hardware `ConfigSpace` implementation
+//! (`mech_one::PortIoConfigSpace`) issues `in`/`out` instructions
 //! against I/O ports `0xCF8`/`0xCFC`. Every `unsafe` block carries a
 //! `// SAFETY:` justification and is covered by a unit test against a
-//! mock [`mech_one::PortIo`] implementation.
+//! mock `mech_one::PortIo` implementation.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

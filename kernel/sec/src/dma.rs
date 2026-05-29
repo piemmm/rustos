@@ -20,7 +20,7 @@
 //!    `TaskId` — every grant must leave a trail an operator can
 //!    reconcile against device traffic (`AGENTS.md` §5.4.4).
 //!
-//! No `unsafe`, no `unwrap`, no `panic!`: see [`AGENTS.md`] §2.9 / §2.10.
+//! No `unsafe`, no `unwrap`, no `panic!`: see `AGENTS.md` §2.9 / §2.10.
 
 use rustos_abi::{CapabilityId, Errno};
 use rustos_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTableOps};

@@ -14,7 +14,7 @@
 //! [`MockTransport`] is the in-process software peer that the unit
 //! tests in this crate (and in `virtio_blk` / `virtio_net`) use to
 //! exercise the queue protocol without real hardware. It owns a
-//! [`crate::queue::ring_view::RingView`] over the same descriptor
+//! `crate::queue::ring_view::RingView` over the same descriptor
 //! / avail / used memory the driver published, drains chains as the
 //! "device" would, and stores per-queue per-device behaviour
 //! through a [`DeviceShim`] callback the driver installs.

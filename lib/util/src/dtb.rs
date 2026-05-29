@@ -14,7 +14,7 @@
 //! produce undefined behaviour or unbounded work — the parser refuses
 //! the blob up front in [`Dtb::parse`] by validating the header and
 //! cross-checking every span against `total_size`. The two structural
-//! cursors ([`StructCursor`] and the property reader) only walk
+//! cursors (`StructCursor` and the property reader) only walk
 //! pre-validated byte ranges thereafter.
 //!
 //! Only the subset of the Devicetree Specification v0.4 actually

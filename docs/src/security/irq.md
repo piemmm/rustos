@@ -129,3 +129,118 @@ follow-up session's kernel-side test plan exercises it directly.
   binding the exiting task held; the kernel unmasks no lines on
   task exit (a freshly created task that wants the same line must
   re-issue `irq_bind`).
+
+## Kernel-side implementation (Stage 4.D Item 2-tail)
+
+The kernel-side substrate that backs the contract above lives in
+the `kernel/irq` crate (`rustos-kernel-irq`). The crate is `no_std`,
+holds no global mutable state, and exposes one type, `IrqTable`,
+together with an `IrqController` seam the architecture port
+implements:
+
+```text
+                  bind(line, caller)                ┌────────────┐
+   syscall ─────────────────────────────────────────►            │
+   irq_bind                                         │  IrqTable  │
+                  try_wait_step(handle, …) ─────────►            │
+   syscall                                          │  (RwLock-  │
+   irq_wait                                         │   guarded  │
+                                                    │   binding  │
+   trap from arch         fire(line, &controller) ──►   table)   │
+   port's IDT vector ───────────────────────────────►            │
+                                                    └────────────┘
+                                                          │
+                                            controller.mask(line)
+                                                          ▼
+                                              architecture port
+                                              (x86_64 IO-APIC,
+                                               aarch64 GIC, …)
+```
+
+### Invariants
+
+1. **Mask-before-wake.** `IrqTable::fire(line, controller)` calls
+   `controller.mask(line)` *before* it sets the per-entry `ready`
+   flag. The Rust source orders the two operations in that
+   sequence; the unit test
+   `kernel/irq::table::tests::mask_is_observed_before_wake`
+   installs a probe controller whose `mask` impl reads the table's
+   own `ready` flag through a borrow and asserts it is still
+   `false` while `mask` is in flight. A regression that reorders
+   the writes fails the test deterministically.
+2. **Forgery defence in the table.** `IrqTable::try_wait_step`
+   re-verifies the `(handle, caller)` mapping before any state
+   transition. The syscall handler does not need to re-check,
+   and the dispatcher does not see forged handles — the
+   distinction surfaces only through the standard
+   `SYSCALL_HANDLER_REJECTED` audit record carrying the syscall
+   name.
+3. **Lock ordering.** The table's interior `RwLock<Inner>` mirrors
+   the `CapTable` lock-ordering policy: the syscall handler
+   acquires the IRQ-table write lock for the duration of one
+   `bind` / `try_wait_step` / `release_for` call and never holds
+   the capability-table lock at the same time. The dispatcher
+   releases the cap-table read lock before invoking the handler
+   body, so a concurrent `cap_revoke` cannot deadlock against an
+   in-flight `irq_wait`.
+4. **Idempotent release.** `IrqTable::release_for(task)` returns
+   the number of bindings it dropped; a second call against the
+   same task returns zero. The `exit` syscall handler invokes
+   `release_for` unconditionally before evicting the capability
+   record, so a task that holds no IRQ bindings still terminates
+   cleanly.
+
+### Wait semantics
+
+The handler implements `irq_wait` as a polling loop on top of
+`IrqTable::try_wait_step`, composing two existing primitives:
+
+* `KernelArch::monotonic_ns(arch.current_cpu())` — non-decreasing
+  per-CPU clock; `irq_wait` reads it once at entry to compute the
+  deadline (`start + saturating(timeout)`) and again on every
+  iteration to detect timeout.
+* `Scheduler::yield_current(caller.task_id)` — invoked between
+  iterations to surrender the rest of the quantum. The handler
+  tolerates `SchedError::InvalidState` (in host-side tests the
+  calling task is not marked Running) and re-loops; the loop
+  always terminates because the per-CPU monotonic clock is
+  strictly monotonic.
+
+This design composes existing scheduler primitives only; no new
+scheduler interface is introduced (`AGENTS.md` §2.4 — no interface
+creep). A power-efficient variant that parks the caller and
+relies on a controller-tick to wake on timeout is queued for a
+future landing alongside the per-arch trap glue; today's wait
+loop is correct but consumes scheduler quanta while blocked.
+
+### Architecture-port glue
+
+Each architecture port supplies an `IrqController` impl. The
+kernel/core default is `UnsupportedController`, whose `mask`
+returns `MaskError::Unsupported`; the kernel binary is expected
+to swap in a real controller during its post-`run_phases` wiring
+phase:
+
+| Architecture | Production controller (planned)              | Status today |
+| ------------ | -------------------------------------------- | ------------ |
+| `x86_64`     | IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the per-vector ISR | **Not wired** in the kernel binary — the IDT external-vector range and the per-vector asm thunks are the next session's lead. `kernel/irq::UnsupportedController` is installed; `irq_bind` succeeds, `irq_wait` will time out, no real `fire` arrives. |
+| `aarch64`    | GIC `ICACTIVE` / distributor mask            | Not wired; `UnsupportedController` installed. |
+| `riscv64`    | PLIC `claim` / `complete` priority gating    | Not wired; `UnsupportedController` installed. |
+| `wasm32`     | No hardware-interrupt concept                | Permanently `UnsupportedController` (per the contract above). |
+
+The kernel binary records one `KERNEL_PHASE_STARTED` /
+`KERNEL_PHASE_READY` pair around the controller installation
+phase once it lands; the kernel/core `Sched` phase remains the
+final init step for the architecture-neutral subsystems.
+
+### Test coverage
+
+* `kernel/irq` ships 18 unit tests covering bind / duplicate
+  refusal / out-of-range refusal / ready-after-fire / timeout /
+  forgery (no binding, wrong caller) / mask-before-wake ordering /
+  controller errors / stray-IRQ containment / release_for
+  semantics / handle-uniqueness across rebinds.
+* `kernel/core::syscalls::tests` adds 6 syscall-handler tests
+  (mint / out-of-range / duplicate / forgery / timeout / pre-fired
+  ready) plus an `exit_releases_every_irq_binding_owned_by_task`
+  test that asserts the `exit` ↔ `release_for` ordering.

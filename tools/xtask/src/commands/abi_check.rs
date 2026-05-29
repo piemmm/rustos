@@ -226,7 +226,37 @@ mod tests {
         fs::create_dir_all(&tmp).expect("tmpdir");
         let mutated_path = tmp.join("table.rs");
         let original_src = fs::read_to_string(&original).expect("read original");
-        let mutated_src = original_src.replacen("0xca,", "0xcb,", 1);
+        // Locate the SYSCALL_TABLE_HASH literal, then flip the first
+        // hex byte token after it. This is robust against any future
+        // refresh of the hash content (AGENTS.md §7 — no flaky
+        // tests; a previous version of this fixture hard-coded a
+        // specific byte that drifted out of the hash and silently
+        // broke the test).
+        let anchor_pos = original_src
+            .find("SYSCALL_TABLE_HASH")
+            .expect("anchor present");
+        let first_byte_pos = anchor_pos
+            + original_src[anchor_pos..]
+                .find("0x")
+                .expect("hash literal has at least one 0x byte");
+        let token = &original_src[first_byte_pos..first_byte_pos + 4];
+        // Token is `0xHH`; we flip the low nibble by one (wrapping)
+        // so the substitution is guaranteed to change the literal
+        // and to remain a valid hex byte.
+        let mut bytes = token.as_bytes().to_vec();
+        bytes[3] = match bytes[3] {
+            b'0'..=b'8' | b'a'..=b'e' | b'A'..=b'E' => bytes[3] + 1,
+            b'9' => b'a',
+            b'f' | b'F' => b'0',
+            other => panic!("unexpected hex char {other:#x}"),
+        };
+        let replacement = core::str::from_utf8(&bytes).expect("ascii");
+        let mutated_src = format!(
+            "{}{}{}",
+            &original_src[..first_byte_pos],
+            replacement,
+            &original_src[first_byte_pos + 4..],
+        );
         assert_ne!(
             original_src, mutated_src,
             "fixture mutation must change the source"

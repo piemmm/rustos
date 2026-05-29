@@ -1334,8 +1334,104 @@ follow-up is its own thread and is now also complete.
   `.junie/next-session-prompt.md` with concrete entry points that
   build on the `VirtioHostFactory` seam landed here.
 
-- Stage 4.D follow-up (Item 2 — IRQ ABI surface, *complete in
-  part*): the ABI-half of Item 2 has landed. `CapabilityId::IRQ_BIND
+- Stage 4.D follow-up (Item 2-tail — kernel IRQ table + per-handle
+  wait queue, *complete*): the kernel-side substrate that backs
+  the frozen `abi-v1` IRQ surface (`CapabilityId::IRQ_BIND`,
+  `SyscallNumber::IRQ_BIND` / `IRQ_WAIT`, `IrqHandle`,
+  `Errno::TimedOut`) has landed. New `kernel/irq` crate
+  (`rustos-kernel-irq`, `no_std`) ships an `IrqTable` carrying a
+  `BTreeMap<u32 line, IrqEntry>` + `BTreeMap<u64 handle_raw, line>`
+  index behind a writer-preference `kernel/sync::RwLock` mirroring
+  the `CapTable` lock-ordering policy. Surface: `bind(line, owner)`,
+  `try_wait_step(handle, caller, now_ns, deadline_ns)`,
+  `fire(line, &dyn IrqController)`, `release_for(task)`,
+  `lookup(handle)`, plus an `IrqController` trait whose production
+  impl on x86_64 will program the IO-APIC redirection-entry mask
+  (deferred to the trap-glue session — see
+  `.junie/next-session-prompt.md`). Mask-before-wake is the
+  load-bearing invariant: `IrqTable::fire` calls
+  `controller.mask(line)` *before* setting the per-entry `ready`
+  flag; the unit test `mask_is_observed_before_wake` installs a
+  probe controller that reads the table's `ready` flag while
+  `mask` is in flight and asserts it is still `false`. Forgery
+  defence: `try_wait_step` re-checks the `(handle, caller)`
+  mapping before any state transition. The crate ships 18 in-tree
+  unit tests covering bind / duplicate refusal / out-of-range
+  refusal / ready-after-fire / timeout / forgery / mask-before-wake
+  ordering / stray-IRQ containment / release_for semantics /
+  handle-uniqueness across rebinds. `kernel/core` integration:
+  `KernelSyscallHandlers::new` now takes `&IrqTable` +
+  `&(dyn IrqController + Sync)` borrows; `irq_bind` / `irq_wait`
+  no longer announce `SYSCALL_FEATURE_UNAVAILABLE`. `irq_bind`
+  calls `IrqTable::bind(line, caller.task_id)` and returns
+  `handle.as_u64()`; `irq_wait` runs a polling loop on
+  `IrqTable::try_wait_step` driven by
+  `KernelArch::monotonic_ns(arch.current_cpu())`, yielding via
+  `Scheduler::yield_current` between iterations and composing
+  only existing primitives (`AGENTS.md` §2.4 — no scheduler
+  interface change). `KernelSyscallHandlers::exit` now calls
+  `IrqTable::release_for(caller.task_id)` before evicting the
+  capability record and the scheduler entry so a task cannot
+  retain a binding past exit (`docs/src/security/irq.md` —
+  freshly created tasks that want the same line must re-issue
+  `irq_bind`). `KernelState` (`kernel/core/src/init.rs`) owns
+  one `IrqTable::new(0)` + `UnsupportedController`; the kernel
+  binary's post-`run_phases` wiring phase will swap in a real
+  controller and widen `max_line` once the x86_64 trap glue
+  lands. `kernel/core` syscall tests grew by 6
+  (`irq_bind_mints_handle_and_records_owner_against_caller`,
+  `irq_bind_returns_out_of_range_for_line_above_max`,
+  `irq_bind_rejects_duplicate_line`,
+  `irq_wait_returns_not_found_on_forged_handle`,
+  `irq_wait_returns_timed_out_when_no_fire_within_zero_timeout`,
+  `irq_wait_returns_ok_when_binding_pre_fired`) and one
+  cross-syscall test (`exit_releases_every_irq_binding_owned_by_task`).
+  The two prior deferral tests
+  (`irq_{bind,wait}_returns_not_implemented_and_audits_feature_unavailable`)
+  have been replaced rather than `#[ignore]`d per AGENTS.md §2.5.
+  `tests/integration/syscall_dispatch_qemu` updated to construct
+  an `IrqTable` + `UnsupportedController` alongside the
+  synthesised `Scheduler`/`CapTable` quartet so its
+  `KernelSyscallHandlers::new` call site matches the new
+  signature. **Pre-existing defect fixed in the same change.**
+  The `tools/xtask::commands::abi_check::tests::desync_in_table_hash_is_detected`
+  fixture hard-coded `0xca,` as the byte it would flip in the
+  hash literal; the current `SYSCALL_TABLE_HASH` contains no
+  `0xca` byte, so the mutation was silently a no-op and failed
+  the `assert_ne!(original, mutated)` guard. The fixture now
+  locates the first `0x` token after the `SYSCALL_TABLE_HASH`
+  anchor and flips its low nibble, so it is robust to any
+  future hash refresh (AGENTS.md §7 — no flaky tests). **Docs.**
+  `docs/src/security/irq.md` extended with a "Kernel-side
+  implementation" section covering the invariants
+  (mask-before-wake, forgery defence, lock ordering, idempotent
+  release), the wait-loop semantics, the
+  per-architecture-port controller table (with explicit
+  "x86_64 trap glue not yet wired" status), and the
+  test-coverage summary. `docs/src/architecture/syscalls.md`
+  handler-wiring table updated: the two *deferred* rows for
+  `irq_bind` / `irq_wait` replaced with the real wiring; an
+  `exit` ↔ `release_for` note added below the table.
+  **Verification.** `cargo test -p rustos-kernel-irq` → 18
+  passing. `cargo test -p rustos-kernel-core` → 36 unit + 5
+  init tests passing. `cargo test --workspace` (excluding the
+  five QEMU-only `tests/integration/*` bins that require QEMU
+  to run) → every test green. `cargo clippy --workspace
+  --all-targets -- -D warnings` (with the same exclusion) →
+  clean. `cargo fmt --check` → clean. **What is still
+  outstanding.** Items 3–6 from the prior next-session-prompt
+  (bus-handle hand-off in `drivers/bus/{pci,mmio}` ↔
+  `drivers/bus/virtio`, four QEMU integration test crates,
+  userland ARP/IP/ICMP responder, acceptance gate) plus the
+  x86_64 IDT external-vector + IO-APIC trap-source wiring and
+  the kernel-binary `VirtioHostFactory` impl. Rewritten into
+  `.junie/next-session-prompt.md` (the trap-glue chunk leads,
+  because virtio-net / virtio-blk integration tests depend on
+  real IRQ delivery).
+
+- Stage 4.D follow-up (Item 2 — IRQ ABI surface, *complete*,
+  superseded by the entry above): the ABI-half of Item 2 had
+  landed. `CapabilityId::IRQ_BIND
   = 11` is appended to the frozen `abi-v1` capability table
   (`lib/abi/src/capability.rs`) and mirrored in
   `kernel/sec::is_known_capability` plus its audit-frozen-id test

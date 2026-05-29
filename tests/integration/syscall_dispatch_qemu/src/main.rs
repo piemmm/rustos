@@ -104,6 +104,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_kernel_core::KernelSyscallHandlers;
+    use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
     use rustos_kernel_sync::RwLock;
@@ -295,8 +296,25 @@ mod kernel {
         //    handlers share the same inner audit sink so the
         //    `SyscallInvoked` record this test relies on actually
         //    reaches `SYSCALL_INVOKED_COUNT`.
-        let handlers: KernelSyscallHandlers<'_, BinArch> =
-            KernelSyscallHandlers::new(&sched, &cap_table, &*arch, &INNER_SINK);
+        // 4.5. IRQ subsystem state. The synthesised dispatcher will
+        //      not exercise `irq_bind` / `irq_wait` in this test, but
+        //      `KernelSyscallHandlers::new` requires both borrows so
+        //      a successful `exit` syscall observes the same struct
+        //      shape it does in production. `IrqTable::new(0)` is the
+        //      conservative default; `UnsupportedController` rejects
+        //      every `fire` with `MaskError::Unsupported` — exactly
+        //      the behaviour `kernel/core::init` installs.
+        let irq_table = IrqTable::new(0);
+        let irq_controller = UnsupportedController;
+
+        let handlers: KernelSyscallHandlers<'_, BinArch> = KernelSyscallHandlers::new(
+            &sched,
+            &cap_table,
+            &*arch,
+            &INNER_SINK,
+            &irq_table,
+            &irq_controller,
+        );
         let dispatcher = Dispatcher::new(&handlers, &INNER_SINK);
         let caller = CallerContext {
             task_id: SecTaskId(task_id),

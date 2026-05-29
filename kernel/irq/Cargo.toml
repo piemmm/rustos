@@ -1,0 +1,31 @@
+[package]
+name = "rustos-kernel-irq"
+description = "RustOS kernel IRQ table and per-handle wait queue (Stage 4.D Item 2-tail). Capability-gated user-space wake-up plumbing for the `irq_bind` / `irq_wait` syscall pair."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `lib/abi` for the frozen `IrqHandle` / `Errno` types; `lib/log` for
+# the audit sink the subsystem's diagnostic records route through;
+# `kernel/sec` for `TaskId` (the security-attribution identifier the
+# IRQ table binds against); `kernel/sync` for the writer-preference
+# `RwLock` mirroring the `CapTable` lock-ordering policy.
+#
+# `kernel/sched` is **not** depended on. The wait-queue substrate is
+# expressed through the `IrqHost` trait so this crate stays free of a
+# transitive scheduler dep — the `kernel/core` orchestrator composes
+# the production `IrqHost` impl on top of `Scheduler::park` /
+# `Scheduler::unpark` (`AGENTS.md` §6 — `no_std` shared-code crates,
+# minimum surface).
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }

@@ -41,7 +41,7 @@
 //! slots, then a trailing guard slot. Guard slots are intentionally
 //! **left unmapped** in the [`AddressSpace`] so that a real MMU faults
 //! on access; the host-testable model additionally paints the
-//! storage-backed guard regions with [`GUARD_BYTE`] and verifies them
+//! storage-backed guard regions with `GUARD_BYTE` and verifies them
 //! at free time, exactly mirroring the convention used by
 //! [`crate::slab`].
 //!
@@ -194,7 +194,7 @@ impl DmaBuffer {
 /// Per-process DMA pool.
 ///
 /// `DmaPool<P>` is generic over a [`PageTableOps`] implementation so
-/// it can be exercised by [`crate::HostPageTable`] in unit tests and
+/// it can be exercised by `crate::HostPageTable` in unit tests and
 /// driven by the architecture page-table types from `kernel/arch/*` in
 /// production.
 ///
@@ -386,7 +386,7 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
     /// Every byte of the data region is zeroed (via the audited
     /// `zeroize` crate's volatile clear) *before* the backing frames
     /// are returned to the [`FrameAllocator`]. Both guard slots are
-    /// validated against the [`GUARD_BYTE`] pattern; a mismatch is
+    /// validated against the `GUARD_BYTE` pattern; a mismatch is
     /// reported as [`DmaError::GuardViolation`] *after* the frames
     /// have nonetheless been recovered, because a guard violation
     /// indicates a programming bug, not a reason to leak memory.
