@@ -1259,6 +1259,61 @@ follow-up is its own thread and is now also complete.
   and is unrelated to this Item 1 work. Items 2–6 of the prior
   next-session prompt remain outstanding and have been rewritten
   into the next session's prompt.
+- Stage 4.D follow-up (Item 0 — `DmaPool` ↔ `VirtioHost` API
+  shape, *unresolved*): the kernel side of the DMA facility (Item
+  1) and the driver consumers (`drivers/bus/virtio`,
+  `drivers/storage/virtio_blk`, `drivers/network/virtio_net`) do
+  not yet meet. The `VirtioHost::alloc_dma_zeroed(&self, size)
+  -> Result<DmaRegion<'_>, DriverError>` trait method returns a
+  borrowed `&'a mut [u8]` whose lifetime is tied to `&self`, but
+  `DmaPool::alloc(&mut self, size)` requires an exclusive borrow
+  of the pool and `DmaPool::bytes_mut(&mut self, &DmaBuffer)`
+  re-borrows the pool on every call. A real kernel-backed
+  `VirtioHost` wrapping a `&mut DmaPool<P>` therefore cannot hand
+  out the **three simultaneous live `DmaRegion`s** that
+  `SplitQueue::new` constructs (descriptor table, avail ring, used
+  ring) — let alone the additional per-transaction regions that
+  `virtio_blk::submit` and `virtio_net::transmit` hold. Three
+  shapes are on the table, ordered by preference:
+  (a) **Owned `DmaSlab` (recommended).** Replace
+      `DmaRegion<'a>` with an owned handle `DmaSlab { phys: u64,
+      ptr: NonNull<u8>, len: usize, pool_id: PoolId, slot: usize
+      }` that carries the disjoint-slot invariant in its
+      `slot`/`pool_id` fields. The host hands the slab back to
+      `kernel_sec::free_dma` at drop time. The `&mut [u8]`
+      borrow happens lazily through `DmaSlab::as_bytes_mut`,
+      whose `// SAFETY:` block cites the pool's slot bitmap as
+      the disjointness witness. Required pool surface:
+      `DmaPool::slot_base(&self, &DmaBuffer) -> NonNull<u8>` —
+      one extra accessor, no widening of the existing borrowed
+      `bytes_mut` API.
+  (b) **Pair / vector disjoint borrows.** Extend `DmaPool` with
+      `bytes_mut_n(&mut self, [&DmaBuffer; N]) -> [&mut [u8]; N]`
+      that verifies disjointness once and lends N slices. Forces
+      the driver to materialise *all* simultaneous regions in a
+      single call site, which does not match the
+      `SplitQueue::new`-then-loop-of-`submit` driver structure.
+      Rejected for that reason.
+  (c) **Per-region pool.** Carve a *separate* `DmaPool` per
+      virtio region (one for descriptors, one per outstanding
+      transaction). Multiplies the per-driver page-table-mapping
+      cost by the queue depth (×128 by default) and breaks the
+      `AGENTS.md` §4 "per-process heaps, never global" rule by
+      requiring the driver host to predict the driver's
+      allocation pattern. Rejected.
+  The next session **must pick (a)** (or justify (b) / (c) /
+  another option in this list) **before** writing the
+  driver-host wiring. The blocker is recorded in
+  `.junie/next-session-prompt.md` as Item 0a; Items 2–6 are
+  unchanged. No code in `kernel/mem`, `kernel/sec`,
+  `drivers/bus/virtio`, or `userland/system/drvhost` has been
+  modified in this session — both because the API choice is a
+  versioned-interface decision (`AGENTS.md` §2.4) and because
+  inventing a half-shape without tests would violate
+  `AGENTS.md` §15.2. `cargo test --workspace --lib` minus the
+  four `kernel/arch/*` targets that need a real boot environment
+  → 650 passing on the pinned `nightly-2026-05-27`, 0 failing,
+  identical to the post-Item-1 baseline.
 
 ---
 

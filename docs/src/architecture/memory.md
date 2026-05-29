@@ -4,7 +4,7 @@ Architecture-neutral, host-testable physical and virtual memory
 management. Delivered by Stage 2.2 of `PLAN.md`. The architecture
 crates (`kernel/arch/*`, Stage 3) supply the only piece this crate
 does not implement: the real page-table writer behind
-[`PageTableOps`](#3-virtual-memory-page-table-operations).
+[`PageTableOps`](#3-virtual-memory--page-table-operations).
 
 ## Layered design
 
@@ -25,7 +25,7 @@ does not implement: the real page-table writer behind
 
 Every layer above depends only on the layer immediately below it; the
 trait that crosses the architecture boundary lives in
-[vmm](#3-virtual-memory-page-table-operations).
+[vmm](#3-virtual-memory--page-table-operations).
 
 ## 1. Physical frame allocator (`frame`)
 
@@ -165,7 +165,7 @@ A future syscall wrapper maps gate failures to `Errno` via
 | --- | --- |
 | `CapabilityMissing` | `PermissionDenied` |
 | `Pool(ZeroSize)` | `BufferTooSmall` |
-| `Pool(Alloc | SizeUnsupported)` | `LengthOutOfRange` |
+| `Pool(Alloc)` / `Pool(SizeUnsupported)` | `LengthOutOfRange` |
 | Other internal pool failures | `OutOfRange` |
 
 [`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated

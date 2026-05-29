@@ -84,12 +84,12 @@ stable `EventId` from `rustos_drvhost::events`:
 | `7002`    | load rejected — manifest decode failed               |
 | `7003`    | load rejected — syscall table hash mismatch          |
 | `7004`    | load rejected — signer key not on trust anchor list  |
-| `7005`    | load rejected — Ed25519 signature verification failed|
+| `7005`    | load rejected — Ed25519 signature verification failed |
 | `7006`    | load rejected — requested capabilities exceed caller |
 | `7007`    | load rejected — `InKernel` without `CAP_DRV_KERNEL`  |
 | `7008`    | load rejected — caller lacks `CAP_DRV_LOAD`          |
 | `7009`    | load rejected — resolver could not bind manifest     |
-| `7010`    | load rejected — driver `register()` returned an error|
+| `7010`    | load rejected — driver `register()` returned an error |
 | `7020`    | driver unloaded                                      |
 | `7021`    | driver reloaded                                      |
 
