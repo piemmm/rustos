@@ -45,6 +45,8 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/login/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/shell/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/wm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/network/virtio_net/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/drivers/storage/virtio_blk/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/rustos-kernel/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/drvhost_qemu/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot/src" isTestSource="false" />

@@ -319,7 +319,10 @@ impl<P: PageTableOps> AddressSpace<P> {
 /// CPU page-table writes happen. The point is to exercise every code
 /// path in [`AddressSpace`] on host hardware (`AGENTS.md` §7 — all
 /// algorithms that do not need hardware must be host-tested).
-#[cfg(test)]
+///
+/// Visible to downstream crates only behind the `host-tests` cargo
+/// feature so production kernel builds never link the test double.
+#[cfg(any(test, feature = "host-tests"))]
 #[derive(Debug, Default)]
 pub struct HostPageTable {
     entries: BTreeMap<Page, (Frame, MapFlags)>,
@@ -328,7 +331,7 @@ pub struct HostPageTable {
     pub(crate) flush_count: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-tests"))]
 impl HostPageTable {
     /// Construct an empty host page table.
     #[must_use]
@@ -340,7 +343,7 @@ impl HostPageTable {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-tests"))]
 impl PageTableOps for HostPageTable {
     fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
         // Reject the obviously-bad combination W^X violation: a

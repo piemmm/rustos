@@ -1,142 +1,162 @@
-# Continuation Prompt — RustOS Stage 2.7 follow-up resume ((f6) and (f7))
+# Next session — Stage 4.D items 2–6 (virtio end-to-end on real hardware)
 
-Copy the text below verbatim into the next agent session as the
-`<issue_description>`.
+## Where we are
 
----
+Item 1 of the previous next-session prompt landed in this session
+under the agreement "land Item 1 only, defer 2–6". The deliverables
+are summarised in the Stage 4 status block of `PLAN.md`; the headline
+items:
 
-Read `AGENTS.md` and `PLAN.md` in full before doing anything else.
-They are binding. Do not skim. In particular: §2 (no hacks, no
-duplication, no bloat, no interface creep), §5.4 (the five-step
-privileged-entry sequence), §7 (tests must pass; no `#[ignore]`;
-coverage floors), §10 (`unsafe` requires `// SAFETY:` + a test +
-safe encapsulation), §13 (docs in the same commit), §14 (commit
-format, one logical change per commit), §15 (no stubs, no silenced
-lints, no weakened security, no invented APIs).
+- `lib/abi`: `CapabilityId::MEM_DMA = 10`, frozen ID test, added to
+  `kernel/sec::manifest::is_known_capability` (`abi-v1` only — do
+  not renumber).
+- `kernel/mem`: new `dma` module (`DmaPool<P>`, `DmaBuffer`,
+  `DmaError`). Per-process virtual window over `AddressSpace<P>`,
+  contiguous frames from `FrameAllocator::alloc_order`, guard slots
+  (unmapped on hardware, `0xCC` on host), zero-on-free via the
+  audited `zeroize` crate, `Result<_, _>` for every failure path.
+  New `host-tests` Cargo feature exposes `HostPageTable` to
+  downstream test crates without leaking it into production builds.
+- `kernel/sec`: companion `dma` module with `alloc_dma` / `free_dma`
+  that gate `CapabilityId::MEM_DMA` and emit
+  `AuditEvent::DmaAllocated = 1030` / `DmaAllocDenied = 1031` on
+  every grant or refusal. `DmaGateError::as_errno()` lands the
+  `abi-v1` mapping for the future syscall wrapper.
+- Tests: `cargo test -p rustos-kernel-mem --lib` → 84 passing,
+  `cargo test -p rustos-kernel-sec --lib` → 46 passing. No
+  regressions in `rustos-abi`, `rustos-caps`, `rustos-drv-bus-virtio`,
+  `rustos-drv-storage-virtio-blk`, `rustos-drv-network-virtio-net`,
+  `rustos-drv-bus-pci`, `rustos-drv-bus-mmio`, `rustos-drvhost`.
+- Docs: new "DMA buffers" section in
+  `docs/src/architecture/memory.md`; the audit catalogue in
+  `docs/src/architecture/security.md` gained the `1030 / 1031`
+  rows.
 
-## Context (already on `master`)
+What still needs doing is everything *Item 2* onward from the prior
+prompt, plus a small first-time-only follow-up triggered by the new
+`DmaPool` (see Item 0 below).
 
-Stages 0..2 are complete. Stage 3a is **complete** for x86_64.
-Stage 2.7 follow-up sub-items (f1)..(f5) are landed:
+## Reading list
 
-- `c93e823` — kernel/sched: per-CPU current-task slot **(f1)**.
-- `fcfb5fc` — kernel/sec: `CapTable` registry **(f2)**.
-- `4497106` — kernel/core: production `SyscallHandlers` impl **(f3)**
-  (`KernelSyscallHandlers<'a, A>` + `KernelArch::monotonic_ns`).
-- `eca9e89` — kernel/core: `DispatchCallbackSlot`, `Phase::Syscall`,
-  `KernelDispatchHook`, `KernelState` wiring **(f4)**. `BootInfo`
-  gained a `dispatcher_callback_slot: &'static DispatchCallbackSlot`
-  field; `kernel_main` `Box::leak`s `KernelState` and publishes a
-  `KernelDispatchHook` through the slot between Sched and Ipc.
-  `InitError::DispatcherAlreadyInstalled` fail-closes a double
-  publish under `phase = "syscall"`.
-- `45c21c3` — kernel/rustos-kernel: `production_dispatch` swap **(f5)**.
-  `boot.rs` installs `production_dispatch` (not `fail_closed_dispatch`).
-  `production_dispatch` reads `DISPATCH_SLOT.get()` and forwards through
-  the hook; the Errno encoder (`encode_result`) negates the
-  discriminant for the userland convention. Halts the CPU on empty
-  slot or `DispatchOutcome::NoCallerContext`.
+- `AGENTS.md` (binding).
+- `PLAN.md` Stage 4 status block, including the new Item-1
+  paragraph.
+- This file.
+- `kernel/mem/src/dma.rs`, `kernel/sec/src/dma.rs` (the seam Items
+  2 and 3 plug into).
+- `drivers/bus/virtio/{src/host.rs, src/transport.rs}` (the
+  consumer side of the kernel API).
+- `drivers/bus/pci/src/lib.rs`, `drivers/bus/mmio/src/lib.rs`
+  (bus driver side of Item 3).
 
-`cargo xtask ci` is green at HEAD (`45c21c3`).
+## What needs doing
 
-## Goal of this session
+### Item 0 — Thread `DmaPool` through `userland/system/drvhost`
 
-Land **(f6) and (f7)** to AGENTS.md quality, then flip the Stage 2.7
-follow-up status block from `partial` to `complete`. The detailed
-descriptions live in PLAN.md "Stage 2.7 follow-up" — read them first.
+The Item-1 work built the kernel side of the DMA facility but did
+**not** wire it through the driver host yet. The current
+`MockHost::alloc_dma_zeroed` is still the test seam used by
+`virtio_blk` / `virtio_net`. This session must:
 
-- **(f6)** QEMU integration test. A `test-hooks`-gated entry point
-  drives `Dispatcher::dispatch` directly with
-  (`cap_query`, `CAP_TIME_SET`) and (`exit`, 0); an audit-observer
-  sink flips `qemu_exit::exit_success` on observing both
-  `SyscallInvoked` records. The hook is gated off by default and
-  release builds that enable it must be rejected (the prompt's
-  cargo-deny check; the cleanest implementation is likely a
-  `compile_error!` guard plus a deny.toml `bans` rule). Joins the
-  `cargo xtask test --qemu` enrolment list.
+- Extend the driver-host's per-driver context with a borrowed
+  `&mut DmaPool<P>`. The host creates one pool per loaded driver
+  module out of the kernel allocator carved for that process.
+- Implement a real `VirtioHost` in `drivers/bus/virtio` (alongside
+  `MockHost`) backed by the new pool — `alloc_dma_zeroed` calls
+  `kernel_sec::alloc_dma(pool, caller_caps, size, audit)?`,
+  releases through `kernel_sec::free_dma`.
+- Update `userland/system/drvhost` tests + the `drvhost_qemu`
+  integration to exercise the real path.
 
-  *Design hint:* directly bypassing `DISPATCH_SLOT.get()`'s
-  `Scheduler::current_task` is the cleanest path — synthesise a
-  `Scheduler`/`CapTable`/`KernelSyscallHandlers`/`Dispatcher` quartet
-  in the test bin's audit-observer sink and call `dispatcher.dispatch`
-  on the `BootCompleted` event before `qemu_exit::exit_success`.
-  Going through the production hook would also require registering
-  a real task and driving the scheduler, which the prompt explicitly
-  marks out of scope for this follow-up.
+This is a precondition for Items 2–4 working end-to-end.
 
-- **(f7)** PLAN.md (f6) tick; add the (f7) commit-id line itself;
-  flip the Stage 2.7 follow-up status block to `complete`; refresh
-  the Stage 2 evidence tail with a fresh `cargo xtask ci` quote.
+### Item 2 — IRQ routing into user-space drivers
 
-## Hard constraints
+Same scope as the previous prompt:
 
-- One logical change per commit per AGENTS.md §14. Each commit
-  carries `Co-authored-by: Junie <junie@jetbrains.com>`.
-- `cargo xtask ci` green at HEAD of every commit. Quote the tail in
-  the final summary.
-- No `unwrap` / `expect` / `panic!` in production paths.
-- `unsafe` paired with `// SAFETY:` and a test or model.
-- No `#[allow(...)]` without a justifying comment (AGENTS.md
-  §15.10).
-- Docs land in the same commit as the code they describe
-  (AGENTS.md §13).
-- `rustdoc` on `pub` items must not link to private items
-  (`-D rustdoc::private-intra-doc-links` is implied by
-  `RUSTDOCFLAGS=-D warnings` in `cargo xtask docs-check`). When a
-  public doc comment needs to mention a private method, use
-  plain backticks (no `[Self::…]`).
-- If anything is ambiguous or impossible in one session, **stop
-  and ask** (AGENTS.md §15.2 / §15.7) before stubbing.
+- New `CapabilityId::IRQ_BIND = 11` in `lib/abi`, mirrored in
+  `kernel/sec::is_known_capability` and the audit-frozen-id tests.
+- Syscalls `irq_bind(line: u32) -> IrqHandle` and
+  `irq_wait(handle, timeout) -> Result<(), Errno>`. Update both
+  `lib/abi/src/syscalls.rs` and `kernel/syscall/src/table.rs` in
+  the same commit (`cargo xtask abi-check` enforces this).
+- The driver host plumbs the handle through
+  `VirtioHost::notify_wait` so the polled cooperative shim in the
+  virtio crate is replaced by a real wait. Document the wakeup
+  contract in `docs/src/architecture/kernel.md` and a new
+  `docs/src/security/irq.md`.
+- Tests: a QEMU integration test that arms an IRQ from a small
+  in-tree mock device and verifies wake-up + masking.
 
-### Carry-over design notes (still binding)
+### Item 3 — Bus-handle hand-off from `drivers/bus/{pci,mmio}`
 
-- `kernel/sync::RwLock` is process-context-only. `current_task`
-  must not be read from interrupt context. Syscall entry runs in
-  process context on the issuing CPU.
-- `define_isr!` is the only sanctioned ISR stub emitter on
-  x86_64. `syscall`/`sysret` is MSR-driven (`IA32_LSTAR`).
-- The trampoline fail-closes via `qemu_exit::exit_failure` if it
-  fires before a callback is installed. `production_dispatch`
-  remains installed via `set_dispatch_callback` **before**
-  `syscall` is enabled on any CPU — the existing (c7-bin)
-  ordering contract.
-- `DISPATCH_SLOT` is a `pub static DispatchCallbackSlot` in
-  `kernel/rustos-kernel/src/dispatch.rs`. The set-once publish is
-  protected by `kernel/sync::OnceCell`; no global mutable static.
-- `RawArgs(arr)` is the sanctioned bridge from the kernel-stack
-  `[u64; SYSCALL_MAX_ARGS]` to the dispatcher; the compile-time
-  `_RAW_ARGS_LAYOUT_MATCHES_ARRAY` assertion locks it.
-- `_DISPATCH_SIGNATURE_PINNED` in
-  `kernel/rustos-kernel::dispatch` pins the callback ABI.
-- `KernelArch::monotonic_ns(cpu) -> u64` is **required** on every
-  arch port. aarch64/riscv64/wasm32 ports added later must opt
-  in (CNTVCT_EL0 / `rdtime` / `performance.now()` are the
-  natural sources); the x86_64 wiring (`apic_timer::Calibration`
-  + RDTSC) is the reference.
+- Extend the `PciBackend` / `MmioBackend` constructors in
+  `drivers/bus/virtio` to receive a capability-checked register
+  window rather than the bare identification tuple they carry
+  today.
+- The PCI and MMIO bus drivers obtain the window from the kernel
+  via the DMA / future MMIO-map facility (the *kernel* allocates
+  the window; the bus driver does not synthesise pointers).
+- Per-bus unit tests with mock register windows; a QEMU
+  integration test that walks PCI / DTB and hands a working window
+  through to the virtio transport.
+- Update `docs/src/drivers/bus.md` with the hand-off sequence and
+  capability flow.
 
-## Toolchain & host requirements (already installed on the workbench)
+### Item 4 — QEMU integration tests
 
-- `nightly-2026-05-27` toolchain (rustc 1.98.0-nightly).
-  PATH: `$HOME/.rustup/toolchains/nightly-2026-05-27-x86_64-unknown-linux-gnu/bin`.
-- `qemu-system-x86_64` 8.2.2, `grub-mkrescue`, `xorriso`,
-  `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd`,
-  `mdbook`, `cargo-deny`, `cargo-llvm-cov` (in `~/.cargo/bin`).
-- `mdbook` lives in `~/.cargo/bin`; ensure that directory is on
-  `PATH` **before** invoking `cargo xtask ci` — `xtask` does not
-  search it automatically.
+Once Items 0–3 are in place:
 
-## Definition of done
+- `tests/integration/virtio_blk_pci_x86_64` — boots the kernel +
+  driver host + signed `.rxe`, attaches `virtio-blk` to a backing
+  qcow2, reads sector 0 (planted by `tools/qemu`), writes a known
+  pattern to sector 1, reads it back, verifies checksum.
+- `tests/integration/virtio_blk_mmio_riscv64` — same against
+  `qemu-system-riscv64 -M virt` with `virtio-blk-device`.
+- `tests/integration/virtio_net_pci_x86_64` and
+  `tests/integration/virtio_net_mmio_riscv64` — ARP + ICMP echo
+  round-trip against `qemu user net`'s built-in DHCP/ARP/ICMP
+  responder. Depends on Item 5.
+- Add an unload → reload → reuse test for each driver.
 
-- (f6)..(f7) implemented to AGENTS.md quality.
-- New host unit tests cover every new public API with the
-  coverage floors in AGENTS.md §7.
-- New QEMU integration test boots the `rustos-kernel` binary
-  (built with the `test-hooks` feature) to a `cap_query` + `exit`
-  audit-event pair observed via the audit-sink observer.
-- All existing QEMU integration tests continue to pass.
-- `cargo xtask ci` green; tail quoted in PLAN.md's Stage 2.7
-  follow-up status block (now flipping from `partial` to
-  `complete`).
-- PLAN.md "Stage 2.7 follow-up" sub-checklist (f1)..(f7) all
-  ticked; the partial-status block flipped to `complete`.
-- One commit per logical change with the AGENTS.md §14 trailer.
+### Item 5 — Userland ARP / IP / ICMP responder
+
+The virtio-net QEMU integration tests need a small userland stack:
+
+- New crate `userland/net/icmp/` implementing only ARP request +
+  reply, IP + ICMP echo, and a minimal main loop sitting on top of
+  the `Net` trait.
+- Out of scope: TCP, UDP, IPv6, routing — those are Stage 6 work.
+
+### Item 6 — Acceptance gate
+
+After Items 0–5 land:
+
+- Run `cargo xtask ci` and paste verbatim output in the PR body.
+- Run `cargo xtask test` and paste verbatim output.
+- Confirm coverage ≥ 75 % on each new crate per `AGENTS.md` §7.
+
+## Toolchain note for the next session
+
+`cargo xtask test` could not be run end-to-end in this session
+because `kernel/arch/x86_64` requires the `nightly-2026-05-27`
+toolchain pinned in `rust-toolchain.toml` (`#[unsafe(naked)]` and
+inline-const) and the host had only stable rustc 1.75. The next
+session must run on an environment with the pinned nightly so the
+acceptance gate above is meaningful — the Item-1 changes themselves
+were verified per-crate (`cargo test -p rustos-kernel-mem -p
+rustos-kernel-sec --lib` → 130 passing).
+
+## Assumptions for the next session to confirm at the top of the PR body
+
+1. The `DmaPool` / `DmaBuffer` / `DmaError` surface in
+   `kernel/mem::dma` is the right seam for both the driver host
+   (Item 0) and the bus drivers (Item 3). If a different shape is
+   needed (e.g. iommu translation), propose it in `PLAN.md` rather
+   than mutating in place.
+2. `kernel/sec::dma::{alloc_dma, free_dma}` are the only blessed
+   capability-checked entry points; the bus + virtio drivers must
+   not call `DmaPool` directly.
+3. The shipped `MockHost` / `MockTransport` test seam stays in
+   place: the QEMU integration tests in Item 4 are *additional*,
+   not a replacement.

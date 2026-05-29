@@ -51,6 +51,73 @@ pub mod filesystem;
 pub mod input;
 pub mod net;
 
+/// Sensitivity class of a payload buffer crossing the driver ABI.
+///
+/// Stage 4.D introduced this hint so block- and network-driver
+/// implementations can scrub their internal DMA staging buffers as
+/// soon as a payload leaves them (`AGENTS.md` §4 "zero-on-free for
+/// any allocation that ever held credentials, keys, or capability
+/// tokens"). The flag is a *promise about the buffer's contents*,
+/// not an access-control gate: capability enforcement remains at the
+/// dispatch site (`AGENTS.md` §5.4).
+///
+/// The variant set is `#[non_exhaustive]` so future classes (for
+/// example a `Secret` class that pins the driver's staging into a
+/// memory-encryption realm) can be added without an ABI break.
+///
+/// # Wire form
+///
+/// On the wire `BufferClass` is a single byte. Hosts that bridge the
+/// hint through a syscall must reject unknown values rather than
+/// silently downgrading to [`BufferClass::NonSensitive`] (failing
+/// closed, `AGENTS.md` §5.4.5).
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum BufferClass {
+    /// The buffer holds no security-relevant material. Drivers may
+    /// retain staging copies until ordinary deallocation.
+    NonSensitive = 0,
+    /// The buffer held — or may have held — credentials, keys,
+    /// session tokens, capability bitmaps, or otherwise security-
+    /// relevant payload. Drivers **must** zero every internal copy
+    /// of the buffer before returning from the call.
+    Sensitive = 1,
+}
+
+impl BufferClass {
+    /// Raw on-wire byte value.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Construct a [`BufferClass`] from its raw on-wire byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::OutOfRange`] if `raw` does not name a
+    /// known class. The host must fail closed in that case
+    /// (`AGENTS.md` §5.4.5).
+    ///
+    /// # Capabilities
+    ///
+    /// None.
+    pub const fn from_u8(raw: u8) -> Result<Self, DriverError> {
+        match raw {
+            0 => Ok(Self::NonSensitive),
+            1 => Ok(Self::Sensitive),
+            _ => Err(DriverError::OutOfRange),
+        }
+    }
+
+    /// Whether the buffer requires zero-on-free handling.
+    #[must_use]
+    pub const fn is_sensitive(self) -> bool {
+        matches!(self, Self::Sensitive)
+    }
+}
+
 /// Magic number identifying an `abi-v1` driver manifest
 /// (`"DRV1"` little-endian).
 pub const DRIVER_MANIFEST_MAGIC: u32 = u32::from_le_bytes(*b"DRV1");
@@ -595,6 +662,17 @@ mod tests {
         fn kind(&self) -> DriverKind {
             DriverKind::UserSpace
         }
+    }
+
+    #[test]
+    fn buffer_class_round_trip() {
+        assert_eq!(BufferClass::NonSensitive.as_u8(), 0);
+        assert_eq!(BufferClass::Sensitive.as_u8(), 1);
+        assert_eq!(BufferClass::from_u8(0), Ok(BufferClass::NonSensitive));
+        assert_eq!(BufferClass::from_u8(1), Ok(BufferClass::Sensitive));
+        assert_eq!(BufferClass::from_u8(2), Err(DriverError::OutOfRange));
+        assert!(BufferClass::Sensitive.is_sensitive());
+        assert!(!BufferClass::NonSensitive.is_sensitive());
     }
 
     #[test]

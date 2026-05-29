@@ -46,6 +46,12 @@ members = [
     "drivers/bus/virtio",
     "drivers/bus/mmio",
 
+    # Drivers — storage
+    "drivers/storage/virtio_blk",
+
+    # Drivers — network
+    "drivers/network/virtio_net",
+
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in
     # AGENTS.md §3.

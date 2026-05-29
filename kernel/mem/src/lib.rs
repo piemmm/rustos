@@ -47,6 +47,7 @@
 extern crate alloc;
 
 pub mod bootinfo;
+pub mod dma;
 pub mod error;
 pub mod frame;
 pub mod ptr;
@@ -55,11 +56,12 @@ pub mod slab;
 pub mod vmm;
 
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+pub use dma::{DmaBuffer, DmaError, DmaPool};
 pub use error::AllocError;
 pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle};
 pub use vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-tests"))]
 pub use vmm::HostPageTable;

@@ -85,6 +85,7 @@ pub fn is_known_capability(id: CapabilityId) -> bool {
             | CapabilityId::IPC_BIND_PRIVILEGED
             | CapabilityId::AUDIT_READ
             | CapabilityId::AUDIT_WRITE
+            | CapabilityId::MEM_DMA
     )
 }
 
@@ -442,6 +443,7 @@ mod tests {
             CapabilityId::IPC_BIND_PRIVILEGED,
             CapabilityId::AUDIT_READ,
             CapabilityId::AUDIT_WRITE,
+            CapabilityId::MEM_DMA,
         ] {
             assert!(is_known_capability(cap));
         }

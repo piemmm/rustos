@@ -26,8 +26,9 @@ pub mod syscalls;
 
 pub use capability::{CapabilityId, CAPABILITY_ID_MAX};
 pub use driver::{
-    DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    BufferClass, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN,
 };
 pub use error::Errno;
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};

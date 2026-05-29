@@ -22,6 +22,8 @@
 //! | 1021 | Info  | `TASK_CAPABILITIES_DELEGATED`     | A delegated subset was installed under a task. |
 //! | 1022 | Error | `TASK_CAPABILITIES_DELEGATE_WIDEN`| A delegation attempt would have widened the parent set and was refused. |
 //! | 1023 | Info  | `TASK_CAPABILITIES_REVOKED`       | One or more capabilities were revoked from a task. |
+//! | 1030 | Info  | `DMA_ALLOCATED`                   | A DMA buffer was allocated for a task that holds `CAP_MEM_DMA` (`AGENTS.md` §4). |
+//! | 1031 | Error | `DMA_ALLOC_DENIED`                | A DMA allocation was refused because the calling task lacks `CAP_MEM_DMA`. |
 //!
 //! Adding a new event requires assigning the next free identifier in this
 //! file and appending a row to the table in
@@ -59,6 +61,12 @@ pub enum AuditEvent {
     TaskCapabilitiesDelegateWiden,
     /// One or more capabilities were revoked from a task.
     TaskCapabilitiesRevoked,
+    /// A DMA buffer was allocated through the capability-gated
+    /// per-process DMA pool.
+    DmaAllocated,
+    /// A DMA allocation was refused because the calling task does
+    /// not hold `CapabilityId::MEM_DMA`.
+    DmaAllocDenied,
 }
 
 impl AuditEvent {
@@ -77,6 +85,8 @@ impl AuditEvent {
             Self::TaskCapabilitiesDelegated => 1021,
             Self::TaskCapabilitiesDelegateWiden => 1022,
             Self::TaskCapabilitiesRevoked => 1023,
+            Self::DmaAllocated => 1030,
+            Self::DmaAllocDenied => 1031,
         })
     }
 
@@ -93,13 +103,15 @@ impl AuditEvent {
             | Self::ManifestVerified
             | Self::TaskCapabilitiesDerived
             | Self::TaskCapabilitiesDelegated
-            | Self::TaskCapabilitiesRevoked => Level::Info,
+            | Self::TaskCapabilitiesRevoked
+            | Self::DmaAllocated => Level::Info,
             Self::IdentityTableRejected
             | Self::ManifestBadHeader
             | Self::ManifestAbiMismatch
             | Self::ManifestSignatureInvalid
             | Self::ManifestUnknownCapability
-            | Self::TaskCapabilitiesDelegateWiden => Level::Error,
+            | Self::TaskCapabilitiesDelegateWiden
+            | Self::DmaAllocDenied => Level::Error,
         }
     }
 
@@ -122,6 +134,8 @@ impl AuditEvent {
             Self::TaskCapabilitiesDelegated => "task capabilities delegated",
             Self::TaskCapabilitiesDelegateWiden => "task delegation would widen authority",
             Self::TaskCapabilitiesRevoked => "task capabilities revoked",
+            Self::DmaAllocated => "dma buffer allocated",
+            Self::DmaAllocDenied => "dma allocation denied: missing CAP_MEM_DMA",
         }
     }
 }
@@ -227,6 +241,8 @@ mod tests {
             EventId(1022)
         );
         assert_eq!(AuditEvent::TaskCapabilitiesRevoked.id(), EventId(1023));
+        assert_eq!(AuditEvent::DmaAllocated.id(), EventId(1030));
+        assert_eq!(AuditEvent::DmaAllocDenied.id(), EventId(1031));
     }
 
     #[test]
@@ -263,6 +279,8 @@ mod tests {
             AuditEvent::TaskCapabilitiesDelegated,
             AuditEvent::TaskCapabilitiesDelegateWiden,
             AuditEvent::TaskCapabilitiesRevoked,
+            AuditEvent::DmaAllocated,
+            AuditEvent::DmaAllocDenied,
         ] {
             let id = ev.id().0;
             assert!(

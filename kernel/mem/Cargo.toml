@@ -11,6 +11,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `host-tests` exposes the in-memory `HostPageTable` test double to
+# downstream crates' unit and integration tests. The feature must not
+# be enabled in production kernel builds — it adds the test double's
+# `BTreeMap` storage to the address-space machinery and serves no
+# purpose outside cargo-test. Per `AGENTS.md` §2.3 the feature flag
+# exists rather than a duplicate definition in every consumer crate.
+host-tests = []
+
 [dependencies]
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
 rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }

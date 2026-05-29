@@ -14,16 +14,14 @@ workspace = true
 [dependencies]
 # Stage 2.4 dependency rules (issue brief): kernel/sec may depend only on
 # kernel/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
-# `crypto`, `log`, and `util`. Nothing else is needed at this stage —
-# table storage is bounded and `no_std`, no synchronisation primitives
-# are required by the in-memory builder/verifier API. Pulling in
-# kernel/sync or kernel/mem "just in case" would violate AGENTS.md §2.3
-# (no bloat). `lib/util` arrived in Stage 2.5 (`kernel/ipc`) as the
-# extraction target for the audit-field formatters previously duplicated
-# here (`AGENTS.md` §2.2 / §6).
+# `crypto`, `log`, and `util`. `kernel/mem` is pulled in at Stage 4.D
+# (DMA capability gate, AGENTS.md §4) to wrap the per-process DMA pool
+# in a `CapabilityId::MEM_DMA` check that emits a structured audit
+# record on every grant or denial.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
@@ -33,3 +31,8 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # Matching the pinned version already audited by `lib/caps`/`lib/crypto`.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The capability-gated DMA tests in `dma::tests` exercise the
+# `kernel/mem` allocator end-to-end through its `HostPageTable` test
+# double, which is gated behind the `host-tests` feature so production
+# builds do not link it (`AGENTS.md` §2.3).
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

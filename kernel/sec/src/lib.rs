@@ -48,11 +48,13 @@
 
 pub mod audit;
 pub mod captable;
+pub mod dma;
 pub mod identity;
 pub mod manifest;
 
 pub use audit::AuditEvent;
 pub use captable::{CapTable, TaskCapabilities, TaskId};
+pub use dma::{alloc_dma, free_dma, DmaGateError};
 pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
     MAX_SUPPLEMENTARY_GROUPS,

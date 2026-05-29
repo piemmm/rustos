@@ -1157,11 +1157,108 @@ follow-up is its own thread and is now also complete.
   `MmioRead`); no `unsafe` leaks across the crate boundary.
   Docs: `docs/src/drivers/bus.md` plus a README per driver
   crate, both wired into `docs/src/SUMMARY.md`.
-- Remaining per-class first drivers (`drivers/display/vesa`,
-  `drivers/display/framebuffer`, `drivers/bus/virtio`,
-  `drivers/storage/virtio_blk`, `drivers/input/ps2`,
-  `drivers/network/virtio_net`) remain outstanding per the Stage 4
-  deliverable list above.
+- `drivers/bus/virtio` (cross-arch virtio transport),
+  `drivers/storage/virtio_blk`, and `drivers/network/virtio_net`
+  shipped in their host-side form: the transport crate implements
+  the virtio 1.1 §2.6 split virtqueue (descriptor table, avail
+  ring, used ring, free-descriptor pool, descriptor chaining), the
+  virtio 1.1 §3.1 status-byte initialisation sequence, a
+  `VirtioHost` allocator+notifier trait, a `BounceBuffer` wrapper
+  that scrubs DMA staging on drop for
+  `BufferClass::Sensitive`, and a `MockTransport` / `ChainView`
+  test seam. The two device drivers implement
+  `rustos_abi::driver::block::Block` / `rustos_abi::driver::net::Net`
+  on the same bus-agnostic transport (so PCI and MMIO use one
+  source) and override `*_with_class` to honour the sensitive
+  scrub contract (`AGENTS.md` §4). 30 transport-crate tests + 8
+  virtio-blk tests + 9 virtio-net tests all pass; `cargo clippy
+  -p rustos-drv-bus-virtio -p rustos-drv-storage-virtio-blk
+  -p rustos-drv-network-virtio-net --all-targets -- -D warnings`
+  is clean. Docs: `docs/src/drivers/virtio.md`,
+  `docs/src/drivers/block.md`, `docs/src/drivers/network.md` plus
+  one README per driver crate, all wired into
+  `docs/src/SUMMARY.md`. Deferred (each spelled out in
+  `.junie/next-session-prompt.md`):
+  (1) kernel per-process-heap DMA allocator with `phys_of()` —
+  the current `MockHost::alloc_dma_zeroed` returns `phys == virt`
+  because the kernel memory-capability surface does not exist;
+  (2) IRQ routing into user-space drivers — `notify_wait` is a
+  polled cooperative hook in this PR;
+  (3) capability-checked bus-handle hand-off from `drivers/bus/pci`
+  and `drivers/bus/mmio` — the `PciBackend` / `MmioBackend` shells
+  carry only the identification tuple they were constructed with;
+  (4) QEMU PCI (x86_64) and MMIO (riscv64) integration tests for
+  virtio-blk read/write+checksum and virtio-net ARP/ICMP echo,
+  plus the unload→reload→reuse path;
+  (5) the userland ARP/IP/ICMP responder required by the
+  virtio-net QEMU integration. The remaining per-class first
+  drivers (`drivers/display/vesa`, `drivers/display/framebuffer`,
+  `drivers/input/ps2`) remain outstanding per the Stage 4
+  deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
+  a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 1 — kernel per-process-heap DMA
+  API): landed. `lib/abi` ships `CapabilityId::MEM_DMA = 10` —
+  the next free slot after `AUDIT_WRITE`, frozen by the
+  `well_known_ids_are_frozen` test (`AGENTS.md` §9).
+  `kernel/mem` grew a new `dma` module (`DmaPool<P>`,
+  `DmaBuffer`, `DmaError`) composed over the existing
+  `FrameAllocator` (contiguous-by-physical frame blocks) and
+  `AddressSpace<P: PageTableOps>` (per-process virtual window):
+  every allocation reserves a leading + trailing guard slot left
+  unmapped in the `AddressSpace` (`AGENTS.md` §4 — guard pages
+  around kernel slabs); the host model paints the guard storage
+  with `0xCC` and verifies it at `free` time so the same call
+  site is testable on host and faults on hardware.
+  `DmaPool::free` zeroes every byte of the data region through
+  the audited `zeroize` crate's volatile clear *before* returning
+  frames to the buddy allocator (`AGENTS.md` §4 — zero-on-free
+  for any buffer that may have held credentials); a
+  `reuse_after_free_sees_zeroed_buffer` test exercises this
+  end-to-end with a sentinel payload. Allocation requests larger
+  than `MAX_ORDER` produce `DmaError::SizeUnsupported`; virtual
+  or physical exhaustion produce
+  `DmaError::Alloc(OutOfMemory)`; no `unwrap` / `expect` /
+  `panic!` on production paths (`AGENTS.md` §2.9).
+  `HostPageTable` moved behind a new `kernel/mem` `host-tests`
+  Cargo feature so downstream crates can borrow it for unit
+  tests without leaking the test double into production builds.
+  `kernel/sec` grew a companion `dma` module: `alloc_dma` /
+  `free_dma` verify `CapabilityId::MEM_DMA` on the calling
+  `TaskCapabilities` before delegating to the pool, emit a
+  structured `AuditEvent::DmaAllocated` (id `1030`, Info) on
+  every grant carrying `(task, len, phys)`, and an
+  `AuditEvent::DmaAllocDenied` (id `1031`, Error) on every
+  refusal carrying `(task, uid, requested)`.
+  `DmaGateError::as_errno()` maps gate failures into `abi-v1`
+  errnos (`PermissionDenied` / `BufferTooSmall` /
+  `LengthOutOfRange` / `OutOfRange`). Tests: 17 new in-crate
+  units in `kernel/mem/src/dma/tests.rs` (alignment, phys lookup,
+  zero-on-free, reuse-sees-zero, OOM-as-Result, leading +
+  trailing guard overrun, frame-reclaim-on-violation,
+  unknown-buffer / double-free) and 7 new in
+  `kernel/sec/src/dma/tests.rs` (grant / denial audit-event
+  sequence, zero-size pool propagation, oversize →
+  LengthOutOfRange, full errno mapping). Crate totals: `cargo
+  test -p rustos-kernel-mem --lib` → 84 passing (was 67);
+  `cargo test -p rustos-kernel-sec --lib` → 46 passing (was 39);
+  zero regressions in `rustos-abi`, `rustos-caps`,
+  `rustos-drv-bus-virtio`, `rustos-drv-storage-virtio-blk`,
+  `rustos-drv-network-virtio-net`, `rustos-drv-bus-pci`,
+  `rustos-drv-bus-mmio`, `rustos-drvhost`. `cargo clippy ...
+  --all-targets -- -D warnings` and `cargo fmt --check` are
+  clean across `rustos-abi`, `rustos-kernel-mem`,
+  `rustos-kernel-sec`. Docs: new "DMA buffers" section in
+  `docs/src/architecture/memory.md`, two new rows
+  (`1030 / DmaAllocated`, `1031 / DmaAllocDenied`) in
+  `docs/src/architecture/security.md`. `cargo xtask test`/`ci`
+  cannot be run end-to-end in the current environment —
+  `kernel/arch/x86_64` needs the `nightly-2026-05-27` toolchain
+  pinned in `rust-toolchain.toml` (for `#[unsafe(naked)]` and
+  inline-const), and the host has only stable rustc 1.75; the
+  failure is identical to the pre-existing Stage 3a footprint
+  and is unrelated to this Item 1 work. Items 2–6 of the prior
+  next-session prompt remain outstanding and have been rewritten
+  into the next session's prompt.
 
 ---
 

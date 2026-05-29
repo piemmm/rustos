@@ -116,6 +116,8 @@ re-used or re-numbered.
 | 1021 | Info  | `TaskCapabilitiesDelegated`       | A delegated subset (or signed `CapabilityToken`) was installed.       |
 | 1022 | Error | `TaskCapabilitiesDelegateWiden`   | A delegation attempt that would have widened authority was refused.  |
 | 1023 | Info  | `TaskCapabilitiesRevoked`         | One or more capabilities were revoked from a task.                    |
+| 1030 | Info  | `DmaAllocated`                    | DMA buffer granted to a task holding `CAP_MEM_DMA` (`AGENTS.md` §4).  |
+| 1031 | Error | `DmaAllocDenied`                  | DMA allocation refused because the caller lacks `CAP_MEM_DMA`.        |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/sec/src/audit.rs` and appending a row to this table in the same

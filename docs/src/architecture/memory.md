@@ -115,7 +115,63 @@ named drop equivalent provided for documentation symmetry.
 silent reallocations that would leak a secret into the old
 allocation. Its `Debug` impl deliberately redacts the contents.
 
-## 5. Result-returning OOM contract
+## 5. DMA buffers
+
+User-space drivers (`drivers/storage/virtio_blk`, `drivers/network/virtio_net`,
+future NVMe / GPU bus-master devices) need page-aligned, contiguous-by-physical
+buffers that a device can address directly. The
+[`DmaPool<P>`](../../rustos_kernel_mem/struct.DmaPool.html) ships that facility,
+composing the layers above:
+
+- **Physical contiguity** — frames are taken from the buddy allocator at a
+  single buddy order; the buffer is therefore physically contiguous up to
+  `MAX_ORDER` pages.
+- **Per-process virtual window** — the pool owns a slice of one process's
+  `AddressSpace<P>`. Each allocation maps `data_pages` consecutive pages
+  with `READ | WRITE | USER`; no `EXEC`, no global sharing.
+- **Guard pages** — every allocation is bracketed by one *unmapped* virtual
+  page on each side. On hardware an overrun faults; the host model fills the
+  guard storage with `0xCC` and detects tampering at `free` time, mirroring
+  the `slab` convention.
+- **Zero-on-free** — every byte of the data region is wiped with
+  [`zeroize`](https://crates.io/crates/zeroize) before the frames return to
+  the buddy allocator. A later allocation that lands on the same slot sees
+  zeros; a forensic read of free physical memory cannot recover the
+  credentials, keys, or capability tokens the buffer once held
+  (`AGENTS.md` §4).
+- **Bounded failure** — `alloc` / `free` return `Result<_, DmaError>`. No
+  panic on resource exhaustion, no `expect` on hot paths, no `unsafe` leaks
+  across the crate boundary. Allocation requests larger than `MAX_ORDER`
+  return `DmaError::SizeUnsupported`; exhaustion of either the virtual
+  window or the frame allocator returns `DmaError::Alloc(OutOfMemory)`.
+
+```text
+[ guard | data_0 | data_1 | … | data_{n-1} | guard ]
+   |       └────────── mapped (R/W/U) ──────────┘   |
+   └──── unmapped (hw) / 0xCC pattern (host) ───────┘
+```
+
+The pool itself is **capability-agnostic**: it does not consult the calling
+task's capability set. The capability gate is the companion module
+`kernel/sec::dma`, whose `alloc_dma` / `free_dma` entry points verify
+[`CapabilityId::MEM_DMA`](../../rustos_abi/struct.CapabilityId.html#associatedconstant.MEM_DMA)
+before dispatching to the pool, and emit
+[`AuditEvent::DmaAllocated`] / [`AuditEvent::DmaAllocDenied`] records on
+every decision (IDs 1030 / 1031, see [Security audit catalogue](./security.md)).
+A future syscall wrapper maps gate failures to `Errno` via
+`DmaGateError::as_errno`:
+
+| Gate error | `Errno` |
+| --- | --- |
+| `CapabilityMissing` | `PermissionDenied` |
+| `Pool(ZeroSize)` | `BufferTooSmall` |
+| `Pool(Alloc | SizeUnsupported)` | `LengthOutOfRange` |
+| Other internal pool failures | `OutOfRange` |
+
+[`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
+[`AuditEvent::DmaAllocDenied`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
+
+## 6. Result-returning OOM contract
 
 Every fallible operation in this crate returns
 `Result<_, AllocError>`. No path panics on out-of-memory
@@ -130,7 +186,7 @@ Every fallible operation in this crate returns
 | `MetadataAllocFailed` | Allocator could not bootstrap itself. |
 | `InvariantViolation` | Double-free, free of a reserved frame, malformed boot map. |
 
-## 6. Unsafe & pointer arithmetic discipline
+## 7. Unsafe & pointer arithmetic discipline
 
 Per `AGENTS.md` §4, raw pointer arithmetic is confined to the
 `ptr` module's bounds-checked helpers (`offset_within`,
@@ -139,7 +195,7 @@ math through them. Every `unsafe` block carries a `// SAFETY:`
 rationale per `AGENTS.md` §2.10, encapsulated behind a safe public
 API; no `unsafe` leaks across crate boundaries.
 
-## 6a. Platform memory-map sources
+## 7a. Platform memory-map sources
 
 The `BootMemoryMap` is *fed* by the architecture port, not constructed
 by `kernel/mem`. On x86_64 (Stage 3a (a)) the discovery surface lives
@@ -159,7 +215,7 @@ for draining the descriptor stream into a `BootMemoryMap` via
 `alloc` so it can be linked into the freestanding Stage-2 QEMU test
 binaries that do not yet provide a `#[global_allocator]`.
 
-## 7. Testing strategy
+## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:
   buddy split/merge, bitmap correctness, slab guard-page detection,

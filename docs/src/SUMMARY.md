@@ -37,6 +37,9 @@
 - [Userland driver host](./drivers/host.md)
 - [Driver lifecycle](./drivers/lifecycle.md)
 - [Bus drivers](./drivers/bus.md)
+- [Virtio transport](./drivers/virtio.md)
+- [Block drivers](./drivers/block.md)
+- [Network drivers](./drivers/network.md)
 
 # ABI
 

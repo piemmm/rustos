@@ -45,6 +45,16 @@ impl CapabilityId {
     pub const AUDIT_READ: Self = Self(8);
     /// Write entries to the security audit log.
     pub const AUDIT_WRITE: Self = Self(9);
+    /// Allocate and free DMA-able memory through the per-process heap.
+    ///
+    /// Granted to user-space drivers that need to publish buffer
+    /// addresses to a bus-master device (virtio-blk, virtio-net,
+    /// future `NVMe`). Holders may call the kernel's DMA allocator,
+    /// which hands back page-aligned, contiguous-by-physical-address
+    /// regions out of the calling process's heap, with guard pages
+    /// around the slab and zero-on-free for every byte ever made
+    /// device-visible (`AGENTS.md` §4).
+    pub const MEM_DMA: Self = Self(10);
 
     /// Construct a [`CapabilityId`] from its raw value, validating the range.
     ///
@@ -88,6 +98,7 @@ mod tests {
         assert_eq!(CapabilityId::IPC_BIND_PRIVILEGED.as_u16(), 7);
         assert_eq!(CapabilityId::AUDIT_READ.as_u16(), 8);
         assert_eq!(CapabilityId::AUDIT_WRITE.as_u16(), 9);
+        assert_eq!(CapabilityId::MEM_DMA.as_u16(), 10);
     }
 
     #[test]
@@ -106,5 +117,6 @@ mod tests {
     #[test]
     fn index_is_within_bitset_bounds() {
         assert!(CapabilityId::AUDIT_WRITE.index() < 256);
+        assert!(CapabilityId::MEM_DMA.index() < 256);
     }
 }
