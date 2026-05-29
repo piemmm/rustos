@@ -512,9 +512,11 @@ version = "0.0.0"
 name = "rustos-kernel"
 version = "0.0.0"
 dependencies = [
+ "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-x86_64",
  "rustos-caps",
+ "rustos-crypto",
  "rustos-drv-bus-virtio",
  "rustos-drvhost",
  "rustos-kernel-core",

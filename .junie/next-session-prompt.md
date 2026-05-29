@@ -8,7 +8,36 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
-- **Hardware-real direct-map DMA/MMIO data path** (latest session).
+- **Live virtio-PCI boot wiring** (latest session). The ring-0 walk
+  (`provision_virtio_pci`) and the per-driver DMA factory
+  (`KernelVirtioFactory`) existed but were reachable only from unit
+  tests; nothing joined them to a live `drvhost::Host`. New module
+  `kernel/rustos-kernel/src/virtio_boot.rs`: `VirtioBootConfig` (the
+  borrowed boot resources) + `provision_and_run(config, make_table,
+  body)` — it builds a `KernelMmioMapper`, provisions the
+  `PciTransport`, constructs a `KernelVirtioFactory`, and hands a live
+  `drvhost::Host` (factory wired into
+  `HostConfig::virtio_host_factory`) plus the transport to a `body`
+  closure. The scope/callback keeps the mapper/factory/host + every
+  minted per-driver `DmaPool` on one boot frame (reclaimed on return;
+  `AGENTS.md` §4); fails closed with `VirtioPciWalkError` without
+  building the host. Host-tested only: `rustos-kernel --lib` 44 (+2 —
+  a happy path that provisions the four register windows over a
+  `SimPhysMap`-backed `MmioMap`, loads a signed `.rxe` whose `register`
+  allocates a zeroed DMA slab through the minted `VirtioHost`, asserts
+  `mmio.live() == 4`; and a missing-device `NoVirtioFunction` path).
+  `rustos-crypto` is now a dep + `ed25519-dalek` a dev-dep (test
+  signing). Clippy/fmt/doc + `x86_64-unknown-none` lib+bin clean.
+  **What this unblocks:** the `tests/integration/virtio_blk_pci_x86_64`
+  kernel test bin now only has to *call* `provision_and_run` from the
+  boot pipeline against the live `Pci` + real `KernelMmioMapper` +
+  `DirectPhysMap`, and drive the loaded `virtio-blk` `.rxe` inside the
+  `body` closure. **Still TODO:** construct a `DirectPhysMap` in the
+  test bin (e.g. `DirectPhysMap::identity(4 GiB)` matching the boot
+  identity map) and a real `MmioMap`/`FrameAllocator` from `BootInfo`,
+  bind the device IRQ line, and feed it all into `provision_and_run`.
+
+- **Hardware-real direct-map DMA/MMIO data path** (earlier session).
   Before this, the kernel DMA/MMIO primitives could not drive a *real*
   device: `kernel/mem::DmaPool` served the driver's CPU-visible bytes
   from a heap `Vec<u8>` decoupled from the physical frames it handed

@@ -1318,6 +1318,42 @@ follow-up is its own thread and is now also complete.
   signed-`.rxe` boot path), the riscv64 runner + DTB/MMIO walk, the
   net tests, and the Item 6 acceptance gate remain outstanding — see
   `.junie/next-session-prompt.md`.
+- Stage 4.D follow-up (Item 4 — live virtio-PCI boot wiring,
+  *complete*): the ring-0 walk (`provision_virtio_pci`) and the
+  per-driver DMA factory (`KernelVirtioFactory`) existed but were only
+  reachable from unit tests; nothing joined them to a live
+  `drvhost::Host`. **Wiring seam.** New module
+  `kernel/rustos-kernel/src/virtio_boot.rs` adds `VirtioBootConfig`
+  (the borrowed boot resources: bus, per-driver `MmioMap`, DMA frame
+  allocator + `PhysMap`, bound `IrqHandle`, `IrqWaiter`, and the
+  driver-host trust inputs) and `provision_and_run(config, make_table,
+  body)`. It builds a `KernelMmioMapper`, provisions the
+  `PciTransport`, constructs a `KernelVirtioFactory`, and hands a live
+  `drvhost::Host` (factory wired into `HostConfig::virtio_host_factory`)
+  plus the transport to a `body` closure. The scope/callback shape
+  keeps the mapper, factory, host, and every minted per-driver DMA pool
+  on one boot frame, so all of it is reclaimed when `body` returns — no
+  driver retains a register window or DMA mapping past its load
+  (`AGENTS.md` §4). The walk fails closed with `VirtioPciWalkError` and
+  never builds the host if the device or a window cannot be resolved.
+  **Tests.** `rustos-kernel --lib` 44 (+2 `virtio_boot` host tests: a
+  happy path that provisions the four register windows over a
+  `SimPhysMap`-backed `MmioMap`, loads a signed `.rxe` whose `register`
+  allocates a zeroed DMA slab through the minted `VirtioHost`, and
+  asserts `mmio.live() == 4`; and a missing-device path asserting
+  `NoVirtioFunction` with nothing mapped). `rustos-crypto` is now a
+  dependency (the config names `Ed25519PublicKey`) and `ed25519-dalek`
+  a dev-dependency (test signing, matching `drvhost`). `cargo clippy
+  -p rustos-kernel --all-targets -- -D warnings`, `cargo fmt --check`,
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-kernel --no-deps`,
+  and the `x86_64-unknown-none` lib + bin build are clean; `drvhost`,
+  `kernel-mem`, `kernel-sec`, `abi` regress none. **Docs.**
+  `docs/src/drivers/bus.md` ("Boot wiring"). **Deferred.** The
+  `tests/integration/virtio_blk_pci_x86_64` QEMU crate that calls
+  `provision_and_run` from the boot pipeline against a real device, the
+  riscv64 runner + DTB/MMIO walk, the net tests, and the Item 6
+  acceptance gate remain outstanding — see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 2-tail.4 — kernel-binary
   `VirtioHostFactory`, *complete*): the production kernel binary now
   owns a concrete `VirtioHostFactory` that mints a fresh, per-driver

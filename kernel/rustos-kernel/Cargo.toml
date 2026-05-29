@@ -50,6 +50,9 @@ path = "src/main.rs"
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The `virtio_boot` wiring config names `Ed25519PublicKey` for the
+# driver-host trust-anchor list (`drvhost::HostConfig::trusted_signers`).
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-kernel-core = { path = "../core", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
@@ -76,3 +79,9 @@ rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0",
 # the `host-tests` feature so production builds never link it
 # (`AGENTS.md` §2.3).
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+# The `virtio_boot` wiring test signs a synthetic `.rxe` manifest with a
+# known keypair so the live `drvhost::Host` accepts it. Pinned to the
+# same version `lib/crypto` audits and `drvhost`'s fixtures use; only
+# test code names `ed25519-dalek`, never production paths
+# (`AGENTS.md` §2.3, mirrors `userland/system/drvhost`).
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }

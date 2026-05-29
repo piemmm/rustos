@@ -66,6 +66,7 @@ pub mod arch_wrapper;
 pub mod bumpalloc;
 pub mod dispatch;
 pub mod ioapic_controller;
+pub mod virtio_boot;
 pub mod virtio_factory;
 pub mod virtio_pci_walk;
 
@@ -79,6 +80,7 @@ pub mod serial_sink;
 pub use arch_wrapper::BinArch;
 pub use bumpalloc::BumpAllocator;
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
+pub use virtio_boot::{provision_and_run, VirtioBootConfig};
 pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
 pub use virtio_pci_walk::{provision_virtio_pci, VirtioPciWalkError, MAX_FUNCTIONS};
 
