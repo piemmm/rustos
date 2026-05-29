@@ -8,6 +8,25 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
+- **virtio-blk backing storage in the QEMU runner** (latest session —
+  the `virtio_blk_pci_x86_64` prerequisite). `tools/qemu` could only
+  build a GRUB ISO + attach OVMF; it had no way to give the guest a
+  block device or to know its contents before boot. New module
+  `tools/qemu/src/disk.rs`: `plant_raw_disk(path, size_sectors,
+  sectors)` (+ `SECTOR_BYTES = 512`) lays down a zero-filled raw image
+  and stamps `(lba, bytes)` at `lba * SECTOR_BYTES` (raw, not qcow2, so
+  the host can re-read a guest-written block by byte offset), failing
+  closed on a zero-sector image / out-of-range `lba` / over-long slice.
+  `Spec` gained a `BlockDevice` field + `with_virtio_blk(image)`
+  builder; the x86_64 backend emits `-drive if=none,format=raw,id=blkN`
+  + `-device virtio-blk-pci,drive=blkN` per device, and `Runner::run`
+  fails closed (`NotFound`) on a missing image before spawning QEMU.
+  `rustos-qemu` 27 host tests (+10); clippy `-D warnings` / fmt / doc
+  clean; `docs/src/platform/x86_64.md` updated. **The kernel-side
+  `tests/integration/virtio_blk_pci_x86_64` crate that consumes this is
+  still TODO** (boot + driver host + signed `.rxe` + live
+  `KernelVirtioFactory`/`PciTransport`).
+
 - **Ring-0 virtio-PCI provisioning walk + `VirtioPciBus` ABI seam**
   (latest session). The per-`cfg_type` window hand-offs were
   `pub(crate)` on the concrete `Pci` type, so ring 0 (whose only
@@ -193,11 +212,19 @@ first — it is the one fully on the existing x86_64 runner and
 proves the `PciTransport` against a real device — then build the
 riscv64 runner + MMIO transport, then the net tests.
 
-- `tests/integration/virtio_blk_pci_x86_64` — attach `virtio-blk` to
-  a backing qcow2, read sector 0 (planted by `tools/qemu`), write a
-  known pattern to sector 1, read it back, verify checksum. **Also
-  satisfies Item 3's deferred "walk PCI and hand a working window to
-  the virtio transport" check.**
+- `tests/integration/virtio_blk_pci_x86_64` — the runner half now
+  exists: `Spec::with_virtio_blk(image)` attaches a `virtio-blk-pci`
+  function and `rustos_qemu::disk::plant_raw_disk` plants a **raw**
+  backing image (sector 0 = known pattern) before boot. Remaining: the
+  kernel-side test bin — boot to `BootCompleted`, run
+  `provision_virtio_pci` against the live `Pci` + `KernelMmioMapper`,
+  mint a `KernelVirtioHost` via `KernelVirtioFactory`, load the signed
+  `virtio-blk` `.rxe` through `drvhost::Host`, read sector 0, write a
+  known pattern to sector 1, read it back, verify checksum, then exit
+  via `qemu_exit`. Enrol it in `tools/xtask/src/commands/qemu_tests.rs`
+  and have its runner spec call `with_virtio_blk` + `plant_raw_disk`.
+  **Also satisfies Item 3's deferred "walk PCI and hand a working
+  window to the virtio transport" check.**
 - `tests/integration/virtio_blk_mmio_riscv64` — same against
   `qemu-system-riscv64 -M virt` with `virtio-blk-device`, exercising
   `Mmio::map_slot_window`.

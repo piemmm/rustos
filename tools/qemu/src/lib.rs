@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod disk;
 pub mod iso;
 pub mod x86_64;
 
@@ -126,6 +127,19 @@ impl Outcome {
     }
 }
 
+/// A backing block device attached to the guest.
+///
+/// Today the only attachment shape is a raw image surfaced to the guest
+/// as a modern `virtio-blk-pci` function — exactly the transport the
+/// Stage 4.D `PciTransport` drives. The host prepares the image with
+/// [`disk::plant_raw_disk`]; this type only records where it lives so
+/// the per-arch argv builder can attach it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockDevice {
+    /// Path to the raw backing image on the host.
+    pub image: PathBuf,
+}
+
 /// Tier-1 architecture this runner can target.
 ///
 /// Only `X86_64` ships today; Stage 3b/3c/3d add the remaining Tier-1
@@ -167,6 +181,9 @@ pub struct Spec {
     pub cpus: u32,
     /// Hard wall-clock deadline. The runner kills QEMU if this elapses.
     pub timeout: Duration,
+    /// Backing block devices attached as `virtio-blk-pci` functions, in
+    /// declaration order. Empty for tests that need no storage.
+    pub block_devices: Vec<BlockDevice>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -184,6 +201,7 @@ impl Spec {
             kernel: kernel.into(),
             cpus: 1,
             timeout: Duration::from_secs(60),
+            block_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -200,6 +218,17 @@ impl Spec {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Attach a raw backing image as an additional `virtio-blk-pci`
+    /// device. Prepare the image's contents with [`disk::plant_raw_disk`]
+    /// before [`Runner::run`].
+    #[must_use]
+    pub fn with_virtio_blk(mut self, image: impl Into<PathBuf>) -> Self {
+        self.block_devices.push(BlockDevice {
+            image: image.into(),
+        });
         self
     }
 }
@@ -227,6 +256,20 @@ impl Runner {
                 io::ErrorKind::NotFound,
                 format!("kernel ELF not found: {}", spec.kernel.display()),
             ));
+        }
+        // Fail closed before spawning QEMU if a backing image is missing:
+        // QEMU would otherwise abort mid-boot with an opaque error that the
+        // runner could only report as a generic failure.
+        for dev in &spec.block_devices {
+            if !dev.image.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "virtio-blk backing image not found: {}",
+                        dev.image.display()
+                    ),
+                ));
+            }
         }
 
         // Build the bootable artifact through the per-arch backend. Today
@@ -357,6 +400,34 @@ mod tests {
     fn missing_kernel_returns_not_found() {
         let s = Spec::for_x86_64_kernel("/definitely/not/a/real/path");
         let err = Runner::run(&s).expect_err("missing kernel should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn with_virtio_blk_records_the_backing_image() {
+        let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_blk("/tmp/disk.img");
+        assert_eq!(s.block_devices.len(), 1);
+        assert_eq!(s.block_devices[0].image, PathBuf::from("/tmp/disk.img"));
+    }
+
+    #[test]
+    fn missing_backing_image_returns_not_found_before_spawning_qemu() {
+        // Plant a real (empty) kernel file so the failure is attributable
+        // to the missing backing image, not to a missing kernel.
+        let kernel =
+            std::env::temp_dir().join(format!("rustos-qemu-kernel-{}.elf", std::process::id()));
+        std::fs::write(&kernel, b"\x7fELF").expect("write placeholder kernel");
+        let s = Spec {
+            arch: Arch::X86_64,
+            kernel,
+            cpus: 1,
+            timeout: Duration::from_secs(60),
+            block_devices: vec![BlockDevice {
+                image: PathBuf::from("/definitely/not/a/real/disk.img"),
+            }],
+            extra_args: Vec::new(),
+        };
+        let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

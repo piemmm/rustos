@@ -143,6 +143,20 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
     argv.push(format!("if=pflash,format=raw,file={}", ovmf.vars_copy.display()).into());
     argv.push("-cdrom".into());
     argv.push(iso.into());
+
+    // Attach each backing image as a modern virtio-blk-pci function.
+    // `if=none` detaches the drive from any automatic controller so the
+    // explicit `-device virtio-blk-pci,drive=blkN` is the only thing that
+    // surfaces it to the guest — that is the PCI function the Stage 4.D
+    // boot walk discovers and `PciTransport` drives.
+    for (i, dev) in spec.block_devices.iter().enumerate() {
+        argv.push("-drive".into());
+        let mut drive = OsString::from(format!("if=none,format=raw,id=blk{i},file="));
+        drive.push(dev.image.as_os_str());
+        argv.push(drive);
+        argv.push("-device".into());
+        argv.push(format!("virtio-blk-pci,drive=blk{i}").into());
+    }
     argv
 }
 
@@ -158,6 +172,7 @@ mod tests {
             kernel: PathBuf::from("/tmp/k.elf"),
             cpus,
             timeout: Duration::from_secs(60),
+            block_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -304,6 +319,49 @@ mod tests {
             "second -drive must be the writable VARS copy, got {}",
             drives[1]
         );
+    }
+
+    #[test]
+    fn argv_without_block_devices_attaches_no_virtio_blk() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+        assert!(
+            !argv.iter().any(|a| a.starts_with("virtio-blk-pci")),
+            "a storage-free spec must not attach a virtio-blk device"
+        );
+    }
+
+    #[test]
+    fn argv_attaches_each_block_device_as_virtio_blk_pci() {
+        let mut spec = fixture_spec(1);
+        spec.block_devices = vec![
+            crate::BlockDevice {
+                image: PathBuf::from("/tmp/disk0.img"),
+            },
+            crate::BlockDevice {
+                image: PathBuf::from("/tmp/disk1.img"),
+            },
+        ];
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+
+        // Each device is a detached drive (`if=none`) bound to its own
+        // virtio-blk-pci function by a matching id.
+        assert!(argv.iter().any(|a| a.contains("if=none")
+            && a.contains("id=blk0")
+            && a.contains("/tmp/disk0.img")));
+        assert!(argv.iter().any(|a| a.contains("if=none")
+            && a.contains("id=blk1")
+            && a.contains("/tmp/disk1.img")));
+        assert!(argv.iter().any(|a| a == "virtio-blk-pci,drive=blk0"));
+        assert!(argv.iter().any(|a| a == "virtio-blk-pci,drive=blk1"));
     }
 
     #[test]

@@ -1196,6 +1196,38 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — virtio-blk backing
+  storage in the QEMU runner, *complete*): the `tests/integration/
+  virtio_blk_pci_x86_64` crate needs the guest to see a
+  `virtio-blk-pci` function whose contents are known before boot, but
+  the `tools/qemu` runner could only build a GRUB ISO + attach OVMF —
+  it had no block-device surface. **Disk planting.** New module
+  `tools/qemu/src/disk.rs` adds `plant_raw_disk(path, size_sectors,
+  sectors)` (+ `SECTOR_BYTES = 512`): it lays down a zero-filled raw
+  image and stamps each `(lba, bytes)` entry at `lba * SECTOR_BYTES`.
+  Raw (not qcow2) is deliberate so the host harness can re-read a
+  guest-written block by byte offset without a qcow2 parser. Validation
+  fails closed (`InvalidInput`, no file created) on a zero-sector
+  image, an out-of-range `lba`, or a slice longer than a sector.
+  **Device attachment.** `Spec` gains a `BlockDevice` field +
+  `with_virtio_blk(image)` builder (the sanctioned alternative to
+  smuggling args through `extra_args`, which the field's own docs call
+  out); the x86_64 backend emits `-drive if=none,format=raw,id=blkN,
+  file=<image>` + `-device virtio-blk-pci,drive=blkN` per device, and
+  `Runner::run` fails closed with `NotFound` if a backing image is
+  missing before spawning QEMU. **Tests.** `rustos-qemu` 27 (+10: five
+  planting paths in `disk::tests`, three argv/no-storage paths and the
+  missing-image guard, plus the `with_virtio_blk` builder). `cargo
+  clippy -p rustos-qemu --all-targets -- -D warnings`, `cargo fmt
+  --check`, and `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-qemu
+  --no-deps` are clean. **Docs.** `docs/src/platform/x86_64.md`
+  ("Stage 4.D — virtio-blk backing storage in the QEMU runner").
+  **Deferred.** The kernel-side `tests/integration/
+  virtio_blk_pci_x86_64` crate that consumes this surface — booting
+  kernel + driver host + signed `.rxe` and threading a live
+  `KernelVirtioFactory` + `PciTransport` — plus the riscv64 runner /
+  MMIO walk, the net tests, and the Item 6 acceptance gate remain
+  outstanding; see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 — ring-0 virtio-PCI provisioning walk
   + ABI seam, *complete*): the per-`cfg_type` window hand-offs existed
   on `drivers/bus/pci` (`Pci::map_virtio_window` /
