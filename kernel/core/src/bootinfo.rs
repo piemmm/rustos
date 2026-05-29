@@ -24,6 +24,7 @@
 
 use alloc::sync::Arc;
 
+use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
 use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_sec::IdentityTableBuilder;
@@ -88,6 +89,148 @@ pub trait KernelArch: SchedulerArch {
     /// to apply per-CPU TSC offset compensation; the contract does
     /// not require them to.
     fn monotonic_ns(&self, cpu: CpuId) -> u64;
+
+    /// IRQ routing the architecture port has installed.
+    ///
+    /// Consulted by [`crate::kernel_main`] during the [`crate::Phase::Irq`]
+    /// init step (between `Sched` and `Syscall`). The kernel
+    /// constructs the [`rustos_kernel_irq::IrqTable`] with the
+    /// returned `max_line` and threads the returned controller
+    /// through every subsequent [`rustos_kernel_irq::IrqTable::fire`]
+    /// call.
+    ///
+    /// # Contract
+    ///
+    /// * The returned [`IrqRouting`] must be **set-once per boot**.
+    ///   Arch ports build the controller during their pre-`kernel_main`
+    ///   wiring phase and hand the kernel core a stable
+    ///   `'static`-lifetime reference; calling the method twice from
+    ///   the same boot must return values that agree on `max_line`
+    ///   and on the controller's identity. The kernel core does not
+    ///   re-call after the `Irq` phase completes, but a stray re-call
+    ///   from a future code path must not observe a different
+    ///   controller (`AGENTS.md` §2.1 — one-shot publish).
+    /// * The `mask_line` bound must encompass every line the arch
+    ///   port intends to expose: `IrqTable::bind` refuses
+    ///   `line > max_line`, so the bound is the user-visible IRQ
+    ///   surface.
+    /// * The controller's [`IrqController::mask`] must be safe to call
+    ///   from interrupt context (the production trap path invokes it
+    ///   with interrupts disabled).
+    ///
+    /// # Default
+    ///
+    /// The default impl returns [`IrqRouting::unsupported`], which is
+    /// the conservative fail-closed shape: `max_line = 0` so only
+    /// line `0` can be bound, and every `mask` call returns
+    /// [`rustos_kernel_irq::MaskError::Unsupported`] —
+    /// [`rustos_kernel_irq::IrqTable::fire`] in turn surfaces
+    /// [`rustos_kernel_irq::IrqError::ArchUnsupported`]. Arch ports
+    /// without a programmable interrupt controller (`wasm32`, test
+    /// harnesses) inherit this default; ports with one
+    /// (`x86_64`, `aarch64`, `riscv64`) override it during their
+    /// pre-`kernel_main` boot pipeline.
+    #[must_use]
+    fn irq_routing(&self) -> IrqRouting {
+        IrqRouting::unsupported()
+    }
+
+    /// Hand the architecture port a `'static` reference to the
+    /// kernel-wide [`IrqTable`] once [`crate::Phase::Irq`] has
+    /// constructed it.
+    ///
+    /// The arch port's external-IRQ trap dispatcher needs this
+    /// reference to translate a vector-level hit (e.g. an IO-APIC pin
+    /// firing) to the architecture-neutral
+    /// [`IrqTable::fire`] call. Because the table is built inside
+    /// `kernel_main` (it cannot exist before the arch port hands the
+    /// kernel a `max_line` via [`Self::irq_routing`]), the hook is
+    /// the only kernel-core → arch publication channel for the
+    /// reference.
+    ///
+    /// # Contract
+    ///
+    /// * Called **exactly once per boot**, immediately after the
+    ///   [`Phase::Irq`] ready event. A second call from any future
+    ///   code path is a defect (`AGENTS.md` §2.1 — one-shot publish);
+    ///   real arch ports fail-closed on the second call by halting.
+    /// * The `table` reference outlives the running kernel because
+    ///   `kernel_main` `Box::leak`s the [`crate::init::KernelState`]
+    ///   wrapping it.
+    /// * The default impl is a no-op so arch ports without an
+    ///   external-IRQ trap dispatcher (the `TestArch` mock,
+    ///   `wasm32`) inherit no work.
+    ///
+    /// [`Phase::Irq`]: crate::Phase::Irq
+    fn install_irq_dispatch(&self, table: &'static IrqTable) {
+        // Default: no-op. The argument is consumed so the trait
+        // method has a concrete signature compilers can monomorphise
+        // through.
+        let _ = table;
+    }
+}
+
+/// IRQ routing handed from the architecture port to the kernel core
+/// during [`crate::Phase::Irq`].
+///
+/// `max_line` is the inclusive upper bound on user-visible IRQ lines;
+/// `controller` is the `'static`-lifetime [`IrqController`] the trap
+/// dispatcher invokes to honour the mask-before-wake ordering. The
+/// reference is shared (`+ Sync`) because [`rustos_kernel_irq::IrqTable::fire`]
+/// is called from interrupt context, possibly on multiple CPUs.
+///
+/// # Invariants
+///
+/// * `controller` must be safe to invoke from any CPU at any IRQ
+///   level the architecture supports.
+/// * The reference must outlive the running kernel — the arch port
+///   typically backs it with a `Box::leak`'d allocation or a `static`.
+#[derive(Copy, Clone)]
+pub struct IrqRouting {
+    /// Inclusive upper bound on `IrqTable::bind` line numbers.
+    pub max_line: u32,
+    /// `'static`-lifetime controller invoked by `IrqTable::fire`.
+    pub controller: &'static (dyn IrqController + Send + Sync),
+}
+
+impl IrqRouting {
+    /// The conservative fail-closed routing: `max_line = 0`, every
+    /// `mask` returns [`rustos_kernel_irq::MaskError::Unsupported`].
+    ///
+    /// This is the [`KernelArch::irq_routing`] default; architecture
+    /// ports with a programmable interrupt controller override the
+    /// trait method and return their own routing.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            max_line: 0,
+            controller: &UNSUPPORTED_CONTROLLER,
+        }
+    }
+}
+
+impl core::fmt::Debug for IrqRouting {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The controller is a trait object with no `Debug` super-trait
+        // (adding one would expand the public surface — `AGENTS.md`
+        // §2.4); print the `max_line` and the controller's address
+        // so the boot audit record carries an identity-stable
+        // discriminator without forcing the supertrait change.
+        f.debug_struct("IrqRouting")
+            .field("max_line", &self.max_line)
+            .field("controller_addr", &{
+                // The controller is a `&'static dyn IrqController`, a
+                // fat pointer (data + vtable). We only print the data
+                // half because vtable identity is irrelevant for log
+                // discrimination; binding the local pointer
+                // explicitly avoids the `ptr_as_ptr` and
+                // `incompatible_msrv` lints while keeping the cast
+                // explicit at the source level.
+                let p: *const dyn IrqController = self.controller;
+                p.cast::<()>() as usize
+            })
+            .finish()
+    }
 }
 
 /// Architecture-neutral kernel handover record.

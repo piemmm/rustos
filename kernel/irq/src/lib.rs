@@ -66,5 +66,5 @@ mod table;
 pub use error::{IrqError, MaskError};
 pub use table::{
     BindOutcome, FireOutcome, IrqController, IrqEntry, IrqTable, ReleaseOutcome,
-    UnsupportedController, WaitStep,
+    UnsupportedController, WaitStep, UNSUPPORTED_CONTROLLER,
 };

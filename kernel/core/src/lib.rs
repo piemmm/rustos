@@ -81,7 +81,7 @@ pub mod test_arch;
 pub mod test_sink;
 
 pub use audit::AuditEvent;
-pub use bootinfo::{BootInfo, BootInfoError, KernelArch, MAX_COMMAND_LINE_BYTES};
+pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome,
 };

@@ -42,19 +42,23 @@
 //! never returns to the trampoline (the boot stub assumes
 //! `kernel_main` does not return — `boot.s` SAFETY-INVARIANT 7).
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use rustos_abi::SYSCALL_MAX_ARGS;
-use rustos_arch_x86_64::acpi;
-use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
+use rustos_arch_x86_64::acpi::{self, MadtEntry};
+use rustos_arch_x86_64::apic::{IoApic, Lapic, VolatileIoApicMmio, VolatileLapicMmio};
 use rustos_arch_x86_64::apic_timer::{self, PolledPit, Rdtsc};
 use rustos_arch_x86_64::bootmemory;
 use rustos_arch_x86_64::gdt::PerCpuGdt;
+use rustos_arch_x86_64::irq as arch_irq;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_arch_x86_64::multiboot2::BootInfo as Mb2BootInfo;
 use rustos_arch_x86_64::percpu::MAX_CPUS;
 use rustos_arch_x86_64::{percpu, preempt, smp, syscall_entry};
-use rustos_kernel_core::{kernel_main, BootInfo};
+use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
+use rustos_kernel_irq::IrqController;
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use rustos_kernel_sched::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
@@ -62,6 +66,7 @@ use rustos_log::{Event, EventId, Field, Level, Sink};
 
 use crate::arch_wrapper::BinArch;
 use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
+use crate::ioapic_controller::IoApicController;
 
 // --- BSP boot configuration ----------------------------------------
 
@@ -168,6 +173,26 @@ pub enum BootError {
     ArchInit,
     /// `BootInfo::new`/`validate` rejected the assembled hand-off.
     BootInfoInvalid,
+    /// MADT advertised no IO-APIC. Every PCAT/UEFI platform RustOS
+    /// supports publishes at least one; the absence is a fatal
+    /// discovery defect.
+    NoIoApic,
+    /// The total IO-APIC pin count exceeded the reserved external-IRQ
+    /// vector range (`0x30..=0xFE`, 207 vectors). Real platforms ship
+    /// at most ~120 pins across all IO-APICs combined, so this is a
+    /// pathological case.
+    IrqVectorExhausted,
+    /// `percpu::install_vector` rejected the external-IRQ IDT install.
+    /// Surfaces a defect in the per-CPU bootstrap latch or an
+    /// out-of-range vector.
+    IrqIdtInstall,
+    /// The arch-crate routing publisher refused the `(gsi, vector)`
+    /// pair. The only documented failure is `VectorAlreadyBound`,
+    /// which means the boot pipeline tried to publish the same
+    /// vector twice.
+    IrqRoutingPublish,
+    /// `IoApicController::program_pin` rejected the binding.
+    IrqProgramPin,
 }
 
 impl BootError {
@@ -188,6 +213,11 @@ impl BootError {
             Self::SyscallInit => "syscall_init_failed",
             Self::ArchInit => "arch_init_failed",
             Self::BootInfoInvalid => "bootinfo_invalid",
+            Self::NoIoApic => "no_io_apic",
+            Self::IrqVectorExhausted => "irq_vector_exhausted",
+            Self::IrqIdtInstall => "irq_idt_install_failed",
+            Self::IrqRoutingPublish => "irq_routing_publish_failed",
+            Self::IrqProgramPin => "irq_program_pin_failed",
         }
     }
 }
@@ -362,6 +392,16 @@ fn try_boot(
             .map_err(|_| BootError::SyscallInit)?;
     }
 
+    // 10b. Stage 4.D Item 2-tail.2: discover every IO-APIC the MADT
+    //      advertises, allocate one external-IRQ vector per pin,
+    //      install the per-pin IDT entry, populate the arch crate's
+    //      lock-free routing table, and program the redirection entry
+    //      `masked = true`. The driver-host side (Item 2-tail.3,
+    //      out of scope here) will later unmask each line through the
+    //      controller's `program_pin` re-publish path when a driver
+    //      binds to the GSI.
+    let irq_routing = discover_and_program_io_apics(&madt, bsp_lapic_id)?;
+
     // 11. Assemble the `BootInfo` and hand off to `kernel_core`.
     //
     // Build the `Arc<BinArch>` ahead of the `BootInfo::new` call so we
@@ -370,7 +410,7 @@ fn try_boot(
     // `arch` field (and re-cloned into `kernel_core`'s `KernelState`),
     // so the published pointer remains valid for the lifetime of the
     // running kernel.
-    let arch_arc: Arc<BinArch> = Arc::new(BinArch::new(arch, calibration));
+    let arch_arc: Arc<BinArch> = Arc::new(BinArch::new(arch, calibration, irq_routing));
     // SAFETY: `arch_arc` is moved into `BootInfo` immediately below
     // (which `kernel_main` consumes and stores). `Arc::as_ptr` returns
     // a stable pointer for the lifetime of any clone of the `Arc`.
@@ -464,6 +504,141 @@ fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescri
         length: desc.length,
         kind,
     });
+}
+
+/// Discover every IO-APIC the MADT advertises, build a production
+/// [`IoApicController`], install one per-pin IDT vector + routing
+/// entry, and program every redirection entry masked.
+///
+/// Returns the [`IrqRouting`] the caller stores in [`BinArch`].
+///
+/// # Failure modes
+///
+/// * [`BootError::NoIoApic`] if MADT advertises none.
+/// * [`BootError::IrqVectorExhausted`] if the total pin count exceeds
+///   the reserved vector range (`0x30..=0xFE`, 207 vectors).
+/// * [`BootError::IrqIdtInstall`] if a per-pin
+///   [`percpu::install_vector`] call fails — pathological, the BSP
+///   has finished `percpu::init` by this point.
+/// * [`BootError::IrqRoutingPublish`] if the arch-crate routing
+///   table refused a `(gsi, vector)` pair. The only documented
+///   failure is `VectorAlreadyBound`, which would mean the boot
+///   pipeline tried to publish the same vector twice.
+/// * [`BootError::IrqProgramPin`] if the controller's
+///   [`IoApicController::program_pin`] refused a binding.
+fn discover_and_program_io_apics(
+    madt: &acpi::Madt<'_>,
+    bsp_lapic_id: u8,
+) -> Result<IrqRouting, BootError> {
+    // Step 1. Discover every IO-APIC entry. Each entry carries the
+    // identification, the physical MMIO base address, and the GSI
+    // base the chip owns. We do not yet read `max_redirection_entry`
+    // — that requires a live `IoApic<M>` instance, which we build
+    // below.
+    struct Discovered {
+        gsi_base: u32,
+        mmio_base: u32,
+        pin_count: u32,
+    }
+    let mut discovered: Vec<Discovered> = Vec::new();
+    for entry in madt.entries() {
+        if let MadtEntry::IoApic {
+            address, gsi_base, ..
+        } = entry
+        {
+            // SAFETY: the IO-APIC MMIO base addresses MADT publishes
+            // sit at firmware-fixed physical frames covered by
+            // `boot.s` SAFETY-INVARIANT 4 (0..4 GiB identity map).
+            // The constructor only stores the pointer; no MMIO
+            // access happens here.
+            let mmio = unsafe { VolatileIoApicMmio::new(address as *mut u32) };
+            let mut ioapic = IoApic::new(mmio);
+            let pin_count = u32::from(ioapic.max_redirection_entry()) + 1;
+            discovered.push(Discovered {
+                gsi_base,
+                mmio_base: address,
+                pin_count,
+            });
+        }
+    }
+    if discovered.is_empty() {
+        return Err(BootError::NoIoApic);
+    }
+
+    // Step 2. Pre-validate the total pin count against the reserved
+    // vector range so we fail-closed before any IDT mutation.
+    let total_pins: u32 = discovered.iter().map(|d| d.pin_count).sum();
+    if total_pins as usize > arch_irq::EXTERNAL_VECTOR_COUNT {
+        return Err(BootError::IrqVectorExhausted);
+    }
+
+    // Step 3. Construct the controller. Each block needs a fresh
+    // `IoApic<M>` instance (the discovery instance above is dropped);
+    // the controller takes ownership and serialises every subsequent
+    // MMIO access through an internal `SpinLock`.
+    let blocks: Vec<(u32, IoApic<VolatileIoApicMmio>, u32)> = discovered
+        .iter()
+        .map(|d| {
+            // SAFETY: same as the discovery pass.
+            let mmio = unsafe { VolatileIoApicMmio::new(d.mmio_base as *mut u32) };
+            (d.gsi_base, IoApic::new(mmio), d.pin_count)
+        })
+        .collect();
+    let controller_static: &'static IoApicController<VolatileIoApicMmio> =
+        Box::leak(Box::new(IoApicController::new(blocks)));
+
+    // Step 4. For every pin: allocate the next vector from the
+    // reserved range, install the per-CPU IDT entry, publish the
+    // `(gsi, vector)` pair into the arch crate's routing table,
+    // and program the IO-APIC redirection entry `masked = true`
+    // so no line fires until a driver explicitly unmasks it.
+    let routing = arch_irq::global_routing();
+    let mut next_vector: u8 = arch_irq::EXTERNAL_VECTOR_FIRST;
+    let mut max_gsi: u32 = 0;
+    for d in &discovered {
+        for pin_offset in 0..d.pin_count {
+            let gsi = d.gsi_base + pin_offset;
+            if next_vector > arch_irq::EXTERNAL_VECTOR_LAST {
+                return Err(BootError::IrqVectorExhausted);
+            }
+            let vector = next_vector;
+            // Saturating-add is sufficient: once `next_vector` lands
+            // on `0xFF` the loop's bound check above fails on the
+            // following iteration.
+            next_vector = next_vector.saturating_add(1);
+
+            // SAFETY: `vector` is in `EXTERNAL_VECTOR_FIRST..=LAST`
+            // by the bound check; `external_isr_addr` returns `Some`
+            // for every value in that range (the per-vector stub
+            // table in `external_irq.s` is dense).
+            let isr_addr = arch_irq::external_isr_addr(vector).ok_or(BootError::IrqIdtInstall)?;
+            // SAFETY: BSP after `percpu::init(0)` (run earlier in
+            // `try_boot`); interrupts disabled; `vector` is in the
+            // reserved external-IRQ range, which never overlaps
+            // `#NMI` (2) or `#DF` (8).
+            unsafe {
+                percpu::install_vector(0, vector, isr_addr)
+                    .map_err(|_| BootError::IrqIdtInstall)?;
+            }
+
+            routing
+                .install(gsi, vector)
+                .map_err(|_| BootError::IrqRoutingPublish)?;
+
+            controller_static
+                .program_pin(gsi, vector, bsp_lapic_id, /* masked = */ true)
+                .map_err(|_| BootError::IrqProgramPin)?;
+
+            if gsi > max_gsi {
+                max_gsi = gsi;
+            }
+        }
+    }
+
+    Ok(IrqRouting {
+        max_line: max_gsi,
+        controller: controller_static as &'static (dyn IrqController + Send + Sync),
+    })
 }
 
 fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), BootError> {

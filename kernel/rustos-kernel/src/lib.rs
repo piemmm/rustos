@@ -65,6 +65,7 @@ extern crate std;
 pub mod arch_wrapper;
 pub mod bumpalloc;
 pub mod dispatch;
+pub mod ioapic_controller;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod boot;

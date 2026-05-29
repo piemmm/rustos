@@ -221,17 +221,72 @@ returns `MaskError::Unsupported`; the kernel binary is expected
 to swap in a real controller during its post-`run_phases` wiring
 phase:
 
-| Architecture | Production controller (planned)              | Status today |
-| ------------ | -------------------------------------------- | ------------ |
-| `x86_64`     | IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the per-vector ISR | **Not wired** in the kernel binary — the IDT external-vector range and the per-vector asm thunks are the next session's lead. `kernel/irq::UnsupportedController` is installed; `irq_bind` succeeds, `irq_wait` will time out, no real `fire` arrives. |
-| `aarch64`    | GIC `ICACTIVE` / distributor mask            | Not wired; `UnsupportedController` installed. |
-| `riscv64`    | PLIC `claim` / `complete` priority gating    | Not wired; `UnsupportedController` installed. |
-| `wasm32`     | No hardware-interrupt concept                | Permanently `UnsupportedController` (per the contract above). |
+| Architecture | Production controller                                                                                  | Status today |
+| ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
+| `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired** end-to-end (Stage 4.D Item 2-tail.2). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The QEMU integration crate that exercises a live IRQ end-to-end is the follow-up. |
+| `aarch64`    | GIC `ICACTIVE` / distributor mask                                                                      | Not wired; `UnsupportedController` installed. |
+| `riscv64`    | PLIC `claim` / `complete` priority gating                                                              | Not wired; `UnsupportedController` installed. |
+| `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
 The kernel binary records one `KERNEL_PHASE_STARTED` /
-`KERNEL_PHASE_READY` pair around the controller installation
-phase once it lands; the kernel/core `Sched` phase remains the
-final init step for the architecture-neutral subsystems.
+`KERNEL_PHASE_READY` pair with `phase = "irq"` strictly between
+the `sched` and `syscall` phase markers. The kernel/core init
+order is therefore `log → mem → sec → sched → irq → syscall →
+ipc`, pinned by
+`kernel/core::init::Phase::ORDER` and the
+`run_phases_emits_each_phase_in_documented_order` and
+`irq_phase_lands_between_sched_and_syscall` regression tests.
+
+### x86_64 trap glue (Stage 4.D Item 2-tail.2)
+
+The x86_64 trap path threads an external IRQ end-to-end through:
+
+1. **IDT vectors `0x30..=0xFE`.** Reserved for external IRQs.
+   Per-vector asm stubs are emitted by an `.altmacro` / `.rept`
+   loop in `kernel/arch/x86_64/src/external_irq.s`; the stub
+   addresses are published as a `.rodata` `.quad` table and
+   exposed through `kernel/arch/x86_64::irq::external_isr_addr`.
+2. **Shared trampoline.** Each per-vector stub pushes the vector
+   immediate and jumps to `rustos_arch_x86_64_external_irq_common`,
+   which saves the 15 GPRs into a `SavedRegs` block and calls
+   `rustos_arch_x86_64_external_irq_dispatch(*mut SavedRegs, u64)`.
+3. **Rust dispatcher.** Reads the installed `ExternalIrqDispatchFn`
+   from a set-once `AtomicUsize` and writes the LAPIC EOI register
+   before returning. The asm trampoline pops GPRs, drops the
+   vector qword, and `iretq`s.
+4. **Vector↔GSI routing.** A read-only-after-init `Routing` table
+   (lock-free, one `AtomicU32` per reserved vector) maps the IDT
+   vector to a GSI. Populated by the kernel binary's
+   `try_boot::discover_and_program_io_apics` during the
+   `Phase::Irq` step.
+5. **IO-APIC programming.** The kernel binary walks every MADT
+   `IoApic { id, address, gsi_base }` entry, allocates a vector
+   per pin from the reserved range, calls
+   `percpu::install_vector` to wire the IDT, calls
+   `Routing::install(gsi, vector)`, and calls
+   `IoApicController::program_pin(gsi, vector, bsp_lapic_id,
+   masked = true)`. Lines start masked; a follow-up driver-host
+   commit unmasks them when a userland driver binds.
+6. **Mask-before-wake.** `IoApicController::mask` re-writes the
+   IO-APIC redirection entry with the cached `(vector, dest)`
+   and `masked = true`, then issues a `core::sync::atomic::fence`
+   with `Ordering::SeqCst`. The fence pairs with the SeqCst
+   load `IrqTable::try_wait_step` performs on `ready`,
+   guaranteeing every CPU that observes `ready = true` also
+   observes the masked redirection entry. The host test
+   `ioapic_controller_mask_before_wake_ordering` in
+   `kernel/rustos-kernel::ioapic_controller` drives this exact
+   path against a `RecordingMmio` mock and asserts the mask write
+   completes before `IrqTable::fire` returns `Marked`.
+
+The `KernelArch` trait extension surface is two new methods:
+`irq_routing(&self) -> IrqRouting` (consulted during
+`Phase::Irq`) and `install_irq_dispatch(&self, &'static
+IrqTable)` (called by `kernel/core::init` immediately after the
+table is constructed, used by the arch port to publish the
+table pointer into its dispatcher slot). Both have safe default
+impls so non-x86_64 ports inherit the conservative
+`IrqRouting::unsupported` behaviour without source-level change.
 
 ### Test coverage
 

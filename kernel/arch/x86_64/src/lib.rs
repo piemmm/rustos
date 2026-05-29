@@ -63,6 +63,13 @@ core::arch::global_asm!(include_str!("context.s"), options(att_syntax));
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("interrupts.s"), options(att_syntax));
 
+// Stage 4.D Item 2-tail.2 external-IRQ thunks. Reserves the
+// architectural vector range 0x30..=0xFE for external IRQs and
+// publishes the per-vector stub-address table consumed by
+// `kernel/arch/x86_64::irq`. Same freestanding gate as `interrupts.s`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
+
 pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
@@ -70,6 +77,7 @@ pub mod bootmemory;
 pub mod context;
 pub mod gdt;
 pub mod interrupts;
+pub mod irq;
 /// Stage 3a (c7-arch): `SchedulerArch` implementation for x86_64.
 ///
 /// Feature-gated on `sched-arch` because pulling `rustos-kernel-sched`

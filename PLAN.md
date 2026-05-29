@@ -1334,6 +1334,138 @@ follow-up is its own thread and is now also complete.
   `.junie/next-session-prompt.md` with concrete entry points that
   build on the `VirtioHostFactory` seam landed here.
 
+- Stage 4.D follow-up (Item 2-tail.2 — x86_64 IDT external-vector +
+  IO-APIC trap glue, *complete*): the architecture half that
+  composes the `kernel/irq` substrate landed in the preceding
+  session into a real trap source on x86_64. **Vector range.**
+  `kernel/arch/x86_64::irq` reserves IDT vectors `0x30..=0xFE`
+  (207 vectors) for external IRQs. Per-vector asm stubs are
+  emitted by an `.altmacro` / `.rept` loop in
+  `kernel/arch/x86_64/src/external_irq.s`; each stub pushes the
+  vector immediate and jumps to a shared trampoline
+  (`rustos_arch_x86_64_external_irq_common`) that saves the 15
+  GPRs (`SavedRegs` layout), loads `%rdi` with the saved-regs
+  pointer and `%rsi` with the vector, calls into Rust
+  (`rustos_arch_x86_64_external_irq_dispatch`), and restores
+  before `iretq`. AGENTS.md §2.2 (no duplication) is honoured by
+  the macro-driven generation. **Vector→stub address table.**
+  Published in `.rodata` as a `.quad` array
+  (`rustos_arch_x86_64_external_irq_table`); exposed to Rust as
+  `extern "C" static …: [usize; 207]` and consumed through
+  `kernel/arch/x86_64::irq::external_isr_addr(vector) ->
+  Option<u64>`. **Vector↔GSI routing.** New `Routing` table
+  (`kernel/arch/x86_64::irq::routing`) backed by one
+  `AtomicU32` per reserved vector with a `u32::MAX` unmapped
+  sentinel; install/lookup are lock-free and set-once after the
+  `Phase::Irq` boot step. 7 host unit tests cover empty/install/
+  out-of-range/sentinel/idempotent-republish/conflict semantics.
+  **Rust dispatcher.** Looks up the GSI via `global_routing`,
+  forwards to the installed `ExternalIrqDispatchFn` slot, then
+  writes the LAPIC EOI register before returning. The
+  dispatcher slot is set-once via `set_external_irq_dispatch`
+  (compare-exchange against `0`). 5 host unit tests cover
+  vector-range, fail-closed-on-double-install,
+  dispatch-addr-round-trip. **IO-APIC controller.** New
+  `kernel/rustos-kernel::ioapic_controller::IoApicController<M>`
+  generic over the arch crate's `IoApicMmio` trait, with one
+  block per IO-APIC and a per-pin `(vector, dest, masked)`
+  cache. Public surface: `new(blocks)`, `program_pin(gsi,
+  vector, dest, masked)`, `block_count`, plus the
+  `IrqController::mask(line)` trait impl. `mask` re-writes the
+  redirection entry via the audited
+  `IoApic::set_redirection_entry` (volatile MMIO) preserving
+  vector + destination, then issues
+  `core::sync::atomic::fence(Ordering::SeqCst)` — paired with
+  the SeqCst load `IrqTable::try_wait_step` performs on
+  `ready`, guaranteeing every CPU observing `ready = true`
+  also observes the masked redirection entry. 8 host unit
+  tests cover locate / program / mask-rewrite / out-of-range
+  refusal / unprogrammed-pin refusal / multi-IO-APIC routing /
+  and the load-bearing
+  `ioapic_controller_mask_before_wake_ordering` regression
+  test that drives a live `IrqTable::fire` against the
+  controller with a `RecordingMmio` mock and asserts the
+  controller's MMIO write log records the mask write
+  *before* `IrqTable::fire` returns `Marked`. **KernelArch
+  extension.** Two new trait methods (with safe default
+  no-op impls so `wasm32` / `TestArch` inherit no work):
+  `KernelArch::irq_routing(&self) -> IrqRouting` (consulted
+  during the new `Phase::Irq`) returns a `max_line` + a
+  `&'static (dyn IrqController + Send + Sync)`, and
+  `KernelArch::install_irq_dispatch(&self, &'static
+  IrqTable)` (called immediately after the table is
+  constructed) lets the arch port publish the table pointer
+  into its dispatcher slot. New `IrqRouting` type + re-export
+  in `kernel/core::lib`. **New `Phase::Irq`.** Inserted into
+  `Phase::ORDER` between `Sched` and `Syscall`; updates
+  `Phase::as_str`, `Phase::ORDER` (`[Phase; 6]` →
+  `[Phase; 7]`), `BootStarted`'s `phase_count` field from
+  `"5"` to `"7"` (the previous value was stale — the trail
+  pre-Item 2-tail.2 already shipped 6 phases). New
+  `irq_phase_lands_between_sched_and_syscall` host test pins
+  the ordering. `KernelState.irq_controller` switched from
+  the concrete `UnsupportedController` to `&'static (dyn
+  IrqController + Send + Sync)`, sourced from
+  `arch.irq_routing()` during `Phase::Irq`. **BinArch.**
+  Now carries the assembled `IrqRouting`; `BinArch::new`
+  publishes the controller pointer into a `OnceCell`-backed
+  `IRQ_CONTROLLER_SLOT`; `BinArch::install_irq_dispatch`
+  publishes the table into `IRQ_TABLE_SLOT` and installs
+  `production_external_irq_dispatch` into the arch crate's
+  set-once dispatcher slot. Fail-closed on the second
+  publish via `arch_halt`. New `irq_routing_returns_captured_value`
+  host test pins the BinArch ↔ IrqRouting wiring. **try_boot
+  wiring.** New helper `discover_and_program_io_apics(&Madt,
+  bsp_lapic_id)` walks every `MadtEntry::IoApic`, reads
+  each `max_redirection_entry`, pre-validates the total
+  pin count against the reserved vector range
+  (`BootError::IrqVectorExhausted`), constructs the
+  `IoApicController`, allocates one vector per pin from a
+  bump counter starting at `EXTERNAL_VECTOR_FIRST`,
+  installs the per-CPU IDT entry via
+  `percpu::install_vector`, publishes
+  `(gsi, vector)` into `global_routing`, and calls
+  `program_pin(gsi, vector, bsp_lapic_id, masked = true)` —
+  every line starts masked. Five new `BootError` variants
+  (`NoIoApic`, `IrqVectorExhausted`, `IrqIdtInstall`,
+  `IrqRoutingPublish`, `IrqProgramPin`) carry stable audit
+  cause strings. **Docs.** `docs/src/security/irq.md`
+  controller table updated from "Not wired" to "Wired"
+  with the IoApicController reference; new "x86_64 trap
+  glue (Stage 4.D Item 2-tail.2)" section documents the
+  six-step trap path from IDT vector to `IrqTable::fire`.
+  `docs/src/architecture/kernel.md` boot-timeline table
+  expanded to include the new `irq` phase between
+  `sched` and `syscall`, with the
+  `arch.install_irq_dispatch(&state.irq)` publication step
+  called out inline. **Verification.** `cargo test
+  --workspace` (excluding the five QEMU-only integration
+  test crates): 766 tests passing (was 740 with item 2-tail
+  baseline; the delta of 26 covers `kernel/arch/x86_64::irq`
+  (12 tests), `kernel/rustos-kernel::ioapic_controller`
+  (8 tests), `kernel/core::init::irq_phase_lands_between_sched_and_syscall`
+  (1), `kernel/rustos-kernel::arch_wrapper::irq_routing_returns_captured_value`
+  (1), plus 4 dispatcher / set-dispatcher / routing-related
+  arch-crate tests). `cargo clippy --workspace --all-targets
+  -- -D warnings` clean on the host build; `cargo clippy -p
+  rustos-arch-x86_64 -p rustos-kernel --target
+  x86_64-unknown-none --features
+  rustos-arch-x86_64/sched-arch -- -D warnings` clean on the
+  freestanding build. `cargo fmt --check` clean. `cargo build
+  -p rustos-kernel --target x86_64-unknown-none` succeeds
+  (asm thunks + Rust glue link). **What is still
+  outstanding.** The QEMU integration test crate
+  `tests/integration/irq_qemu_x86_64` mandated by the
+  prompt's reading list is the sole hand-off: I cannot run
+  QEMU in the current environment, so the test would land
+  as a non-validated artifact contrary to AGENTS.md §15.6
+  ("Run the full test suite … Quote the actual output").
+  Per the user-confirmed A2 scope split, the QEMU test
+  crate is queued for the next session, alongside the
+  carried Items 2-tail.3 / 2-tail.4 / 3 / 4 / 5 / 6 from
+  the prior prompt. Rewritten into
+  `.junie/next-session-prompt.md`.
+
 - Stage 4.D follow-up (Item 2-tail — kernel IRQ table + per-handle
   wait queue, *complete*): the kernel-side substrate that backs
   the frozen `abi-v1` IRQ surface (`CapabilityId::IRQ_BIND`,

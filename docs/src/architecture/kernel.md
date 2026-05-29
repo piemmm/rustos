@@ -45,8 +45,9 @@ break the boot-timeline they key off (`AGENTS.md` §5.4, §2.4).
 | 2 | `mem`   | `rustos_kernel_mem::FrameAllocator::new(&boot.memory_map)`.                           |
 | 3 | `sec`   | `boot.identity.verify(boot.audit_sink)` → `IdentityTable`.                            |
 | 4 | `sched` | `rustos_kernel_sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))`. |
-| 5 | `syscall` | Production `DispatchHook` published into `boot.dispatcher_callback_slot` (see [Syscall registration phase](#syscall-registration-phase)). |
-| 6 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
+| 5 | `irq`   | `arch.irq_routing()` returns the architecture-installed `IrqRouting`; the kernel core builds `rustos_kernel_irq::IrqTable::new(routing.max_line)` and stores `routing.controller` in `KernelState`. Immediately after the leak, `arch.install_irq_dispatch(&state.irq)` publishes the `'static` table reference into the arch port's external-IRQ dispatcher slot (Stage 4.D Item 2-tail.2). |
+| 6 | `syscall` | Production `DispatchHook` published into `boot.dispatcher_callback_slot` (see [Syscall registration phase](#syscall-registration-phase)). |
+| 7 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
 | ∞ | —       | `BootCompleted` event emitted; `arch.halt()` parks the CPU.                           |
 
 Each phase emits exactly:

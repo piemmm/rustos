@@ -514,9 +514,11 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-x86_64",
  "rustos-kernel-core",
+ "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sched",
  "rustos-kernel-sec",
+ "rustos-kernel-sync",
  "rustos-kernel-syscall",
  "rustos-log",
 ]

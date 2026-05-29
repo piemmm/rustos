@@ -26,7 +26,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use rustos_kernel_irq::{IrqTable, UnsupportedController};
+use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator};
 use rustos_kernel_sched::{SchedError, Scheduler};
 use rustos_kernel_sec::{CapTable, IdentityTable};
@@ -34,7 +34,7 @@ use rustos_kernel_sync::RwLock;
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
 
 use crate::audit::AuditEvent;
-use crate::bootinfo::{BootInfo, BootInfoError, KernelArch};
+use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
 use crate::syscalls::KernelDispatchHook;
 
@@ -55,6 +55,14 @@ pub enum Phase {
     Sec,
     /// Build the SMP scheduler.
     Sched,
+    /// Consult the architecture port's [`crate::KernelArch::irq_routing`]
+    /// and construct the kernel-wide [`rustos_kernel_irq::IrqTable`].
+    ///
+    /// Phase 4.D Item 2-tail.2 — inserted between [`Phase::Sched`] and
+    /// [`Phase::Syscall`] so the IRQ table is wired with a
+    /// realistic `max_line` and the production controller is in
+    /// place before any syscall can race the deferral path.
+    Irq,
     /// Register the production syscall dispatcher.
     ///
     /// Stage 2.7 follow-up (f4). Between `Sched` and `Ipc`,
@@ -74,11 +82,12 @@ pub enum Phase {
 
 impl Phase {
     /// Iteration order used by [`kernel_main`].
-    pub const ORDER: [Phase; 6] = [
+    pub const ORDER: [Phase; 7] = [
         Phase::Log,
         Phase::Mem,
         Phase::Sec,
         Phase::Sched,
+        Phase::Irq,
         Phase::Syscall,
         Phase::Ipc,
     ];
@@ -93,6 +102,7 @@ impl Phase {
             Phase::Mem => "mem",
             Phase::Sec => "sec",
             Phase::Sched => "sched",
+            Phase::Irq => "irq",
             Phase::Syscall => "syscall",
             Phase::Ipc => "ipc",
         }
@@ -221,7 +231,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootStarted,
         &[Field {
             key: "phase_count",
-            value: "5",
+            value: "7",
         }],
     );
 
@@ -331,6 +341,27 @@ fn run_phases<A: KernelArch>(
         Scheduler::new(scheduler_config, Arc::clone(&arch)).map_err(InitError::Sched)?;
     phase_ready(log_sink, Phase::Sched);
 
+    // Phase 5 — Irq. Consult the arch port's
+    // [`KernelArch::irq_routing`] hook and construct the kernel-wide
+    // [`IrqTable`] with the returned `max_line`. The controller
+    // returned here is the `'static` seam every subsequent
+    // [`IrqTable::fire`] call goes through; it is sourced from the
+    // arch port (`x86_64` returns an `IoApicController` programmed
+    // against the MADT-discovered IO-APIC; the
+    // [`KernelArch::irq_routing`] default returns the conservative
+    // [`IrqRouting::unsupported`] which keeps `max_line = 0` and
+    // makes every `mask` call surface `Errno::NotImplemented`).
+    //
+    // The phase is placed strictly between `Sched` and `Syscall` so
+    // the IRQ table is in place before any caller can dispatch
+    // `irq_bind` / `irq_wait` (`AGENTS.md` §5.4.5 — fail closed). The
+    // audit log fields the phase emits are `phase = "irq"`.
+    phase_started(log_sink, Phase::Irq);
+    let routing: IrqRouting = arch.irq_routing();
+    let irq_table = IrqTable::new(routing.max_line);
+    let irq_controller: &'static (dyn IrqController + Send + Sync) = routing.controller;
+    phase_ready(log_sink, Phase::Irq);
+
     // Assemble `KernelState` and lift it to `'static` so the
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
     // referencing its fields. The `Box::leak` is intentional: the
@@ -340,19 +371,6 @@ fn run_phases<A: KernelArch>(
     // mutable static; this allocation is immutable after creation
     // because every interior field carries its own synchronisation
     // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
-    // The default kernel/core build ships an [`UnsupportedController`]
-    // so calling [`IrqTable::fire`] before the arch port installs a
-    // real controller fails-closed with `Errno::NotImplemented`. The
-    // kernel binary replaces the controller (and may extend
-    // `max_line`) during its post-`run_phases` wiring phase as part of
-    // the next-session trap-glue work (see
-    // `.junie/next-session-prompt.md`).
-    //
-    // `IrqTable::new(0)` is the conservative default: with `max_line
-    // = 0` only line 0 is accepted by `bind` (and the kernel binary
-    // can widen this once the arch port reports the controller's
-    // `max_redirection_entry`). The kernel binary's startup audit
-    // log records the chosen value.
     let state: &'static KernelState<A> = Box::leak(Box::new(KernelState {
         frame_allocator,
         identity_table,
@@ -360,11 +378,20 @@ fn run_phases<A: KernelArch>(
         caps: RwLock::new(CapTable::new()),
         arch,
         audit_sink,
-        irq: IrqTable::new(0),
-        irq_controller: UnsupportedController,
+        irq: irq_table,
+        irq_controller,
     }));
 
-    // Phase 5 — Syscall. Publish the production `DispatchHook` into
+    // Hand the arch port a `'static` reference to the freshly
+    // constructed IrqTable so its external-IRQ trap dispatcher can
+    // translate a vector-level hit to `IrqTable::fire`. The default
+    // [`KernelArch::install_irq_dispatch`] is a no-op; real arch
+    // ports (x86_64) override it to publish the reference into the
+    // arch crate's dispatcher slot (set-once per boot — `AGENTS.md`
+    // §2.1).
+    state.arch.install_irq_dispatch(&state.irq);
+
+    // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
     // the same reason as `KernelState`: its borrows reference
     // `KernelState` fields and must therefore be `'static`.
@@ -376,7 +403,7 @@ fn run_phases<A: KernelArch>(
             state.arch.as_ref(),
             audit_sink,
             &state.irq,
-            &state.irq_controller,
+            state.irq_controller,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
@@ -431,12 +458,21 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// every binding the exiting task held.
     pub(crate) irq: IrqTable,
     /// Controller-mask seam consumed by [`IrqTable::fire`] from the
-    /// arch port's trap path. The kernel/core default is
-    /// [`UnsupportedController`]; the kernel binary swaps in a
-    /// real implementation (IO-APIC on x86_64) during its
-    /// post-`run_phases` wiring phase
-    /// (see `.junie/next-session-prompt.md`).
-    pub(crate) irq_controller: UnsupportedController,
+    /// arch port's trap path.
+    ///
+    /// Sourced from the architecture port's
+    /// [`crate::KernelArch::irq_routing`] hook during [`Phase::Irq`].
+    /// The default is the kernel/irq
+    /// [`rustos_kernel_irq::UNSUPPORTED_CONTROLLER`] (every `mask`
+    /// returns [`rustos_kernel_irq::MaskError::Unsupported`]); ports
+    /// with a programmable controller (x86_64's `IoApicController`)
+    /// override the trait method and return a real instance.
+    ///
+    /// Stored as a `&'static` trait object so [`KernelDispatchHook`]'s
+    /// `&'a (dyn IrqController + Sync)` borrow can be taken without
+    /// indirection through `Box`. The reference's stability for the
+    /// lifetime of the running kernel is the arch port's contract.
+    pub(crate) irq_controller: &'static (dyn IrqController + Send + Sync),
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
@@ -633,6 +669,48 @@ mod tests {
         assert!(sched_ready_pos < syscall_started_pos);
         assert!(syscall_started_pos < syscall_ready_pos);
         assert!(syscall_ready_pos < ipc_started_pos);
+    }
+
+    /// Stage 4.D Item 2-tail.2 — the `Irq` init phase lands strictly
+    /// between `Sched` and `Syscall` on the diagnostic log, carrying
+    /// the documented `phase = "irq"` field. The `TestArch`
+    /// inherits [`KernelArch::irq_routing`]'s
+    /// [`IrqRouting::unsupported`] default, so the regression bound
+    /// here is *ordering*; the controller-installation contract is
+    /// covered by the kernel binary's host tests against the real
+    /// IO-APIC controller.
+    #[test]
+    fn irq_phase_lands_between_sched_and_syscall() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let started_id = AuditEvent::PhaseStarted.id();
+        let ready_id = AuditEvent::PhaseReady.id();
+        let events = log_sink.snapshot();
+        let pos = |id: rustos_log::EventId, name: &str| -> usize {
+            events
+                .iter()
+                .position(|e| e.id == id && e.fields[0].1 == name)
+                .unwrap_or_else(|| panic!("event {name} missing"))
+        };
+        let sched_ready = pos(ready_id, "sched");
+        let irq_started = pos(started_id, "irq");
+        let irq_ready = pos(ready_id, "irq");
+        let syscall_started = pos(started_id, "syscall");
+        assert!(
+            sched_ready < irq_started,
+            "irq must follow sched ({sched_ready} < {irq_started})"
+        );
+        assert!(
+            irq_started < irq_ready,
+            "irq started precedes irq ready ({irq_started} < {irq_ready})"
+        );
+        assert!(
+            irq_ready < syscall_started,
+            "syscall must follow irq ({irq_ready} < {syscall_started})"
+        );
     }
 
     /// (f4) — installing into a slot that already holds a hook
