@@ -403,13 +403,20 @@ fn run_negative(
 
 // -- Stage 4.D Item 0-tail: VirtioHostFactory wiring tests ----------
 
-// Observation latch used by the `register()` fns below. The two
-// virtio-factory tests live in the same translation unit and run
-// serially under `cargo test`'s default thread settings; resetting
-// at the top of each test is enough to keep them disjoint.
+// Observation latches used by the `register()` fns below. The two
+// virtio-factory tests share this translation unit and `cargo test`
+// runs them in parallel, so each test owns a *disjoint* latch: a
+// single shared latch would race (one test's reset/observation
+// clobbering the other's) and make the suite flaky.
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+/// Set by `register_uses_virtio_host` when the some-factory test
+/// observes a virtio host. Owned solely by that test.
 static VIRTIO_SEEN: AtomicBool = AtomicBool::new(false);
 static VIRTIO_ALLOC_LEN: AtomicUsize = AtomicUsize::new(0);
+/// Set by `register_expects_no_virtio` to record whether the
+/// none-factory test saw a virtio host. Owned solely by that test,
+/// disjoint from `VIRTIO_SEEN` so the two tests never share state.
+static NONE_FACTORY_SAW_VIRTIO: AtomicBool = AtomicBool::new(false);
 
 /// `register` fn used by `virtio_host_factory_default_none_yields_none`:
 /// asserts that the host reports no virtio host and records the
@@ -418,7 +425,7 @@ fn register_expects_no_virtio(
     host: &dyn rustos_abi::DriverHost,
 ) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
     let seen = host.virtio_host().is_some();
-    VIRTIO_SEEN.store(seen, AtomicOrdering::SeqCst);
+    NONE_FACTORY_SAW_VIRTIO.store(seen, AtomicOrdering::SeqCst);
     rustos_abi::DriverHandle::from_raw(0xD00D)
 }
 
@@ -476,7 +483,7 @@ fn virtio_host_factory_default_none_yields_none() {
     // driver-visible `DriverHost::virtio_host()` accessor reports
     // `None`. This is the source-compatibility contract for every
     // existing host shipped before Stage 4.D Item 0-tail.
-    VIRTIO_SEEN.store(false, AtomicOrdering::SeqCst);
+    NONE_FACTORY_SAW_VIRTIO.store(false, AtomicOrdering::SeqCst);
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
@@ -496,7 +503,7 @@ fn virtio_host_factory_default_none_yields_none() {
     let mut host = Host::new(cfg);
     host.load("/d/probe", &full_caps()).expect("load ok");
     assert!(
-        !VIRTIO_SEEN.load(AtomicOrdering::SeqCst),
+        !NONE_FACTORY_SAW_VIRTIO.load(AtomicOrdering::SeqCst),
         "register() saw a virtio host where none was configured"
     );
 }
