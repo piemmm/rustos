@@ -1283,6 +1283,40 @@ follow-up is its own thread and is now also complete.
   boot-time PCI walk that maps the BARs, the MMIO `Transport`, and
   the QEMU integration crates + acceptance gate (Items 4 / 6) remain
   outstanding — see `.junie/next-session-prompt.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — virtio-1.x PCI
+  capability decode + register-window hand-off, *complete*): the PCI
+  capability walker decoded MSI / MSI-X but not the vendor-specific
+  virtio capability (`cap_id = 0x09`), so the planned boot-time PCI
+  walk had no way to turn a device's virtio-1.x capabilities into the
+  `(BAR, offset, length)` triples `PciTransport` needs. `drivers/bus/
+  pci/src/config.rs` gains the `Capability::Virtio` /
+  `Capability::VirtioNotify` records and the `VIRTIO_CFG_*` /
+  `CAP_ID_VENDOR` constants (virtio 1.x §4.1.4); `enumerate.rs` gains
+  the `decode_virtio` walker arm plus two public hand-offs:
+  `Pci::map_virtio_window(bdf, cfg_type, mapper)` (resolves a
+  requested config structure to `bar.base + offset`, bounds-checks
+  `bar_offset + length` against the BAR size — failing closed with
+  `OutOfRange` — and maps exactly `length` bytes through the
+  `CAP_MMIO_MAP`-gated `MmioMapper`, refusing I/O-port BARs) and
+  `Pci::virtio_notify_off_multiplier(bdf)`. The BAR-finding logic was
+  extracted into a shared `resolve_bar` helper, so `map_bar_window`
+  and `map_virtio_window` do not duplicate it (`AGENTS.md` §2.2). No
+  pointer arithmetic, no ambient authority (`AGENTS.md` §4). The four
+  windows + multiplier are exactly what `PciTransport::new` consumes,
+  so a boot-time PCI walk can now assemble a live modern-virtio
+  transport. **Tests.** `cargo test -p rustos-drv-bus-pci` → 21 (+5:
+  virtio cap decode order against a `virtio-blk-pci` `1AF4:1042`
+  fixture, per-cfg-type window hand-off + usable round-trip, notify
+  multiplier, absent-cfg-type `NotFound`, capability-denial). `cargo
+  clippy -p rustos-drv-bus-pci --all-targets -- -D warnings`, `cargo
+  fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc
+  -p rustos-drv-bus-pci --no-deps`, and the `x86_64-unknown-none`
+  build are clean. **Docs.** PCI README + `docs/src/drivers/bus.md`
+  ("virtio-1.x configuration windows"). **Deferred.** The ring-0
+  boot-time PCI walk that *calls* these hand-offs, the MMIO
+  `Transport`, the riscv64 QEMU runner, and the QEMU integration
+  crates + acceptance gate (Items 4 / 6) remain outstanding — see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 5 — userland ARP / IP / ICMP responder,
   *complete*): new crate `userland/net/icmp` (`rustos-net-icmp`),
   the first substantial userland crate and the protocol peer the

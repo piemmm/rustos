@@ -14,7 +14,10 @@
 use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
 
-use crate::config::{BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace};
+use crate::config::{
+    BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
+    VIRTIO_CFG_NOTIFY,
+};
 
 /// Maximum number of BAR slots a type-0 PCI function exposes
 /// (PCI Local Bus 3.0 §6.1).
@@ -145,6 +148,7 @@ impl<C: ConfigSpace> Pci<C> {
             let entry = match cap_id {
                 0x05 => decode_msi(self, addr, cap_offset, msg_ctrl),
                 0x11 => decode_msix(self, addr, cap_offset, msg_ctrl),
+                CAP_ID_VENDOR => decode_virtio(self, addr, cap_offset, msg_ctrl),
                 id => Capability::Other {
                     offset: cap_offset,
                     id,
@@ -281,18 +285,7 @@ impl<C: ConfigSpace> Pci<C> {
         bar_index: u8,
         mapper: &dyn MmioMapper,
     ) -> Result<RegisterWindow, DriverError> {
-        let mut descriptors = [BarDescriptor {
-            index: 0,
-            kind: BarKind::Memory32,
-            base: 0,
-            size: 0,
-            prefetchable: false,
-        }; MAX_BARS];
-        let n = self.bars(bdf, &mut descriptors)?;
-        let bar = descriptors[..n]
-            .iter()
-            .find(|b| b.index == bar_index)
-            .ok_or(DriverError::NotFound)?;
+        let bar = self.resolve_bar(bdf, bar_index)?;
         // An I/O-port BAR is reached through port I/O, not a mapped
         // register window; refuse to pretend otherwise.
         if matches!(bar.kind, BarKind::Io) {
@@ -305,6 +298,145 @@ impl<C: ConfigSpace> Pci<C> {
         mapper
             .map_window(bar.base, len)
             .map_err(MmioMapError::as_driver_error)
+    }
+
+    /// Resolve the virtio-1.x configuration structure of kind
+    /// `cfg_type` on function `bdf` and ask the kernel `mapper` to map
+    /// it, returning the resulting [`RegisterWindow`].
+    ///
+    /// This is the boot-time hand-off the virtio PCI transport needs:
+    /// the bus driver walks the function's capability list, locates
+    /// the vendor-specific virtio capability of the requested
+    /// `cfg_type` (one of [`VIRTIO_CFG_COMMON`](crate::config::VIRTIO_CFG_COMMON),
+    /// [`VIRTIO_CFG_NOTIFY`](crate::config::VIRTIO_CFG_NOTIFY),
+    /// [`VIRTIO_CFG_ISR`](crate::config::VIRTIO_CFG_ISR), or
+    /// [`VIRTIO_CFG_DEVICE`](crate::config::VIRTIO_CFG_DEVICE)),
+    /// resolves the `(bar, bar_offset, length)` triple to a physical
+    /// base, and asks the kernel's MMIO-map facility for a window over
+    /// exactly that region. The driver never synthesises a pointer —
+    /// the kernel allocates and validates the mapping (`AGENTS.md` §4).
+    /// The four windows so produced are what
+    /// `PciTransport::new` consumes.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — the function advertises no virtio
+    ///   capability of `cfg_type`, or the underlying BAR is unused.
+    /// * [`DriverError::Unsupported`] — the structure lives in an
+    ///   I/O-port BAR, which is reached through port I/O rather than a
+    ///   mapped register window, or the function is not a type-0 header.
+    /// * [`DriverError::OutOfRange`] — the structure's
+    ///   `bar_offset + length` exceeds the resolved BAR size.
+    /// * [`DriverError::LengthOutOfRange`] — the region length does not
+    ///   fit in `usize` on this target.
+    /// * [`DriverError::PermissionDenied`] — the caller does not hold
+    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   (propagated from the mapper).
+    ///
+    /// # Capabilities
+    ///
+    /// The `mapper` enforces
+    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    pub fn map_virtio_window(
+        &self,
+        bdf: u64,
+        cfg_type: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        let (bar_index, bar_offset, length) = self.find_virtio_region(bdf, cfg_type)?;
+        let bar = self.resolve_bar(bdf, bar_index)?;
+        if matches!(bar.kind, BarKind::Io) {
+            return Err(DriverError::Unsupported);
+        }
+        let end = u64::from(bar_offset)
+            .checked_add(u64::from(length))
+            .ok_or(DriverError::OutOfRange)?;
+        if length == 0 || end > bar.size {
+            return Err(DriverError::OutOfRange);
+        }
+        // `bar.base + bar_offset` stays within the BAR's reserved span
+        // (checked above), so the addition cannot overflow the address.
+        let phys_base = bar
+            .base
+            .checked_add(u64::from(bar_offset))
+            .ok_or(DriverError::OutOfRange)?;
+        let len = usize::try_from(length).map_err(|_| DriverError::LengthOutOfRange)?;
+        mapper
+            .map_window(phys_base, len)
+            .map_err(MmioMapError::as_driver_error)
+    }
+
+    /// Read the `notify_off_multiplier` from the function's virtio
+    /// notification capability.
+    ///
+    /// Returned alongside the four windows from [`map_virtio_window`]
+    /// to populate `PciTransport`'s notification scale (virtio 1.x
+    /// §4.1.4.4).
+    ///
+    /// [`map_virtio_window`]: Self::map_virtio_window
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — the function advertises no virtio
+    ///   notification capability, or no capability list at all.
+    /// * [`DriverError::BufferTooSmall`] / [`DriverError::DeviceFault`]
+    ///   — propagated from the capability-list walk.
+    pub fn virtio_notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = self.capabilities(bdf, &mut caps)?;
+        caps[..n]
+            .iter()
+            .find_map(|c| match *c {
+                Capability::VirtioNotify {
+                    notify_off_multiplier,
+                    ..
+                } => Some(notify_off_multiplier),
+                _ => None,
+            })
+            .ok_or(DriverError::NotFound)
+    }
+
+    /// Locate the virtio config region of `cfg_type`, returning its
+    /// `(bar_index, bar_offset, length)`.
+    fn find_virtio_region(&self, bdf: u64, cfg_type: u8) -> Result<(u8, u32, u32), DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = self.capabilities(bdf, &mut caps)?;
+        caps[..n]
+            .iter()
+            .find_map(|c| match *c {
+                Capability::Virtio {
+                    cfg_type: ct,
+                    bar,
+                    bar_offset,
+                    length,
+                    ..
+                } if ct == cfg_type => Some((bar, bar_offset, length)),
+                Capability::VirtioNotify {
+                    bar,
+                    bar_offset,
+                    length,
+                    ..
+                } if cfg_type == VIRTIO_CFG_NOTIFY => Some((bar, bar_offset, length)),
+                _ => None,
+            })
+            .ok_or(DriverError::NotFound)
+    }
+
+    /// Resolve a single BAR descriptor by index.
+    fn resolve_bar(&self, bdf: u64, bar_index: u8) -> Result<BarDescriptor, DriverError> {
+        let mut descriptors = [BarDescriptor {
+            index: 0,
+            kind: BarKind::Memory32,
+            base: 0,
+            size: 0,
+            prefetchable: false,
+        }; MAX_BARS];
+        let n = self.bars(bdf, &mut descriptors)?;
+        descriptors[..n]
+            .iter()
+            .copied()
+            .find(|b| b.index == bar_index)
+            .ok_or(DriverError::NotFound)
     }
 
     fn is_multifunction(&self, bus: u8, device: u8) -> bool {
@@ -404,5 +536,43 @@ fn decode_msix<C: ConfigSpace>(
         table_offset: table_dword & 0xFFFF_FFF8,
         pba_bar: (pba_dword & 0x7) as u8,
         pba_offset: pba_dword & 0xFFFF_FFF8,
+    }
+}
+
+fn decode_virtio<C: ConfigSpace>(
+    this: &Pci<C>,
+    base: ConfigAddress,
+    offset: u8,
+    msg_ctrl: u16,
+) -> Capability {
+    // The virtio cap header reuses the vendor-specific layout: the
+    // upper half of the header dword (`msg_ctrl`) carries `cap_len`
+    // in its low byte and `cfg_type` in its high byte (virtio 1.x
+    // §4.1.4). Mask + cast of an 8-bit field is lossless.
+    let cfg_type = (msg_ctrl >> 8) as u8;
+    // `bar` is byte 4 of the capability (dword 1, low byte).
+    let bar = (this.config.read32(addr_with_byte_offset(base, offset + 4)) & 0x7) as u8;
+    // `offset`/`length` are dwords 2 and 3 of the capability.
+    let bar_offset = this.config.read32(addr_with_byte_offset(base, offset + 8));
+    let length = this.config.read32(addr_with_byte_offset(base, offset + 12));
+    if cfg_type == VIRTIO_CFG_NOTIFY {
+        // The notification structure appends `notify_off_multiplier`
+        // as dword 4 of the capability (virtio 1.x §4.1.4.4).
+        let notify_off_multiplier = this.config.read32(addr_with_byte_offset(base, offset + 16));
+        Capability::VirtioNotify {
+            offset,
+            bar,
+            bar_offset,
+            length,
+            notify_off_multiplier,
+        }
+    } else {
+        Capability::Virtio {
+            offset,
+            cfg_type,
+            bar,
+            bar_offset,
+            length,
+        }
     }
 }

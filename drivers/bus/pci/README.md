@@ -3,7 +3,8 @@
 PCI/PCIe bus driver. Enumerates devices on x86_64 platforms through
 the configuration-access **mechanism #1** (`0xCF8` / `0xCFC`) and
 walks each function's capability list to surface MSI / MSI-X
-descriptors and BAR (Base Address Register) windows.
+descriptors, virtio-1.x configuration structures, and BAR (Base
+Address Register) windows.
 
 ## Supported hardware
 
@@ -14,6 +15,7 @@ descriptors and BAR (Base Address Register) windows.
 | AHCI SATA         | QEMU `q35` (`8086:2922`)                           |
 | SMBus             | QEMU `q35` (`8086:2930`)                           |
 | virtio-net-pci    | `1AF4:1041` (modern transitional)                  |
+| virtio-blk-pci    | `1AF4:1042` (modern, virtio-1.x cap layout)        |
 
 The fixture in `src/tests.rs` reproduces the exact `q35` PCI topology
 byte for byte; the live-QEMU surface uses the same enumeration core
@@ -33,9 +35,15 @@ authority is requested (`AGENTS.md` §4).
 
 - x86_64-only. ECAM (PCIe enhanced configuration access) is **not**
   implemented; that is Stage 4.D scope.
-- BARs are **discovered** but never mapped; mapping requests are
-  routed through the driver host's memory capability by the upper
-  driver (virtio-blk / virtio-net) in Stage 4.D.
+- A memory BAR is mapped only by routing the request through the
+  kernel MMIO-map facility (`map_bar_window`); the driver never
+  synthesises a pointer (`AGENTS.md` §4).
+- virtio-1.x vendor-specific capabilities (`cap_id = 0x09`) are
+  decoded into `(bar, offset, length)` triples; `map_virtio_window`
+  resolves a requested `cfg_type` (common / notify / ISR / device)
+  to a capability-checked register window for the virtio PCI
+  transport, and `virtio_notify_off_multiplier` surfaces the
+  notification scale.
 - MSI / MSI-X capabilities are **discovered** but never enabled.
 - Loadable, unloadable, and reloadable at runtime (`AGENTS.md` §8) —
   the driver holds no global state beyond the `Pci<C>` instance the
@@ -47,7 +55,10 @@ authority is requested (`AGENTS.md` §4).
 
 - The PIO-bridge round-trip test against a recording mock.
 - The exact `q35` device-list assertion.
-- Capability-list and BAR-sizing walkers.
+- Capability-list and BAR-sizing walkers, including the virtio-1.x
+  configuration-structure decode.
+- The memory-BAR and virtio-config register-window hand-offs to a
+  mock MMIO mapper (including the capability-denial path).
 - The `register` capability gate.
 
 ## License

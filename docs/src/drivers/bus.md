@@ -197,6 +197,27 @@ hand-off reads the `<base, length>` pair from the matching
 `virtio,mmio` device-tree node. Neither path can run without the
 caller holding `CAP_MMIO_MAP`.
 
+### virtio-1.x configuration windows
+
+A modern virtio-PCI device does not expose its register blocks as
+whole BARs; instead it publishes each configuration structure as a
+vendor-specific capability (`cap_id = 0x09`) carrying a
+`(cfg_type, bar, offset, length)` tuple (virtio 1.x §4.1.4). The PCI
+capability walker decodes these into `Capability::Virtio` /
+`Capability::VirtioNotify` records, and
+`Pci::map_virtio_window(bdf, cfg_type, mapper)` resolves a requested
+`cfg_type` — common (`1`), notify (`2`), ISR (`3`), or device (`4`) —
+to its `bar.base + offset` physical address and maps exactly `length`
+bytes through the same `CAP_MMIO_MAP`-gated `MmioMapper`. The
+`bar_offset + length` span is bounds-checked against the resolved BAR
+size before the mapping request, so a malformed capability fails
+closed (`OutOfRange`) rather than mapping past the device's window.
+`Pci::virtio_notify_off_multiplier(bdf)` returns the notification
+scale from the notify capability. The four windows plus the
+multiplier are exactly what `PciTransport::new` consumes, so a
+boot-time PCI walk hands a working modern-virtio transport to the
+driver host without ever synthesising a pointer.
+
 ## Shared types
 
 There is no copy-paste between the two drivers; the only shared

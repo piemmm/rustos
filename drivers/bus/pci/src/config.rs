@@ -164,6 +164,48 @@ pub enum Capability {
         /// Offset of the PBA within `pba_bar`.
         pba_offset: u32,
     },
+    /// A virtio-1.x vendor-specific capability (`cap_id = 0x09`) other
+    /// than the notification structure.
+    ///
+    /// virtio reuses the generic PCI vendor-specific capability to
+    /// publish the byte location of each device-configuration
+    /// structure (common / ISR / device / PCI-window) as a
+    /// `(bar, bar_offset, length)` triple (virtio 1.x §4.1.4). The
+    /// notification structure carries an extra field and is surfaced
+    /// as [`Capability::VirtioNotify`] instead.
+    Virtio {
+        /// Byte offset of the capability header in configuration space.
+        offset: u8,
+        /// Structure kind (`cfg_type`); one of [`VIRTIO_CFG_COMMON`],
+        /// [`VIRTIO_CFG_ISR`], [`VIRTIO_CFG_DEVICE`],
+        /// [`VIRTIO_CFG_PCI`], or a future value surfaced verbatim.
+        cfg_type: u8,
+        /// Index of the BAR holding the structure.
+        bar: u8,
+        /// Offset of the structure within `bar`.
+        bar_offset: u32,
+        /// Length of the structure in bytes.
+        length: u32,
+    },
+    /// The virtio-1.x notification capability
+    /// (`cap_id = 0x09`, `cfg_type = `[`VIRTIO_CFG_NOTIFY`]).
+    ///
+    /// Identical to [`Capability::Virtio`] but additionally carries
+    /// `notify_off_multiplier`, the scale applied to a queue's
+    /// `queue_notify_off` to derive its notification address
+    /// (virtio 1.x §4.1.4.4).
+    VirtioNotify {
+        /// Byte offset of the capability header in configuration space.
+        offset: u8,
+        /// Index of the BAR holding the notification structure.
+        bar: u8,
+        /// Offset of the structure within `bar`.
+        bar_offset: u32,
+        /// Length of the structure in bytes.
+        length: u32,
+        /// Multiplier applied to `queue_notify_off` (virtio 1.x §4.1.4.4).
+        notify_off_multiplier: u32,
+    },
     /// Any other capability ID. Surfaced opaquely; the host audits.
     Other {
         /// Byte offset of the capability header in configuration space.
@@ -172,6 +214,23 @@ pub enum Capability {
         id: u8,
     },
 }
+
+/// PCI capability ID for a vendor-specific capability (PCI Local Bus
+/// 3.0 §H); virtio 1.x reuses it for its configuration structures.
+pub const CAP_ID_VENDOR: u8 = 0x09;
+
+/// virtio `cfg_type` for the common configuration structure
+/// (virtio 1.x §4.1.4.3).
+pub const VIRTIO_CFG_COMMON: u8 = 1;
+/// virtio `cfg_type` for the notification structure (virtio 1.x §4.1.4.4).
+pub const VIRTIO_CFG_NOTIFY: u8 = 2;
+/// virtio `cfg_type` for the ISR-status structure (virtio 1.x §4.1.4.5).
+pub const VIRTIO_CFG_ISR: u8 = 3;
+/// virtio `cfg_type` for the device-specific structure (virtio 1.x §4.1.4.6).
+pub const VIRTIO_CFG_DEVICE: u8 = 4;
+/// virtio `cfg_type` for the PCI configuration-access window
+/// (virtio 1.x §4.1.4.7).
+pub const VIRTIO_CFG_PCI: u8 = 5;
 
 #[cfg(test)]
 mod tests {

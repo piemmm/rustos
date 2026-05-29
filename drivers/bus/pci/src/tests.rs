@@ -24,7 +24,10 @@ use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
 };
 
-use crate::config::{BarKind, Capability, ConfigAddress, ConfigSpace};
+use crate::config::{
+    BarKind, Capability, ConfigAddress, ConfigSpace, VIRTIO_CFG_COMMON, VIRTIO_CFG_DEVICE,
+    VIRTIO_CFG_ISR, VIRTIO_CFG_NOTIFY, VIRTIO_CFG_PCI,
+};
 use crate::enumerate::Pci;
 
 // ---- Mock MMIO mapper ----------------------------------------------------
@@ -539,6 +542,209 @@ fn map_bar_window_propagates_capability_denial() {
     let mapper = MockMapper::new(false);
     assert_eq!(
         pci.map_bar_window(virtio_bdf(), 1, &mapper).unwrap_err(),
+        DriverError::PermissionDenied
+    );
+}
+
+// ---- virtio-1.x capability fixture ---------------------------------------
+
+/// Encode one dword of a virtio vendor-specific capability header.
+///
+/// virtio reuses the PCI vendor-specific capability (`cap_id = 0x09`);
+/// the header dword packs `cap_vndr`, `cap_next`, `cap_len`, and
+/// `cfg_type` into bytes 0..=3 (virtio 1.x §4.1.4).
+fn virtio_cap_header(reg: u8, next: u8, cap_len: u8, cfg_type: u8) -> (u8, u32) {
+    (
+        reg,
+        0x09 | (u32::from(next) << 8) | (u32::from(cap_len) << 16) | (u32::from(cfg_type) << 24),
+    )
+}
+
+/// A `virtio-blk-pci` (modern, device-id `0x1042`) function on
+/// `00:04.0` whose four configuration structures live in a single
+/// 16 KiB 64-bit memory BAR (BAR4) at `0xFE00_0000`:
+///
+/// * common cfg  — offset `0x0000`, length `0x38`
+/// * notify cfg  — offset `0x1000`, length `0x1000`, multiplier `4`
+/// * ISR cfg     — offset `0x2000`, length `0x1000`
+/// * device cfg  — offset `0x3000`, length `0x1000`
+///
+/// The capability list is `common -> notify -> ISR -> device`, the
+/// layout QEMU's `virtio-blk-pci` advertises, so a future live-on-QEMU
+/// test asserts the same triples this host test does.
+fn virtio_blk_fixture() -> MockConfigSpace {
+    let host_bridge = MockFunction {
+        bus: 0,
+        device: 0,
+        function: 0,
+        regs: vec![id(0x8086, 0x29C0), class(0x0600), header(0x00)],
+        sizing: vec![],
+    };
+
+    let virtio_blk = MockFunction {
+        bus: 0,
+        device: 4,
+        function: 0,
+        regs: vec![
+            id(0x1AF4, 0x1042),
+            status_with_caplist(),
+            class(0x0100),
+            header(0x00),
+            // BAR4 — 64-bit memory at 0xFE00_0000 (low dword sets the
+            // memory + 64-bit-type bits; the high dword is zero).
+            (8, 0xFE00_0004),
+            (9, 0x0000_0000),
+            cap_pointer(0x40),
+            // common cfg @ 0x40 -> next 0x50, len 0x10, cfg_type 1.
+            virtio_cap_header(16, 0x50, 0x10, VIRTIO_CFG_COMMON),
+            (17, 0x0000_0004), // bar = 4
+            (18, 0x0000_0000), // bar_offset = 0
+            (19, 0x0000_0038), // length = 0x38
+            // notify cfg @ 0x50 -> next 0x68, len 0x14, cfg_type 2.
+            virtio_cap_header(20, 0x68, 0x14, VIRTIO_CFG_NOTIFY),
+            (21, 0x0000_0004), // bar = 4
+            (22, 0x0000_1000), // bar_offset = 0x1000
+            (23, 0x0000_1000), // length = 0x1000
+            (24, 0x0000_0004), // notify_off_multiplier = 4
+            // ISR cfg @ 0x68 -> next 0x78, len 0x10, cfg_type 3.
+            virtio_cap_header(26, 0x78, 0x10, VIRTIO_CFG_ISR),
+            (27, 0x0000_0004), // bar = 4
+            (28, 0x0000_2000), // bar_offset = 0x2000
+            (29, 0x0000_1000), // length = 0x1000
+            // device cfg @ 0x78 -> next 0x00, len 0x10, cfg_type 4.
+            virtio_cap_header(30, 0x00, 0x10, VIRTIO_CFG_DEVICE),
+            (31, 0x0000_0004), // bar = 4
+            (32, 0x0000_3000), // bar_offset = 0x3000
+            (33, 0x0000_1000), // length = 0x1000
+        ],
+        // BAR4 is 16 KiB: it must span the device cfg's end (0x4000).
+        sizing: vec![(8, 0xFFFF_C004)],
+    };
+
+    MockConfigSpace::new(vec![host_bridge, virtio_blk])
+}
+
+fn virtio_blk_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 4,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+}
+
+#[test]
+fn capabilities_walker_decodes_virtio_structures_in_order() {
+    let pci = Pci::new(virtio_blk_fixture());
+    let mut out = [Capability::Other { offset: 0, id: 0 }; 8];
+    let n = pci
+        .capabilities(virtio_blk_bdf(), &mut out)
+        .expect("cap walk ok");
+    assert_eq!(n, 4);
+    assert_eq!(
+        out[0],
+        Capability::Virtio {
+            offset: 0x40,
+            cfg_type: VIRTIO_CFG_COMMON,
+            bar: 4,
+            bar_offset: 0x0000,
+            length: 0x38,
+        }
+    );
+    assert_eq!(
+        out[1],
+        Capability::VirtioNotify {
+            offset: 0x50,
+            bar: 4,
+            bar_offset: 0x1000,
+            length: 0x1000,
+            notify_off_multiplier: 4,
+        }
+    );
+    assert_eq!(
+        out[2],
+        Capability::Virtio {
+            offset: 0x68,
+            cfg_type: VIRTIO_CFG_ISR,
+            bar: 4,
+            bar_offset: 0x2000,
+            length: 0x1000,
+        }
+    );
+    assert_eq!(
+        out[3],
+        Capability::Virtio {
+            offset: 0x78,
+            cfg_type: VIRTIO_CFG_DEVICE,
+            bar: 4,
+            bar_offset: 0x3000,
+            length: 0x1000,
+        }
+    );
+}
+
+#[test]
+fn map_virtio_window_hands_off_each_cfg_region() {
+    let pci = Pci::new(virtio_blk_fixture());
+    let mapper = MockMapper::new(true);
+    let bdf = virtio_blk_bdf();
+
+    let common = pci
+        .map_virtio_window(bdf, VIRTIO_CFG_COMMON, &mapper)
+        .expect("common cfg maps");
+    assert_eq!(common.phys_base(), 0xFE00_0000);
+    assert_eq!(common.len(), 0x38);
+    // The window is usable: a register round-trips through it.
+    common.write_u32(0, 0xDEAD_BEEF).expect("in bounds");
+    assert_eq!(common.read_u32(0).expect("in bounds"), 0xDEAD_BEEF);
+
+    let notify = pci
+        .map_virtio_window(bdf, VIRTIO_CFG_NOTIFY, &mapper)
+        .expect("notify cfg maps");
+    assert_eq!(notify.phys_base(), 0xFE00_1000);
+    assert_eq!(notify.len(), 0x1000);
+
+    let isr = pci
+        .map_virtio_window(bdf, VIRTIO_CFG_ISR, &mapper)
+        .expect("isr cfg maps");
+    assert_eq!(isr.phys_base(), 0xFE00_2000);
+    assert_eq!(isr.len(), 0x1000);
+
+    let device = pci
+        .map_virtio_window(bdf, VIRTIO_CFG_DEVICE, &mapper)
+        .expect("device cfg maps");
+    assert_eq!(device.phys_base(), 0xFE00_3000);
+    assert_eq!(device.len(), 0x1000);
+}
+
+#[test]
+fn virtio_notify_off_multiplier_reads_notify_cap() {
+    let pci = Pci::new(virtio_blk_fixture());
+    assert_eq!(pci.virtio_notify_off_multiplier(virtio_blk_bdf()), Ok(4));
+}
+
+#[test]
+fn map_virtio_window_reports_not_found_for_absent_cfg_type() {
+    let pci = Pci::new(virtio_blk_fixture());
+    let mapper = MockMapper::new(true);
+    // The fixture advertises no PCI-window structure (cfg_type 5).
+    assert_eq!(
+        pci.map_virtio_window(virtio_blk_bdf(), VIRTIO_CFG_PCI, &mapper)
+            .unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn map_virtio_window_propagates_capability_denial() {
+    let pci = Pci::new(virtio_blk_fixture());
+    // Mapper without CAP_MMIO_MAP: the hand-off surfaces the kernel's
+    // refusal rather than synthesising a pointer.
+    let mapper = MockMapper::new(false);
+    assert_eq!(
+        pci.map_virtio_window(virtio_blk_bdf(), VIRTIO_CFG_COMMON, &mapper)
+            .unwrap_err(),
         DriverError::PermissionDenied
     );
 }
