@@ -46,6 +46,7 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/shell/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/wm/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/rustos-kernel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/drvhost_qemu/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/scheduler_stress/src" isTestSource="false" />
@@ -58,6 +59,8 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/gui/wm/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/session/login/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/shell/shell/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/system/drvhost/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/userland/system/drvhost/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/init/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/installer/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />

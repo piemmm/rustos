@@ -454,6 +454,17 @@ name = "rustos-drv-fs-rustfs"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-drvhost"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-iconbar"
 version = "0.0.0"
 
@@ -577,6 +588,20 @@ version = "0.0.0"
 [[package]]
 name = "rustos-shell"
 version = "0.0.0"
+
+[[package]]
+name = "rustos-test-drvhost-qemu"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drvhost",
+ "rustos-kernel",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-test-kernel-arch-boot"

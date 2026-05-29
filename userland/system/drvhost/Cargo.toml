@@ -1,0 +1,25 @@
+[package]
+name = "rustos-drvhost"
+description = "RustOS userland driver host: loads, verifies, and lifecycles signed `.rxe` driver modules with capability enforcement (Stage 4 — `AGENTS.md` §8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# Pinned to match the version `lib/crypto` audits. The dev-dependency
+# is used **only** by the integration-test fixtures under `tests/` to
+# sign synthetic `.rxe` manifests with a known keypair; production
+# code in this crate never names `ed25519-dalek` directly.
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }

@@ -49,6 +49,7 @@ members = [
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in
     # AGENTS.md §3.
+    "userland/system/drvhost",
     "userland/system/init",
     "userland/system/installer",
     "userland/session/login",
@@ -69,6 +70,7 @@ members = [
     "tests/integration/scheduler_stress_qemu",
     "tests/integration/kernel_arch_boot",
     "tests/integration/syscall_dispatch_qemu",
+    "tests/integration/drvhost_qemu",
 ]
 
 # Settings that apply to every crate in the workspace.

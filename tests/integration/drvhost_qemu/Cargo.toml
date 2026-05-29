@@ -1,0 +1,41 @@
+[package]
+name = "rustos-test-drvhost-qemu"
+description = "Stage 4 QEMU integration test: boot the rustos-kernel pipeline, instantiate `rustos-drvhost::Host`, load a baked-in signed mock `.rxe` image, observe the load audit record, and signal QEMU success."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Stage 4 QEMU integration test. The binary reuses the production
+# boot pipeline from `rustos-kernel`'s library half (`kernel/rustos-
+# kernel/src/lib.rs`) and replaces only the audit sink so that on
+# observing `AuditEvent::BootCompleted` (`EventId(4004)`) it drives
+# `rustos_drvhost::Host` through the load/unload/reload sequence
+# against a baked-in signed mock driver fixture and flips QEMU's
+# `isa-debug-exit` device to success when every step has cleared.
+#
+# The mock driver bytes and the matching trust-anchor public key are
+# generated at build time by `build.rs` into `mock_fixture.rs` so the
+# integration test itself stays `no_std` + `no_main`.
+
+[[bin]]
+name = "rustos-test-drvhost-qemu"
+path = "src/main.rs"
+
+[build-dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

@@ -1089,8 +1089,52 @@ follow-up is its own thread and is now also complete.
   capability model, kinds) + `docs/src/abi/driver_traits.md` (ABI
   reference, frozen `abi-v1`); both wired into `docs/src/SUMMARY.md`
   under new `# Drivers` and `# ABI` top-level sections.
-- Driver host (`userland/`) and per-class first drivers remain
-  outstanding per the Stage 4 deliverable list above.
+- Driver host shipped as `userland/system/drvhost`: a `no_std` +
+  `alloc` userland service that owns `.rxe` driver-module lifecycle
+  (`load`, `unload`, `reload`) with capability enforcement at load
+  time per `AGENTS.md` §8. The host depends only on the audited
+  `rustos-abi`, `rustos-caps`, `rustos-crypto`, and `rustos-log`
+  crates and re-uses `lib/abi`'s `DriverManifest` decoder rather than
+  duplicating it. The verification pipeline runs nine gates in
+  order — envelope parse, syscall-table hash match, trust-anchor
+  lookup, Ed25519 signature verification, capability-body decode,
+  in-kernel-kind gate (`CAP_DRV_KERNEL` required for
+  `DriverKind::InKernel`), subset-only delegation gate, resolver
+  bind, driver `register()` call — and fails closed at the first
+  failure (`AGENTS.md` §5.4.5). Every transition emits a structured
+  `rustos_log::Event` from the reserved `7000..8000` `EventId`
+  range. Buffers that held the manifest signature or capability
+  bitmap are wiped with a volatile-clear primitive
+  (`zeroize::secure_clear`, the one `unsafe` block in the crate,
+  covered by a dedicated unit test). No `unwrap` / `expect` /
+  `panic!` / `todo!` in production paths; `HostError::as_errno`
+  surfaces a stable `Errno` mapping for the future syscall wrapper.
+  Tests: 19 in-crate unit tests + 13 integration tests under
+  `userland/system/drvhost/tests/` covering happy-path load → call
+  → unload → reload, tampered signature, untrusted signer, ABI
+  version mismatch, syscall-table hash mismatch, capability
+  escalation, `InKernel` without `CAP_DRV_KERNEL`, caller without
+  `CAP_DRV_LOAD`, resolver miss, driver `register()` failure, and
+  source-read failure propagation. QEMU integration test
+  `tests/integration/drvhost_qemu` boots the production
+  `rustos-kernel` pipeline on `x86_64-unknown-none`, observes
+  `AuditEvent::BootCompleted`, then drives the host through `load →
+  snapshot → reload → unload` against a build-time-signed mock
+  `.rxe` fixture (`build.rs` emits `MOCK_IMAGE` + matching
+  `TRUSTED_SIGNER_PUBKEY` + `SYSCALL_TABLE_HASH` consts) and flips
+  `qemu_exit::exit_success`; enrolled in `tools/xtask` with a
+  60-second budget matching the other Stage-3a boot-then-do-fixed-
+  work tests. Docs: `docs/src/drivers/host.md` (public surface,
+  trust anchor model, audit catalogue, security model) and
+  `docs/src/drivers/lifecycle.md` (gate-by-gate flow, capability
+  table, sensitive-buffer wipe contract); both wired into
+  `docs/src/SUMMARY.md`.
+- Per-class first drivers (`drivers/display/vesa`,
+  `drivers/display/framebuffer`, `drivers/bus/pci`,
+  `drivers/bus/mmio`, `drivers/bus/virtio`,
+  `drivers/storage/virtio_blk`, `drivers/input/ps2`,
+  `drivers/network/virtio_net`) remain outstanding per the Stage 4
+  deliverable list above.
 
 ---
 

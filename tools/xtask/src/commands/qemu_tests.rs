@@ -83,6 +83,18 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
     },
+    // Stage 4 deliverable: boot the production kernel pipeline,
+    // instantiate `rustos_drvhost::Host`, load a baked-in signed
+    // mock `.rxe` image, exercise `load → snapshot → reload →
+    // unload`, then flip `qemu_exit::exit_success`. Single CPU
+    // suffices and the 60-second budget matches the other Stage 3a
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-drvhost-qemu",
+        binary: "rustos-test-drvhost-qemu",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+    },
 ];
 
 const TARGET: &str = "x86_64-unknown-none";
