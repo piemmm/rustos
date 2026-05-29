@@ -122,8 +122,8 @@ a `DisplayFormat` (`Rgba8888` or `Bgra8888`).
 | `unmount()`         | `CAP_FS_MOUNT` (plus driver handle).            |
 
 `MountFlags` is a checked bitmap of `READ_ONLY`, `NOSUID`, `NODEV`,
-`NOEXEC`. The installer's secure default layout (`AGENTS.md` §11.3)
-sets `NOSUID | NODEV` on `/home` and `/var` via this type.
+`NOEXEC`. The installer's secure default layout (`AGENTS.md` §11.3,
+§16.3) sets `NOSUID | NODEV` on `/Users` and `/Apps` via this type.
 
 ## Block
 

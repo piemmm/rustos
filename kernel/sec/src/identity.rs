@@ -1,7 +1,7 @@
 //! User and group identity state held by the kernel.
 //!
-//! The on-disk identity records persist in `/etc/rustos/users` and
-//! `/etc/rustos/groups` (see `AGENTS.md` §5.1). Loading them is a
+//! The on-disk identity records persist in `/System/Security/Users` and
+//! `/System/Security/Groups` (see `AGENTS.md` §5.1 and §16). Loading them is a
 //! userland responsibility; this module provides the **in-memory builder
 //! and verifier** the kernel uses to ingest already-loaded records and
 //! turn them into a frozen [`IdentityTable`] it can consult on every
@@ -63,7 +63,7 @@ pub struct GroupId(pub u32);
 
 /// In-memory user record.
 ///
-/// Mirrors the on-disk `/etc/rustos/users` schema with the fields
+/// Mirrors the on-disk `/System/Security/Users` schema with the fields
 /// `kernel/sec` actually consults: every privileged operation needs
 /// `(uid, primary group, supplementary groups, capability grants)` and
 /// nothing else. The textual fields (display name, home directory) live

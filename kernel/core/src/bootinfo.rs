@@ -285,8 +285,8 @@ where
 
     /// Initial identity table to install during the `sec` init phase.
     ///
-    /// Built from `/etc/rustos/users` and `/etc/rustos/groups` (or the
-    /// installer-supplied bootstrap records on first boot). The builder
+    /// Built from `/System/Security/Users` and `/System/Security/Groups`
+    /// (or the installer-supplied bootstrap records on first boot). The builder
     /// is consumed and verified by [`crate::kernel_main`]; a rejected
     /// table aborts boot, per `AGENTS.md` §5.4.5 (fail closed).
     pub identity: IdentityTableBuilder,
