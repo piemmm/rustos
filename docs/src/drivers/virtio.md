@@ -11,8 +11,10 @@ The transport crate covers:
 
 - A `Transport` trait abstracting the PCI (`x86_64`) and MMIO
   (`aarch64`, `riscv64 virt`) bus seams behind a single interface,
-  plus a concrete modern-PCI implementation, `PciTransport`
-  (see [Modern PCI transport](#modern-pci-transport-pcitransport)).
+  plus two concrete implementations: the modern-PCI `PciTransport`
+  (see [Modern PCI transport](#modern-pci-transport-pcitransport))
+  and the virtio-MMIO `MmioTransport`
+  (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
   (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
 - The virtio 1.1 §2.6 **split virtqueue**: descriptor table, avail
@@ -37,8 +39,7 @@ The transport crate covers:
 | Packed virtqueues (virtio 1.1 §2.7)        | Split queues meet the Stage 4 acceptance bar; packed is Stage 5 follow-up          | this page                                    |
 | Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `.junie/next-session-prompt.md` item 0      |
 | IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `.junie/next-session-prompt.md` item 2      |
-| MMIO `Transport` implementation            | The modern-PCI `PciTransport` lands first (Stage 4.D Item 4 prerequisite); the MMIO transport follows with the riscv64 QEMU work | `.junie/next-session-prompt.md` item 4 |
-| Boot-time PCI walk → live driver host      | The kernel binary does not yet enumerate PCI and construct a live `drvhost::Host`  | `.junie/next-session-prompt.md` item 4      |
+| Boot-time PCI/MMIO walk → live driver host | The kernel binary does not yet enumerate the bus and construct a live `drvhost::Host` | `.junie/next-session-prompt.md` item 4   |
 | QEMU integration tests (PCI + MMIO)        | Depend on the boot-time bring-up above plus the userland net stack from `.junie/next-session-prompt.md` item 5 | `.junie/next-session-prompt.md` item 4      |
 
 ## Layering picture
@@ -99,6 +100,40 @@ bounds-checked against the notification window on the fallible
 `queue_set` path, so the infallible `notify` only ever writes within
 a pre-validated offset and fails closed (skips the write) for an
 unprogrammed queue.
+
+## Modern MMIO transport (`MmioTransport`)
+
+`MmioTransport` (`drivers/bus/virtio/src/transport_mmio.rs`) is the
+concrete `Transport` for a modern (virtio-1.x) MMIO device — the
+layout QEMU's `-M virt` `virtio-mmio` transport and the RISC-V /
+`AArch64` device-tree nodes advertise (virtio 1.1 §4.2). Unlike the
+four capability-selected PCI windows, a virtio-MMIO device exposes a
+**single** contiguous register block, so the transport owns one
+`RegisterWindow`. The bus driver resolves the block's `(base,
+length)` from the boot device tree and maps it through the same
+`CAP_MMIO_MAP`-gated MMIO-map facility; the transport therefore holds
+**no** ambient authority and performs **no** pointer arithmetic
+(`AGENTS.md` §4).
+
+`MmioTransport::new` validates the `MagicValue` (`"virt"`), a modern
+`Version` of `2`, a non-zero `DeviceID`, and a window that spans the
+whole register block (`regs::WINDOW_MIN_LEN`), so every register the
+infallible `Transport` methods touch is a compile-time constant
+below that bound and never panics (`AGENTS.md` §2.9). Two MMIO-only
+differences from the PCI transport:
+
+- There is no "number of queues" register; a queue's existence is
+  advertised through a non-zero `QueueNumMax`, so `num_queues`
+  reports the architectural 16-bit maximum and the driver probes
+  per-queue via `queue_select` + `queue_max_size`.
+- Notification is a single write of the queue index to the
+  `QueueNotify` register — there is no per-queue notify offset or
+  multiplier — so `notify` is a constant-offset write that always
+  stays in bounds.
+
+The 64-bit queue-address registers (`QueueDesc`, `QueueDriver`,
+`QueueDevice`) are written as `Low`/`High` `u32` pairs, and
+`QueueReady` is set to `1` to bring a programmed queue online.
 
 ## DMA ownership model
 
@@ -218,7 +253,14 @@ read, status write/read + reset, driver-feature halves, queue-select
 range check, queue programming + notify-offset recording, oversize
 and out-of-bounds-notify rejection, no-op notify for an unprogrammed
 queue, device-config read with zero-fill overflow, and a
-`SplitQueue`-drives-`PciTransport` integration check): queue
+`SplitQueue`-drives-`PciTransport` integration check), the twelve
+`transport_mmio` tests added for the riscv64 / `AArch64` virtio-MMIO
+transport (short-window, bad-magic, legacy-version and empty-slot
+rejection, status write/read + reset, device/driver-feature halves,
+queue-select register write, queue programming + `QueueReady`,
+oversize rejection, single-register notify, device-config read with
+zero-fill overflow, and a `SplitQueue`-drives-`MmioTransport`
+integration check): queue
 free-list initialisation, descriptor chaining (single
 + multi), exhaustion, used-ring wrap-around, status progression,
 mock-peer round-trip, sensitive-class scrub on drop, the four

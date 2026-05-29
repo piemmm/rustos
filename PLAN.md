@@ -1244,6 +1244,47 @@ follow-up is its own thread and is now also complete.
   (acceptance gate) remain outstanding — they require real
   PCI/DTB→DMA→IRQ device bring-up and are rewritten in
   `.junie/next-session-prompt.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — virtio-MMIO
+  `MmioTransport`, *complete*): `PciTransport` covered the `x86_64`
+  bus, but the riscv64 `-M virt` / `AArch64` path had no concrete
+  `Transport`, so the planned riscv64 QEMU bring-up had nothing to
+  drive a `virtio-mmio` register block. New module
+  `drivers/bus/virtio/src/transport_mmio.rs` adds `MmioTransport`,
+  the concrete modern (virtio-1.x) MMIO `Transport` over the single
+  kernel-mapped `RegisterWindow` a bus driver resolves from the boot
+  device tree and maps through the `CAP_MMIO_MAP`-gated MMIO-map
+  facility. It drives the full §3.1 sequence against the virtio 1.1
+  §4.2.2 MMIO register layout: status read/write + reset, 64-bit
+  feature negotiation (`*FeaturesSel` windowed `u32` halves), per-queue
+  `QueueSel`/`QueueNum`/`QueueDesc`/`QueueDriver`/`QueueDevice`
+  programming (64-bit addresses as `Low`/`High` pairs) + `QueueReady`,
+  and single-register `QueueNotify` notification. Two MMIO-only
+  differences from PCI: there is no num-queues register (queues are
+  probed via a non-zero `QueueNumMax`, so `num_queues` reports the
+  16-bit max) and no per-queue notify offset/multiplier (notify is a
+  constant-offset write). It performs no pointer arithmetic and holds
+  no ambient authority (`AGENTS.md` §4). `MmioTransport::new`
+  validates the `"virt"` magic, modern version `2`, a non-zero
+  device-id, and a window ≥ the full register block, so the infallible
+  `Transport` methods touch only in-bounds constant offsets and never
+  panic (`AGENTS.md` §2.9). **Tests.** `cargo test
+  -p rustos-drv-bus-virtio` → 73 (+12 `transport_mmio` tests against a
+  `RegisterWindow`-backed `FakeMmioDevice`: short-window, bad-magic,
+  legacy-version and empty-slot rejection, status/reset,
+  device/driver-feature halves, queue-select write, queue programming
+  + `QueueReady`, oversize rejection, single-register notify,
+  device-config read with zero-fill, and a
+  `SplitQueue`-drives-`MmioTransport` integration check); green with
+  and without `--features kernel-host`. `cargo clippy
+  -p rustos-drv-bus-virtio --all-targets -- -D warnings` (both feature
+  sets), `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc
+  -p rustos-drv-bus-virtio --no-deps`, and the `x86_64-unknown-none` /
+  `riscv64gc-unknown-none-elf` builds are clean. **Docs.**
+  `docs/src/drivers/virtio.md` gains a "Modern MMIO transport" section
+  and a refreshed scope / out-of-scope table. **Deferred.** The
+  ring-0 boot-time bus walk, the riscv64 QEMU runner, and the QEMU
+  integration crates + acceptance gate (Items 4 / 6) remain
+  outstanding — see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — modern-PCI
   `PciTransport`, *complete*): the only `Transport` implementation
   in the tree was the in-process `MockTransport`; nothing turned a

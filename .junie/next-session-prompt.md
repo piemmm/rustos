@@ -48,6 +48,26 @@
   `virtio-blk-pci` `1AF4:1042` fixture); clippy / fmt / doc /
   `x86_64-unknown-none` build clean; PCI README +
   `docs/src/drivers/bus.md` updated.
+- **Modern virtio-MMIO `MmioTransport`** (latest session — the
+  riscv64 / `AArch64` transport prerequisite). `PciTransport` covered
+  the `x86_64` bus, but the `-M virt` / device-tree MMIO path had no
+  concrete `Transport`. New module
+  `drivers/bus/virtio/src/transport_mmio.rs`: `MmioTransport` over the
+  single kernel-mapped `RegisterWindow` a bus driver resolves from the
+  boot DTB and maps through the `CAP_MMIO_MAP`-gated MMIO-map facility
+  (virtio 1.1 §4.2.2 register layout). Drives the §3.1 init sequence,
+  64-bit feature negotiation, per-queue `Low`/`High` address
+  programming + `QueueReady`, and single-register `QueueNotify`
+  notification — no pointer arithmetic, no ambient authority
+  (`AGENTS.md` §4). Fallible `new` validates magic/version/device-id
+  and a full-length window so the infallible `Transport` methods touch
+  only in-bounds constant offsets and never panic (§2.9). MMIO-only:
+  no num-queues register (`num_queues` = 16-bit max, probe via
+  `QueueNumMax`) and no notify offset/multiplier. Exported from
+  `lib.rs`; 12 new unit tests against a `RegisterWindow`-backed
+  `FakeMmioDevice`; `docs/src/drivers/virtio.md` + PLAN.md Stage 4.D
+  updated. `rustos-drv-bus-virtio` host tests now **73** (default and
+  `--features kernel-host`).
 - **Modern virtio-1.x PCI `PciTransport`** (earlier session — the
   Item 4 transport prerequisite). Investigation found the only `Transport`
   impl in-tree was the in-process `MockTransport`; `PciBackend` /
@@ -72,7 +92,7 @@
 
 Baseline host tests after this session (all green): `rustos-abi`
 77, `rustos-kernel-mem` 101, `rustos-kernel-sec` 52,
-`rustos-drv-bus-virtio` **61** (default and `--features
+`rustos-drv-bus-virtio` **73** (default and `--features
 kernel-host`), `rustos-kernel --lib` 37, `rustos-drvhost` 19 lib;
 no regressions elsewhere (`rustos-drv-storage-virtio-blk`,
 `rustos-drv-network-virtio-net` green). Clippy (`-D warnings`,
@@ -125,9 +145,12 @@ real-hardware transport. What still does **not** exist:
   `Pci::virtio_notify_off_multiplier`); the remaining work is the
   ring-0 walk that enumerates the bus, picks the virtio function,
   and *calls* these hand-offs with the kernel `KernelMmioMapper`.
-- The equivalent **MMIO `Transport`** for `riscv64 -M virt`
-  (`virtio-mmio` register block via `Mmio::map_slot_window`), which
-  does not yet exist.
+- The **MMIO `Transport`** for `riscv64 -M virt` / `AArch64` now
+  exists (`drivers/bus/virtio::MmioTransport`, latest session). The
+  remaining MMIO work is the ring-0 DTB walk that resolves the
+  `virtio-mmio` slot, maps its register block via
+  `Mmio::map_slot_window` → `KernelMmioMapper`, and feeds the window
+  into `MmioTransport::new`.
 - riscv64 support in the **QEMU runner** (`tools/qemu` is x86_64-only
   today: single `Arch::X86_64`, GRUB-ISO boot, `isa-debug-exit`).
 
