@@ -103,7 +103,7 @@ mod kernel {
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_kernel_core::KernelSyscallHandlers;
+    use rustos_kernel_core::{IrqRouting, KernelSyscallHandlers};
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
@@ -257,7 +257,18 @@ mod kernel {
             period_micros: 1_000,
             tsc_per_second: 1_000_000_000,
         };
-        let arch = alloc::sync::Arc::new(BinArch::new(arch_inner, calibration));
+        // `IrqRouting::unsupported()` keeps the synthesised arch
+        // free of any programmable interrupt controller — none of the
+        // dispatched syscalls (cap_query / exit) touch the IRQ path,
+        // and a real routing would require a live `IoApicController`
+        // we deliberately do not stand up in this test. The host
+        // tests in `kernel/rustos-kernel::arch_wrapper` cover the
+        // `IrqRouting::unsupported` shape.
+        let arch = alloc::sync::Arc::new(BinArch::new(
+            arch_inner,
+            calibration,
+            IrqRouting::unsupported(),
+        ));
 
         // 2. Scheduler with a single CPU (matches `boot::try_boot`).
         let cfg = SchedulerConfig::defaults_for(1);

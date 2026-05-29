@@ -267,6 +267,20 @@ impl<M: IoApicMmio> IoApic<M> {
         self.mmio.write(reg, low);
         self.mmio.write(reg.saturating_add(1), high);
     }
+
+    /// Read the low half of redirection entry `pin` through the
+    /// underlying [`IoApicMmio`].
+    ///
+    /// Bit 16 is the mask bit; bits 0..7 carry the vector. Used by
+    /// the kernel-binary `IoApicController::read_pin_low` accessor
+    /// (Stage 4.D Item 2-tail.2 QEMU validation) to re-read the
+    /// hardware mask state after `IrqTable::fire`; that path is
+    /// the evidence trail for the mask-before-wake invariant
+    /// documented in `docs/src/security/irq.md`.
+    pub fn read_redirection_entry_low(&mut self, pin: u8) -> u32 {
+        let reg = 0x10u8 + pin.saturating_mul(2);
+        self.mmio.read(reg)
+    }
 }
 
 /// Volatile-MMIO impl of [`IoApicMmio`] for a real IO-APIC.

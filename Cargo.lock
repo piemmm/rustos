@@ -650,6 +650,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-irq-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-irq",
+ "rustos-kernel-sec",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-kernel-arch-boot"
 version = "0.0.0"
 dependencies = [

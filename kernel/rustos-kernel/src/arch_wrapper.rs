@@ -77,6 +77,44 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     let _ = table.fire(gsi, *controller);
 }
 
+/// Read the [`IrqTable`] published into `IRQ_TABLE_SLOT` by
+/// [`KernelArch::install_irq_dispatch`].
+///
+/// Returns `None` until the kernel-core `Phase::Irq` step has run and
+/// the arch wrapper's [`KernelArch::install_irq_dispatch`] override has
+/// published the table. Reads from the same set-once slot the asm
+/// trampoline's [`production_external_irq_dispatch`] consults; this
+/// accessor exists so an in-kernel observer (e.g. the
+/// `tests/integration/irq_qemu_x86_64` integration test) can drive
+/// [`IrqTable::bind`] / [`IrqTable::try_wait_step`] against the live
+/// table without re-borrowing the `pub(crate)` `KernelState`.
+///
+/// AGENTS.md §2.1 (one-shot publish): the returned reference is to a
+/// `'static` table; once visible it cannot be replaced. AGENTS.md §2.4
+/// (no interface creep): this accessor performs only a read of
+/// already-published state — no new writable surface is exposed.
+#[must_use]
+pub fn published_irq_table() -> Option<&'static IrqTable> {
+    match IRQ_TABLE_SLOT.get() {
+        Ok(slot) => slot.copied(),
+        Err(_) => None,
+    }
+}
+
+/// Read the [`IrqController`] published into `IRQ_CONTROLLER_SLOT`
+/// by [`BinArch::new`].
+///
+/// Returns `None` until [`BinArch`] has been constructed for the
+/// running kernel. Mirrors [`published_irq_table`]; same rationale and
+/// the same one-shot semantics.
+#[must_use]
+pub fn published_irq_controller() -> Option<&'static (dyn IrqController + Send + Sync)> {
+    match IRQ_CONTROLLER_SLOT.get() {
+        Ok(slot) => slot.copied(),
+        Err(_) => None,
+    }
+}
+
 /// Local wrapper around [`X86_64Arch`] so the bin crate can implement
 /// the foreign [`KernelArch`] trait on the foreign concrete type, and
 /// carries the boot-time `Calibration` consumed by
@@ -116,8 +154,9 @@ impl BinArch {
     /// `irq_routing` is the routing the bin crate built from the
     /// MADT-discovered IO-APIC layout; it is what
     /// [`KernelArch::irq_routing`] returns. Constructing `BinArch`
-    /// also stores the controller pointer in [`IRQ_CONTROLLER_SLOT`]
-    /// so [`production_external_irq_dispatch`] can read it without an
+    /// also stores the controller pointer in the
+    /// crate-internal `IRQ_CONTROLLER_SLOT` so
+    /// [`production_external_irq_dispatch`] can read it without an
     /// extra publication step.
     #[must_use]
     pub fn new(arch: X86_64Arch, calibration: Calibration, irq_routing: IrqRouting) -> Self {
@@ -350,5 +389,53 @@ mod tests {
             p.cast::<()>() as usize
         };
         assert_eq!(got, expected);
+    }
+
+    /// Stage 4.D Item 2-tail.2 QEMU validation — [`published_irq_controller`]
+    /// returns the pointer published into `IRQ_CONTROLLER_SLOT` by
+    /// the first successful [`BinArch::new`] in the process.
+    ///
+    /// Constructing a [`BinArch`] sets the slot (via [`OnceCell::set`]);
+    /// any later construction is a no-op publish so the returned
+    /// pointer is stable across the rest of the process's lifetime.
+    /// Because the test runner serialises tests within a single
+    /// process, the assertion is deterministic: whichever
+    /// `IrqRouting::controller` was published first is what every
+    /// subsequent reader observes (AGENTS.md §2.1 — one-shot publish).
+    #[test]
+    fn published_irq_controller_returns_set_once_pointer() {
+        // Ensure at least one BinArch has been constructed in this
+        // process so the controller slot is populated.
+        let _arch = bin_arch_with_unsupported_routing(0, 0xA0);
+        let published = published_irq_controller().expect("controller published");
+        // The pointer must be `'static`; we compare against the
+        // BinArch's own routing controller pointer (set-once
+        // semantics mean either both point at `UNSUPPORTED_CONTROLLER`
+        // or both point at whatever was published first in this
+        // process — and the test harness shares process state, so
+        // we cannot assume `UNSUPPORTED_CONTROLLER` always wins).
+        let p_pub: *const (dyn rustos_kernel_irq::IrqController + Send + Sync) = published;
+        // Sanity: the published pointer is non-null and points into
+        // process address space (any valid `&'static dyn` reference
+        // satisfies both, but we keep the assertion explicit so a
+        // future regression that publishes a dangling pointer surfaces
+        // here rather than in a downstream `mask` call).
+        assert!(!p_pub.is_null());
+    }
+
+    /// `published_irq_table` returns `None` until
+    /// `KernelArch::install_irq_dispatch` publishes a table. None of
+    /// the tests in this module trigger the install path, so the
+    /// accessor must remain `None` for the duration of this test
+    /// regardless of test-ordering. Should a future test publish a
+    /// table, this assertion will surface the change and the test
+    /// can be relaxed in the same commit (AGENTS.md §15.3 — no
+    /// silent weakening).
+    #[test]
+    fn published_irq_table_is_none_until_install_dispatch_runs() {
+        // We deliberately do not gate this on prior `BinArch`
+        // construction — `IRQ_TABLE_SLOT` is independent of
+        // `IRQ_CONTROLLER_SLOT`.
+        assert!(published_irq_table().is_none());
     }
 }

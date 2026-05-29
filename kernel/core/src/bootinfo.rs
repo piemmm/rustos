@@ -155,7 +155,7 @@ pub trait KernelArch: SchedulerArch {
     ///   code path is a defect (`AGENTS.md` §2.1 — one-shot publish);
     ///   real arch ports fail-closed on the second call by halting.
     /// * The `table` reference outlives the running kernel because
-    ///   `kernel_main` `Box::leak`s the [`crate::init::KernelState`]
+    ///   `kernel_main` `Box::leak`s the crate-internal `KernelState`
     ///   wrapping it.
     /// * The default impl is a no-op so arch ports without an
     ///   external-IRQ trap dispatcher (the `TestArch` mock,

@@ -95,6 +95,26 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
     },
+    // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
+    // kernel pipeline, then drive a real hardware-interrupt round
+    // trip on the legacy IRQ-0 GSI through the IO-APIC + PIT. The
+    // test binary `rustos-test-irq-qemu-x86-64` installs an audit
+    // sink that — on observing `AuditEvent::BootCompleted` — binds
+    // the line in the published `IrqTable`, unmasks through the
+    // production `IoApicController`, programs PIT channel 0 as a
+    // one-shot, polls `IrqTable::try_wait_step` until
+    // `WaitStep::Ready`, re-reads the IO-APIC redirection-entry
+    // mask bit to verify the mask-before-wake invariant, and flips
+    // `qemu_exit::exit_success`. Any deviation flips
+    // `qemu_exit::exit_failure`. Single CPU suffices and a 60-second
+    // budget matches the other Stage-3/4 boot-then-do-fixed-work
+    // tests.
+    QemuTest {
+        package: "rustos-test-irq-qemu-x86-64",
+        binary: "rustos-test-irq-qemu-x86-64",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+    },
 ];
 
 const TARGET: &str = "x86_64-unknown-none";

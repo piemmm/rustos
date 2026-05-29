@@ -586,6 +586,14 @@ fn discover_and_program_io_apics(
         .collect();
     let controller_static: &'static IoApicController<VolatileIoApicMmio> =
         Box::leak(Box::new(IoApicController::new(blocks)));
+    // Publish the typed controller into the bin-crate's `PUBLISHED_TYPED`
+    // slot so in-kernel observers (e.g. the
+    // `tests/integration/irq_qemu_x86_64` QEMU integration test) can
+    // reach [`IoApicController::program_pin`] and
+    // [`IoApicController::read_pin_low`] without re-borrowing the
+    // `pub(crate)` `KernelState`. AGENTS.md §2.1 — one-shot publish;
+    // the slot accepts the same pointer the `IrqRouting` carries.
+    crate::ioapic_controller::publish_typed(controller_static);
 
     // Step 4. For every pin: allocate the next vector from the
     // reserved range, install the per-CPU IDT entry, publish the

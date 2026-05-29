@@ -1334,6 +1334,100 @@ follow-up is its own thread and is now also complete.
   `.junie/next-session-prompt.md` with concrete entry points that
   build on the `VirtioHostFactory` seam landed here.
 
+- Stage 4.D follow-up (Item 2-tail.2 QEMU validation — live IRQ
+  end-to-end on x86_64 QEMU, *complete*): the QEMU integration
+  crate deferred from the preceding A2 split has landed and the
+  full Item 2-tail.2 deliverable is now hardware-validated. New
+  freestanding `tests/integration/irq_qemu_x86_64` crate
+  (`[[bin]] rustos-test-irq-qemu-x86-64`, `test-hooks` default
+  feature, same `compile_error!` release-build guard the
+  syscall-dispatch QEMU test uses) reuses `rustos_kernel::boot`
+  verbatim and installs a custom audit Sink. On observing
+  `AuditEvent::BootCompleted` the sink: (1) reads the published
+  `IrqTable` via the new `rustos_kernel::arch_wrapper::published_irq_table`
+  and the typed `IoApicController<VolatileIoApicMmio>` via the
+  new `rustos_kernel::ioapic_controller::published_typed`;
+  (2) resolves the IDT vector assigned to GSI 2 (QEMU's
+  PIIX/Q35 `InterruptSourceOverride { source: 0, gsi: 2 }`
+  mapping for the legacy ISA IRQ-0 PIT line) via
+  `rustos_arch_x86_64::irq::global_routing().vector_for_gsi(2)`;
+  (3) binds GSI 2 in the `IrqTable` against the synthesised
+  `TaskId(0)`, masks the legacy 8259 PIC (OCW1 IMR ← `0xFF`),
+  unmasks the line via the new `IoApicController::unmask(gsi)`,
+  and arms PIT channel 0 in mode 0 as a one-shot
+  (architectural 1.193182 MHz × 2000-tick reload ≈ 1.68 ms);
+  (4) `sti`s, then spin-polls `IrqTable::try_wait_step` with
+  `hlt` between polls and a 1 s deadline. The asm trampoline +
+  `production_external_irq_dispatch` chain delivers the IRQ →
+  `IrqTable::fire(2, controller)` masks the line + SeqCst-fences
+  → `ready` flips → `try_wait_step` observes
+  `WaitStep::Ready`; (5) `cli`s and re-reads the IO-APIC
+  redirection-entry low half via the new
+  `IoApicController::read_pin_low(gsi)`, asserting bit 16 is
+  set — the load-bearing evidence the controller's mask write
+  reached the IO-APIC MMIO window before the wake;
+  (6) flips `qemu_exit::exit_success`. Any deviation —
+  missing slot, no vector bound, `WaitStep::TimedOut`,
+  `WaitStep::NotFound`, mask bit clear — flips
+  `qemu_exit::exit_failure` with the QEMU serial log attached
+  by `tools/qemu::Runner`. **New public seams** (all
+  read-only-after-init publish-from-existing-state, no new
+  writable surface — `AGENTS.md` §2.4 honoured):
+  `rustos_kernel::arch_wrapper::published_irq_table`,
+  `rustos_kernel::arch_wrapper::published_irq_controller`,
+  `rustos_kernel::ioapic_controller::publish_typed` (called
+  from `try_boot::discover_and_program_io_apics`),
+  `rustos_kernel::ioapic_controller::published_typed`,
+  `IoApicController::unmask`,
+  `IoApicController::read_pin_low`, and a small
+  `IoApic::read_redirection_entry_low` reader in the arch
+  crate. Each surface ships host unit tests:
+  `published_irq_controller_returns_set_once_pointer`,
+  `published_irq_table_is_none_until_install_dispatch_runs`,
+  `unmask_clears_mask_bit_and_preserves_vector`,
+  `unmask_rejects_gsi_out_of_range`,
+  `unmask_rejects_unprogrammed_pin`,
+  `read_pin_low_returns_low_half_after_program_pin`. The
+  `RecordingMmio` test mock grew a per-register `last_writes`
+  back-channel so `IoApicMmio::read` returns the last value
+  written — necessary to exercise `read_pin_low` against the
+  mock. **Workspace + xtask wiring.**
+  `Cargo.toml::[workspace].members` grew a sixth
+  `tests/integration/irq_qemu_x86_64` entry;
+  `tools/xtask::commands::qemu_tests::TESTS` grew a sixth
+  enrolment with a 60 s budget. `cargo xtask test --qemu`
+  builds and runs all six integration crates in sequence.
+  **Drive-by fix.** The previous session's
+  `tests/integration/syscall_dispatch_qemu/src/main.rs` had
+  not been updated for the
+  `BinArch::new(arch, calibration, irq_routing)` signature
+  refresh; the test was excluded from `cargo test --workspace`
+  but its freestanding build was broken. Fixed in the same
+  change by passing `IrqRouting::unsupported()` — the call
+  site does not exercise the IRQ path. **Docs.**
+  `docs/src/security/irq.md` controller table updated from
+  "Wired" to "Wired and QEMU-validated"; a new "x86_64 QEMU
+  validation (Stage 4.D Item 2-tail.2 QEMU)" section
+  documents the six-step end-to-end scenario; the
+  test-coverage section grew bullets for the new
+  `arch_wrapper` accessor tests, the `ioapic_controller`
+  `unmask` / `read_pin_low` tests, and the QEMU integration
+  crate. **Verification.** `cargo test -p rustos-kernel
+  --lib` → 34 passing (3 new accessor tests + 3 new unmask
+  tests vs the 28 baseline). `cargo run -p rustos-xtask --
+  test --qemu` → six QEMU crates pass:
+  `rustos-test-memory-isolation`,
+  `rustos-test-scheduler-stress-qemu`,
+  `rustos-test-kernel-arch-boot`,
+  `rustos-test-syscall-dispatch-qemu`,
+  `rustos-test-drvhost-qemu`,
+  `rustos-test-irq-qemu-x86-64`. **What is still
+  outstanding.** Items 2-tail.3 / 2-tail.4 / 3 / 4 / 5 / 6
+  from the preceding next-session prompt remain deferred —
+  the user-confirmed scope for this session was the QEMU
+  validation only. Rewritten into
+  `.junie/next-session-prompt.md`.
+
 - Stage 4.D follow-up (Item 2-tail.2 — x86_64 IDT external-vector +
   IO-APIC trap glue, *complete*): the architecture half that
   composes the `kernel/irq` substrate landed in the preceding

@@ -126,7 +126,7 @@ impl IrqController for UnsupportedController {
 
 /// Shared `'static` [`UnsupportedController`] suitable as the default
 /// controller reference handed back from
-/// [`rustos_kernel_core::KernelArch::irq_routing`] on architectures
+/// `rustos_kernel_core::KernelArch::irq_routing` on architectures
 /// or boot paths that have not yet installed a real controller.
 ///
 /// Exposed as a `pub static` (not a `const`) so callers can take a
@@ -135,7 +135,7 @@ impl IrqController for UnsupportedController {
 /// unit-like type has no interior mutability, so the lint does not
 /// fire here, but the `static` form keeps the address stable and
 /// allows the type-erased reference to round-trip through the
-/// [`rustos_kernel_core`] handover without surprise. `AGENTS.md`
+/// `rustos_kernel_core` handover without surprise. `AGENTS.md`
 /// §2.1 — no global mutable state; this is an *immutable* static.
 pub static UNSUPPORTED_CONTROLLER: UnsupportedController = UnsupportedController;
 

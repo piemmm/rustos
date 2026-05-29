@@ -1,0 +1,39 @@
+[package]
+name = "rustos-test-irq-qemu-x86-64"
+description = "Stage 4.D Item 2-tail.2 QEMU validation: end-to-end IRQ delivery on x86_64. Boots the production kernel, programs the legacy IRQ-0 line through the IO-APIC controller, arms PIT channel 0 as a one-shot, observes WaitStep::Ready through the kernel/irq table, and asserts the IO-APIC redirection-entry mask bit was re-asserted before the wake (mask-before-wake invariant)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the Stage 4.D Item 2-tail.2 QEMU validation deliverable.
+# It exercises the full x86_64 external-IRQ trap glue end-to-end on a
+# real (emulated) IO-APIC + PIT, complementing the host-side substrate
+# tests in `kernel/irq` and `kernel/rustos-kernel::ioapic_controller`.
+#
+# Layout mirrors `tests/integration/syscall_dispatch_qemu`. The
+# `test-hooks` default feature gates the synthetic-IRQ scenario; a
+# release build that enables it is rejected by the `compile_error!`
+# guard in `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail
+# closed; §15 — test affordances stay in test crates).
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-irq-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

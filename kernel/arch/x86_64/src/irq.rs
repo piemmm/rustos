@@ -9,10 +9,10 @@
 //!   architecture-neutral GSI line numbers.
 //! * The Rust dispatcher invoked by the shared asm trampoline. The
 //!   dispatcher looks up the GSI through [`Routing`], forwards to the
-//!   architecture-neutral [`rustos_kernel_irq::IrqTable::fire`] via a
+//!   architecture-neutral `rustos_kernel_irq::IrqTable::fire` via a
 //!   one-shot-published callback ([`set_external_irq_dispatch`]), and
 //!   writes the LAPIC EOI register before returning.
-//! * The MADT IO-APIC discovery helper [`discover_io_apics`] consumed
+//! * The MADT IO-APIC discovery helper `discover_io_apics` consumed
 //!   by the kernel binary's boot pipeline.
 //!
 //! # Mask-before-wake invariant
@@ -21,7 +21,7 @@
 //! requires every controller to mask the line before signalling
 //! `ready = true`. The Rust dispatcher in this module **does not**
 //! perform the mask write itself — it calls
-//! [`rustos_kernel_irq::IrqTable::fire`], which in turn invokes the
+//! `rustos_kernel_irq::IrqTable::fire`, which in turn invokes the
 //! installed controller's `mask` *before* setting `ready`. The
 //! production controller (`IoApicController` in
 //! `kernel/rustos-kernel`) issues a volatile, fenced write to the
@@ -122,9 +122,9 @@ pub fn external_isr_addr(_vector: u8) -> Option<u64> {
 /// function pointer packed into a `usize`.
 ///
 /// The kernel binary installs the production dispatcher (which
-/// forwards to [`rustos_kernel_irq::IrqTable::fire`]) exactly once
+/// forwards to `rustos_kernel_irq::IrqTable::fire`) exactly once
 /// during boot via [`set_external_irq_dispatch`]. The asm trampoline
-/// calls [`rustos_arch_x86_64_external_irq_dispatch`] on every
+/// calls `rustos_arch_x86_64_external_irq_dispatch` on every
 /// delivery; that Rust function reads this slot, looks up the GSI
 /// through [`global_routing`], forwards, and writes EOI.
 static EXTERNAL_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
@@ -133,7 +133,7 @@ static EXTERNAL_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
 ///
 /// `vector` is the IDT vector the trap fired on; the dispatcher is
 /// responsible for translating it to a GSI through [`global_routing`]
-/// and invoking [`rustos_kernel_irq::IrqTable::fire`] before
+/// and invoking `rustos_kernel_irq::IrqTable::fire` before
 /// returning. The dispatcher must be safe to invoke from interrupt
 /// context (interrupts disabled, no allocation, no scheduler reentry).
 pub type ExternalIrqDispatchFn = extern "C" fn(vector: u8);
@@ -227,7 +227,7 @@ pub(crate) fn clear_routing_for_tests() {
 ///      is belt-and-braces.
 ///   2. Calls the installed [`ExternalIrqDispatchFn`] with the
 ///      truncated vector. The dispatcher forwards to
-///      [`rustos_kernel_irq::IrqTable::fire`].
+///      `rustos_kernel_irq::IrqTable::fire`.
 ///   3. Writes `0` to the LAPIC EOI register releasing the
 ///      in-service bit (Intel SDM Vol 3A §11.8.5). EOI is performed
 ///      *after* the dispatcher because the dispatcher must observe

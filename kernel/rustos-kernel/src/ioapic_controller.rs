@@ -3,7 +3,7 @@
 //!
 //! Stage 4.D Item 2-tail.2. The kernel binary builds one
 //! [`IoApicController`] per boot during its post-MADT wiring phase
-//! (see [`crate::boot::try_boot`]). The controller owns every
+//! (see `crate::boot::try_boot`, bare-metal only). The controller owns every
 //! IO-APIC the firmware advertises through MADT and exposes a single
 //! [`IrqController::mask`] method that the kernel-neutral
 //! [`rustos_kernel_irq::IrqTable::fire`] path invokes *before* it
@@ -52,6 +52,61 @@ use core::sync::atomic::{fence, Ordering};
 use rustos_arch_x86_64::apic::{IoApic, IoApicMmio};
 use rustos_kernel_irq::{IrqController, MaskError};
 use rustos_kernel_sync::spinlock::SpinLock;
+
+/// Set-once typed publication of the production
+/// `IoApicController<VolatileIoApicMmio>` constructed by
+/// [`crate::boot::try_boot`].
+///
+/// Bare-metal only because the `VolatileIoApicMmio` type used in the
+/// slot's `'static` reference is itself gated to `target_os = "none"`
+/// — host tests have no IO-APIC MMIO window to publish.
+///
+/// Published alongside the [`crate::arch_wrapper`] controller slot
+/// (which carries the same controller as a `dyn IrqController` trait
+/// object). The typed slot exposes [`IoApicController::program_pin`]
+/// and [`IoApicController::read_pin_low`] — methods that are *not*
+/// part of the [`IrqController`] trait surface because they are
+/// architecture-specific and have no analogue on every port.
+///
+/// Stage 4.D Item 2-tail.2 QEMU validation. The
+/// `tests/integration/irq_qemu_x86_64` integration test reads this
+/// slot to unmask a real IO-APIC pin (`program_pin(masked=false)`)
+/// and to re-read the redirection-entry mask state after
+/// [`rustos_kernel_irq::IrqTable::fire`] runs. AGENTS.md §2.1 — the
+/// slot is set-once per boot; AGENTS.md §2.4 — the typed accessor is
+/// a *read* of already-published state, not a new writable surface.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static PUBLISHED_TYPED: rustos_kernel_sync::once::OnceCell<
+    &'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>,
+> = rustos_kernel_sync::once::OnceCell::new();
+
+/// Publish the production controller into [`PUBLISHED_TYPED`].
+///
+/// Called once during [`crate::boot::try_boot`]'s
+/// `discover_and_program_io_apics` step. A second publish is silently
+/// ignored — production code reaches this path exactly once.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn publish_typed(
+    controller: &'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>,
+) {
+    let _ = PUBLISHED_TYPED.set(controller);
+}
+
+/// Read the controller published into [`PUBLISHED_TYPED`].
+///
+/// Returns `None` until [`publish_typed`] has run. The
+/// `tests/integration/irq_qemu_x86_64` integration test calls this
+/// from its `AuditEvent::BootCompleted` observer to obtain typed
+/// access to the production [`IoApicController`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub fn published_typed(
+) -> Option<&'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>> {
+    match PUBLISHED_TYPED.get() {
+        Ok(slot) => slot.copied(),
+        Err(_) => None,
+    }
+}
 
 /// Cached pre-image of one IO-APIC redirection entry's
 /// non-mask-bit state. Refreshed whenever the kernel re-writes the
@@ -180,6 +235,73 @@ impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
+
+    /// Re-program the redirection entry owning `gsi` with the cached
+    /// `(vector, dest)` and `masked = false`.
+    ///
+    /// Returns [`ProgramError::GsiOutOfRange`] when no block owns
+    /// `gsi`, or when the pin was never programmed (in which case
+    /// there is no cached `(vector, dest)` to re-apply). Symmetric
+    /// counterpart of [`IrqController::mask`]: that method
+    /// re-asserts the mask bit using the cached state; this one
+    /// clears it.
+    ///
+    /// Stage 4.D Item 2-tail.2 QEMU validation. The QEMU integration
+    /// test programs a legacy line (boot pipeline left it
+    /// `masked = true` per `discover_and_program_io_apics`) and
+    /// unmasks it through this method before arming the PIT. Driver
+    /// hosts will use the same method during Item 2-tail.3.
+    pub fn unmask(&self, gsi: u32) -> Result<(), ProgramError> {
+        let (idx, pin) = self.locate(gsi).ok_or(ProgramError::GsiOutOfRange)?;
+        let block = &self.blocks[idx];
+        let mut inner = block.inner.lock();
+        let cache_slot = inner.pin_cache[pin as usize].ok_or(ProgramError::GsiOutOfRange)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let pin_u8 = pin as u8;
+        inner.ioapic.set_redirection_entry(
+            pin_u8,
+            cache_slot.vector,
+            cache_slot.dest_apic_id,
+            false,
+        );
+        inner.pin_cache[pin as usize] = Some(PinSettings {
+            masked: false,
+            ..cache_slot
+        });
+        Ok(())
+    }
+
+    /// Read the low half of the IO-APIC redirection entry owning
+    /// `gsi`, issued through the same volatile MMIO path the
+    /// production [`Self::program_pin`] / [`Self::mask`] writes use.
+    ///
+    /// Returns `None` if no block owns `gsi`. The low half carries
+    /// the vector (bits 0..7), delivery mode (bits 8..10),
+    /// destination mode (bit 11), pending (bit 12), polarity
+    /// (bit 13), remote IRR (bit 14), trigger (bit 15), and — the
+    /// load-bearing observation for the mask-before-wake invariant
+    /// — the mask bit (bit 16).
+    ///
+    /// Stage 4.D Item 2-tail.2 QEMU validation. The
+    /// `tests/integration/irq_qemu_x86_64` integration test calls
+    /// this after observing [`rustos_kernel_irq::WaitStep::Ready`]
+    /// to re-read the redirection entry and assert
+    /// `low & (1 << 16) != 0` — i.e. that
+    /// [`rustos_kernel_irq::IrqTable::fire`]'s controller-side mask
+    /// write reached the hardware. AGENTS.md §5.4.4 — every
+    /// security-relevant invariant has a direct evidence path.
+    #[must_use]
+    pub fn read_pin_low(&self, gsi: u32) -> Option<u32> {
+        let (idx, pin) = self.locate(gsi)?;
+        let block = &self.blocks[idx];
+        let mut inner = block.inner.lock();
+        // `pin < pin_count` (bounded by `locate`); `pin_count` is the
+        // IO-APIC's `max_redirection_entry + 1`, which fits in `u8`
+        // by the architectural register layout (Intel SDM Vol 3A §11.5).
+        #[allow(clippy::cast_possible_truncation)]
+        let pin_u8 = pin as u8;
+        Some(inner.ioapic.read_redirection_entry_low(pin_u8))
+    }
 }
 
 impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
@@ -228,16 +350,22 @@ mod tests {
     use std::vec::Vec as StdVec;
 
     /// Recording mock IO-APIC MMIO. Captures every write in a
-    /// shared log so tests can assert the order of operations.
+    /// shared log so tests can assert the order of operations, and
+    /// surfaces the last value written to a register on subsequent
+    /// reads so [`IoApicController::read_pin_low`] tests can observe
+    /// the redirection-entry state through the same MMIO seam the
+    /// production driver uses.
     #[derive(Clone)]
     struct RecordingMmio {
         log: Arc<Mutex<StdVec<(u8, u32)>>>,
+        last_writes: Arc<Mutex<std::collections::HashMap<u8, u32>>>,
     }
 
     impl RecordingMmio {
         fn new() -> Self {
             Self {
                 log: Arc::new(Mutex::new(StdVec::new())),
+                last_writes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
         }
         fn snapshot(&self) -> StdVec<(u8, u32)> {
@@ -247,16 +375,17 @@ mod tests {
 
     impl IoApicMmio for RecordingMmio {
         fn read(&mut self, reg: u8) -> u32 {
-            // The IoApic driver reads IOAPICID (reg 0x00) and
-            // IOAPICVER (reg 0x01) during construction-time
-            // metadata queries; the controller never invokes
-            // either, so the mock returns zeroes. The two reads
-            // are not appended to the write log.
-            let _ = reg;
-            0
+            // Surface the last write to `reg` so `read_pin_low`
+            // tests observe the mask state set by `program_pin` /
+            // `IrqController::mask`. The IoApic driver reads
+            // IOAPICID (reg 0x00) and IOAPICVER (reg 0x01) during
+            // its metadata queries; both default to zero, which is
+            // the correct sentinel here.
+            *self.last_writes.lock().unwrap().get(&reg).unwrap_or(&0)
         }
         fn write(&mut self, reg: u8, value: u32) {
             self.log.lock().unwrap().push((reg, value));
+            self.last_writes.lock().unwrap().insert(reg, value);
         }
     }
 
@@ -417,5 +546,73 @@ mod tests {
             writes[pre_fire_writes].1 & (1 << 16) != 0,
             "mask bit must be set in the low half of the redirection entry"
         );
+    }
+
+    /// Stage 4.D Item 2-tail.2 QEMU validation — [`read_pin_low`]
+    /// returns `None` for an unowned GSI and the cached
+    /// redirection-entry low half for an owned pin.
+    ///
+    /// Used by the QEMU integration test to re-read the IO-APIC
+    /// redirection-entry mask bit after [`IrqTable::fire`] runs; this
+    /// host probe pins the contract on the same MMIO read seam.
+    #[test]
+    fn read_pin_low_returns_low_half_after_program_pin() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        // Out-of-range GSI → None.
+        assert!(controller.read_pin_low(99).is_none());
+
+        // After `program_pin(masked=false)` the low half carries
+        // the vector but not the mask bit.
+        controller.program_pin(7, 0x42, 0xAB, false).expect("prog");
+        let low = controller.read_pin_low(7).expect("pin 7 readable");
+        assert_eq!(low & 0xFF, 0x42, "vector preserved in low byte");
+        assert_eq!(low & (1 << 16), 0, "mask bit clear after unmasked program");
+
+        // After `IrqController::mask`, the low half re-reads with
+        // the mask bit set — the QEMU integration test's evidence
+        // path for the mask-before-wake invariant.
+        IrqController::mask(&controller, 7).expect("mask");
+        let low_after = controller.read_pin_low(7).expect("pin 7 readable");
+        assert_eq!(low_after & 0xFF, 0x42, "vector still preserved");
+        assert!(
+            low_after & (1 << 16) != 0,
+            "mask bit set after IrqController::mask"
+        );
+    }
+
+    /// Stage 4.D Item 2-tail.2 QEMU validation — [`unmask`] clears
+    /// the mask bit while preserving the cached vector + destination.
+    /// The QEMU integration test calls this on the legacy IRQ-0 GSI
+    /// the boot pipeline programmed `masked = true`.
+    #[test]
+    fn unmask_clears_mask_bit_and_preserves_vector() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        // Boot pipeline analogue: pin 7 programmed masked.
+        controller.program_pin(7, 0x55, 0xCD, true).expect("prog");
+        let low_before = controller.read_pin_low(7).expect("readable");
+        assert!(low_before & (1 << 16) != 0, "pre-unmask: masked");
+        // Unmask.
+        controller.unmask(7).expect("unmask");
+        let low_after = controller.read_pin_low(7).expect("readable");
+        assert_eq!(low_after & 0xFF, 0x55, "vector preserved");
+        assert_eq!(low_after & (1 << 16), 0, "mask bit cleared");
+    }
+
+    /// `unmask` on a GSI outside every block fails fail-closed.
+    #[test]
+    fn unmask_rejects_gsi_out_of_range() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        assert_eq!(controller.unmask(99), Err(ProgramError::GsiOutOfRange));
+    }
+
+    /// `unmask` on a pin that was never programmed has no cached
+    /// `(vector, dest)` to re-apply, so it surfaces
+    /// `ProgramError::GsiOutOfRange` — symmetric with
+    /// [`IrqController::mask`]'s posture
+    /// (`mask_returns_out_of_range_for_unprogrammed_pin`).
+    #[test]
+    fn unmask_rejects_unprogrammed_pin() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        assert_eq!(controller.unmask(7), Err(ProgramError::GsiOutOfRange));
     }
 }

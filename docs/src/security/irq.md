@@ -223,7 +223,7 @@ phase:
 
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
-| `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired** end-to-end (Stage 4.D Item 2-tail.2). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The QEMU integration crate that exercises a live IRQ end-to-end is the follow-up. |
+| `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
 | `aarch64`    | GIC `ICACTIVE` / distributor mask                                                                      | Not wired; `UnsupportedController` installed. |
 | `riscv64`    | PLIC `claim` / `complete` priority gating                                                              | Not wired; `UnsupportedController` installed. |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
@@ -288,6 +288,49 @@ table pointer into its dispatcher slot). Both have safe default
 impls so non-x86_64 ports inherit the conservative
 `IrqRouting::unsupported` behaviour without source-level change.
 
+### x86_64 QEMU validation (Stage 4.D Item 2-tail.2 QEMU)
+
+`tests/integration/irq_qemu_x86_64` is the end-to-end regression
+bound for the x86_64 trap path. The crate is a freestanding
+`x86_64-unknown-none` kernel binary that reuses
+`rustos_kernel::boot` verbatim and installs a custom audit Sink.
+On observing `AuditEvent::BootCompleted` the sink:
+
+1. Reads the published `IrqTable` through
+   `rustos_kernel::arch_wrapper::published_irq_table` and the
+   typed `IoApicController<VolatileIoApicMmio>` through
+   `rustos_kernel::ioapic_controller::published_typed`. Both
+   accessors expose state already published into set-once slots
+   during boot; they perform no new writes (`AGENTS.md` §2.1).
+2. Resolves the IDT vector assigned to GSI 2 (legacy ISA IRQ 0
+   under QEMU's PIIX/Q35 `InterruptSourceOverride { source: 0,
+   gsi: 2 }` mapping) via
+   `rustos_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
+3. Binds GSI 2 in the `IrqTable` against the synthesised
+   `TaskId(0)`, masks the legacy 8259 PIC, unmasks the line via
+   `IoApicController::unmask`, and arms PIT channel 0 in mode 0
+   as a one-shot (architectural 1.193182 MHz × 2000-tick reload
+   ≈ 1.68 ms).
+4. `sti`s, then spin-polls `IrqTable::try_wait_step` with `hlt`
+   between polls and a 1 s deadline. The asm trampoline +
+   `production_external_irq_dispatch` chain delivers the IRQ →
+   the dispatcher calls `IrqTable::fire(2, controller)` → the
+   controller masks the line + SeqCst-fences → `ready` flips →
+   `try_wait_step` observes `WaitStep::Ready`.
+5. `cli`s and re-reads the IO-APIC redirection-entry low half via
+   `IoApicController::read_pin_low(2)`. Asserts `low & (1 << 16)
+   != 0` — the load-bearing evidence that the controller's mask
+   write reached the IO-APIC MMIO window before the wake.
+6. Flips `qemu_exit::exit_success`. Any deviation —
+   missing slot, no vector bound, `WaitStep::TimedOut`,
+   `WaitStep::NotFound`, mask bit clear — flips
+   `qemu_exit::exit_failure` with the QEMU serial log attached
+   by `tools/qemu::Runner`.
+
+The crate is enrolled in `tools/xtask::commands::qemu_tests::TESTS`
+with a 60 s budget. `cargo xtask test --qemu` builds and runs it
+alongside the other five freestanding integration crates.
+
 ### Test coverage
 
 * `kernel/irq` ships 18 unit tests covering bind / duplicate
@@ -299,3 +342,14 @@ impls so non-x86_64 ports inherit the conservative
   (mint / out-of-range / duplicate / forgery / timeout / pre-fired
   ready) plus an `exit_releases_every_irq_binding_owned_by_task`
   test that asserts the `exit` ↔ `release_for` ordering.
+* `kernel/rustos-kernel::ioapic_controller` adds host tests for
+  `program_pin`, `mask`, `unmask`, `read_pin_low`, multi-IO-APIC
+  routing, the mask-before-wake ordering against a
+  `RecordingMmio` mock, and out-of-range / unprogrammed-pin
+  fail-closed paths.
+* `kernel/rustos-kernel::arch_wrapper` adds host tests pinning
+  the set-once semantics of the `published_irq_controller` slot
+  and the "still-None until installed" invariant of the
+  `published_irq_table` slot.
+* `tests/integration/irq_qemu_x86_64` is the QEMU-validated
+  end-to-end regression bound described above.

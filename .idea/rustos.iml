@@ -50,6 +50,7 @@
       <sourceFolder url="file://$MODULE_DIR$/kernel/irq/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/kernel/rustos-kernel/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/drvhost_qemu/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/irq_qemu_x86_64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/scheduler_stress/src" isTestSource="false" />
