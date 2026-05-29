@@ -239,6 +239,27 @@ The constants live once in `rustos_abi`; the driver's `VIRTIO_CFG_*`
 names bind to them rather than re-stating the literals (`AGENTS.md`
 §2.2).
 
+### Ring-0 virtio-MMIO walk
+
+The `virt`-platform path mirrors the PCI walk one level down. A
+virtio-MMIO device is a single register block whose `<base, length>`
+pair the MMIO bus driver reads from its `virtio,mmio` device-tree node;
+`Mmio::map_slot_window(base, mapper)` maps exactly that block through
+the `CAP_MMIO_MAP`-gated `MmioMapper`. As with PCI, this hand-off is
+`pub(crate)` on the concrete `Mmio` type, so ring 0 reaches it through
+a frozen ABI seam: `Mmio<'_, T>` implements
+`rustos_abi::driver::virtio_mmio::VirtioMmioBus` (a supertrait of
+`Bus`), whose `map_slot_window` forwards to the inherent one. The
+kernel's `provision_virtio_mmio(bus, device_id, mapper)` (in
+`kernel/rustos-kernel/src/virtio_mmio_walk.rs`) takes a `&dyn
+VirtioMmioBus`, enumerates the bus into a bounded table, picks the
+first slot whose `DeviceID` matches the requested virtio device type
+(the bare type over MMIO, not the PCI `0x1040 + type` encoding), maps
+its single window, and builds an `MmioTransport`. Ring 0 never names a
+concrete `drivers/bus/*` type and holds no ambient authority; every
+failure is a typed `VirtioMmioWalkError` rather than a panic
+(`AGENTS.md` §2.9).
+
 ### Boot wiring
 
 `provision_virtio_pci` yields a transport, but a virtio-class driver

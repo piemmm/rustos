@@ -1196,6 +1196,43 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — virtio-MMIO
+  provisioning seam + ring-0 walk, *complete*): the PCI vertical had
+  a frozen `VirtioPciBus` ABI seam and a host-tested
+  `provision_virtio_pci` ring-0 walk, but the riscv64 / `AArch64`
+  `-M virt` path had no equivalent: the MMIO bus driver's
+  `Mmio::map_slot_window` was `pub(crate)`, so ring 0 (whose only
+  sanctioned driver surface is `register`, `AGENTS.md` §8) had no
+  driver-agnostic way to turn a `virtio-mmio` slot into a kernel
+  window. **ABI seam (frozen `abi-v1`).** New module
+  `lib/abi/src/driver/virtio_mmio.rs` adds `VirtioMmioBus: Bus`
+  (`map_slot_window(base, mapper)`), re-exported from the crate root;
+  it mirrors `VirtioPciBus`, but the MMIO transport consumes exactly
+  one window (not four). **MMIO driver.** `Mmio<'_, T>` implements
+  `VirtioMmioBus`, forwarding to the inherent `map_slot_window`, so the
+  concrete type stays `pub(crate)`. **Ring-0 walk.** New module
+  `kernel/rustos-kernel/src/virtio_mmio_walk.rs`:
+  `provision_virtio_mmio(bus, device_id, mapper)` takes a `&dyn
+  VirtioMmioBus`, enumerates into a bounded table (`MAX_SLOTS = 64`,
+  fails closed on overflow), picks the first slot whose `DeviceID`
+  matches the bare virtio device type, maps its single window through
+  the `CAP_MMIO_MAP`-gated `MmioMapper`, and builds an `MmioTransport`
+  — no ambient authority, every failure a typed `VirtioMmioWalkError`
+  rather than a panic (`AGENTS.md` §2.9). **Tests.** `rustos-abi`
+  (+4 seam tests), `rustos-drv-bus-mmio` green, `rustos-kernel --lib`
+  49 (+4 walk tests: matching-slot provision, no-matching-slot,
+  capability-denied map, enumeration overflow). `cargo clippy
+  -p rustos-abi -p rustos-drv-bus-mmio -p rustos-kernel --all-targets
+  -- -D warnings`, `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings"
+  cargo doc --no-deps` are clean; `rustos-abi` + `rustos-drv-bus-mmio`
+  build for `riscv64gc-unknown-none-elf` and `aarch64-unknown-none`,
+  and `rustos-kernel` builds for `x86_64-unknown-none`. **Docs.**
+  `docs/src/abi/driver_traits.md` ("Virtio-MMIO provisioning") +
+  `docs/src/drivers/bus.md` ("Ring-0 virtio-MMIO walk"). **Deferred.**
+  Wiring `provision_virtio_mmio` into a live riscv64 boot pipeline (the
+  ring-0 DTB resolution + `KernelMmioMapper`), the riscv64 QEMU runner,
+  and the QEMU integration crates + acceptance gate (Items 4 / 6)
+  remain outstanding — see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 — MSI-X routing wired into the boot
   provisioning, *complete*): the previous session landed
   `Pci::route_msix` + the `MsixBus` ABI seam + `msi_message`, but

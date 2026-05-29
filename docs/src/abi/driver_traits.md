@@ -20,6 +20,7 @@ capability model, kinds) lives in
 | [`rustos_abi::driver::input`]         | `Input` trait + event records.         |
 | [`rustos_abi::driver::bus`]           | `Bus` trait + device records.          |
 | [`rustos_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
+| [`rustos_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
 
 [`rustos_abi::driver`]: #shared-types
 [`rustos_abi::driver::display`]: #display
@@ -29,6 +30,7 @@ capability model, kinds) lives in
 [`rustos_abi::driver::input`]: #input
 [`rustos_abi::driver::bus`]: #bus
 [`rustos_abi::driver::virtio_pci`]: #virtio-pci-provisioning
+[`rustos_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
 
 ## Shared types
 
@@ -194,6 +196,28 @@ kernel's `provision_virtio_pci` walk (see
 through the `Bus` supertrait, picks the matching function, maps the
 four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`, and builds
 a `PciTransport` — without naming the concrete `Pci` type.
+
+## Virtio-MMIO provisioning
+
+`trait VirtioMmioBus: Bus`. The `virt`-platform counterpart of
+`VirtioPciBus`. A virtio-MMIO device is presented as a single
+memory-mapped register block discovered from the flat device tree;
+the boot-time walk that maps it lives in ring 0, which may not name a
+concrete `drivers/bus/*` type (`AGENTS.md` §8). This frozen seam lets
+it call into the MMIO bus driver through `&dyn VirtioMmioBus`:
+
+| Method                          | Capability gate                       |
+|---------------------------------|---------------------------------------|
+| `map_slot_window(base, mapper)` | `CAP_MMIO_MAP` (enforced by `mapper`). |
+
+Unlike the PCI transport's four capability-selected windows, the MMIO
+transport consumes exactly one window over the register block at the
+slot's `BusDevice::address`. The kernel's `provision_virtio_mmio` walk
+(see [Bus drivers](../drivers/bus.md#ring-0-virtio-mmio-walk))
+enumerates through the `Bus` supertrait, picks the slot whose
+`DeviceID` matches, maps its window through the `CAP_MMIO_MAP`-gated
+`MmioMapper`, and builds an `MmioTransport` — without naming the
+concrete `Mmio` type.
 
 ## Versioning
 

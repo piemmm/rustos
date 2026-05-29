@@ -68,6 +68,7 @@ pub mod dispatch;
 pub mod ioapic_controller;
 pub mod virtio_boot;
 pub mod virtio_factory;
+pub mod virtio_mmio_walk;
 pub mod virtio_pci_walk;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -82,6 +83,9 @@ pub use bumpalloc::BumpAllocator;
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
 pub use virtio_boot::{provision_and_run, VirtioBootConfig};
 pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
+pub use virtio_mmio_walk::{
+    provision_virtio_mmio, VirtioMmioProvision, VirtioMmioWalkError, MAX_SLOTS,
+};
 pub use virtio_pci_walk::{
     provision_virtio_pci, VirtioPciWalkError, VirtioProvision, MAX_FUNCTIONS,
 };

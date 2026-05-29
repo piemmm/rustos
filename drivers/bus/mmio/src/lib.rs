@@ -38,7 +38,8 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
+use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
 pub(crate) mod enumerate;
 pub(crate) mod transport;
@@ -77,5 +78,22 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 impl<T: MmioRead> Bus for Mmio<'_, T> {
     fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
         self.enumerate_into(out)
+    }
+}
+
+// The frozen `abi-v1` virtio-MMIO transport-provisioning seam
+// (`AGENTS.md` §9). The ring-0 device-tree walk (whose only sanctioned
+// driver surface is `register`, §8) reaches the concrete `Mmio` through
+// `&dyn VirtioMmioBus`, so the bus driver never leaks its concrete type
+// across the crate boundary (`AGENTS.md` §8). The inherent
+// `Mmio::map_slot_window` wins method resolution, so the forward is not
+// recursive.
+impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
+    fn map_slot_window(
+        &self,
+        base: u64,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        Mmio::map_slot_window(self, base, mapper)
     }
 }
