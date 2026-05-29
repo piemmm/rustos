@@ -1297,6 +1297,58 @@ follow-up is its own thread and is now also complete.
   2–6 of the prior next-session prompt remain outstanding and
   have been rewritten into the next session's prompt.
 
+- Stage 4.D follow-up (Item 0 — `KernelVirtioHost` wiring,
+  *complete*): the in-kernel companion to `MockHost` has landed in
+  `drivers/bus/virtio/src/kernel_host.rs`, gated behind a new
+  `kernel-host` Cargo feature so the userland / cross-arch build
+  matrix stays free of `kernel/*` deps (`AGENTS.md` §2.3). The
+  type `KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized>`
+  wraps a borrowed `&'a mut DmaPool<'a, P>`, the calling task's
+  `&'a TaskCapabilities`, an audit `&'a S`, a fresh `PoolId`, a
+  monotonic slot counter, and a `RefCell<BTreeMap<usize,
+  DmaBuffer>>` live table. `alloc_dma_zeroed` routes through
+  `kernel/sec::dma::alloc_dma` (which performs the
+  `CapabilityId::MEM_DMA` check and emits
+  `AuditEvent::DmaAllocated` / `…Denied`), then mints a `DmaSlab`
+  via `DmaSlab::from_pool` carrying a generic
+  `slab_free_shim::<P, S>` that re-enters the host on drop and
+  routes the buffer back through `kernel/sec::dma::free_dma`. The
+  single `unsafe` site (`DmaSlab::from_pool`) carries the full
+  `// SAFETY:` justification cited in the module-level rustdoc —
+  pool-bitmap disjointness, lifetime-bounded host pointer, and
+  monomorphised cast inverse — per `AGENTS.md` §2.10. Capability
+  refusals surface as `DriverError::PermissionDenied`; every other
+  refusal collapses to `DriverError::LengthOutOfRange`, matching
+  the `MockHost` failure surface. `notify_wait` remains the polled
+  cooperative shim from `MockHost` — IRQ-routed wake-ups are
+  Stage 4.D Item 2 (carried into the next session). Tests: 7 new
+  in-crate units in `drivers/bus/virtio/src/kernel_host.rs::tests`
+  (zero-initialised slab + audit emit, drop routes through
+  `free_dma` (`live()` returns to zero), capability-missing →
+  `PermissionDenied` + `DmaAllocDenied` event, zero-size →
+  `BufferTooSmall`, two simultaneous disjoint slabs, `notify_wait`
+  records the queue index, oversize → `LengthOutOfRange`). Crate
+  totals: `cargo test -p rustos-drv-bus-virtio --lib` → 41
+  passing (was 34). Workspace: `cargo test --workspace --lib
+  --exclude rustos-kernel-arch-*` → 663 passing on the pinned
+  `nightly-2026-05-27` (was 656; +7). `cargo clippy -p
+  rustos-drv-bus-virtio --lib --tests --all-features -- -D
+  warnings` and `cargo fmt --check` are clean. Docs: new
+  "Kernel host (`KernelVirtioHost`)" section in
+  `docs/src/drivers/virtio.md` and refreshed "Test surface"
+  paragraph. The DriverHost-trait `dma_pool` accessor that the
+  prior next-session prompt sketched was deliberately not added:
+  there is no in-tree `.rxe` driver yet that consumes a
+  `VirtioHost` through the `DriverHost` surface, so adding the
+  accessor without a consumer would be the kind of dead-code
+  bloat `AGENTS.md` §2.3 forbids. The drvhost ↔
+  `KernelVirtioHost` plumbing is reopened in the next-session
+  prompt and will land alongside the first in-tree consumer (the
+  virtio-blk / virtio-net `.rxe` images planned for Item 4).
+  Items 2–6 of the prior next-session prompt remain outstanding
+  and have been rewritten into the new
+  `.junie/next-session-prompt.md`.
+
 - Stage 4.D follow-up (Item 0 — `DmaPool` ↔ `VirtioHost` API
   shape, *historical, superseded by Item 0a above*): the kernel
   side of the DMA facility (Item 1) and the driver consumers

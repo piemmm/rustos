@@ -437,6 +437,10 @@ name = "rustos-drv-bus-virtio"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-caps",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-log",
 ]
 
 [[package]]

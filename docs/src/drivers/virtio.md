@@ -85,10 +85,50 @@ status) without ever re-borrowing the pool.
 
 The in-process `MockHost` mints slabs with `PoolId::MOCK`, a
 monotonic `slot` counter, and a no-op free shim (the leak contract
-is unchanged). The future `KernelVirtioHost` (Stage 4.D Item 0)
-threads through `kernel/sec::dma::alloc_dma` and constructs the
-slab from `DmaPool::slot_base(&self, &DmaBuffer) -> NonNull<u8>`,
-the single new accessor added to the pool for this purpose.
+is unchanged).
+
+### Kernel host (`KernelVirtioHost`)
+
+Stage 4.D Item 0 ships the real, capability-checked
+`VirtioHost` implementation. It lives in
+`drivers/bus/virtio/src/kernel_host.rs`, behind the crate's
+`kernel-host` Cargo feature (off by default — `AGENTS.md` §2.3),
+and is generic over the page-table backend `P` and the audit
+`Sink` `S`:
+
+```rust
+pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
+    /* RefCell<&'a mut DmaPool<'a, P>>, &'a TaskCapabilities,
+       &'a S, fresh PoolId, monotonic slot counter, live-slot
+       table */
+}
+```
+
+`alloc_dma_zeroed` routes every request through
+`kernel/sec::dma::alloc_dma`, which performs the
+`CapabilityId::MEM_DMA` check and emits the
+`AuditEvent::DmaAllocated` (or `…Denied`) record. The host then
+calls `DmaPool::slot_base(&buf)` and mints a `DmaSlab` via
+`DmaSlab::from_pool`, stamping its own fresh `PoolId` and a
+monotonic slot index. The slab carries a free shim
+(`unsafe fn(*const(), usize, usize)`) that re-enters the host on
+drop, looks the buffer up by slot, and routes it back through
+`kernel/sec::dma::free_dma`. The shim is monomorphised per
+`(P, S)` so the `*const ()` cast back to
+`*const KernelVirtioHost<'_, P, S>` is the inverse of the one
+performed at construction (`AGENTS.md` §2.10 — every `unsafe`
+block carries its `// SAFETY:` justification).
+
+`notify_wait` is still the polled cooperative shim inherited from
+`MockHost`: real IRQ-routed wake-ups are Stage 4.D Item 2 work,
+tracked in `.junie/next-session-prompt.md`.
+
+Capability refusals surface as `DriverError::PermissionDenied`;
+allocator failures (oversize requests, OOM, internal pool config
+errors) collapse to `DriverError::LengthOutOfRange` — the same
+shape the `MockHost` uses when its 64 MiB cap is hit, so a driver
+consumer sees a single failure surface regardless of which host
+minted it.
 
 ## Capability model
 
@@ -100,12 +140,18 @@ the single new accessor added to the pool for this purpose.
 
 ## Test surface
 
-`cargo test -p rustos-drv-bus-virtio` covers 34 host-side tests:
-queue free-list initialisation, descriptor chaining (single + multi),
-exhaustion, used-ring wrap-around, status progression, mock-peer
-round-trip, sensitive-class scrub on drop, and the four `DmaSlab`
-tests added in Stage 4.D Item 0a (round-trip; three simultaneous
-disjoint writes; `drop` invokes the free shim once with the right
-`(slot, len)`; `pool_id` distinguishes slabs across pools). Coverage
-of the crate's public surface is comfortably above the 75% Stage 4
-bar (`AGENTS.md` §7).
+`cargo test -p rustos-drv-bus-virtio --lib` covers 41 host-side
+tests: queue free-list initialisation, descriptor chaining (single
++ multi), exhaustion, used-ring wrap-around, status progression,
+mock-peer round-trip, sensitive-class scrub on drop, the four
+`DmaSlab` tests added in Stage 4.D Item 0a (round-trip; three
+simultaneous disjoint writes; `drop` invokes the free shim once
+with the right `(slot, len)`; `pool_id` distinguishes slabs across
+pools), and the seven `KernelVirtioHost` tests added in Item 0
+(zero-initialisation + audit emit, drop routes through
+`free_dma`, `CapabilityId::MEM_DMA` refusal returns
+`PermissionDenied`, zero-size short-circuit, two simultaneous
+disjoint slabs, `notify_wait` records queue index, oversize
+collapses to `LengthOutOfRange`). Coverage of the crate's public
+surface is comfortably above the 75% Stage 4 bar
+(`AGENTS.md` §7).

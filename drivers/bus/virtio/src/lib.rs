@@ -44,6 +44,8 @@ extern crate alloc;
 pub mod backend;
 pub mod dma;
 pub mod host;
+#[cfg(any(feature = "kernel-host", test))]
+pub mod kernel_host;
 pub mod queue;
 pub mod transport;
 
@@ -53,6 +55,8 @@ mod tests;
 pub use backend::{MmioBackend, MmioOps, PciBackend, PortIo};
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
 pub use host::{MockHost, VirtioHost};
+#[cfg(any(feature = "kernel-host", test))]
+pub use kernel_host::KernelVirtioHost;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
 
