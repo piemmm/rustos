@@ -258,6 +258,11 @@ an update to this section.
   6. `cargo doc --no-deps` (doc build must succeed; broken links fail the build).
 - **A failing test blocks the change.** Whether or not the failure existed
   before is irrelevant.
+- **Tests are never deferred.** Writing the tests for a change is part of
+  that change, not "future work". You may not merge code with the tests
+  stubbed, postponed, marked `#[ignore]`, or tracked as a "tests to be
+  added later" follow-up. A change whose tests are not written and passing
+  is incomplete and must not be reported as done.
 - **No flaky tests.** A test that fails intermittently is a bug; fix the test
   or fix the code, never retry.
 - **Coverage targets** (enforced by `cargo xtask coverage`):
