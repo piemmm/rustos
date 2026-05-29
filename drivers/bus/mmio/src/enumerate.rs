@@ -1,0 +1,132 @@
+//! DTB-driven enumeration of virtio-MMIO transport slots.
+//!
+//! The walker visits every node whose `compatible` property contains
+//! the string `"virtio,mmio"`, reads the slot's `reg` property to
+//! obtain the physical base address (and window length), then probes
+//! the four-register identifier window through [`MmioRead`]:
+//!
+//! ```text
+//!  offset 0x000 : MagicValue   (must equal `"virt"` LE = 0x74726976)
+//!  offset 0x004 : Version      (must equal 1 or 2)
+//!  offset 0x008 : DeviceID     (0 means "slot empty")
+//!  offset 0x00C : VendorID
+//! ```
+//!
+//! Slots whose `MagicValue` mismatches or whose `DeviceID` is 0 are
+//! skipped silently — this is exactly how QEMU's `virt` machine
+//! presents unattached transports (`hw/virtio/virtio-mmio.c`).
+
+// Same `dead_code` rationale as the PCI driver crate.
+#![allow(dead_code)]
+
+use rustos_abi::driver::bus::BusDevice;
+use rustos_abi::DriverError;
+use rustos_util::dtb::Dtb;
+
+use crate::transport::MmioRead;
+
+/// The string the walker matches against `compatible`.
+pub const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
+
+/// `MagicValue` byte sequence — `"virt"` as a little-endian word.
+pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
+
+/// Vendor field used in [`BusDevice::vendor`] for virtio-MMIO
+/// transports. Virtio over MMIO does not carry a PCI-style vendor
+/// ID, so the driver reports the canonical Red Hat / virtio vendor
+/// ID (`0x1AF4`) read from the `VendorID` register; if the device
+/// fails to populate that register the walker substitutes the
+/// well-known fallback below — matching what `virtio-mmio.c` in
+/// QEMU writes when no upper driver has attached.
+pub const VIRTIO_MMIO_DEFAULT_VENDOR: u32 = 0x554D_4551; // "QEMU"
+
+const REG_MAGIC: u64 = 0x000;
+const REG_VERSION: u64 = 0x004;
+const REG_DEVICE_ID: u64 = 0x008;
+const REG_VENDOR_ID: u64 = 0x00C;
+
+/// The MMIO bus driver instance.
+///
+/// Bound to a parsed [`Dtb`] (`'dtb`) and a [`MmioRead`] reader; the
+/// type is `pub(crate)` per `AGENTS.md` §8 and reached from outside
+/// only via `dyn Bus`.
+pub struct Mmio<'dtb, T: MmioRead> {
+    dtb: Dtb<'dtb>,
+    reader: T,
+}
+
+impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
+    /// Construct an [`Mmio`] over a pre-parsed device-tree blob and
+    /// volatile reader.
+    pub const fn new(dtb: Dtb<'dtb>, reader: T) -> Self {
+        Self { dtb, reader }
+    }
+
+    /// Enumerate every populated virtio-MMIO slot into `out`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] if `out` cannot hold every
+    ///   discovered slot.
+    /// * [`DriverError::DeviceFault`] if the DTB walk encounters a
+    ///   malformed `compatible` or `reg` property; the walker fails
+    ///   closed so a hostile blob cannot cause silent
+    ///   under-enumeration.
+    pub fn enumerate_into(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+        let mut count = 0usize;
+        let mut overflow = false;
+        for node in self.dtb.nodes() {
+            let node = node.map_err(|_| DriverError::DeviceFault)?;
+            if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+                continue;
+            }
+            // `reg` carries one `<base, length>` pair for `virt`-style
+            // platforms (#address-cells = 2, #size-cells = 2).
+            let reg = node.property("reg").ok_or(DriverError::DeviceFault)?;
+            let base = reg.read_be_u64(0).map_err(|_| DriverError::DeviceFault)?;
+            // length is read but not currently propagated; the size
+            // field on `BusDevice` is the bus-defined `class` slot.
+            let _length = reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault)?;
+
+            let magic = self.reader.read32(base + REG_MAGIC);
+            if magic != VIRTIO_MMIO_MAGIC {
+                continue;
+            }
+            let device_id = self.reader.read32(base + REG_DEVICE_ID);
+            if device_id == 0 {
+                continue;
+            }
+            let version = self.reader.read32(base + REG_VERSION);
+            let vendor_raw = self.reader.read32(base + REG_VENDOR_ID);
+            let vendor = if vendor_raw == 0 {
+                VIRTIO_MMIO_DEFAULT_VENDOR
+            } else {
+                vendor_raw
+            };
+
+            // The `class` slot carries the virtio transport version
+            // (1 or 2); that information is needed by virtio-blk /
+            // virtio-net to choose the legacy vs. modern protocol.
+            // Truncating to 16 bits is lossless — version is 1 or 2.
+            let class = (version & 0xFFFF) as u16;
+            let entry = BusDevice {
+                vendor,
+                device: device_id,
+                class,
+                reserved0: 0,
+                address: base,
+            };
+            if count < out.len() {
+                out[count] = entry;
+            } else {
+                overflow = true;
+            }
+            count += 1;
+        }
+        if overflow {
+            Err(DriverError::BufferTooSmall)
+        } else {
+            Ok(count)
+        }
+    }
+}

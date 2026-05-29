@@ -36,6 +36,7 @@
 - [Overview](./drivers/overview.md)
 - [Userland driver host](./drivers/host.md)
 - [Driver lifecycle](./drivers/lifecycle.md)
+- [Bus drivers](./drivers/bus.md)
 
 # ABI
 

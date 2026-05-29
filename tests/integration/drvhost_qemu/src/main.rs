@@ -33,9 +33,7 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use alloc::vec::Vec;
-    use rustos_abi::{
-        CapabilityId, DriverError, DriverHandle, DriverHost, DriverManifest, Errno,
-    };
+    use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, DriverManifest, Errno};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
@@ -155,9 +153,7 @@ mod kernel {
     impl Sink for BootObserverSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id == BOOT_COMPLETED_EVENT_ID
-                && !DRVHOST_RAN.swap(true, Ordering::SeqCst)
-            {
+            if event.id == BOOT_COMPLETED_EVENT_ID && !DRVHOST_RAN.swap(true, Ordering::SeqCst) {
                 drive_drvhost();
                 qemu_exit::exit_success();
             }

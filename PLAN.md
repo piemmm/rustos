@@ -1129,9 +1129,36 @@ follow-up is its own thread and is now also complete.
   `docs/src/drivers/lifecycle.md` (gate-by-gate flow, capability
   table, sensitive-buffer wipe contract); both wired into
   `docs/src/SUMMARY.md`.
-- Per-class first drivers (`drivers/display/vesa`,
-  `drivers/display/framebuffer`, `drivers/bus/pci`,
-  `drivers/bus/mmio`, `drivers/bus/virtio`,
+- `drivers/bus/pci` (x86_64) and `drivers/bus/mmio` (aarch64 /
+  riscv64) shipped: each implements
+  `rustos_abi::driver::bus::Bus` against a transport-specific
+  configuration-access seam (`ConfigSpace` for mechanism #1 PIO,
+  `MmioRead` for volatile MMIO loads). Per `AGENTS.md` §8 the only
+  public function in either crate is `register`; every other type
+  is `pub(crate)` and exercised through in-crate `#[cfg(test)]`
+  modules. The PCI walker covers bus / device / function
+  enumeration, capability-list traversal with structural MSI /
+  MSI-X decoding (other IDs surfaced opaquely), and BAR sizing
+  through the FFFFFFFF/read-back/restore probe; BAR mapping is
+  deferred to Stage 4.D where virtio-blk / virtio-net route the
+  request through the driver host's memory capability. The MMIO
+  walker iterates the boot DTB through `rustos_util::dtb` (a new
+  shared parser promoted into `lib/util` once a second caller
+  materialised per `AGENTS.md` §2.3 / §6 — the consumers today
+  are this driver and the future platform-discovery code that
+  reads the same boot blob). Tests: 12 host-side unit tests for
+  the PCI driver (including the exact `q35` device-list
+  assertion, capability-walker, BAR-sizing probe, and
+  `register` capability gate) and 6 for the MMIO driver
+  (including the exact `virt`-slot list against a four-slot DTB
+  fixture). The PCI volatile `unsafe asm!` and the MMIO
+  volatile-read `unsafe` block each carry a `// SAFETY:` block
+  and are encapsulated behind a safe trait (`PortIo` /
+  `MmioRead`); no `unsafe` leaks across the crate boundary.
+  Docs: `docs/src/drivers/bus.md` plus a README per driver
+  crate, both wired into `docs/src/SUMMARY.md`.
+- Remaining per-class first drivers (`drivers/display/vesa`,
+  `drivers/display/framebuffer`, `drivers/bus/virtio`,
   `drivers/storage/virtio_blk`, `drivers/input/ps2`,
   `drivers/network/virtio_net`) remain outstanding per the Stage 4
   deliverable list above.

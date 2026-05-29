@@ -416,10 +416,17 @@ dependencies = [
 [[package]]
 name = "rustos-drv-bus-mmio"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-util",
+]
 
 [[package]]
 name = "rustos-drv-bus-pci"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-drv-bus-usb"
