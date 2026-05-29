@@ -49,6 +49,7 @@ path = "src/main.rs"
 
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-kernel-core = { path = "../core", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
@@ -58,3 +59,20 @@ rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
 rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 rustos-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+# Stage 4.D Item 2-tail.4: the kernel-binary `VirtioHostFactory`
+# (`virtio_factory` module) mints a per-driver `KernelVirtioHost` and
+# plugs it into the userland driver host's `HostConfig`. `drvhost`
+# itself stays free of `kernel/*` deps; the kernel binary is the one
+# place that depends on both it and the `kernel-host` build of the
+# virtio transport (`AGENTS.md` §3).
+rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0", features = [
+    "kernel-host",
+] }
+
+[dev-dependencies]
+# The `virtio_factory` unit tests drive a real `DmaPool` through
+# `kernel/mem`'s in-memory `HostPageTable` test double, gated behind
+# the `host-tests` feature so production builds never link it
+# (`AGENTS.md` §2.3).
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

@@ -6,12 +6,12 @@
 //! allocation through the capability-gated [`rustos_kernel_sec::alloc_dma`]
 //! / [`rustos_kernel_sec::free_dma`] pair (`AGENTS.md` §5.4).
 //!
-//! The host owns a borrowed mutable reference to a single
-//! [`rustos_kernel_mem::DmaPool`] (per-driver pool — `AGENTS.md` §4
-//! "per-process heaps, never a global user heap"). Allocations:
+//! The host owns a single [`rustos_kernel_mem::DmaPool`] (per-driver
+//! pool — `AGENTS.md` §4 "per-process heaps, never a global user
+//! heap"). Allocations:
 //!
-//! 1. `kernel_sec::alloc_dma` performs the [`CapabilityId::MEM_DMA`]
-//!    check and emits the [`AuditEvent::DmaAllocated`] / `…Denied`
+//! 1. `kernel_sec::alloc_dma` performs the `CapabilityId::MEM_DMA`
+//!    check and emits the `AuditEvent::DmaAllocated` / `…Denied`
 //!    record. The pool zero-fills the data slots; the bytes are
 //!    therefore safe to publish into a virtio descriptor without an
 //!    extra scrub pass.
@@ -76,16 +76,18 @@ use crate::host::VirtioHost;
 ///
 /// # Lifetime
 ///
-/// `'a` bounds both the borrowed pool and the borrowed
+/// `'a` bounds the pool's allocator borrow and the borrowed
 /// [`TaskCapabilities`]. Every [`DmaSlab`] minted by this host
 /// re-enters the host on drop, so by construction no slab can
 /// outlive the host — Rust's borrow checker enforces this through
-/// the `&'a self` borrow returned by [`Self::alloc_dma_zeroed`]
-/// (the slab carries no lifetime in its type, but the slab's drop
-/// would dereference `&self` if it ran after the host went away;
-/// see [`Self::shutdown`] for the audited tear-down contract).
+/// the `&'a self` borrow returned by [`Self::alloc_dma_zeroed`]:
+/// the slab carries no lifetime in its type, but the slab's drop
+/// would dereference `&self` if it ran after the host went away.
+/// Every slab re-enters the host through its free shim on drop, so
+/// all outstanding slabs must be dropped before the host (and the
+/// [`DmaPool`] it owns) is dropped.
 pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
-    pool: RefCell<&'a mut DmaPool<'a, P>>,
+    pool: RefCell<DmaPool<'a, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
     id: PoolId,
@@ -109,7 +111,15 @@ pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
 }
 
 impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
-    /// Wrap a borrowed [`DmaPool`] in a capability-checking host.
+    /// Take ownership of a [`DmaPool`] behind a capability-checking
+    /// host.
+    ///
+    /// The host owns the pool for its whole lifetime so that a
+    /// `&self` factory (the kernel binary's
+    /// `KernelVirtioFactory`) can mint a fresh per-driver host from
+    /// a freshly-constructed pool — a borrowed-`&mut` pool could not
+    /// be handed out from behind a shared `&self` borrow. The pool's
+    /// `'a` allocator borrow still bounds the host.
     ///
     /// `id` must be a fresh, process-unique [`PoolId`] (mint via
     /// [`PoolId::fresh`]). `caller` is the [`TaskCapabilities`] of
@@ -126,7 +136,7 @@ impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
     /// [`IrqTable::try_wait_step`] (`AGENTS.md` §5.4).
     #[must_use]
     pub fn new(
-        pool: &'a mut DmaPool<'a, P>,
+        pool: DmaPool<'a, P>,
         caller: &'a TaskCapabilities,
         audit: &'a S,
         id: PoolId,
@@ -213,7 +223,7 @@ unsafe fn slab_free_shim<P: PageTableOps, S: Sink + ?Sized>(
         // pool keeps the slot reserved (the supervisor process is
         // expected to reclaim it). We deliberately do not retry —
         // `AGENTS.md` §2.1 forbids retry-until-it-works.
-        let _ = free_dma(*host.pool.borrow_mut(), host.caller, buf, host.audit);
+        let _ = free_dma(&mut *host.pool.borrow_mut(), host.caller, buf, host.audit);
     }
 }
 
@@ -224,7 +234,7 @@ impl<P: PageTableOps, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S
         }
         let buf = {
             let mut pool = self.pool.borrow_mut();
-            alloc_dma(*pool, self.caller, size, self.audit).map_err(map_gate_error)?
+            alloc_dma(&mut *pool, self.caller, size, self.audit).map_err(map_gate_error)?
         };
         // `slot_base` returns the data-region base for the buffer.
         // It cannot fail for a buffer minted from this pool one
@@ -239,7 +249,7 @@ impl<P: PageTableOps, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S
             // in practice for a buffer minted one statement above,
             // but the recovery path keeps `AGENTS.md` §2.9 satisfied
             // without an `expect`.
-            let _ = free_dma(*self.pool.borrow_mut(), self.caller, buf, self.audit);
+            let _ = free_dma(&mut *self.pool.borrow_mut(), self.caller, buf, self.audit);
             return Err(DriverError::LengthOutOfRange);
         };
         let slot = self.next_slot.get();
@@ -487,20 +497,13 @@ mod tests {
     #[test]
     fn alloc_returns_zero_initialised_slab() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
         assert_eq!(slab.len(), PAGE_SIZE);
         assert!(slab.as_bytes().iter().all(|b| *b == 0));
@@ -518,20 +521,13 @@ mod tests {
     #[test]
     fn drop_routes_through_free_dma() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         {
             let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
             assert_eq!(host.outstanding(), 1);
@@ -550,21 +546,14 @@ mod tests {
     #[test]
     fn capability_missing_is_permission_denied() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         // No `MEM_DMA` capability: every allocation must fail closed.
         let caller = task_with(&[], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         let err = host.alloc_dma_zeroed(PAGE_SIZE).unwrap_err();
         assert!(matches!(err, DriverError::PermissionDenied));
         assert_eq!(host.outstanding(), 0);
@@ -576,20 +565,13 @@ mod tests {
     #[test]
     fn zero_size_request_rejected_before_capability_check() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         let err = host.alloc_dma_zeroed(0).unwrap_err();
         assert!(matches!(err, DriverError::BufferTooSmall));
         assert_eq!(host.outstanding(), 0);
@@ -598,20 +580,13 @@ mod tests {
     #[test]
     fn two_simultaneous_slabs_are_disjoint() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         let mut a = host.alloc_dma_zeroed(PAGE_SIZE).expect("first");
         let mut b = host.alloc_dma_zeroed(PAGE_SIZE).expect("second");
         // Distinct slot indices guarantee the slabs name disjoint
@@ -640,7 +615,7 @@ mod tests {
     #[test]
     fn notify_wait_returns_when_line_pre_fired() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -648,15 +623,8 @@ mod tests {
         // Pre-fire the line through a permissive controller so the
         // ready flag is already set when `notify_wait` polls.
         irq.fire(4, &OkController).expect("pre-fire");
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         host.notify_wait(0);
         // No yield occurred: the pre-fired ready flag was consumed on
         // the first poll.
@@ -675,20 +643,13 @@ mod tests {
     #[test]
     fn notify_wait_blocks_until_line_fires() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::firing(&irq, 4, 3);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         host.notify_wait(0);
         // The loop parked three times before the injected fire
         // released it.
@@ -742,7 +703,7 @@ mod tests {
         }
 
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -757,15 +718,8 @@ mod tests {
             line: 4,
             yields: Cell::new(0),
         };
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         host.notify_wait(0);
         assert_eq!(
             probe.ready_during_mask.get(),
@@ -783,7 +737,7 @@ mod tests {
     #[test]
     fn notify_wait_returns_when_binding_released() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -791,15 +745,8 @@ mod tests {
         // Release every binding owned by the device task before the
         // wait runs.
         irq.release_for(OWNER);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         host.notify_wait(0);
         assert!(irq.lookup(handle).is_none());
     }
@@ -807,20 +754,13 @@ mod tests {
     #[test]
     fn oversize_request_collapses_to_length_out_of_range() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let mut pool = fresh_pool(&frames);
+        let pool = fresh_pool(&frames);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq);
-        let host = KernelVirtioHost::new(
-            &mut pool,
-            &caller,
-            &sink,
-            PoolId::fresh(),
-            &irq,
-            handle,
-            &waiter,
-        );
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         // The pool is configured with 16 pages; requesting many
         // multiples of that triggers the pool's size-or-OOM path,
         // which `map_gate_error` collapses to `LengthOutOfRange`.

@@ -1196,6 +1196,54 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 2-tail.4 — kernel-binary
+  `VirtioHostFactory`, *complete*): the production kernel binary now
+  owns a concrete `VirtioHostFactory` that mints a fresh, per-driver
+  `KernelVirtioHost`, ready to be threaded through
+  `rustos_drvhost::HostConfig::virtio_host_factory`. **ABI/host
+  change.** `KernelVirtioHost::new` was changed to take its `DmaPool`
+  **by value** (the field is now `RefCell<DmaPool<'a, P>>` instead of
+  `RefCell<&'a mut DmaPool<'a, P>>`). Owning the pool is what makes a
+  `&self` factory sound: `VirtioHostFactory::mint(&'r self, granted)
+  -> Option<Box<dyn VirtioHost + 'r>>` cannot hand out a borrowed
+  `&'a mut DmaPool` from behind a shared borrow, so the host must own
+  the pool it is given. `'a` now bounds only the pool's
+  `FrameAllocator` borrow; there was no production caller of the old
+  signature (only in-crate tests), so this is an additive reshape of
+  an as-yet-unconsumed seam. **New factory.**
+  `kernel/rustos-kernel/src/virtio_factory.rs` adds
+  `KernelVirtioFactory<'k, P, F>` + a borrowed-fields
+  `KernelVirtioFactoryConfig<'k>` (mirroring `HostConfig` to dodge
+  `clippy::too_many_arguments`). `mint` fails closed when the
+  driver's granted set lacks `CAP_MEM_DMA` (returns `None` before
+  allocating), else builds a brand-new `AddressSpace` (via a
+  `make_table: Fn() -> P` closure) + `DmaPool` and hands ownership to
+  a fresh `KernelVirtioHost` — one per-process heap per loaded driver
+  (`AGENTS.md` §4). The impl lives in the kernel binary, not
+  `drvhost`, so the userland host crate keeps zero `kernel/*` deps
+  (`AGENTS.md` §3); `rustos-kernel` gained `rustos-caps`,
+  `rustos-drvhost`, and `rustos-drv-bus-virtio` (`kernel-host`) deps
+  plus a `host-tests`-featured dev-dep on `kernel/mem`. **Tests.**
+  `rustos-kernel --lib` 37 (+3: mint-yields-host, mint-refuses-no-
+  `MEM_DMA`, distinct-pool-per-call); `rustos-drv-bus-virtio
+  --features kernel-host` 50 (unchanged — all call sites migrated to
+  the owned-pool `new`); zero regressions in `rustos-kernel-mem`
+  (101), `rustos-kernel-sec` (52), `rustos-abi` (77), `rustos-drvhost`
+  (19 lib). `cargo clippy -p rustos-kernel --lib --all-targets` and
+  `-p rustos-drv-bus-virtio --features kernel-host --all-targets`
+  (`-D warnings`), `cargo fmt --check`, and
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-kernel --no-deps`
+  are clean; the freestanding lib **and** the production
+  `rustos-kernel` bin both build for `x86_64-unknown-none` with the
+  new deps. **Docs.** `docs/src/drivers/virtio.md` (owned-pool
+  snippet + "Kernel-binary factory" subsection) and
+  `docs/src/drivers/host.md` (factory section now names
+  `KernelVirtioFactory`). **Deferred.** Items 4 (the four virtio
+  QEMU integration crates, which boot kernel + driver host + signed
+  `.rxe` and thread this factory into a live `Host`) and 6
+  (acceptance gate) remain outstanding — they require real
+  PCI/DTB→DMA→IRQ device bring-up and are rewritten in
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 5 — userland ARP / IP / ICMP responder,
   *complete*): new crate `userland/net/icmp` (`rustos-net-icmp`),
   the first substantial userland crate and the protocol peer the

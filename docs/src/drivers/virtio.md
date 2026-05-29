@@ -98,11 +98,18 @@ and is generic over the page-table backend `P` and the audit
 
 ```rust
 pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
-    /* RefCell<&'a mut DmaPool<'a, P>>, &'a TaskCapabilities,
-       &'a S, fresh PoolId, monotonic slot counter, live-slot
-       table */
+    /* RefCell<DmaPool<'a, P>>, &'a TaskCapabilities, &'a S,
+       fresh PoolId, monotonic slot counter, live-slot table,
+       &'a IrqTable, IrqHandle, &'a dyn IrqWaiter */
 }
 ```
+
+The host **owns** its `DmaPool` (the `'a` lifetime now bounds only
+the pool's `FrameAllocator` borrow, not the pool itself). Ownership
+is what lets the kernel binary's `KernelVirtioFactory` mint a fresh
+per-driver host from behind a shared `&self` borrow — a
+borrowed-`&mut` pool could not be handed out that way (see
+[Kernel-binary factory](#kernel-binary-factory-kernelvirtiofactory)).
 
 `alloc_dma_zeroed` routes every request through
 `kernel/sec::dma::alloc_dma`, which performs the
@@ -119,9 +126,30 @@ drop, looks the buffer up by slot, and routes it back through
 performed at construction (`AGENTS.md` §2.10 — every `unsafe`
 block carries its `// SAFETY:` justification).
 
-`notify_wait` is still the polled cooperative shim inherited from
-`MockHost`: real IRQ-routed wake-ups are Stage 4.D Item 2 work,
-tracked in `.junie/next-session-prompt.md`.
+`notify_wait` blocks the loaded driver task on the device's
+pre-bound interrupt line through `kernel/irq::block_until_ready`
+(Stage 4.D Item 2-tail.3); the host borrows the kernel `IrqTable`,
+the bus-driver-minted `IrqHandle`, and the scheduler/clock
+`IrqWaiter` seam for this.
+
+### Kernel-binary factory (`KernelVirtioFactory`)
+
+Stage 4.D Item 2-tail.4 wires the host into the userland driver
+host. The userland `drvhost` defines a `VirtioHostFactory` trait
+(`mint(&self, granted) -> Option<Box<dyn VirtioHost>>`) and calls
+it just before a driver's `register()`; the kernel binary supplies
+the concrete implementation, `KernelVirtioFactory`, in
+`kernel/rustos-kernel/src/virtio_factory.rs`. Keeping the impl in
+the kernel binary lets `drvhost` stay free of every `kernel/*`
+dependency (`AGENTS.md` §3): only the kernel binary depends on both
+`drvhost` and the `kernel-host` build of this crate.
+
+Each `mint` call builds a brand-new `AddressSpace` (via a
+`make_table` closure) and `DmaPool`, then hands ownership to a fresh
+`KernelVirtioHost`, so every loaded driver gets its own per-process
+heap (`AGENTS.md` §4). A driver whose granted capability set lacks
+`CAP_MEM_DMA` is refused a host outright (`mint` returns `None`),
+failing closed before any pool is allocated.
 
 Capability refusals surface as `DriverError::PermissionDenied`;
 allocator failures (oversize requests, OOM, internal pool config

@@ -514,6 +514,9 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-drv-bus-virtio",
+ "rustos-drvhost",
  "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-mem",

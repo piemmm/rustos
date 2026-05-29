@@ -66,6 +66,7 @@ pub mod arch_wrapper;
 pub mod bumpalloc;
 pub mod dispatch;
 pub mod ioapic_controller;
+pub mod virtio_factory;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod boot;
@@ -77,6 +78,7 @@ pub mod serial_sink;
 pub use arch_wrapper::BinArch;
 pub use bumpalloc::BumpAllocator;
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
+pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use boot::{boot, BootError};
