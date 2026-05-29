@@ -81,7 +81,7 @@ pub mod source;
 pub mod zeroize;
 
 pub use error::HostError;
-pub use host::{Host, HostConfig, LoadedSnapshot};
+pub use host::{Host, HostConfig, LoadedSnapshot, VirtioHostFactory};
 pub use image::ParsedImage;
 pub use resolver::{DriverEntry, EntryResolver};
 pub use source::ImageSource;

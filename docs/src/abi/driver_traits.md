@@ -39,11 +39,27 @@ driver's `register` entry point.
 |-------------------------------------|---------------------------------------|
 | `has_capability(cap)`               | None (pure query of load-time grant). |
 | `kind()`                            | None.                                 |
+| `virtio_host()`                     | None (factory enforces gates).        |
 
 The trait deliberately exposes only what the driver needs to learn
 about its own load-time grant. Audit, logging, IPC channels, and
 device-tree access live in the userland driver host (delivered as a
 separate change set per the Stage 4 task split).
+
+`virtio_host(&self) -> Option<&dyn VirtioHost>` is an `abi-v1`
+*internal* extension added at Stage 4.D Item 0-tail. A virtio-class
+driver consults it from inside `register()` to obtain the
+per-driver host minted by `HostConfig::virtio_host_factory` (see
+[Userland driver host](../drivers/host.md#virtio-host-factory)); the
+default impl returns `None`, which keeps every existing
+non-virtio host source-compatible. The public `register(host:
+&dyn DriverHost) -> Result<DriverHandle, DriverError>` entry point
+per `AGENTS.md` §8 is unchanged: the accessor takes `&self` to
+compose with the immutable driver-host loan, and `VirtioHost`'s
+own methods use interior mutability for state. The owned
+`DmaSlab`, `PoolId`, and `SlabFreeFn` types backing the trait now
+live in `rustos_abi::driver::dma`; `drivers/bus/virtio`
+re-exports them so existing import sites remain unchanged.
 
 ### DriverHandle
 

@@ -18,51 +18,11 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 use rustos_abi::DriverError;
 
-/// Trait every virtio driver consumes to allocate DMA-able memory
-/// and to wait for queue notifications.
-///
-/// The two-method shape — `alloc_dma_zeroed` and `notify_wait` — is
-/// the minimum surface a Stage-4 split-virtqueue driver needs.
-/// Anything larger would be a Stage-5 deliverable per
-/// `AGENTS.md` §2.3.
-pub trait VirtioHost {
-    /// Allocate a contiguous, device-visible DMA region.
-    ///
-    /// The returned [`DmaSlab`] is owned by the caller; it carries
-    /// the pool id and slot it was minted from so the host's drop
-    /// path can reclaim the slot. The bytes are zero-initialised so
-    /// that the driver can publish the slab into a queue without
-    /// first clearing leftover bytes from another transaction
-    /// (defence in depth — `AGENTS.md` §7).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BufferTooSmall`] if `size == 0`.
-    /// * [`DriverError::LengthOutOfRange`] if the host exhausts its
-    ///   DMA pool.
-    ///
-    /// # Capabilities
-    ///
-    /// None directly; the host enforces its own DMA-pool quota at
-    /// allocation time (`AGENTS.md` §4, "Per-process heaps").
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError>;
-
-    /// Block (or busy-wait) until the device signals a completion
-    /// on `queue_index`.
-    ///
-    /// The mock host returns immediately because completions are
-    /// produced inline by the in-process software peer. The
-    /// production kernel host parks the calling task on a wait
-    /// queue and is resumed by the virtio MSI / MMIO-IRQ ISR.
-    ///
-    /// # Errors
-    ///
-    /// Never fails by design; the trait method returns `()` so a
-    /// caller cannot accidentally treat "spurious wake-up" as a
-    /// retriable failure (which would be the kind of hack
-    /// `AGENTS.md` §2.1 forbids).
-    fn notify_wait(&self, queue_index: u16);
-}
+// `VirtioHost` moved into `lib/abi` at Stage 4.D Item 0-tail; the
+// trait is re-exported here so existing `use crate::VirtioHost`
+// import sites (in this crate and in every consuming virtio driver
+// crate) keep working unchanged.
+pub use rustos_abi::driver::VirtioHost;
 
 /// In-process [`VirtioHost`] implementation used by the unit tests
 /// in this crate and in the consuming `virtio_blk` / `virtio_net`

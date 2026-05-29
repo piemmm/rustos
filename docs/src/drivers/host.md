@@ -20,6 +20,7 @@ let cfg = HostConfig {
     source: &my_source,     // impl ImageSource
     resolver: &my_resolver, // impl EntryResolver
     sink: &my_audit_sink,   // impl rustos_log::Sink
+    virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
 };
 let mut host = Host::new(cfg);
 
@@ -72,6 +73,41 @@ test cares about.
 The resolver is *only* invoked after every other verification gate has
 cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving resolver
 cannot widen the host's authority.
+
+### Virtio host factory
+
+`HostConfig::virtio_host_factory: Option<&dyn VirtioHostFactory>` is
+the seam at which the host supplies a per-driver
+`rustos_abi::driver::VirtioHost` for the duration of a single
+`register()` call. The driver retrieves the host through the new
+`DriverHost::virtio_host(&self) -> Option<&dyn VirtioHost>` accessor
+(an `abi-v1` internal addition; the public `register(host: &dyn
+DriverHost) -> Result<DriverHandle, DriverError>` entry point per
+`AGENTS.md` §8 is unchanged) and stashes it inside its own driver
+struct.
+
+A factory that returns `None` is indistinguishable from leaving
+`virtio_host_factory` unset; both shapes cause `host.virtio_host()`
+to report `None`, and a virtio-class driver's `register()` should
+then refuse to load (it has no transport). The default factory in
+production deployments mints a `KernelVirtioHost`
+(`drivers/bus/virtio` with the `kernel-host` feature) backed by a
+freshly-carved per-driver `DmaPool` and the calling task's
+`TaskCapabilities`; the mock factory used in unit tests mints a
+`MockHost` whose allocations leak for the duration of the test
+process.
+
+The factory is consulted **after** every other verification gate
+has cleared and **before** `register()` is called, so a driver
+load that is going to be refused never reaches the factory and a
+factory that refuses (returns `None`) never widens the host's
+authority. The boxed virtio host lives on the
+`verify_and_bind` stack frame and is dropped immediately after
+`register()` returns; the caller's per-driver `DmaPool` slots are
+reclaimed at that drop. The host that calls `register()` is the
+sole owner of the box — drivers must not retain `&dyn VirtioHost`
+references across the `register()` boundary (the lifetime in the
+trait signature prevents this at compile time).
 
 ### Audit sink
 

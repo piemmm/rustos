@@ -47,9 +47,14 @@ use crate::{CapabilityId, Errno};
 pub mod block;
 pub mod bus;
 pub mod display;
+pub mod dma;
 pub mod filesystem;
 pub mod input;
 pub mod net;
+pub mod virtio;
+
+pub use dma::{DmaSlab, PoolId, SlabFreeFn};
+pub use virtio::VirtioHost;
 
 /// Sensitivity class of a payload buffer crossing the driver ABI.
 ///
@@ -486,6 +491,46 @@ pub trait DriverHost {
     ///
     /// None.
     fn kind(&self) -> DriverKind;
+
+    /// Returns the per-driver virtio host, if the driver host has
+    /// minted one for this driver module.
+    ///
+    /// Drivers that consume virtio transports (`virtio_blk`,
+    /// `virtio_net`, future virtio-class drivers) call this once at
+    /// `register()` time to obtain a [`VirtioHost`] handle the
+    /// driver retains (typically inside its driver struct) for the
+    /// lifetime of the load. The default implementation returns
+    /// `None`, which is the correct shape for every host that does
+    /// not (yet) ship virtio-class plumbing — for example a
+    /// unit-test seam that drives a non-virtio driver, or the
+    /// kernel host before the `kernel-host` feature is enabled on
+    /// `rustos-drv-bus-virtio`.
+    ///
+    /// The signature takes `&self` (not `&mut self`) so it composes
+    /// with the frozen driver-load entry point
+    /// `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle,
+    /// DriverError>` (`AGENTS.md` §8). The returned [`VirtioHost`]
+    /// uses interior mutability for its own per-allocation
+    /// bookkeeping (see [`VirtioHost`]'s `&self`-based method
+    /// signatures), so passing it through an immutable reference is
+    /// sound.
+    ///
+    /// This method is an `abi-v1` *internal* addition (i.e., it
+    /// extends the host trait observed by in-tree drivers; the
+    /// public driver entry point above is unchanged). The default
+    /// body keeps every existing host impl source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; absence of a virtio host is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the underlying host enforces capability
+    /// checks at each [`VirtioHost`] method.
+    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
+        None
+    }
 }
 
 #[inline]

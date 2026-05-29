@@ -70,6 +70,7 @@ fn happy_path_load_unload_reload() {
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
 
@@ -238,6 +239,7 @@ fn in_kernel_kind_with_cap_drv_kernel_succeeds() {
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let caller = full_caps(); // includes CAP_DRV_KERNEL
@@ -278,6 +280,7 @@ fn unknown_driver_refused_by_resolver() {
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -303,6 +306,7 @@ fn driver_register_failure_refused() {
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -329,6 +333,7 @@ fn source_read_failure_propagates() {
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -366,6 +371,7 @@ fn drive(
         source: &source,
         resolver: &resolver,
         sink: &sink,
+        virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let result = host.load("/d/img", &caller_caps);
@@ -392,5 +398,145 @@ fn run_negative(
     assert!(
         ids.contains(&want_event_id),
         "missing audit id {want_event_id}: {ids:?}"
+    );
+}
+
+// -- Stage 4.D Item 0-tail: VirtioHostFactory wiring tests ----------
+
+// Observation latch used by the `register()` fns below. The two
+// virtio-factory tests live in the same translation unit and run
+// serially under `cargo test`'s default thread settings; resetting
+// at the top of each test is enough to keep them disjoint.
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+static VIRTIO_SEEN: AtomicBool = AtomicBool::new(false);
+static VIRTIO_ALLOC_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// `register` fn used by `virtio_host_factory_default_none_yields_none`:
+/// asserts that the host reports no virtio host and records the
+/// observation. Returns the canonical mock handle.
+fn register_expects_no_virtio(
+    host: &dyn rustos_abi::DriverHost,
+) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    let seen = host.virtio_host().is_some();
+    VIRTIO_SEEN.store(seen, AtomicOrdering::SeqCst);
+    rustos_abi::DriverHandle::from_raw(0xD00D)
+}
+
+/// `register` fn used by `virtio_host_factory_some_yields_virtio_host`:
+/// retrieves the per-driver virtio host through the new accessor,
+/// exercises `alloc_dma_zeroed` to prove the wiring is real, and
+/// records the length on success.
+fn register_uses_virtio_host(
+    host: &dyn rustos_abi::DriverHost,
+) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    let Some(vh) = host.virtio_host() else {
+        return Err(rustos_abi::DriverError::Unsupported);
+    };
+    let slab = vh.alloc_dma_zeroed(64)?;
+    VIRTIO_ALLOC_LEN.store(slab.len(), AtomicOrdering::SeqCst);
+    VIRTIO_SEEN.store(true, AtomicOrdering::SeqCst);
+    // The slab is dropped here; for the `MockHost` seam this is a
+    // no-op, but the `KernelVirtioHost` seam would reach back into
+    // the free shim. Either way the host returns Ok with a fresh
+    // handle (the host crate's freshly-minted one wins anyway).
+    drop(slab);
+    rustos_abi::DriverHandle::from_raw(0xBEEF)
+}
+
+/// Resolver that pins every manifest to a caller-supplied entry. A
+/// bespoke type is necessary because the existing `SingleResolver`
+/// hard-codes `mock_register`.
+struct PinnedResolver(rustos_drvhost::DriverEntry);
+impl rustos_drvhost::EntryResolver for PinnedResolver {
+    fn resolve(
+        &self,
+        _manifest: &DriverManifest,
+        _payload: &[u8],
+    ) -> Option<rustos_drvhost::DriverEntry> {
+        Some(self.0)
+    }
+}
+
+/// `MockHost`-backed [`VirtioHostFactory`]. Always mints a fresh
+/// `MockHost` (the production seam mints a `KernelVirtioHost`
+/// instead; see `kernel_host.rs`).
+struct MockVirtioFactory;
+impl rustos_drvhost::VirtioHostFactory for MockVirtioFactory {
+    fn mint<'r>(
+        &'r self,
+        _granted: &CapabilitySet,
+    ) -> Option<Box<dyn rustos_abi::driver::VirtioHost + 'r>> {
+        Some(Box::new(rustos_drv_bus_virtio::MockHost::new()))
+    }
+}
+
+#[test]
+fn virtio_host_factory_default_none_yields_none() {
+    // Sanity: with the default `virtio_host_factory: None` slot, the
+    // driver-visible `DriverHost::virtio_host()` accessor reports
+    // `None`. This is the source-compatibility contract for every
+    // existing host shipped before Stage 4.D Item 0-tail.
+    VIRTIO_SEEN.store(false, AtomicOrdering::SeqCst);
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
+    let mut source = MemSource::new();
+    source.images.insert("/d/probe".into(), img);
+    let resolver = PinnedResolver(register_expects_no_virtio as rustos_drvhost::DriverEntry);
+    let sink = RecordingSink::new();
+    let cfg = HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: SYS_HASH,
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        source: &source,
+        resolver: &resolver,
+        sink: &sink,
+        virtio_host_factory: None,
+    };
+    let mut host = Host::new(cfg);
+    host.load("/d/probe", &full_caps()).expect("load ok");
+    assert!(
+        !VIRTIO_SEEN.load(AtomicOrdering::SeqCst),
+        "register() saw a virtio host where none was configured"
+    );
+}
+
+#[test]
+fn virtio_host_factory_some_yields_virtio_host() {
+    // With a `VirtioHostFactory` that mints a `MockHost`, the driver
+    // observes `Some(&dyn VirtioHost)` from `DriverHost::virtio_host`
+    // and successfully exercises `alloc_dma_zeroed`. This proves the
+    // factory → boxed-host → `LoadedHostView` → trait-method wiring
+    // end-to-end. The kernel build wires a `KernelVirtioHost`-backed
+    // factory in the same slot (Stage 4.D Item 0-tail PLAN.md entry).
+    VIRTIO_SEEN.store(false, AtomicOrdering::SeqCst);
+    VIRTIO_ALLOC_LEN.store(0, AtomicOrdering::SeqCst);
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
+    let mut source = MemSource::new();
+    source.images.insert("/d/virtio".into(), img);
+    let resolver = PinnedResolver(register_uses_virtio_host as rustos_drvhost::DriverEntry);
+    let sink = RecordingSink::new();
+    let factory = MockVirtioFactory;
+    let cfg = HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: SYS_HASH,
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        source: &source,
+        resolver: &resolver,
+        sink: &sink,
+        virtio_host_factory: Some(&factory),
+    };
+    let mut host = Host::new(cfg);
+    host.load("/d/virtio", &full_caps()).expect("load ok");
+    assert!(
+        VIRTIO_SEEN.load(AtomicOrdering::SeqCst),
+        "register() did not observe the virtio host"
+    );
+    assert_eq!(
+        VIRTIO_ALLOC_LEN.load(AtomicOrdering::SeqCst),
+        64,
+        "alloc_dma_zeroed reported the wrong length back to register()"
     );
 }

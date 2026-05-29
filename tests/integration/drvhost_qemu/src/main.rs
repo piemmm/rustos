@@ -117,6 +117,13 @@ mod kernel {
             source: &source,
             resolver: &resolver,
             sink: &SerialSink::new(),
+            // Stage 4.D Item 0-tail: this integration runs against a
+            // bumpalloc-backed kernel that has no kernel-side
+            // `DmaPool` yet (the per-process DMA facility is wired
+            // separately in the production binary). `None` keeps the
+            // pre-Item-0-tail behaviour: the mock driver loaded
+            // below does not consume virtio.
+            virtio_host_factory: None,
         };
         let mut host = Host::new(cfg);
 

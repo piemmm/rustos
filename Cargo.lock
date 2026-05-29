@@ -491,6 +491,7 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-crypto",
+ "rustos-drv-bus-virtio",
  "rustos-log",
 ]
 

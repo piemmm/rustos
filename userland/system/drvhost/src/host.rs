@@ -5,10 +5,12 @@
 //! [`crate::events`]) and the per-record sensitive buffers are wiped
 //! through [`crate::zeroize::secure_clear`] on drop.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use rustos_abi::driver::VirtioHost;
 use rustos_abi::{
     CapabilityId, DriverHandle, DriverHost, DriverKind, DRIVER_MANIFEST_MAX_CAPABILITIES,
 };
@@ -41,6 +43,42 @@ pub struct LoadedSnapshot {
     pub granted: CapabilitySet,
 }
 
+/// Factory that mints a per-driver [`VirtioHost`] for the duration
+/// of a single `register()` call.
+///
+/// Drvhost calls [`Self::mint`] just before invoking the driver's
+/// `register` entry point; the returned host lives on the stack
+/// frame of `verify_and_bind` (boxed only because the concrete type
+/// is build-specific) and is dropped immediately after `register`
+/// returns. Stage 4.D Item 0-tail is the wire-up of a kernel-side
+/// implementation that mints a real `KernelVirtioHost` backed by a
+/// per-driver `DmaPool`; the default drvhost build keeps the
+/// factory slot empty and the [`DriverHost::virtio_host`] accessor
+/// reports `None`, which is the source-compatible behaviour for
+/// every existing test and integration site.
+///
+/// # Capabilities
+///
+/// Implementations are passed the already-intersected capability
+/// set granted to the driver. A capability-aware factory uses this
+/// to short-circuit the allocation path when the driver was not
+/// granted `CAP_MEM_DMA` (the [`VirtioHost::alloc_dma_zeroed`]
+/// fast-fail at the kernel boundary is still authoritative).
+pub trait VirtioHostFactory {
+    /// Construct a fresh virtio host for the upcoming `register()`
+    /// call.
+    ///
+    /// Returns `None` if the factory chooses not to expose a virtio
+    /// host to this driver (for example because the granted caps
+    /// do not include `CAP_MEM_DMA`, or because the host runs on a
+    /// platform without a virtio transport at all).
+    ///
+    /// The returned box is borrowed from the factory's lifetime; the
+    /// factory must remain live for as long as the returned host
+    /// is in use, which is at most the duration of `register()`.
+    fn mint<'r>(&'r self, granted: &CapabilitySet) -> Option<Box<dyn VirtioHost + 'r>>;
+}
+
 /// Configuration handed to [`Host::new`].
 ///
 /// All fields are borrowed; the host outlives them via `'h`. The
@@ -65,6 +103,16 @@ pub struct HostConfig<'h> {
     /// Sink that receives every structured-log [`Event`] the host
     /// emits.
     pub sink: &'h dyn Sink,
+    /// Optional factory minting a per-driver [`VirtioHost`].
+    ///
+    /// `None` for hosts that do not (yet) ship virtio-class plumbing
+    /// — the [`DriverHost::virtio_host`] accessor on the driver
+    /// view then reports `None` and the driver `register()` impl
+    /// must fall back to a no-virtio path or refuse to load. The
+    /// kernel binary wires a real implementation here that mints a
+    /// `KernelVirtioHost` per driver (`AGENTS.md` §4, per-process
+    /// heaps).
+    pub virtio_host_factory: Option<&'h dyn VirtioHostFactory>,
 }
 
 /// One row in the host's loaded-driver table.
@@ -249,9 +297,19 @@ impl<'h> Host<'h> {
         let handle = self.next_handle();
         // Construct the host view *before* calling register() so the
         // driver sees the bitmap that is about to be installed.
+        // The virtio host (if the deployment ships one) lives for
+        // exactly the duration of register(): drvhost owns the box,
+        // the view borrows a `&dyn VirtioHost` from it, and the box
+        // is dropped on fall-through (free path) or on the early
+        // return below.
+        let virtio_host_owned = self
+            .cfg
+            .virtio_host_factory
+            .and_then(|f| f.mint(&requested));
         let view = LoadedHostView {
             granted: requested,
             kind: parsed.manifest.kind,
+            virtio_host: virtio_host_owned.as_deref(),
         };
         match entry(&view) {
             Ok(_returned) => {
@@ -266,9 +324,21 @@ impl<'h> Host<'h> {
                     path,
                     "driver register",
                 );
+                // The view borrows from `virtio_host_owned`; the
+                // borrow ends at the function return below, after
+                // which the boxed virtio host (if any) is dropped
+                // and any per-driver `DmaPool` slots are reclaimed.
                 return Err(HostError::DriverRegisterFailed(e));
             }
         }
+        // Falling through, the view and the boxed virtio host are
+        // both dropped at the end of this function: the view borrow
+        // ends first (lexical order, view declared after the box),
+        // then the box releases any per-driver DMA bookkeeping.
+        // Explicit `drop()` calls would be redundant and clippy's
+        // `drop_non_drop` lint flags them.
+        let _ = view;
+        let _ = &virtio_host_owned;
         let mut record_image = Vec::with_capacity(image.len());
         record_image.extend_from_slice(image);
         let record = LoadedRecord {
@@ -450,19 +520,30 @@ impl<'h> Host<'h> {
 }
 
 /// Driver-visible view of a host. Only what the driver may legitimately
-/// observe — the granted capability bitmap and the kind — is exposed.
-struct LoadedHostView {
+/// observe — the granted capability bitmap, the kind, and the
+/// per-driver virtio host if one was minted — is exposed.
+struct LoadedHostView<'v> {
     granted: CapabilitySet,
     kind: DriverKind,
+    /// Borrowed [`VirtioHost`] minted by
+    /// [`HostConfig::virtio_host_factory`] for this driver load.
+    /// `None` whenever the host config has no factory or the factory
+    /// declined to expose one to this driver (for example because
+    /// `CAP_MEM_DMA` was not granted).
+    virtio_host: Option<&'v dyn VirtioHost>,
 }
 
-impl DriverHost for LoadedHostView {
+impl DriverHost for LoadedHostView<'_> {
     fn has_capability(&self, cap: CapabilityId) -> bool {
         self.granted.contains(cap)
     }
 
     fn kind(&self) -> DriverKind {
         self.kind
+    }
+
+    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
+        self.virtio_host
     }
 }
 

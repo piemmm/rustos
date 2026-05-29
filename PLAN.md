@@ -1259,6 +1259,81 @@ follow-up is its own thread and is now also complete.
   and is unrelated to this Item 1 work. Items 2–6 of the prior
   next-session prompt remain outstanding and have been rewritten
   into the next session's prompt.
+- Stage 4.D follow-up (Item 0-tail — `KernelVirtioHost` plumbing
+  into `userland/system/drvhost`, *complete*): the wiring deferred
+  by Item 0 has landed end-to-end and the host↔driver virtio ABI
+  has been re-homed where the layering allows it. **ABI re-home.**
+  `PoolId`, `SlabFreeFn`, `DmaSlab` (the owned-slab shape) and the
+  `VirtioHost` trait now live in `lib/abi/src/driver/{dma.rs,
+  virtio.rs}` instead of `drivers/bus/virtio`. The original
+  proposal — extend `DriverHost::virtio_host(&mut self) -> &dyn
+  VirtioHost` directly — would have forced `lib/abi` to depend on
+  `drivers/bus/virtio` (or required moving the trait), inverting
+  the layering and violating `AGENTS.md` §3. Re-homing keeps the
+  ABI seam where every other host/driver trait already lives. The
+  signature was reshaped to `DriverHost::virtio_host(&self) ->
+  Option<&dyn VirtioHost>` because the frozen driver-load entry
+  point per `AGENTS.md` §8 is
+  `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle,
+  DriverError>` — i.e. immutable — and `VirtioHost`'s own methods
+  already use `&self` plus interior mutability, so the `&mut`
+  shape in the previous prompt would not have composed with the
+  existing entry point. The default body returns `None`, keeping
+  every existing `DriverHost` impl source-compatible. The owned
+  `DmaSlab` test suite (round-trip, three simultaneous disjoint
+  writes, drop-frees-pool, pool-id rejection) stays in
+  `drivers/bus/virtio/src/dma.rs` against the re-exported types,
+  because `lib/abi` is no-alloc by crate invariant — moving the
+  tests would have required pulling `alloc` into `lib/abi`.
+  **Drvhost wiring.** `userland/system/drvhost::host` gained a new
+  `VirtioHostFactory` trait, `HostConfig::virtio_host_factory:
+  Option<&'h dyn VirtioHostFactory>`, and a borrowed `virtio_host:
+  Option<&'v dyn VirtioHost>` field on `LoadedHostView`. The
+  factory mints a fresh `Box<dyn VirtioHost + 'r>` for the
+  duration of a single `register()` call; the host owns the box,
+  the view borrows a `&dyn VirtioHost` from it for the duration of
+  `entry(&view)`, and both are dropped at function return so any
+  per-driver `DmaPool` slots are reclaimed. Drivers retrieve the
+  host through `host.virtio_host()`. **Deliberate non-decisions.**
+  The `kernel-host` feature on `userland/system/drvhost` itself
+  was *not* added: the factory abstraction keeps the kernel-side
+  generics (`P: PageTableOps`, `S: Sink`) out of drvhost entirely
+  — the kernel binary supplies an impl whose internals do mention
+  those generics, and drvhost stays free of `kernel/*` deps in its
+  production build. Adding the feature without a concrete kernel
+  consumer would have been the kind of dead-code bloat
+  `AGENTS.md` §2.3 forbids. **Tests.** Two new integration tests
+  in `userland/system/drvhost/tests/host_integration.rs`
+  (`virtio_host_factory_default_none_yields_none`,
+  `virtio_host_factory_some_yields_virtio_host`) cover both seams
+  end-to-end: the first asserts the default `None` slot causes
+  `host.virtio_host()` to report `None` inside `register()`; the
+  second wires a `MockHost`-backed factory and asserts that the
+  driver successfully calls `alloc_dma_zeroed(64)` through the
+  trait. `rustos-drv-bus-virtio` was added to
+  `rustos-drvhost`'s `[dev-dependencies]` for the `MockHost`
+  symbol. **Doc updates.** `docs/src/drivers/host.md` gained a
+  "Virtio host factory" subsection and an updated `HostConfig`
+  example; `docs/src/abi/driver_traits.md` documents the new
+  `virtio_host()` accessor and the ABI re-home in the
+  `DriverHost` table. The `drvhost_qemu` integration was updated
+  to set `virtio_host_factory: None` (the bumpalloc-backed kernel
+  test bin has no kernel-side `DmaPool` yet; that arrives with
+  Item 2 — IRQ plumbing — and the production kernel binary's
+  factory). **Verification.** `cargo test --workspace --lib
+  --exclude rustos-kernel-arch-*` → 663 passing (unchanged
+  baseline; the move did not delete or add lib-level tests).
+  `cargo test -p rustos-drvhost` → 19 lib + 15 integration = 34
+  passing (was 19 + 13). `cargo test -p rustos-drv-bus-virtio`
+  default → 41 passing; with `--features kernel-host` → 41
+  passing. `cargo clippy -p rustos-abi -p rustos-drv-bus-virtio
+  -p rustos-drvhost --all-targets --all-features -- -D warnings`
+  and `cargo fmt --check` on touched crates are clean. Items 2–6
+  of the prior next-session prompt remain outstanding and have
+  been rewritten into the new
+  `.junie/next-session-prompt.md` with concrete entry points that
+  build on the `VirtioHostFactory` seam landed here.
+
 - Stage 4.D follow-up (Item 0a — owned `DmaSlab` API shape,
   *complete*): the API conflict described below has been resolved
   by adopting Option (a). The driver-side `DmaRegion<'a>` borrowed
