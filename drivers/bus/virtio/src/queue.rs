@@ -10,7 +10,7 @@
 //! Packed queues (virtio 1.1 §2.7) are intentionally absent; see the
 //! crate root for the deferral note.
 
-use crate::dma::DmaRegion;
+use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
 use core::mem::size_of;
@@ -62,13 +62,13 @@ pub struct ChainSegment {
 /// Split virtqueue.
 ///
 /// The descriptor table, avail ring, and used ring each live in
-/// host-allocated [`DmaRegion`]s carried inside this struct.
+/// host-allocated [`DmaSlab`]s carried inside this struct.
 pub struct SplitQueue {
     queue_index: u16,
     queue_size: u16,
-    desc: DmaRegion<'static>,
-    avail: DmaRegion<'static>,
-    used: DmaRegion<'static>,
+    desc: DmaSlab,
+    avail: DmaSlab,
+    used: DmaSlab,
     /// Index of the first free descriptor in the free-list. Each
     /// free entry's `next` field points to the following free one;
     /// the tail's `next` field is `queue_size` (an out-of-range
@@ -112,7 +112,7 @@ impl SplitQueue {
     /// Propagates allocation and transport errors.
     pub fn new<T: Transport>(
         transport: &mut T,
-        host: &'static dyn VirtioHost,
+        host: &dyn VirtioHost,
         queue_index: u16,
         requested_size: u16,
     ) -> Result<Self, VirtioError> {
@@ -416,7 +416,7 @@ pub(crate) mod ring_view {
         /// The mock peer (the only caller) treats these `*mut u8`s
         /// as `&mut [u8]` of the appropriate ring length, governed
         /// by [`crate::queue::SplitQueue`]'s sizing helpers. The
-        /// queue stores those slices in `DmaRegion<'static>`s that
+        /// queue stores those slices in `DmaSlab`s that
         /// outlive every `RingView` derived from them; we therefore
         /// only access them inside the body of `MockTransport`
         /// methods (which borrow the driver exclusively via the
@@ -517,7 +517,7 @@ pub(crate) mod ring_view {
                 }
                 let d = self.read_desc(cur);
                 // SAFETY: `d.addr` was programmed by the driver from
-                // a `DmaRegion` whose backing slice it still owns; the
+                // a `DmaSlab` whose backing storage it still owns; the
                 // mock peer reconstructs a `&[u8]` of length `d.len`
                 // for the duration of one `drain_queue` call.
                 if (d.flags & VRING_DESC_F_WRITE) != 0 {

@@ -249,6 +249,41 @@ fn guard_violation_still_returns_frames() {
 }
 
 #[test]
+fn slot_base_points_at_live_data_bytes() {
+    // The new `slot_base` accessor (Stage 4.D Item 0a) hands out a
+    // raw `NonNull<u8>` to a buffer's data slots so a future
+    // user-space-driver host can construct an owned `DmaSlab`
+    // without re-borrowing the pool. The pointer must round-trip
+    // through `bytes_mut`'s slice view.
+    let frames = fresh_frames(8);
+    let mut pool = pool_with_capacity(&frames, 4);
+    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let ptr = pool.slot_base(&buf).expect("slot_base");
+    // Write through the slice view; observe through the raw ptr.
+    let slice = pool.bytes_mut(buf).expect("bytes_mut");
+    slice[0] = 0xAB;
+    slice[PAGE_SIZE - 1] = 0xCD;
+    // SAFETY: the slot bitmap proves no other reference covers
+    // `[ptr, ptr + PAGE_SIZE)`; the slice borrow above has been
+    // released for this read.
+    let view = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), PAGE_SIZE) };
+    assert_eq!(view[0], 0xAB);
+    assert_eq!(view[PAGE_SIZE - 1], 0xCD);
+    pool.free(buf).expect("free");
+}
+
+#[test]
+fn slot_base_rejects_unknown_buffer() {
+    // After `free`, the descriptor is no longer live; `slot_base`
+    // must refuse to lend a pointer to its (now-recycled) slots.
+    let frames = fresh_frames(8);
+    let mut pool = pool_with_capacity(&frames, 4);
+    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    pool.free(buf).expect("free");
+    assert_eq!(pool.slot_base(&buf).err(), Some(DmaError::UnknownBuffer));
+}
+
+#[test]
 fn dma_buffer_is_not_empty() {
     let frames = fresh_frames(8);
     let mut pool = pool_with_capacity(&frames, 4);

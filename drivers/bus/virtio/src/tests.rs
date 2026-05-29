@@ -1,7 +1,7 @@
 //! Cross-module unit tests: end-to-end split-virtqueue protocol
 //! against the in-process [`crate::MockTransport`] peer.
 
-use crate::dma::{BounceBuffer, DmaRegion};
+use crate::dma::{BounceBuffer, DmaSlab};
 use crate::host::{MockHost, VirtioHost};
 use crate::queue::{ChainSegment, SplitQueue};
 use crate::transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
@@ -39,9 +39,9 @@ fn add_chain_consumes_descriptors_and_publishes_avail() {
     let mut t = MockTransport::new(1, 8, 0, 0);
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, 8).unwrap();
-    let mut region: DmaRegion<'_> = host.alloc_dma_zeroed(64).unwrap();
-    let phys = region.phys();
-    region.as_bytes_mut()[..4].copy_from_slice(b"PING");
+    let mut slab: DmaSlab = host.alloc_dma_zeroed(64).unwrap();
+    let phys = slab.phys();
+    slab.as_bytes_mut()[..4].copy_from_slice(b"PING");
     let segments = [ChainSegment {
         phys,
         len: 4,
@@ -58,9 +58,9 @@ fn descriptor_chain_round_trip_through_mock_peer() {
     let mut t = MockTransport::new(1, 8, 0, 0);
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, 8).unwrap();
-    let mut input = host.alloc_dma_zeroed(8).unwrap();
+    let mut input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
     input.as_bytes_mut()[..4].copy_from_slice(b"PING");
-    let output = host.alloc_dma_zeroed(8).unwrap();
+    let output: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
     let segs = [
         ChainSegment {
             phys: input.phys(),
@@ -228,8 +228,8 @@ fn transport_setup_records_status_progression() {
 #[test]
 fn bounce_buffer_zeroises_on_sensitive_path() {
     let host = MockHost::new();
-    let region = host.alloc_dma_zeroed(16).unwrap();
-    let mut bb = BounceBuffer::new(region, BufferClass::Sensitive);
+    let slab = host.alloc_dma_zeroed(16).unwrap();
+    let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
     bb.stage(b"top-secret-data!").unwrap();
     let phys = bb.phys();
     drop(bb);

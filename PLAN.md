@@ -1259,12 +1259,51 @@ follow-up is its own thread and is now also complete.
   and is unrelated to this Item 1 work. Items 2–6 of the prior
   next-session prompt remain outstanding and have been rewritten
   into the next session's prompt.
+- Stage 4.D follow-up (Item 0a — owned `DmaSlab` API shape,
+  *complete*): the API conflict described below has been resolved
+  by adopting Option (a). The driver-side `DmaRegion<'a>` borrowed
+  view has been replaced by an owned `DmaSlab { phys: u64, ptr:
+  NonNull<u8>, len: usize, pool_id: PoolId, slot: usize, /* erased
+  free shim */ }` in `drivers/bus/virtio/src/dma.rs`. The slab
+  carries the disjoint-slot invariant in its `pool_id` / `slot`
+  fields; `DmaSlab::as_bytes_mut`'s `// SAFETY:` block cites the
+  pool's slot bitmap (one slot ↔ one slab) as the disjointness
+  witness. `BounceBuffer` now wraps `DmaSlab`. The `VirtioHost`
+  trait return type is `Result<DmaSlab, DriverError>` (no
+  lifetime); `SplitQueue` stores three owned `DmaSlab`s. The
+  kernel-side companion accessor
+  `DmaPool::slot_base(&self, &DmaBuffer) -> Result<NonNull<u8>,
+  DmaError>` has landed in `kernel/mem/src/dma.rs` with two new
+  tests (`slot_base_points_at_live_data_bytes`,
+  `slot_base_rejects_unknown_buffer`). The `MockHost`'s
+  `Box::leak` storage strategy is unchanged: slabs are minted with
+  `PoolId::MOCK`, a monotonically increasing `slot`, and a `None`
+  free shim. Four new `DmaSlab` tests in
+  `drivers/bus/virtio/src/dma.rs` exercise the round-trip, three
+  simultaneous disjoint writes, drop-frees-pool (the erased free
+  shim is invoked exactly once with the right `(slot, len)`), and
+  pool-id rejection across pools. Docs:
+  `docs/src/drivers/virtio.md` rewritten with a new "DMA ownership
+  model" section; `docs/src/architecture/memory.md` gained a
+  "Slab hand-off to user-space drivers" subsection (§5.1).
+  `cargo test --workspace --lib --exclude rustos-kernel-arch-*` →
+  656 passing on the pinned `nightly-2026-05-27` (was 650
+  pre-Item-0a; +4 in `rustos-drv-bus-virtio` for the new
+  `DmaSlab` tests, +2 in `rustos-kernel-mem` for `slot_base`).
+  `cargo clippy -p rustos-drv-bus-virtio -p
+  rustos-drv-storage-virtio-blk -p rustos-drv-network-virtio-net
+  -p rustos-kernel-mem -p rustos-kernel-sec --lib --tests --
+  -D warnings` is clean. `cargo fmt --check` is clean. Items 0,
+  2–6 of the prior next-session prompt remain outstanding and
+  have been rewritten into the next session's prompt.
+
 - Stage 4.D follow-up (Item 0 — `DmaPool` ↔ `VirtioHost` API
-  shape, *unresolved*): the kernel side of the DMA facility (Item
-  1) and the driver consumers (`drivers/bus/virtio`,
-  `drivers/storage/virtio_blk`, `drivers/network/virtio_net`) do
-  not yet meet. The `VirtioHost::alloc_dma_zeroed(&self, size)
-  -> Result<DmaRegion<'_>, DriverError>` trait method returns a
+  shape, *historical, superseded by Item 0a above*): the kernel
+  side of the DMA facility (Item 1) and the driver consumers
+  (`drivers/bus/virtio`, `drivers/storage/virtio_blk`,
+  `drivers/network/virtio_net`) did not meet. The
+  `VirtioHost::alloc_dma_zeroed(&self, size)
+  -> Result<DmaRegion<'_>, DriverError>` trait method returned a
   borrowed `&'a mut [u8]` whose lifetime is tied to `&self`, but
   `DmaPool::alloc(&mut self, size)` requires an exclusive borrow
   of the pool and `DmaPool::bytes_mut(&mut self, &DmaBuffer)`

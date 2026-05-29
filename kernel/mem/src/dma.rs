@@ -67,6 +67,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ptr::NonNull;
 
 use zeroize::Zeroize;
 
@@ -474,6 +475,48 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
         let start = first_data_slot * PAGE_SIZE;
         let end = start + record.data_pages * PAGE_SIZE;
         Ok(&mut self.storage[start..end])
+    }
+
+    /// Raw, non-null base pointer to the data slots of `buf`.
+    ///
+    /// Companion to [`Self::bytes_mut`] that hands out only a
+    /// pointer (no slice borrow), so a future user-space-driver
+    /// host shim can mint an owned `DmaSlab` carrying the pointer
+    /// independently of the pool's mutable borrow. The disjointness
+    /// witness is the pool's slot bitmap: one slot ↔ one
+    /// allocation, so the bytes covered by `[ptr, ptr + buf.len())`
+    /// alias nothing else the pool has minted.
+    ///
+    /// # Safety-invariant
+    ///
+    /// The returned pointer is valid for reads and writes of
+    /// `buf.len()` bytes until the buffer is freed via
+    /// [`Self::free`]. The caller (a future Stage 4.D Item 0
+    /// `KernelVirtioHost`) must ensure the slab carrying this
+    /// pointer is dropped strictly before
+    /// [`Self::free`] is called for the same `buf`.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::UnknownBuffer`] if `buf` does not name a live
+    /// allocation of this pool.
+    pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError> {
+        let record = self
+            .allocations
+            .get(&buf.virt.as_u64())
+            .ok_or(DmaError::UnknownBuffer)?;
+        let first_data_slot = record.leading_guard_slot + 1;
+        let start = first_data_slot * PAGE_SIZE;
+        // The host-side storage is a `Vec<u8>` whose buffer is
+        // stable for the lifetime of the pool (see [`Self::new`]).
+        // Casting the immutable raw pointer to `*mut u8` is sound
+        // because (i) the slot bitmap proves no other reference
+        // covers `[start, start + buf.len())`, and (ii) every
+        // future write through this pointer is gated by the
+        // slot's exclusive owner (the `DmaSlab` that records the
+        // same `slot` index).
+        let base = self.storage.as_ptr().wrapping_add(start).cast_mut();
+        NonNull::new(base).ok_or(DmaError::InvalidPoolConfig)
     }
 
     /// Borrow the data bytes of `buf` immutably.

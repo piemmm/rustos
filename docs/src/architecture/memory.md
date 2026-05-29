@@ -171,6 +171,26 @@ A future syscall wrapper maps gate failures to `Errno` via
 [`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
 [`AuditEvent::DmaAllocDenied`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
 
+### 5.1 Slab hand-off to user-space drivers
+
+The user-space virtio driver crates carry an owned
+`DmaSlab { phys, ptr: NonNull<u8>, len, pool_id, slot, /* erased
+free shim */ }` rather than borrowing the pool on every accessor
+(Stage 4.D Item 0a). The pool exposes a single companion accessor,
+
+```rust
+pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError>;
+```
+
+that hands out the base pointer of `buf`'s data slots. The
+disjointness witness is the pool's slot bitmap (one slot ↔ one
+allocation); the slab carries `(pool_id, slot, len)` so its drop
+can invoke a type-erased free shim that returns the slot to the
+pool. See [Virtio transport — DMA ownership model](../drivers/virtio.md#dma-ownership-model)
+for the consumer-side view. The kernel-side wiring of a
+`KernelVirtioHost` that builds slabs from `alloc_dma` is the
+subject of Stage 4.D Item 0.
+
 ## 6. Result-returning OOM contract
 
 Every fallible operation in this crate returns

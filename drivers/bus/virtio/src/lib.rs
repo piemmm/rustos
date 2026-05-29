@@ -51,7 +51,7 @@ pub mod transport;
 mod tests;
 
 pub use backend::{MmioBackend, MmioOps, PciBackend, PortIo};
-pub use dma::{BounceBuffer, DmaRegion};
+pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
 pub use host::{MockHost, VirtioHost};
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};

@@ -93,10 +93,7 @@ impl AutoDrainHost {
 }
 
 impl VirtioHost for AutoDrainHost {
-    fn alloc_dma_zeroed(
-        &self,
-        size: usize,
-    ) -> Result<rustos_drv_bus_virtio::DmaRegion<'_>, DriverError> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_drv_bus_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
     fn notify_wait(&self, queue_index: u16) {
