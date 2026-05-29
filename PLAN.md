@@ -1334,6 +1334,53 @@ follow-up is its own thread and is now also complete.
   `.junie/next-session-prompt.md` with concrete entry points that
   build on the `VirtioHostFactory` seam landed here.
 
+- Stage 4.D follow-up (Item 2-tail.3 — `KernelVirtioHost::notify_wait`
+  blocks on a pre-bound `IrqHandle`, *complete*): the in-kernel
+  virtio host's `notify_wait` is no longer a polled cooperative shim;
+  it now blocks the loaded driver task on the device's pre-bound
+  interrupt line through the kernel IRQ subsystem. **Shared blocking
+  primitive.** The poll-and-yield loop that previously lived only in
+  `kernel/core::syscalls::irq_wait` was extracted into the new
+  `kernel/irq::wait` module as `block_until_ready(table, handle,
+  caller, timeout_ns, &dyn IrqWaiter) -> WaitOutcome`, so both the
+  `irq_wait` syscall handler and `notify_wait` drive one
+  implementation (`AGENTS.md` §2.2 — no duplication). The clock +
+  cooperative yield are inverted behind the two-method `IrqWaiter`
+  trait (`now_ns` / `yield_now`), keeping `kernel/irq` free of any
+  scheduler or architecture dependency; `IrqWaitAbort`
+  (`TaskVanished` / `SchedulerError`) carries yield-abort reasons the
+  callers map onto their own error surface. `IrqTable` and
+  `IrqController` are unchanged — the addition composes them, per the
+  carried-over assumption. **Syscall handler.** `irq_wait` now builds
+  a `SyscallIrqWaiter` (wraps `Scheduler::yield_current` +
+  `KernelArch::monotonic_ns`, capturing the issuing CPU once) and
+  delegates to `block_until_ready`, preserving the exact errno
+  mapping (`Ready→Ok`, `TimedOut→TimedOut`, `NotFound→NotFound`,
+  `TaskVanished→NotFound`, `SchedulerError→OutOfRange`). **Virtio
+  host.** `KernelVirtioHost` gained `&IrqTable`, the bound
+  `IrqHandle`, and an `&dyn IrqWaiter` (waiting against the owning
+  task via `caller.task()` with an unbounded `u64::MAX` timeout); the
+  polled `notify_log` was removed (it survives only on `MockHost`).
+  `rustos-kernel-irq` was added to `rustos-drv-bus-virtio`'s
+  `kernel-host` feature deps and `[dev-dependencies]`. **Tests.**
+  `kernel/irq::wait` ships 6 unit tests (pre-fired, fire-during-yield,
+  timeout, forged handle, yield-abort, unbounded-no-wrap). The virtio
+  `kernel_host` tests were rewired onto an IRQ fixture and the old
+  `notify_log` test replaced with four: `notify_wait_returns_when_line
+  _pre_fired`, `notify_wait_blocks_until_line_fires`,
+  `notify_wait_observes_mask_before_wake` (probe controller asserts
+  `ready == false` while `mask` runs), and
+  `notify_wait_returns_when_binding_released`. **Docs.**
+  `docs/src/security/irq.md` intro and "Wait semantics" section
+  rewritten to document the shared loop, the `IrqWaiter` seam, and the
+  virtio consumer. **Verification.** `cargo test -p
+  rustos-kernel-irq --lib` → 24; `cargo test -p rustos-kernel-core
+  --lib` → 37; `cargo test -p rustos-drv-bus-virtio` and `--features
+  kernel-host` → 44 each. **What is still outstanding.** Items
+  2-tail.4 / 3 / 4 / 5 / 6 from `.junie/next-session-prompt.md` remain
+  deferred — the user-confirmed scope for this session was Item
+  2-tail.3 only.
+
 - Stage 4.D follow-up (Item 2-tail.2 QEMU validation — live IRQ
   end-to-end on x86_64 QEMU, *complete*): the QEMU integration
   crate deferred from the preceding A2 split has landed and the

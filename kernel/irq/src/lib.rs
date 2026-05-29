@@ -62,9 +62,11 @@ extern crate alloc;
 
 mod error;
 mod table;
+mod wait;
 
 pub use error::{IrqError, MaskError};
 pub use table::{
     BindOutcome, FireOutcome, IrqController, IrqEntry, IrqTable, ReleaseOutcome,
     UnsupportedController, WaitStep, UNSUPPORTED_CONTROLLER,
 };
+pub use wait::{block_until_ready, IrqWaitAbort, IrqWaiter, WaitOutcome};

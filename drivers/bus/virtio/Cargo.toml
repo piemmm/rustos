@@ -18,6 +18,7 @@ publish.workspace = true
 kernel-host = [
     "dep:rustos-kernel-mem",
     "dep:rustos-kernel-sec",
+    "dep:rustos-kernel-irq",
     "dep:rustos-log",
 ]
 
@@ -28,6 +29,7 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # unit tests (which run in user space via `cargo test`) lightweight.
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", optional = true }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0", optional = true }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0", optional = true }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
@@ -38,6 +40,7 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0", optional = true }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [lints]

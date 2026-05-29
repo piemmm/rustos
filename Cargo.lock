@@ -438,6 +438,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-caps",
+ "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
  "rustos-log",

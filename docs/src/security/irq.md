@@ -5,10 +5,13 @@ hardware interrupts to user-space drivers. The contract is exercised
 by the `irq_bind` / `irq_wait` syscall pair and gated by the
 `CAP_IRQ_BIND` capability (`lib/abi/src/capability.rs`).
 
-Wake-up plumbing on the kernel side — the per-line wait queue, the
-controller-level mask / unmask sequence, and the `KernelVirtioHost::
-notify_wait` rewrite that consumes this ABI — lands in a follow-up
-session. This page locks down the contract those pieces must respect.
+Wake-up plumbing on the kernel side — the per-line wait queue and the
+controller-level mask / unmask sequence — is wired and
+QEMU-validated (see *Kernel-side implementation* below). The first
+in-kernel consumer of the wait loop, `KernelVirtioHost::notify_wait`,
+blocks a loaded virtio driver on its device's pre-bound `IrqHandle`
+through the same shared primitive (Stage 4.D Item 2-tail.3). This
+page locks down the contract those pieces respect.
 
 ## ABI surface
 
@@ -192,19 +195,43 @@ implements:
 
 ### Wait semantics
 
-The handler implements `irq_wait` as a polling loop on top of
-`IrqTable::try_wait_step`, composing two existing primitives:
+The polling loop on top of `IrqTable::try_wait_step` lives in one
+place — `rustos_kernel_irq::block_until_ready` — so every in-kernel
+waiter drives the same implementation rather than re-deriving it
+(`AGENTS.md` §2.2 — no duplication). The loop computes the deadline
+once (`start + saturating(timeout)`, so `u64::MAX` does not wrap to a
+tiny value), polls `try_wait_step`, and yields between polls until
+the line fires, the deadline elapses, or the binding disappears.
 
-* `KernelArch::monotonic_ns(arch.current_cpu())` — non-decreasing
-  per-CPU clock; `irq_wait` reads it once at entry to compute the
-  deadline (`start + saturating(timeout)`) and again on every
-  iteration to detect timeout.
-* `Scheduler::yield_current(caller.task_id)` — invoked between
-  iterations to surrender the rest of the quantum. The handler
-  tolerates `SchedError::InvalidState` (in host-side tests the
-  calling task is not marked Running) and re-loops; the loop
-  always terminates because the per-CPU monotonic clock is
-  strictly monotonic.
+The clock and the cooperative yield are inverted behind the
+two-method `IrqWaiter` trait, which keeps `kernel/irq` free of any
+scheduler or architecture dependency:
+
+* `IrqWaiter::now_ns()` — non-decreasing per-CPU clock reading.
+* `IrqWaiter::yield_now()` — surrenders the rest of the quantum and
+  returns `Ok` to re-loop, or `Err(IrqWaitAbort)` to abort (e.g. the
+  task can no longer be scheduled).
+
+Two implementations exist:
+
+* **`irq_wait` syscall handler** (`kernel/core::syscalls`): wraps
+  `KernelArch::monotonic_ns(arch.current_cpu())` and
+  `Scheduler::yield_current(caller.task_id)`. It tolerates
+  `SchedError::InvalidState` (in host-side tests the calling task is
+  not marked Running) and re-loops, maps `NoSuchTask` to
+  `Errno::NotFound`, and fails closed to `Errno::OutOfRange` on any
+  other scheduler error. The loop always terminates because the
+  per-CPU monotonic clock is strictly monotonic.
+* **`KernelVirtioHost::notify_wait`** (`drivers/bus/virtio`, behind
+  the `kernel-host` feature): waits on the device's pre-bound
+  `IrqHandle` against the owning task (`caller.task()`) with an
+  unbounded (`u64::MAX`) timeout. A virtio device signals completion
+  on a single MSI / MMIO line, not per-queue, so the wait key is the
+  handle, not `queue_index`; the driver re-scans every used ring on
+  wake-up. Because the wake-up is the ready flag that `fire` sets
+  *after* masking, the mask-before-wake invariant is observed before
+  the driver returns from `notify_wait` — exercised by
+  `kernel_host::tests::notify_wait_observes_mask_before_wake`.
 
 This design composes existing scheduler primitives only; no new
 scheduler interface is introduced (`AGENTS.md` §2.4 — no interface

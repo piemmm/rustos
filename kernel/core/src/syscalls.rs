@@ -48,8 +48,10 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use rustos_abi::{CapabilityId, Errno, IrqHandle};
-use rustos_kernel_irq::{IrqController, IrqTable, WaitStep};
-use rustos_kernel_sched::{SchedError, Scheduler, SchedulerArch};
+use rustos_kernel_irq::{
+    block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
+};
+use rustos_kernel_sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_sync::RwLock;
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
@@ -333,48 +335,78 @@ where
         handle: IrqHandle,
         timeout_ns: u64,
     ) -> SyscallResult {
-        // Compute the deadline once, against the CPU the handler is
-        // currently executing on. `monotonic_ns` is documented as
-        // non-decreasing per CPU; we never read it on a sibling CPU
-        // so the comparison in `try_wait_step` is sound
-        // (`docs/src/security/irq.md` — "interpreted relative to
-        // the kernel monotonic clock"). `saturating_add` is the
-        // fail-closed bound: a caller passing `u64::MAX` does not
-        // wrap the deadline back to a tiny number
-        // (`AGENTS.md` §5.4.5).
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        let start_ns = self.arch.monotonic_ns(cpu);
-        let deadline_ns = start_ns.saturating_add(timeout_ns);
-        loop {
-            let now_ns = self.arch.monotonic_ns(cpu);
-            match self
-                .irq
-                .try_wait_step(handle, caller.task_id, now_ns, deadline_ns)
-            {
-                WaitStep::Ready => return Ok(0),
-                WaitStep::TimedOut => return Err(Errno::TimedOut),
-                WaitStep::NotFound => return Err(Errno::NotFound),
-                WaitStep::Continue => {
-                    // Yield the rest of the quantum back to the
-                    // scheduler. A successful yield re-enters the
-                    // run queue; `InvalidState` happens in tests
-                    // where the calling task is not marked Running
-                    // (e.g. the host-side handler tests that do
-                    // not drive a real dispatch loop) — the loop
-                    // still terminates because `monotonic_ns` is
-                    // strictly monotonic on every supported arch
-                    // port. `NoSuchTask` cannot happen here
-                    // (`CallerContext` is built from the live
-                    // scheduler current-task slot) but is mapped
-                    // to `Errno::NotFound` for symmetry with
-                    // `yield_now` (`AGENTS.md` §5.4.5).
-                    match self.sched.yield_current(caller.task_id.0) {
-                        Ok(()) | Err(SchedError::InvalidState) => {}
-                        Err(SchedError::NoSuchTask) => return Err(Errno::NotFound),
-                        Err(_) => return Err(Errno::OutOfRange),
-                    }
-                }
+        // The poll-and-yield loop itself lives in
+        // `rustos_kernel_irq::block_until_ready` so the in-kernel
+        // `KernelVirtioHost::notify_wait` path can drive the same
+        // implementation without a second copy (`AGENTS.md` §2.2).
+        // This handler supplies the scheduler + arch seam through
+        // `SyscallIrqWaiter` and translates the terminal outcome to
+        // the documented stable `Errno`.
+        let waiter = SyscallIrqWaiter {
+            sched: self.sched,
+            arch: self.arch,
+            // The CPU is captured once: `monotonic_ns` is documented
+            // as non-decreasing per CPU, and the handler never
+            // migrates mid-wait, so every clock read inside the loop
+            // observes the same monotone source
+            // (`docs/src/security/irq.md`).
+            cpu: SchedulerArch::current_cpu(self.arch),
+            task: caller.task_id,
+        };
+        match block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter) {
+            WaitOutcome::Ready => Ok(0),
+            WaitOutcome::TimedOut => Err(Errno::TimedOut),
+            // A forged / released handle and a vanished task both map
+            // to `Errno::NotFound`: `NoSuchTask` cannot happen here
+            // (`CallerContext` is built from the live scheduler
+            // current-task slot) but is mapped for symmetry with
+            // `yield_now` (`AGENTS.md` §5.4.5).
+            WaitOutcome::NotFound | WaitOutcome::Aborted(IrqWaitAbort::TaskVanished) => {
+                Err(Errno::NotFound)
             }
+            // Any other scheduler error fails closed to
+            // `Errno::OutOfRange`.
+            WaitOutcome::Aborted(IrqWaitAbort::SchedulerError) => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// [`IrqWaiter`] adapter wiring the `irq_wait` syscall handler's
+/// scheduler + architecture borrows into the shared
+/// [`block_until_ready`] loop.
+///
+/// Holds only borrows and a captured CPU id; constructed fresh per
+/// `irq_wait` call on the issuing CPU's process context.
+struct SyscallIrqWaiter<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    sched: &'a Scheduler<A>,
+    arch: &'a A,
+    cpu: CpuId,
+    task: SecTaskId,
+}
+
+impl<A> IrqWaiter for SyscallIrqWaiter<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn now_ns(&self) -> u64 {
+        self.arch.monotonic_ns(self.cpu)
+    }
+
+    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        // A successful yield re-enters the run queue; `InvalidState`
+        // happens in tests where the calling task is not marked
+        // Running (e.g. the host-side handler tests that do not
+        // drive a real dispatch loop) and is treated as a benign
+        // continue — the loop still terminates because
+        // `monotonic_ns` is strictly monotonic on every supported
+        // arch port.
+        match self.sched.yield_current(self.task.0) {
+            Ok(()) | Err(SchedError::InvalidState) => Ok(()),
+            Err(SchedError::NoSuchTask) => Err(IrqWaitAbort::TaskVanished),
+            Err(_) => Err(IrqWaitAbort::SchedulerError),
         }
     }
 }
