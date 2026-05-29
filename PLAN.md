@@ -1244,6 +1244,45 @@ follow-up is its own thread and is now also complete.
   (acceptance gate) remain outstanding — they require real
   PCI/DTB→DMA→IRQ device bring-up and are rewritten in
   `.junie/next-session-prompt.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — modern-PCI
+  `PciTransport`, *complete*): the only `Transport` implementation
+  in the tree was the in-process `MockTransport`; nothing turned a
+  kernel-mapped BAR into a driveable virtio device, so the Item 4
+  QEMU bring-up had no real transport to stand on. New module
+  `drivers/bus/virtio/src/transport_pci.rs` adds `PciTransport`
+  (+ `PciTransportWindows`), the concrete modern (virtio-1.x) PCI
+  `Transport`. It owns the four capability-checked `RegisterWindow`s
+  a bus driver resolves from the device's virtio PCI capabilities
+  (virtio 1.1 §4.1.4 — common-cfg, notify, ISR, device-cfg) plus the
+  notification capability's `notify_off_multiplier`, and drives the
+  full §3.1 sequence: status read/write, 64-bit feature negotiation
+  (written as `u32` halves), per-queue select/size/desc/driver/device
+  programming + enable, and queue notification at
+  `queue_notify_off * multiplier`. It performs no pointer arithmetic
+  and holds no ambient authority (`AGENTS.md` §4) — every access goes
+  through the bounds-checked window accessors. `PciTransport::new`
+  validates the common-cfg window ≥ `0x38` bytes and reads
+  `num_queues` up front so the infallible `Transport` methods touch
+  only in-bounds constant offsets and never panic (`AGENTS.md` §2.9);
+  the device-supplied notify offset is bounds-checked on the fallible
+  `queue_set` path before `notify` can use it, which fails closed for
+  an unprogrammed queue. **Tests.** `cargo test
+  -p rustos-drv-bus-virtio` → 61 (+11 `transport_pci` tests against a
+  `RegisterWindow`-backed `FakeDevice`: short-window rejection,
+  `num_queues` read, status/reset, driver-feature halves,
+  queue-select range, queue programming + notify recording, oversize
+  + out-of-bounds-notify rejection, no-op notify for an unprogrammed
+  queue, device-config read with zero-fill, and a
+  `SplitQueue`-drives-`PciTransport` integration check); green with
+  and without `--features kernel-host`. `cargo clippy
+  -p rustos-drv-bus-virtio --all-targets -- -D warnings` (both
+  feature sets), `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings"
+  cargo doc -p rustos-drv-bus-virtio --no-deps` are clean. **Docs.**
+  `docs/src/drivers/virtio.md` gains a "Modern PCI transport" section
+  and a refreshed scope / out-of-scope table. **Deferred.** The
+  boot-time PCI walk that maps the BARs, the MMIO `Transport`, and
+  the QEMU integration crates + acceptance gate (Items 4 / 6) remain
+  outstanding — see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 5 — userland ARP / IP / ICMP responder,
   *complete*): new crate `userland/net/icmp` (`rustos-net-icmp`),
   the first substantial userland crate and the protocol peer the

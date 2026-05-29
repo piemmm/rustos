@@ -10,7 +10,9 @@ and the device drivers carry only the device-specific wire format.
 The transport crate covers:
 
 - A `Transport` trait abstracting the PCI (`x86_64`) and MMIO
-  (`aarch64`, `riscv64 virt`) bus seams behind a single interface.
+  (`aarch64`, `riscv64 virt`) bus seams behind a single interface,
+  plus a concrete modern-PCI implementation, `PciTransport`
+  (see [Modern PCI transport](#modern-pci-transport-pcitransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
   (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
 - The virtio 1.1 §2.6 **split virtqueue**: descriptor table, avail
@@ -35,8 +37,9 @@ The transport crate covers:
 | Packed virtqueues (virtio 1.1 §2.7)        | Split queues meet the Stage 4 acceptance bar; packed is Stage 5 follow-up          | this page                                    |
 | Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `.junie/next-session-prompt.md` item 0      |
 | IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `.junie/next-session-prompt.md` item 2      |
-| Bus-handle hand-off from PCI/MMIO drivers  | The `drivers/bus/pci` and `drivers/bus/mmio` shells stop at enumeration            | `.junie/next-session-prompt.md` item 3      |
-| QEMU integration tests (PCI + MMIO)        | Depend on items 1–3 plus the userland net stack from `.junie/next-session-prompt.md` item 5 | `.junie/next-session-prompt.md` item 4      |
+| MMIO `Transport` implementation            | The modern-PCI `PciTransport` lands first (Stage 4.D Item 4 prerequisite); the MMIO transport follows with the riscv64 QEMU work | `.junie/next-session-prompt.md` item 4 |
+| Boot-time PCI walk → live driver host      | The kernel binary does not yet enumerate PCI and construct a live `drvhost::Host`  | `.junie/next-session-prompt.md` item 4      |
+| QEMU integration tests (PCI + MMIO)        | Depend on the boot-time bring-up above plus the userland net stack from `.junie/next-session-prompt.md` item 5 | `.junie/next-session-prompt.md` item 4      |
 
 ## Layering picture
 
@@ -56,6 +59,46 @@ The transport crate covers:
 |  drivers/bus/pci  /  drivers/bus/mmio
 +-------------------------------------+
 ```
+
+## Modern PCI transport (`PciTransport`)
+
+`PciTransport` (`drivers/bus/virtio/src/transport_pci.rs`) is the
+concrete `Transport` for a modern (virtio-1.x) PCI device. It owns
+the four capability-checked `RegisterWindow`s the bus driver resolves
+from the device's virtio PCI capabilities (virtio 1.1 §4.1.4) —
+*common configuration*, *notification*, *ISR status*, and
+*device-specific configuration* — plus the notification
+capability's `notify_off_multiplier`:
+
+```rust
+pub struct PciTransportWindows {
+    pub common: RegisterWindow,
+    pub notify: RegisterWindow,
+    pub isr: RegisterWindow,
+    pub device: RegisterWindow,
+    pub notify_off_multiplier: u32,
+}
+```
+
+Because a window can only be minted by the kernel MMIO-map facility
+after a `CAP_MMIO_MAP` check, the transport holds **no** ambient
+authority and performs **no** pointer arithmetic: every register
+access goes through the bounds-checked `RegisterWindow` accessors
+(`AGENTS.md` §4). The 64-bit queue-address registers (`queue_desc`,
+`queue_driver`, `queue_device`) are written as two little-endian
+`u32` halves because the window exposes no `u64` accessor.
+
+`PciTransport::new` validates that the common-configuration window
+is at least `virtio_pci_common_cfg` length (`0x38` bytes) and reads
+`num_queues` up front. Every common-cfg offset the infallible
+`Transport` methods touch is a compile-time constant below that
+bound, so those methods treat their accesses as in-bounds and fall
+back to a safe default on the (then impossible) error rather than
+panicking (`AGENTS.md` §2.9). The device-supplied notify offset is
+bounds-checked against the notification window on the fallible
+`queue_set` path, so the infallible `notify` only ever writes within
+a pre-validated offset and fails closed (skips the write) for an
+unprogrammed queue.
 
 ## DMA ownership model
 
@@ -168,8 +211,15 @@ minted it.
 
 ## Test surface
 
-`cargo test -p rustos-drv-bus-virtio --lib` covers 41 host-side
-tests: queue free-list initialisation, descriptor chaining (single
+`cargo test -p rustos-drv-bus-virtio --lib` covers the host-side
+tests, including the eleven `transport_pci` tests added as the
+Stage 4.D Item 4 prerequisite (short-window rejection, `num_queues`
+read, status write/read + reset, driver-feature halves, queue-select
+range check, queue programming + notify-offset recording, oversize
+and out-of-bounds-notify rejection, no-op notify for an unprogrammed
+queue, device-config read with zero-fill overflow, and a
+`SplitQueue`-drives-`PciTransport` integration check): queue
+free-list initialisation, descriptor chaining (single
 + multi), exhaustion, used-ring wrap-around, status progression,
 mock-peer round-trip, sensitive-class scrub on drop, the four
 `DmaSlab` tests added in Stage 4.D Item 0a (round-trip; three

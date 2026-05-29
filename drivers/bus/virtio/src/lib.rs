@@ -52,6 +52,7 @@ pub mod kernel_host;
 pub mod kernel_mmio;
 pub mod queue;
 pub mod transport;
+pub mod transport_pci;
 
 #[cfg(test)]
 mod tests;
@@ -65,6 +66,7 @@ pub use kernel_host::KernelVirtioHost;
 pub use kernel_mmio::KernelMmioMapper;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
+pub use transport_pci::{PciTransport, PciTransportWindows};
 
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
