@@ -338,7 +338,7 @@ mod tests {
     use rustos_kernel_irq::{IrqController, IrqWaitAbort, MaskError};
     use rustos_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
-        AddressSpace, FrameAllocator, HostPageTable, PhysAddr, VirtAddr, PAGE_SIZE,
+        AddressSpace, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
     use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
     use rustos_kernel_sec::identity::UserId;
@@ -469,12 +469,22 @@ mod tests {
         m
     }
 
-    fn fresh_pool(frames: &FrameAllocator) -> DmaPool<'_, HostPageTable> {
+    /// Simulated physical RAM covering the frame allocator's region so
+    /// the pool can reach a buffer's frames from the CPU.
+    fn fresh_sim() -> SimPhysMap {
+        SimPhysMap::new(PhysAddr::new(PAGE_SIZE as u64 * 16), 16 * PAGE_SIZE)
+    }
+
+    fn fresh_pool<'a>(
+        frames: &'a FrameAllocator,
+        sim: &'a SimPhysMap,
+    ) -> DmaPool<'a, HostPageTable> {
         DmaPool::new(
             AddressSpace::new(HostPageTable::new()),
             VirtAddr::new(0x2000_0000),
             16,
             frames,
+            sim,
         )
         .expect("pool constructs")
     }
@@ -497,7 +507,8 @@ mod tests {
     #[test]
     fn alloc_returns_zero_initialised_slab() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -521,7 +532,8 @@ mod tests {
     #[test]
     fn drop_routes_through_free_dma() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -546,7 +558,8 @@ mod tests {
     #[test]
     fn capability_missing_is_permission_denied() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         // No `MEM_DMA` capability: every allocation must fail closed.
         let caller = task_with(&[], &sink);
@@ -565,7 +578,8 @@ mod tests {
     #[test]
     fn zero_size_request_rejected_before_capability_check() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -580,7 +594,8 @@ mod tests {
     #[test]
     fn two_simultaneous_slabs_are_disjoint() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -615,7 +630,8 @@ mod tests {
     #[test]
     fn notify_wait_returns_when_line_pre_fired() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -643,7 +659,8 @@ mod tests {
     #[test]
     fn notify_wait_blocks_until_line_fires() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -703,7 +720,8 @@ mod tests {
         }
 
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -737,7 +755,8 @@ mod tests {
     #[test]
     fn notify_wait_returns_when_binding_released() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
@@ -754,7 +773,8 @@ mod tests {
     #[test]
     fn oversize_request_collapses_to_length_out_of_range() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
-        let pool = fresh_pool(&frames);
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);

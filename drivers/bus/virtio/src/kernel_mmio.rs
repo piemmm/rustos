@@ -47,19 +47,24 @@ use rustos_log::Sink;
 /// exercised by `kernel/mem::HostPageTable` in unit tests and by the
 /// architecture page-table types in production) and the audit
 /// [`Sink`] implementation `S`.
-pub struct KernelMmioMapper<'a, P: PageTableOps, S: Sink + ?Sized> {
-    map: RefCell<&'a mut MmioMap<P>>,
+pub struct KernelMmioMapper<'a, 'p, P: PageTableOps, S: Sink + ?Sized> {
+    map: RefCell<&'a mut MmioMap<'p, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
 }
 
-impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelMmioMapper<'a, P, S> {
+impl<'a, 'p, P: PageTableOps, S: Sink + ?Sized> KernelMmioMapper<'a, 'p, P, S> {
     /// Wrap a borrowed [`MmioMap`] in a capability-checking mapper.
     ///
     /// `caller` is the [`TaskCapabilities`] of the bus-driver task;
     /// every map request is audited against this capability set.
+    ///
+    /// The `'p` lifetime is the [`MmioMap`]'s borrow of the direct
+    /// physical map; it is kept distinct from the mapper's own borrow
+    /// `'a` so the caller may hold the underlying `PhysMap` for longer
+    /// than the mapper.
     #[must_use]
-    pub fn new(map: &'a mut MmioMap<P>, caller: &'a TaskCapabilities, audit: &'a S) -> Self {
+    pub fn new(map: &'a mut MmioMap<'p, P>, caller: &'a TaskCapabilities, audit: &'a S) -> Self {
         Self {
             map: RefCell::new(map),
             caller,
@@ -75,7 +80,7 @@ impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelMmioMapper<'a, P, S> {
     }
 }
 
-impl<P: PageTableOps, S: Sink + ?Sized> MmioMapper for KernelMmioMapper<'_, P, S> {
+impl<P: PageTableOps, S: Sink + ?Sized> MmioMapper for KernelMmioMapper<'_, '_, P, S> {
     fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
         let region = {
             let mut map = self.map.borrow_mut();
@@ -125,7 +130,7 @@ mod tests {
     use core::cell::RefCell as StdRefCell;
     use rustos_abi::CapabilityId;
     use rustos_caps::CapabilitySet;
-    use rustos_kernel_mem::{AddressSpace, HostPageTable, VirtAddr};
+    use rustos_kernel_mem::{AddressSpace, HostPageTable, PhysAddr, SimPhysMap, VirtAddr};
     use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
     use rustos_kernel_sec::identity::UserId;
     use rustos_log::{Event, Sink};
@@ -152,11 +157,18 @@ mod tests {
     const MMIO_MAPPED_ID: u32 = 1040;
     const MMIO_MAP_DENIED_ID: u32 = 1041;
 
-    fn fresh_map() -> MmioMap<HostPageTable> {
+    /// Simulated register block covering the BAR addresses the tests
+    /// map (`0xFEBD_0000` and `0xFEBE_0000`).
+    fn fresh_sim() -> SimPhysMap {
+        SimPhysMap::new(PhysAddr::new(0xFEBD_0000), 0x4_0000)
+    }
+
+    fn fresh_map(phys: &SimPhysMap) -> MmioMap<'_, HostPageTable> {
         MmioMap::new(
             AddressSpace::new(HostPageTable::new()),
             VirtAddr::new(0x6000_0000),
             16,
+            phys,
         )
         .expect("mapper constructs")
     }
@@ -171,7 +183,8 @@ mod tests {
 
     #[test]
     fn map_window_grants_and_round_trips() {
-        let mut map = fresh_map();
+        let sim = fresh_sim();
+        let mut map = fresh_map(&sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
         let mapper = KernelMmioMapper::new(&mut map, &caller, &sink);
@@ -186,7 +199,8 @@ mod tests {
 
     #[test]
     fn map_window_without_capability_is_permission_denied() {
-        let mut map = fresh_map();
+        let sim = fresh_sim();
+        let mut map = fresh_map(&sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::DRV_LOAD], &sink);
         let mapper = KernelMmioMapper::new(&mut map, &caller, &sink);
@@ -198,7 +212,8 @@ mod tests {
 
     #[test]
     fn zero_length_request_is_invalid_region() {
-        let mut map = fresh_map();
+        let sim = fresh_sim();
+        let mut map = fresh_map(&sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
         let mapper = KernelMmioMapper::new(&mut map, &caller, &sink);
@@ -210,10 +225,12 @@ mod tests {
     fn exhausted_window_is_unsupported() {
         // Capacity 4 pages: one 0x1000 window fits (1 data + 2 guard);
         // a second cannot.
+        let sim = fresh_sim();
         let mut map = MmioMap::new(
             AddressSpace::new(HostPageTable::new()),
             VirtAddr::new(0x6000_0000),
             4,
+            &sim,
         )
         .expect("mapper constructs");
         let sink = Recorder::new();
@@ -226,7 +243,8 @@ mod tests {
 
     #[test]
     fn two_windows_are_disjoint() {
-        let mut map = fresh_map();
+        let sim = fresh_sim();
+        let mut map = fresh_map(&sim);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
         let mapper = KernelMmioMapper::new(&mut map, &caller, &sink);

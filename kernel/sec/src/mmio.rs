@@ -84,7 +84,7 @@ impl From<MmioError> for MmioGateError {
 /// * [`MmioGateError::Map`] — propagated from the mapper (malformed
 ///   region, no virtual space, etc.).
 pub fn map_mmio<P: PageTableOps, S: Sink + ?Sized>(
-    map: &mut MmioMap<P>,
+    map: &mut MmioMap<'_, P>,
     caller: &TaskCapabilities,
     phys_base: u64,
     len: usize,
@@ -163,7 +163,7 @@ pub fn map_mmio<P: PageTableOps, S: Sink + ?Sized>(
 ///
 /// See [`map_mmio`].
 pub fn unmap_mmio<P: PageTableOps, S: Sink + ?Sized>(
-    map: &mut MmioMap<P>,
+    map: &mut MmioMap<'_, P>,
     caller: &TaskCapabilities,
     region: MmioRegion,
     audit: &S,

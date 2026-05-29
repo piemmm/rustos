@@ -16,7 +16,8 @@ use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{
     bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
-    AddressSpace, DmaPool, FrameAllocator, HostPageTable, PhysAddr, VirtAddr, PAGE_SIZE,
+    AddressSpace, DmaPool, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr,
+    PAGE_SIZE,
 };
 
 fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -43,12 +44,19 @@ fn small_map(usable_pages: usize) -> BootMemoryMap {
     m
 }
 
-fn fresh_pool(frames: &FrameAllocator) -> DmaPool<'_, HostPageTable> {
+/// Simulated physical RAM covering the frame allocator's usable
+/// region, so the pool can reach a buffer's frames from the CPU.
+fn fresh_sim() -> SimPhysMap {
+    SimPhysMap::new(PhysAddr::new(PAGE_SIZE as u64 * 16), 16 * PAGE_SIZE)
+}
+
+fn fresh_pool<'a>(frames: &'a FrameAllocator, sim: &'a SimPhysMap) -> DmaPool<'a, HostPageTable> {
     DmaPool::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(0x2000_0000),
         16,
         frames,
+        sim,
     )
     .expect("pool constructs")
 }
@@ -65,7 +73,8 @@ fn ids_after_derive(sink: &RecordingSink) -> alloc::vec::Vec<u32> {
 #[test]
 fn alloc_succeeds_when_caller_holds_mem_dma() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, &sink).expect("granted");
@@ -80,7 +89,8 @@ fn alloc_succeeds_when_caller_holds_mem_dma() {
 #[test]
 fn alloc_refused_without_mem_dma() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     // The caller holds *other* capabilities but not MEM_DMA, so the
     // gate is the only thing standing between it and the buffer.
@@ -100,7 +110,8 @@ fn alloc_refused_without_mem_dma() {
 #[test]
 fn alloc_zero_size_propagates_pool_error_with_audit() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     let err = alloc_dma(&mut pool, &caller, 0, &sink).unwrap_err();
@@ -115,7 +126,8 @@ fn alloc_zero_size_propagates_pool_error_with_audit() {
 #[test]
 fn alloc_oversized_request_maps_to_length_out_of_range() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     // Exceed MAX_ORDER ⇒ DmaError::SizeUnsupported.
@@ -127,7 +139,8 @@ fn alloc_oversized_request_maps_to_length_out_of_range() {
 #[test]
 fn alloc_then_free_round_trip_emits_one_audit_record() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, &sink).expect("alloc");
@@ -141,7 +154,8 @@ fn alloc_then_free_round_trip_emits_one_audit_record() {
 #[test]
 fn free_refused_without_mem_dma_and_buffer_is_retained() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
-    let mut pool = fresh_pool(&frames);
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
     let granted_sink = RecordingSink::new();
     let granter = task_with(&[CapabilityId::MEM_DMA], &granted_sink);
     let buf = alloc_dma(&mut pool, &granter, PAGE_SIZE, &granted_sink).expect("alloc");
@@ -185,7 +199,7 @@ fn as_errno_maps_every_pool_error_into_abi_v1() {
         Errno::OutOfRange
     );
     assert_eq!(
-        DmaGateError::Pool(DmaError::GuardViolation).as_errno(),
+        DmaGateError::Pool(DmaError::DirectMap).as_errno(),
         Errno::OutOfRange
     );
     assert_eq!(

@@ -39,11 +39,19 @@
 //! Each live allocation occupies *(2 + `data_pages`)* consecutive slots
 //! in the pool's virtual window: a leading guard slot, the data
 //! slots, then a trailing guard slot. Guard slots are intentionally
-//! **left unmapped** in the [`AddressSpace`] so that a real MMU faults
-//! on access; the host-testable model additionally paints the
-//! storage-backed guard regions with `GUARD_BYTE` and verifies them
-//! at free time, exactly mirroring the convention used by
+//! **left unmapped** in the [`AddressSpace`] so that the MMU faults on
+//! a register-block over-run instead of letting it reach a
+//! neighbouring allocation, exactly mirroring the convention used by
 //! [`crate::slab`].
+//!
+//! # CPU access
+//!
+//! A driver's CPU-side code and the device both touch the buffer's
+//! *physical frames*. The CPU reaches them through the kernel's direct
+//! physical map ([`crate::phys::PhysMap`]): [`DmaPool::bytes`],
+//! [`DmaPool::bytes_mut`], and [`DmaPool::slot_base`] translate the
+//! buffer's `phys` into a pointer, so the bytes the driver reads are
+//! exactly the bytes the device wrote — not a disconnected copy.
 //!
 //! # Zero-on-free
 //!
@@ -73,12 +81,9 @@ use zeroize::Zeroize;
 
 use crate::error::AllocError;
 use crate::frame::{Frame, FrameAllocator, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
+use crate::phys::PhysMap;
+use crate::ptr::slice_within;
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
-
-/// Byte pattern painted into the host-side guard slots. Matches
-/// [`crate::slab`]'s `GUARD_BYTE` so an operator who sees the value in
-/// a dump recognises it as "this region is supposed to be untouched".
-const GUARD_BYTE: u8 = 0xCC;
 
 /// Errors specific to [`DmaPool`].
 ///
@@ -96,12 +101,12 @@ pub enum DmaError {
     /// `free` was called with a [`DmaBuffer`] whose `virt` is not the
     /// start of a live allocation in this pool.
     UnknownBuffer,
-    /// `free` detected that a guard slot's host-side pattern was
-    /// disturbed — a buffer over-run was observed. On real hardware
-    /// the MMU would have already faulted; the host model surfaces it
-    /// through this variant so the same call sites can be tested
-    /// everywhere.
-    GuardViolation,
+    /// A buffer's physical frames fall outside the kernel's direct
+    /// physical map, so the CPU cannot reach them. Indicates a
+    /// mis-sized [`crate::phys::PhysMap`] for the platform; the pool
+    /// fails closed rather than synthesising a pointer (`AGENTS.md`
+    /// §2.9, §4).
+    DirectMap,
     /// The pool was constructed with a request that the allocator
     /// cannot satisfy (e.g. zero capacity, or a virtual base not
     /// page-aligned).
@@ -134,7 +139,7 @@ impl fmt::Display for DmaError {
             Self::Alloc(e) => write!(f, "dma alloc: {e}"),
             Self::PageTable(e) => write!(f, "dma page-table: {e:?}"),
             Self::UnknownBuffer => f.write_str("dma buffer not from this pool"),
-            Self::GuardViolation => f.write_str("dma guard-slot violation"),
+            Self::DirectMap => f.write_str("dma buffer outside the direct physical map"),
             Self::InvalidPoolConfig => f.write_str("dma pool config invalid"),
             Self::SizeUnsupported => f.write_str("dma request exceeds max buddy order"),
             Self::ZeroSize => f.write_str("zero-sized dma allocation is not permitted"),
@@ -214,13 +219,12 @@ pub struct DmaPool<'a, P: PageTableOps> {
     /// page, i.e. the byte after the leading guard). `BTreeMap` rather
     /// than `HashMap` because this crate is `no_std`.
     allocations: BTreeMap<u64, Record>,
-    /// Host-side backing storage for the pool's virtual window. On
-    /// real hardware the bytes live in the per-process page frames;
-    /// here we keep them in a `Vec<u8>` so the unit tests can read
-    /// and write through the same indexing that production code will
-    /// use. The pool maps frames into the `AddressSpace` so the
-    /// page-table accounting is exercised identically in both worlds.
-    storage: Vec<u8>,
+    /// Direct physical map used to reach a buffer's frames from the
+    /// CPU. The same frames the device DMAs to are the bytes the
+    /// driver reads/writes, so there is no disconnected copy: in
+    /// production this is the boot identity map, in host tests a
+    /// `SimPhysMap` standing in for physical RAM.
+    phys: &'a dyn PhysMap,
     /// Borrowed frame allocator used to back the data slots.
     ///
     /// `FrameAllocator` is internally synchronised via a
@@ -256,34 +260,36 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
     /// their allocators and so a future per-process kernel layout can
     /// hand a process a `&FrameAllocator` carved from the global pool.
     ///
+    /// `phys` is the kernel's direct physical map; the pool reaches a
+    /// buffer's frames through it so the CPU sees exactly the bytes
+    /// the device DMAs to.
+    ///
     /// # Errors
     ///
-    /// * [`DmaError::InvalidPoolConfig`] if `capacity_pages == 0` or
-    ///   `base` is not page-aligned.
+    /// * [`DmaError::InvalidPoolConfig`] if `capacity_pages == 0`,
+    ///   `base` is not page-aligned, or the window size overflows.
     pub fn new(
         address_space: AddressSpace<P>,
         base: VirtAddr,
         capacity_pages: usize,
         frames: &'a FrameAllocator,
+        phys: &'a dyn PhysMap,
     ) -> Result<Self, DmaError> {
         if capacity_pages == 0 || !base.is_page_aligned() {
             return Err(DmaError::InvalidPoolConfig);
         }
-        let bytes = capacity_pages
+        // Reject a window whose byte span would overflow the slot
+        // offset arithmetic in `virt_of_slot` before committing state.
+        capacity_pages
             .checked_mul(PAGE_SIZE)
             .ok_or(DmaError::InvalidPoolConfig)?;
-        // Initialise the entire window to the guard byte so any slot
-        // that is *not* part of a live data region matches the
-        // verification pattern. Data slots are zeroed when they
-        // transition from guard to live.
-        let storage = vec![GUARD_BYTE; bytes];
         Ok(Self {
             address_space,
             base,
             capacity_pages,
             slot_used: vec![false; capacity_pages],
             allocations: BTreeMap::new(),
-            storage,
+            phys,
             frames,
         })
     }
@@ -351,12 +357,24 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
             }
         }
 
-        // Zero the data slots in the host-side storage so the caller
-        // observes a clean buffer (defence in depth; the storage was
-        // painted with GUARD_BYTE on pool construction).
-        let data_byte_start = first_data_slot * PAGE_SIZE;
-        let data_byte_end = data_byte_start + data_pages * PAGE_SIZE;
-        for b in &mut self.storage[data_byte_start..data_byte_end] {
+        // Zero the data region through the direct map so the caller
+        // observes a clean buffer. The frames are mapped above and not
+        // yet reachable by any other allocation, so a failure to reach
+        // them is a platform-config bug: roll back and fail closed.
+        let data_len = data_pages * PAGE_SIZE;
+        // SAFETY: when `translate` succeeds it returns a pointer to
+        // `data_len` bytes of the frames just mapped; no other live
+        // allocation covers them (the slot run was free), so the slice
+        // aliases nothing.
+        let data = self
+            .phys
+            .translate(start_frame.start(), data_len)
+            .and_then(|ptr| unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) });
+        let Some(data) = data else {
+            self.rollback_partial_map(first_data_slot, data_pages, start_frame, order);
+            return Err(DmaError::DirectMap);
+        };
+        for b in data.iter_mut() {
             *b = 0;
         }
 
@@ -385,19 +403,20 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
     ///
     /// Every byte of the data region is zeroed (via the audited
     /// `zeroize` crate's volatile clear) *before* the backing frames
-    /// are returned to the [`FrameAllocator`]. Both guard slots are
-    /// validated against the `GUARD_BYTE` pattern; a mismatch is
-    /// reported as [`DmaError::GuardViolation`] *after* the frames
-    /// have nonetheless been recovered, because a guard violation
-    /// indicates a programming bug, not a reason to leak memory.
+    /// are returned to the [`FrameAllocator`], so neither a later
+    /// allocation nor a forensic dump of free memory can recover the
+    /// credentials the buffer once held (`AGENTS.md` §4). The clear
+    /// runs through the direct map, i.e. on the same physical frames
+    /// the device used.
     ///
     /// # Errors
     ///
     /// * [`DmaError::UnknownBuffer`] — the buffer's `virt` is not the
     ///   start of a live allocation in this pool (covers double-free
     ///   and cross-pool free).
-    /// * [`DmaError::GuardViolation`] — a guard slot's host-side
-    ///   pattern was disturbed while the allocation was live.
+    /// * [`DmaError::DirectMap`] — the buffer's frames are outside the
+    ///   direct physical map, so the zero-on-free clear cannot run
+    ///   (a platform-config bug).
     /// * [`DmaError::PageTable`] — propagated from
     ///   [`AddressSpace::unmap`] (e.g. if a higher-level test removed
     ///   a mapping out of band).
@@ -410,19 +429,22 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
         let first_data_slot = record.leading_guard_slot + 1;
         let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
 
-        // 1. Zero the data region (zero-on-free).
-        let start = first_data_slot * PAGE_SIZE;
-        let end = start + data_pages * PAGE_SIZE;
-        // `zeroize` performs a volatile write so the compiler cannot
-        // elide the clear (the very reason we depend on the crate).
-        self.storage[start..end].zeroize();
+        // 1. Zero the data region (zero-on-free) on the real frames,
+        //    before they are unmapped or returned to the allocator.
+        let data_len = data_pages * PAGE_SIZE;
+        let ptr = self
+            .phys
+            .translate(record.start_frame.start(), data_len)
+            .ok_or(DmaError::DirectMap)?;
+        // SAFETY: the frames are still mapped and reserved (the slot
+        // bitmap is cleared only below), so the pointer is exclusively
+        // owned for `data_len` bytes. `zeroize` performs a volatile
+        // write the compiler cannot elide.
+        unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) }
+            .ok_or(DmaError::DirectMap)?
+            .zeroize();
 
-        // 2. Verify guard regions. Capture the result but continue
-        //    teardown so the frames are not leaked even on a guard
-        //    violation.
-        let guard_ok = self.guards_intact(record.leading_guard_slot, trailing_guard_slot);
-
-        // 3. Unmap data pages.
+        // 2. Unmap data pages.
         for i in 0..data_pages {
             let virt = self.virt_of_slot(first_data_slot + i);
             let page = Page::from_addr(virt)?;
@@ -432,49 +454,37 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
             let _ = self.address_space.unmap(page)?;
         }
 
-        // 4. Return frames in one buddy-order operation.
+        // 3. Return frames in one buddy-order operation.
         self.frames
             .free_order(record.start_frame, record.order)
             .map_err(DmaError::Alloc)?;
 
-        // 5. Mark slots free and repaint with the guard byte so
-        //    future guard checks remain sound on this range.
+        // 4. Mark guard and data slots free again.
         for s in record.leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = false;
         }
-        let repaint_start = record.leading_guard_slot * PAGE_SIZE;
-        let repaint_end = (trailing_guard_slot + 1) * PAGE_SIZE;
-        for b in &mut self.storage[repaint_start..repaint_end] {
-            *b = GUARD_BYTE;
-        }
-
-        if guard_ok {
-            Ok(())
-        } else {
-            Err(DmaError::GuardViolation)
-        }
+        Ok(())
     }
 
     /// Borrow the data bytes of `buf` mutably.
     ///
-    /// Production callers reach the data through the buffer's `virt`
-    /// pointer directly; this accessor exists so unit tests and
-    /// host-side driver code can read/write the backing storage
-    /// without resorting to `unsafe`.
+    /// The slice points at the buffer's physical frames through the
+    /// direct map, so writes are seen by the device and vice versa.
     ///
     /// # Errors
     ///
-    /// [`DmaError::UnknownBuffer`] if `buf` is not a live allocation
-    /// of this pool.
+    /// * [`DmaError::UnknownBuffer`] if `buf` is not a live allocation
+    ///   of this pool.
+    /// * [`DmaError::DirectMap`] if the frames are outside the direct
+    ///   physical map.
     pub fn bytes_mut(&mut self, buf: DmaBuffer) -> Result<&mut [u8], DmaError> {
-        let record = self
-            .allocations
-            .get(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let start = first_data_slot * PAGE_SIZE;
-        let end = start + record.data_pages * PAGE_SIZE;
-        Ok(&mut self.storage[start..end])
+        let (phys, len) = self.live_frames(&buf)?;
+        let ptr = self.phys.translate(phys, len).ok_or(DmaError::DirectMap)?;
+        // SAFETY: `translate` returned a pointer to `len` bytes of this
+        // buffer's frames; the slot bitmap proves no other live
+        // allocation covers them and `&mut self` makes the borrow
+        // exclusive for the returned slice's lifetime.
+        unsafe { slice_within(ptr.as_ptr(), len, 0, len) }.ok_or(DmaError::DirectMap)
     }
 
     /// Raw, non-null base pointer to the data slots of `buf`.
@@ -501,22 +511,13 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
     /// [`DmaError::UnknownBuffer`] if `buf` does not name a live
     /// allocation of this pool.
     pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError> {
-        let record = self
-            .allocations
-            .get(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let start = first_data_slot * PAGE_SIZE;
-        // The host-side storage is a `Vec<u8>` whose buffer is
-        // stable for the lifetime of the pool (see [`Self::new`]).
-        // Casting the immutable raw pointer to `*mut u8` is sound
-        // because (i) the slot bitmap proves no other reference
-        // covers `[start, start + buf.len())`, and (ii) every
-        // future write through this pointer is gated by the
-        // slot's exclusive owner (the `DmaSlab` that records the
-        // same `slot` index).
-        let base = self.storage.as_ptr().wrapping_add(start).cast_mut();
-        NonNull::new(base).ok_or(DmaError::InvalidPoolConfig)
+        let (phys, len) = self.live_frames(buf)?;
+        // The pointer names the buffer's physical frames through the
+        // direct map. The slot bitmap proves no other live allocation
+        // covers `[ptr, ptr + len)`, and every write through it is
+        // gated by the slot's exclusive owner (the `DmaSlab` that
+        // records the same buffer).
+        self.phys.translate(phys, len).ok_or(DmaError::DirectMap)
     }
 
     /// Borrow the data bytes of `buf` immutably.
@@ -525,14 +526,13 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
     ///
     /// See [`Self::bytes_mut`].
     pub fn bytes(&self, buf: DmaBuffer) -> Result<&[u8], DmaError> {
-        let record = self
-            .allocations
-            .get(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let start = first_data_slot * PAGE_SIZE;
-        let end = start + record.data_pages * PAGE_SIZE;
-        Ok(&self.storage[start..end])
+        let (phys, len) = self.live_frames(&buf)?;
+        let ptr = self.phys.translate(phys, len).ok_or(DmaError::DirectMap)?;
+        // SAFETY: as `bytes_mut`, but the shared borrow of `self`
+        // yields a shared slice; the pool holds the single live record
+        // for these bytes so no `&mut` alias exists. The base pointer
+        // already covers `len` bytes, so no further arithmetic occurs.
+        Ok(unsafe { core::slice::from_raw_parts(ptr.as_ptr().cast_const(), len) })
     }
 
     /// Number of live allocations.
@@ -547,22 +547,20 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
         self.capacity_pages
     }
 
-    /// Test trapdoor: write `byte` to the host-side storage at
-    /// `offset` from the pool's `base`. Used by unit tests to
-    /// *simulate* a buffer over-run that bleeds into a guard slot.
-    /// Production callers must never need this.
-    ///
-    /// Returns `None` if `offset` is outside the pool window.
-    #[cfg(test)]
-    pub(crate) fn poke_for_test(&mut self, offset: usize, byte: u8) -> Option<()> {
-        let b = self.storage.get_mut(offset)?;
-        *b = byte;
-        Some(())
-    }
-
     // -----------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------
+
+    /// Look up `buf`'s live record and return its `(physical base,
+    /// byte length)`. Returns [`DmaError::UnknownBuffer`] if the
+    /// buffer is not live in this pool.
+    fn live_frames(&self, buf: &DmaBuffer) -> Result<(PhysAddr, usize), DmaError> {
+        let record = self
+            .allocations
+            .get(&buf.virt.as_u64())
+            .ok_or(DmaError::UnknownBuffer)?;
+        Ok((record.start_frame.start(), record.data_pages * PAGE_SIZE))
+    }
 
     fn virt_of_slot(&self, slot: usize) -> VirtAddr {
         VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
@@ -609,19 +607,6 @@ impl<'a, P: PageTableOps> DmaPool<'a, P> {
             }
         }
         let _ = self.frames.free_order(start_frame, order);
-    }
-
-    fn guards_intact(&self, leading_guard_slot: usize, trailing_guard_slot: usize) -> bool {
-        let head_start = leading_guard_slot * PAGE_SIZE;
-        let head_end = head_start + PAGE_SIZE;
-        let tail_start = trailing_guard_slot * PAGE_SIZE;
-        let tail_end = tail_start + PAGE_SIZE;
-        self.storage[head_start..head_end]
-            .iter()
-            .all(|&b| b == GUARD_BYTE)
-            && self.storage[tail_start..tail_end]
-                .iter()
-                .all(|&b| b == GUARD_BYTE)
     }
 }
 

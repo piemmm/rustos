@@ -1,14 +1,40 @@
 # Next session — Stage 4.D Items 4 / 6
-# (carried over after the ring-0 virtio-PCI provisioning walk +
-#  `VirtioPciBus` ABI seam landed, on top of the virtio-1.x PCI
-#  capability decode + register-window hand-off and the modern
-#  virtio-PCI `PciTransport`)
+# (carried over after the hardware-real direct-map DMA/MMIO data path
+#  landed, on top of the ring-0 virtio-PCI provisioning walk +
+#  `VirtioPciBus` ABI seam, the virtio-1.x PCI capability decode +
+#  register-window hand-off, and the modern virtio-PCI `PciTransport`)
 
 ## Where we are
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
-- **virtio-blk backing storage in the QEMU runner** (latest session —
+- **Hardware-real direct-map DMA/MMIO data path** (latest session).
+  Before this, the kernel DMA/MMIO primitives could not drive a *real*
+  device: `kernel/mem::DmaPool` served the driver's CPU-visible bytes
+  from a heap `Vec<u8>` decoupled from the physical frames it handed
+  the device, and both `DmaPool` and `MmioMap` mapped into a
+  freshly-minted `AddressSpace` never loaded into CR3. New
+  `kernel/mem::phys` module: `PhysMap` trait + production
+  `DirectPhysMap` (identity/offset over the boot low-memory direct
+  map — the x86_64 trampoline identity-maps 0..4 GiB) + test-only
+  `SimPhysMap`. `DmaPool::new` / `MmioMap::new` now take `&dyn
+  PhysMap`; `DmaPool::{bytes,bytes_mut,slot_base}` + zero-on-
+  alloc/free and `MmioMap::region_base` resolve the device `phys`
+  through it, so CPU view == device frame. The `0xCC` guard-byte
+  *simulation* is gone (unmapped guard pages remain the real
+  mechanism); new `DmaError::DirectMap` / `MmioError::DirectMap` fail
+  closed. Threaded through `kernel/sec::{dma,mmio}`,
+  `KernelMmioMapper` (`&'a mut MmioMap<'p,P>`), and
+  `KernelVirtioFactoryConfig` (new `phys` field). All host tests +
+  `x86_64-unknown-none` build + clippy/fmt/doc clean. **What this
+  unblocks:** a real virtio device can now round-trip data; the
+  remaining Item 4 work is purely *wiring* (construct a
+  `DirectPhysMap` in `boot.rs` — e.g. `DirectPhysMap::identity(4
+  GiB)` matching the boot identity map — and thread it into the live
+  `KernelMmioMapper` + `KernelVirtioFactoryConfig.phys` used by the
+  `virtio_blk_pci_x86_64` test).
+
+- **virtio-blk backing storage in the QEMU runner** (earlier session —
   the `virtio_blk_pci_x86_64` prerequisite). `tools/qemu` could only
   build a GRUB ISO + attach OVMF; it had no way to give the guest a
   block device or to know its contents before boot. New module

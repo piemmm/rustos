@@ -14,7 +14,7 @@ use crate::captable::{TaskCapabilities, TaskId};
 use crate::identity::UserId;
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{AddressSpace, HostPageTable, MmioError, VirtAddr};
+use rustos_kernel_mem::{AddressSpace, HostPageTable, MmioError, PhysAddr, SimPhysMap, VirtAddr};
 
 fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
     let mut s = CapabilitySet::empty();
@@ -29,11 +29,17 @@ fn task_with(caps: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
     TaskCapabilities::derive(TaskId(42), UserId(1000), grant, grant, sink)
 }
 
-fn fresh_map() -> MmioMap<HostPageTable> {
+/// Simulated register block covering the BAR addresses the tests map.
+fn fresh_sim() -> SimPhysMap {
+    SimPhysMap::new(PhysAddr::new(0xFEBD_0000), 0x1_0000)
+}
+
+fn fresh_map(phys: &SimPhysMap) -> MmioMap<'_, HostPageTable> {
     MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(0x5000_0000),
         16,
+        phys,
     )
     .expect("mapper constructs")
 }
@@ -47,7 +53,8 @@ fn ids_after_derive(sink: &RecordingSink) -> alloc::vec::Vec<u32> {
 
 #[test]
 fn map_succeeds_when_caller_holds_mmio_map() {
-    let mut map = fresh_map();
+    let sim = fresh_sim();
+    let mut map = fresh_map(&sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
     let region = map_mmio(&mut map, &caller, 0xFEBD_0000, 0x1000, &sink).expect("granted");
@@ -63,7 +70,8 @@ fn map_succeeds_when_caller_holds_mmio_map() {
 
 #[test]
 fn map_refused_without_mmio_map() {
-    let mut map = fresh_map();
+    let sim = fresh_sim();
+    let mut map = fresh_map(&sim);
     let sink = RecordingSink::new();
     // The caller holds other capabilities but not MMIO_MAP.
     let caller = task_with(&[CapabilityId::FS_MOUNT, CapabilityId::MEM_DMA], &sink);
@@ -81,7 +89,8 @@ fn map_refused_without_mmio_map() {
 
 #[test]
 fn map_zero_length_propagates_mapper_error_without_denial() {
-    let mut map = fresh_map();
+    let sim = fresh_sim();
+    let mut map = fresh_map(&sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
     let err = map_mmio(&mut map, &caller, 0xFEBD_0000, 0, &sink).unwrap_err();
@@ -93,7 +102,8 @@ fn map_zero_length_propagates_mapper_error_without_denial() {
 
 #[test]
 fn map_then_unmap_round_trip_emits_one_grant_record() {
-    let mut map = fresh_map();
+    let sim = fresh_sim();
+    let mut map = fresh_map(&sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MMIO_MAP], &sink);
     let region = map_mmio(&mut map, &caller, 0xFEBD_0000, 0x1000, &sink).expect("map");
@@ -105,7 +115,8 @@ fn map_then_unmap_round_trip_emits_one_grant_record() {
 
 #[test]
 fn unmap_refused_without_mmio_map_and_window_is_retained() {
-    let mut map = fresh_map();
+    let sim = fresh_sim();
+    let mut map = fresh_map(&sim);
     let grant_sink = RecordingSink::new();
     let granter = task_with(&[CapabilityId::MMIO_MAP], &grant_sink);
     let region = map_mmio(&mut map, &granter, 0xFEBD_0000, 0x1000, &grant_sink).expect("map");
@@ -141,7 +152,7 @@ fn as_errno_maps_every_mapper_error_into_abi_v1() {
         Errno::OutOfRange
     );
     assert_eq!(
-        MmioGateError::Map(MmioError::GuardViolation).as_errno(),
+        MmioGateError::Map(MmioError::DirectMap).as_errno(),
         Errno::OutOfRange
     );
     assert_eq!(

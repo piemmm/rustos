@@ -51,6 +51,7 @@ pub mod dma;
 pub mod error;
 pub mod frame;
 pub mod mmio;
+pub mod phys;
 pub mod ptr;
 pub mod sensitive;
 pub mod slab;
@@ -61,9 +62,12 @@ pub use dma::{DmaBuffer, DmaError, DmaPool};
 pub use error::AllocError;
 pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
 pub use mmio::{MmioError, MmioMap, MmioRegion};
+pub use phys::{DirectPhysMap, PhysMap};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle};
 pub use vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
 
+#[cfg(any(test, feature = "host-tests"))]
+pub use phys::SimPhysMap;
 #[cfg(any(test, feature = "host-tests"))]
 pub use vmm::HostPageTable;

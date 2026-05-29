@@ -38,7 +38,7 @@ use rustos_caps::CapabilitySet;
 use rustos_drv_bus_virtio::{KernelVirtioHost, PoolId};
 use rustos_drvhost::VirtioHostFactory;
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
-use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTableOps, VirtAddr};
+use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTableOps, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 
@@ -52,6 +52,10 @@ use rustos_log::Sink;
 pub struct KernelVirtioFactoryConfig<'k> {
     /// Physical frame allocator the per-driver [`DmaPool`] draws from.
     pub frames: &'k FrameAllocator,
+    /// Kernel direct physical map the per-driver [`DmaPool`] reaches a
+    /// buffer's frames through, so the CPU sees exactly the frames the
+    /// device DMAs to (the boot identity map in production).
+    pub phys: &'k dyn PhysMap,
     /// Capabilities of the task that owns the driver's per-process
     /// pool. Every allocation and free is audited against this set,
     /// and [`KernelVirtioHost::notify_wait`] waits on the line bound by
@@ -132,6 +136,7 @@ where
             self.config.pool_base,
             self.config.pool_pages,
             self.config.frames,
+            self.config.phys,
         )
         .ok()?;
 
@@ -157,7 +162,7 @@ mod tests {
     use rustos_kernel_irq::IrqWaitAbort;
     use rustos_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
-        HostPageTable, PhysAddr, PAGE_SIZE,
+        HostPageTable, PhysAddr, SimPhysMap, PAGE_SIZE,
     };
     use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
     use rustos_kernel_sec::identity::UserId;
@@ -209,6 +214,12 @@ mod tests {
         m
     }
 
+    /// Simulated physical RAM covering the usable region so a minted
+    /// pool can reach its frames from the CPU.
+    fn fresh_sim(pages: usize) -> SimPhysMap {
+        SimPhysMap::new(PhysAddr::new(PAGE_SIZE as u64 * 16), pages * PAGE_SIZE)
+    }
+
     fn task_with(caps: &[CapabilityId], sink: &Recorder) -> TaskCapabilities {
         let mut set = CapabilitySet::empty();
         for c in caps {
@@ -225,6 +236,7 @@ mod tests {
 
     fn config<'k>(
         frames: &'k FrameAllocator,
+        phys: &'k SimPhysMap,
         caller: &'k TaskCapabilities,
         audit: &'k Recorder,
         irq: &'k IrqTable,
@@ -233,6 +245,7 @@ mod tests {
     ) -> KernelVirtioFactoryConfig<'k> {
         KernelVirtioFactoryConfig {
             frames,
+            phys,
             caller,
             audit,
             irq,
@@ -246,12 +259,13 @@ mod tests {
     #[test]
     fn mint_yields_host_for_dma_capable_driver() {
         let frames = FrameAllocator::new(&usable_map(16)).unwrap();
+        let sim = fresh_sim(16);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = binding(4);
         let waiter = IdleWaiter;
         let factory = KernelVirtioFactory::new(
-            config(&frames, &caller, &sink, &irq, handle, &waiter),
+            config(&frames, &sim, &caller, &sink, &irq, handle, &waiter),
             HostPageTable::new,
         );
 
@@ -268,12 +282,13 @@ mod tests {
     #[test]
     fn mint_refuses_driver_without_mem_dma() {
         let frames = FrameAllocator::new(&usable_map(16)).unwrap();
+        let sim = fresh_sim(16);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = binding(4);
         let waiter = IdleWaiter;
         let factory = KernelVirtioFactory::new(
-            config(&frames, &caller, &sink, &irq, handle, &waiter),
+            config(&frames, &sim, &caller, &sink, &irq, handle, &waiter),
             HostPageTable::new,
         );
 
@@ -285,12 +300,13 @@ mod tests {
     #[test]
     fn mint_builds_a_distinct_pool_each_call() {
         let frames = FrameAllocator::new(&usable_map(64)).unwrap();
+        let sim = fresh_sim(64);
         let sink = Recorder::new();
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = binding(4);
         let waiter = IdleWaiter;
         let factory = KernelVirtioFactory::new(
-            config(&frames, &caller, &sink, &irq, handle, &waiter),
+            config(&frames, &sim, &caller, &sink, &irq, handle, &waiter),
             HostPageTable::new,
         );
 

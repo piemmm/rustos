@@ -130,9 +130,15 @@ composing the layers above:
   `AddressSpace<P>`. Each allocation maps `data_pages` consecutive pages
   with `READ | WRITE | USER`; no `EXEC`, no global sharing.
 - **Guard pages** — every allocation is bracketed by one *unmapped* virtual
-  page on each side. On hardware an overrun faults; the host model fills the
-  guard storage with `0xCC` and detects tampering at `free` time, mirroring
-  the `slab` convention.
+  page on each side, so an overrun faults on the MMU rather than reaching a
+  neighbouring allocation.
+- **CPU access via the direct map** — the bytes the driver reads/writes are
+  the buffer's *physical frames*, reached through the kernel direct physical
+  map (`PhysMap`): `bytes` / `bytes_mut` / `slot_base` translate the buffer's
+  `phys` into a pointer. The CPU therefore sees exactly the frames the device
+  DMAs to — there is no disconnected copy. Production wires a `DirectPhysMap`
+  (the boot identity map over low physical memory); host tests wire a
+  `SimPhysMap` standing in for physical RAM.
 - **Zero-on-free** — every byte of the data region is wiped with
   [`zeroize`](https://crates.io/crates/zeroize) before the frames return to
   the buddy allocator. A later allocation that lands on the same slot sees
@@ -148,8 +154,12 @@ composing the layers above:
 ```text
 [ guard | data_0 | data_1 | … | data_{n-1} | guard ]
    |       └────────── mapped (R/W/U) ──────────┘   |
-   └──── unmapped (hw) / 0xCC pattern (host) ───────┘
+   └──────────────── unmapped (fault) ──────────────┘
 ```
+
+The data frames are reached by the CPU through the direct physical map
+(`phys`), keyed on each buffer's `phys` address, so the driver's view
+and the device's view are the same memory.
 
 The pool itself is **capability-agnostic**: it does not consult the calling
 task's capability set. The capability gate is the companion module
@@ -200,10 +210,13 @@ BAR or a virtio-MMIO transport slot. `kernel/mem::mmio::MmioMap`
 provides this. Unlike [`DmaPool`][DmaPool] it does **not** allocate
 frames: the physical address is fixed by the hardware, so the mapper
 maps the *device's own* frames into a per-process `AddressSpace<P>`
-with caching disabled (`MapFlags::NO_CACHE`) and the same guard-page
-bracketing the DMA pool uses. `MmioMap::map(phys_base, len)` returns
-an `MmioRegion`; `region_base` hands out the base pointer the
-kernel-host mapper turns into an [ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off).
+with caching disabled (`MapFlags::NO_CACHE`) and the same unmapped
+guard-page bracketing the DMA pool uses. `MmioMap::map(phys_base, len)`
+returns an `MmioRegion`; `region_base` resolves the region's device
+physical base through the direct physical map (`PhysMap`) into the base
+pointer the kernel-host mapper turns into an
+[ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off), so
+the window addresses the device's real registers.
 
 The mapper is **capability-agnostic**; the gate is
 `kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify

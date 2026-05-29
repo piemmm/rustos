@@ -1196,6 +1196,52 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — hardware-real direct-map
+  DMA/MMIO data path, *complete*): investigation while scoping the
+  `tests/integration/virtio_blk_pci_x86_64` crate found that the
+  kernel DMA/MMIO primitives could not drive a *real* device. The DMA
+  pool served the driver's CPU-visible bytes from a heap `Vec<u8>`
+  decoupled from the physical frames it handed the device, and both
+  `DmaPool` and `MmioMap` resolved pointers into a freshly-minted
+  `AddressSpace` that is never loaded into CR3 — so on hardware a
+  device would DMA into / a BAR would live at frames the driver never
+  reads. **Direct-map seam.** New `kernel/mem::phys` module adds the
+  `PhysMap` trait (`translate(PhysAddr, len) -> Option<NonNull<u8>>`)
+  with a production `DirectPhysMap` (identity/offset over the boot
+  low-memory direct map; the x86_64 trampoline identity-maps 0..4 GiB)
+  and a test-only page-aligned `SimPhysMap` standing in for physical
+  RAM. **DMA pool.** `DmaPool::new` now takes `&dyn PhysMap`; `bytes`
+  / `bytes_mut` / `slot_base` and the zero-on-alloc / zero-on-free
+  clears resolve the buffer's `phys` through it, so the CPU reads/
+  writes the very frames the device DMAs to (a real fix: the old
+  zero-on-free wiped the disconnected `Vec`, never the frames). The
+  host-side `0xCC` guard-byte *simulation* (`GuardViolation`,
+  `guards_intact`, `poke_for_test`) is removed — it modelled a
+  non-hardware "detect at free" behaviour; the unmapped guard pages in
+  the `AddressSpace` (the real fault mechanism) remain, and a new
+  `DmaError::DirectMap` fails closed when a frame is outside the map.
+  **MMIO mapper.** `MmioMap` gains the same `&dyn PhysMap` (now
+  `MmioMap<'a, P>`); `region_base` resolves the region's device
+  physical base through it (no register zeroing on map), with a new
+  `MmioError::DirectMap`. `KernelMmioMapper` decouples its borrow `'a`
+  from the map's `'p` (`&'a mut MmioMap<'p, P>`). **Threaded through.**
+  `kernel/sec::{dma,mmio}` signatures, `KernelVirtioHost`'s test pool,
+  and `KernelVirtioFactoryConfig` (new `phys` field, passed to
+  `DmaPool::new` in `mint`). **Tests.** `rustos-kernel-mem` 107 (+ new
+  `phys` unit tests and DMA/MMIO `cpu_view_aliases_device_physical_
+  frame` / `free_zeroes_the_physical_frame` / `region_base_addresses_
+  the_device_physical_frame` aliasing tests), `rustos-kernel-sec` 52,
+  `rustos-drv-bus-virtio` 73 (`--features kernel-host`), `rustos-kernel
+  --lib` 42 — full `cargo test --workspace` green. `cargo clippy
+  --all-targets -- -D warnings`, `cargo fmt --check`, `RUSTDOCFLAGS=
+  "-D warnings" cargo doc --no-deps`, and the `x86_64-unknown-none`
+  build (default + `kernel-host`) are clean on every touched crate.
+  **Docs.** `docs/src/architecture/memory.md` (direct-map CPU access;
+  guard-page wording). **Deferred.** Constructing the production
+  `DirectPhysMap` in `boot.rs` and threading it + a live `Pci` /
+  `KernelMmioMapper` / `KernelVirtioFactory` into a `drvhost::Host`
+  remains the `tests/integration/virtio_blk_pci_x86_64` work; see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — virtio-blk backing
   storage in the QEMU runner, *complete*): the `tests/integration/
   virtio_blk_pci_x86_64` crate needs the guest to see a

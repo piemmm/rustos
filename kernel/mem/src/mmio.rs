@@ -25,13 +25,16 @@
 //! `kernel/sec::mmio`, since `kernel/mem` deliberately depends on
 //! neither `rustos-abi` nor `rustos-caps` (see `kernel/mem/Cargo.toml`).
 //!
-//! # Host model
+//! # CPU access
 //!
-//! On real hardware the mapped bytes are the device's registers. The
-//! host-testable model keeps a `Vec<u8>` backing for the window so
-//! unit tests and host-side driver code can read and write through
-//! [`MmioMap::region_base`] using the same pointer arithmetic
-//! production code uses, exactly mirroring [`crate::dma::DmaPool`].
+//! On real hardware the mapped bytes are the device's registers,
+//! reachable from the CPU through the kernel's direct physical map
+//! ([`crate::phys::PhysMap`]). [`MmioMap::region_base`] translates the
+//! region's device physical base into a pointer, so the
+//! `RegisterWindow` a driver touches addresses the device's own
+//! registers — in production via the boot identity map, in host tests
+//! via a `SimPhysMap` standing in for the register
+//! block, exactly mirroring [`crate::dma::DmaPool`].
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -39,13 +42,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ptr::NonNull;
 
-use crate::frame::{Frame, PAGE_SHIFT, PAGE_SIZE};
+use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+use crate::phys::PhysMap;
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
-
-/// Byte pattern painted into the host-side guard slots. Matches
-/// [`crate::dma`]'s `GUARD_BYTE` so an operator who sees the value in
-/// a dump recognises it as "this region is supposed to be untouched".
-const GUARD_BYTE: u8 = 0xCC;
 
 /// Errors specific to [`MmioMap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,9 +61,11 @@ pub enum MmioError {
     /// `unmap` was called with an [`MmioRegion`] that does not name a
     /// live mapping in this mapper.
     UnknownRegion,
-    /// `unmap` detected that a guard slot's host-side pattern was
-    /// disturbed — a register-block over-run was observed.
-    GuardViolation,
+    /// A region's physical frames fall outside the kernel's direct
+    /// physical map, so the CPU cannot reach the registers. Indicates
+    /// a mis-sized [`crate::phys::PhysMap`] for the platform; the
+    /// mapper fails closed (`AGENTS.md` §2.9, §4).
+    DirectMap,
     /// The mapper was constructed with an invalid request (zero
     /// capacity, or a virtual base that is not page aligned).
     InvalidMapConfig,
@@ -83,7 +84,7 @@ impl fmt::Display for MmioError {
             Self::NoVirtualSpace => f.write_str("mmio mapper has no free virtual window"),
             Self::PageTable(e) => write!(f, "mmio page-table: {e:?}"),
             Self::UnknownRegion => f.write_str("mmio region not from this mapper"),
-            Self::GuardViolation => f.write_str("mmio guard-slot violation"),
+            Self::DirectMap => f.write_str("mmio region outside the direct physical map"),
             Self::InvalidMapConfig => f.write_str("mmio mapper config invalid"),
         }
     }
@@ -138,75 +139,61 @@ struct Record {
     leading_guard_slot: usize,
     /// Number of mapped data pages.
     data_pages: usize,
-    /// Offset of `phys_base` within its containing page.
-    page_offset: usize,
 }
 
 /// Per-process MMIO register-window mapper.
 ///
 /// Generic over [`PageTableOps`] so the same code is exercised by
 /// `crate::HostPageTable` in unit tests and driven by the
-/// architecture page-table types in production.
-pub struct MmioMap<P: PageTableOps> {
+/// architecture page-table types in production. The `'a` lifetime
+/// bounds the borrow of the direct physical map the mapper resolves
+/// register pointers through.
+pub struct MmioMap<'a, P: PageTableOps> {
     address_space: AddressSpace<P>,
     base: VirtAddr,
     capacity_pages: usize,
     slot_used: Vec<bool>,
     regions: BTreeMap<u64, Record>,
-    /// Host-side backing for the window bytes. Over-allocated by one
-    /// page and offset by [`Self::align_pad`] so the logical base is
-    /// page-aligned; a `RegisterWindow` (`lib/abi`) minted over
-    /// `region_base` then satisfies its ≥ 4-byte alignment contract
-    /// for word-wide volatile accesses in the host model. On hardware
-    /// the backing is the device's own mapped frames.
-    storage: Vec<u8>,
-    /// Byte offset within `storage` at which the page-aligned logical
-    /// window begins.
-    align_pad: usize,
+    /// Direct physical map used to reach a region's device registers
+    /// from the CPU. In production this is the boot identity map; in
+    /// host tests a `SimPhysMap` standing in for the
+    /// device's register block.
+    phys: &'a dyn PhysMap,
 }
 
-impl<P: PageTableOps> MmioMap<P> {
+impl<'a, P: PageTableOps> MmioMap<'a, P> {
     /// Construct a mapper managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
     ///
+    /// `phys` is the kernel's direct physical map; the mapper resolves
+    /// every register window through it so a `RegisterWindow` points
+    /// at the device's own registers.
+    ///
     /// # Errors
     ///
-    /// [`MmioError::InvalidMapConfig`] if `capacity_pages == 0` or
-    /// `base` is not page-aligned.
+    /// [`MmioError::InvalidMapConfig`] if `capacity_pages == 0`,
+    /// `base` is not page-aligned, or the window size overflows.
     pub fn new(
         address_space: AddressSpace<P>,
         base: VirtAddr,
         capacity_pages: usize,
+        phys: &'a dyn PhysMap,
     ) -> Result<Self, MmioError> {
         if capacity_pages == 0 || !base.is_page_aligned() {
             return Err(MmioError::InvalidMapConfig);
         }
-        let bytes = capacity_pages
+        // Reject a window whose byte span would overflow the slot
+        // offset arithmetic in `virt_of_slot` before committing state.
+        capacity_pages
             .checked_mul(PAGE_SIZE)
             .ok_or(MmioError::InvalidMapConfig)?;
-        // Over-allocate by one page so the logical window can begin at
-        // a page-aligned offset regardless of the allocator's base
-        // alignment.
-        let raw = bytes
-            .checked_add(PAGE_SIZE)
-            .ok_or(MmioError::InvalidMapConfig)?;
-        let storage = vec![GUARD_BYTE; raw];
-        let align_pad = storage.as_ptr().align_offset(PAGE_SIZE);
-        if align_pad > PAGE_SIZE {
-            // `align_offset` only fails (returns `usize::MAX`) when the
-            // requested alignment is unreachable; the extra page makes
-            // that impossible, but fail closed rather than index out
-            // of range (`AGENTS.md` §2.9).
-            return Err(MmioError::InvalidMapConfig);
-        }
         Ok(Self {
             address_space,
             base,
             capacity_pages,
             slot_used: vec![false; capacity_pages],
             regions: BTreeMap::new(),
-            storage,
-            align_pad,
+            phys,
         })
     }
 
@@ -274,14 +261,9 @@ impl<P: PageTableOps> MmioMap<P> {
             }
         }
 
-        // Initialise the host-side data bytes to zero so a freshly
-        // mapped window reads deterministically in the test model.
-        let data_byte_start = self.align_pad + first_data_slot * PAGE_SIZE;
-        let data_byte_end = data_byte_start + data_pages * PAGE_SIZE;
-        for b in &mut self.storage[data_byte_start..data_byte_end] {
-            *b = 0;
-        }
-
+        // No zeroing here: these are the device's own registers, not
+        // RAM the mapper owns. Writing them on map would clobber live
+        // hardware state.
         for s in leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = true;
         }
@@ -293,7 +275,6 @@ impl<P: PageTableOps> MmioMap<P> {
             Record {
                 leading_guard_slot,
                 data_pages,
-                page_offset,
             },
         );
         Ok(MmioRegion {
@@ -309,8 +290,6 @@ impl<P: PageTableOps> MmioMap<P> {
     ///
     /// * [`MmioError::UnknownRegion`] — `region` is not a live
     ///   mapping of this mapper (covers double-unmap).
-    /// * [`MmioError::GuardViolation`] — a guard slot's host-side
-    ///   pattern was disturbed while the mapping was live.
     /// * [`MmioError::PageTable`] — propagated from
     ///   [`AddressSpace::unmap`].
     pub fn unmap(&mut self, region: MmioRegion) -> Result<(), MmioError> {
@@ -322,8 +301,6 @@ impl<P: PageTableOps> MmioMap<P> {
         let first_data_slot = record.leading_guard_slot + 1;
         let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
 
-        let guard_ok = self.guards_intact(record.leading_guard_slot, trailing_guard_slot);
-
         for i in 0..data_pages {
             let virt = self.virt_of_slot(first_data_slot + i);
             let page = Page::from_addr(virt)?;
@@ -333,17 +310,7 @@ impl<P: PageTableOps> MmioMap<P> {
         for s in record.leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = false;
         }
-        let repaint_start = self.align_pad + record.leading_guard_slot * PAGE_SIZE;
-        let repaint_end = self.align_pad + (trailing_guard_slot + 1) * PAGE_SIZE;
-        for b in &mut self.storage[repaint_start..repaint_end] {
-            *b = GUARD_BYTE;
-        }
-
-        if guard_ok {
-            Ok(())
-        } else {
-            Err(MmioError::GuardViolation)
-        }
+        Ok(())
     }
 
     /// Raw, non-null base pointer to the first register of `region`.
@@ -357,17 +324,20 @@ impl<P: PageTableOps> MmioMap<P> {
     ///
     /// # Errors
     ///
-    /// [`MmioError::UnknownRegion`] if `region` does not name a live
-    /// mapping of this mapper.
+    /// * [`MmioError::UnknownRegion`] if `region` does not name a live
+    ///   mapping of this mapper.
+    /// * [`MmioError::DirectMap`] if the region's registers fall
+    ///   outside the direct physical map.
     pub fn region_base(&self, region: &MmioRegion) -> Result<NonNull<u8>, MmioError> {
-        let record = self
-            .regions
-            .get(&region.virt.as_u64())
-            .ok_or(MmioError::UnknownRegion)?;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let start = self.align_pad + first_data_slot * PAGE_SIZE + record.page_offset;
-        let base = self.storage.as_ptr().wrapping_add(start).cast_mut();
-        NonNull::new(base).ok_or(MmioError::InvalidMapConfig)
+        if !self.regions.contains_key(&region.virt.as_u64()) {
+            return Err(MmioError::UnknownRegion);
+        }
+        // The register block is reachable at its device physical base
+        // through the direct map; the within-page offset is already
+        // baked into `region.phys`.
+        self.phys
+            .translate(PhysAddr::new(region.phys), region.len)
+            .ok_or(MmioError::DirectMap)
     }
 
     /// Number of live mappings.
@@ -387,19 +357,6 @@ impl<P: PageTableOps> MmioMap<P> {
     #[must_use]
     pub fn mapped_pages(&self) -> usize {
         self.address_space.mapped_pages()
-    }
-
-    /// Test trapdoor: write `byte` to the host-side storage at
-    /// `offset` from the mapper's `base`, simulating a register-block
-    /// over-run that bleeds into a guard slot.
-    ///
-    /// Returns `None` if `offset` is outside the mapper window.
-    #[cfg(test)]
-    pub(crate) fn poke_for_test(&mut self, offset: usize, byte: u8) -> Option<()> {
-        let idx = self.align_pad.checked_add(offset)?;
-        let b = self.storage.get_mut(idx)?;
-        *b = byte;
-        Some(())
     }
 
     // -----------------------------------------------------------------
@@ -438,19 +395,6 @@ impl<P: PageTableOps> MmioMap<P> {
                 let _ = self.address_space.unmap(page);
             }
         }
-    }
-
-    fn guards_intact(&self, leading_guard_slot: usize, trailing_guard_slot: usize) -> bool {
-        let head_start = self.align_pad + leading_guard_slot * PAGE_SIZE;
-        let head_end = head_start + PAGE_SIZE;
-        let tail_start = self.align_pad + trailing_guard_slot * PAGE_SIZE;
-        let tail_end = tail_start + PAGE_SIZE;
-        self.storage[head_start..head_end]
-            .iter()
-            .all(|&b| b == GUARD_BYTE)
-            && self.storage[tail_start..tail_end]
-                .iter()
-                .all(|&b| b == GUARD_BYTE)
     }
 }
 
