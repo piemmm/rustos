@@ -86,7 +86,7 @@ members = [
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.75"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/rustos-project/rustos"
 publish = false
 

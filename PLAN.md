@@ -65,7 +65,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
   Stage 1 per-crate `lib/*` pages.
 - CI definition `.github/workflows/ci.yml` runs `cargo xtask ci` on every
   push and pull request, with cargo + xtask-helper-tool caches.
-- `LICENSE-APACHE`, `LICENSE-MIT`, `README.md`, `AGENTS.md`, `PLAN.md` are
+- `LICENSE` (GPL-3.0-only), `README.md`, `AGENTS.md`, `PLAN.md` are
   all present at the repository root.
 
 ---

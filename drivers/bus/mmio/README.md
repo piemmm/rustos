@@ -51,4 +51,4 @@ requested (`AGENTS.md` §4).
 
 ## License
 
-MIT OR Apache-2.0.
+GPL-3.0-only.
