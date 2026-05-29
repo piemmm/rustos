@@ -59,6 +59,14 @@ These are absolute. They override any local convenience.
     - A `// SAFETY:` block immediately above, explaining every invariant.
     - A unit test (or model check) covering the invariants.
     - Encapsulation behind a safe API. No `unsafe` leaks across crate boundaries.
+11. **Code must be self-documenting.** Write code clearly enough that it
+    explains itself with the comments stripped out: intention-revealing names,
+    small single-purpose functions, obvious control flow, and types that make
+    illegal states unrepresentable. If a comment is the only thing that makes a
+    line understandable, the code is wrong — rewrite the code, do not add the
+    comment. Comments are reserved for *why* (rationale, invariants, references,
+    `// SAFETY:`), never for restating *what* the code already says. This does
+    not relax §2.8: rustdoc and `docs/` pages remain mandatory.
 
 ---
 
