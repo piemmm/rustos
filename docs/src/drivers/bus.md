@@ -218,6 +218,27 @@ multiplier are exactly what `PciTransport::new` consumes, so a
 boot-time PCI walk hands a working modern-virtio transport to the
 driver host without ever synthesising a pointer.
 
+### Ring-0 virtio-PCI walk
+
+These hand-offs are `pub(crate)` on the concrete `Pci` type, because a
+driver crate's only public surface is `register` (`AGENTS.md` §8). Ring
+0 therefore reaches them through a frozen ABI seam rather than the
+concrete type: `Pci<C>` implements
+`rustos_abi::driver::virtio_pci::VirtioPciBus` (a supertrait of `Bus`),
+whose `map_virtio_window` / `notify_off_multiplier` methods forward to
+the inherent ones. The kernel's `provision_virtio_pci(bus, device_id,
+mapper)` (in `kernel/rustos-kernel/src/virtio_pci_walk.rs`) takes a
+`&dyn VirtioPciBus`, enumerates the bus into a bounded table, picks the
+first function matching `VIRTIO_PCI_VENDOR_ID` and the requested device
+ID, maps the four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
+reads the notify multiplier, and builds a `PciTransport`. Ring 0 thus
+never names a concrete `drivers/bus/*` type and holds no ambient
+authority — the capability check lives in the mapper, and every failure
+is a typed `VirtioPciWalkError` rather than a panic (`AGENTS.md` §2.9).
+The constants live once in `rustos_abi`; the driver's `VIRTIO_CFG_*`
+names bind to them rather than re-stating the literals (`AGENTS.md`
+§2.2).
+
 ## Shared types
 
 There is no copy-paste between the two drivers; the only shared

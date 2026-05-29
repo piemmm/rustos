@@ -37,7 +37,8 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_abi::driver::virtio_pci::VirtioPciBus;
+use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
@@ -89,5 +90,27 @@ use enumerate::Pci;
 impl<C: ConfigSpace> Bus for Pci<C> {
     fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
         self.enumerate_into(out)
+    }
+}
+
+// The frozen `abi-v1` virtio-PCI transport-provisioning seam
+// (`AGENTS.md` §9). The ring-0 boot walk reaches the concrete `Pci`
+// through `&dyn VirtioPciBus`, so the bus driver never leaks its
+// concrete type across the crate boundary (`AGENTS.md` §8). Both
+// methods forward to the inherent enumeration core; the inherent
+// `Pci::map_virtio_window` wins method resolution, so the forward is
+// not recursive.
+impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
+    fn map_virtio_window(
+        &self,
+        bdf: u64,
+        cfg_type: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        Pci::map_virtio_window(self, bdf, cfg_type, mapper)
+    }
+
+    fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
+        self.virtio_notify_off_multiplier(bdf)
     }
 }

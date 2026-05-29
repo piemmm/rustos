@@ -19,6 +19,7 @@ capability model, kinds) lives in
 | [`rustos_abi::driver::net`]           | `Net` trait + MAC address.             |
 | [`rustos_abi::driver::input`]         | `Input` trait + event records.         |
 | [`rustos_abi::driver::bus`]           | `Bus` trait + device records.          |
+| [`rustos_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
 
 [`rustos_abi::driver`]: #shared-types
 [`rustos_abi::driver::display`]: #display
@@ -27,6 +28,7 @@ capability model, kinds) lives in
 [`rustos_abi::driver::net`]: #net
 [`rustos_abi::driver::input`]: #input
 [`rustos_abi::driver::bus`]: #bus
+[`rustos_abi::driver::virtio_pci`]: #virtio-pci-provisioning
 
 ## Shared types
 
@@ -170,6 +172,28 @@ Event records are `InputEvent { kind, reserved0, code, value }`;
 
 `BusDevice` carries `vendor`, `device`, `class`, and bus-local
 `address`.
+
+## Virtio-PCI provisioning
+
+`trait VirtioPciBus: Bus`. The boot-time PCI walk that turns a modern
+virtio device's vendor-specific capabilities into kernel-mapped
+register windows lives in ring 0, but ring 0 may not name a concrete
+`drivers/bus/*` type (`AGENTS.md` §8). This trait is the frozen seam
+that lets it call into the PCI driver through `&dyn VirtioPciBus`:
+
+| Method                                       | Capability gate                       |
+|----------------------------------------------|---------------------------------------|
+| `map_virtio_window(bdf, cfg_type, mapper)`   | `CAP_MMIO_MAP` (enforced by `mapper`). |
+| `notify_off_multiplier(bdf)`                 | Driver handle.                        |
+
+The `VIRTIO_PCI_CFG_*` constants name the four `cfg_type` discriminants
+(common `1`, notify `2`, ISR `3`, device `4`) the caller maps, and
+`VIRTIO_PCI_VENDOR_ID` (`0x1AF4`) identifies a virtio function. The
+kernel's `provision_virtio_pci` walk (see
+[Bus drivers](../drivers/bus.md#ring-0-virtio-pci-walk)) enumerates
+through the `Bus` supertrait, picks the matching function, maps the
+four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`, and builds
+a `PciTransport` — without naming the concrete `Pci` type.
 
 ## Versioning
 

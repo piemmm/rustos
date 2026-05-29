@@ -219,18 +219,25 @@ pub enum Capability {
 /// 3.0 §H); virtio 1.x reuses it for its configuration structures.
 pub const CAP_ID_VENDOR: u8 = 0x09;
 
+// The virtio `cfg_type` discriminants are the frozen `abi-v1`
+// transport-provisioning seam (`AGENTS.md` §9): the kernel walk picks
+// a `cfg_type` from `rustos_abi` and this driver resolves it, so both
+// sides must agree on one definition. These aliases bind to the
+// `rustos_abi` source of truth rather than re-stating the literals,
+// keeping the driver free of a second copy (`AGENTS.md` §2.2).
+
 /// virtio `cfg_type` for the common configuration structure
 /// (virtio 1.x §4.1.4.3).
-pub const VIRTIO_CFG_COMMON: u8 = 1;
+pub const VIRTIO_CFG_COMMON: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_COMMON;
 /// virtio `cfg_type` for the notification structure (virtio 1.x §4.1.4.4).
-pub const VIRTIO_CFG_NOTIFY: u8 = 2;
+pub const VIRTIO_CFG_NOTIFY: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
 /// virtio `cfg_type` for the ISR-status structure (virtio 1.x §4.1.4.5).
-pub const VIRTIO_CFG_ISR: u8 = 3;
+pub const VIRTIO_CFG_ISR: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_ISR;
 /// virtio `cfg_type` for the device-specific structure (virtio 1.x §4.1.4.6).
-pub const VIRTIO_CFG_DEVICE: u8 = 4;
+pub const VIRTIO_CFG_DEVICE: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_DEVICE;
 /// virtio `cfg_type` for the PCI configuration-access window
 /// (virtio 1.x §4.1.4.7).
-pub const VIRTIO_CFG_PCI: u8 = 5;
+pub const VIRTIO_CFG_PCI: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_PCI;
 
 #[cfg(test)]
 mod tests {

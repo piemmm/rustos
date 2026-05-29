@@ -1,11 +1,34 @@
 # Next session — Stage 4.D Items 4 / 6
-# (carried over after the virtio-1.x PCI capability decode +
-#  register-window hand-off — the boot-PCI-walk prerequisite — landed,
-#  on top of the modern virtio-PCI `PciTransport`)
+# (carried over after the ring-0 virtio-PCI provisioning walk +
+#  `VirtioPciBus` ABI seam landed, on top of the virtio-1.x PCI
+#  capability decode + register-window hand-off and the modern
+#  virtio-PCI `PciTransport`)
 
 ## Where we are
 
 `PLAN.md` Stage 4.D records the following as **complete**:
+
+- **Ring-0 virtio-PCI provisioning walk + `VirtioPciBus` ABI seam**
+  (latest session). The per-`cfg_type` window hand-offs were
+  `pub(crate)` on the concrete `Pci` type, so ring 0 (whose only
+  sanctioned PCI surface is `register`, §8) had no way to call them.
+  New frozen `abi-v1` seam `lib/abi/src/driver/virtio_pci.rs`:
+  `VirtioPciBus: Bus` (`map_virtio_window` + `notify_off_multiplier`)
+  + `VIRTIO_PCI_CFG_*` / `VIRTIO_PCI_VENDOR_ID` consts. `Pci<C>`
+  implements it (forwarding to its inherent methods); the PCI
+  `VIRTIO_CFG_*` consts now bind to the abi source of truth (§2.2).
+  New kernel module `kernel/rustos-kernel/src/virtio_pci_walk.rs`:
+  `provision_virtio_pci(bus: &dyn VirtioPciBus, device_id, mapper)`
+  enumerates into a bounded stack table (`MAX_FUNCTIONS = 64`, fails
+  closed on overflow), finds the virtio function, maps the four
+  windows through the `CAP_MMIO_MAP`-gated mapper, and builds a
+  `PciTransport` — driver-agnostic ring 0, no ambient authority, no
+  panics (`VirtioPciWalkError`). Host-tested only (mock
+  `VirtioPciBus` + `MmioMapper`); **not yet wired into a live
+  `drvhost::Host`** and **not yet run against a real QEMU device**.
+  `rustos-abi` 81 (+4), `rustos-kernel --lib` 42 (+5); full `cargo
+  test --workspace`, clippy/fmt/doc, and the `x86_64-unknown-none`
+  kernel build all clean.
 
 - Item 1 — kernel per-process-heap `DmaPool` + `kernel/sec::dma`
   gate (`CAP_MEM_DMA`, audit 1030/1031).
@@ -136,15 +159,17 @@ environment (the rustdoc half passed). The acceptance gate (Item
 The `PciTransport` (this session) supplies the missing
 real-hardware transport. What still does **not** exist:
 
-- A **boot-time PCI walk** in ring 0 that resolves a virtio device's
-  virtio-1.x capabilities to `(BAR, offset, length)` triples, calls
-  `Pci::map_bar_window` → `KernelMmioMapper` for each, and feeds the
-  four windows + `notify_off_multiplier` into
-  `PciTransport::new`. The capability decode + per-`cfg_type` window
-  hand-off now exists (`Pci::map_virtio_window` /
-  `Pci::virtio_notify_off_multiplier`); the remaining work is the
-  ring-0 walk that enumerates the bus, picks the virtio function,
-  and *calls* these hand-offs with the kernel `KernelMmioMapper`.
+- The **boot-time PCI walk** now exists as
+  `rustos_kernel::provision_virtio_pci` (`virtio_pci_walk.rs`),
+  reaching the PCI driver through the `VirtioPciBus` ABI seam. The
+  remaining work is to **wire it into the live boot pipeline**:
+  construct a `Pci` (via the PCI driver's `register` path / driver
+  host), pass it as `&dyn VirtioPciBus` plus the real
+  `KernelMmioMapper` into `provision_virtio_pci`, and feed the
+  resulting `PciTransport` + a `KernelVirtioFactory`-minted
+  `KernelVirtioHost` into the `drvhost::Host` that runs the signed
+  `virtio-blk` `.rxe`. That wiring is what `tests/integration/
+  virtio_blk_pci_x86_64` exercises.
 - The **MMIO `Transport`** for `riscv64 -M virt` / `AArch64` now
   exists (`drivers/bus/virtio::MmioTransport`, latest session). The
   remaining MMIO work is the ring-0 DTB walk that resolves the

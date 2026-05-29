@@ -1196,6 +1196,50 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — ring-0 virtio-PCI provisioning walk
+  + ABI seam, *complete*): the per-`cfg_type` window hand-offs existed
+  on `drivers/bus/pci` (`Pci::map_virtio_window` /
+  `virtio_notify_off_multiplier`), but they were `pub(crate)` on the
+  concrete `Pci` type, and a driver crate's only public surface is
+  `register` (`AGENTS.md` §8) — so ring 0 had no sanctioned way to
+  *call* them. **ABI seam (frozen `abi-v1`).** New module
+  `lib/abi/src/driver/virtio_pci.rs` adds the `VirtioPciBus: Bus`
+  trait (`map_virtio_window(bdf, cfg_type, mapper)` +
+  `notify_off_multiplier(bdf)`) plus the `VIRTIO_PCI_CFG_*` /
+  `VIRTIO_PCI_VENDOR_ID` constants. The kernel reaches the PCI driver
+  through `&dyn VirtioPciBus` exactly as it already reaches a bus via
+  `Bus` and the mapper via `MmioMapper`, so ring 0 names no concrete
+  `drivers/bus/*` type (`AGENTS.md` §8) and the PCI crate's public
+  surface stays `register`-only. **PCI driver.** `Pci<C>` implements
+  `VirtioPciBus` (forwarding to its inherent methods), and
+  `config.rs`'s `VIRTIO_CFG_*` constants now bind to the `rustos_abi`
+  source of truth rather than re-stating the literals (`AGENTS.md`
+  §2.2). **Ring-0 walk.** New module
+  `kernel/rustos-kernel/src/virtio_pci_walk.rs` adds
+  `provision_virtio_pci(bus, device_id, mapper)`: it enumerates the
+  bus into a bounded stack table (`MAX_FUNCTIONS = 64`, failing closed
+  with `DeviceTableOverflow` rather than allocating), picks the first
+  function matching the virtio vendor + requested device ID, maps the
+  four virtio register windows through the `CAP_MMIO_MAP`-gated mapper,
+  and builds a `PciTransport`. Every failure mode is a
+  `VirtioPciWalkError` variant — no panics (`AGENTS.md` §2.9), no
+  ambient authority (`AGENTS.md` §4). **Tests.** `rustos-abi` 81 (+4
+  seam tests: per-`cfg_type` provisioning, unknown-cfg `NotFound`,
+  capability-denial, enumerate), `rustos-drv-bus-pci` 21 (unchanged,
+  trait impl exercised through the inherent path), `rustos-kernel
+  --lib` 42 (+5 walk tests: transport provisioned for a matching
+  device, no-match / wrong-device-id `NoVirtioFunction`, map-failure
+  propagation, enumeration overflow). Full `cargo test --workspace` is
+  green. `cargo clippy --all-targets -- -D warnings`, `cargo fmt
+  --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, and the
+  `x86_64-unknown-none` kernel build are clean on every touched crate.
+  **Docs.** `docs/src/abi/driver_traits.md` (new seam) and
+  `docs/src/drivers/bus.md` (ring-0 walk). **Deferred.** Wiring the
+  walk into a live `drvhost::Host` from the boot pipeline, the
+  `tests/integration/virtio_blk_pci_x86_64` QEMU crate (needs the
+  signed-`.rxe` boot path), the riscv64 runner + DTB/MMIO walk, the
+  net tests, and the Item 6 acceptance gate remain outstanding — see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 2-tail.4 — kernel-binary
   `VirtioHostFactory`, *complete*): the production kernel binary now
   owns a concrete `VirtioHostFactory` that mints a fresh, per-driver

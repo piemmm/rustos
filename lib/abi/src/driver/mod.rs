@@ -53,10 +53,15 @@ pub mod input;
 pub mod mmio;
 pub mod net;
 pub mod virtio;
+pub mod virtio_pci;
 
 pub use dma::{DmaSlab, PoolId, SlabFreeFn};
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use virtio::VirtioHost;
+pub use virtio_pci::{
+    VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
+    VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
+};
 
 /// Sensitivity class of a payload buffer crossing the driver ABI.
 ///
