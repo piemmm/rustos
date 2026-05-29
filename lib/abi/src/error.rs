@@ -54,6 +54,15 @@ pub enum Errno {
     /// plumbing lands). The variant is part of `abi-v1` and its
     /// discriminant is frozen alongside the others.
     NotImplemented = 12,
+    /// A bounded wait expired before the awaited event occurred.
+    ///
+    /// Emitted by the `irq_wait` syscall (and future bounded-wait
+    /// syscalls) when the caller-supplied `timeout_ns` elapses
+    /// before the kernel can wake the caller. Returning this errno
+    /// is **not** an error in the IRQ subsystem itself — the line
+    /// stays bound, the handle stays valid, and the caller may
+    /// re-issue `irq_wait` immediately.
+    TimedOut = 13,
 }
 
 impl Errno {
@@ -79,6 +88,7 @@ impl fmt::Display for Errno {
             Self::AbiVersionUnsupported => "abi version unsupported",
             Self::MessageTooLarge => "message too large",
             Self::NotImplemented => "operation not implemented",
+            Self::TimedOut => "operation timed out",
         };
         f.write_str(message)
     }
@@ -103,6 +113,7 @@ mod tests {
         assert_eq!(Errno::AbiVersionUnsupported.as_i32(), 10);
         assert_eq!(Errno::MessageTooLarge.as_i32(), 11);
         assert_eq!(Errno::NotImplemented.as_i32(), 12);
+        assert_eq!(Errno::TimedOut.as_i32(), 13);
     }
 
     #[test]

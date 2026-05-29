@@ -86,6 +86,7 @@ pub fn is_known_capability(id: CapabilityId) -> bool {
             | CapabilityId::AUDIT_READ
             | CapabilityId::AUDIT_WRITE
             | CapabilityId::MEM_DMA
+            | CapabilityId::IRQ_BIND
     )
 }
 
@@ -444,6 +445,7 @@ mod tests {
             CapabilityId::AUDIT_READ,
             CapabilityId::AUDIT_WRITE,
             CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
         ] {
             assert!(is_known_capability(cap));
         }

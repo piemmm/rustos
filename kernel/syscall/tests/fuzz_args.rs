@@ -18,7 +18,7 @@
 
 use core::cell::RefCell;
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, SyscallNumber, ENCODED_TABLE_LEN, SYSCALLS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, SyscallNumber, ENCODED_TABLE_LEN, SYSCALLS,
     SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
@@ -84,6 +84,14 @@ impl SyscallHandlers for AcceptingHandlers {
         Ok(0)
     }
     fn clock_get(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn irq_bind(&self, _c: &CallerContext<'_>, _line: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn irq_wait(&self, _c: &CallerContext<'_>, _h: IrqHandle, _timeout_ns: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

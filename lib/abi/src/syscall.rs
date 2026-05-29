@@ -51,6 +51,27 @@ impl SyscallNumber {
     pub const CAP_REVOKE: Self = Self(6);
     /// Read the monotonic clock.
     pub const CLOCK_GET: Self = Self(7);
+    /// Bind to a hardware interrupt line.
+    ///
+    /// Argument: `line: u32` — architecture-defined IRQ identifier
+    /// (GSI on x86_64, GIC `IntId` on `AArch64`, PLIC source on
+    /// RISC-V; the per-architecture binding is documented in
+    /// `docs/src/security/irq.md`). Returns an opaque
+    /// [`crate::IrqHandle`] (kernel-issued, unforgeable) bound to the
+    /// calling task. Requires [`crate::CapabilityId::IRQ_BIND`].
+    pub const IRQ_BIND: Self = Self(8);
+    /// Wait for a wake-up on a previously bound interrupt handle.
+    ///
+    /// Arguments: `handle: IrqHandle`, `timeout_ns: u64`. The kernel
+    /// blocks the caller on the handle's wait queue. Returns
+    /// `Ok(())` when the interrupt fires (the kernel masks the line
+    /// at the controller before resuming the waiter so the same edge
+    /// does not stampede the driver), or [`crate::Errno::TimedOut`]
+    /// if `timeout_ns` elapses first. Requires
+    /// [`crate::CapabilityId::IRQ_BIND`] — the handle is also
+    /// re-checked against the calling task's binding to defend
+    /// against handle forgery (`AGENTS.md` §5.4).
+    pub const IRQ_WAIT: Self = Self(9);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -72,9 +93,47 @@ impl SyscallNumber {
     }
 }
 
+/// Opaque, kernel-issued handle to a bound hardware interrupt line.
+///
+/// Returned by the `irq_bind` syscall and consumed by `irq_wait`. The
+/// inner `u64` is unforgeable in the sense that the kernel rejects any
+/// `irq_wait` whose `handle` was not previously minted for the calling
+/// task (`AGENTS.md` §5.2 — capabilities are unforgeable tokens; §5.4 —
+/// no trusted-caller shortcuts). The wire representation is the raw
+/// `u64`; the wrapper exists so call sites cannot confuse it with
+/// arbitrary integer arguments.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct IrqHandle(u64);
+
+impl IrqHandle {
+    /// Reserved invalid value.
+    ///
+    /// The kernel must never mint this value; it is reserved so a
+    /// caller-zeroed buffer cannot be mistaken for a live handle.
+    pub const INVALID: Self = Self(0);
+
+    /// Wrap a raw value as a handle.
+    ///
+    /// Reserved for the kernel's IRQ allocator. User-space code
+    /// receives handles from `irq_bind`; constructing one by hand
+    /// gains nothing because the kernel re-checks the handle against
+    /// the caller's binding on every `irq_wait`.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Raw on-wire value.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SyscallNumber, SYSCALL_TABLE_HASH_LEN};
+    use super::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
     use crate::Errno;
 
     #[test]
@@ -88,6 +147,16 @@ mod tests {
         assert_eq!(SyscallNumber::CAP_DELEGATE.as_u16(), 5);
         assert_eq!(SyscallNumber::CAP_REVOKE.as_u16(), 6);
         assert_eq!(SyscallNumber::CLOCK_GET.as_u16(), 7);
+        assert_eq!(SyscallNumber::IRQ_BIND.as_u16(), 8);
+        assert_eq!(SyscallNumber::IRQ_WAIT.as_u16(), 9);
+    }
+
+    #[test]
+    fn irq_handle_round_trips_and_invalid_is_zero() {
+        assert_eq!(IrqHandle::INVALID.as_u64(), 0);
+        let h = IrqHandle::from_raw(0xDEAD_BEEF_CAFE_F00D);
+        assert_eq!(h.as_u64(), 0xDEAD_BEEF_CAFE_F00D);
+        assert_ne!(h, IrqHandle::INVALID);
     }
 
     #[test]

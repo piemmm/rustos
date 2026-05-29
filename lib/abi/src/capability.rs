@@ -55,6 +55,18 @@ impl CapabilityId {
     /// around the slab and zero-on-free for every byte ever made
     /// device-visible (`AGENTS.md` §4).
     pub const MEM_DMA: Self = Self(10);
+    /// Bind to a hardware interrupt line and wait for its wake-ups.
+    ///
+    /// Granted to user-space drivers whose hardware raises an IRQ the
+    /// driver must observe (virtio-blk / virtio-net completion queues,
+    /// future NIC / `NVMe` driver interrupts). Holders may call the
+    /// `irq_bind` / `irq_wait` syscall pair (`abi-v1` numbers 8 and 9),
+    /// which mint an opaque [`crate::IrqHandle`] backed by a per-line
+    /// kernel wait queue and block on it with a caller-supplied
+    /// timeout. The capability does not grant the ability to *raise*
+    /// or *mask* an interrupt line; both remain kernel-only
+    /// (`AGENTS.md` §5.4 — capability checks before state touches).
+    pub const IRQ_BIND: Self = Self(11);
 
     /// Construct a [`CapabilityId`] from its raw value, validating the range.
     ///
@@ -99,6 +111,7 @@ mod tests {
         assert_eq!(CapabilityId::AUDIT_READ.as_u16(), 8);
         assert_eq!(CapabilityId::AUDIT_WRITE.as_u16(), 9);
         assert_eq!(CapabilityId::MEM_DMA.as_u16(), 10);
+        assert_eq!(CapabilityId::IRQ_BIND.as_u16(), 11);
     }
 
     #[test]
@@ -118,5 +131,6 @@ mod tests {
     fn index_is_within_bitset_bounds() {
         assert!(CapabilityId::AUDIT_WRITE.index() < 256);
         assert!(CapabilityId::MEM_DMA.index() < 256);
+        assert!(CapabilityId::IRQ_BIND.index() < 256);
     }
 }

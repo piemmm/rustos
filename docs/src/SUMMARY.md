@@ -20,6 +20,7 @@
 # Security
 
 - [Per-task capability registry](./security/captable.md)
+- [Hardware interrupts: capability-gated wake-ups](./security/irq.md)
 
 # Shared libraries
 

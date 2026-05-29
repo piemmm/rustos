@@ -33,7 +33,7 @@ pub use driver::{
 pub use error::Errno;
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
 pub use manifest::{ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES};
-pub use syscall::{SyscallNumber, SYSCALL_TABLE_HASH_LEN};
+pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
     SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,

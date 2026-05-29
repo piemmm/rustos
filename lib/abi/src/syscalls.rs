@@ -251,11 +251,43 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::IRQ_BIND,
+        name: "irq_bind",
+        arg_count: 1,
+        args: [
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Handle,
+        required_capability: Some(CapabilityId::IRQ_BIND),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::IRQ_WAIT,
+        name: "irq_wait",
+        arg_count: 2,
+        args: [
+            AbiType::Handle,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::IRQ_BIND),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
 /// [`ENCODED_TABLE`].
-pub const ENCODED_TABLE_LEN: usize = SYSCALL_ENCODED_RECORD_LEN * 8;
+pub const ENCODED_TABLE_LEN: usize = SYSCALL_ENCODED_RECORD_LEN * 10;
 
 /// Canonical byte representation of [`SYSCALLS`].
 ///
@@ -404,6 +436,16 @@ mod tests {
         // a refactor cannot loosen the requirement.
         let revoke = spec_for(SyscallNumber::CAP_REVOKE).unwrap();
         assert_eq!(revoke.required_capability, Some(CapabilityId::USER_ADMIN));
+        // The IRQ pair is gated by CAP_IRQ_BIND on both ends — there
+        // is no asymmetry between bind and wait (a task that may
+        // bind a line must be able to wait on it, and a task that
+        // may wait on a handle must have been authorised to mint
+        // it). Lock that down so a refactor cannot split the gate.
+        let bind = spec_for(SyscallNumber::IRQ_BIND).unwrap();
+        assert_eq!(bind.required_capability, Some(CapabilityId::IRQ_BIND));
+        assert!(bind.audit, "irq_bind must be audited");
+        let wait = spec_for(SyscallNumber::IRQ_WAIT).unwrap();
+        assert_eq!(wait.required_capability, Some(CapabilityId::IRQ_BIND));
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

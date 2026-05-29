@@ -47,7 +47,7 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
-use rustos_abi::{CapabilityId, Errno};
+use rustos_abi::{CapabilityId, Errno, IrqHandle};
 use rustos_kernel_sched::{Scheduler, SchedulerArch};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_sync::RwLock;
@@ -266,6 +266,37 @@ where
         // sanctioned source.
         let cpu = rustos_kernel_sched::SchedulerArch::current_cpu(self.arch);
         Ok(self.arch.monotonic_ns(cpu))
+    }
+
+    fn irq_bind(&self, caller: &CallerContext<'_>, _line: u32) -> SyscallResult {
+        // The `abi-v1` syscall + capability surface is frozen
+        // (`docs/src/security/irq.md`); the kernel-side IRQ table,
+        // per-handle wait queue, and controller-level mask/unmask
+        // sequence land in the follow-up session that ships the
+        // `KernelVirtioHost::notify_wait` rewrite. Until then the
+        // handler announces the deferral the same way `cap_delegate`
+        // already does for `user_memory_copyin` — one
+        // `SYSCALL_FEATURE_UNAVAILABLE` audit record and
+        // `Errno::NotImplemented` (`AGENTS.md` §5.4.5 — fail closed).
+        self.audit_feature_unavailable(caller, "irq_subsystem");
+        Err(Errno::NotImplemented)
+    }
+
+    fn irq_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        _handle: IrqHandle,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        // Symmetric with `irq_bind`: no handle can have been minted
+        // (the bind path is itself deferred), so any handle the
+        // caller presents would necessarily be unknown to the
+        // kernel. The handler must still emit the deferral record
+        // rather than `NotFound` because the *subsystem* is missing,
+        // not the *handle* — surface that distinction so the audit
+        // log can be used to drive the follow-up.
+        self.audit_feature_unavailable(caller, "irq_subsystem");
+        Err(Errno::NotImplemented)
     }
 }
 
@@ -630,6 +661,59 @@ mod tests {
         assert_eq!(
             h.cap_revoke(&ctx, 999, CapabilityId::FS_MOUNT),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// `irq_bind` defers to the (not yet wired) IRQ subsystem. The
+    /// handler must emit one `SYSCALL_FEATURE_UNAVAILABLE` audit
+    /// record carrying `feature = "irq_subsystem"` and return
+    /// `Errno::NotImplemented` — symmetric with `cap_delegate`'s
+    /// `user_memory_copyin` deferral.
+    #[test]
+    fn irq_bind_returns_not_implemented_and_audits_feature_unavailable() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        sink.clear();
+        assert_eq!(h.irq_bind(&ctx, 42), Err(Errno::NotImplemented));
+        assert_eq!(
+            sink.event_ids(),
+            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+        );
+    }
+
+    /// `irq_wait` mirrors `irq_bind`'s deferral.
+    #[test]
+    fn irq_wait_returns_not_implemented_and_audits_feature_unavailable() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink);
+        sink.clear();
+        assert_eq!(
+            h.irq_wait(&ctx, IrqHandle::from_raw(0xDEAD_BEEF), 1_000_000),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            sink.event_ids(),
+            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
         );
     }
 

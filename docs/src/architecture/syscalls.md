@@ -53,6 +53,8 @@ re-typed. New behaviour ships as `abi-v2`.
 |   5 | `cap_delegate` | `target_handle`, `user_ptr`             | `errno` | —                       | yes     |
 |   6 | `cap_revoke`   | `target_handle`, `cap`                  | `errno` | `CAP_USER_ADMIN`        | yes     |
 |   7 | `clock_get`    | —                                       | `u64`   | —                       | no      |
+|   8 | `irq_bind`     | `u32 line`                              | `IrqHandle` | `CAP_IRQ_BIND`      | yes     |
+|   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
 
 ### Capability matrix
 
@@ -60,9 +62,14 @@ The dispatcher consults `kernel/sec`'s `TaskCapabilities::has` against
 the syscall's `required_capability` before any handler runs. The matrix
 is exhaustive — anything not listed below is ungated:
 
-| Capability         | Syscalls gated by it |
-| ------------------ | -------------------- |
-| `CAP_USER_ADMIN`   | `cap_revoke`         |
+| Capability         | Syscalls gated by it       |
+| ------------------ | -------------------------- |
+| `CAP_USER_ADMIN`   | `cap_revoke`               |
+| `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
+
+The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
+modes are documented in
+[`security/irq.md`](../security/irq.md).
 
 A future syscall that needs e.g. `CAP_DRV_LOAD` lands as a new entry in
 the table and a new row here; existing rows never move.
@@ -137,6 +144,8 @@ re-validates arguments — the dispatcher does that first.
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`                                                                | —                                                                         |
+| `irq_bind`      | *deferred* — kernel IRQ table + per-handle wait queue not landed                                              | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = irq_subsystem`) + `NotImplemented`. |
+| `irq_wait`      | *deferred* — same as `irq_bind`                                                                               | Same.                                                                     |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

@@ -1334,6 +1334,76 @@ follow-up is its own thread and is now also complete.
   `.junie/next-session-prompt.md` with concrete entry points that
   build on the `VirtioHostFactory` seam landed here.
 
+- Stage 4.D follow-up (Item 2 — IRQ ABI surface, *complete in
+  part*): the ABI-half of Item 2 has landed. `CapabilityId::IRQ_BIND
+  = 11` is appended to the frozen `abi-v1` capability table
+  (`lib/abi/src/capability.rs`) and mirrored in
+  `kernel/sec::is_known_capability` plus its audit-frozen-id test
+  (`is_known_capability_covers_abi_v1_constants`).
+  `SyscallNumber::IRQ_BIND = 8` and `IRQ_WAIT = 9` are appended in
+  `lib/abi/src/syscall.rs` next to the existing frozen numbers, and
+  their `SyscallSpec` rows landed in `lib/abi/src/syscalls.rs` with
+  `required_capability = Some(CapabilityId::IRQ_BIND)` on both —
+  `irq_bind` (`U32 -> Handle`, audited) and `irq_wait` (`Handle,
+  U64 -> Errno`, unaudited on success). `ENCODED_TABLE_LEN` bumped
+  from `26 * 8` to `26 * 10`; `SYSCALL_TABLE_HASH` in
+  `kernel/syscall/src/table.rs` refreshed to
+  `6b6dbd9c30b6aa87d41ac840a5bdef1cc6fc6a71ae03fe4db7746d964c09814b`
+  via `cargo xtask abi-check`. New opaque ABI newtype
+  `IrqHandle(u64)` in `lib/abi/src/syscall.rs` with `INVALID = 0`
+  reserved against caller-zeroed buffers. New `Errno::TimedOut =
+  13` appended to the `#[non_exhaustive]` `Errno` enum (also
+  frozen). Trait surface: `SyscallHandlers::irq_bind`/`irq_wait`
+  added with `Dispatcher::invoke` arms; production
+  `KernelSyscallHandlers` (`kernel/core/src/syscalls.rs`)
+  implements both as `SYSCALL_FEATURE_UNAVAILABLE(feature =
+  irq_subsystem) + Errno::NotImplemented` — the same deferral
+  pattern `cap_delegate` uses for `user_memory_copyin`. Mock and
+  fuzz-test handlers updated. **What is deferred to Items 2-tail /
+  3–6.** The kernel-side IRQ table, the per-handle wait queue, the
+  controller-level mask/unmask sequence, the
+  `KernelVirtioHost::notify_wait` rewrite, the kernel-binary
+  `VirtioHostFactory` impl, and the QEMU mock-device wake-up
+  integration test all remain outstanding. The ABI-half landing
+  was scoped explicitly because the next-session-prompt's "Item 2
+  in full" wording presumed kernel infrastructure (production
+  handlers wiring, scheduler wait-queue API, per-process `DmaPool`
+  carve point reachable from kernel binary) parts of which
+  required additional follow-up sessions to land at AGENTS.md's
+  no-hacks bar. **Docs.** New
+  [`docs/src/security/irq.md`](src/security/irq.md) locks down the
+  user-visible contract (per-architecture line-id namespaces,
+  `CAP_IRQ_BIND` rationale, wake-up sequencing, failure-mode
+  table, mask-before-wake invariant); cross-linked from
+  `docs/src/architecture/syscalls.md` (capability matrix +
+  handler-wiring row) and added to `docs/src/SUMMARY.md` under
+  "Security". **Tests.** New unit tests:
+  `lib/abi/src/capability.rs::well_known_ids_are_frozen` + index
+  test extended for `IRQ_BIND`;
+  `lib/abi/src/syscall.rs::well_known_numbers_are_frozen` +
+  `irq_handle_round_trips_and_invalid_is_zero`;
+  `lib/abi/src/syscalls.rs::capability_requirements_are_frozen`
+  pins both rows + the audit flag;
+  `lib/abi/src/error.rs::discriminants_are_frozen` extended for
+  `TimedOut`; `kernel/sec` audit test mirrored.
+  `kernel/syscall/src/table.rs` gained four new dispatcher tests
+  (`irq_bind_without_capability_is_refused_and_audited`,
+  `irq_bind_with_capability_reaches_handler_and_audits_invocation`,
+  `irq_bind_rejects_line_argument_with_high_bits_set`,
+  `irq_wait_passes_handle_and_timeout_verbatim`) covering all
+  four dispatcher policy edges (cap-denied, cap-granted + decode
+  + audit, U32 high-bits rejected, opaque-handle passthrough).
+  `kernel/core` gained
+  `irq_{bind,wait}_returns_not_implemented_and_audits_feature_unavailable`
+  mirroring the `cap_delegate` deferral test. **Verification.**
+  `cargo xtask abi-check` clean. `cargo test -p rustos-abi -p
+  rustos-kernel-syscall -p rustos-kernel-sec -p
+  rustos-kernel-core` all green. Items 3–6 (bus-handle hand-off,
+  four QEMU integration test crates, userland ARP/IP/ICMP
+  responder, acceptance gate) plus the Item 2-tail kernel work
+  remain outstanding and have been rewritten into the new
+  `.junie/next-session-prompt.md`.
+
 - Stage 4.D follow-up (Item 0a — owned `DmaSlab` API shape,
   *complete*): the API conflict described below has been resolved
   by adopting Option (a). The driver-side `DmaRegion<'a>` borrowed

@@ -9,7 +9,7 @@
 //! (`AGENTS.md` §2.3 — no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, SyscallNumber, SyscallSpec, ENCODED_TABLE,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, SyscallNumber, SyscallSpec, ENCODED_TABLE,
     SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0xca, 0x91, 0x9c, 0x1d, 0xb0, 0x58, 0x7d, 0xc8, 0x4e, 0x6e, 0xd8, 0x2f, 0x49, 0xae, 0x9f, 0xa5,
-    0x52, 0x0e, 0xdc, 0x5a, 0xc2, 0xe8, 0xcf, 0x4f, 0xba, 0xd1, 0x80, 0x39, 0xe0, 0x5e, 0x30, 0xfb,
+    0x6b, 0x6d, 0xbd, 0x9c, 0x30, 0xb6, 0xaa, 0x87, 0xd4, 0x1a, 0xc8, 0x40, 0xa5, 0xbd, 0xef, 0x1c,
+    0xc6, 0xfc, 0x6a, 0x71, 0xae, 0x03, 0xfe, 0x4d, 0xb7, 0x74, 0x6d, 0x96, 0x4c, 0x09, 0x81, 0x4b,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -154,6 +154,32 @@ pub trait SyscallHandlers {
     ) -> SyscallResult;
     /// Read the monotonic clock (nanoseconds since boot).
     fn clock_get(&self, caller: &CallerContext<'_>) -> SyscallResult;
+    /// Bind the calling task to a hardware interrupt line.
+    ///
+    /// `line` is the architecture-defined IRQ identifier. The
+    /// implementation returns the freshly minted [`IrqHandle`] as a
+    /// `u64` in [`SyscallResult::Ok`]; subsequent `irq_wait` calls
+    /// must present that handle. The implementation is responsible
+    /// for refusing duplicate bindings, refusing lines outside the
+    /// platform's allowable range, and recording the binding against
+    /// the calling task so the handle cannot be forged
+    /// (`AGENTS.md` §5.2, §5.4).
+    fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult;
+    /// Block the calling task until `handle` fires, with timeout.
+    ///
+    /// On wake-up the implementation returns `Ok(0)`. On timeout
+    /// expiry it returns `Err(Errno::TimedOut)`. The implementation
+    /// must re-check that `handle` was minted for the calling task
+    /// before performing any state transition and must mask the
+    /// underlying line at the controller before resuming the waiter,
+    /// so the same edge cannot stampede the driver
+    /// (`docs/src/security/irq.md`).
+    fn irq_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: IrqHandle,
+        timeout_ns: u64,
+    ) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -280,6 +306,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.cap_revoke(caller, args.0[0], cap)
             }
             SyscallNumber::CLOCK_GET => self.handlers.clock_get(caller),
+            SyscallNumber::IRQ_BIND => {
+                // `validate_arg` already constrained args[0] to fit in
+                // u32 (upper bits zero), so the narrowing is lossless.
+                #[allow(clippy::cast_possible_truncation)]
+                let line = (args.0[0] & 0xFFFF_FFFF) as u32;
+                self.handlers.irq_bind(caller, line)
+            }
+            SyscallNumber::IRQ_WAIT => {
+                let handle = IrqHandle::from_raw(args.0[0]);
+                self.handlers.irq_wait(caller, handle, args.0[1])
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -550,6 +587,22 @@ mod tests {
             self.record("clock_get");
             Ok(42)
         }
+        fn irq_bind(&self, _c: &CallerContext<'_>, line: u32) -> SyscallResult {
+            self.record("irq_bind");
+            // Echo the line back as a fabricated handle so the test
+            // can assert the dispatcher decoded the argument
+            // correctly without inventing a real IRQ allocator.
+            Ok(u64::from(line) | 0xF000_0000_0000_0000)
+        }
+        fn irq_wait(
+            &self,
+            _c: &CallerContext<'_>,
+            _h: IrqHandle,
+            _timeout_ns: u64,
+        ) -> SyscallResult {
+            self.record("irq_wait");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -562,7 +615,7 @@ mod tests {
     fn every_syscall_is_reachable_with_required_capability() {
         let sink = RecordingSink::new();
         // Hold every capability the abi-v1 table requires.
-        let caps = build_caps(&[CapabilityId::USER_ADMIN], &sink);
+        let caps = build_caps(&[CapabilityId::USER_ADMIN, CapabilityId::IRQ_BIND], &sink);
         let ctx = CallerContext {
             task_id: TaskId(7),
             caps: &caps,
@@ -806,5 +859,106 @@ mod tests {
             .is_ok());
         let _ = args;
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn irq_bind_without_capability_is_refused_and_audited() {
+        // Without `CAP_IRQ_BIND` the dispatcher must short-circuit on
+        // the capability check (AGENTS.md §5.4 step 2), refuse with
+        // PermissionDenied, never call the handler, and emit exactly
+        // one denied audit record.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 42; // line — well-typed
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None);
+        assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn irq_bind_with_capability_reaches_handler_and_audits_invocation() {
+        // With `CAP_IRQ_BIND` granted the dispatcher decodes the `u32`
+        // line argument, calls `irq_bind`, and emits a single
+        // SyscallInvoked record (the spec row sets `audit: true`).
+        // The Mock impl fabricates a handle of `line | top-nibble`;
+        // assert the dispatcher returned that verbatim so we know the
+        // narrowing decode is correct.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::IRQ_BIND], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 17;
+        let r = d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args);
+        assert_eq!(r, Ok(0x11 | 0xF000_0000_0000_0000));
+        assert_eq!(h.last(), Some("irq_bind"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn irq_bind_rejects_line_argument_with_high_bits_set() {
+        // The `irq_bind` spec row declares its single argument as
+        // `U32`; the dispatcher's per-arg validator must refuse a
+        // value whose upper 32 bits are non-zero before the handler
+        // is reached, with `Errno::OutOfRange` and a bad-arguments
+        // audit record.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::IRQ_BIND], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1u64 << 40; // high bits set — invalid `U32`
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None);
+        assert_eq!(sink.ids(), [AuditEvent::SyscallBadArguments.id().0]);
+    }
+
+    #[test]
+    fn irq_wait_passes_handle_and_timeout_verbatim() {
+        // `irq_wait` carries `(Handle, U64)`; both slots accept any
+        // 64-bit value verbatim. The dispatcher must forward both
+        // arguments to the handler unchanged and emit no
+        // `SyscallInvoked` record (the spec row sets `audit: false`).
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::IRQ_BIND], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0xCAFE_F00D_DEAD_BEEF; // handle
+        args.0[1] = 1_000_000_000; // timeout_ns
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::IRQ_WAIT.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("irq_wait"));
+        assert!(sink.ids().is_empty(), "irq_wait must not audit on success");
     }
 }
