@@ -133,10 +133,76 @@ The two trailing slots have `DeviceID == 0` and are skipped — the
 same behaviour `virtio-mmio.c` in QEMU exhibits for unattached
 transports.
 
+## Register-window hand-off
+
+Enumeration only *names* a device; before a virtio transport can
+drive it, the device's register block has to be mapped into the
+driver's address space. A bus driver never synthesises that pointer
+itself — doing so would be ambient authority, which `AGENTS.md` §4
+forbids. Instead the kernel is the sole minter of a register window.
+
+### The seam
+
+`lib/abi` defines two types and one trait:
+
+- `RegisterWindow` — a capability-checked, kernel-mapped MMIO window.
+  Its only constructor (`from_mapping`) is `unsafe` and is called
+  *only* by the kernel after it has validated the mapping, so safe
+  code can never fabricate one. Every accessor (`read_u32` /
+  `write_u32` / …) is bounds- and alignment-checked and returns
+  `WindowError` rather than touching memory out of range.
+- `MmioMapper` — the kernel-side MMIO-map facility the bus driver
+  calls: `map_window(phys_base, len) -> Result<RegisterWindow,
+  MmioMapError>`.
+- `MmioMapError` — `CapabilityMissing` / `InvalidRegion` /
+  `Unsupported`, each with an `as_driver_error()` mapping.
+
+The host hands the bus driver an `&dyn MmioMapper` through
+`DriverHost::mmio_mapper()` (default `None`). The kernel's concrete
+mapper is `KernelMmioMapper` in `drivers/bus/virtio` (behind the
+`kernel-host` feature); it wraps `kernel/mem::MmioMap` and routes
+every request through the capability gate `kernel/sec::map_mmio`.
+
+### Capability flow
+
+```text
+bus driver                     kernel (KernelMmioMapper)
+----------                     --------------------------
+resolve (phys_base, len)
+   PCI : Pci::map_bar_window(bdf, bar_index, mapper)
+   MMIO: Mmio::map_slot_window(base, mapper)
+        │
+        └── mapper.map_window(phys_base, len) ──► kernel/sec::map_mmio
+                                                    1. check CAP_MMIO_MAP
+                                                       │ no  → MmioMapDenied (audit 1041)
+                                                       │       Err(CapabilityMissing)
+                                                       │ yes
+                                                    2. MmioMap::map  (NO_CACHE, guard pages)
+                                                    3. emit MmioMapped (audit 1040)
+        ◄────────────── RegisterWindow ─────────────┘
+   wrap in PciBackend / MmioBackend (virtio transport)
+```
+
+The kernel maps the device's *own* physical frames with caching
+disabled (`MapFlags::NO_CACHE`) and brackets the window with guard
+pages, so a driver that walks off the end of a register block faults
+instead of poking a neighbouring device (`AGENTS.md` §4). The grant
+and every refusal are recorded in the audit log (events `1040`
+`MmioMapped` / `1041` `MmioMapDenied`; see
+`architecture/security.md`).
+
+The PCI hand-off resolves the requested memory BAR (refusing I/O-port
+BARs, which are reached through port I/O, and unused BARs); the MMIO
+hand-off reads the `<base, length>` pair from the matching
+`virtio,mmio` device-tree node. Neither path can run without the
+caller holding `CAP_MMIO_MAP`.
+
 ## Shared types
 
 There is no copy-paste between the two drivers; the only shared
-piece of code is the FDT parser, which lives in `lib/util::dtb`
-because two independent crates need it (`AGENTS.md` §2.3). PCI and
-MMIO each carry their own configuration-access abstraction inside
-the crate because no second caller has materialised.
+pieces of code are the FDT parser (`lib/util::dtb`) and the
+`RegisterWindow` / `MmioMapper` register-window seam (`lib/abi`),
+both of which live below the drivers because more than one crate
+needs them (`AGENTS.md` §2.3). PCI and MMIO each keep their own
+configuration-access abstraction inside the crate because no second
+caller has materialised.

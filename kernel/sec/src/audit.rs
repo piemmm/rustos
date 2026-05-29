@@ -24,6 +24,8 @@
 //! | 1023 | Info  | `TASK_CAPABILITIES_REVOKED`       | One or more capabilities were revoked from a task. |
 //! | 1030 | Info  | `DMA_ALLOCATED`                   | A DMA buffer was allocated for a task that holds `CAP_MEM_DMA` (`AGENTS.md` §4). |
 //! | 1031 | Error | `DMA_ALLOC_DENIED`                | A DMA allocation was refused because the calling task lacks `CAP_MEM_DMA`. |
+//! | 1040 | Info  | `MMIO_MAPPED`                     | A device register window was mapped for a task that holds `CAP_MMIO_MAP` (`AGENTS.md` §4). |
+//! | 1041 | Error | `MMIO_MAP_DENIED`                 | An MMIO-map request was refused because the calling task lacks `CAP_MMIO_MAP`. |
 //!
 //! Adding a new event requires assigning the next free identifier in this
 //! file and appending a row to the table in
@@ -67,6 +69,12 @@ pub enum AuditEvent {
     /// A DMA allocation was refused because the calling task does
     /// not hold `CapabilityId::MEM_DMA`.
     DmaAllocDenied,
+    /// A device register window was mapped through the
+    /// capability-gated MMIO-map facility.
+    MmioMapped,
+    /// An MMIO-map request was refused because the calling task does
+    /// not hold `CapabilityId::MMIO_MAP`.
+    MmioMapDenied,
 }
 
 impl AuditEvent {
@@ -87,6 +95,8 @@ impl AuditEvent {
             Self::TaskCapabilitiesRevoked => 1023,
             Self::DmaAllocated => 1030,
             Self::DmaAllocDenied => 1031,
+            Self::MmioMapped => 1040,
+            Self::MmioMapDenied => 1041,
         })
     }
 
@@ -104,14 +114,16 @@ impl AuditEvent {
             | Self::TaskCapabilitiesDerived
             | Self::TaskCapabilitiesDelegated
             | Self::TaskCapabilitiesRevoked
-            | Self::DmaAllocated => Level::Info,
+            | Self::DmaAllocated
+            | Self::MmioMapped => Level::Info,
             Self::IdentityTableRejected
             | Self::ManifestBadHeader
             | Self::ManifestAbiMismatch
             | Self::ManifestSignatureInvalid
             | Self::ManifestUnknownCapability
             | Self::TaskCapabilitiesDelegateWiden
-            | Self::DmaAllocDenied => Level::Error,
+            | Self::DmaAllocDenied
+            | Self::MmioMapDenied => Level::Error,
         }
     }
 
@@ -136,6 +148,8 @@ impl AuditEvent {
             Self::TaskCapabilitiesRevoked => "task capabilities revoked",
             Self::DmaAllocated => "dma buffer allocated",
             Self::DmaAllocDenied => "dma allocation denied: missing CAP_MEM_DMA",
+            Self::MmioMapped => "mmio register window mapped",
+            Self::MmioMapDenied => "mmio map denied: missing CAP_MMIO_MAP",
         }
     }
 }
@@ -243,6 +257,8 @@ mod tests {
         assert_eq!(AuditEvent::TaskCapabilitiesRevoked.id(), EventId(1023));
         assert_eq!(AuditEvent::DmaAllocated.id(), EventId(1030));
         assert_eq!(AuditEvent::DmaAllocDenied.id(), EventId(1031));
+        assert_eq!(AuditEvent::MmioMapped.id(), EventId(1040));
+        assert_eq!(AuditEvent::MmioMapDenied.id(), EventId(1041));
     }
 
     #[test]
@@ -281,6 +297,8 @@ mod tests {
             AuditEvent::TaskCapabilitiesRevoked,
             AuditEvent::DmaAllocated,
             AuditEvent::DmaAllocDenied,
+            AuditEvent::MmioMapped,
+            AuditEvent::MmioMapDenied,
         ] {
             let id = ev.id().0;
             assert!(

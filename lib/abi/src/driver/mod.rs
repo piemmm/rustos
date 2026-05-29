@@ -50,10 +50,12 @@ pub mod display;
 pub mod dma;
 pub mod filesystem;
 pub mod input;
+pub mod mmio;
 pub mod net;
 pub mod virtio;
 
 pub use dma::{DmaSlab, PoolId, SlabFreeFn};
+pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use virtio::VirtioHost;
 
 /// Sensitivity class of a payload buffer crossing the driver ABI.
@@ -529,6 +531,37 @@ pub trait DriverHost {
     /// None at the call site; the underlying host enforces capability
     /// checks at each [`VirtioHost`] method.
     fn virtio_host(&self) -> Option<&dyn VirtioHost> {
+        None
+    }
+
+    /// Returns the per-driver MMIO-map facility, if the driver host
+    /// has minted one for this driver module.
+    ///
+    /// Bus drivers (`drivers/bus/pci`, `drivers/bus/mmio`) call this
+    /// once they have discovered a device's register block and need
+    /// a [`RegisterWindow`] over it. The returned [`MmioMapper`]
+    /// enforces [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP)
+    /// at each [`map_window`](MmioMapper::map_window) call; the bus
+    /// driver never synthesises a pointer itself (`AGENTS.md` §4).
+    ///
+    /// The default implementation returns `None`, which is the
+    /// correct shape for every host that does not (yet) ship the
+    /// MMIO-map facility — for example a unit-test seam that drives a
+    /// non-bus driver. This is an `abi-v1` *internal* addition that
+    /// extends the host trait observed by in-tree drivers; the public
+    /// driver entry point is unchanged and the default body keeps
+    /// every existing host impl source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; absence of a mapper is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the mapper enforces
+    /// [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP) at
+    /// each call.
+    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         None
     }
 }

@@ -17,12 +17,60 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::ptr::NonNull;
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind};
+use rustos_abi::{
+    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
+};
 
 use crate::config::{BarKind, Capability, ConfigAddress, ConfigSpace};
 use crate::enumerate::Pci;
+
+// ---- Mock MMIO mapper ----------------------------------------------------
+
+/// Stand-in for the kernel's MMIO-map facility. Backs every minted
+/// [`RegisterWindow`] with a fixed heap buffer that outlives the
+/// mapper (and therefore every window). `granted` models the
+/// `CAP_MMIO_MAP` check the real kernel mapper performs.
+struct MockMapper {
+    /// `u32`-element backing so its base is \u2265 4-byte aligned, matching
+    /// the page-aligned mapping the real kernel mapper produces.
+    backing: RefCell<Vec<u32>>,
+    granted: bool,
+}
+
+impl MockMapper {
+    fn new(granted: bool) -> Self {
+        Self {
+            // 0x4000 words = 64 KiB.
+            backing: RefCell::new(vec![0u32; 0x4000]),
+            granted,
+        }
+    }
+}
+
+impl MmioMapper for MockMapper {
+    fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
+        if !self.granted {
+            return Err(MmioMapError::CapabilityMissing);
+        }
+        if len == 0 {
+            return Err(MmioMapError::InvalidRegion);
+        }
+        let mut backing = self.backing.borrow_mut();
+        if len > backing.len() * 4 {
+            return Err(MmioMapError::Unsupported);
+        }
+        let base = NonNull::new(backing.as_mut_ptr().cast::<u8>()).expect("non-null heap buffer");
+        // SAFETY: `base` covers `backing.len() * 4 >= len` bytes and is
+        // 4-byte aligned (the `Vec<u32>` allocation guarantee); the
+        // backing lives for the mapper's lifetime, which outlives every
+        // window minted here, and no other reference aliases it while
+        // the window is live.
+        Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
+    }
+}
 
 // ---- Mock host -----------------------------------------------------------
 
@@ -434,4 +482,63 @@ fn enumeration_skips_invalid_vendor_sentinel() {
         address: 0,
     }; 4];
     assert_eq!((&pci as &dyn Bus).enumerate(&mut buf), Ok(0));
+}
+
+fn virtio_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 3,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+}
+
+#[test]
+fn map_bar_window_hands_off_memory_bar_to_kernel_mapper() {
+    let pci = Pci::new(q35_fixture());
+    let mapper = MockMapper::new(true);
+    // BAR1 is the 16 KiB 64-bit memory BAR at 0xFEBF_0000.
+    let window = pci
+        .map_bar_window(virtio_bdf(), 1, &mapper)
+        .expect("memory BAR maps");
+    assert_eq!(window.phys_base(), 0xFEBF_0000);
+    assert_eq!(window.len(), 16 * 1024);
+    // The window is usable: a register round-trips through it.
+    window.write_u32(0, 0x1AF4_1000).expect("in bounds");
+    assert_eq!(window.read_u32(0).expect("in bounds"), 0x1AF4_1000);
+}
+
+#[test]
+fn map_bar_window_refuses_io_bar() {
+    let pci = Pci::new(q35_fixture());
+    let mapper = MockMapper::new(true);
+    // BAR0 is an I/O-port BAR — not mappable as a register window.
+    assert_eq!(
+        pci.map_bar_window(virtio_bdf(), 0, &mapper).unwrap_err(),
+        DriverError::Unsupported
+    );
+}
+
+#[test]
+fn map_bar_window_reports_not_found_for_absent_bar() {
+    let pci = Pci::new(q35_fixture());
+    let mapper = MockMapper::new(true);
+    // BAR5 is unused on the virtio function.
+    assert_eq!(
+        pci.map_bar_window(virtio_bdf(), 5, &mapper).unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn map_bar_window_propagates_capability_denial() {
+    let pci = Pci::new(q35_fixture());
+    // Mapper without CAP_MMIO_MAP: the hand-off must surface the
+    // kernel's refusal, not synthesise a pointer.
+    let mapper = MockMapper::new(false);
+    assert_eq!(
+        pci.map_bar_window(virtio_bdf(), 1, &mapper).unwrap_err(),
+        DriverError::PermissionDenied
+    );
 }

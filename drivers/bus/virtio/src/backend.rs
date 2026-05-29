@@ -1,175 +1,185 @@
-//! PCI and MMIO backend seams for the virtio [`crate::Transport`]
+//! PCI and MMIO backend adapters for the virtio [`crate::Transport`]
 //! trait.
 //!
-//! Stage 4.D wires these seams to the kernel-side BAR / MMIO-region
-//! capability that the existing `drivers/bus/pci` and
-//! `drivers/bus/mmio` crates discover (`PLAN.md` Stage 4 status).
-//! Until that capability is wired, this module ships **only the
-//! safe trait surfaces** — [`PortIo`] and [`MmioOps`] — plus the
-//! tiny [`PciBackend`] / [`MmioBackend`] adapter shells. The
-//! concrete `Transport` impls live behind the same `#[cfg]` gates as
-//! the existing bus-driver `unsafe asm!` blocks and are landed in
-//! the Stage-4.D wiring PR; this crate documents the contract here
-//! so the virtio-blk and virtio-net driver crates can already be
-//! reviewed against a stable seam (`AGENTS.md` §2.4 / §8).
+//! Each backend wraps a single capability-checked
+//! [`RegisterWindow`] — the device's register block, mapped into the
+//! driver's address space by the kernel's MMIO-map facility
+//! (`kernel/sec::map_mmio`, reached through
+//! [`MmioMapper`](rustos_abi::MmioMapper)). Before Stage 4.D Item 3
+//! these shells carried a *bare identification tuple* (a PCI
+//! bus/device/function triple, or an MMIO window length) and the
+//! driver was expected to synthesise register accesses itself; that
+//! violated `AGENTS.md` §4 ("no ambient authority — a process can
+//! only reach memory the kernel mapped for it"). The window is now
+//! the single thing a backend holds: a driver cannot fabricate one,
+//! so it can only ever touch registers the kernel chose to expose.
 //!
-//! Keeping the seams in *this* crate, not in a `lib/`, follows
-//! `AGENTS.md` §2.2 / §6: the seams currently have a single caller
-//! (the virtio transport) and so the two-caller rule does not
-//! justify a `lib/` crate yet.
+//! The PCI and MMIO transports decode *different* register layouts
+//! (virtio 1.1 §4.1 modern-PCI common-config capability vs §4.2 the
+//! MMIO register map), which is why two distinct backend types exist
+//! rather than one (`AGENTS.md` §2.3 — each justifies its existence).
+//! Both delegate the actual load/store to the bounds-checked
+//! accessors on [`RegisterWindow`]; neither performs raw pointer
+//! arithmetic.
 
-/// Safe abstraction over the architecture's port I/O space.
-///
-/// Mirrors `drivers/bus/pci`'s `PortIo` trait so that this crate can
-/// host its own legacy-PCI register accessors without depending on
-/// `rustos-drv-bus-pci`'s internals (`AGENTS.md` §2.4 — no implicit
-/// inter-crate API surface).
-pub trait PortIo {
-    /// Read a 32-bit value from `port`.
-    fn read_u32(&self, port: u16) -> u32;
-    /// Write a 32-bit value to `port`.
-    fn write_u32(&self, port: u16, value: u32);
-}
-
-/// Safe abstraction over the architecture's volatile MMIO accesses.
-///
-/// Mirrors `drivers/bus/mmio`'s `MmioRead` and extends it with a
-/// matching write side; the virtio MMIO transport (`virtio 1.1
-/// §4.2`) requires both directions.
-pub trait MmioOps {
-    /// Volatile-read a 32-bit value `offset` bytes into the device's
-    /// MMIO window.
-    fn read_u32(&self, offset: usize) -> u32;
-    /// Volatile-write a 32-bit value `offset` bytes into the
-    /// device's MMIO window.
-    fn write_u32(&self, offset: usize, value: u32);
-}
+use rustos_abi::{RegisterWindow, WindowError};
 
 /// PCI-bus backend adapter.
 ///
-/// Carries a reference to the [`PortIo`] seam, along with the
-/// PCI device's bus / device / function triple. The concrete
-/// `Transport` impl lives in the Stage-4.D follow-up PR; this
-/// adapter shell is exported so that the bus-driver hand-off API
-/// can be sketched against a stable type name today.
-pub struct PciBackend<'a, P: PortIo + ?Sized> {
-    /// Borrowed `PortIo` seam.
-    pub port_io: &'a P,
-    /// PCI device address.
-    pub bus: u8,
-    /// PCI device slot.
-    pub device: u8,
-    /// PCI function.
-    pub function: u8,
+/// Owns the [`RegisterWindow`] mapped over the virtio device's modern
+/// PCI capability register block (the BAR the bus driver resolved and
+/// handed to [`MmioMapper::map_window`](rustos_abi::MmioMapper::map_window)).
+pub struct PciBackend {
+    window: RegisterWindow,
+}
+
+impl PciBackend {
+    /// Wrap a kernel-mapped PCI register window.
+    ///
+    /// The window is obtained by the PCI bus driver from the kernel's
+    /// MMIO-map facility after it resolves the device's memory BAR;
+    /// this constructor never synthesises a pointer.
+    #[must_use]
+    pub fn new(window: RegisterWindow) -> Self {
+        Self { window }
+    }
+
+    /// Borrow the underlying register window.
+    #[must_use]
+    pub fn window(&self) -> &RegisterWindow {
+        &self.window
+    }
+
+    /// Read a 32-bit device register at byte `offset` within the
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`WindowError`] if `offset` is misaligned or the
+    /// access overruns the window.
+    pub fn read_u32(&self, offset: usize) -> Result<u32, WindowError> {
+        self.window.read_u32(offset)
+    }
+
+    /// Write a 32-bit device register at byte `offset` within the
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`WindowError`] if `offset` is misaligned or the
+    /// access overruns the window.
+    pub fn write_u32(&self, offset: usize, value: u32) -> Result<(), WindowError> {
+        self.window.write_u32(offset, value)
+    }
 }
 
 /// MMIO-bus backend adapter.
 ///
-/// Carries a reference to the [`MmioOps`] seam and the device's
-/// MMIO window length, planted by `drivers/bus/mmio` when it
-/// hand-offs the device.
-pub struct MmioBackend<'a, M: MmioOps + ?Sized> {
-    /// Borrowed `MmioOps` seam.
-    pub mmio: &'a M,
-    /// Length of the device's MMIO window, in bytes.
-    pub window_len: usize,
+/// Owns the [`RegisterWindow`] mapped over the virtio-MMIO transport
+/// slot the MMIO bus driver discovered in the device tree and handed
+/// to [`MmioMapper::map_window`](rustos_abi::MmioMapper::map_window).
+pub struct MmioBackend {
+    window: RegisterWindow,
+}
+
+impl MmioBackend {
+    /// Wrap a kernel-mapped MMIO register window.
+    ///
+    /// The window is obtained by the MMIO bus driver from the
+    /// kernel's MMIO-map facility after it parses the transport
+    /// slot's base + length from the device tree; this constructor
+    /// never synthesises a pointer.
+    #[must_use]
+    pub fn new(window: RegisterWindow) -> Self {
+        Self { window }
+    }
+
+    /// Borrow the underlying register window.
+    #[must_use]
+    pub fn window(&self) -> &RegisterWindow {
+        &self.window
+    }
+
+    /// Length of the device's MMIO register window, in bytes.
+    #[must_use]
+    pub fn window_len(&self) -> usize {
+        self.window.len()
+    }
+
+    /// Read a 32-bit device register at byte `offset` within the
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`WindowError`] if `offset` is misaligned or the
+    /// access overruns the window.
+    pub fn read_u32(&self, offset: usize) -> Result<u32, WindowError> {
+        self.window.read_u32(offset)
+    }
+
+    /// Write a 32-bit device register at byte `offset` within the
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`WindowError`] if `offset` is misaligned or the
+    /// access overruns the window.
+    pub fn write_u32(&self, offset: usize, value: u32) -> Result<(), WindowError> {
+        self.window.write_u32(offset, value)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::Cell;
+    use core::ptr::NonNull;
 
-    /// Deterministic in-memory fake [`PortIo`] used by the in-crate
-    /// unit tests (the same pattern `drivers/bus/pci` uses for its
-    /// mock).
-    struct FakePortIo {
-        last_port: Cell<u16>,
-        last_value: Cell<u32>,
-    }
+    /// 8-byte-aligned byte buffer so a window's base satisfies
+    /// `RegisterWindow::from_mapping`'s ≥ 4-byte alignment contract.
+    #[repr(align(8))]
+    struct Aligned<const N: usize>([u8; N]);
 
-    impl PortIo for FakePortIo {
-        fn read_u32(&self, port: u16) -> u32 {
-            self.last_port.set(port);
-            0xDEAD_BEEF
-        }
-        fn write_u32(&self, port: u16, value: u32) {
-            self.last_port.set(port);
-            self.last_value.set(value);
-        }
-    }
-
-    struct FakeMmio {
-        last_offset: Cell<usize>,
-        last_value: Cell<u32>,
-    }
-
-    impl MmioOps for FakeMmio {
-        fn read_u32(&self, offset: usize) -> u32 {
-            self.last_offset.set(offset);
-            0xCAFE_BABE
-        }
-        fn write_u32(&self, offset: usize, value: u32) {
-            self.last_offset.set(offset);
-            self.last_value.set(value);
-        }
+    /// Build a [`RegisterWindow`] over a borrowed, aligned test
+    /// buffer. The buffer outlives the window inside each test.
+    fn window_over(buf: &mut [u8], phys: u64) -> RegisterWindow {
+        let len = buf.len();
+        let base = NonNull::new(buf.as_mut_ptr()).expect("non-null");
+        // SAFETY: `base` covers exactly `len` bytes of the borrowed
+        // buffer, which outlives the window, and the mutable borrow
+        // guarantees unique access. `phys` is a synthetic device
+        // address for the test.
+        unsafe { RegisterWindow::from_mapping(phys, base, len) }
     }
 
     #[test]
-    fn fake_port_io_round_trip() {
-        let fake = FakePortIo {
-            last_port: Cell::new(0),
-            last_value: Cell::new(0),
-        };
-        assert_eq!(fake.read_u32(0xCF8), 0xDEAD_BEEF);
-        assert_eq!(fake.last_port.get(), 0xCF8);
-        fake.write_u32(0xCFC, 0x1234_5678);
-        assert_eq!(fake.last_port.get(), 0xCFC);
-        assert_eq!(fake.last_value.get(), 0x1234_5678);
+    fn pci_backend_round_trips_through_window() {
+        let mut buf = Aligned([0u8; 64]);
+        let backend = PciBackend::new(window_over(&mut buf.0, 0xFEBD_0000));
+        backend.write_u32(0x10, 0x1AF4_1000).expect("in bounds");
+        assert_eq!(backend.read_u32(0x10).expect("in bounds"), 0x1AF4_1000);
+        assert_eq!(backend.window().phys_base(), 0xFEBD_0000);
     }
 
     #[test]
-    fn fake_mmio_round_trip() {
-        let fake = FakeMmio {
-            last_offset: Cell::new(0),
-            last_value: Cell::new(0),
-        };
-        assert_eq!(fake.read_u32(0x70), 0xCAFE_BABE);
-        assert_eq!(fake.last_offset.get(), 0x70);
-        fake.write_u32(0x14, 0xAA);
-        assert_eq!(fake.last_offset.get(), 0x14);
-        assert_eq!(fake.last_value.get(), 0xAA);
+    fn pci_backend_propagates_out_of_bounds() {
+        let mut buf = Aligned([0u8; 8]);
+        let backend = PciBackend::new(window_over(&mut buf.0, 0));
+        assert_eq!(backend.read_u32(8), Err(WindowError::OutOfBounds));
     }
 
     #[test]
-    fn pci_backend_shell_carries_address() {
-        let fake = FakePortIo {
-            last_port: Cell::new(0),
-            last_value: Cell::new(0),
-        };
-        let b = PciBackend {
-            port_io: &fake,
-            bus: 0,
-            device: 5,
-            function: 1,
-        };
-        assert_eq!(b.bus, 0);
-        assert_eq!(b.device, 5);
-        assert_eq!(b.function, 1);
-        assert_eq!(b.port_io.read_u32(0), 0xDEAD_BEEF);
+    fn mmio_backend_round_trips_through_window() {
+        let mut buf = Aligned([0u8; 0x100]);
+        let backend = MmioBackend::new(window_over(&mut buf.0, 0x1000_0000));
+        assert_eq!(backend.window_len(), 0x100);
+        backend.write_u32(0x70, 0xCAFE_BABE).expect("in bounds");
+        assert_eq!(backend.read_u32(0x70).expect("in bounds"), 0xCAFE_BABE);
     }
 
     #[test]
-    fn mmio_backend_shell_carries_window() {
-        let fake = FakeMmio {
-            last_offset: Cell::new(0),
-            last_value: Cell::new(0),
-        };
-        let b = MmioBackend {
-            mmio: &fake,
-            window_len: 0x200,
-        };
-        assert_eq!(b.window_len, 0x200);
-        assert_eq!(b.mmio.read_u32(0), 0xCAFE_BABE);
+    fn mmio_backend_propagates_misaligned() {
+        let mut buf = Aligned([0u8; 0x100]);
+        let backend = MmioBackend::new(window_over(&mut buf.0, 0));
+        assert_eq!(backend.write_u32(0x71, 0), Err(WindowError::Misaligned));
     }
 }

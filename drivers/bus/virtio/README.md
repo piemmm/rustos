@@ -31,27 +31,29 @@ only the device-specific wire format.
 - **IRQ delivery into userland.** The current `notify_wait` is a
   polled cooperative hook; real interrupt routing is item 2 of the
   next-session prompt.
-- **Bus-handle hand-off** from the PCI / MMIO bus drivers. The
-  `PciBackend` / `MmioBackend` shells in this crate carry only the
-  identification tuple they were constructed with; the actual
-  capability-checked register window comes from the driver host
-  once 4.D wires it up.
+- **Live register access.** The `PciBackend` / `MmioBackend` types
+  now own a capability-checked `RegisterWindow` minted by the
+  kernel's MMIO-map facility (Stage 4.D Item 3); the remaining work
+  is the concrete `Transport` impl that decodes the virtio register
+  layout on top of that window.
 
 ## Supported hardware
 
 The transport itself is hardware-agnostic. The backends shipped in
 this crate are:
 
-| Backend         | Bus  | Architectures            | Stage 4 status |
-|-----------------|------|--------------------------|----------------|
-| `PciBackend`    | PCI  | x86_64                   | shell only     |
-| `MmioBackend`   | MMIO | aarch64, riscv64         | shell only     |
+| Backend         | Bus  | Architectures            | Stage 4 status     |
+|-----------------|------|--------------------------|--------------------|
+| `PciBackend`    | PCI  | x86_64                   | register window    |
+| `MmioBackend`   | MMIO | aarch64, riscv64         | register window    |
 
-"Shell only" means the wire protocol (status byte, feature
-negotiation, queue programming, notification) is exercised through
-the `MockTransport` seam but is not yet driven against real
-hardware registers — that depends on the per-process DMA API and
-bus-handle hand-off from items 1 and 3 of the next-session prompt.
+"Register window" means each backend owns a capability-checked
+`RegisterWindow` (Stage 4.D Item 3) and exposes bounds-checked
+register accessors over it; the wire protocol (status byte, feature
+negotiation, queue programming, notification) is still exercised
+through the `MockTransport` seam, and the concrete `Transport` impl
+that decodes the virtio register layout on top of the window is the
+remaining Stage 4.D work.
 
 ## Required capabilities
 

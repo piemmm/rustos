@@ -28,12 +28,14 @@
 //!
 //! # Safety
 //!
-//! The MMIO and PCI backends each perform `unsafe` volatile loads /
-//! stores against device registers; every such block carries a
-//! `// SAFETY:` justification, is encapsulated behind a safe
-//! trait (`MmioOps` / `PortIo`), and is exercised by a unit test
-//! against a deterministic in-memory fake.  No `unsafe` is exported
-//! across this crate's public boundary.
+//! The MMIO and PCI backends reach device registers exclusively
+//! through the bounds-checked accessors on
+//! [`rustos_abi::RegisterWindow`], the capability-checked window the
+//! kernel's MMIO-map facility mints for the bus driver. The backends
+//! themselves perform no raw pointer arithmetic and export no
+//! `unsafe` across this crate's public boundary; the single `unsafe`
+//! construction site for a window lives in `lib/abi` and is reached
+//! only by the kernel mapper.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -46,17 +48,21 @@ pub mod dma;
 pub mod host;
 #[cfg(any(feature = "kernel-host", test))]
 pub mod kernel_host;
+#[cfg(any(feature = "kernel-host", test))]
+pub mod kernel_mmio;
 pub mod queue;
 pub mod transport;
 
 #[cfg(test)]
 mod tests;
 
-pub use backend::{MmioBackend, MmioOps, PciBackend, PortIo};
+pub use backend::{MmioBackend, PciBackend};
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
 pub use host::{MockHost, VirtioHost};
 #[cfg(any(feature = "kernel-host", test))]
 pub use kernel_host::KernelVirtioHost;
+#[cfg(any(feature = "kernel-host", test))]
+pub use kernel_mmio::KernelMmioMapper;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
 

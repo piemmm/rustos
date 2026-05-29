@@ -51,6 +51,7 @@ pub mod captable;
 pub mod dma;
 pub mod identity;
 pub mod manifest;
+pub mod mmio;
 
 pub use audit::AuditEvent;
 pub use captable::{CapTable, TaskCapabilities, TaskId};
@@ -60,3 +61,4 @@ pub use identity::{
     MAX_SUPPLEMENTARY_GROUPS,
 };
 pub use manifest::{is_known_capability, verify_manifest, VerifiedManifest};
+pub use mmio::{map_mmio, unmap_mmio, MmioGateError};

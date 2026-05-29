@@ -12,9 +12,13 @@
 #![allow(dead_code)]
 
 use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::DriverError;
+use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
 
 use crate::config::{BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace};
+
+/// Maximum number of BAR slots a type-0 PCI function exposes
+/// (PCI Local Bus 3.0 §6.1).
+const MAX_BARS: usize = 6;
 
 /// Vendor-ID sentinel returned by the host bridge when no function
 /// is present at a given `(bus, device, function)`.
@@ -240,6 +244,67 @@ impl<C: ConfigSpace> Pci<C> {
         } else {
             Ok(count)
         }
+    }
+
+    /// Resolve the memory BAR at `bar_index` on function `bdf` and ask
+    /// the kernel `mapper` to map it, returning the resulting
+    /// [`RegisterWindow`].
+    ///
+    /// This is the Stage 4.D Item 3 hand-off: the PCI bus driver
+    /// resolves the device's register-block physical base and length
+    /// from configuration space and asks the kernel's MMIO-map
+    /// facility for a window over it. The driver never synthesises a
+    /// pointer — the kernel allocates and validates the mapping
+    /// (`AGENTS.md` §4). The returned window is what the bus driver
+    /// hands to the virtio transport's `PciBackend`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no BAR with `bar_index` exists,
+    ///   or the BAR is unused (`size == 0`).
+    /// * [`DriverError::Unsupported`] — the BAR is an I/O-port BAR,
+    ///   which is reached through port I/O rather than a mapped
+    ///   register window, or the function is not a type-0 header.
+    /// * [`DriverError::LengthOutOfRange`] — the BAR size does not fit
+    ///   in `usize` on this target.
+    /// * [`DriverError::PermissionDenied`] — the caller does not hold
+    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   (propagated from the mapper).
+    ///
+    /// # Capabilities
+    ///
+    /// The `mapper` enforces
+    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    pub fn map_bar_window(
+        &self,
+        bdf: u64,
+        bar_index: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        let mut descriptors = [BarDescriptor {
+            index: 0,
+            kind: BarKind::Memory32,
+            base: 0,
+            size: 0,
+            prefetchable: false,
+        }; MAX_BARS];
+        let n = self.bars(bdf, &mut descriptors)?;
+        let bar = descriptors[..n]
+            .iter()
+            .find(|b| b.index == bar_index)
+            .ok_or(DriverError::NotFound)?;
+        // An I/O-port BAR is reached through port I/O, not a mapped
+        // register window; refuse to pretend otherwise.
+        if matches!(bar.kind, BarKind::Io) {
+            return Err(DriverError::Unsupported);
+        }
+        if bar.size == 0 {
+            return Err(DriverError::NotFound);
+        }
+        let len = usize::try_from(bar.size).map_err(|_| DriverError::LengthOutOfRange)?;
+        mapper
+            .map_window(bar.base, len)
+            .map_err(MmioMapError::as_driver_error)
     }
 
     fn is_multifunction(&self, bus: u8, device: u8) -> bool {

@@ -118,6 +118,8 @@ re-used or re-numbered.
 | 1023 | Info  | `TaskCapabilitiesRevoked`         | One or more capabilities were revoked from a task.                    |
 | 1030 | Info  | `DmaAllocated`                    | DMA buffer granted to a task holding `CAP_MEM_DMA` (`AGENTS.md` §4).  |
 | 1031 | Error | `DmaAllocDenied`                  | DMA allocation refused because the caller lacks `CAP_MEM_DMA`.        |
+| 1040 | Info  | `MmioMapped`                      | Device register window mapped for a task holding `CAP_MMIO_MAP` (`AGENTS.md` §4). |
+| 1041 | Error | `MmioMapDenied`                   | MMIO-map request refused because the caller lacks `CAP_MMIO_MAP`.     |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/sec/src/audit.rs` and appending a row to this table in the same

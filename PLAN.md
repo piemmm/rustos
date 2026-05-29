@@ -1196,6 +1196,66 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 3 — capability-checked register-window
+  hand-off from `drivers/bus/{pci,mmio}`, *complete*): the bare
+  identification tuple the `PciBackend` / `MmioBackend` shells used
+  to carry is gone; a bus driver now obtains a kernel-minted
+  register window and the backends own it. **ABI seam.** `lib/abi`
+  ships `CapabilityId::MMIO_MAP = 12` (next free slot after
+  `IRQ_BIND`, frozen by `well_known_ids_are_frozen` and added to
+  `kernel/sec::is_known_capability`), plus a new
+  `lib/abi/src/driver/mmio.rs`: `RegisterWindow` (a
+  capability-checked, kernel-mapped MMIO window whose only
+  constructor `from_mapping` is `unsafe` — so safe code cannot
+  fabricate one — with bounds- and alignment-checked
+  `read_u8/u16/u32` / `write_*` accessors returning `WindowError`),
+  the `MmioMapper` trait (`map_window(phys_base, len) ->
+  Result<RegisterWindow, MmioMapError>`), and `MmioMapError`
+  (`CapabilityMissing` / `InvalidRegion` / `Unsupported`, each with
+  `as_driver_error()`). `DriverHost::mmio_mapper()` is a new
+  default-`None` accessor mirroring `virtio_host()`. **Kernel
+  facility.** `kernel/mem` grew an `mmio` module (`MmioMap<P>`,
+  `MmioRegion`, `MmioError`) that maps the device's *own* physical
+  frames into a per-process `AddressSpace<P>` with
+  `MapFlags::NO_CACHE` and the same guard-page bracketing as
+  `DmaPool` (it does not allocate frames); the host model backs the
+  window with a page-aligned `Vec<u8>` so a `RegisterWindow` minted
+  over `region_base` is word-aligned in tests too. `kernel/sec`
+  grew a companion `mmio` gate (`map_mmio` / `unmap_mmio`) verifying
+  `CapabilityId::MMIO_MAP` and emitting `AuditEvent::MmioMapped`
+  (id `1040`, Info, `(task, phys, len)`) / `MmioMapDenied`
+  (id `1041`, Error) with `MmioGateError::as_errno()`. **Virtio.**
+  `PciBackend` / `MmioBackend` were rewritten to own a
+  `RegisterWindow` and expose `read_u32` / `write_u32`; the
+  placeholder `PortIo` / `MmioOps` traits were removed. A new
+  `kernel-host`-gated `KernelMmioMapper` wraps `&mut MmioMap` +
+  `&TaskCapabilities` + audit `Sink` and mints `RegisterWindow`s
+  through `kernel/sec::map_mmio` (drvhost stays free of `kernel/*`
+  deps). **Bus hand-off.** `Pci::map_bar_window(bdf, bar_index,
+  &dyn MmioMapper)` resolves a memory BAR (refusing I/O BARs and
+  unused/absent BARs) and `Mmio::map_slot_window(base, &dyn
+  MmioMapper)` reads the DTB `<base, length>` pair; both ask the
+  kernel mapper for the window and never synthesise a pointer.
+  **Tests.** `rustos-abi --lib` 77 (+9), `rustos-kernel-mem --lib`
+  101 (+17), `rustos-kernel-sec --lib` 52 (+6), `rustos-drv-bus-pci`
+  16 (+4), `rustos-drv-bus-mmio` 9 (+3), `rustos-drv-bus-virtio` 50
+  (+10, incl. `KernelMmioMapper`); zero regressions in `drvhost`,
+  `virtio_blk`, `virtio_net`, `kernel-core`, `kernel-syscall`.
+  `cargo clippy --all-targets [--all-features] -- -D warnings`,
+  `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings" cargo doc
+  --no-deps` are clean across every touched crate. **Docs.** New
+  "Register-window hand-off" section in `docs/src/drivers/bus.md`
+  (seam + capability-flow diagram), a "5.2 MMIO register-window
+  mapper" section in `docs/src/architecture/memory.md`, two new
+  audit rows (`1040` / `1041`) in
+  `docs/src/architecture/security.md`, and the virtio README /
+  `docs/src/drivers/virtio.md` "shells" wording updated.
+  **Deferred.** The Item 3 QEMU integration test (boot kernel +
+  walk PCI/DTB + hand a working window to the virtio transport)
+  is folded into Item 4 (it needs the same full boot wiring the
+  four virtio QEMU crates require); Items 2-tail.4 / 4 / 5 / 6
+  remain outstanding and are rewritten in
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 1 — kernel per-process-heap DMA
   API): landed. `lib/abi` ships `CapabilityId::MEM_DMA = 10` —
   the next free slot after `AUDIT_WRITE`, frozen by the

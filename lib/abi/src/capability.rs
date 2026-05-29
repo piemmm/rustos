@@ -67,6 +67,22 @@ impl CapabilityId {
     /// or *mask* an interrupt line; both remain kernel-only
     /// (`AGENTS.md` §5.4 — capability checks before state touches).
     pub const IRQ_BIND: Self = Self(11);
+    /// Map a device's memory-mapped register window into a driver's
+    /// address space.
+    ///
+    /// Granted to user-space bus drivers (`drivers/bus/pci`,
+    /// `drivers/bus/mmio`) that must read and write a device's
+    /// register block (a PCI memory BAR, a virtio-MMIO transport
+    /// slot). Holders may call the kernel's MMIO-map facility, which
+    /// validates the requested physical region, maps it with caching
+    /// disabled (`MapFlags::NO_CACHE`), and hands back a
+    /// bounds-checked [`RegisterWindow`](crate::RegisterWindow). The
+    /// capability does not let a driver synthesise an arbitrary
+    /// pointer: the kernel is the sole minter of a `RegisterWindow`,
+    /// so a driver can only reach memory the kernel chose to map for
+    /// it (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// checks before state touches).
+    pub const MMIO_MAP: Self = Self(12);
 
     /// Construct a [`CapabilityId`] from its raw value, validating the range.
     ///
@@ -112,6 +128,7 @@ mod tests {
         assert_eq!(CapabilityId::AUDIT_WRITE.as_u16(), 9);
         assert_eq!(CapabilityId::MEM_DMA.as_u16(), 10);
         assert_eq!(CapabilityId::IRQ_BIND.as_u16(), 11);
+        assert_eq!(CapabilityId::MMIO_MAP.as_u16(), 12);
     }
 
     #[test]
@@ -132,5 +149,6 @@ mod tests {
         assert!(CapabilityId::AUDIT_WRITE.index() < 256);
         assert!(CapabilityId::MEM_DMA.index() < 256);
         assert!(CapabilityId::IRQ_BIND.index() < 256);
+        assert!(CapabilityId::MMIO_MAP.index() < 256);
     }
 }

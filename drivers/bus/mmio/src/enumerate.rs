@@ -20,7 +20,7 @@
 #![allow(dead_code)]
 
 use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::DriverError;
+use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
 use rustos_util::dtb::Dtb;
 
 use crate::transport::MmioRead;
@@ -128,5 +128,58 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
         } else {
             Ok(count)
         }
+    }
+
+    /// Resolve the virtio-MMIO transport slot at physical `base` and
+    /// ask the kernel `mapper` to map its register window, returning
+    /// the resulting [`RegisterWindow`].
+    ///
+    /// This is the Stage 4.D Item 3 hand-off for the MMIO bus: the
+    /// driver reads the slot's `<base, length>` pair from the device
+    /// tree and asks the kernel's MMIO-map facility for a window over
+    /// it. The driver never synthesises a pointer — the kernel
+    /// allocates and validates the mapping (`AGENTS.md` §4). The
+    /// returned window is what the bus driver hands to the virtio
+    /// transport's `MmioBackend`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no `virtio,mmio` slot whose `reg`
+    ///   base equals `base` exists in the device tree.
+    /// * [`DriverError::DeviceFault`] — the matching node's `reg`
+    ///   property is malformed (fails closed, like
+    ///   [`Self::enumerate_into`]).
+    /// * [`DriverError::LengthOutOfRange`] — the slot length does not
+    ///   fit in `usize` on this target.
+    /// * [`DriverError::PermissionDenied`] — the caller does not hold
+    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   (propagated from the mapper).
+    ///
+    /// # Capabilities
+    ///
+    /// The `mapper` enforces
+    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    pub fn map_slot_window(
+        &self,
+        base: u64,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        for node in self.dtb.nodes() {
+            let node = node.map_err(|_| DriverError::DeviceFault)?;
+            if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+                continue;
+            }
+            let reg = node.property("reg").ok_or(DriverError::DeviceFault)?;
+            let slot_base = reg.read_be_u64(0).map_err(|_| DriverError::DeviceFault)?;
+            if slot_base != base {
+                continue;
+            }
+            let length = reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault)?;
+            let len = usize::try_from(length).map_err(|_| DriverError::LengthOutOfRange)?;
+            return mapper
+                .map_window(slot_base, len)
+                .map_err(MmioMapError::as_driver_error);
+        }
+        Err(DriverError::NotFound)
     }
 }

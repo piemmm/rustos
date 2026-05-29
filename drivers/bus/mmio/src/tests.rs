@@ -19,13 +19,62 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::ptr::NonNull;
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind};
+use rustos_abi::{
+    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
+};
 use rustos_util::dtb::Dtb;
 
 use crate::enumerate::{Mmio, VIRTIO_MMIO_DEFAULT_VENDOR, VIRTIO_MMIO_MAGIC};
 use crate::transport::MmioRead;
+
+// ---- Mock MMIO mapper ----------------------------------------------------
+
+/// Stand-in for the kernel's MMIO-map facility (mirrors the PCI
+/// crate's mock). Backs every minted [`RegisterWindow`] with a fixed
+/// heap buffer that outlives the mapper and every window; `granted`
+/// models the `CAP_MMIO_MAP` check.
+struct MockMapper {
+    /// `u32`-element backing so its base is ≥ 4-byte aligned, matching
+    /// the page-aligned mapping the real kernel mapper produces.
+    backing: RefCell<Vec<u32>>,
+    granted: bool,
+}
+
+impl MockMapper {
+    fn new(granted: bool) -> Self {
+        Self {
+            // 0x400 words = 4 KiB.
+            backing: RefCell::new(vec![0u32; 0x400]),
+            granted,
+        }
+    }
+}
+
+impl MmioMapper for MockMapper {
+    fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
+        if !self.granted {
+            return Err(MmioMapError::CapabilityMissing);
+        }
+        if len == 0 {
+            return Err(MmioMapError::InvalidRegion);
+        }
+        let mut backing = self.backing.borrow_mut();
+        if len > backing.len() * 4 {
+            return Err(MmioMapError::Unsupported);
+        }
+        let base = NonNull::new(backing.as_mut_ptr().cast::<u8>()).expect("non-null heap buffer");
+        // SAFETY: `base` covers `backing.len() * 4 >= len` bytes and is
+        // 4-byte aligned (the `Vec<u32>` allocation guarantee); the
+        // backing lives for the mapper's lifetime, which outlives every
+        // window minted here, and no other reference aliases it while
+        // the window is live.
+        Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
+    }
+}
 
 // ---- Mock host -----------------------------------------------------------
 
@@ -258,4 +307,47 @@ fn empty_dtb_enumerates_to_zero() {
         address: 0,
     }; 4];
     assert_eq!((&bus as &dyn Bus).enumerate(&mut out), Ok(0));
+}
+
+#[test]
+fn map_slot_window_hands_off_to_kernel_mapper() {
+    let blob = build_virt_dtb(4);
+    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let regs: Vec<(u64, u32)> = slot(0x0A00_0200, 2, 0x554D_4551, 2).to_vec();
+    let bus = Mmio::new(dtb, FakeMmio { regs });
+    let mapper = MockMapper::new(true);
+    // Slot 1 sits at 0x0A00_0200 with a 0x200-byte window.
+    let window = bus
+        .map_slot_window(0x0A00_0200, &mapper)
+        .expect("slot maps");
+    assert_eq!(window.phys_base(), 0x0A00_0200);
+    assert_eq!(window.len(), 0x200);
+    window.write_u32(0, VIRTIO_MMIO_MAGIC).expect("in bounds");
+    assert_eq!(window.read_u32(0).expect("in bounds"), VIRTIO_MMIO_MAGIC);
+}
+
+#[test]
+fn map_slot_window_reports_not_found_for_unknown_base() {
+    let blob = build_virt_dtb(2);
+    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
+    let mapper = MockMapper::new(true);
+    // No slot is laid out at this address.
+    assert_eq!(
+        bus.map_slot_window(0x0B00_0000, &mapper).unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn map_slot_window_propagates_capability_denial() {
+    let blob = build_virt_dtb(2);
+    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
+    // Mapper without CAP_MMIO_MAP: the hand-off surfaces the refusal.
+    let mapper = MockMapper::new(false);
+    assert_eq!(
+        bus.map_slot_window(0x0A00_0000, &mapper).unwrap_err(),
+        DriverError::PermissionDenied
+    );
 }

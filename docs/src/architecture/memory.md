@@ -193,6 +193,27 @@ for the consumer-side view. The kernel-side wiring of a
 `KernelVirtioHost` that builds slabs from `alloc_dma` is the
 subject of Stage 4.D Item 0.
 
+### 5.2 MMIO register-window mapper
+
+Device drivers also need their *register block* mapped — a PCI memory
+BAR or a virtio-MMIO transport slot. `kernel/mem::mmio::MmioMap`
+provides this. Unlike [`DmaPool`][DmaPool] it does **not** allocate
+frames: the physical address is fixed by the hardware, so the mapper
+maps the *device's own* frames into a per-process `AddressSpace<P>`
+with caching disabled (`MapFlags::NO_CACHE`) and the same guard-page
+bracketing the DMA pool uses. `MmioMap::map(phys_base, len)` returns
+an `MmioRegion`; `region_base` hands out the base pointer the
+kernel-host mapper turns into an [ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off).
+
+The mapper is **capability-agnostic**; the gate is
+`kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify
+[`CapabilityId::MMIO_MAP`][CapabilityId::MMIO_MAP] and emit
+`MmioMapped` / `MmioMapDenied` audit records (IDs 1040 / 1041, see
+[Security audit catalogue](./security.md)). `MmioGateError::as_errno`
+maps refusals to `Errno` exactly as the DMA gate does.
+
+[CapabilityId::MMIO_MAP]: ../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MMIO_MAP
+
 ## 6. Result-returning OOM contract
 
 Every fallible operation in this crate returns

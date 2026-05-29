@@ -50,7 +50,7 @@ The transport crate covers:
 +-------------------------------------+
 |  drivers/bus/virtio                 |  virtio 1.1 §2.6 split queues, §3.1 init
 +-------------------+-----------------+
-                    | PciBackend / MmioBackend (shells today)
+                    | PciBackend / MmioBackend (own a RegisterWindow)
                     v
 +-------------------------------------+
 |  drivers/bus/pci  /  drivers/bus/mmio
