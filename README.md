@@ -12,6 +12,10 @@ code:
 - [`docs/`](./docs) — long-form architecture, security, and platform book
   (built with mdBook).
 
+## Status
+**Work in progress.** - There is a long way to go before this project is ready
+for prime time. Do not expect anything to work yet.
+
 ## Building
 
 ```sh
