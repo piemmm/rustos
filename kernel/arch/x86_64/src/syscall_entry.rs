@@ -79,7 +79,7 @@
 //! and audit emission all stay in `kernel/syscall`.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_abi::SYSCALL_MAX_ARGS;
 
@@ -250,7 +250,7 @@ pub unsafe fn install_kernel_rsp0(
     // SAFETY: caller's contract pins `cpu_index` to this CPU; no
     // other CPU writes to the same slot.
     unsafe {
-        let base = core::ptr::addr_of_mut!(PER_CPU_TLS) as *mut SyscallTls;
+        let base = core::ptr::addr_of_mut!(PER_CPU_TLS).cast::<SyscallTls>();
         let slot = base.add(cpu_index);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).user_rsp_save), 0);
@@ -282,7 +282,7 @@ pub type SyscallDispatchFn =
 /// host build never reads or writes it (matches the
 /// [`crate::preempt::set_timer_callback`] pattern).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static SYSCALL_DISPATCH_CALLBACK: AtomicU64 = AtomicU64::new(0);
+static SYSCALL_DISPATCH_CALLBACK: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the per-binary dispatch callback. Called once during
 /// kernel boot, before `init_local_syscalls` enables `syscall`
@@ -299,7 +299,7 @@ static SYSCALL_DISPATCH_CALLBACK: AtomicU64 = AtomicU64::new(0);
 /// gating.
 pub fn set_dispatch_callback(cb: SyscallDispatchFn) {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    SYSCALL_DISPATCH_CALLBACK.store(cb as usize as u64, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.store(cb as usize, Ordering::Release);
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     let _ = cb;
 }
@@ -321,7 +321,7 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
             // SAFETY: every store into `SYSCALL_DISPATCH_CALLBACK`
             // originates from `set_dispatch_callback`, which round-
             // trips a valid `SyscallDispatchFn` pointer.
-            Some(unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw as usize) })
+            Some(unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) })
         }
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
@@ -366,8 +366,7 @@ unsafe extern "C" fn rustos_arch_x86_64_syscall_dispatch(
     }
     // SAFETY: see `dispatch_callback` — every store round-trips a
     // valid `SyscallDispatchFn`.
-    let cb: SyscallDispatchFn =
-        unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw as usize) };
+    let cb: SyscallDispatchFn = unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) };
     cb(number, args_ptr)
 }
 
@@ -525,7 +524,7 @@ unsafe fn rdmsr(msr: u32) -> u64 {
             options(nomem, nostack, preserves_flags),
         );
     }
-    ((hi as u64) << 32) | (lo as u64)
+    (u64::from(hi) << 32) | u64::from(lo)
 }
 
 /// Write `value` to MSR `msr`.
@@ -538,7 +537,12 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[inline]
 unsafe fn wrmsr(msr: u32, value: u64) {
+    // Splitting the 64-bit MSR value into eax:edx is the documented
+    // wrmsr ABI (Intel SDM Vol 2B §4.3); each half is exactly 32 bits
+    // by construction, so the `as u32` truncations are lossless.
+    #[allow(clippy::cast_possible_truncation)]
     let lo = value as u32;
+    #[allow(clippy::cast_possible_truncation)]
     let hi = (value >> 32) as u32;
     // SAFETY: see function-level contract.
     unsafe {

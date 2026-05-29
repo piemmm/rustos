@@ -47,7 +47,10 @@ extern "C" {
 /// kernel bug.
 #[no_mangle]
 pub extern "C" fn rustos_arch_x86_64_main(magic: u64, multiboot_info: u64) -> ! {
-    if (magic as u32) != MULTIBOOT2_BOOTLOADER_MAGIC {
+    // The magic arrives in `%rdi` zero-extended from the 32-bit value
+    // GRUB places in `%eax`. Only the low 32 bits carry the magic; the
+    // truncation is the documented multiboot2 ABI.
+    if u32::try_from(magic & 0xFFFF_FFFF).unwrap_or(0) != MULTIBOOT2_BOOTLOADER_MAGIC {
         // Mismatched multiboot magic means we were entered by something
         // other than a multiboot2 loader; fail closed.
         qemu_exit::exit_failure();

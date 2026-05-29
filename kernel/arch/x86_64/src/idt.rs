@@ -90,6 +90,19 @@ static mut IDT: Idt = Idt {
 /// Returns a `'static` reference to the IDT for symmetry — callers cannot
 /// use it to mutate the table because the table's interior is private.
 pub unsafe fn init(pf: PageFaultHandler) -> &'static Idt {
+    // `IDT_LEN` is a small compile-time constant; the byte size of
+    // the table fits in the 16-bit `lidt` limit field. The const is
+    // declared at the top of the function (rather than just before
+    // its single use) to satisfy `clippy::items_after_statements`.
+    const IDT_LIMIT: u16 = {
+        let bytes = size_of::<[IdtEntry; IDT_LEN]>();
+        assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
+        // SAFETY-INVARIANT: the `assert!` proves the truncation cast
+        // is lossless; AGENTS.md §15.10 justified `#[allow]`.
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = (bytes - 1) as u16;
+        limit
+    };
     // SAFETY: we are documented as the single, one-shot writer of `IDT`
     // (see module-level comment, points 1–3). Subsequent reads via `lidt`
     // observe a fully-initialised table.
@@ -111,7 +124,7 @@ pub unsafe fn init(pf: PageFaultHandler) -> &'static Idt {
         }
 
         let ptr = IdtPointer {
-            limit: (size_of::<[IdtEntry; IDT_LEN]>() - 1) as u16,
+            limit: IDT_LIMIT,
             base: core::ptr::addr_of!(IDT.entries) as u64,
         };
         core::arch::asm!("lidt [{ptr}]", ptr = in(reg) &ptr, options(nostack, preserves_flags));

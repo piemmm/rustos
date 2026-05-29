@@ -451,8 +451,22 @@ impl PerCpuGdt {
     ///   valid) at the time of return.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn install(&'static mut self) {
+        // `GDT_SLOTS` is a small compile-time constant, so the byte
+        // size of the table fits trivially in a `u16` (the GDT limit
+        // field is itself 16 bits). Compute the limit as a `const` to
+        // keep the conversion infallible and lint-clean.
+        const GDT_LIMIT: u16 = {
+            let bytes = size_of::<[u64; GDT_SLOTS]>();
+            assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
+            // SAFETY-INVARIANT: the `assert!` above proves that
+            // `bytes - 1` fits in a `u16`, so the truncation cast
+            // is lossless. AGENTS.md §15.10 — justified `#[allow]`.
+            #[allow(clippy::cast_possible_truncation)]
+            let limit = (bytes - 1) as u16;
+            limit
+        };
         let gdtr = GdtPointer {
-            limit: (size_of::<[u64; GDT_SLOTS]>() - 1) as u16,
+            limit: GDT_LIMIT,
             base: core::ptr::addr_of!(self.entries) as u64,
         };
         let sel = Self::selectors();

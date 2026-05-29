@@ -349,6 +349,7 @@ pub fn init_sipi_sipi<M: LapicMmio, D: Delay>(
 /// have software-enabled its LAPIC and the MMIO frame must be
 /// identity-mapped (boot.s does both).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
 pub fn bsp_lapic_id() -> u8 {
     // SAFETY: 0xFEE00020 is the architectural LAPIC ID register on
     // every Intel/AMD CPU since the original Pentium; on QEMU it is the
@@ -380,7 +381,11 @@ pub fn trampoline_payload() -> &'static [u8] {
     unsafe {
         let start = core::ptr::addr_of!(_ap_trampoline_start);
         let end = core::ptr::addr_of!(_ap_trampoline_end);
-        let len = end.offset_from(start) as usize;
+        // SAFETY: `end >= start` is guaranteed by the linker script
+        // (`_ap_trampoline_end` is laid out *after* `_ap_trampoline_start`
+        // in the same `KEEP`'d output section), so the signed difference
+        // is non-negative and fits in `usize` on every supported target.
+        let len = usize::try_from(end.offset_from(start)).unwrap_or(0);
         core::slice::from_raw_parts(start, len)
     }
 }

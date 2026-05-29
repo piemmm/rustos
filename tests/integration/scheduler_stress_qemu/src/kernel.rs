@@ -24,7 +24,7 @@ use rustos_kernel_sched::{Priority, Scheduler, SchedulerArch, SchedulerConfig, T
 /// Tasks per CPU. The QEMU runner allocates 256 MiB of guest RAM
 /// (`tools/qemu::Spec::for_x86_64_kernel` default) and the bump heap is
 /// 64 MiB; 2048 tasks per CPU × 4 CPUs = 8192 tasks fits comfortably
-/// with headroom for the BTreeMap / Arc bookkeeping the scheduler does
+/// with headroom for the `BTreeMap` / `Arc` bookkeeping the scheduler does
 /// internally. The host-side `scheduler_stress` test still drives the
 /// 20 000-task figure mandated by Stage-2; this binary's purpose is to
 /// prove the *real-cores* path, not to repeat the host scale.
@@ -60,9 +60,13 @@ const MAX_CPUS: usize = 16;
 const MAX_CPUS_FITS_PERCPU_ARENA: () = assert!(MAX_CPUS <= rustos_arch_x86_64::percpu::MAX_CPUS);
 static PER_CPU_EXEC: [AtomicU64; MAX_CPUS] = {
     // `AtomicU64::new` is `const`. Hand-roll the array; the
-    // `[AtomicU64::new(0); MAX_CPUS]` syntax requires `Copy`.
-    const Z: AtomicU64 = AtomicU64::new(0);
-    [Z; MAX_CPUS]
+    // `[AtomicU64::new(0); MAX_CPUS]` syntax requires `Copy`. The
+    // `const` initializer is consumed by the array literal and never
+    // re-named; `declare_interior_mutable_const` is suppressed with
+    // rationale per AGENTS.md §15.10.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_CPUS]
 };
 
 /// Number of APs that have entered the step loop. The BSP waits on this
@@ -204,15 +208,14 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // performs CAS-driven bump allocation and never advances past
         // `HEAP_BYTES`, so the returned pointer is in-bounds whenever
         // the function returns non-null.
-        let base = unsafe { core::ptr::addr_of_mut!(HEAP.0) as *mut u8 };
+        let base = unsafe { core::ptr::addr_of_mut!(HEAP.0).cast::<u8>() };
         let align = layout.align();
         let size = layout.size();
         let mut cur = self.cursor.load(Ordering::Relaxed);
         loop {
             let aligned = (cur + align - 1) & !(align - 1);
-            let next = match aligned.checked_add(size) {
-                Some(n) => n,
-                None => return core::ptr::null_mut(),
+            let Some(next) = aligned.checked_add(size) else {
+                return core::ptr::null_mut();
             };
             if next > HEAP_BYTES {
                 return core::ptr::null_mut();
@@ -305,6 +308,17 @@ impl Delay for PitDelay {
 // --- BSP entry ----------------------------------------------------
 
 /// Entry point: BSP only.
+//
+// The body is long because it sequences every Stage 3a (c) bring-up
+// step in a single linear path — multiboot parse, ACPI/MADT discovery,
+// LAPIC software-enable, PIT calibration, scheduler construction, AP
+// SIPI-SIPI, workload spawn, watchdog, and the per-CPU preemption
+// audit. Splitting it would only push the same `qemu_exit::exit_failure`
+// branches into multiple helpers and obscure the deliberate boot
+// ordering; AGENTS.md §15.5 forbids gratuitous helpers without two
+// independent call sites. The `too_many_lines` lint is suppressed
+// with rationale.
+#[allow(clippy::too_many_lines)]
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
@@ -364,12 +378,9 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     preempt::set_cpu_id_for_lapic(bsp_id, 0);
 
     // Discover APs.
-    let ap_ids = match discover_aps(multiboot_info, bsp_id, &mut com1) {
-        Some(ids) => ids,
-        None => {
-            let _ = writeln!(com1, "[scheduler_stress_qemu] FAIL: MADT discovery");
-            qemu_exit::exit_failure();
-        }
+    let Some(ap_ids) = discover_aps(multiboot_info, bsp_id, &mut com1) else {
+        let _ = writeln!(com1, "[scheduler_stress_qemu] FAIL: MADT discovery");
+        qemu_exit::exit_failure();
     };
     let cpu_count = (ap_ids.count + 1) as u32;
     let _ = writeln!(
@@ -395,7 +406,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     let arch = Arc::new(SmpArch);
     let sched = Arc::new(Scheduler::new(cfg, arch).expect("scheduler"));
     // Leak one Arc into the global pointer so APs can clone it.
-    let raw = Arc::into_raw(sched.clone()) as *mut Scheduler<SmpArch>;
+    let raw = Arc::into_raw(sched.clone()).cast_mut();
     SCHED_PTR.store(raw, Ordering::Release);
     // The timer ISR consults `SCHED_FOR_TIMER` directly (so it does
     // not have to touch `Arc`'s strong count in interrupt context).
@@ -513,7 +524,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // latency which is a (c) concern. The point of *this* test is to
     // prove the AP bring-up path put multiple real cores to work.)
     let mut distinct_cpus = 0u32;
-    for slot in PER_CPU_EXEC.iter() {
+    for slot in &PER_CPU_EXEC {
         if slot.load(Ordering::Relaxed) > 0 {
             distinct_cpus += 1;
         }

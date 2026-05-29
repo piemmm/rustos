@@ -65,7 +65,7 @@ pub unsafe fn publish_arch(arch_ptr: *const BinArch) {
     // `Release` so a panic that follows on another CPU observes the
     // initialised pointer; the matching `Acquire` load lives in
     // [`handle_panic_via_kernel_core`].
-    PANIC_ARCH_PTR.store(arch_ptr as *mut BinArch, Ordering::Release);
+    PANIC_ARCH_PTR.store(arch_ptr.cast_mut(), Ordering::Release);
 }
 
 /// Shared `#[panic_handler]` body used by both bin crates.

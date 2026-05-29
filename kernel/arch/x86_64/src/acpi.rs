@@ -444,9 +444,9 @@ pub unsafe fn locate_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
     let n_entries = (len - ACPI_SDT_HEADER_LEN) / 4;
     for i in 0..n_entries {
         // SAFETY: caller's contract.
-        let entry =
-            unsafe { read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4) }
-                as u64;
+        let entry = u64::from(unsafe {
+            read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4)
+        });
         // SAFETY: caller's contract.
         if let Some(bytes) = unsafe { try_madt_at(entry) } {
             return Some(bytes);

@@ -301,8 +301,20 @@ impl Idt {
     ///   delivery that races with `lidt`.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn load(&'static self) {
+        // `IDT_LEN` is a small compile-time constant (≤ 256 vectors,
+        // 16 bytes each), so the byte size fits trivially in the IDT
+        // pseudo-descriptor's 16-bit limit field.
+        const IDT_LIMIT: u16 = {
+            let bytes = size_of::<[IdtEntry; IDT_LEN]>();
+            assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
+            // SAFETY-INVARIANT: the `assert!` proves the truncation
+            // cast is lossless; AGENTS.md §15.10 justified `#[allow]`.
+            #[allow(clippy::cast_possible_truncation)]
+            let limit = (bytes - 1) as u16;
+            limit
+        };
         let ptr = IdtPointer {
-            limit: (size_of::<[IdtEntry; IDT_LEN]>() - 1) as u16,
+            limit: IDT_LIMIT,
             base: core::ptr::addr_of!(self.entries) as u64,
         };
         // SAFETY: `ptr` lives on the local stack only for the duration

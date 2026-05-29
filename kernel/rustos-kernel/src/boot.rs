@@ -197,7 +197,7 @@ impl BootError {
 /// *before* `kernel_core::kernel_main` is ever entered (and therefore
 /// before its phase events have any meaning).
 ///
-/// EventId `4099` sits in the `4000..5000` range owned by `kernel/core`
+/// `EventId(4099)` sits in the `4000..5000` range owned by `kernel/core`
 /// (per `lib/log`'s subsystem ranges) but at the top of the range so
 /// it cannot collide with any phase-numbered event. The id is part of
 /// the audit contract with external consumers and may not be renumbered

@@ -55,8 +55,9 @@ impl Table {
 }
 
 /// Maximum number of page-table pages the Stage-2 tests need. Sized for
-/// two AddressSpaces, each with up to 4 levels deep on one extra mapping
-/// plus the initial 32 MiB identity map: 2 × (PML4 + PDPT + PD) + spares.
+/// two [`AddressSpace`]s, each with up to 4 levels deep on one extra
+/// mapping plus the initial 32 MiB identity map: 2 × (PML4 + PDPT + PD)
+/// + spares.
 const POOL_SIZE: usize = 16;
 
 /// A statically-allocated pool of zero-initialised page-table pages.
@@ -75,15 +76,37 @@ pub struct PageTablePool {
 // whose lifetimes are disjoint by construction.
 unsafe impl Sync for PageTablePool {}
 
+impl Default for PageTablePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PageTablePool {
     /// Construct an empty pool. `const`, so the pool lives in `.bss`.
     #[must_use]
     pub const fn new() -> Self {
         // Build the array of `UnsafeCell<Table>` via a const expression;
-        // each cell is zero-initialised by `Table::new`.
+        // each cell is zero-initialised by `Table::new`. The `const`
+        // initializer is consumed at array-literal expansion time and
+        // never re-named, so the `declare_interior_mutable_const` lint
+        // is suppressed with rationale per AGENTS.md §15.10. The
+        // array itself is `POOL_SIZE * sizeof::<Table>() = 64 KiB`
+        // and is materialised straight into the returned `Self`,
+        // which lives in `.bss` via `static` storage at every call
+        // site — there is no real stack temporary despite the
+        // `large_stack_arrays` lint's heuristic.
+        #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
+        // `[ZERO; POOL_SIZE]` evaluates the const into each slot;
+        // semantically the value is materialised straight into the
+        // returned `Self`, which lives in `.bss` via `static` storage
+        // at every call site — there is no real stack temporary
+        // despite the `large_stack_arrays` lint's heuristic.
+        #[allow(clippy::large_stack_arrays)]
+        let storage = [ZERO; POOL_SIZE];
         Self {
-            storage: [ZERO; POOL_SIZE],
+            storage,
             used: AtomicUsize::new(0),
         }
     }
@@ -140,8 +163,8 @@ impl AddressSpace {
         pml4[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
         pdpt[0] = pd_phys | flags::PRESENT | flags::WRITABLE;
         // 16 × 2 MiB = 32 MiB identity-mapped.
-        for i in 0..16u64 {
-            pd[i as usize] = (i << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        for (i, slot) in pd.iter_mut().take(16).enumerate() {
+            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
         }
 
         Some(Self { pml4_phys, pml4 })
@@ -218,6 +241,13 @@ impl AddressSpace {
     }
 }
 
+// `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
+// reference does not borrow from `parent` (it points at a freshly
+// alloc'd table from `pool`, or at a sibling table recovered through
+// the identity map). `mut_from_ref` / `mut_from_immut` clippy lint
+// flags this shape because the function does not return a borrow of
+// `parent`'s lifetime — which is exactly the documented contract.
+#[allow(clippy::mut_from_ref)]
 fn ensure_child(
     parent: &mut [u64; ENTRIES_PER_TABLE],
     idx: usize,

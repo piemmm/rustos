@@ -43,7 +43,7 @@
 //! closed.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Bare-metal-only imports — host builds carry neither
 // `init_local_preempt` nor the timer dispatcher (the static callback
@@ -67,12 +67,13 @@ pub const TIMER_VECTOR: u8 = 0x20;
 
 /// The Rust callback the timer ISR forwards each tick to.
 ///
-/// Stored as an `Option<extern "C" fn(u32)>` packed into a `u64` so
-/// the ISR can swap it in/out with `Relaxed` atomics — the callback
-/// table is set up *before* any timer fires and never mutated again
-/// in normal operation.
+/// Stored as an `Option<extern "C" fn(u32)>` packed into a `usize`
+/// (the architectural size of a function pointer) so the ISR can
+/// swap it in/out with `Relaxed` atomics — the callback table is set
+/// up *before* any timer fires and never mutated again in normal
+/// operation.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static TIMER_CALLBACK_FN: AtomicU64 = AtomicU64::new(0);
+static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// LAPIC EOI register MMIO offset (Intel SDM Vol 3A §11.4.1 Table 11-1).
 /// Re-declared here so the dispatcher can write through a bare-metal
@@ -106,9 +107,9 @@ pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
 /// from interrupt context: there is no captured environment that
 /// could be `Drop`-ped while the ISR is mid-flight.
 pub fn set_timer_callback(cb: extern "C" fn(u32)) {
-    // `as u64` is safe: `fn` pointers are `usize`-sized.
+    // `fn` pointers are `usize`-sized, so `as usize` is lossless.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    TIMER_CALLBACK_FN.store(cb as usize as u64, Ordering::Relaxed);
+    TIMER_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
     // On host builds the static is omitted — callers gated this themselves.
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     let _ = cb;
@@ -129,7 +130,7 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
             // SAFETY: every store into `TIMER_CALLBACK_FN` originates
             // from `set_timer_callback`, which always rounds-trips a
             // valid `extern "C" fn(u32)` pointer.
-            Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw as usize) })
+            Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
         }
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
@@ -154,8 +155,19 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
 /// fires before the mapping table is populated is *not* a panic.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
-    const Z: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
-    [Z; 256]
+    // SAFETY-INVARIANT: the `const` here is used **only** as the
+    // initializer for a static array of atomics — the
+    // `declare_interior_mutable_const` lint flags this idiom even
+    // though there is no way to observe the interior mutability
+    // through the const itself (it is consumed at array-literal
+    // expansion time and never named again). This is the canonical
+    // pattern for building a static `[Atomic_; N]` in `no_std` Rust;
+    // see Rust RFC 1440 and the `core` source for `AtomicUsize`'s
+    // own array constructors. Allow with rationale per AGENTS.md
+    // §15.10.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+    [ZERO; 256]
 };
 
 /// Record the dense `rustos_kernel_sched::CpuId` this `lapic_id` maps to.
@@ -237,7 +249,7 @@ unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(_regs: *mut SavedRegs) {
         // so it has no captured environment and is safe to invoke
         // from interrupt context with interrupts disabled.
         let cb: extern "C" fn(u32) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw as usize) };
+            unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) };
         cb(cpu_id);
     }
 

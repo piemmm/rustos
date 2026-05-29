@@ -65,7 +65,7 @@ mod kernel {
 
     // --- Audit observer Sink --------------------------------------
 
-    /// EventId emitted by `kernel_core::kernel_main` when every init
+    /// `EventId` emitted by `kernel_core::kernel_main` when every init
     /// phase completed successfully. Pinned by the
     /// `event_ids_are_unique` test in
     /// `kernel/core/src/audit.rs`; if the catalogue ever renumbers,

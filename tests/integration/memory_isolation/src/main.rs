@@ -109,16 +109,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // CPU) and the read in `page_fault_handler` happens after the store
     // completes. Use the raw pointer to avoid a `&mut` to the static.
     unsafe {
-        let p = core::ptr::addr_of_mut!(SECRET_FRAME) as *mut u8;
+        let p = core::ptr::addr_of_mut!(SECRET_FRAME).cast::<u8>();
         p.write_volatile(SECRET_BYTE);
     }
 
-    let mut victim = match paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) {
-        Some(a) => a,
-        None => {
-            let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (victim)");
-            qemu_exit::exit_failure();
-        }
+    let Some(mut victim) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) else {
+        let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (victim)");
+        qemu_exit::exit_failure();
     };
     if victim
         .map_4k(&PAGE_TABLE_POOL, SECRET_VADDR, secret_paddr, true)
@@ -127,24 +124,20 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (mapping)");
         qemu_exit::exit_failure();
     }
+    let victim_pml4 = victim.pml4_phys();
     let _ = writeln!(
         com1,
-        "[memory_isolation] victim PML4 = 0x{:x}, secret_paddr = 0x{:x}",
-        victim.pml4_phys(),
-        secret_paddr
+        "[memory_isolation] victim PML4 = 0x{victim_pml4:x}, secret_paddr = 0x{secret_paddr:x}"
     );
 
-    let attacker = match paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) {
-        Some(a) => a,
-        None => {
-            let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (attacker)");
-            qemu_exit::exit_failure();
-        }
+    let Some(attacker) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) else {
+        let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (attacker)");
+        qemu_exit::exit_failure();
     };
+    let attacker_pml4 = attacker.pml4_phys();
     let _ = writeln!(
         com1,
-        "[memory_isolation] attacker PML4 = 0x{:x}",
-        attacker.pml4_phys()
+        "[memory_isolation] attacker PML4 = 0x{attacker_pml4:x}"
     );
 
     // ---- Phase 1: confirm the victim mapping is genuine. ----
@@ -156,16 +149,11 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     if v_byte != SECRET_BYTE {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: victim observed wrong byte 0x{:x}",
-            v_byte
+            "[memory_isolation] FAIL: victim observed wrong byte 0x{v_byte:x}"
         );
         qemu_exit::exit_failure();
     }
-    let _ = writeln!(
-        com1,
-        "[memory_isolation] victim sees secret = 0x{:x}",
-        v_byte
-    );
+    let _ = writeln!(com1, "[memory_isolation] victim sees secret = 0x{v_byte:x}");
 
     // ---- Phase 2: switch to the attacker and read the same VA. ----
     ATTACKER_ACTIVE.store(true, Ordering::SeqCst);
@@ -173,8 +161,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     unsafe { attacker.switch() };
     let _ = writeln!(
         com1,
-        "[memory_isolation] attacker about to read 0x{:x} (expect #PF)",
-        SECRET_VADDR
+        "[memory_isolation] attacker about to read 0x{SECRET_VADDR:x} (expect #PF)"
     );
 
     // The next read MUST fault. If it returns, the kernel is broken.
@@ -185,8 +172,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // Reaching this line is a failure: the CPU should have faulted.
     let _ = writeln!(
         com1,
-        "[memory_isolation] FAIL: attacker read 0x{:x} without faulting",
-        attacker_byte
+        "[memory_isolation] FAIL: attacker read 0x{attacker_byte:x} without faulting"
     );
     qemu_exit::exit_failure();
 }
@@ -206,8 +192,7 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(
         com1,
-        "[memory_isolation] #PF: error=0x{:x} rip=0x{:x}",
-        error_code, rip
+        "[memory_isolation] #PF: error=0x{error_code:x} rip=0x{rip:x}"
     );
 
     if !ATTACKER_ACTIVE.load(Ordering::SeqCst) {
@@ -231,8 +216,7 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     if error_code != 0 {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: unexpected #PF error code 0x{:x}",
-            error_code
+            "[memory_isolation] FAIL: unexpected #PF error code 0x{error_code:x}"
         );
         qemu_exit::exit_failure();
     }
@@ -250,8 +234,7 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     if cr2 != SECRET_VADDR {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: CR2 was 0x{:x}, expected 0x{:x}",
-            cr2, SECRET_VADDR
+            "[memory_isolation] FAIL: CR2 was 0x{cr2:x}, expected 0x{SECRET_VADDR:x}"
         );
         qemu_exit::exit_failure();
     }
@@ -265,16 +248,14 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     if victim_byte != SECRET_BYTE {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: victim corrupted (saw 0x{:x})",
-            victim_byte
+            "[memory_isolation] FAIL: victim corrupted (saw 0x{victim_byte:x})"
         );
         qemu_exit::exit_failure();
     }
 
     let _ = writeln!(
         com1,
-        "[memory_isolation] PASS: attacker faulted, victim intact (0x{:x})",
-        victim_byte
+        "[memory_isolation] PASS: attacker faulted, victim intact (0x{victim_byte:x})"
     );
     qemu_exit::exit_success();
 }

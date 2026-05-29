@@ -211,7 +211,7 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     // reference to `PER_CPU[cpu_index]` for the duration of this call.
     // No other CPU touches this slot.
     let slot: &'static mut PerCpu = unsafe {
-        let base = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu;
+        let base = core::ptr::addr_of_mut!(PER_CPU).cast::<PerCpu>();
         &mut *base.add(cpu_index)
     };
 
@@ -297,7 +297,7 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
     // The caller's safety contract requires interrupts to be disabled
     // on the calling CPU, so a delivery cannot race the write.
     unsafe {
-        let base = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu;
+        let base = core::ptr::addr_of_mut!(PER_CPU).cast::<PerCpu>();
         let entry_ptr =
             core::ptr::addr_of_mut!((*base.add(cpu_index)).idt.entries[vector as usize]);
         let selector = PerCpuGdt::selectors().kernel_cs;

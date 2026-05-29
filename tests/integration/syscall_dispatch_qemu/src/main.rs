@@ -96,7 +96,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::{CapabilityId, Errno, SyscallNumber};
+    use rustos_abi::{CapabilityId, SyscallNumber};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
@@ -242,9 +242,8 @@ mod kernel {
         // map contains the BSP. Using `0` keeps the test deterministic
         // and avoids reading the LAPIC ID register a second time.
         cpu_to_lapic[0] = Some(0);
-        let arch_inner = match X86_64Arch::new(0, 0, cpu_to_lapic) {
-            Ok(a) => a,
-            Err(_) => qemu_exit::exit_failure(),
+        let Ok(arch_inner) = X86_64Arch::new(0, 0, cpu_to_lapic) else {
+            qemu_exit::exit_failure();
         };
         // A synthetic 1 GHz TSC calibration. `monotonic_ns` is not
         // exercised by either dispatched syscall (`cap_query` and
@@ -262,9 +261,8 @@ mod kernel {
 
         // 2. Scheduler with a single CPU (matches `boot::try_boot`).
         let cfg = SchedulerConfig::defaults_for(1);
-        let sched = match Scheduler::new(cfg, arch.clone()) {
-            Ok(s) => s,
-            Err(_) => qemu_exit::exit_failure(),
+        let Ok(sched) = Scheduler::new(cfg, arch.clone()) else {
+            qemu_exit::exit_failure();
         };
 
         // 3. Spawn a no-op task on CPU 0 so `Scheduler::exit(task_id)`
@@ -272,9 +270,8 @@ mod kernel {
         //    the scheduler hot loop is not run — but the closure
         //    still has to type-check (`AGENTS.md` §15.1 — no stubs:
         //    the body must be a real `TaskAction`-returning closure).
-        let task_id = match sched.spawn(0, Priority::Normal, |_| TaskAction::Exit) {
-            Ok(id) => id,
-            Err(_) => qemu_exit::exit_failure(),
+        let Ok(task_id) = sched.spawn(0, Priority::Normal, |_| TaskAction::Exit) else {
+            qemu_exit::exit_failure();
         };
 
         // 4. CapTable registry with the calling task's record. The
@@ -357,7 +354,8 @@ mod kernel {
         exit_args.0[0] = 0;
         match dispatcher.dispatch(&caller, SyscallNumber::EXIT.as_u16(), exit_args) {
             Ok(_) => {}
-            Err(Errno::NotFound | Errno::OutOfRange) => qemu_exit::exit_failure(),
+            // Any error — whether a typed `Errno::NotFound` /
+            // `OutOfRange` or anything else — fails the test.
             Err(_) => qemu_exit::exit_failure(),
         }
 

@@ -80,7 +80,7 @@ impl fmt::Write for Serial {
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[inline(always)]
+#[inline]
 unsafe fn outb(port: u16, value: u8) {
     // SAFETY: caller has verified `port` is a legitimate I/O port and that
     // we are in ring 0 with IOPL=0 (always true in the kernel).
@@ -95,7 +95,7 @@ unsafe fn outb(port: u16, value: u8) {
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[inline(always)]
+#[inline]
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
     // SAFETY: see `outb`.

@@ -54,7 +54,7 @@ pub fn exit_failure() -> ! {
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[inline(always)]
+#[inline]
 unsafe fn write_port(value: u8) {
     // SAFETY: caller guarantees a valid x86_64 environment with port I/O
     // permission (ring 0, which is where the kernel runs throughout the
