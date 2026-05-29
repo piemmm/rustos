@@ -63,6 +63,7 @@ members = [
     "userland/shell/shell",
     "userland/gui/wm",
     "userland/gui/iconbar",
+    "userland/net/icmp",
 
     # Tooling
     "tools/xtask",

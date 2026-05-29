@@ -1196,6 +1196,38 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 5 — userland ARP / IP / ICMP responder,
+  *complete*): new crate `userland/net/icmp` (`rustos-net-icmp`),
+  the first substantial userland crate and the protocol peer the
+  virtio-net QEMU integration (Item 4) drives. A new `userland/net`
+  class was registered in `AGENTS.md` §3 and the workspace manifest.
+  The crate is `no_std`, allocation-free, and
+  `#![forbid(unsafe_code)]`, depending only on
+  `rustos_abi::driver::net::Net`. Four protocol modules
+  (`ethernet`, `arp`, `ipv4`, `icmp`) parse and serialise one layer
+  each with bounds-checked, panic-free accessors that drop truncated
+  or malformed input; the RFC 1071 one's-complement checksum lives
+  once in `internet_checksum` and is shared by the IPv4 and ICMP
+  layers (`AGENTS.md` §2.2). `Responder` binds an interface's MAC +
+  IPv4 address and is otherwise stateless: `handle_frame` is a pure
+  frame→optional-reply function (answering only correctly-addressed,
+  well-formed, checksum-valid requests and dropping everything else),
+  and `poll` / `run` drive it over any `Net` driver with a mandatory
+  finite poll budget (no sleep-until / retry-until loop, `AGENTS.md`
+  §2.1). In scope: ARP request+reply (RFC 826), option-free IPv4
+  (RFC 791), ICMP echo (RFC 792). Out of scope (Stage 6): TCP, UDP,
+  IPv6, routing, fragmentation. **Tests.** `cargo test
+  -p rustos-net-icmp` → 33 passing (per-layer round-trips + rejection
+  paths, RFC 1071 checksum vector, end-to-end ARP/ICMP answers over a
+  mock `Net`, ignore-other-MAC/IP, output-too-small, poll/run,
+  driver-error propagation). `cargo clippy -p rustos-net-icmp
+  --all-targets -- -D warnings`, `cargo fmt --check`, and
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-net-icmp --no-deps`
+  are clean. **Docs.** README plus `docs/src/userland/net_icmp.md`
+  (new "Userland" section in `docs/src/SUMMARY.md`). **Deferred.**
+  Items 2-tail.4 / 4 / 6 remain outstanding (see
+  `.junie/next-session-prompt.md`); the virtio-net QEMU crates in
+  Item 4 will exercise this responder against a live device.
 - Stage 4.D follow-up (Item 3 — capability-checked register-window
   hand-off from `drivers/bus/{pci,mmio}`, *complete*): the bare
   identification tuple the `PciBackend` / `MmioBackend` shells used

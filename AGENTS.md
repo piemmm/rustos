@@ -128,6 +128,8 @@ rustos/
 │   ├── gui/             # Graphical desktop components.
 │   │   ├── wm/          # Compositing window manager (RISC OS-style).
 │   │   └── iconbar/     # RISC OS-style iconbar.
+│   ├── net/             # Userland networking services.
+│   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
 │   └── apps/            # Default apps. Each app is its own crate.
 │
 ├── docs/                # Long-form documentation (mdBook).

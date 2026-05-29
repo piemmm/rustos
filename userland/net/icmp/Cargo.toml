@@ -1,0 +1,15 @@
+[package]
+name = "rustos-net-icmp"
+description = "RustOS userland ARP / IPv4 / ICMP-echo responder over the link-layer Net driver trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+[lints]
+workspace = true

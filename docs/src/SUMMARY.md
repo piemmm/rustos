@@ -42,6 +42,10 @@
 - [Block drivers](./drivers/block.md)
 - [Network drivers](./drivers/network.md)
 
+# Userland
+
+- [Networking responder](./userland/net_icmp.md)
+
 # ABI
 
 - [Driver traits (`abi-v1`)](./abi/driver_traits.md)
