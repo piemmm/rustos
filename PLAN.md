@@ -1196,6 +1196,36 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — MSI-X routing wired into the boot
+  provisioning, *complete*): the previous session landed
+  `Pci::route_msix` + the `MsixBus` ABI seam + `msi_message`, but
+  `provision_and_run` still never *called* `route_msix`, so a loaded
+  virtio-blk `.rxe` would park on `notify_wait` forever. This joins the
+  two. **Walk.** `provision_virtio_pci` now returns
+  `VirtioProvision { transport, bdf }` so the boot wiring can route the
+  interrupt of the function the walk already located, without
+  re-enumerating (`AGENTS.md` §2.2). **Boot wiring.** `VirtioBootConfig`
+  gains `msix: &dyn MsixBus` (the same `Pci` object reached through the
+  second frozen seam), `msix_entry`, and the architecture-built
+  `msi_message`; `provision_and_run` routes MSI-X through the same
+  `KernelMmioMapper` after the four register windows are mapped and
+  before the driver host is built, failing the whole bring-up closed
+  with the new `VirtioPciWalkError::RouteMsix` variant if routing is
+  refused. The arch caller stays responsible for binding the line in
+  `kernel/irq::IrqTable` (line → vector) and encoding the `MsiMessage`,
+  keeping `virtio_boot` architecture-neutral. **Tests.** `rustos-kernel
+  --lib` 45 (+1: a routing-refused fail-closed path; the happy-path test
+  now also asserts the `(bdf, entry, message)` reached `route_msix` and
+  the missing-device test asserts no route was attempted). `cargo clippy
+  -p rustos-kernel --all-targets -- -D warnings`, `cargo fmt --check`,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, and the
+  `x86_64-unknown-none` lib build are clean. **Docs.**
+  `docs/src/drivers/bus.md` (Boot wiring + MSI-X sections). **Deferred.**
+  Allocating + binding the external vector in `IrqTable` and building the
+  `MsiMessage` from it in `boot.rs`, then driving the live device from
+  the `tests/integration/virtio_blk_pci_x86_64` kernel test bin, remain
+  the QEMU-test work; legacy MSI and INTx routing are not implemented.
+  See `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — PCI MSI-X interrupt
   routing, *complete*): scoping the `tests/integration/
   virtio_blk_pci_x86_64` crate found the hard blocker that a real

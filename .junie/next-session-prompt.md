@@ -28,13 +28,25 @@
   the x86 LAPIC message (physical/fixed/edge, SDM §11.11). Host-tested
   only: `rustos-abi` 84 (+3), `rustos-drv-bus-pci` 26 (+5),
   `rustos-arch-x86_64` 133 (+2); clippy/fmt/doc clean; abi+pci build
-  for `x86_64-unknown-none`. **Still TODO (the IRQ-binding the QEMU
-  test needs):** allocate a free external vector + bind it in
-  `kernel/irq::IrqTable`, build the `MsiMessage` via `msi_message`,
-  call `route_msix` from the boot pipeline, and wire that `IrqHandle`
-  into `KernelVirtioFactory`/`provision_and_run` so the loaded
-  virtio-blk `.rxe`'s `notify_wait` actually wakes. Legacy MSI and
-  INTx routing remain unimplemented.
+  for `x86_64-unknown-none`. Legacy MSI and INTx routing remain
+  unimplemented.
+
+- **MSI-X routing wired into boot provisioning** (latest session).
+  `provision_and_run` now actually *calls* `route_msix`.
+  `provision_virtio_pci` returns `VirtioProvision { transport, bdf }`;
+  `VirtioBootConfig` gained `msix: &dyn MsixBus`, `msix_entry`, and the
+  arch-built `msi_message`, and `provision_and_run` routes MSI-X through
+  the same `KernelMmioMapper` after the four register windows are mapped
+  and before the driver host is built, failing closed with the new
+  `VirtioPciWalkError::RouteMsix`. The arch caller still owns binding
+  the line in `kernel/irq::IrqTable` and encoding the `MsiMessage`
+  (`virtio_boot` stays arch-neutral). Host-tested only: `rustos-kernel
+  --lib` 45 (+1); clippy/fmt/doc clean; `x86_64-unknown-none` lib build
+  clean. **Still TODO (the remaining IRQ-binding the QEMU test needs):**
+  in `boot.rs`, allocate a free external vector + bind it in
+  `IrqTable`, build the `MsiMessage` via `msi_message` from that
+  vector, and pass the `IrqHandle` + `msi_message` + `msix_entry` into
+  `provision_and_run` from the live boot pipeline.
 
 - **Live virtio-PCI boot wiring** (earlier session). The ring-0 walk
   (`provision_virtio_pci`) and the per-driver DMA factory

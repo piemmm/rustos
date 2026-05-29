@@ -51,6 +51,28 @@ pub enum VirtioPciWalkError {
     /// The mapped windows did not form a valid transport (e.g. a
     /// malformed common-configuration capability).
     Transport(VirtioError),
+    /// Routing the device's MSI-X interrupt failed (propagated
+    /// verbatim from
+    /// [`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix);
+    /// e.g. the caller lacks `CAP_MMIO_MAP` or the function
+    /// advertises no MSI-X capability).
+    RouteMsix(DriverError),
+}
+
+/// A provisioned virtio-PCI device: its driver-facing [`PciTransport`]
+/// plus the bus-local address of the function it was built from.
+///
+/// The boot wiring needs the `bdf` after the walk to route the
+/// device's MSI-X interrupt
+/// ([`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix)),
+/// which is keyed by function — the walk already located it, so it is
+/// returned here rather than re-enumerated (`AGENTS.md` §2.2).
+#[derive(Debug)]
+pub struct VirtioProvision {
+    /// Transport over the four kernel-mapped virtio register windows.
+    pub transport: PciTransport,
+    /// Bus-local address of the provisioned virtio function.
+    pub bdf: u64,
 }
 
 /// Enumerate `bus`, locate the first virtio function whose PCI device
@@ -77,7 +99,7 @@ pub fn provision_virtio_pci(
     bus: &dyn VirtioPciBus,
     device_id: u16,
     mapper: &dyn MmioMapper,
-) -> Result<PciTransport, VirtioPciWalkError> {
+) -> Result<VirtioProvision, VirtioPciWalkError> {
     let bdf = find_virtio_function(bus, device_id)?;
     let windows = PciTransportWindows {
         common: map(bus, bdf, VIRTIO_PCI_CFG_COMMON, mapper)?,
@@ -88,7 +110,8 @@ pub fn provision_virtio_pci(
             .notify_off_multiplier(bdf)
             .map_err(VirtioPciWalkError::MapWindow)?,
     };
-    PciTransport::new(windows).map_err(VirtioPciWalkError::Transport)
+    let transport = PciTransport::new(windows).map_err(VirtioPciWalkError::Transport)?;
+    Ok(VirtioProvision { transport, bdf })
 }
 
 /// Map one virtio configuration window, tagging a failure as a
@@ -241,11 +264,13 @@ mod tests {
             ],
         };
         let mapper = RecordingMapper::new(true);
-        let transport =
+        let provision =
             provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect("transport");
 
-        // All four windows plus the multiplier were provisioned.
-        assert_eq!(transport.windows().notify_off_multiplier, 4);
+        // The located function and all four windows plus the
+        // multiplier were provisioned.
+        assert_eq!(provision.bdf, TARGET_BDF);
+        assert_eq!(provision.transport.windows().notify_off_multiplier, 4);
         let reqs = mapper.requests.borrow();
         assert_eq!(reqs.len(), 4);
         // Each cfg_type was mapped exactly once at its synthetic base.

@@ -245,18 +245,22 @@ names bind to them rather than re-stating the literals (`AGENTS.md`
 also needs a per-process DMA host and a driver host to run its signed
 `.rxe`. `kernel/rustos-kernel/src/virtio_boot.rs` joins the three:
 `provision_and_run(config, make_table, body)` takes a
-`VirtioBootConfig` bundling the bus, the per-driver `MmioMap`, the DMA
-frame allocator + direct physical map, the device's bound `IrqHandle`,
-and the driver-host trust inputs. It builds a `KernelMmioMapper`,
-provisions the `PciTransport`, constructs a `KernelVirtioFactory`, and
-hands a live `drvhost::Host` (with the factory wired into
-`HostConfig::virtio_host_factory`) plus the transport to the `body`
-closure. The scope/callback shape keeps the mapper, factory, and host —
-and every per-driver DMA pool the factory mints — on one boot frame, so
-all of it is reclaimed when `body` returns and no driver retains a
-register window or DMA mapping past its load (`AGENTS.md` §4). The boot
-walk fails closed with a `VirtioPciWalkError` and never constructs the
-host if the device or a window cannot be resolved.
+`VirtioBootConfig` bundling the bus (reached through both the
+`VirtioPciBus` and `MsixBus` seams), the per-driver `MmioMap`, the DMA
+frame allocator + direct physical map, the device's bound `IrqHandle`
+plus the MSI-X table entry and architecture-built `MsiMessage` that
+delivers its vector, and the driver-host trust inputs. It builds a
+`KernelMmioMapper`, provisions the `PciTransport`, routes the device's
+MSI-X interrupt through the same mapper (see below), constructs a
+`KernelVirtioFactory`, and hands a live `drvhost::Host` (with the
+factory wired into `HostConfig::virtio_host_factory`) plus the
+transport to the `body` closure. The scope/callback shape keeps the
+mapper, factory, and host — and every per-driver DMA pool the factory
+mints — on one boot frame, so all of it is reclaimed when `body`
+returns and no driver retains a register window or DMA mapping past its
+load (`AGENTS.md` §4). The boot walk fails closed with a
+`VirtioPciWalkError` and never constructs the host if the device, a
+window, or the interrupt route cannot be resolved.
 
 ### MSI-X interrupt routing
 
@@ -295,7 +299,12 @@ a frozen ABI seam rather than the concrete type: `Pci<C>` implements
 `rustos_abi::driver::msix::MsixBus` (a supertrait of `Bus`), so the
 boot path can route a device's interrupt through a single `&dyn
 MsixBus` without naming a concrete `drivers/bus/*` type
-(`AGENTS.md` §8). Legacy MSI and INTx routing are not implemented.
+(`AGENTS.md` §8). `provision_and_run` calls it once per device — after
+the four register windows are mapped and before the driver host is
+built — so a routing failure fails the whole bring-up closed
+(`VirtioPciWalkError::RouteMsix`) without loading a driver whose
+`notify_wait` could never wake. Legacy MSI and INTx routing are not
+implemented.
 
 ## Shared types
 

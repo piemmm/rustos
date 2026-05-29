@@ -20,8 +20,9 @@
 //! mints are all reclaimed when the closure returns — no driver retains
 //! a register window or DMA mapping past its load (`AGENTS.md` §4).
 
+use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
-use rustos_abi::IrqHandle;
+use rustos_abi::{IrqHandle, MsiMessage};
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_virtio::{KernelMmioMapper, PciTransport};
 use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
@@ -44,6 +45,10 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTableOps> {
     /// PCI bus the device is provisioned from, reached only through the
     /// frozen [`VirtioPciBus`] ABI seam.
     pub bus: &'k dyn VirtioPciBus,
+    /// The same PCI bus reached through the frozen [`MsixBus`] ABI seam,
+    /// used to route the device's interrupt once the transport is up.
+    /// In production this is the same `Pci` object as [`Self::bus`].
+    pub msix: &'k dyn MsixBus,
     /// Modern virtio PCI device ID (`0x1040 + virtio_device_type`).
     pub device_id: u16,
     /// Per-driver MMIO map the device's four register windows are
@@ -62,6 +67,14 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTableOps> {
     pub irq: &'k IrqTable,
     /// Handle for the device's bound interrupt line.
     pub irq_handle: IrqHandle,
+    /// MSI-X table entry to program with [`Self::msi_message`].
+    pub msix_entry: u16,
+    /// Architecture-built MSI message delivering the bound interrupt's
+    /// vector. Built by the arch layer (e.g.
+    /// `rustos_arch_x86_64::irq::msi_message`) from the vector the
+    /// [`Self::irq_handle`]'s line maps to; copied verbatim into the
+    /// device's MSI-X table entry by [`MsixBus::route_msix`].
+    pub msi_message: MsiMessage,
     /// Clock + cooperative-yield seam the blocking wait loop drives.
     pub waiter: &'k dyn IrqWaiter,
     /// Base virtual address of each minted per-driver DMA window.
@@ -113,6 +126,9 @@ where
         audit,
         irq,
         irq_handle,
+        msix,
+        msix_entry,
+        msi_message,
         waiter,
         pool_base,
         pool_pages,
@@ -125,7 +141,10 @@ where
 
     let transport = {
         let mapper = KernelMmioMapper::new(mmio, caller, audit);
-        provision_virtio_pci(bus, device_id, &mapper)?
+        let provision = provision_virtio_pci(bus, device_id, &mapper)?;
+        msix.route_msix(provision.bdf, msix_entry, msi_message, &mapper)
+            .map_err(VirtioPciWalkError::RouteMsix)?;
+        provision.transport
     };
 
     let factory = KernelVirtioFactory::new(
@@ -160,18 +179,20 @@ where
 mod tests {
     use super::*;
 
+    use core::cell::Cell;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use alloc::vec::Vec;
     use ed25519_dalek::{Signer, SigningKey};
     use rustos_abi::driver::bus::{Bus, BusDevice};
+    use rustos_abi::driver::msix::MsixBus;
     use rustos_abi::driver::virtio_pci::{
         VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
         VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
     };
     use rustos_abi::{
         CapabilityId, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, Errno,
-        MmioMapError, MmioMapper, RegisterWindow, DRIVER_MANIFEST_MAGIC,
+        MmioMapError, MmioMapper, MsiMessage, RegisterWindow, DRIVER_MANIFEST_MAGIC,
     };
     use rustos_caps::CapabilitySet;
     use rustos_drv_bus_virtio::transport_pci::common;
@@ -190,6 +211,16 @@ mod tests {
     const TARGET_BDF: u64 = 0x0000_0800;
     const NOTIFY_MULTIPLIER: u32 = 4;
     const OWNER: TaskId = TaskId(77);
+
+    /// MSI-X table entry + message the arch layer hands the boot wiring
+    /// to route the device's interrupt. The address/data encoding is
+    /// opaque here (the arch encoding is tested in `rustos-arch-x86_64`);
+    /// the wiring test only asserts the pair reaches `route_msix`.
+    const MSIX_ENTRY: u16 = 0;
+    const MSI_MESSAGE: MsiMessage = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x0000_0030,
+    };
 
     /// Deterministic signing seed so the trust anchor is stable.
     const SEED: [u8; 32] = [7u8; 32];
@@ -221,6 +252,22 @@ mod tests {
     /// supplied kernel mapper.
     struct SimBus {
         devices: Vec<BusDevice>,
+        /// Whether [`MsixBus::route_msix`] should succeed.
+        route_ok: bool,
+        /// `(bdf, entry, message)` recorded by the last successful
+        /// [`MsixBus::route_msix`] call, for the test to assert the
+        /// boot wiring routed the device's interrupt.
+        routed: Cell<Option<(u64, u16, MsiMessage)>>,
+    }
+
+    impl SimBus {
+        fn new(devices: Vec<BusDevice>) -> Self {
+            Self {
+                devices,
+                route_ok: true,
+                routed: Cell::new(None),
+            }
+        }
     }
 
     impl Bus for SimBus {
@@ -248,6 +295,22 @@ mod tests {
 
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Ok(NOTIFY_MULTIPLIER)
+        }
+    }
+
+    impl MsixBus for SimBus {
+        fn route_msix(
+            &self,
+            bdf: u64,
+            entry: u16,
+            message: MsiMessage,
+            _mapper: &dyn MmioMapper,
+        ) -> Result<(), DriverError> {
+            if !self.route_ok {
+                return Err(DriverError::PermissionDenied);
+            }
+            self.routed.set(Some((bdf, entry, message)));
+            Ok(())
         }
     }
 
@@ -393,15 +456,14 @@ mod tests {
         let source = OneImage { image };
         let resolver = ToVirtioRegister;
 
-        let bus = SimBus {
-            devices: alloc::vec![
-                dev(0x8086, 0x29C0, 0x0000_0000),
-                dev(VIRTIO_PCI_VENDOR_ID, VIRTIO_BLK_DEVICE_ID, TARGET_BDF),
-            ],
-        };
+        let bus = SimBus::new(alloc::vec![
+            dev(0x8086, 0x29C0, 0x0000_0000),
+            dev(VIRTIO_PCI_VENDOR_ID, VIRTIO_BLK_DEVICE_ID, TARGET_BDF),
+        ]);
 
         let config = VirtioBootConfig {
             bus: &bus,
+            msix: &bus,
             device_id: VIRTIO_BLK_DEVICE_ID,
             mmio: &mut mmio,
             frames: &frames,
@@ -410,6 +472,8 @@ mod tests {
             audit: &sink,
             irq: &irq,
             irq_handle,
+            msix_entry: MSIX_ENTRY,
+            msi_message: MSI_MESSAGE,
             waiter: &waiter,
             pool_base: VirtAddr::new(0x2000_0000),
             pool_pages: 16,
@@ -441,6 +505,12 @@ mod tests {
         assert_eq!(DMA_LEN.load(Ordering::SeqCst), PAGE_SIZE);
         // The MMIO mapper handed out exactly the four virtio windows.
         assert_eq!(mmio.live(), 4);
+        // The boot wiring routed the device's MSI-X interrupt for the
+        // located function with the arch-supplied entry + message.
+        assert_eq!(
+            bus.routed.get(),
+            Some((TARGET_BDF, MSIX_ENTRY, MSI_MESSAGE))
+        );
     }
 
     #[test]
@@ -466,12 +536,11 @@ mod tests {
         let resolver = ToVirtioRegister;
 
         // Bus with no virtio function present.
-        let bus = SimBus {
-            devices: alloc::vec![dev(0x8086, 0x29C0, 0)],
-        };
+        let bus = SimBus::new(alloc::vec![dev(0x8086, 0x29C0, 0)]);
 
         let config = VirtioBootConfig {
             bus: &bus,
+            msix: &bus,
             device_id: VIRTIO_BLK_DEVICE_ID,
             mmio: &mut mmio,
             frames: &frames,
@@ -480,6 +549,8 @@ mod tests {
             audit: &sink,
             irq: &irq,
             irq_handle,
+            msix_entry: MSIX_ENTRY,
+            msi_message: MSI_MESSAGE,
             waiter: &waiter,
             pool_base: VirtAddr::new(0x2000_0000),
             pool_pages: 16,
@@ -495,6 +566,72 @@ mod tests {
         assert_eq!(err, VirtioPciWalkError::NoVirtioFunction);
         // Nothing was mapped: the walk failed before any window request.
         assert_eq!(mmio.live(), 0);
+        // The interrupt was never routed for a device that was not found.
+        assert_eq!(bus.routed.get(), None);
+    }
+
+    #[test]
+    fn msix_routing_failure_fails_closed_after_windows_map() {
+        let mmio_sim = SimPhysMap::new(PhysAddr::new(MMIO_PHYS_BASE), 0x4000);
+        let mut mmio = MmioMap::new(
+            AddressSpace::new(HostPageTable::new()),
+            VirtAddr::new(0x6000_0000),
+            32,
+            &mmio_sim,
+        )
+        .expect("mmio map constructs");
+        let frames = FrameAllocator::new(&usable_map(32)).expect("frames");
+        let dma_sim = SimPhysMap::new(PhysAddr::new(PAGE_SIZE as u64 * 16), 32 * PAGE_SIZE);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA], &sink);
+        let irq = IrqTable::new(31);
+        let irq_handle = irq.bind(7, OWNER).expect("bind").handle;
+        let waiter = IdleWaiter;
+        let signing_key = SigningKey::from_bytes(&SEED);
+        let trusted = [pubkey_of(&signing_key)];
+        let source = OneImage { image: Vec::new() };
+        let resolver = ToVirtioRegister;
+
+        // The device is present, but its MSI-X routing is refused.
+        let mut bus = SimBus::new(alloc::vec![
+            dev(0x8086, 0x29C0, 0x0000_0000),
+            dev(VIRTIO_PCI_VENDOR_ID, VIRTIO_BLK_DEVICE_ID, TARGET_BDF),
+        ]);
+        bus.route_ok = false;
+
+        let config = VirtioBootConfig {
+            bus: &bus,
+            msix: &bus,
+            device_id: VIRTIO_BLK_DEVICE_ID,
+            mmio: &mut mmio,
+            frames: &frames,
+            phys: &dma_sim,
+            caller: &caller,
+            audit: &sink,
+            irq: &irq,
+            irq_handle,
+            msix_entry: MSIX_ENTRY,
+            msi_message: MSI_MESSAGE,
+            waiter: &waiter,
+            pool_base: VirtAddr::new(0x2000_0000),
+            pool_pages: 16,
+            trusted_signers: &trusted,
+            syscall_table_hash: [0x5Au8; 32],
+            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            source: &source,
+            resolver: &resolver,
+        };
+
+        let err = provision_and_run(config, HostPageTable::new, |_host, _t| ())
+            .expect_err("routing refused");
+        assert_eq!(
+            err,
+            VirtioPciWalkError::RouteMsix(DriverError::PermissionDenied)
+        );
+        // The transport's four windows were mapped before routing was
+        // attempted; the `body` closure (which loads the driver) is
+        // never reached once routing fails.
+        assert_eq!(mmio.live(), 4);
     }
 
     fn dev(vendor: u16, device: u16, address: u64) -> BusDevice {
