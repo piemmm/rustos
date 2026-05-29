@@ -27,10 +27,10 @@ pub mod syscalls;
 pub use capability::{CapabilityId, CAPABILITY_ID_MAX};
 pub use driver::{
     BufferClass, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, MmioMapError,
-    MmioMapper, RegisterWindow, VirtioPciBus, WindowError, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY,
-    VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
+    MmioMapper, MsiMessage, MsixBus, RegisterWindow, VirtioPciBus, WindowError,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
+    VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
 pub use error::Errno;
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};

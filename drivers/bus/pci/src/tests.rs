@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -21,7 +22,8 @@ use core::ptr::NonNull;
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
+    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, MsiMessage,
+    RegisterWindow,
 };
 
 use crate::config::{
@@ -111,21 +113,31 @@ struct MockFunction {
 
 struct MockConfigSpace {
     funcs: Vec<MockFunction>,
-    state: RefCell<MockState>,
+    state: Rc<RefCell<MockState>>,
 }
 
 #[derive(Default)]
 struct MockState {
     /// Active sizing probe: `(bus, dev, fn, reg)`.
     probing: Option<(u8, u8, u8, u8)>,
+    /// Log of every configuration-space write, so tests can assert the
+    /// MSI-X enable hand-off without a private accessor on `Pci`.
+    writes: Vec<(ConfigAddress, u32)>,
 }
 
 impl MockConfigSpace {
     fn new(funcs: Vec<MockFunction>) -> Self {
         Self {
             funcs,
-            state: RefCell::new(MockState::default()),
+            state: Rc::new(RefCell::new(MockState::default())),
         }
+    }
+
+    /// A shared handle to the mock's mutable state, cloned out before
+    /// the config space is moved into a [`Pci`] so a test can inspect
+    /// the write log afterwards.
+    fn shared_state(&self) -> Rc<RefCell<MockState>> {
+        Rc::clone(&self.state)
     }
 
     fn find(&self, addr: ConfigAddress) -> Option<&MockFunction> {
@@ -155,15 +167,17 @@ impl ConfigSpace for MockConfigSpace {
     }
 
     fn write32(&self, addr: ConfigAddress, value: u32) {
-        // Only the BAR-sizing protocol is modelled: an FFFFFFFF
-        // write to a BAR enters "probing" state, any other write
-        // (the restore) leaves it.
+        // The BAR-sizing protocol is modelled: an FFFFFFFF write to a
+        // BAR enters "probing" state, any other write (the restore)
+        // leaves it. Every write is also logged so tests can assert
+        // non-sizing writes such as the MSI-X enable hand-off.
         let mut st = self.state.borrow_mut();
         if value == 0xFFFF_FFFF {
             st.probing = Some((addr.bus, addr.device, addr.function, addr.register));
         } else {
             st.probing = None;
         }
+        st.writes.push((addr, value));
     }
 }
 
@@ -744,6 +758,153 @@ fn map_virtio_window_propagates_capability_denial() {
     let mapper = MockMapper::new(false);
     assert_eq!(
         pci.map_virtio_window(virtio_blk_bdf(), VIRTIO_CFG_COMMON, &mapper)
+            .unwrap_err(),
+        DriverError::PermissionDenied
+    );
+}
+
+// ---- MSI-X interrupt routing ---------------------------------------------
+
+/// A virtio function whose MSI-X table lives in the *I/O* BAR (BAR0).
+/// Such a table is not memory-mappable; [`Pci::route_msix`] must refuse
+/// it rather than pretend to map an I/O-port BAR as a register window.
+fn msix_io_table_fixture() -> MockConfigSpace {
+    let func = MockFunction {
+        bus: 0,
+        device: 5,
+        function: 0,
+        regs: vec![
+            id(0x1AF4, 0x1041),
+            status_with_caplist(),
+            class(0x0200),
+            header(0x00),
+            // BAR0 — I/O at 0xC000.
+            (4, 0x0000_C001),
+            cap_pointer(0x50),
+            // MSI-X cap @ 0x50 (dword 20): id=0x11, next=0, table_size=4.
+            #[allow(clippy::identity_op)]
+            (20, (0x0003u32 << 16) | (0x00u32 << 8) | 0x11_u32),
+            // Table off/BIR @ 0x54 (dword 21): table_bar=0 (the I/O BAR).
+            (21, 0x0000_0000),
+            // PBA off/BIR @ 0x58 (dword 22): pba_bar=0, offset=0x80.
+            (22, 0x0000_0080),
+        ],
+        sizing: vec![(4, 0xFFFF_FFE1)],
+    };
+    MockConfigSpace::new(vec![func])
+}
+
+fn msix_io_table_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 5,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+}
+
+#[test]
+fn route_msix_programs_entry_and_enables_function() {
+    let config = q35_fixture();
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    let mapper = MockMapper::new(true);
+    let message = MsiMessage {
+        address: 0xFEE0_1000,
+        data: 0x0000_0030,
+    };
+
+    pci.route_msix(virtio_bdf(), 0, message, &mapper)
+        .expect("routes entry 0");
+
+    // The table entry was written into the mapped window. The mock
+    // mapper backs every window at the start of its buffer, so the
+    // four dwords of the entry land at backing[0..4].
+    let backing = mapper.backing.borrow();
+    assert_eq!(backing[0], 0xFEE0_1000, "message address low");
+    assert_eq!(backing[1], 0x0000_0000, "message address high");
+    assert_eq!(backing[2], 0x0000_0030, "message data");
+    assert_eq!(backing[3], 0x0000_0000, "vector control: entry unmasked");
+
+    // MSI-X was enabled function-wide: the capability header dword
+    // (register 20) was written with the enable bit (bit 31) set and
+    // the function mask (bit 30) clear, preserving cap_id / next /
+    // table-size in the low bits.
+    let st = state.borrow();
+    let enable = st
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.bus == 0 && a.device == 3 && a.function == 0 && a.register == 20);
+    assert_eq!(enable.map(|(_, v)| *v), Some(0x8003_0011));
+}
+
+#[test]
+fn route_msix_reports_not_found_without_msix_capability() {
+    let pci = Pci::new(q35_fixture());
+    let mapper = MockMapper::new(true);
+    // The LPC function advertises no capability list at all.
+    let lpc_bdf = ConfigAddress {
+        bus: 0,
+        device: 0x1F,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let message = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x30,
+    };
+    assert_eq!(
+        pci.route_msix(lpc_bdf, 0, message, &mapper).unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn route_msix_rejects_entry_beyond_table() {
+    let pci = Pci::new(q35_fixture());
+    let mapper = MockMapper::new(true);
+    let message = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x30,
+    };
+    // The q35 virtio function's MSI-X table holds 4 entries (0..=3).
+    assert_eq!(
+        pci.route_msix(virtio_bdf(), 4, message, &mapper)
+            .unwrap_err(),
+        DriverError::OutOfRange
+    );
+}
+
+#[test]
+fn route_msix_refuses_io_bar_table() {
+    let pci = Pci::new(msix_io_table_fixture());
+    let mapper = MockMapper::new(true);
+    let message = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x30,
+    };
+    assert_eq!(
+        pci.route_msix(msix_io_table_bdf(), 0, message, &mapper)
+            .unwrap_err(),
+        DriverError::Unsupported
+    );
+}
+
+#[test]
+fn route_msix_propagates_capability_denial() {
+    let pci = Pci::new(q35_fixture());
+    // Mapper without CAP_MMIO_MAP: the table write must surface the
+    // kernel's refusal rather than synthesise a pointer.
+    let mapper = MockMapper::new(false);
+    let message = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x30,
+    };
+    assert_eq!(
+        pci.route_msix(virtio_bdf(), 0, message, &mapper)
             .unwrap_err(),
         DriverError::PermissionDenied
     );

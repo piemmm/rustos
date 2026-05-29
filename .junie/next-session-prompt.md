@@ -8,7 +8,35 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
-- **Live virtio-PCI boot wiring** (latest session). The ring-0 walk
+- **PCI MSI-X interrupt routing** (latest session). Scoping
+  `virtio_blk_pci_x86_64` surfaced a hard blocker: a real
+  virtio-blk-pci round-trip cannot complete without delivering the
+  device's interrupt (`VirtioBlk::run_request` parks on
+  `host.notify_wait()` → `block_until_ready` on a *pre-bound*
+  `IrqHandle`), yet the tree had **no** PCI interrupt-routing path
+  (MSI/MSI-X were *discovered* but never enabled; INTx would need an
+  ACPI `_PRT`/AML interpreter that does not exist). Landed the modern,
+  host-testable half: a frozen `abi-v1` seam
+  `lib/abi/src/driver/msix.rs` (`MsiMessage { address, data }` +
+  `MsixBus: Bus` with `route_msix(bdf, entry, message, mapper)`);
+  `Pci::route_msix` (find MSI-X cap → bounds-check entry → map the
+  16-byte table entry through the `CAP_MMIO_MAP`-gated `MmioMapper` →
+  write addr/data + unmask vector control → set MSI-X Enable + clear
+  function mask; fails closed NotFound/OutOfRange/Unsupported/
+  PermissionDenied) + `MsixBus for Pci<C>`; and
+  `rustos_arch_x86_64::irq::msi_message(vector, destination)` building
+  the x86 LAPIC message (physical/fixed/edge, SDM §11.11). Host-tested
+  only: `rustos-abi` 84 (+3), `rustos-drv-bus-pci` 26 (+5),
+  `rustos-arch-x86_64` 133 (+2); clippy/fmt/doc clean; abi+pci build
+  for `x86_64-unknown-none`. **Still TODO (the IRQ-binding the QEMU
+  test needs):** allocate a free external vector + bind it in
+  `kernel/irq::IrqTable`, build the `MsiMessage` via `msi_message`,
+  call `route_msix` from the boot pipeline, and wire that `IrqHandle`
+  into `KernelVirtioFactory`/`provision_and_run` so the loaded
+  virtio-blk `.rxe`'s `notify_wait` actually wakes. Legacy MSI and
+  INTx routing remain unimplemented.
+
+- **Live virtio-PCI boot wiring** (earlier session). The ring-0 walk
   (`provision_virtio_pci`) and the per-driver DMA factory
   (`KernelVirtioFactory`) existed but were reachable only from unit
   tests; nothing joined them to a live `drvhost::Host`. New module

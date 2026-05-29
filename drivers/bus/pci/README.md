@@ -44,7 +44,17 @@ authority is requested (`AGENTS.md` §4).
   to a capability-checked register window for the virtio PCI
   transport, and `virtio_notify_off_multiplier` surfaces the
   notification scale.
-- MSI / MSI-X capabilities are **discovered** but never enabled.
+- MSI / MSI-X capabilities are **discovered** by the capability walk;
+  MSI-X is additionally **routable**: `route_msix` programs a table
+  entry with a kernel-supplied `MsiMessage`, unmasks the entry, and
+  sets the function's MSI-X Enable bit (clearing the function mask).
+  The table write goes through the kernel MMIO-map facility — the
+  driver never synthesises a pointer (`AGENTS.md` §4). The message
+  itself is built by the architecture layer (e.g.
+  `rustos_arch_x86_64::irq::msi_message`); the bus driver copies it
+  verbatim. Legacy MSI and INTx routing are not implemented.
+  Ring 0 reaches `route_msix` through the frozen `abi-v1`
+  `rustos_abi::MsixBus` seam.
 - Loadable, unloadable, and reloadable at runtime (`AGENTS.md` §8) —
   the driver holds no global state beyond the `Pci<C>` instance the
   host owns.
@@ -57,6 +67,9 @@ authority is requested (`AGENTS.md` §4).
 - The exact `q35` device-list assertion.
 - Capability-list and BAR-sizing walkers, including the virtio-1.x
   configuration-structure decode.
+- The MSI-X routing hand-off: programming a table entry + enabling
+  the function, plus the not-found / out-of-range / I/O-BAR /
+  capability-denied failure paths.
 - The memory-BAR and virtio-config register-window hand-offs to a
   mock MMIO mapper (including the capability-denial path).
 - The `register` capability gate.

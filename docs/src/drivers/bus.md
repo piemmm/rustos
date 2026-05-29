@@ -258,6 +258,45 @@ register window or DMA mapping past its load (`AGENTS.md` §4). The boot
 walk fails closed with a `VirtioPciWalkError` and never constructs the
 host if the device or a window cannot be resolved.
 
+### MSI-X interrupt routing
+
+Enumeration and window mapping bring a device's registers online; the
+device also needs an interrupt line. A modern virtio-PCI function
+delivers interrupts through MSI-X (PCI Local Bus 3.0 §6.8.2): one
+message-signalled vector per table entry held in a memory BAR, plus a
+per-function enable bit in configuration space. Routing the line means
+programming an entry with the message the platform interrupt controller
+minted, unmasking that entry, and enabling MSI-X on the function.
+
+`Pci::route_msix(bdf, entry, message, mapper)` does exactly that: it
+locates the function's MSI-X capability (decoded by the capability
+walk), bounds-checks `entry` against the table size, resolves the table
+BAR, maps the addressed 16-byte entry through the same
+`CAP_MMIO_MAP`-gated `MmioMapper`, writes the message address/data and
+clears the entry's per-vector mask, then sets the MSI-X Enable bit and
+clears the function mask in the capability's Message Control register.
+A table that lives in an I/O-port BAR is refused (`Unsupported`); an
+entry index beyond the table or an entry that overruns its BAR fails
+closed (`OutOfRange`); a caller without `CAP_MMIO_MAP` is denied
+(`PermissionDenied`, propagated from the mapper). The driver never
+synthesises a pointer.
+
+The `MsiMessage` (address + data) is **opaque** to the bus driver: only
+the architecture layer knows how to address its interrupt controller.
+On x86, `rustos_arch_x86_64::irq::msi_message(vector, destination)`
+encodes the local-APIC message format (physical destination, fixed
+delivery, edge trigger; Intel SDM Vol 3A §11.11) — the `0xFEE`-prefixed
+address selecting the destination CPU and the data carrying the chosen
+external vector (`0x30..=0xFE`). A GIC or PLIC port would build a
+different pair; the bus driver copies whichever it is given verbatim.
+
+As with the virtio-window hand-off, ring 0 reaches `route_msix` through
+a frozen ABI seam rather than the concrete type: `Pci<C>` implements
+`rustos_abi::driver::msix::MsixBus` (a supertrait of `Bus`), so the
+boot path can route a device's interrupt through a single `&dyn
+MsixBus` without naming a concrete `drivers/bus/*` type
+(`AGENTS.md` §8). Legacy MSI and INTx routing are not implemented.
+
 ## Shared types
 
 There is no copy-paste between the two drivers; the only shared

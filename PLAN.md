@@ -1196,6 +1196,48 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — PCI MSI-X interrupt
+  routing, *complete*): scoping the `tests/integration/
+  virtio_blk_pci_x86_64` crate found the hard blocker that a real
+  virtio-blk-pci round-trip cannot complete without delivering the
+  device's interrupt — `VirtioBlk::run_request` parks on
+  `host.notify_wait()` → `block_until_ready` on a *pre-bound*
+  `IrqHandle` — yet the tree had no PCI interrupt-routing path at all
+  (the PCI driver *discovered* MSI / MSI-X capabilities but never
+  enabled them; INTx would need an ACPI `_PRT`/AML interpreter that
+  does not exist). This lands the modern, host-testable half: MSI-X
+  enablement. **ABI seam (frozen `abi-v1`).** New module
+  `lib/abi/src/driver/msix.rs` adds the `MsiMessage { address, data }`
+  type (the architecture-built interrupt message, opaque to the bus
+  driver) and the `MsixBus: Bus` trait
+  (`route_msix(bdf, entry, message, mapper)`), re-exported from the
+  crate root. Ring 0 reaches the PCI driver through `&dyn MsixBus`,
+  naming no concrete `drivers/bus/*` type (`AGENTS.md` §8). **PCI
+  driver.** `Pci::route_msix` locates the function's MSI-X capability,
+  bounds-checks the entry against the table size, maps the addressed
+  16-byte table entry through the `CAP_MMIO_MAP`-gated `MmioMapper`,
+  writes the message address/data + clears the per-vector mask, then
+  sets the MSI-X Enable bit and clears the function mask in the
+  capability's Message Control register — failing closed on a missing
+  capability (`NotFound`), an out-of-range/overrunning entry
+  (`OutOfRange`), an I/O-port table BAR (`Unsupported`), or a denied
+  mapper (`PermissionDenied`); the driver never synthesises a pointer
+  (`AGENTS.md` §4). `Pci<C>` implements `MsixBus` by forwarding to the
+  inherent method. **Arch.** `rustos_arch_x86_64::irq::msi_message(
+  vector, destination)` builds the x86 local-APIC message (physical
+  destination, fixed delivery, edge trigger; Intel SDM Vol 3A §11.11),
+  reusing `preempt::LAPIC_BASE_PHYS`. **Tests.** `rustos-abi` 84 (+3
+  seam tests), `rustos-drv-bus-pci` 26 (+5: program-entry-and-enable
+  asserting both the table write and the config enable bit, NotFound,
+  OutOfRange, I/O-BAR Unsupported, PermissionDenied; the
+  `MockConfigSpace` now logs config writes), `rustos-arch-x86_64` 133
+  (+2 message-encoding tests). **Docs.** `docs/src/drivers/bus.md`
+  ("MSI-X interrupt routing") + the PCI README. **Deferred.** Binding
+  the minted vector in `kernel/irq::IrqTable`, allocating a free
+  external vector, and calling `route_msix` from the boot pipeline so
+  `virtio_blk_pci_x86_64` can drive a live device remain the QEMU-test
+  work; legacy MSI and INTx routing are not implemented. See
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — hardware-real direct-map
   DMA/MMIO data path, *complete*): investigation while scoping the
   `tests/integration/virtio_blk_pci_x86_64` crate found that the

@@ -37,8 +37,11 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
+use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use rustos_abi::{
+    CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, MsiMessage, RegisterWindow,
+};
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
@@ -112,5 +115,22 @@ impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
 
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
         self.virtio_notify_off_multiplier(bdf)
+    }
+}
+
+// The frozen `abi-v1` MSI-X interrupt-routing seam (`AGENTS.md` §9).
+// Ring 0 reaches the concrete `Pci` through `&dyn MsixBus` to route a
+// device's interrupt, never naming the driver's concrete type
+// (`AGENTS.md` §8). The inherent `Pci::route_msix` wins method
+// resolution, so the forward is not recursive.
+impl<C: ConfigSpace> MsixBus for Pci<C> {
+    fn route_msix(
+        &self,
+        bdf: u64,
+        entry: u16,
+        message: MsiMessage,
+        mapper: &dyn MmioMapper,
+    ) -> Result<(), DriverError> {
+        Pci::route_msix(self, bdf, entry, message, mapper)
     }
 }

@@ -47,6 +47,8 @@ use crate::preempt::{LAPIC_BASE_PHYS, LAPIC_EOI_OFFSET};
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use rustos_abi::MsiMessage;
+
 mod routing;
 
 pub use routing::{Routing, RoutingError};
@@ -209,6 +211,35 @@ pub(crate) fn clear_routing_for_tests() {
     }
 }
 
+// --- MSI message construction -------------------------------------
+
+/// Build the x86 local-APIC MSI message that delivers `vector` to the
+/// CPU whose local-APIC ID is `destination`.
+///
+/// This is the architecture half of the PCI MSI-X routing seam
+/// ([`rustos_abi::MsixBus`]): the kernel picks a free external vector
+/// (`0x30..=0xFE`) and a destination CPU, this function encodes the
+/// Intel-defined message, and the PCI bus driver writes it into the
+/// device's MSI-X table.
+///
+/// The encoding uses **physical** destination mode, **fixed** delivery,
+/// and **edge** trigger (Intel SDM Vol 3A §11.11):
+///
+/// * Address — the LAPIC message-address format: the fixed `0xFEE`
+///   prefix (here [`LAPIC_BASE_PHYS`](crate::preempt::LAPIC_BASE_PHYS))
+///   with the destination APIC ID in bits 19..12 and the redirection-
+///   hint / destination-mode bits clear.
+/// * Data — the low byte carries the vector; the delivery-mode,
+///   level, and trigger-mode bits are all zero.
+#[must_use]
+pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
+    let address = crate::preempt::LAPIC_BASE_PHYS | (u64::from(destination) << 12);
+    MsiMessage {
+        address,
+        data: u32::from(vector),
+    }
+}
+
 // --- Rust trampoline called from the asm thunk -------------------
 
 /// Rust entry point invoked by the asm trampoline.
@@ -284,6 +315,26 @@ mod tests {
         assert_eq!(EXTERNAL_VECTOR_FIRST, 0x30);
         assert_eq!(EXTERNAL_VECTOR_LAST, 0xFE);
         assert_eq!(EXTERNAL_VECTOR_COUNT, 207);
+    }
+
+    #[test]
+    fn msi_message_encodes_destination_and_vector() {
+        // Vector 0x41 to APIC ID 0: address is the bare LAPIC base,
+        // data is the vector.
+        let m = msi_message(0x41, 0);
+        assert_eq!(m.address, 0xFEE0_0000);
+        assert_eq!(m.data, 0x41);
+    }
+
+    #[test]
+    fn msi_message_places_destination_in_bits_19_12() {
+        // APIC ID 0xAB lands in bits 19..12 of the message address;
+        // the fixed 0xFEE prefix is preserved and the low 12 bits stay
+        // clear (redirection hint / destination mode == 0).
+        let m = msi_message(0x30, 0xAB);
+        assert_eq!(m.address, 0xFEE0_0000 | (0xAB << 12));
+        assert_eq!(m.address & 0xFFF, 0);
+        assert_eq!(m.data, 0x30);
     }
 
     #[test]

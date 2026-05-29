@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
+use rustos_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow, WindowError};
 
 use crate::config::{
     BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
@@ -37,6 +37,20 @@ const STATUS_CAP_LIST: u16 = 1 << 4;
 /// catch any walker bug (a circular `next` pointer) without spinning
 /// forever.
 const CAP_LIST_HARD_LIMIT: usize = 64;
+
+/// MSI-X table entry size in bytes (PCI Local Bus 3.0 §6.8.2.9):
+/// message address (8) + message data (4) + vector control (4).
+const MSIX_ENTRY_LEN: usize = 16;
+
+/// MSI-X Message Control "MSI-X Enable" bit. The Message Control
+/// register occupies the high 16 bits of the capability header dword,
+/// so its bit 15 lands at bit 31 of the dword.
+const MSIX_CTRL_ENABLE: u32 = 1 << 31;
+
+/// MSI-X Message Control "Function Mask" bit (bit 14 of Message
+/// Control → bit 30 of the header dword); cleared so unmasked table
+/// entries deliver.
+const MSIX_CTRL_FUNCTION_MASK: u32 = 1 << 30;
 
 /// The PCI bus driver instance.
 ///
@@ -391,6 +405,121 @@ impl<C: ConfigSpace> Pci<C> {
                     notify_off_multiplier,
                     ..
                 } => Some(notify_off_multiplier),
+                _ => None,
+            })
+            .ok_or(DriverError::NotFound)
+    }
+
+    /// Program MSI-X table `entry` of function `bdf` with `message`,
+    /// unmask the entry, and enable MSI-X on the function.
+    ///
+    /// This is the interrupt-routing hand-off a virtio (or any
+    /// MSI-X-capable) driver needs: the kernel's interrupt controller
+    /// mints an [`MsiMessage`] for a chosen vector/destination, and the
+    /// bus driver writes it into the device's table and flips the
+    /// enable bit. The driver never synthesises a pointer — the table
+    /// write goes through a kernel-mapped [`RegisterWindow`] obtained
+    /// from `mapper` (`AGENTS.md` §4).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — the function advertises no MSI-X
+    ///   capability, or no capability list at all.
+    /// * [`DriverError::OutOfRange`] — `entry` is beyond the function's
+    ///   MSI-X table, or the addressed entry overruns its BAR.
+    /// * [`DriverError::Unsupported`] — the table lives in an I/O-port
+    ///   BAR, which is not memory-mappable, or the function is not a
+    ///   type-0 header.
+    /// * [`DriverError::LengthOutOfRange`] — the region length does not
+    ///   fit in `usize` on this target (propagated from the mapper).
+    /// * [`DriverError::PermissionDenied`] — the caller does not hold
+    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   (propagated from the mapper).
+    /// * [`DriverError::BufferTooSmall`] / [`DriverError::DeviceFault`]
+    ///   — propagated from the capability-list walk.
+    ///
+    /// # Capabilities
+    ///
+    /// The `mapper` enforces
+    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    pub fn route_msix(
+        &self,
+        bdf: u64,
+        entry: u16,
+        message: MsiMessage,
+        mapper: &dyn MmioMapper,
+    ) -> Result<(), DriverError> {
+        let (cap_offset, table_size, table_bar, table_offset) = self.find_msix(bdf)?;
+        if entry >= table_size {
+            return Err(DriverError::OutOfRange);
+        }
+        let bar = self.resolve_bar(bdf, table_bar)?;
+        if matches!(bar.kind, BarKind::Io) {
+            return Err(DriverError::Unsupported);
+        }
+        // Byte offset of this entry within the table BAR, bounds-checked
+        // against the BAR's reserved span before any access.
+        let entry_off = u64::from(table_offset)
+            .checked_add(u64::from(entry).wrapping_mul(MSIX_ENTRY_LEN as u64))
+            .ok_or(DriverError::OutOfRange)?;
+        let end = entry_off
+            .checked_add(MSIX_ENTRY_LEN as u64)
+            .ok_or(DriverError::OutOfRange)?;
+        if end > bar.size {
+            return Err(DriverError::OutOfRange);
+        }
+        let phys = bar
+            .base
+            .checked_add(entry_off)
+            .ok_or(DriverError::OutOfRange)?;
+        let window = mapper
+            .map_window(phys, MSIX_ENTRY_LEN)
+            .map_err(MmioMapError::as_driver_error)?;
+        // MSI-X table entry layout (PCI Local Bus 3.0 §6.8.2.9):
+        // message address low / high, message data, vector control.
+        // Program address + data first, then clear the entry's mask
+        // bit (vector control bit 0) by writing zero.
+        let addr_lo = (message.address & 0xFFFF_FFFF) as u32;
+        let addr_hi = (message.address >> 32) as u32;
+        window
+            .write_u32(0, addr_lo)
+            .map_err(WindowError::as_driver_error)?;
+        window
+            .write_u32(4, addr_hi)
+            .map_err(WindowError::as_driver_error)?;
+        window
+            .write_u32(8, message.data)
+            .map_err(WindowError::as_driver_error)?;
+        window
+            .write_u32(12, 0)
+            .map_err(WindowError::as_driver_error)?;
+        // Enable MSI-X function-wide and clear the function mask so the
+        // freshly-unmasked entry can deliver. The Message Control
+        // register lives in the high 16 bits of the capability header
+        // dword; cap_id / next-pointer in the low 16 bits are
+        // read-only and ignore writes.
+        let header_addr = addr_with_byte_offset(unpack_bdf(bdf, 0), cap_offset);
+        let header = self.config.read32(header_addr);
+        let updated = (header | MSIX_CTRL_ENABLE) & !MSIX_CTRL_FUNCTION_MASK;
+        self.config.write32(header_addr, updated);
+        Ok(())
+    }
+
+    /// Locate the function's MSI-X capability, returning its
+    /// `(cap_offset, table_size, table_bar, table_offset)`.
+    fn find_msix(&self, bdf: u64) -> Result<(u8, u16, u8, u32), DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = self.capabilities(bdf, &mut caps)?;
+        caps[..n]
+            .iter()
+            .find_map(|c| match *c {
+                Capability::MsiX {
+                    offset,
+                    table_size,
+                    table_bar,
+                    table_offset,
+                    ..
+                } => Some((offset, table_size, table_bar, table_offset)),
                 _ => None,
             })
             .ok_or(DriverError::NotFound)
