@@ -14,7 +14,7 @@ code:
 
 ## Status
 **Work in progress.** - There is a long way to go before this project is ready
-for prime time. Do not expect anything to work yet.
+for prime time, if ever. Do not expect anything to work yet.
 
 ## Building
 

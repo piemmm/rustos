@@ -1888,15 +1888,26 @@ follow-up is its own thread and is now also complete.
   cards).
 - VFS layer in `kernel/core` (path resolution, mount table, permission
   enforcement via `kernel/sec`).
+- Enforcement of the on-disk layout defined in `AGENTS.md` §16: the VFS
+  refuses to create any of the reserved legacy POSIX top-level names
+  (`/etc`, `/home`, `/usr`, `/var`, `/proc`, `/sys`, `/lib`, `/lib64`,
+  `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`, `/dev`, `/mnt`, `/media`,
+  `/run`, `/boot`), and the default root template provides only
+  `/System`, `/Users`, `/Apps`, `/Storage`.
 
 **Tests**
 - POSIX FS test suite (`pjdfstest`-equivalent) run under QEMU.
 - ACL + capability gate tests: a user without `CAP_AUDIT_READ` cannot read
   a file marked as such, even with mode 0644.
 - Crash-consistency tests for `rustfs` journal.
+- Layout-enforcement tests: attempting to `mkdir /etc` (or any other
+  reserved name from `AGENTS.md` §16.1) at the root returns
+  `Error::ReservedPath`; `/System` is read-only at runtime except for
+  the two writable paths listed in §16.2.
 
 **Docs**
-- `docs/src/filesystem/{overview,rustfs,ext4,fat32,permissions}.md`.
+- `docs/src/filesystem/{overview,rustfs,ext4,fat32,permissions,layout}.md`
+  (the new `layout.md` mirrors `AGENTS.md` §16).
 
 ---
 
@@ -1913,8 +1924,25 @@ follow-up is its own thread and is now also complete.
   offers graphical mode only when a display driver and `userland/gui/wm`
   are available.
 - Core CLI utilities (`ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`,
-  `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`).
-  Each utility is its own small crate under `userland/apps/`.
+  `chmod`, `chown`, `useradd`, `groupadd`, `setcap`, `getcap`,
+  `sysinfo`). Each utility is its own small crate under `userland/apps/`.
+  `ps`, `mount`, and `sysinfo` are clients of the System Information API
+  defined in `AGENTS.md` §16.6 (`lib/abi/src/sysinfo.rs`); they do **not**
+  read a `/proc`-style virtual filesystem.
+- `lib/abi/src/sysinfo.rs`: typed, versioned, capability-gated request /
+  response types for the System Information API (§16.6). Frozen on
+  release; new queries ship as `sysinfo-v2`.
+- `userland/system/sysinfod`: user-space system service that serves the
+  API. Installed to `/System/Services/sysinfod`.
+- Application-bundle loader in `kernel/core` (or a user-space service
+  invoked by `init`) that recognises `/Apps/<Name>.app/` bundles per
+  `AGENTS.md` §16.5: parses and verifies the signed `AppInfo`
+  manifest, computes the granted capability set as the intersection of
+  the user's grants and the manifest request, and refuses bundles whose
+  top-level layout deviates from the fixed set.
+- Dynamic loader policy: shared-library references resolve only against
+  the calling bundle's own `Libraries/` directory and `/System/Libraries/`
+  (§16.4). Any other path is a load-time error.
 
 **Tests**
 - Integration tests: boot to login, log in, run each utility, exercise
@@ -1954,7 +1982,10 @@ follow-up is its own thread and is now also complete.
 
 **Deliverables**
 - `userland/system/installer` with text and graphical front-ends sharing one core
-  library. Functions per `AGENTS.md` §11.
+  library. Functions per `AGENTS.md` §11 and lays out the filesystem per
+  `AGENTS.md` §16: exactly `/System`, `/Users`, `/Apps`, `/Storage`; no
+  legacy POSIX top-level directories; mount flags as specified in §11.3
+  and §16.3; expert mode refuses any reserved name.
 - `tools/mkimage` producing:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI).
   - `images/rustos-aarch64-rpi.img`.

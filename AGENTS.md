@@ -180,8 +180,12 @@ an update to this section.
 - `uid = 0` is **not** all-powerful. It is merely the system user; powers come
   from capabilities, not from the uid.
 - Groups are first-class objects with their own ACL.
-- Users and groups are persisted in `/etc/rustos/users` and `/etc/rustos/groups`,
-  both of which are themselves protected by capabilities.
+- Users and groups are persisted in `/System/Security/Users` and
+  `/System/Security/Groups` (see §16 for the on-disk filesystem layout).
+  Both are themselves protected by capabilities.
+- There is no `/etc`. Anything that on a POSIX system would live under
+  `/etc` lives under `/System/Settings/` (machine-wide) or under the
+  per-user `/Users/<name>/Settings/` (user-scoped). See §16.
 
 ### 5.2 Capabilities
 
@@ -199,8 +203,10 @@ an update to this section.
 - POSIX mode bits **plus** ACLs **plus** capability gates.
 - Every inode stores: owner uid, owning gid, mode, ACL, and an optional
   capability requirement (e.g. "reading this file requires `CAP_AUDIT_READ`").
-- Mounts have their own permission policy (nosuid, nodev, noexec, ro, etc.)
-  and the installer's default partition layout uses them aggressively.
+- Mounts have their own permission policy (`nosuid`, `nodev`, `noexec`,
+  `ro`, etc.) and the installer's default layout uses them aggressively.
+  The concrete defaults for `/System`, `/Users`, `/Apps`, and `/Storage`
+  are defined in §16.
 
 ### 5.4 Mandatory rules for every IPC/syscall/driver entry point
 
@@ -303,13 +309,21 @@ an update to this section.
 - It must:
   1. Prompt for system name (hostname).
   2. Prompt for the first user (username, password, full name, primary group).
-  3. Offer a secure default partitioning scheme:
+  3. Offer the secure default layout defined in §16:
      - Encrypted root (LUKS-equivalent using `lib/crypto`).
-     - Separate `/home` with `nosuid,nodev`.
-     - Separate `/var` with `nosuid,nodev`.
-     - Read-only `/usr`.
+     - `/System` mounted read-only (the only writable paths inside it
+       are `/System/Logs` and `/System/Settings`, and they are mounted
+       `nosuid,nodev,noexec`).
+     - `/Users` mounted `nosuid,nodev`.
+     - `/Apps` mounted `nosuid,nodev` (application binaries are
+       capability-gated, not setuid).
+     - `/Storage` mounted `nosuid,nodev,noexec` by default; per-volume
+       overrides are capability-gated.
   4. Allow expert mode for manual partitioning, but the default is the
-     secure layout.
+     secure layout. Expert mode may not introduce legacy POSIX top-level
+     directories (`/etc`, `/home`, `/usr`, `/var`, `/proc`, `/lib`,
+     `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`, `/dev`); those names are
+     reserved and refused by the installer.
   5. Generate a per-installation machine ID and signing key for the local
      capability authority.
 - The installer is the same binary on every platform; platform specifics
@@ -393,6 +407,181 @@ You are not exempt from any rule above. In addition:
 10. If you are about to write `// HACK`, `// FIXME later`, `// works for now`,
     or `#[allow(...)]` without a justification comment — **stop**. Rework
     the change.
+
+---
+
+## 16. OS Filesystem Layout (authoritative)
+
+This section governs the **installed system's** on-disk layout, not the
+source repository (the source layout is §3). It is binding.
+
+### 16.1 Top-level directories
+
+RustOS has **exactly four** top-level directories. Anything else is a
+defect.
+
+```
+/
+├── System/    # All OS-provided files. Read-only at runtime.
+├── Users/     # One subdirectory per user account.
+├── Apps/      # Installed applications. One bundle per app.
+└── Storage/   # Mount points for removable / extra volumes.
+```
+
+The following legacy POSIX names are **reserved and forbidden** as
+top-level directories: `/etc`, `/home`, `/usr`, `/var`, `/proc`, `/sys`,
+`/lib`, `/lib64`, `/bin`, `/sbin`, `/opt`, `/root`, `/tmp`, `/dev`,
+`/mnt`, `/media`, `/run`, `/boot`. The kernel filesystem layer refuses
+to create them; the installer refuses to lay them out; any driver or
+userland code that hard-codes one of these paths is a defect.
+
+There is **no `/proc`** and **no `/sys`**. Live system information is
+exposed exclusively through the System Information API (§16.6).
+
+### 16.2 `/System`
+
+`/System` contains every file that ships as part of the OS. It is
+mounted read-only at runtime. The installer and the updater are the
+only components permitted to mutate it, and only by re-mounting it
+read-write under `CAP_SYSTEM_UPDATE`.
+
+Authoritative subdirectories:
+
+```
+/System/
+├── Kernel/      # Kernel image(s) and boot artifacts for the platform.
+├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
+├── Libraries/   # The OS-provided shared libraries (see §16.4).
+├── Fonts/       # System fonts.
+├── Graphics/    # WM, compositor assets, cursors, icons.
+├── Audio/       # System audio service assets.
+├── Network/     # Network stack configuration and service binaries.
+├── Security/    # Users, Groups, capability authority, keys, policy.
+│   ├── Users    # User database (see §5.1).
+│   ├── Groups   # Group database (see §5.1).
+│   ├── Keys/    # Local capability-authority signing material.
+│   └── Policy/  # MAC and capability policy.
+├── Printing/    # Print spooler and drivers' user-space services.
+├── Logs/        # Append-only structured logs (writable; nosuid,nodev,noexec).
+├── Settings/    # Machine-wide settings (writable; nosuid,nodev,noexec).
+└── Services/    # Long-running system services (init manifests, etc).
+```
+
+Adding a new top-level subdirectory under `/System` requires updating
+this section and `PLAN.md`. Subdirectories outside this list are a
+defect.
+
+`/System/Logs` and `/System/Settings` are the only writable paths
+beneath `/System`. They are mounted `nosuid,nodev,noexec` and are
+capability-gated (`CAP_LOG_WRITE`, `CAP_SETTINGS_WRITE`).
+
+### 16.3 `/Users`, `/Apps`, `/Storage`
+
+- `/Users/<username>/` is the only place user-owned files live. It
+  contains at least `Documents/`, `Settings/`, `Library/` (per-user
+  caches/state, **not** shared libraries), and `Desktop/`. The shape is
+  fixed; applications may not invent sibling directories at this level.
+  `/Users` is mounted `nosuid,nodev`.
+- `/Apps/<Name>.app/` is the only place applications live (see §16.5).
+  `/Apps` is mounted `nosuid,nodev`. Apps acquire privilege through
+  capabilities declared in their manifest, never through setuid.
+- `/Storage/<volume>/` is where mounted volumes appear (removable media,
+  extra disks, network shares). Default mount flags are
+  `nosuid,nodev,noexec`; relaxations require `CAP_FS_MOUNT_RELAX` and
+  are recorded in the audit log.
+
+### 16.4 Shared libraries
+
+The OS ships a **closed, curated set** of shared libraries under
+`/System/Libraries/`. They are the only shared libraries on the system.
+The permitted classes are:
+
+- Windowing / compositor client
+- Font rendering
+- Image decoding
+- Media (audio/video) decoding and playback
+- Archive extraction
+- Printing
+- TLS / cryptography (via `lib/crypto`)
+- Networking (sockets, DNS, HTTP client)
+
+Adding a new class of OS-provided shared library requires an update to
+this list **and** to `PLAN.md`. "Convenience" libraries are forbidden.
+
+Applications **must be self-contained**. They may not install shared
+libraries outside their own bundle, and they may not depend on shared
+libraries other than the curated `/System/Libraries/` set. An
+application that needs additional code links it statically or vendors
+it privately into `Libraries/` inside its own bundle (§16.5);
+statically-linked code is preferred because it leaves responsibility
+for security updates squarely with the application developer.
+
+The dynamic loader refuses to resolve a shared-library reference that
+points anywhere other than the requesting app's own `Libraries/` or
+`/System/Libraries/`.
+
+### 16.5 Application bundles (`.app`)
+
+An installed application is a directory named `<Name>.app` placed
+directly under `/Apps/`. The bundle layout is fixed:
+
+```
+/Apps/Example.app/
+├── AppInfo            # Signed manifest. Required. See below.
+├── Run                # Entry-point rxe binary. Required.
+├── Code/              # Additional rxe binaries / plugins.
+├── Libraries/         # Private shared libraries used only by this app.
+├── Resources/         # Images, locales, UI definitions, etc.
+├── DefaultSettings/   # Read-only defaults; copied into the user's
+│                      # /Users/<u>/Settings/<Name>/ on first launch.
+└── Documentation/     # Bundled docs, opened by the help viewer.
+```
+
+Exactly these names are permitted at the top of a bundle; additional
+entries are a packaging defect and the loader will refuse the bundle.
+
+`AppInfo` is the application manifest. It is a signed document (see §9)
+and declares at minimum:
+
+- Bundle identifier, human-readable name, version.
+- Target ABI version (`abi-vN`) and required syscall hashes.
+- The exact set of capabilities the app requests (§5.2). The kernel
+  grants only the intersection of these with the launching user's
+  grants; ambient authority is forbidden (§4).
+- Declared MIME / file-type associations.
+- The signer's identity and signature over the bundle contents.
+
+Apps may not write outside their own per-user state
+(`/Users/<u>/Settings/<Name>/` and an app-scoped `Library/<Name>/`
+cache directory). All other writes require a user-mediated capability
+(e.g. a file picker handing the app a one-shot file capability).
+
+### 16.6 System Information API
+
+Because there is no `/proc` or `/sys`, every piece of information that
+would have lived there is exposed through a single, versioned,
+capability-checked API: the **System Information API** (`sysinfo`).
+
+- The API is defined in `lib/abi/src/sysinfo.rs` and served by a
+  user-space system service under `/System/Services/`.
+- Each query is a typed request returning a typed response; there is
+  no free-form text scraping interface. Adding a query requires the
+  same ABI discipline as a syscall (§9): versioned, hashed, frozen
+  on release.
+- Every query declares the capability it requires. Unprivileged queries
+  (e.g. "list my own processes") need none; privileged queries (e.g.
+  "list all processes system-wide", "read kernel memory stats") require
+  capabilities such as `CAP_SYSINFO_GLOBAL` or `CAP_SYSINFO_KERNEL`.
+- A single command-line tool, `sysinfo`, in `userland/shell/`, exposes
+  the same API to the terminal. It does **not** open files in a virtual
+  filesystem; it calls the API. There is no privileged path that
+  bypasses the capability check.
+
+Any in-tree code that needs runtime system data uses this API.
+Fabricating a `/proc`-style virtual filesystem, even "just for
+compatibility", is forbidden.
+
+---
 
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.
