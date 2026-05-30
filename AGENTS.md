@@ -151,6 +151,7 @@ rustos/
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.
 │   │   ├── init/        # PID 1.
+│   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
 │   │   └── login/       # Text + graphical login (graphical falls back to text).
@@ -745,6 +746,99 @@ kernel internals; they consume `lib/abi` only.
 - The headless build is a Tier-1 image: `cargo xtask build
   --headless --target <platform>` must succeed for every Tier-1
   target and is exercised by `cargo xtask ci`.
+
+---
+
+## 18. Hardware Detection and Driver Autoload
+
+RustOS detects the hardware actually present at boot and autoloads the
+matching drivers; it does not ship a hand-maintained, per-image static
+device list. This section is binding and as non-negotiable as §2. It
+builds on the driver rules (§8), the capability model (§5), the Arch
+HAL (§17.2), and the headless guarantee (§17.3).
+
+### 18.1 The hardware tree
+
+- Detected hardware is represented in a single, architecture-neutral
+  **hardware tree**, defined in `lib/abi/src/hwtree.rs`. It is an ABI
+  type held to the same discipline as the syscall table (§9) and the
+  System Information API (§16.6): versioned, hashed, and frozen on
+  release. Extend it with a new version; never mutate a shipped one.
+- Each node describes exactly one detected bus or device: a stable node
+  id, its parent, a device class (`display`, `input`, `network`,
+  `storage`, `bus`, `timer`, …), and a set of **match keys** — e.g.
+  device-tree `compatible` strings, PCI `vendor:device:class`, USB
+  `vid:pid:class`, virtio device id, or MMIO `compatible`. A node also
+  declares the resources the device exposes (MMIO regions, IRQ lines,
+  DMA constraints, port ranges) as capability-grant *requests*, never as
+  raw ambient handles (§4).
+- The hardware tree is the only hardware-inventory contract. No
+  subsystem keeps its own parallel device list.
+
+### 18.2 Discovery (per architecture)
+
+- Building the hardware tree is part of the Arch HAL's "early-boot
+  platform discovery" (§17.2) and lives **only** under
+  `kernel/arch/<target>/`. Each architecture backend normalises its
+  platform's native source into the common tree:
+  - `aarch64`, `riscv64`: the flattened device tree (FDT/DTB).
+  - `x86_64`: ACPI tables (with the UEFI/firmware hand-off) plus the
+    legacy fallbacks.
+  - `wasm32`: the host-environment capability query.
+  - Bus children (PCI/USB/virtio/MMIO) are enumerated by the bus
+    drivers under `drivers/bus/*` and attached to the tree as further
+    nodes.
+- Architecture-specific parsing (ACPI, FDT, …) never leaks outside
+  `kernel/arch/<target>/`. The rest of the kernel and all of userland
+  see only the normalised tree; target-conditional code elsewhere is a
+  defect (§17.2, enforced by `cargo xtask cfg-check`).
+
+### 18.3 Matching and autoload
+
+- A user-space **device manager** service, `userland/system/devmgr/`,
+  owns autoload. Matching policy is not kernel code (microkernel-
+  leaning, §4).
+- On boot it reads the hardware tree, matches each node's match keys
+  against the **bind table** every driver declares in its signed
+  manifest (§8, §9), and loads each matching driver through the §8
+  driver-host load gate. From a clean install the classes that must
+  autoload include at least: input (keyboard, mouse), display, network,
+  storage, and the I/O buses they depend on.
+- Autoload is capability-gated and fails closed (§5.4): the device
+  manager loads drivers under `CAP_DRV_LOAD` (and `CAP_DRV_KERNEL` for
+  in-kernel drivers, §8), and a loaded driver receives only the resource
+  capabilities its matched node requested — never more. Every match,
+  load, skip, and failure is logged through `lib/log` with a stable
+  event ID.
+- Matching is deterministic. When more than one driver matches a node,
+  the manifest-declared bind specificity/priority decides; an unbroken
+  tie is a packaging defect, not a coin-flip. "Load everything and see
+  what sticks" and retry-until-it-works are forbidden (§2.1).
+
+### 18.4 Missing drivers, hotplug, headless
+
+- A node with no matching driver is left **unbound** and logged; this is
+  never an error and never a panic (§2.9). A headless image (§17.3) with
+  no display driver simply leaves the display node unbound and proceeds
+  to text login (§10).
+- Runtime changes (hotplug, removal) update the hardware tree and drive
+  the same match path: a newly matched node loads its driver, a removed
+  node unloads it (§8 runtime load/unload). No reboot is required to
+  pick up newly attached hardware that has a driver.
+- The hardware tree is exposed read-only to tools through the System
+  Information API (§16.6) behind a privileged query (e.g.
+  `CAP_SYSINFO_HW`). There is no `/proc` or `/sys` device tree and no
+  path that bypasses the capability check (§16.1).
+
+### 18.5 Forbidden
+
+- A hard-coded, per-image static device list standing in for detection.
+- Architecture-conditional hardware probing (`cfg(target_arch …)`)
+  outside `kernel/arch/<target>/` (§17.2).
+- A driver granting itself authority it can reach without its matched
+  node's capability request (§4 — no ambient authority).
+- "Probe by poking every address blindly": discovery uses the platform's
+  enumerable sources (hardware tree, bus enumeration) only.
 
 ---
 

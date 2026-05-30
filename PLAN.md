@@ -3141,6 +3141,63 @@ follow-up is its own thread and is now also complete.
 
 ---
 
+## Stage 4.HW — Hardware Detection and Driver Autoload
+
+**Dependencies:** Stage 4 (driver host + bus drivers) and the Stage 3
+sub-stages for each target's early-boot platform discovery.
+
+This stage implements `AGENTS.md` §18: detect the hardware present at
+boot and autoload the matching drivers, with no hand-maintained static
+device list.
+
+**Deliverables**
+- `lib/abi/src/hwtree.rs`: the architecture-neutral **hardware tree** ABI
+  type (§18.1). Versioned, hashed, frozen on release like the syscall
+  table (§9) and sysinfo (§16.6); each node carries a stable id, parent,
+  device class, match keys (DT `compatible`, PCI `vendor:device:class`,
+  USB `vid:pid:class`, virtio id, MMIO `compatible`), and its resource
+  requirements expressed as capability-grant requests (never ambient
+  handles).
+- Per-architecture discovery that emits the hardware tree, living **only**
+  under `kernel/arch/<target>/` as part of the Arch HAL "early-boot
+  platform discovery" (§17.2):
+  - `aarch64`, `riscv64`: FDT/DTB → hardware tree.
+  - `x86_64`: ACPI (+ UEFI/firmware hand-off) and legacy fallbacks →
+    hardware tree.
+  - `wasm32`: host-environment capability query → hardware tree.
+  - Bus children enumerated by `drivers/bus/*` are attached as nodes.
+- `userland/system/devmgr`: user-space device manager that reads the
+  hardware tree, matches nodes against each driver manifest's **bind
+  table**, and autoloads matching drivers through the §8 driver-host
+  load gate under `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`. Deterministic match
+  resolution; fail-closed; every match/load/skip/failure logged through
+  `lib/log` with a stable event ID.
+- Driver-manifest **bind table** (§8, §9): drivers declare the match keys
+  they bind to. Wire it into the existing signed-manifest path.
+- Runtime path: hotplug/removal updates the tree and triggers
+  load/unload (§8). Unbound nodes are logged, never an error (§18.4).
+- A privileged System Information API query (`CAP_SYSINFO_HW`, §16.6)
+  that exposes the hardware tree read-only to tools; no `/proc`/`/sys`.
+
+**Tests**
+- Host unit tests for `lib/abi::hwtree` encode/decode and ABI hashing.
+- Host unit tests for `devmgr` matching: exact match, multi-match
+  priority resolution, unbroken-tie rejection, no-match → unbound,
+  capability-denied load fails closed.
+- Per-arch host tests that the discovery code normalises a sample
+  FDT / ACPI / host descriptor into the expected tree.
+- QEMU integration per Tier-1 target: boot → devmgr autoloads the
+  input/display/storage/network drivers for the emulated devices →
+  device usable; headless image leaves the display node unbound and
+  reaches text login without error (§17.3).
+
+**Docs**
+- `docs/src/drivers/hardware-detection.md` mirroring `AGENTS.md` §18.
+- Update `docs/src/drivers/overview.md` and `docs/src/abi/` for the
+  hardware-tree type and the `devmgr` service.
+
+---
+
 ## Stage 5 — Filesystem
 
 **Dependencies:** Stage 4 (`Filesystem` trait + a block driver).
