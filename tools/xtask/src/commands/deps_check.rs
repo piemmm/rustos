@@ -94,22 +94,6 @@ struct GrandfatheredEdge {
 /// is a tracked defect for the §17 burn-down (`PLAN.md`); this list may
 /// only shrink.
 const GRANDFATHERED: &[GrandfatheredEdge] = &[
-    // Architecture ports still name concrete kernel crates instead of
-    // the Arch HAL `kernel/arch/api`. x86_64 has been migrated: it now
-    // implements `rustos_arch_api::SchedulerArch` and no longer names a
-    // scheduler crate. riscv64 remains grandfathered because its boot
-    // pipeline (`boot.rs`) builds a `kernel_core::BootInfo` from
-    // `kernel/{mem,sec}` types, names `SchedulerConfig` from the
-    // scheduler API, and calls `kernel_main` directly; removing those
-    // edges requires relocating the boot orchestration into `kernel/core`
-    // (the single §17.4 selection point) and is tracked in the §17
-    // burn-down (`PLAN.md`). The `kernel/sync` edge is resolved — those
-    // primitives now live in `lib/sync`, which an `ArchImpl` may name.
-    edge("rustos-arch-riscv64", "rustos-kernel-core"),
-    edge("rustos-arch-riscv64", "rustos-kernel-sched-api"),
-    edge("rustos-arch-riscv64", "rustos-kernel-mem"),
-    edge("rustos-arch-riscv64", "rustos-kernel-sec"),
-    edge("rustos-arch-riscv64", "rustos-kernel-irq"),
     // The x86_64 production kernel binary is a second integration point
     // beside `kernel/core`: it brings the allocator, the arch port, and
     // the boot-time drivers together. §17.4 allows exactly one selection
@@ -572,6 +556,45 @@ mod tests {
         assert!(
             kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
             "kernel/virtio must build its transports from the lib/virtio seam"
+        );
+    }
+
+    #[test]
+    fn riscv64_port_is_pure_arch_hal() {
+        // §17 burn-down regression (§17.2 / §17.4): the riscv64 port was
+        // migrated onto the Arch HAL exactly like x86_64. Its boot
+        // pipeline (`RiscvBinArch` `KernelArch` wrapper, `BootInfo`
+        // assembly, boot-state slots) and the `IrqController` bridge over
+        // its PLIC moved into the downstream boot consumer
+        // (`tests/integration/riscv64_boot`), so the arch crate names only
+        // `kernel/arch/api` + `lib/*`. None of the former
+        // `rustos-arch-riscv64 -> kernel/{core,mem,sec,irq,sched-api}`
+        // edges may return or be re-grandfathered.
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let riscv = crates
+            .iter()
+            .find(|c| c.name == "rustos-arch-riscv64")
+            .expect("riscv64 port present");
+        for kernel_crate in [
+            "rustos-kernel-core",
+            "rustos-kernel-mem",
+            "rustos-kernel-sec",
+            "rustos-kernel-irq",
+            "rustos-kernel-sched-api",
+        ] {
+            assert!(
+                !riscv.deps.iter().any(|d| d == kernel_crate),
+                "riscv64 arch port regained a dependency on {kernel_crate}"
+            );
+            assert!(
+                !is_grandfathered("rustos-arch-riscv64", kernel_crate),
+                "stale grandfather entry for the riscv64 port must stay removed"
+            );
+        }
+        assert!(
+            riscv.deps.iter().any(|d| d == "rustos-arch-api"),
+            "riscv64 arch port must implement the Arch HAL (rustos-arch-api)"
         );
     }
 

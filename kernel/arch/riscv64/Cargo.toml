@@ -1,6 +1,6 @@
 [package]
 name = "rustos-arch-riscv64"
-description = "RustOS architecture port: riscv64 (Stage 4.D Item 4 — virt-board boot pipeline to AuditEvent::BootCompleted)."
+description = "RustOS architecture port: riscv64 (Arch HAL implementation + virt-board external-IRQ / boot primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,29 +14,20 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-# Unlike `kernel/arch/x86_64`, this crate depends on `rustos-kernel-core`
-# directly and houses the whole riscv64 boot pipeline (entry trampoline,
-# SBI console, FDT memory-map parse, `RiscvArch: KernelArch`, and the
-# `boot()` that builds a `kernel_core::BootInfo` and hands it to
-# `kernel_core::kernel_main`).
+# Like `kernel/arch/x86_64`, this crate is a pure Arch HAL
+# implementation (`AGENTS.md` §17.2 / §17.4): it names only the Arch
+# HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
+# subsystem. `RiscvArch` implements `rustos_arch_api::SchedulerArch`;
+# the `kernel/core::KernelArch` wrapper, the `BootInfo` assembly, the
+# set-once boot-state slots, and the `IrqController` bridge over
+# `plic::PlicController` all live in the downstream boot consumer
+# (`tests/integration/riscv64_boot`), so this crate acquires no edge to
+# `kernel/{core,mem,sec,irq}` or `kernel/sched/api`.
 #
-# The x86_64 port keeps `KernelArch` out of the arch crate so the two
-# *pre-existing* freestanding Stage-2 QEMU bins
-# (`memory_isolation`, `scheduler_stress_qemu`) can link it without a
-# `#[global_allocator]`. riscv64 has no such bins to protect: its only
-# freestanding consumer is the boot harness, which provides an allocator
-# anyway. Housing the pipeline here therefore avoids threading riscv64
-# through the heavily x86_64-coupled `rustos-kernel` crate
-# (`AGENTS.md` §2.2 — no duplication, §3 — arch ports own their boot
-# path). The boot/SBI/serial/entry modules are gated to
+# The boot/SBI/serial/entry/panic modules are gated to
 # `cfg(all(target_arch = "riscv64", target_os = "none"))`; the FDT
-# parser and the `RiscvArch` struct build on the host so their unit
-# tests run under `cargo test`.
+# parser, the `RiscvArch` struct, and the PLIC register driver build on
+# the host so their unit tests run under `cargo test`.
 [dependencies]
-rustos-kernel-core = { path = "../../core", version = "=0.0.0" }
-rustos-kernel-sched-api = { path = "../../sched/api", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../sec", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../irq", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+rustos-arch-api = { path = "../api", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

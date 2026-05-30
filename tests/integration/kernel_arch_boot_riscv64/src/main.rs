@@ -29,9 +29,10 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_riscv64::{boot, handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_log::{Event, EventId, Sink};
+    use rustos_test_riscv64_boot::boot;
 
     /// Static boot heap.
     ///

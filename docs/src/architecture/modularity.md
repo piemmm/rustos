@@ -51,9 +51,14 @@ boot discovery) migrate here as the §17 burn-down advances.
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
 re-exports the HAL trait so existing `rustos_kernel_sched_api::SchedulerArch`
-paths resolve to the single canonical definition. The riscv64 port still
-reaches concrete kernel crates through its boot pipeline and remains a
-tracked grandfathered defect.
+paths resolve to the single canonical definition. `kernel/arch/riscv64`
+is likewise a pure HAL implementation: `RiscvArch` implements
+`SchedulerArch`, and the boot orchestration that used to name concrete
+kernel crates (the `BootInfo` assembly, the `KernelArch` wrapper, the
+boot-state slots, and the `IrqController` bridge over its PLIC) moved
+into the downstream Tooling crate `tests/integration/riscv64_boot` —
+the riscv64 analogue of how x86_64 keeps that pipeline in `rustos-kernel`.
+Both ports now name only `kernel/arch/api` + `lib/*`.
 
 ## `cargo xtask cfg-check`
 

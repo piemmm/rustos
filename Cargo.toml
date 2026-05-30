@@ -89,6 +89,7 @@ members = [
     "tests/integration/scheduler_stress_qemu",
     "tests/integration/kernel_arch_boot",
     "tests/integration/kernel_arch_boot_riscv64",
+    "tests/integration/riscv64_boot",
     "tests/integration/syscall_dispatch_qemu",
     "tests/integration/drvhost_qemu",
     "tests/integration/irq_qemu_x86_64",

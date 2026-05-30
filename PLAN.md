@@ -3221,20 +3221,20 @@ tracked defect; the burn-down removes them, and removing the last entry of
 a list collapses that list. No *new* violation may be added.
 
 **`deps-check` grandfathered edges (§17.4 / §17.1):**
-- `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`: the
-  riscv64 port still names concrete kernel crates from its boot
-  pipeline. The Arch HAL `kernel/arch/api` now exists (see burn-down
-  below); migrate the port onto it the way x86_64 was. (The
-  `kernel/arch/x86_64` → `kernel/sched` edge that sat here is *done*;
-  the `→ kernel/sync` edge is *done* now that the primitives live in
-  `lib/sync`, and the port now names the `kernel/sched/api` contract
-  rather than a concrete scheduler.)
 - `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
   `userland/system/drvhost`, `drivers/bus/virtio`:
   collapse the production binary's bring-up into the single §17.4
   selection point (`kernel/core`). (The `→ kernel/sched` edge is *done*:
   the binary now names only the `kernel/sched/api` contract, a permitted
-  `KernelSubsystem → SchedApi` edge.)
+  `KernelSubsystem → SchedApi` edge.) The agreed resolution is to
+  reclassify the final-image binary as a Tooling-exempt integration
+  point in `deps_check.rs` (it is the image-assembly seam, not a kernel
+  subsystem, and legitimately names the arch port, `kernel/core`, the
+  driver host, and the bus driver), mirroring how the riscv64 boot
+  consumer was handled in the burn-down below.
+  (The `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`
+  edges that sat here are *done* — see the riscv64 Arch HAL migration
+  in the burn-down below.)
 
 **`cfg-check` grandfathered directories (§17.2):**
 - *(none)* — the `kernel/rustos-kernel/` entry has been burned down (see
@@ -3258,6 +3258,32 @@ a list collapses that list. No *new* violation may be added.
   inline bring-up of `kernel/core`, `kernel/arch/x86_64`, the driver
   host, and the virtio bus into the single §17.4 selection point — are a
   separate thread and unchanged by this work.)
+- riscv64 port → Arch HAL migration (deps-check §17.2 / §17.4) —
+  *done*. The riscv64 port (`kernel/arch/riscv64`) is now a pure Arch
+  HAL implementation exactly like x86_64: `RiscvArch` implements
+  `rustos_arch_api::SchedulerArch` and exposes the monotonic clock, the
+  hart-park primitive, and the `plic::PlicController` register driver
+  (inherent `mask`/`arm`/`unmask`/`claim`/`complete`), but the crate
+  names only `kernel/arch/api` + `lib/*`. The boot orchestration it used
+  to own — the `kernel_core::BootInfo` assembly, the `RiscvBinArch`
+  `KernelArch` wrapper, the set-once boot-state slots, and the
+  `IrqController` bridge (`PlicIrqController`) over the PLIC — moved into
+  a new downstream Tooling crate `tests/integration/riscv64_boot`
+  (`rustos-test-riscv64-boot`), which legitimately names
+  `kernel/{core,mem,sec,irq}` + `kernel/sched/api` as a test crate (the
+  §17.4 layering is relaxed for `tests/`). This mirrors how x86_64 keeps
+  its boot pipeline and `BinArch` wrapper in the downstream
+  `rustos-kernel` crate. The two riscv64 QEMU consumers
+  (`kernel_arch_boot_riscv64` and `virtio_qemu_support::imp_mmio`) now
+  import `boot` / `published_*` / `PlicIrqController` from `riscv64_boot`;
+  the arch crate's `kernel_arch`/`plic` tests were split into their own
+  `*_tests.rs` files. All five grandfather edges
+  (`rustos-arch-riscv64 → kernel/{core,mem,sec,irq,sched-api}`) have been
+  removed and a regression test
+  (`deps_check::tests::riscv64_port_is_pure_arch_hal`) fails closed if
+  any returns. `deps-check`, `cfg-check`, and `cargo xtask test --qemu`
+  (all 11 verticals incl. the 3 riscv64) are green. Docs updated:
+  `docs/src/platform/riscv64.md` and `docs/src/security/irq.md`.
 - Arch HAL `kernel/arch/api` + x86_64 migration (deps-check) — *done*.
   The §17.2 architecture surface now lives in its own `no_std`,
   dependency-free crate `kernel/arch/api` (`rustos-arch-api`), carrying
@@ -3268,8 +3294,9 @@ a list collapses that list. No *new* violation may be added.
   the HAL instead. The `kernel/arch/x86_64` → `kernel/sched`
   grandfather edge has been removed and `deps-check` is clean.
   Remaining HAL primitives (MMU/TLB, context switch, timer, interrupt
-  entry/exit, per-CPU storage, boot discovery) and the riscv64 port
-  migration are the next steps on this thread.
+  entry/exit, per-CPU storage, boot discovery) are the next steps on
+  this thread; the riscv64 port migration is *done* (see the entry
+  above).
 - `tests/integration/` (cfg-check) — *done*. Target selection for the
   freestanding QEMU bins now lives in one audited build-glue crate,
   `tests/integration/harness` (`rustos-itest-harness`), whose

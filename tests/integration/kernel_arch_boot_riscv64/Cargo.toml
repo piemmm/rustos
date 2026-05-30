@@ -29,6 +29,11 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+# The boot pipeline (`boot()`) lives in the downstream boot consumer now
+# that the arch port is a pure Arch HAL implementation (`AGENTS.md`
+# §17.2); the arch crate supplies only the serial sink, panic bridge,
+# and QEMU finisher.
+rustos-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
 rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 

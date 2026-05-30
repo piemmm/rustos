@@ -1,5 +1,4 @@
-//! riscv64 Platform-Level Interrupt Controller (PLIC) driver and the
-//! production [`IrqController`] backed by it.
+//! riscv64 Platform-Level Interrupt Controller (PLIC) register driver.
 //!
 //! Stage 4.D Item 4 (riscv64 external-IRQ controller). On the QEMU
 //! `virt` board — and on every SiFive-derived platform RustOS targets
@@ -17,19 +16,28 @@
 //!
 //! # Mask-before-wake
 //!
-//! [`rustos_kernel_irq::IrqTable::fire`] requires the controller's
-//! `mask` to complete (and be globally observable) *before* the wait
-//! handle's `ready` flag flips (`docs/src/security/irq.md`).
-//! [`PlicController`] honours the contract by writing the masked
-//! source's **priority register to zero** — a single 32-bit MMIO write,
-//! after which a source can never out-prioritise the context threshold
-//! and so cannot re-fire — and then emitting a
-//! [`core::sync::atomic::fence`] with [`Ordering::SeqCst`]. The
-//! priority-write masking strategy is deliberately lock-free: it is a
-//! single store to a per-source register, so it needs no
-//! read-modify-write and races neither the trap handler's
-//! claim/complete nor a concurrent arm/unmask on a different source
-//! (`AGENTS.md` §4 — no hacks, interrupt-reentrancy-safe by design).
+//! The architecture-neutral IRQ table (`kernel/irq`) requires a
+//! controller's `mask` to complete (and be globally observable)
+//! *before* a wait handle's `ready` flag flips
+//! (`docs/src/security/irq.md`). [`PlicController::mask`] honours the
+//! contract by writing the masked source's **priority register to
+//! zero** — a single 32-bit MMIO write, after which a source can never
+//! out-prioritise the context threshold and so cannot re-fire — and
+//! then emitting a [`core::sync::atomic::fence`] with
+//! [`Ordering::SeqCst`]. The priority-write masking strategy is
+//! deliberately lock-free: it is a single store to a per-source
+//! register, so it needs no read-modify-write and races neither the
+//! trap handler's claim/complete nor a concurrent arm/unmask on a
+//! different source (`AGENTS.md` §4 — no hacks,
+//! interrupt-reentrancy-safe by design).
+//!
+//! # Arch HAL boundary (`AGENTS.md` §17.2)
+//!
+//! This crate is a pure Arch HAL implementation and does **not** name
+//! `kernel/irq`. [`PlicController`] exposes an inherent
+//! [`PlicController::mask`]; the downstream boot consumer wraps it in a
+//! local newtype that implements `kernel/irq`'s `IrqController` (orphan
+//! rules), keeping the `kernel/irq` dependency out of the arch port.
 //!
 //! # Hart contexts
 //!
@@ -42,8 +50,6 @@
 //! context set with the rest of the harts.
 
 use core::sync::atomic::{fence, Ordering};
-
-use rustos_kernel_irq::{IrqController, MaskError};
 
 /// PLIC register-offset arithmetic.
 ///
@@ -214,10 +220,13 @@ pub enum PlicError {
     SourceOutOfRange,
 }
 
-/// Production [`IrqController`] backed by a single-context [`Plic`].
+/// Single-context PLIC controller: the policy layer over [`Plic`].
 ///
 /// The controller validates every source against `max_source` and
-/// fails closed (`AGENTS.md` §5.4.5) before touching a register.
+/// fails closed (`AGENTS.md` §5.4.5) before touching a register. It
+/// exposes an inherent [`Self::mask`] the downstream `IrqController`
+/// bridge forwards to (`AGENTS.md` §17.2 — the arch port owns no
+/// `kernel/irq` dependency).
 pub struct PlicController<M: PlicMmio> {
     plic: Plic<M>,
     max_source: u32,
@@ -267,9 +276,9 @@ impl<M: PlicMmio> PlicController<M> {
 
     /// Clear the mask on `source` by restoring its delivering priority.
     ///
-    /// Symmetric counterpart of [`IrqController::mask`]: that method
-    /// drops the priority to zero, this one restores it. The enable bit
-    /// is untouched (arm sets it once).
+    /// Symmetric counterpart of [`Self::mask`]: that method drops the
+    /// priority to zero, this one restores it. The enable bit is
+    /// untouched (arm sets it once).
     ///
     /// # Errors
     ///
@@ -301,21 +310,33 @@ impl<M: PlicMmio> PlicController<M> {
     pub fn source_priority(&self, source: u32) -> u32 {
         self.plic.source_priority(source)
     }
-}
 
-impl<M: PlicMmio> IrqController for PlicController<M> {
-    fn mask(&self, line: u32) -> Result<(), MaskError> {
-        if !self.in_range(line) {
-            return Err(MaskError::OutOfRange);
+    /// Mask `source` by dropping its priority to zero, then emit a
+    /// `SeqCst` fence so every CPU that later observes a wait handle's
+    /// `ready` flag also observes the masked priority
+    /// (`docs/src/security/irq.md`). Symmetric counterpart of
+    /// [`Self::unmask`].
+    ///
+    /// This is the primitive the downstream `IrqController` bridge
+    /// forwards `mask` to; keeping it inherent is what lets the arch
+    /// port avoid a `kernel/irq` dependency (`AGENTS.md` §17.2).
+    ///
+    /// # Errors
+    ///
+    /// [`PlicError::SourceOutOfRange`] if `source` is `0` or exceeds
+    /// [`Self::max_source`].
+    pub fn mask(&self, source: u32) -> Result<(), PlicError> {
+        if !self.in_range(source) {
+            return Err(PlicError::SourceOutOfRange);
         }
         // Mask by dropping the source priority to zero: a single 32-bit
         // store, after which the source can never exceed the (zero)
         // threshold and so cannot re-fire while the driver drains its
         // completion queue.
-        self.plic.set_source_priority(line, MASKED_PRIORITY);
-        // SeqCst fence pairs with the SeqCst load `IrqTable::try_wait_step`
-        // performs on `ready`: every CPU that observes `ready = true`
-        // also observes the masked priority (`docs/src/security/irq.md`).
+        self.plic.set_source_priority(source, MASKED_PRIORITY);
+        // SeqCst fence pairs with the SeqCst load the IRQ table performs
+        // on `ready`: every CPU that observes `ready = true` also
+        // observes the masked priority (`docs/src/security/irq.md`).
         fence(Ordering::SeqCst);
         Ok(())
     }
@@ -364,166 +385,5 @@ impl PlicMmio for VolatilePlicMmio {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::vec::Vec;
-
-    /// In-memory PLIC register file. Records every write in order so
-    /// tests can assert the operation sequence, and serves the last
-    /// value written to a register on a subsequent read.
-    struct MockPlicMmio {
-        cells: Mutex<HashMap<usize, u32>>,
-        writes: Mutex<Vec<(usize, u32)>>,
-    }
-
-    impl MockPlicMmio {
-        fn new() -> Self {
-            Self {
-                cells: Mutex::new(HashMap::new()),
-                writes: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn write_log(&self) -> Vec<(usize, u32)> {
-            self.writes.lock().unwrap().clone()
-        }
-    }
-
-    impl PlicMmio for MockPlicMmio {
-        fn read32(&self, offset: usize) -> u32 {
-            *self.cells.lock().unwrap().get(&offset).unwrap_or(&0)
-        }
-
-        fn write32(&self, offset: usize, value: u32) {
-            self.cells.lock().unwrap().insert(offset, value);
-            self.writes.lock().unwrap().push((offset, value));
-        }
-    }
-
-    fn controller(max_source: u32) -> PlicController<MockPlicMmio> {
-        PlicController::new(
-            Plic::new(MockPlicMmio::new(), s_mode_context(0)),
-            max_source,
-        )
-    }
-
-    #[test]
-    fn s_mode_context_interleaves_per_hart() {
-        assert_eq!(s_mode_context(0), 1);
-        assert_eq!(s_mode_context(1), 3);
-        assert_eq!(s_mode_context(3), 7);
-    }
-
-    #[test]
-    fn register_offsets_match_sifive_layout() {
-        // Source 0 priority at base; source 1 four bytes up.
-        assert_eq!(regs::source_priority(0), 0x0000);
-        assert_eq!(regs::source_priority(1), 0x0004);
-        // Context 1 enable bitmap: base + 1*0x80; source 32 is the
-        // second word.
-        assert_eq!(regs::enable_word(1, 1), 0x2080);
-        assert_eq!(regs::enable_word(1, 32), 0x2084);
-        assert_eq!(regs::enable_bit(1), 0x2);
-        assert_eq!(regs::enable_bit(32), 0x1);
-        // Context 1 threshold/claim block at 0x20_0000 + 0x1000.
-        assert_eq!(regs::threshold(1), 0x0020_1000);
-        assert_eq!(regs::claim(1), 0x0020_1004);
-    }
-
-    #[test]
-    fn arm_enables_source_sets_priority_and_threshold() {
-        let c = controller(31);
-        c.arm(8).expect("arm in range");
-        // Threshold dropped to zero, source enabled, priority delivering.
-        assert_eq!(c.source_priority(8), ACTIVE_PRIORITY);
-        let plic = &c.plic;
-        assert_eq!(plic.mmio.read32(regs::threshold(1)), 0);
-        let enable_word = plic.mmio.read32(regs::enable_word(1, 8));
-        assert_eq!(enable_word & regs::enable_bit(8), regs::enable_bit(8));
-    }
-
-    #[test]
-    fn arm_rejects_out_of_range_source() {
-        let c = controller(31);
-        assert_eq!(c.arm(0), Err(PlicError::SourceOutOfRange));
-        assert_eq!(c.arm(32), Err(PlicError::SourceOutOfRange));
-        // Boundary: max_source itself is accepted.
-        assert_eq!(c.arm(31), Ok(()));
-    }
-
-    #[test]
-    fn mask_drops_priority_to_zero() {
-        let c = controller(31);
-        c.arm(8).expect("arm");
-        IrqController::mask(&c, 8).expect("mask");
-        assert_eq!(c.source_priority(8), MASKED_PRIORITY);
-    }
-
-    #[test]
-    fn unmask_restores_delivering_priority() {
-        let c = controller(31);
-        c.arm(8).expect("arm");
-        IrqController::mask(&c, 8).expect("mask");
-        c.unmask(8).expect("unmask");
-        assert_eq!(c.source_priority(8), ACTIVE_PRIORITY);
-    }
-
-    #[test]
-    fn mask_rejects_source_zero_and_out_of_range() {
-        let c = controller(15);
-        assert_eq!(IrqController::mask(&c, 0), Err(MaskError::OutOfRange));
-        assert_eq!(IrqController::mask(&c, 16), Err(MaskError::OutOfRange));
-    }
-
-    #[test]
-    fn enable_then_disable_source_toggles_the_bitmap_bit() {
-        let plic = Plic::new(MockPlicMmio::new(), s_mode_context(0));
-        plic.enable_source(8);
-        let off = regs::enable_word(1, 8);
-        assert_eq!(
-            plic.mmio.read32(off) & regs::enable_bit(8),
-            regs::enable_bit(8)
-        );
-        plic.disable_source(8);
-        assert_eq!(plic.mmio.read32(off) & regs::enable_bit(8), 0);
-        assert_eq!(plic.context(), 1);
-    }
-
-    #[test]
-    fn claim_and_complete_round_trip_the_claim_register() {
-        let c = controller(31);
-        // A pending claim is whatever the PLIC reports; seed the mock.
-        c.plic.mmio.write32(regs::claim(1), 8);
-        assert_eq!(c.claim(), 8);
-        c.complete(8);
-        // Complete writes the source back to the same register.
-        assert_eq!(c.plic.mmio.read32(regs::claim(1)), 8);
-    }
-
-    /// Mask-before-wake regression probe: driving [`IrqTable`] with the
-    /// PLIC controller must mask the source (priority → 0) before
-    /// `fire` returns `Marked` — i.e. before any waiter can observe
-    /// `ready = true`.
-    #[test]
-    fn mask_before_wake_through_irq_table() {
-        use rustos_kernel_irq::{FireOutcome, IrqTable};
-        use rustos_kernel_sec::TaskId;
-
-        let c = controller(31);
-        c.arm(8).expect("arm");
-        assert_eq!(c.source_priority(8), ACTIVE_PRIORITY);
-
-        let table = IrqTable::new(31);
-        let _bind = table.bind(8, TaskId(1)).expect("bind");
-        let outcome = table.fire(8, &c as &dyn IrqController).expect("fire");
-        assert_eq!(outcome, FireOutcome::Marked);
-        // The mask write must have landed by the time `fire` returned.
-        assert_eq!(c.source_priority(8), MASKED_PRIORITY);
-        // The masking write was the last register write in the sequence.
-        let log = c.plic.mmio.write_log();
-        let last = log.last().copied().expect("at least one write");
-        assert_eq!(last, (regs::source_priority(8), MASKED_PRIORITY));
-    }
-}
+#[path = "plic_tests.rs"]
+mod tests;

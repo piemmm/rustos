@@ -17,7 +17,6 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use rustos_abi::{CapabilityId, IrqHandle};
 use rustos_arch_riscv64::plic::{s_mode_context, Plic, PlicController, VolatilePlicMmio};
-use rustos_arch_riscv64::publish::{published_dtb, published_memory_map};
 use rustos_arch_riscv64::{qemu_exit, trap, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
@@ -33,6 +32,7 @@ use rustos_kernel_virtio::{
     KernelVirtioHost,
 };
 use rustos_log::{Event, EventId, Level, Sink};
+use rustos_test_riscv64_boot::{published_dtb, published_memory_map, PlicIrqController};
 use rustos_util::dtb::Dtb;
 use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
@@ -44,13 +44,15 @@ pub use rustos_drv_bus_virtio::MmioTransport as ScenarioTransport;
 // `$crate::...`. (`BOOT_COMPLETED_EVENT_ID` is re-exported at the crate
 // root through `pub use common::*`.)
 #[doc(hidden)]
-pub use rustos_arch_riscv64::{boot, handle_panic_via_serial};
+pub use rustos_arch_riscv64::handle_panic_via_serial;
 #[doc(hidden)]
 pub use rustos_arch_riscv64::{
     SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK,
 };
 #[doc(hidden)]
 pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as HarnessSink};
+#[doc(hidden)]
+pub use rustos_test_riscv64_boot::boot;
 
 use crate::common::{
     carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
@@ -215,7 +217,7 @@ fn device_interrupt(dtb: &Dtb<'_>, slot_base: u64) -> Option<u32> {
 
 /// The PLIC controller the trap dispatch claims/masks/completes through.
 /// Published once (from a leaked `'static` box) before traps are armed.
-static DISPATCH_PLIC: AtomicPtr<PlicController<VolatilePlicMmio>> =
+static DISPATCH_PLIC: AtomicPtr<PlicIrqController<VolatilePlicMmio>> =
     AtomicPtr::new(core::ptr::null_mut());
 
 /// The IRQ table the trap dispatch fires into. Published with
@@ -246,7 +248,7 @@ extern "C" fn trap_dispatch() {
     // SAFETY: both pointers were published once, before `init_traps`
     // armed interrupts, from `Box::leak`ed `'static` allocations that
     // are never freed or mutated; the dispatch only takes `&` to them.
-    let plic: &PlicController<VolatilePlicMmio> = unsafe { &*plic_ptr };
+    let plic: &PlicIrqController<VolatilePlicMmio> = unsafe { &*plic_ptr };
     let table: &IrqTable = unsafe { &*table_ptr };
     let source = plic.claim();
     if source != 0 {
@@ -285,7 +287,7 @@ extern "C" fn trap_dispatch() {
 /// it and wakes — no edge is lost and no bounding timer is needed
 /// (`AGENTS.md` §2 — no unbounded sleep loop, no hack).
 struct WfiWaiter {
-    plic: &'static PlicController<VolatilePlicMmio>,
+    plic: &'static PlicIrqController<VolatilePlicMmio>,
     source: u32,
     table: &'static IrqTable,
     handle: IrqHandle,
@@ -333,7 +335,7 @@ fn arm_external_irq(
     slot_base: u64,
 ) -> (
     &'static IrqTable,
-    &'static PlicController<VolatilePlicMmio>,
+    &'static PlicIrqController<VolatilePlicMmio>,
     IrqHandle,
     u32,
 ) {
@@ -350,8 +352,11 @@ fn arm_external_irq(
     // device tree, identity-mapped and exclusively ours on the
     // single-hart `virt` board.
     let plic_mmio = unsafe { VolatilePlicMmio::new(plic_base) };
-    let controller = PlicController::new(Plic::new(plic_mmio, s_mode_context(0)), plic_info.ndev);
-    let controller: &'static PlicController<VolatilePlicMmio> = Box::leak(Box::new(controller));
+    let controller = PlicIrqController::new(PlicController::new(
+        Plic::new(plic_mmio, s_mode_context(0)),
+        plic_info.ndev,
+    ));
+    let controller: &'static PlicIrqController<VolatilePlicMmio> = Box::leak(Box::new(controller));
     let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(plic_info.ndev)));
 
     let Ok(bind) = table.bind(source, TASK) else {
@@ -361,7 +366,7 @@ fn arm_external_irq(
         env.fail("arm PLIC source");
     }
     DISPATCH_PLIC.store(
-        (controller as *const PlicController<VolatilePlicMmio>).cast_mut(),
+        (controller as *const PlicIrqController<VolatilePlicMmio>).cast_mut(),
         Ordering::Release,
     );
     DISPATCH_TABLE.store((table as *const IrqTable).cast_mut(), Ordering::Release);

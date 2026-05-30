@@ -50,6 +50,11 @@ rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+# The riscv64 boot pipeline (`boot`), the boot-state slots
+# (`published_*`), and the `IrqController` bridge (`PlicIrqController`)
+# live in the downstream boot consumer now that the arch port is a pure
+# Arch HAL implementation (`AGENTS.md` §17.2).
+rustos-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
 rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }

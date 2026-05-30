@@ -10,8 +10,16 @@ and the argv contract.
 
 ## Kernel boot pipeline
 
-`kernel/arch/riscv64` owns the riscv64 boot path (Stage 4.D Item 4). It
-boots to `AuditEvent::BootCompleted` and is exercised by the
+Like x86_64, `kernel/arch/riscv64` is a pure Arch HAL implementation
+(`AGENTS.md` §17.2): it implements `rustos_arch_api::SchedulerArch`, the
+monotonic clock, the hart-park primitive, the PLIC register driver, and
+the S-mode trap glue, but it names no concrete kernel subsystem. The
+boot pipeline that *does* name `kernel/{core,mem,sec}` and
+`kernel/sched/api` lives downstream in the
+`tests/integration/riscv64_boot` crate (`rustos-test-riscv64-boot`),
+exactly as x86_64 keeps its boot pipeline and `BinArch` wrapper in the
+downstream `rustos-kernel` crate. It boots to
+`AuditEvent::BootCompleted` and is exercised by the
 `tests/integration/kernel_arch_boot_riscv64` QEMU test — the riscv64
 analogue of the x86_64 `kernel_arch_boot` bin.
 
@@ -27,11 +35,13 @@ Boot sequence:
    reader extracts the first `/memory` node's `reg` (base/size) and the
    `/cpus` `timebase-frequency`. It is host-tested against a hand-built
    DTB fixture.
-3. **Boot pipeline (`boot.rs`).** Builds a `BootMemoryMap` reserving
-   `[ram_base, __kernel_end)` (firmware + kernel image + boot heap) and
-   marking `[__kernel_end, ram_end)` usable, constructs `RiscvArch`
-   (`kernel_arch.rs`, the `kernel_core::KernelArch` impl whose monotonic
-   clock reads the `time` CSR via `rdtime`), assembles a
+3. **Boot pipeline (`riscv64_boot::boot`).** Builds a `BootMemoryMap`
+   reserving `[ram_base, __kernel_end)` (firmware + kernel image + boot
+   heap) and marking `[__kernel_end, ram_end)` usable, constructs
+   `RiscvArch` (`kernel_arch.rs`, the arch port's
+   `rustos_arch_api::SchedulerArch` impl whose monotonic clock reads the
+   `time` CSR via `rdtime`) wrapped in the downstream `RiscvBinArch`
+   `kernel_core::KernelArch` adapter (orphan rules), assembles a
    `kernel_core::BootInfo`, and hands it to `kernel_core::kernel_main`.
 4. **Console (`sbi.rs`, `serial.rs`).** The boot log and audit records
    are written through the SBI legacy `console_putchar`, which OpenSBI
@@ -72,11 +82,14 @@ interrupts disabled (it neither calls `trap::init_traps` nor builds a
   (`s_mode_context(hartid) = 2 * hartid + 1` on the `virt` layout),
   `arm`s a source (enable bit + zero threshold + delivering priority),
   and `claim`/`complete`s through the per-context claim register.
-- **Mask-before-wake.** The `IrqController::mask` the kernel-neutral
-  `IrqTable::fire` calls masks a source by writing its PLIC priority
-  register to zero (a single lock-free 32-bit store) followed by a
-  `SeqCst` fence — the riscv64 analogue of the x86_64 IO-APIC
-  redirection-entry mask. See `docs/src/security/irq.md`.
+- **Mask-before-wake.** `PlicController::mask` (inherent) masks a source
+  by writing its PLIC priority register to zero (a single lock-free
+  32-bit store) followed by a `SeqCst` fence — the riscv64 analogue of
+  the x86_64 IO-APIC redirection-entry mask. The arch port owns no
+  `kernel/irq` dependency, so the kernel-neutral `IrqController` bridge
+  (`PlicIrqController`, in `tests/integration/riscv64_boot`) is what
+  `IrqTable::fire` calls; it forwards to that inherent `mask`. See
+  `docs/src/security/irq.md`.
 - **S-mode trap vector.** `trap::init_traps` installs
   `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode)
   and enables `sie.SEIE` + `sstatus.SIE`. The vector saves
@@ -87,10 +100,13 @@ interrupts disabled (it neither calls `trap::init_traps` nor builds a
 
 ## Boot-state publication
 
-`kernel/arch/riscv64::publish` exposes the boot-state a driver-bring-up
+`riscv64_boot::publish` exposes the boot-state a driver-bring-up
 observer needs as set-once slots, the riscv64 analogue of the
-`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64 (riscv64 owns
-its boot pipeline in the arch crate, so the hooks live there too):
+`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64. They live
+beside the boot pipeline in the downstream `riscv64_boot` crate (not the
+arch port) because publishing the firmware `BootMemoryMap` names
+`kernel/mem`, which the HAL-only arch port must not (`AGENTS.md`
+§17.2):
 
 - `publish_memory_map` / `published_memory_map` — a `'static` clone of
   the firmware `BootMemoryMap`, published by `boot::try_boot` before the
@@ -105,8 +121,8 @@ Both slots are one-shot (`AGENTS.md` §2.1) and the accessors expose no
 writable surface (`AGENTS.md` §2.4). Unlike x86_64 there is no published
 `IrqTable`: the boot-to-`BootCompleted` slice runs with interrupts
 disabled and hands the kernel `IrqRouting::unsupported`, so a vertical
-builds its own `PlicController` + `IrqTable` over the DTB-discovered PLIC
-base rather than reusing a `max_line == 0` kernel-core table.
+builds its own `PlicIrqController` + `IrqTable` over the DTB-discovered
+PLIC base rather than reusing a `max_line == 0` kernel-core table.
 
 ## virtio-MMIO QEMU verticals
 
@@ -131,7 +147,8 @@ The riscv64 bring-up (`imp_mmio`):
    provisions an `MmioTransport` through the `CAP_MMIO_MAP`-gated
    `KernelMmioMapper` (`kernel/virtio::provision_virtio_mmio`).
 3. Walks the DTB for the PLIC base + `riscv,ndev` and the device's
-   `interrupts` source, builds a `PlicController` + `IrqTable`, `arm`s
+   `interrupts` source, builds a `PlicIrqController` (the `IrqController`
+   bridge wrapping the arch port's `PlicController`) + `IrqTable`, `arm`s
    the source, installs the S-mode trap dispatch (PLIC claim →
    virtio-MMIO `InterruptACK` → `IrqTable::fire` → complete), and calls
    `init_traps`.

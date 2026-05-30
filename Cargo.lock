@@ -381,13 +381,8 @@ version = "0.0.0"
 name = "rustos-arch-riscv64"
 version = "0.0.0"
 dependencies = [
- "rustos-kernel-core",
- "rustos-kernel-irq",
- "rustos-kernel-mem",
- "rustos-kernel-sched-api",
- "rustos-kernel-sec",
+ "rustos-arch-api",
  "rustos-log",
- "rustos-sync",
 ]
 
 [[package]]
@@ -742,6 +737,7 @@ dependencies = [
  "rustos-bumpalloc",
  "rustos-itest-harness",
  "rustos-log",
+ "rustos-test-riscv64-boot",
 ]
 
 [[package]]
@@ -750,6 +746,22 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
+]
+
+[[package]]
+name = "rustos-test-riscv64-boot"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-irq",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sec",
+ "rustos-log",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -857,6 +869,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-net-icmp",
+ "rustos-test-riscv64-boot",
  "rustos-util",
  "rustos-virtio",
 ]

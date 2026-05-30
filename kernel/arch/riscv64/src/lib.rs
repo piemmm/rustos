@@ -1,38 +1,39 @@
 //! RustOS riscv64 architecture port.
 //!
-//! Stage 4.D Item 4 lands the QEMU `virt`-board boot pipeline up to
-//! `AuditEvent::BootCompleted`: an S-mode entry trampoline, an SBI
-//! console log sink, a minimal flattened-device-tree reader for the
-//! physical-memory map and timer frequency, the [`RiscvArch`]
-//! implementation of [`rustos_kernel_core::KernelArch`], and the
-//! `boot()` entry that assembles a [`rustos_kernel_core::BootInfo`]
-//! and hands it to `kernel_core::kernel_main`. (`boot` and the other
-//! freestanding-only modules are gated to the riscv64 bare-metal
-//! target, so this link is plain text on host doc builds.)
+//! Stage 4.D Item 4 lands the QEMU `virt`-board external-IRQ and boot
+//! primitives: an S-mode entry trampoline, an SBI console log sink, a
+//! minimal flattened-device-tree reader for the physical-memory map
+//! and timer frequency, the [`RiscvArch`] implementation of the Arch
+//! HAL ([`rustos_arch_api::SchedulerArch`]), and the PLIC + S-mode trap
+//! vector. (The freestanding-only modules are gated to the riscv64
+//! bare-metal target, so their links are plain text on host doc
+//! builds.)
 //!
 //! # What is here
 //!
 //! | Module        | Role                                                            |
 //! | ------------- | --------------------------------------------------------------- |
 //! | [`fdt`]       | Flattened-device-tree reader (`/memory`, `timebase-frequency`). |
-//! | [`kernel_arch`] | [`RiscvArch`] — the `KernelArch` impl + monotonic clock.      |
-//! | [`plic`]      | PLIC driver + the `IrqController` the kernel masks through.     |
-//! | [`publish`]   | Set-once boot-state slots (memory map + DTB pointer).           |
+//! | [`kernel_arch`] | [`RiscvArch`] — the `SchedulerArch` impl + monotonic clock.   |
+//! | [`plic`]      | PLIC register driver (inherent mask/arm/claim).                 |
 //! | [`trap`]      | S-mode trap vector + external-interrupt dispatch seam.          |
 //! | [`qemu_exit`] | `SiFive` Test finisher used by the integration tests.           |
 //! | `sbi`         | SBI legacy console output (freestanding only).                  |
 //! | `serial`      | SBI-backed `rustos_log::Sink` (freestanding only).              |
 //! | `entry`       | `rustos_arch_riscv64_main` Rust trampoline (freestanding only). |
-//! | `boot`        | The `boot(hartid, dtb, …)` pipeline (freestanding only).        |
 //! | `panic`       | Shared `#[panic_handler]` bridge (freestanding only).           |
 //!
-//! # Why depend on `kernel/core` here
+//! # Arch HAL boundary (`AGENTS.md` §17.2 / §17.4)
 //!
-//! See `Cargo.toml`: unlike x86_64, this crate owns its `KernelArch`
-//! impl and boot pipeline directly. The freestanding-only modules are
-//! gated to `cfg(all(target_arch = "riscv64", target_os = "none"))`;
-//! the [`fdt`] reader and the [`RiscvArch`] struct build on the host so
-//! their unit tests run under `cargo test`.
+//! Like x86_64, this crate is a pure Arch HAL implementation: it names
+//! only `kernel/arch/api` and `lib/*`, never a concrete kernel
+//! subsystem. The `KernelArch` wrapper, the `BootInfo` assembly
+//! (`boot`), the set-once boot-state slots, and the `IrqController`
+//! bridge over [`plic::PlicController`] all live in the downstream boot
+//! consumer. The freestanding-only modules are gated to
+//! `cfg(all(target_arch = "riscv64", target_os = "none"))`; the [`fdt`]
+//! reader and the [`RiscvArch`] struct build on the host so their unit
+//! tests run under `cargo test`.
 //!
 //! # Not yet here
 //!
@@ -52,12 +53,6 @@
 #[cfg(test)]
 extern crate std;
 
-// The boot pipeline builds an `Arc<RiscvArch>` for `BootInfo`, so it
-// needs `alloc`. Only the freestanding build links it; the allocator
-// is provided by the boot binary's `#[global_allocator]`.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-extern crate alloc;
-
 // The S-mode entry trampoline is only meaningful on the bare-metal
 // target; host `cargo test` omits it so the crate builds on the host.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -66,12 +61,9 @@ core::arch::global_asm!(include_str!("boot.s"));
 pub mod fdt;
 pub mod kernel_arch;
 pub mod plic;
-pub mod publish;
 pub mod qemu_exit;
 pub mod trap;
 
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub mod boot;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod entry;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -81,10 +73,10 @@ pub mod sbi;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod serial;
 
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub use kernel_arch::halt_current_hart;
 pub use kernel_arch::RiscvArch;
 
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub use boot::{boot, BootError};
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub use panic::handle_panic_via_serial;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]

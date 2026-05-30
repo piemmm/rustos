@@ -5,8 +5,9 @@
 //! module reads exactly the two facts the boot pipeline needs from it
 //! and nothing more (`AGENTS.md` §2.3 — no bloat):
 //!
-//! * the physical base/size of the first `/memory` node, used to build
-//!   the [`rustos_kernel_mem::BootMemoryMap`];
+//! * the physical base/size of the first `/memory` node, which the
+//!   downstream boot consumer uses to build the firmware
+//!   `BootMemoryMap`;
 //! * the `/cpus` `timebase-frequency`, the divisor that converts the
 //!   `time` CSR ticks into nanoseconds for the monotonic clock.
 //!

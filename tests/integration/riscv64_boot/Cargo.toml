@@ -1,0 +1,39 @@
+[package]
+name = "rustos-test-riscv64-boot"
+description = "Downstream boot consumer for the riscv64 Arch HAL port: the KernelArch wrapper (RiscvBinArch), the virt-board BootInfo assembly + set-once boot-state slots, and the IrqController bridge over the arch port's PLIC register driver. Shared by the riscv64 QEMU verticals so no integration bin duplicates the bring-up (AGENTS.md §2.2). It legitimately names kernel/{core,mem,sec,irq} + kernel/sched/api as Tooling (tests relax the §17.4 layering), keeping those edges out of the arch port (§17.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Host + every target: the `IrqController` bridge over the arch port's
+# `plic::PlicController`. It is host-buildable so the mask-before-wake
+# regression test runs under `cargo test` (the arch port itself owns no
+# `kernel/irq` dependency — `AGENTS.md` §17.2).
+[dependencies]
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+
+# Freestanding (`virt`-board) only: the boot orchestration that builds a
+# `kernel_core::BootInfo` and hands it to `kernel_core::kernel_main`. It
+# is gated to the bare-metal target because it calls the arch port's
+# freestanding-only `halt_current_hart` / SBI console.
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
