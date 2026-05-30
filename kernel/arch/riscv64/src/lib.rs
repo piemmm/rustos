@@ -17,6 +17,7 @@
 //! | [`fdt`]       | Flattened-device-tree reader (`/memory`, `timebase-frequency`). |
 //! | [`kernel_arch`] | [`RiscvArch`] — the `KernelArch` impl + monotonic clock.      |
 //! | [`plic`]      | PLIC driver + the `IrqController` the kernel masks through.     |
+//! | [`publish`]   | Set-once boot-state slots (memory map + DTB pointer).           |
 //! | [`trap`]      | S-mode trap vector + external-interrupt dispatch seam.          |
 //! | [`qemu_exit`] | `SiFive` Test finisher used by the integration tests.           |
 //! | `sbi`         | SBI legacy console output (freestanding only).                  |
@@ -65,6 +66,7 @@ core::arch::global_asm!(include_str!("boot.s"));
 pub mod fdt;
 pub mod kernel_arch;
 pub mod plic;
+pub mod publish;
 pub mod qemu_exit;
 pub mod trap;
 

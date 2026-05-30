@@ -38,4 +38,5 @@ rustos-kernel-sched = { path = "../../sched", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../../sec", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../../irq", version = "=0.0.0" }
+rustos-kernel-sync = { path = "../../sync", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

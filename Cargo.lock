@@ -382,6 +382,7 @@ dependencies = [
  "rustos-kernel-mem",
  "rustos-kernel-sched",
  "rustos-kernel-sec",
+ "rustos-kernel-sync",
  "rustos-log",
 ]
 

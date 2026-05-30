@@ -189,6 +189,13 @@ fn try_boot(
         length: ram_end - usable_start,
     });
 
+    // Publish the firmware map and the device-tree pointer for a
+    // driver-bring-up observer (the virtio-MMIO QEMU verticals) before
+    // the map is moved into the `kernel_core` hand-off. Both slots are
+    // set-once (`AGENTS.md` §2.1); see `crate::publish`.
+    crate::publish::publish_memory_map(&memory_map);
+    crate::publish::publish_dtb(dtb);
+
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.
     let arch = Arc::new(RiscvArch::new(BOOT_CPU, timebase_hz));

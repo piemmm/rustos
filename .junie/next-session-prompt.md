@@ -8,6 +8,27 @@
 `PLAN.md` Stage 4.D records the following as **complete** (most recent
 first):
 
+- **riscv64 boot-state publication hooks — landed (latest session).**
+  The riscv64 MMIO verticals need the firmware memory map (to carve a
+  per-device DMA pool) and the DTB pointer (to walk the `virtio_mmio`
+  slots, the PLIC base, and each device's `interrupts` cell), but the
+  riscv64 boot exposed neither. New host-buildable
+  `kernel/arch/riscv64::publish` module mirrors the x86_64
+  `arch_wrapper` memory-map publish pattern: set-once `OnceCell` slots
+  for a `BootMemoryMap` clone and the DTB pointer, with
+  `publish_memory_map`/`published_memory_map` and
+  `publish_dtb`/`published_dtb`; `boot::try_boot` publishes both before
+  the map moves into the `kernel_core` hand-off. The crate gained a
+  `rustos-kernel-sync` dep. No `IrqTable` slot is published — the
+  riscv64 boot runs with interrupts disabled and hands the kernel
+  `IrqRouting::unsupported`, so the verticals build their own
+  `PlicController` + `IrqTable` over the DTB-discovered PLIC base.
+  Verified: `cargo test -p rustos-arch-riscv64` (34 tests, +2 new),
+  riscv64-target build, `clippy -D warnings` (host + riscv64), `cargo
+  fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` all
+  clean. Docs: `docs/src/platform/riscv64.md` ("Boot-state
+  publication").
+
 - **riscv64 external-IRQ controller (PLIC + S-mode trap glue) — landed
   (latest session).** `KernelVirtioHost::notify_wait` blocks on a real
   IRQ line (`block_until_ready`, unbounded `u64::MAX` deadline — it does
@@ -136,9 +157,13 @@ The x86_64 PCI verticals (blk + net) are done and gated. What remains:
   `set_trap_dispatch`s a callback wired to that controller + the
   `IrqTable`, and `init_traps`, then (d) mints a `KernelVirtioHost` over
   a carved DMA pool and runs the shared `drive_driver_lifecycle`. The
-  riscv64 boot exposes neither a published DTB nor a memory-map/IRQ-table
-  accessor today (the `arch_wrapper` publish slots are x86_64-only), so
-  adding those riscv64 publish hooks is the first sub-task.
+  riscv64 boot now publishes the DTB pointer and the firmware memory map
+  via `kernel/arch/riscv64::publish` (`published_dtb` /
+  `published_memory_map`) — that first sub-task landed this session. The
+  next sub-task is the MMIO bring-up scaffold itself, which consumes
+  those accessors. (No published `IrqTable`: the scaffold builds its own
+  `PlicController` + `IrqTable` over the DTB-discovered PLIC base, since
+  the riscv64 boot hands the kernel `IrqRouting::unsupported`.)
 - `tests/integration/virtio_blk_mmio_riscv64` and
   `virtio_net_mmio_riscv64` — once the riscv64 boot port lands, these are
   the MMIO analogues of the x86_64 verticals. Note the shared

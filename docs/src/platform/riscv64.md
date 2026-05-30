@@ -83,6 +83,29 @@ first consumer is the virtio-mmio integration verticals.
   a supervisor external interrupt to a one-shot dispatch callback that
   performs the PLIC claim → `IrqTable::fire` → complete handshake.
 
+## Boot-state publication
+
+`kernel/arch/riscv64::publish` exposes the boot-state a driver-bring-up
+observer needs as set-once slots, the riscv64 analogue of the
+`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64 (riscv64 owns
+its boot pipeline in the arch crate, so the hooks live there too):
+
+- `publish_memory_map` / `published_memory_map` — a `'static` clone of
+  the firmware `BootMemoryMap`, published by `boot::try_boot` before the
+  map is moved into the `kernel_core` hand-off, so a vertical can carve a
+  per-device DMA pool from high RAM without re-borrowing the kernel state.
+- `publish_dtb` / `published_dtb` — the flattened-device-tree pointer
+  (`a1`), so a vertical can walk the `virtio_mmio` slots, the PLIC base,
+  and each device's `interrupts` cell when it builds the MMIO transport
+  and the external-IRQ path.
+
+Both slots are one-shot (`AGENTS.md` §2.1) and the accessors expose no
+writable surface (`AGENTS.md` §2.4). Unlike x86_64 there is no published
+`IrqTable`: the boot-to-`BootCompleted` slice runs with interrupts
+disabled and hands the kernel `IrqRouting::unsupported`, so a vertical
+builds its own `PlicController` + `IrqTable` over the DTB-discovered PLIC
+base rather than reusing a `max_line == 0` kernel-core table.
+
 ## Board model: `virt`
 
 The runner targets QEMU's generic `virt` board (`qemu-system-riscv64 -M

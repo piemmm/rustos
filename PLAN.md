@@ -1196,6 +1196,39 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — riscv64 boot-state publication hooks,
+  *complete*): the riscv64 MMIO verticals (the next sub-task) need the
+  firmware memory map (to carve a per-device DMA pool) and the
+  device-tree pointer (to walk the `virtio_mmio` slots, the PLIC base,
+  and each device's `interrupts` cell), but the riscv64 boot exposed
+  neither — only x86_64 had the `rustos-kernel` `arch_wrapper` publish
+  slots. **Change.** New host-buildable `kernel/arch/riscv64::publish`
+  module mirrors the x86_64 memory-map publish pattern: set-once
+  `OnceCell` slots for a `BootMemoryMap` clone and the DTB pointer, with
+  `publish_memory_map`/`published_memory_map` and
+  `publish_dtb`/`published_dtb` (read-only accessors, no writable
+  surface — `AGENTS.md` §2.4). `boot::try_boot` publishes both before the
+  map is moved into the `kernel_core` hand-off (`AGENTS.md` §2.1 —
+  one-shot publish). The crate gained a `rustos-kernel-sync` dependency
+  for `OnceCell`. No `IrqTable` slot is published: the
+  boot-to-`BootCompleted` slice runs with interrupts disabled and hands
+  the kernel `IrqRouting::unsupported`, so a vertical builds its own
+  `PlicController` + `IrqTable` over the DTB-discovered PLIC base
+  (publishing a `max_line == 0` table would be a misleading stub —
+  `AGENTS.md` §15.1). **Verification.** `cargo test -p rustos-arch-riscv64`
+  (34 host unit tests, +2 new covering the set-once memory-map and DTB
+  slots) green; the crate builds for `riscv64gc-unknown-none-elf`; `cargo
+  clippy -- -D warnings` (host + riscv64 target),
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, and `cargo fmt
+  --check` all clean. **Docs.** `docs/src/platform/riscv64.md`
+  ("Boot-state publication"). **Deferred.** The MMIO bring-up scaffold
+  itself (DTB walk → `Mmio` bus → `MmioTransport` → `PlicController` +
+  `init_traps` + `set_trap_dispatch` → `KernelVirtioHost` →
+  `drive_driver_lifecycle`), the `virtio_blk_mmio_riscv64` /
+  `virtio_net_mmio_riscv64` verticals (an arch-gated MMIO sibling in the
+  shared `virtio_qemu_support` crate, reusing the identical device-tail
+  closures), their xtask enrolment, and the Item 6 acceptance gate
+  (`cargo xtask ci` — mdBook `docs-check` half + `cargo deny`).
 - Stage 4.D follow-up (Item 4 — riscv64 external-IRQ controller: PLIC +
   S-mode trap glue, *complete*): `KernelVirtioHost::notify_wait` blocks
   on a real IRQ line (`block_until_ready` with an unbounded `u64::MAX`
