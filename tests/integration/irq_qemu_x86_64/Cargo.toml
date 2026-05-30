@@ -37,3 +37,6 @@ rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

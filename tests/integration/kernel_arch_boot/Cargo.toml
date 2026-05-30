@@ -35,3 +35,6 @@ path = "src/main.rs"
 rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

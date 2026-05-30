@@ -55,8 +55,8 @@
 //! additionally forbids the production `rustos-kernel` crate from
 //! ever growing a `test-hooks` feature (see `deny.toml`).
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
 // The bin crate's freestanding configuration needs `alloc::sync::Arc`
@@ -68,7 +68,7 @@
 // warning on the host build is justified: the synthesised quartet is
 // `cfg`-gated to `target_os = "none"`, so on host this declaration
 // is unused but mandatory under the bare-metal cfg).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
@@ -91,7 +91,7 @@ compile_error!(
 
 // --- Freestanding test bin (`x86_64-unknown-none`) -----------------
 
-#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "test-hooks"))]
+#[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -414,11 +414,7 @@ mod kernel {
 // sanity check (`cargo build --no-default-features -p
 // rustos-test-syscall-dispatch-qemu`) still builds — AGENTS.md §1
 // (no hacks: a disabled test must compile cleanly).
-#[cfg(all(
-    target_arch = "x86_64",
-    target_os = "none",
-    not(feature = "test-hooks")
-))]
+#[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no dispatch, no QEMU exit affordance: the
@@ -436,11 +432,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     }
 }
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_os = "none",
-    not(feature = "test-hooks")
-))]
+#[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
 fn rustos_test_syscall_dispatch_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
@@ -452,10 +444,10 @@ fn rustos_test_syscall_dispatch_qemu_panic_stub(_info: &core::panic::PanicInfo<'
 }
 
 // --- Host stub -----------------------------------------------------
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
 // AGENTS.md §15.10: this `#[allow]` is justified — the freestanding
 // configuration declares `#![no_main]`, but the host configuration

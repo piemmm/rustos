@@ -74,7 +74,10 @@ members = [
     # QEMU integration tests (Stage 2 deliverable; each is a freestanding
     # kernel binary built for `x86_64-unknown-none` and launched through
     # `tools/qemu` by `cargo xtask test --qemu`). Stage 3b/3c/3d add their
-    # own per-arch trees alongside this one.
+    # own per-arch trees alongside this one. `harness` is the shared
+    # build-glue crate that emits their `freestanding`/`itest_*` cfgs
+    # (AGENTS.md §17.2), keeping target selection out of test source.
+    "tests/integration/harness",
     "tests/integration/memory_isolation",
     "tests/integration/scheduler_stress",
     "tests/integration/scheduler_stress_qemu",

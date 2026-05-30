@@ -39,58 +39,58 @@
 //! Any other outcome (no fault, wrong fault, corrupted victim byte) is a
 //! closed failure (`AGENTS.md` §5.4.5 — fail closed).
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 use core::fmt::Write as _;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 use rustos_arch_x86_64::{idt, paging, qemu_exit, serial};
 
 /// Virtual address only the *victim* address space maps. Chosen well
 /// outside the 32 MiB identity-mapped boot region so any access from
 /// the *attacker* address space is guaranteed to be unmapped at every
 /// level of its PML4 hierarchy.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 const SECRET_VADDR: u64 = 0x4000_0000;
 
 /// Magic byte written into the secret frame.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 const SECRET_BYTE: u8 = 0xC0;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// 4 KiB frame the victim space maps at `SECRET_VADDR`. Aligned via
 /// `#[repr(align(4096))]` so its physical address is a valid page frame.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 #[repr(C, align(4096))]
 struct SecretFrame([u8; 4096]);
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 static mut SECRET_FRAME: SecretFrame = SecretFrame([0; 4096]);
 
 /// `true` once the attacker context has been entered. Used by the page-
 /// fault handler to distinguish an *expected* fault (attacker reading a
 /// supposedly-isolated address) from a kernel bug (any other fault).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 static ATTACKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Physical address of the secret frame, recorded once after we set it
 /// up. The fault handler reads it through this address to prove the
 /// victim's data survived the attack.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 static SECRET_PHYS: AtomicU64 = AtomicU64::new(0);
 
 /// Entry point for the freestanding kernel. Called by
 /// `rustos_arch_x86_64`'s boot trampoline after the multiboot magic
 /// has been validated.
 #[no_mangle]
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[memory_isolation] booted on x86_64");
@@ -187,7 +187,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 /// The handler treats anything other than the expected supervisor-mode
 /// not-present read at `SECRET_VADDR` (and from inside the attacker
 /// context) as a kernel bug.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 fn page_fault_handler(error_code: u64, rip: u64) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(
@@ -264,7 +264,7 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
 /// rather than entering an infinite loop, so a buggy test never
 /// silently hangs (`AGENTS.md` §7 — no flaky tests, strict timeouts).
 #[panic_handler]
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[memory_isolation] panic: {info}");
@@ -275,8 +275,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 // target; on the host we provide a no-op `main` so `cargo build` /
 // `cargo test` against the host triple work for IDE indexing and so
 // `cargo xtask ci` doesn't have to special-case this crate.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
 fn _suppress_no_main() {}

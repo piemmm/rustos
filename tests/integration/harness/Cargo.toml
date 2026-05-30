@@ -1,0 +1,15 @@
+[package]
+name = "rustos-itest-harness"
+description = "Build-time target classification shared by the freestanding QEMU integration binaries: emits the central `freestanding`/`itest_*` cfg flags so the binaries never name the target architecture in their own source (AGENTS.md §2.2, §17.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

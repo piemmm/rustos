@@ -52,15 +52,15 @@
 //! builds that enable it are rejected by the `compile_error!` guard
 //! below (AGENTS.md §1 — no hacks; §5.4.5 — fail closed).
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
 // `alloc` is required by the freestanding configuration so the
 // synthesised observer can build an `Arc<BinArch>` — same idiom the
 // syscall-dispatch test uses. On host targets the declaration is
 // unused (the freestanding cfg gates the module that consumes it).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
@@ -73,7 +73,7 @@ compile_error!(
 
 // --- Freestanding test bin (`x86_64-unknown-none`) -----------------
 
-#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "test-hooks"))]
+#[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -431,11 +431,7 @@ mod kernel {
 
 // --- Stub when the test-hooks feature is off ----------------------
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_os = "none",
-    not(feature = "test-hooks")
-))]
+#[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no IRQ scenario, no QEMU exit affordance:
@@ -451,11 +447,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     }
 }
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_os = "none",
-    not(feature = "test-hooks")
-))]
+#[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
 fn rustos_test_irq_qemu_x86_64_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
@@ -467,9 +459,9 @@ fn rustos_test_irq_qemu_x86_64_panic_stub(_info: &core::panic::PanicInfo<'_>) ->
 }
 
 // --- Host stub -----------------------------------------------------
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
 fn _suppress_no_main() {}

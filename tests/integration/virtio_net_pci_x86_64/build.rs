@@ -38,6 +38,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x33; 32];
 
 fn main() {
+    rustos_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();

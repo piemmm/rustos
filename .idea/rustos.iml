@@ -76,6 +76,7 @@
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_net_pci_x86_64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_qemu_support/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/net/icmp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/harness/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

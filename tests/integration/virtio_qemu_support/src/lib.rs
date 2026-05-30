@@ -19,35 +19,23 @@
 //! bridges the freestanding panic handler, both of which would conflict
 //! with `std`).
 
-#![cfg_attr(
-    any(
-        all(target_arch = "x86_64", target_os = "none"),
-        all(target_arch = "riscv64", target_os = "none")
-    ),
-    no_std
-)]
+#![cfg_attr(freestanding, no_std)]
 #![deny(missing_docs)]
 
 // Device-agnostic scaffolding, built for every freestanding vertical.
-#[cfg(any(
-    all(target_arch = "x86_64", target_os = "none"),
-    all(target_arch = "riscv64", target_os = "none")
-))]
+#[cfg(freestanding)]
 mod common;
-#[cfg(any(
-    all(target_arch = "x86_64", target_os = "none"),
-    all(target_arch = "riscv64", target_os = "none")
-))]
+#[cfg(freestanding)]
 pub use common::*;
 
 // x86_64 PCI bring-up + `define_boot_harness!`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 mod imp_pci;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 pub use imp_pci::*;
 
 // riscv64 `virt`-board MMIO bring-up + `define_mmio_boot_harness!`.
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[cfg(itest_riscv64)]
 mod imp_mmio;
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[cfg(itest_riscv64)]
 pub use imp_mmio::*;

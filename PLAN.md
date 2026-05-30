@@ -3243,10 +3243,19 @@ a list collapses that list. No *new* violation may be added.
 **`cfg-check` grandfathered directories (§17.2):**
 - `kernel/rustos-kernel/`: select the arch through the Arch HAL selection
   point rather than inline `cfg(target_arch …)`.
-- `tests/integration/`: move the freestanding `no_std`/`no_main` boot
-  gating behind a shared test harness.
 - `drivers/bus/pci/`: move the x86_64 port-I/O mechanism behind an Arch
   HAL port-I/O capability.
+
+**Burn-down progress:**
+- `tests/integration/` (cfg-check) — *done*. Target selection for the
+  freestanding QEMU bins now lives in one audited build-glue crate,
+  `tests/integration/harness` (`rustos-itest-harness`), whose
+  `emit_target_cfg()` build-script hook maps the cargo target onto the
+  custom `freestanding` / `itest_x86_64` / `itest_riscv64` cfgs. Every
+  bin and the shared `virtio_qemu_support` library gate on those names
+  instead of `cfg(target_arch …, target_os = "none")`, so no test source
+  names the target instruction set (§17.2). The grandfather entry has
+  been removed and `cfg-check` is clean with the tree scanned.
 
 ---
 

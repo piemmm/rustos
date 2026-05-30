@@ -525,6 +525,10 @@ name = "rustos-installer"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-itest-harness"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-kernel"
 version = "0.0.0"
 dependencies = [
@@ -690,6 +694,7 @@ dependencies = [
  "rustos-caps",
  "rustos-crypto",
  "rustos-drvhost",
+ "rustos-itest-harness",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -700,6 +705,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-x86_64",
+ "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-irq",
@@ -712,6 +718,7 @@ name = "rustos-test-kernel-arch-boot"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
+ "rustos-itest-harness",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -722,6 +729,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-riscv64",
  "rustos-bumpalloc",
+ "rustos-itest-harness",
  "rustos-log",
 ]
 
@@ -730,6 +738,7 @@ name = "rustos-test-memory-isolation"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
+ "rustos-itest-harness",
 ]
 
 [[package]]
@@ -744,6 +753,7 @@ name = "rustos-test-scheduler-stress-qemu"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
+ "rustos-itest-harness",
  "rustos-kernel-sched",
 ]
 
@@ -754,6 +764,7 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-x86_64",
  "rustos-caps",
+ "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-irq",
@@ -771,6 +782,7 @@ dependencies = [
  "ed25519-dalek",
  "rustos-abi",
  "rustos-drv-storage-virtio-blk",
+ "rustos-itest-harness",
  "rustos-test-virtio-qemu-support",
 ]
 
@@ -782,6 +794,7 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
+ "rustos-itest-harness",
  "rustos-test-virtio-qemu-support",
 ]
 
@@ -792,6 +805,7 @@ dependencies = [
  "ed25519-dalek",
  "rustos-abi",
  "rustos-drv-network-virtio-net",
+ "rustos-itest-harness",
  "rustos-test-virtio-qemu-support",
 ]
 
@@ -803,6 +817,7 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-network-virtio-net",
  "rustos-drvhost",
+ "rustos-itest-harness",
  "rustos-net-icmp",
  "rustos-test-virtio-qemu-support",
 ]
@@ -823,6 +838,7 @@ dependencies = [
  "rustos-drv-network-virtio-net",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
+ "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-irq",
  "rustos-kernel-mem",

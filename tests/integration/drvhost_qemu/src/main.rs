@@ -13,11 +13,11 @@
 //! so that `cargo build --workspace` does not require the
 //! `x86_64-unknown-none` toolchain at every check.
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 mod fixture {
     //! Pull in the build-time generated mock driver fixture.
     include!(concat!(env!("OUT_DIR"), "/mock_fixture.rs"));
@@ -25,7 +25,7 @@ mod fixture {
 
 // --- Freestanding test bin (`x86_64-unknown-none`) -----------------
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 mod kernel {
     extern crate alloc;
 
@@ -184,5 +184,5 @@ mod kernel {
 }
 
 // --- Host stub -----------------------------------------------------
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}

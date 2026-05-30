@@ -27,6 +27,7 @@ name = "rustos-test-virtio-blk-pci-x86-64"
 path = "src/main.rs"
 
 [build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 

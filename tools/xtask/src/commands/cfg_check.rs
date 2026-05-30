@@ -30,10 +30,6 @@ const GRANDFATHERED: &[&str] = &[
     // inline rather than through the (not-yet-existing) Arch HAL
     // selection point. Burned down when `kernel/arch/api` lands.
     "kernel/rustos-kernel/",
-    // Freestanding QEMU integration bins gate their `no_std`/`no_main`
-    // entry on the boot target. They move behind a shared harness in the
-    // §17 burn-down.
-    "tests/integration/",
     // The PCI bus driver gates its x86_64 mechanism-#1 port I/O impl on
     // the target. It moves behind the Arch HAL port-I/O capability in the
     // §17 burn-down.

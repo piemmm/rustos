@@ -47,6 +47,30 @@ anywhere else means the Arch HAL boundary has leaked. As with
 `deps-check`, the directories that violate the rule today are listed in a
 shrink-only grandfather set.
 
+### Freestanding integration-test harness
+
+The freestanding QEMU integration binaries under `tests/integration/`
+compile two ways: as bare-metal `no_std`/`no_main` kernels for a QEMU
+target, and as inert host stubs for `cargo build --workspace`. Choosing
+between those forms is a target decision, so it cannot live in the test
+source — that would name the instruction set outside the architecture
+ports.
+
+Instead it lives in one audited build-glue crate,
+`tests/integration/harness` (`rustos-itest-harness`). Each test crate
+calls `rustos_itest_harness::emit_target_cfg()` from its build script;
+the helper inspects the cargo target and enables custom cfgs:
+
+- `freestanding` — a bare-metal (`os = "none"`) target; compile the
+  kernel body.
+- `itest_x86_64` / `itest_riscv64` — the freestanding x86_64 / riscv64
+  ports.
+
+Every binary and the shared `virtio_qemu_support` library gate on those
+names (`#[cfg(itest_x86_64)]`, `#[cfg(not(itest_x86_64))]`, …) rather
+than on `cfg(target_arch …, target_os = "none")`, so `cfg-check` scans
+the tree with no grandfather entry for it.
+
 ## Headless builds
 
 `cargo xtask build --headless` excludes every `userland/gui/*` crate from

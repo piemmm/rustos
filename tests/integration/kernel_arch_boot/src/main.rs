@@ -22,13 +22,13 @@
 //! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what
 //! the kernel does next).
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
 // --- Freestanding test bin (`x86_64-unknown-none`) -----------------
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 mod kernel {
     use core::panic::PanicInfo;
 
@@ -127,9 +127,9 @@ mod kernel {
 }
 
 // --- Host stub -----------------------------------------------------
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
 fn _suppress_no_main() {}

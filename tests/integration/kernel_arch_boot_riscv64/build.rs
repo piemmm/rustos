@@ -5,6 +5,8 @@
 //! architecture port owns (`AGENTS.md` §2.2 — no duplication).
 
 fn main() {
+    rustos_itest_harness::emit_target_cfg();
+
     let target = std::env::var("TARGET").unwrap_or_default();
     if target == "riscv64gc-unknown-none-elf" {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");

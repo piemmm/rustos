@@ -37,26 +37,26 @@
 //! to prove "real CPUs actually executed scheduler work in parallel"
 //! because each `step` body returns `TaskAction::Exit` immediately.
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(itest_x86_64, no_std)]
+#![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 // Workload sizing constants are hand-tuned for the 256 MiB QEMU spec; a
 // few lossless `as` casts (CPU id u32 → i32 for arithmetic, atomic u32
 // reads) keep the boot-path code readable. AGENTS.md §15 rule 10
 // requires every `#[allow]` carry a justification — this is it.
 #![cfg_attr(
-    all(target_arch = "x86_64", target_os = "none"),
+    itest_x86_64,
     allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)
 )]
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(itest_x86_64)]
 mod kernel;
 
 // Host-target stub mirrors `tests/integration/memory_isolation/src/main.rs`.
 // The crate produces a meaningful artefact only for x86_64-unknown-none;
 // on the host triple it has nothing to run.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 fn main() {}
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
 fn _suppress_no_main() {}

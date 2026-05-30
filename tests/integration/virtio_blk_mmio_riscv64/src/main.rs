@@ -6,19 +6,19 @@
 //! no-op so that `cargo build --workspace` does not require the
 //! freestanding toolchain at every check.
 
-#![cfg_attr(all(target_arch = "riscv64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "riscv64", target_os = "none"), no_main)]
+#![cfg_attr(itest_riscv64, no_std)]
+#![cfg_attr(itest_riscv64, no_main)]
 #![deny(missing_docs)]
 
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[cfg(itest_riscv64)]
 mod fixture {
     //! Build-time generated signed `.rxe` fixture + trust anchor.
     include!(concat!(env!("OUT_DIR"), "/rxe_fixture.rs"));
 }
 
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[cfg(itest_riscv64)]
 mod kernel;
 
 // --- Host stub -----------------------------------------------------
-#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+#[cfg(not(itest_riscv64))]
 fn main() {}

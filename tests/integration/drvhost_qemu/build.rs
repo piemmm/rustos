@@ -35,6 +35,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x11; 32];
 
 fn main() {
+    rustos_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     // Hand the kernel linker script (which carries the multiboot
