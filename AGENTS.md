@@ -20,8 +20,11 @@ Do not "just make it work".**
   - `aarch64-unknown-none` (Raspberry Pi 3/4/5, generic ARMv8)
   - `riscv64gc-unknown-none-elf` (QEMU virt, SiFive boards)
   - `wasm32-unknown-unknown` (browser, Chrome-class environment)
-- **Focus:** Security, correctness, multi-user, multi-core, modular drivers,
-  RISC OS-style desktop with a compositing window manager.
+- **Focus:** Security, correctness, multi-user, multi-core, modular
+  drivers, modular scheduler, modular architecture support, and an
+  optional RISC OS-style desktop with a compositing window manager.
+  The desktop is a session frontend, not a kernel requirement: a
+  headless build must remain a first-class configuration (§17).
 
 ---
 
@@ -34,6 +37,11 @@ These are absolute. They override any local convenience.
    global mutable static, retry-until-it-works, or commented-out test.
 2. **No code duplication, ever.** If you find yourself writing similar code
    twice, extract a crate in `lib/` (see §6). Duplication is a review blocker.
+   *Carve-out:* Parallel implementations of the same trait — two
+   schedulers, two architecture backends, two filesystems, two window
+   managers — are not duplication; they are the deliberate shape of
+   the modularity contracts in §17. Do not "deduplicate" sibling
+   implementations by collapsing them behind `cfg` switches.
 3. **No bloat.** Every type, trait, function, file, and folder must justify its
    existence. "Helper" modules that wrap one-liners are forbidden.
 4. **No interface creep.** Public interfaces (kernel syscalls, driver traits,
@@ -614,6 +622,125 @@ capability-checked API: the **System Information API** (`sysinfo`).
 Any in-tree code that needs runtime system data uses this API.
 Fabricating a `/proc`-style virtual filesystem, even "just for
 compatibility", is forbidden.
+
+---
+
+## 17. Modularity Contracts
+
+RustOS is built so that the scheduler, the architecture backend, and
+the desktop can each be replaced or omitted without rewriting the rest
+of the system. This section makes those guarantees binding. They are
+as non-negotiable as §2.
+
+### 17.1 Pluggable scheduler
+
+- The scheduler's contract is a trait, **`SchedulerPolicy`**, defined
+  in `kernel/sched/api/` (a sibling crate to the concrete
+  implementations). The trait covers task admission, picking the next
+  runnable task on a CPU, yield, block/wake, priority/quantum
+  accounting, and the SMP hooks (per-CPU run queues, work stealing,
+  IPI-based preemption requests).
+- Concrete schedulers live in **sibling crates** under `kernel/sched/`,
+  one per policy (e.g. `kernel/sched/eevdf/`, `kernel/sched/rt/`).
+  Adding a scheduler means adding a sibling crate, never editing an
+  existing one.
+- **No crate outside `kernel/sched/*` may name a concrete scheduler
+  type.** The rest of the kernel depends on `SchedulerPolicy` (or a
+  generic `Scheduler<P: SchedulerPolicy>`), never on a concrete impl.
+- There is exactly **one selection point**, in `kernel/core`, chosen at
+  build time via a workspace feature (`scheduler-eevdf`,
+  `scheduler-rt`, …). Exactly one such feature must be active per
+  image; the build fails otherwise.
+- Every concrete scheduler must pass the shared conformance test
+  suite in `kernel/sched/api/tests/` (fairness bounds, no starvation
+  under N×M load, correct yield/wake semantics, SMP stress on ≥ 4
+  emulated cores). A scheduler that does not pass the suite cannot
+  ship.
+
+### 17.2 Pluggable architecture (Arch HAL)
+
+- The architecture surface is a closed set of traits in
+  **`kernel/arch/api/`** — the *Arch HAL*. It enumerates exactly:
+  context switch, MMU/page-table primitives, TLB shootdown, IPI,
+  timer, interrupt entry/exit, atomics/fences, per-CPU storage, and
+  early-boot platform discovery. Adding to this surface requires a
+  PLAN.md entry and updates this section.
+- Each architecture is a crate under `kernel/arch/<target>/` that
+  implements the Arch HAL and **nothing else public**. No
+  architecture crate exposes its own ad-hoc API to the rest of the
+  kernel.
+- **`#[cfg(target_arch = "…")]`, `#[cfg(target_pointer_width = …)]`,
+  and equivalent target-conditional compilation are forbidden
+  outside `kernel/arch/<target>/`, the build glue in `.cargo/`,
+  `tools/mkimage/`, and `tools/xtask/`.** Anywhere else in
+  `kernel/`, `drivers/`, `lib/`, or `userland/`, target-conditional
+  code is a defect. Enforced by `cargo xtask deps-check` (§17.5).
+- Adding a new architecture must not require editing any crate
+  outside `kernel/arch/<target>/`, the syscall table generator in
+  `lib/abi/src/syscalls.rs` / `kernel/syscall/src/table.rs`, and
+  `tools/mkimage/`. If a fifth arch forces edits elsewhere, the
+  HAL is incomplete and must be extended in `kernel/arch/api/`
+  rather than worked around in place.
+- Every architecture crate must pass the Arch HAL conformance suite
+  in `kernel/arch/api/tests/` under its native QEMU target.
+
+### 17.3 Optional desktop
+
+- The graphical desktop (`userland/gui/*`) is **always optional**.
+  RustOS must build and run as a fully usable headless system —
+  text login (§10), shell, networking, services — with every
+  `userland/gui/*` crate excluded from the image.
+- **One-way dependency edge.** No crate under `kernel/`, `drivers/`,
+  `lib/`, `userland/system/`, `userland/session/`, `userland/shell/`,
+  `userland/net/`, or `userland/apps/` (except apps that are
+  themselves graphical) may depend, directly or transitively, on any
+  crate under `userland/gui/`. The dependency graph from non-GUI
+  code to GUI code has zero edges.
+- The window manager and compositor talk to the kernel **only**
+  through the public framebuffer/input capabilities and the public
+  IPC ABI (§4, §9). No private back-channel, no GUI-specific
+  syscall.
+- The login flow (§10) treats the graphical session as a launchable
+  option, never a precondition. Absence of `userland/gui/*` in the
+  image hides the option; it never produces an error.
+
+### 17.4 Layering
+
+The workspace dependency graph is layered. Each arrow below is
+permitted; the reverse is forbidden.
+
+```
+lib/*                       → (no deps on kernel/*, drivers/*, userland/*)
+kernel/arch/api             → lib/*
+kernel/arch/<target>        → kernel/arch/api, lib/*
+kernel/sched/api            → kernel/arch/api, lib/*
+kernel/sched/<impl>         → kernel/sched/api, kernel/arch/api, lib/*
+kernel/{mem,ipc,sec,syscall}→ kernel/arch/api, kernel/sched/api, lib/*
+kernel/core                 → all of the above (the single selection point)
+drivers/*                   → lib/abi, lib/*               (NEVER kernel/*)
+userland/*                  → lib/* and the public syscall ABI only
+userland/gui/*              → no reverse dependents (see §17.3)
+```
+
+In particular: no kernel subsystem outside `kernel/core` may depend
+on a *concrete* arch or scheduler crate. Drivers never link against
+kernel internals; they consume `lib/abi` only.
+
+### 17.5 Enforcement
+
+- A new `cargo xtask deps-check` subcommand walks `cargo metadata`
+  and fails the build if the §17.4 graph is violated, if a non-GUI
+  crate transitively depends on `userland/gui/*`, or if a kernel
+  crate outside `kernel/sched/*` / `kernel/core` names a concrete
+  scheduler crate.
+- A companion `cargo xtask cfg-check` scans the source tree and
+  fails if `cfg(target_arch …)` or `cfg(target_pointer_width …)`
+  appears outside the allow-list in §17.2.
+- Both checks are part of `cargo xtask ci` (add to §7) and are
+  blocking in CI.
+- The headless build is a Tier-1 image: `cargo xtask build
+  --headless --target <platform>` must succeed for every Tier-1
+  target and is exercised by `cargo xtask ci`.
 
 ---
 
