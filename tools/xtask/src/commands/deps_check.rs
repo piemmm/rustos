@@ -114,15 +114,6 @@ const GRANDFATHERED: &[GrandfatheredEdge] = &[
     edge("rustos-arch-riscv64", "rustos-kernel-mem"),
     edge("rustos-arch-riscv64", "rustos-kernel-sec"),
     edge("rustos-arch-riscv64", "rustos-kernel-irq"),
-    // The virtio bus driver links kernel internals for its in-kernel host
-    // mode (feature-gated). Moves behind `lib/abi` driver traits.
-    edge("rustos-drv-bus-virtio", "rustos-kernel-mem"),
-    edge("rustos-drv-bus-virtio", "rustos-kernel-sec"),
-    edge("rustos-drv-bus-virtio", "rustos-kernel-irq"),
-    // Concrete device drivers depend on the virtio bus driver crate
-    // directly rather than through a bus trait in `lib/abi`.
-    edge("rustos-drv-storage-virtio-blk", "rustos-drv-bus-virtio"),
-    edge("rustos-drv-network-virtio-net", "rustos-drv-bus-virtio"),
     // The x86_64 production kernel binary is a second integration point
     // beside `kernel/core`: it brings the allocator, the arch port, and
     // the boot-time drivers together. §17.4 allows exactly one selection
@@ -525,6 +516,66 @@ mod tests {
             !is_grandfathered("rustos-drvhost", "rustos-drv-bus-virtio"),
             "stale grandfather entry must stay removed"
         );
+    }
+
+    #[test]
+    fn virtio_driver_layer_is_on_lib_only() {
+        // §17 burn-down regression (scope C): the bus-agnostic virtio
+        // protocol now lives in `lib/virtio`, so the virtio bus driver
+        // and the virtio device drivers depend on `lib/*` only — the bus
+        // crate no longer links `kernel/{mem,sec,irq}` (the kernel host
+        // moved to `kernel/virtio`), and the device drivers no longer
+        // depend on the bus driver crate (`AGENTS.md` §17.4). These edges
+        // must stay removed, not silently re-grandfathered.
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let dep_of = |name: &str| -> Vec<String> {
+            crates
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} present"))
+                .deps
+                .clone()
+        };
+
+        let bus = dep_of("rustos-drv-bus-virtio");
+        for kernel_crate in [
+            "rustos-kernel-mem",
+            "rustos-kernel-sec",
+            "rustos-kernel-irq",
+        ] {
+            assert!(
+                !bus.iter().any(|d| d == kernel_crate),
+                "virtio bus driver regained a kernel dependency on {kernel_crate}"
+            );
+            assert!(
+                !is_grandfathered("rustos-drv-bus-virtio", kernel_crate),
+                "stale grandfather entry for the virtio bus driver must stay removed"
+            );
+        }
+        assert!(
+            bus.iter().any(|d| d == "rustos-virtio"),
+            "virtio bus driver must consume the protocol from lib/virtio"
+        );
+
+        for (driver, expected_lib) in [
+            ("rustos-drv-storage-virtio-blk", "rustos-virtio"),
+            ("rustos-drv-network-virtio-net", "rustos-virtio"),
+        ] {
+            let deps = dep_of(driver);
+            assert!(
+                !deps.iter().any(|d| d == "rustos-drv-bus-virtio"),
+                "{driver} regained a direct dependency on the virtio bus driver"
+            );
+            assert!(
+                !is_grandfathered(driver, "rustos-drv-bus-virtio"),
+                "stale grandfather entry for {driver} must stay removed"
+            );
+            assert!(
+                deps.iter().any(|d| d == expected_lib),
+                "{driver} must consume the virtio protocol from {expected_lib}"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! In-kernel [`VirtioHost`] backed by a per-process [`DmaPool`].
 //!
-//! Stage 4.D Item 0 wiring: the always-available [`crate::MockHost`]
-//! satisfies [`crate::VirtioHost`] by leaking `Box<[u8]>` storage; the
+//! Stage 4.D Item 0 wiring: the always-available [`rustos_virtio::MockHost`]
+//! satisfies [`rustos_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
 //! [`KernelVirtioHost`] here satisfies the same trait but routes every
 //! allocation through the capability-gated [`rustos_kernel_sec::alloc_dma`]
 //! / [`rustos_kernel_sec::free_dma`] pair (`AGENTS.md` §5.4).
@@ -31,7 +31,7 @@
 //! [`rustos_kernel_irq::block_until_ready`] poll-and-yield loop
 //! through an injected [`IrqWaiter`] (Stage 4.D Item 2-tail.3). The
 //! polled in-process `notify_log` is retained only on
-//! [`crate::MockHost`]; the production wake-up is the IRQ path.
+//! [`rustos_virtio::MockHost`]; the production wake-up is the IRQ path.
 //!
 //! # Safety
 //!
@@ -51,8 +51,6 @@
 //!   inverse of the cast performed at construction and therefore
 //!   sound.
 
-#![cfg(any(feature = "kernel-host", test))]
-
 use alloc::collections::BTreeMap;
 use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
@@ -64,8 +62,7 @@ use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
 use rustos_log::Sink;
 
-use crate::dma::{DmaSlab, PoolId};
-use crate::host::VirtioHost;
+use rustos_virtio::{DmaSlab, PoolId, VirtioHost};
 
 /// Capability-checked, [`DmaPool`]-backed [`VirtioHost`].
 ///
@@ -185,13 +182,13 @@ impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
 /// `pool` is the host pointer recorded at construction time
 /// (cast through `*const ()`). `slot` is the slab's unique slot
 /// index within this host; `len` is the slab's byte length and is
-/// retained for symmetry with [`crate::SlabFreeFn`] — the actual
+/// retained for symmetry with [`rustos_virtio::SlabFreeFn`] — the actual
 /// free goes through [`free_dma`] which keys on the [`DmaBuffer`]
 /// stored in [`KernelVirtioHost::live`].
 ///
 /// # Safety
 ///
-/// Mirrors the [`crate::SlabFreeFn`] contract:
+/// Mirrors the [`rustos_virtio::SlabFreeFn`] contract:
 ///
 /// * `pool` must be the `*const ()` produced by
 ///   `KernelVirtioHost::alloc_dma_zeroed` for some slab carrying
@@ -313,7 +310,7 @@ impl<P: PageTableOps, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S
 /// Capability refusals surface as [`DriverError::PermissionDenied`];
 /// every other failure (oversize requests, OOM, pool config bugs)
 /// collapses to [`DriverError::LengthOutOfRange`] — the same
-/// variant the existing [`crate::MockHost`] uses when its
+/// variant the existing [`rustos_virtio::MockHost`] uses when its
 /// 64 MiB cap is hit, so a driver consumer sees a single failure
 /// shape regardless of which host minted it.
 fn map_gate_error(e: DmaGateError) -> DriverError {

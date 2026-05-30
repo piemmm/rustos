@@ -18,7 +18,7 @@
 //!
 //! A [`RegisterWindow`] carries a raw pointer into the [`MmioMap`]'s
 //! window backing but no lifetime in its type and no free-on-drop
-//! shim (unlike [`crate::dma::DmaSlab`]). A device's register window
+//! shim (unlike [`rustos_virtio::DmaSlab`]). A device's register window
 //! lives for the whole duration of a driver load — it is not a
 //! transient allocation — so the mapper retains every mapped region
 //! and the kernel reclaims them when the driver's [`MmioMap`] (and
@@ -30,8 +30,6 @@
 //!
 //! [`MmioMapper`]: rustos_abi::MmioMapper
 //! [`CapabilityId::MMIO_MAP`]: rustos_abi::CapabilityId::MMIO_MAP
-
-#![cfg(any(feature = "kernel-host", test))]
 
 use core::cell::RefCell;
 

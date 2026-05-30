@@ -1,11 +1,11 @@
 //! RustOS virtio-blk block driver.
 //!
 //! Implements [`rustos_abi::driver::block::Block`] on top of the
-//! cross-arch virtio transport from `drivers/bus/virtio`. The driver
-//! is bus-agnostic: the same source compiles against the PCI and
-//! MMIO transports because both implement the
-//! [`rustos_drv_bus_virtio::Transport`] trait. (`AGENTS.md` §2.2 —
-//! the queue protocol lives once, in the transport crate.)
+//! bus-agnostic virtio protocol from `lib/virtio`. The driver is
+//! bus-agnostic: the same source compiles against the PCI and MMIO
+//! transports (from `drivers/bus/virtio`) because both implement the
+//! [`rustos_virtio::Transport`] trait. (`AGENTS.md` §2.2 / §17.4 —
+//! the queue protocol lives once, in `lib/virtio`.)
 //!
 //! # Public surface
 //!
@@ -24,7 +24,7 @@
 //!
 //! The classified `read_blocks_with_class` / `write_blocks_with_class`
 //! methods honour the sensitive flag by scrubbing the bounce-buffer
-//! staging through [`rustos_drv_bus_virtio::BounceBuffer`]'s drop
+//! staging through [`rustos_virtio::BounceBuffer`]'s drop
 //! impl (`AGENTS.md` §4 / `BufferClass::Sensitive` contract).
 
 #![no_std]
@@ -37,7 +37,7 @@ use core::convert::TryFrom;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use rustos_drv_bus_virtio::{
+use rustos_virtio::{
     BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
 };
 

@@ -222,8 +222,8 @@ Two implementations exist:
   `Errno::NotFound`, and fails closed to `Errno::OutOfRange` on any
   other scheduler error. The loop always terminates because the
   per-CPU monotonic clock is strictly monotonic.
-* **`KernelVirtioHost::notify_wait`** (`drivers/bus/virtio`, behind
-  the `kernel-host` feature): waits on the device's pre-bound
+* **`KernelVirtioHost::notify_wait`** (`kernel/virtio`): waits on
+  the device's pre-bound
   `IrqHandle` against the owning task (`caller.task()`) with an
   unbounded (`u64::MAX`) timeout. A virtio device signals completion
   on a single MSI / MMIO line, not per-queue, so the wait key is the

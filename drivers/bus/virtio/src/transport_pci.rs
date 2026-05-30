@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use rustos_abi::RegisterWindow;
 
-use crate::transport::{Status, Transport, VirtioError};
+use rustos_virtio::{Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
 /// to `queue_msix_vector` / `msix_config` tells the device not to
@@ -364,10 +364,9 @@ impl Transport for PciTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::MockHost;
-    use crate::queue::SplitQueue;
     use alloc::boxed::Box;
     use core::ptr::NonNull;
+    use rustos_virtio::{MockHost, SplitQueue};
 
     /// One device register region. The leaked, 8-byte-aligned
     /// backing storage outlives every window built over it (the test

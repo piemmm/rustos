@@ -1,0 +1,20 @@
+[package]
+name = "rustos-virtio"
+description = "RustOS bus-agnostic virtio 1.x split-virtqueue protocol: the Transport trait, SplitQueue management, owned DMA slabs / bounce buffers, and the in-process MockHost/MockTransport doubles, shared by every virtio class driver and the kernel-side virtio host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Bus-agnostic virtio protocol shared by `drivers/storage/virtio_blk`,
+# `drivers/network/virtio_net`, the `drivers/bus/virtio` transports, and
+# the kernel-side host in `kernel/virtio`. It lives in `lib/` because more
+# than one crate consumes it (`AGENTS.md` §2.2 / §6) and depends only on
+# the stable ABI types in `lib/abi`, so it builds for every Tier-1 target.
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }

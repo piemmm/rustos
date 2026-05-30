@@ -10,7 +10,12 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../bus/virtio", version = "=0.0.0" }
+# The bus-agnostic virtio split-virtqueue protocol (Transport trait,
+# SplitQueue, DMA slabs, the MockHost/MockTransport doubles) lives in
+# `lib/virtio`. The driver consumes it from `lib/*` and never depends on
+# the `drivers/bus/virtio` transport crate (`AGENTS.md` §17.4 — a driver
+# may depend on `lib/*` but never on another driver).
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [lints]
 workspace = true

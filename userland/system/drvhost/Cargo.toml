@@ -24,9 +24,10 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # code in this crate never names `ed25519-dalek` directly.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 # The Stage 4.D Item 0-tail integration tests cover the new
-# `VirtioHostFactory` seam in `HostConfig`. A `MockHost`-backed
-# factory is the only seam the host crate exposes that can mint a
-# concrete `dyn VirtioHost` *without* pulling in `kernel/mem` or
-# `kernel/sec`; production builds wire a `KernelVirtioHost`-backed
-# factory of their own.
-rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+# `VirtioHostFactory` seam in `HostConfig`. The bus-agnostic
+# `MockHost` (from `lib/virtio`) mints a concrete `dyn VirtioHost`
+# *without* pulling in `kernel/mem` or `kernel/sec` or any driver
+# crate; production builds wire a `KernelVirtioHost`-backed factory of
+# their own. Depending on `lib/virtio` keeps this crate's test deps on
+# `lib/*` only (`AGENTS.md` §17.4).
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }

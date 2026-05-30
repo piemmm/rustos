@@ -3232,14 +3232,6 @@ a list collapses that list. No *new* violation may be added.
   the `→ kernel/sync` edge is *done* now that the primitives live in
   `lib/sync`, and the port now names the `kernel/sched/api` contract
   rather than a concrete scheduler.)
-- `drivers/bus/virtio` → `kernel/{mem,sec,irq}`;
-  `drivers/storage/virtio_blk` & `drivers/network/virtio_net` →
-  `drivers/bus/virtio`: route driver-to-kernel and driver-to-bus access
-  through `lib/abi` traits instead of direct crate links. (The
-  `userland/system/drvhost` → `drivers/bus/virtio` edge that sat here is
-  *done*: drvhost reaches the bus crate only from `[dev-dependencies]`
-  test fixtures, never from production code, so the build-graph edge does
-  not exist; see burn-down below.)
 - `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
   `userland/system/drvhost`, `drivers/bus/virtio`:
   collapse the production binary's bring-up into the single §17.4
@@ -3335,10 +3327,33 @@ a list collapses that list. No *new* violation may be added.
   *future* production dependency. It has been removed and a regression
   test (`deps_check::tests::drvhost_has_no_production_edge_to_virtio_bus`)
   now fails closed if drvhost ever gains a real production edge to the bus
-  crate. The remaining virtio-bus deps-check edges
-  (`drivers/bus/virtio → kernel/{mem,sec,irq}`, the device drivers → bus,
-  and `kernel/virtio` → `drivers/bus/virtio` / `userland/system/drvhost`)
-  are unchanged by this work.
+  crate. (The driver-host dev-dependency was subsequently repointed off
+  the bus crate onto `lib/virtio` by the virtio driver-layer thread
+  below, so even the dev-only edge is gone.)
+- Virtio driver-layer split: `lib/virtio` + kernel host relocation
+  (deps-check §17.4) — *done*. The bus-agnostic split-virtqueue protocol
+  (the `Transport` trait, `SplitQueue`, the owned `DmaSlab` /
+  `BounceBuffer`, and the in-process `MockHost` / `MockTransport`
+  doubles) moved out of `drivers/bus/virtio` into a new shared crate
+  `lib/virtio` (`rustos-virtio`), which depends only on `lib/abi`. The
+  bus driver now keeps only the concrete PCI / MMIO `Transport`
+  implementations (`PciTransport` / `MmioTransport`) and re-exports the
+  protocol from `lib/virtio`. The capability-checked kernel host
+  (`KernelVirtioHost`, `kernel_host.rs`) and MMIO mapper
+  (`KernelMmioMapper`, `kernel_mmio.rs`) — which link
+  `kernel/{mem,sec,irq}` — moved into `kernel/virtio`, so the bus driver
+  crate dropped its `kernel-host` Cargo feature and every `kernel/*`
+  dependency. The device drivers `drivers/storage/virtio_blk` and
+  `drivers/network/virtio_net` now consume the protocol from `lib/virtio`
+  and no longer depend on the bus driver crate at all. Grandfather edges
+  removed: `drivers/bus/virtio → kernel/{mem,sec,irq}`,
+  `rustos-drv-storage-virtio-blk → rustos-drv-bus-virtio`, and
+  `rustos-drv-network-virtio-net → rustos-drv-bus-virtio`; a regression
+  test (`deps_check::tests::virtio_driver_layer_is_on_lib_only`) fails
+  closed if any of them returns. `deps-check` and `cfg-check` are clean.
+  The remaining virtio deps-check edges
+  (`kernel/virtio → drivers/bus/virtio` / `userland/system/drvhost`, part
+  of the single-selection-point thread) are unchanged by this work.
 
 ---
 

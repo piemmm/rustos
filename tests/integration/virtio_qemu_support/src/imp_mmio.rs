@@ -21,9 +21,7 @@ use rustos_arch_riscv64::publish::{published_dtb, published_memory_map};
 use rustos_arch_riscv64::{qemu_exit, trap, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
-use rustos_drv_bus_virtio::{
-    KernelMmioMapper, KernelVirtioHost, MmioTransport, PoolId, VirtioHost,
-};
+use rustos_drv_bus_virtio::MmioTransport;
 use rustos_drvhost::VirtioHostFactory;
 use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{
@@ -31,9 +29,13 @@ use rustos_kernel_mem::{
 };
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::{provision_virtio_mmio, KernelVirtioFactory, KernelVirtioFactoryConfig};
+use rustos_kernel_virtio::{
+    provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
+    KernelVirtioHost,
+};
 use rustos_log::{Event, EventId, Level, Sink};
 use rustos_util::dtb::Dtb;
+use rustos_virtio::{PoolId, VirtioHost};
 
 /// Re-export so the verticals name the concrete transport for the shared
 /// device-tail turbofish under the same name as the PCI vertical.

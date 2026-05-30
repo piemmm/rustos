@@ -113,8 +113,9 @@ rustos/
 │   ├── ipc/             # Capabilities, message ports.
 │   ├── sec/             # Users, groups, capabilities, MAC.
 │   ├── syscall/         # Syscall dispatch + ABI definitions.
-│   ├── virtio/          # Arch-neutral virtio host factory + transport-
-│   │                    #   provisioning walks (PCI + MMIO).
+│   ├── virtio/          # Arch-neutral kernel-side virtio: capability-
+│   │                    #   checked DMA/MMIO hosts, per-driver host
+│   │                    #   factory, transport-provisioning walks.
 │   └── arch/
 │       ├── x86_64/
 │       ├── aarch64/
@@ -143,7 +144,9 @@ rustos/
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── log/             # Structured logging.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
-│   └── util/            # Strictly justified utilities.
+│   ├── util/            # Strictly justified utilities.
+│   └── virtio/          # Bus-agnostic virtio split-virtqueue protocol
+│                        #   (Transport trait, queues, DMA slabs).
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.

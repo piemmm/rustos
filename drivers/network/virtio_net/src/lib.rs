@@ -37,7 +37,7 @@
 //! [`Net::transmit_with_class`] and [`Net::receive_with_class`]
 //! honour [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass)
 //! by scrubbing every staging copy through
-//! [`rustos_drv_bus_virtio::BounceBuffer`]'s drop impl
+//! [`rustos_virtio::BounceBuffer`]'s drop impl
 //! (`AGENTS.md` §4).
 
 #![no_std]
@@ -48,7 +48,7 @@ use core::convert::TryFrom;
 use rustos_abi::driver::net::{MacAddress, Net, MAC_ADDRESS_LEN};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use rustos_drv_bus_virtio::{
+use rustos_virtio::{
     BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
 };
 

@@ -21,10 +21,14 @@ workspace = true
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0", features = [
-    "kernel-host",
-] }
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
 rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+# The bus-agnostic virtio protocol (Transport, SplitQueue, DmaSlab,
+# VirtioHost). The kernel-side host (`kernel_host` / `kernel_mmio`)
+# implements its seams against `kernel/{mem,sec,irq}`; it used to live in
+# `drivers/bus/virtio`, but a driver crate may not depend on `kernel/*`
+# (`AGENTS.md` §17.4), so the kernel-linking host moved here.
+rustos-virtio = { path = "../../lib/virtio", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }

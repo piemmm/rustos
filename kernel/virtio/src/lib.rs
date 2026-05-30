@@ -5,7 +5,7 @@
 //!
 //! * [`virtio_factory`] — the per-driver [`KernelVirtioFactory`] that
 //!   mints one capability-checked
-//!   [`KernelVirtioHost`](rustos_drv_bus_virtio::KernelVirtioHost) over a
+//!   [`KernelVirtioHost`] over a
 //!   fresh per-process [`DmaPool`](rustos_kernel_mem::DmaPool) for every
 //!   loaded virtio-class driver.
 //! * [`virtio_pci_walk`] — the ring-0 walk that turns a virtio-PCI bus
@@ -39,10 +39,14 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod kernel_host;
+pub mod kernel_mmio;
 pub mod virtio_factory;
 pub mod virtio_mmio_walk;
 pub mod virtio_pci_walk;
 
+pub use kernel_host::KernelVirtioHost;
+pub use kernel_mmio::KernelMmioMapper;
 pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
 pub use virtio_mmio_walk::{
     provision_virtio_mmio, VirtioMmioProvision, VirtioMmioWalkError, MAX_SLOTS,

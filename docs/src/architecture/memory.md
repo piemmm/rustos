@@ -214,7 +214,8 @@ with caching disabled (`MapFlags::NO_CACHE`) and the same unmapped
 guard-page bracketing the DMA pool uses. `MmioMap::map(phys_base, len)`
 returns an `MmioRegion`; `region_base` resolves the region's device
 physical base through the direct physical map (`PhysMap`) into the base
-pointer the kernel-host mapper turns into an
+pointer the kernel-side mapper (`KernelMmioMapper`, in `kernel/virtio`)
+turns into an
 [ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off), so
 the window addresses the device's real registers.
 

@@ -32,15 +32,16 @@
 
 use alloc::boxed::Box;
 
+use crate::kernel_host::KernelVirtioHost;
 use rustos_abi::driver::VirtioHost;
 use rustos_abi::{CapabilityId, IrqHandle};
 use rustos_caps::CapabilitySet;
-use rustos_drv_bus_virtio::{KernelVirtioHost, PoolId};
 use rustos_drvhost::VirtioHostFactory;
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
 use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTableOps, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
+use rustos_virtio::PoolId;
 
 /// Borrowed kernel resources and per-device parameters a
 /// [`KernelVirtioFactory`] needs to mint a [`KernelVirtioHost`].

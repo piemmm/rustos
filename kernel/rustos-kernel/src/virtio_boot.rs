@@ -24,11 +24,12 @@ use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
 use rustos_abi::{IrqHandle, MsiMessage};
 use rustos_crypto::Ed25519PublicKey;
-use rustos_drv_bus_virtio::{KernelMmioMapper, PciTransport};
+use rustos_drv_bus_virtio::PciTransport;
 use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
 use rustos_kernel_mem::{FrameAllocator, MmioMap, PageTableOps, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
+use rustos_kernel_virtio::kernel_mmio::KernelMmioMapper;
 use rustos_log::Sink;
 
 use rustos_kernel_virtio::virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};

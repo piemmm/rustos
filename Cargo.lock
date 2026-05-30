@@ -454,11 +454,7 @@ name = "rustos-drv-bus-virtio"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-caps",
- "rustos-kernel-irq",
- "rustos-kernel-mem",
- "rustos-kernel-sec",
- "rustos-log",
+ "rustos-virtio",
 ]
 
 [[package]]
@@ -493,7 +489,7 @@ name = "rustos-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-drv-bus-virtio",
+ "rustos-virtio",
 ]
 
 [[package]]
@@ -501,7 +497,7 @@ name = "rustos-drv-storage-virtio-blk"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-drv-bus-virtio",
+ "rustos-virtio",
 ]
 
 [[package]]
@@ -512,8 +508,8 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-crypto",
- "rustos-drv-bus-virtio",
  "rustos-log",
+ "rustos-virtio",
 ]
 
 [[package]]
@@ -667,6 +663,7 @@ dependencies = [
  "rustos-kernel-mem",
  "rustos-kernel-sec",
  "rustos-log",
+ "rustos-virtio",
 ]
 
 [[package]]
@@ -863,11 +860,19 @@ dependencies = [
  "rustos-log",
  "rustos-net-icmp",
  "rustos-util",
+ "rustos-virtio",
 ]
 
 [[package]]
 name = "rustos-util"
 version = "0.0.0"
+
+[[package]]
+name = "rustos-virtio"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-wm"

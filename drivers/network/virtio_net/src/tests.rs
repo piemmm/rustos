@@ -9,7 +9,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_drv_bus_virtio::{ChainView, MockHost, MockTransport};
+use rustos_virtio::{ChainView, MockHost, MockTransport};
 
 /// MAC address the mock device exposes through its config window.
 const DEVICE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -93,7 +93,7 @@ impl AutoDrainHost {
 }
 
 impl VirtioHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_drv_bus_virtio::DmaSlab, DriverError> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
     fn notify_wait(&self, queue_index: u16) {

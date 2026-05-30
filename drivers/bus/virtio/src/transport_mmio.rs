@@ -29,7 +29,7 @@
 
 use rustos_abi::RegisterWindow;
 
-use crate::transport::{Status, Transport, VirtioError};
+use rustos_virtio::{Status, Transport, VirtioError};
 
 /// Byte offsets within the virtio-MMIO register block (virtio 1.1
 /// §4.2.2, `MMIO Device Register Layout`). All registers are 32 bits
@@ -285,10 +285,9 @@ impl Transport for MmioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::MockHost;
-    use crate::queue::SplitQueue;
     use alloc::boxed::Box;
     use core::ptr::NonNull;
+    use rustos_virtio::{MockHost, SplitQueue};
 
     /// A buffer-backed stand-in for a modern virtio-MMIO device. The
     /// leaked, 8-byte-aligned backing storage outlives every window

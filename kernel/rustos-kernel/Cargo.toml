@@ -72,16 +72,15 @@ rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # no architecture port duplicates them (`AGENTS.md` §2.2).
 rustos-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
 rustos-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-# Stage 4.D Item 2-tail.4: the kernel-binary `VirtioHostFactory`
-# (`virtio_factory` module) mints a per-driver `KernelVirtioHost` and
-# plugs it into the userland driver host's `HostConfig`. `drvhost`
-# itself stays free of `kernel/*` deps; the kernel binary is the one
-# place that depends on both it and the `kernel-host` build of the
-# virtio transport (`AGENTS.md` §3).
+# Stage 4.D Item 2-tail.4: the kernel-binary `VirtioHostFactory` lives
+# in `kernel/virtio` (the `KernelVirtioFactory`); it mints a per-driver
+# `KernelVirtioHost` and plugs it into the userland driver host's
+# `HostConfig`. `drvhost` itself stays free of `kernel/*` deps. The
+# binary also names the concrete `PciTransport` / `MmioTransport` from
+# the bus driver, which now depends only on `lib/*` (`AGENTS.md` §17.4):
+# the kernel-side DMA / MMIO hosts moved to `kernel/virtio`.
 rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0", features = [
-    "kernel-host",
-] }
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
 
 [dev-dependencies]
 # The `virtio_factory` unit tests drive a real `DmaPool` through

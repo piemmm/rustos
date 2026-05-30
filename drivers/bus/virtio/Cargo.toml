@@ -8,40 +8,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[features]
-# `kernel-host` brings in the in-kernel [`KernelVirtioHost`] implementation
-# alongside the always-available in-process [`MockHost`]. Off by default
-# so the crate stays cheap to compile for the unit-test / userland
-# build matrix (`AGENTS.md` §2.3 — every type must justify its existence);
-# the kernel build of `userland/system/drvhost` turns it on to give a
-# loaded driver an actual capability-checked DMA allocator.
-kernel-host = [
-    "dep:rustos-kernel-mem",
-    "dep:rustos-kernel-sec",
-    "dep:rustos-kernel-irq",
-    "dep:rustos-log",
-]
-
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# Optional — pulled in only by the `kernel-host` feature. Letting the
-# default build stay free of the `kernel/*` crates keeps the driver-side
-# unit tests (which run in user space via `cargo test`) lightweight.
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", optional = true }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0", optional = true }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0", optional = true }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0", optional = true }
-
-[dev-dependencies]
-# The `kernel_host` unit tests drive a `DmaPool` through `kernel/mem`'s
-# in-memory `HostPageTable` test double. The double is gated behind the
-# `host-tests` feature so production builds do not link it
-# (`AGENTS.md` §2.3).
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The bus-agnostic split-virtqueue protocol (Transport trait, SplitQueue,
+# DMA slabs, MockHost) lives in `lib/virtio` so that the device-class
+# drivers can consume it without depending on this bus driver crate
+# (`AGENTS.md` §17.4 — `drivers/* → lib/*` only). This crate provides the
+# concrete PCI / MMIO `Transport` implementations on top of it.
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [lints]
 workspace = true

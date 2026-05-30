@@ -159,9 +159,10 @@ forbids. Instead the kernel is the sole minter of a register window.
 
 The host hands the bus driver an `&dyn MmioMapper` through
 `DriverHost::mmio_mapper()` (default `None`). The kernel's concrete
-mapper is `KernelMmioMapper` in `drivers/bus/virtio` (behind the
-`kernel-host` feature); it wraps `kernel/mem::MmioMap` and routes
-every request through the capability gate `kernel/sec::map_mmio`.
+mapper is `KernelMmioMapper` in `kernel/virtio` (the kernel crate,
+because it links `kernel/{mem,sec}`, which a driver may not —
+`AGENTS.md` §17.4); it wraps `kernel/mem::MmioMap` and routes every
+request through the capability gate `kernel/sec::map_mmio`.
 
 ### Capability flow
 

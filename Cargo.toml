@@ -37,6 +37,7 @@ members = [
     "lib/log",
     "lib/sync",
     "lib/util",
+    "lib/virtio",
 
     # Drivers — display
     "drivers/display/vesa",

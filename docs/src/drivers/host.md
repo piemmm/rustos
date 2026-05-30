@@ -91,12 +91,12 @@ A factory that returns `None` is indistinguishable from leaving
 to report `None`, and a virtio-class driver's `register()` should
 then refuse to load (it has no transport). The concrete production
 factory is `KernelVirtioFactory`
-(`kernel/rustos-kernel/src/virtio_factory.rs`, Stage 4.D Item
-2-tail.4): it mints a `KernelVirtioHost` (`drivers/bus/virtio` with
-the `kernel-host` feature) backed by a freshly-carved per-driver
-`DmaPool` and the calling task's `TaskCapabilities`. It lives in the
-kernel binary rather than in `drvhost` so the host crate stays free
-of every `kernel/*` dependency (`AGENTS.md` §3). The mock factory
+(`kernel/virtio/src/virtio_factory.rs`, Stage 4.D Item
+2-tail.4): it mints a `KernelVirtioHost` (`kernel/virtio`) backed by
+a freshly-carved per-driver `DmaPool` and the calling task's
+`TaskCapabilities`. It lives in `kernel/virtio` rather than in
+`drvhost` so the host crate stays free of every `kernel/*`
+dependency (`AGENTS.md` §3 / §17.4). The mock factory
 used in unit tests mints a `MockHost` whose allocations leak for the
 duration of the test process.
 

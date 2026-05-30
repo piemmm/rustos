@@ -1,17 +1,22 @@
 # Virtio transport
 
-`drivers/bus/virtio` ships the cross-arch **split-virtqueue** plumbing
-that `drivers/storage/virtio_blk` and `drivers/network/virtio_net` both
-build on. Per `AGENTS.md` §2.2 the queue protocol lives once, here,
+The bus-agnostic **split-virtqueue** protocol lives in `lib/virtio`
+(crate `rustos-virtio`); `drivers/bus/virtio` adds only the concrete
+PCI / MMIO `Transport` implementations on top of it. The device
+drivers `drivers/storage/virtio_blk` and `drivers/network/virtio_net`
+depend on `lib/virtio` and never on the bus driver crate — a driver
+may depend on `lib/*` but not on another driver (`AGENTS.md` §17.4).
+Per `AGENTS.md` §2.2 the queue protocol lives once, in `lib/virtio`,
 and the device drivers carry only the device-specific wire format.
 
 ## Scope
 
-The transport crate covers:
+`lib/virtio` (the protocol) covers:
 
 - A `Transport` trait abstracting the PCI (`x86_64`) and MMIO
-  (`aarch64`, `riscv64 virt`) bus seams behind a single interface,
-  plus two concrete implementations: the modern-PCI `PciTransport`
+  (`aarch64`, `riscv64 virt`) bus seams behind a single interface.
+  Its two concrete implementations live in `drivers/bus/virtio`: the
+  modern-PCI `PciTransport`
   (see [Modern PCI transport](#modern-pci-transport-pcitransport))
   and the virtio-MMIO `MmioTransport`
   (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
@@ -52,7 +57,12 @@ The transport crate covers:
                     | Transport, SplitQueue, BounceBuffer, VirtioHost
                     v
 +-------------------------------------+
-|  drivers/bus/virtio                 |  virtio 1.1 §2.6 split queues, §3.1 init
+|  lib/virtio                         |  virtio 1.1 §2.6 split queues, §3.1 init
++-------------------+-----------------+
+                    ^ implemented by PciTransport / MmioTransport
+                    |
++-------------------+-----------------+
+|  drivers/bus/virtio                 |  concrete PCI / MMIO Transport impls
 +-------------------+-----------------+
                     | PciBackend / MmioBackend (own a RegisterWindow)
                     v
@@ -60,6 +70,11 @@ The transport crate covers:
 |  drivers/bus/pci  /  drivers/bus/mmio
 +-------------------------------------+
 ```
+
+The kernel-side `VirtioHost` (`KernelVirtioHost`) and its per-driver
+factory live one layer up, in `kernel/virtio`, because they link
+`kernel/{mem,sec,irq}`; a driver crate may not (`AGENTS.md` §17.4).
+They consume the same `lib/virtio` protocol the drivers do.
 
 ## Modern PCI transport (`PciTransport`)
 
@@ -169,10 +184,10 @@ is unchanged).
 
 Stage 4.D Item 0 ships the real, capability-checked
 `VirtioHost` implementation. It lives in
-`drivers/bus/virtio/src/kernel_host.rs`, behind the crate's
-`kernel-host` Cargo feature (off by default — `AGENTS.md` §2.3),
-and is generic over the page-table backend `P` and the audit
-`Sink` `S`:
+`kernel/virtio/src/kernel_host.rs` — the kernel crate, because it
+links `kernel/{mem,sec,irq}`, which a driver crate may not
+(`AGENTS.md` §17.4) — and is generic over the page-table backend `P`
+and the audit `Sink` `S`:
 
 ```rust
 pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
@@ -184,7 +199,7 @@ pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
 
 The host **owns** its `DmaPool` (the `'a` lifetime now bounds only
 the pool's `FrameAllocator` borrow, not the pool itself). Ownership
-is what lets the kernel binary's `KernelVirtioFactory` mint a fresh
+is what lets `kernel/virtio`'s `KernelVirtioFactory` mint a fresh
 per-driver host from behind a shared `&self` borrow — a
 borrowed-`&mut` pool could not be handed out that way (see
 [Kernel-binary factory](#kernel-binary-factory-kernelvirtiofactory)).
@@ -215,12 +230,13 @@ the bus-driver-minted `IrqHandle`, and the scheduler/clock
 Stage 4.D Item 2-tail.4 wires the host into the userland driver
 host. The userland `drvhost` defines a `VirtioHostFactory` trait
 (`mint(&self, granted) -> Option<Box<dyn VirtioHost>>`) and calls
-it just before a driver's `register()`; the kernel binary supplies
+it just before a driver's `register()`; `kernel/virtio` supplies
 the concrete implementation, `KernelVirtioFactory`, in
-`kernel/rustos-kernel/src/virtio_factory.rs`. Keeping the impl in
-the kernel binary lets `drvhost` stay free of every `kernel/*`
-dependency (`AGENTS.md` §3): only the kernel binary depends on both
-`drvhost` and the `kernel-host` build of this crate.
+`kernel/virtio/src/virtio_factory.rs`. Keeping the impl in
+`kernel/virtio` lets `drvhost` stay free of every `kernel/*`
+dependency (`AGENTS.md` §3 / §17.4): `kernel/virtio` depends on
+`drvhost` (for the factory trait) and on `kernel/{mem,sec,irq}`,
+while the bus driver and device drivers stay on `lib/*` only.
 
 Each `mint` call builds a brand-new `AddressSpace` (via a
 `make_table` closure) and `DmaPool`, then hands ownership to a fresh
@@ -246,32 +262,36 @@ minted it.
 
 ## Test surface
 
-`cargo test -p rustos-drv-bus-virtio --lib` covers the host-side
-tests, including the eleven `transport_pci` tests added as the
-Stage 4.D Item 4 prerequisite (short-window rejection, `num_queues`
-read, status write/read + reset, driver-feature halves, queue-select
-range check, queue programming + notify-offset recording, oversize
-and out-of-bounds-notify rejection, no-op notify for an unprogrammed
-queue, device-config read with zero-fill overflow, and a
-`SplitQueue`-drives-`PciTransport` integration check), the twelve
-`transport_mmio` tests added for the riscv64 / `AArch64` virtio-MMIO
-transport (short-window, bad-magic, legacy-version and empty-slot
-rejection, status write/read + reset, device/driver-feature halves,
-queue-select register write, queue programming + `QueueReady`,
-oversize rejection, single-register notify, device-config read with
-zero-fill overflow, and a `SplitQueue`-drives-`MmioTransport`
-integration check): queue
-free-list initialisation, descriptor chaining (single
-+ multi), exhaustion, used-ring wrap-around, status progression,
-mock-peer round-trip, sensitive-class scrub on drop, the four
-`DmaSlab` tests added in Stage 4.D Item 0a (round-trip; three
-simultaneous disjoint writes; `drop` invokes the free shim once
-with the right `(slot, len)`; `pool_id` distinguishes slabs across
-pools), and the seven `KernelVirtioHost` tests added in Item 0
-(zero-initialisation + audit emit, drop routes through
-`free_dma`, `CapabilityId::MEM_DMA` refusal returns
-`PermissionDenied`, zero-size short-circuit, two simultaneous
-disjoint slabs, `notify_wait` records queue index, oversize
-collapses to `LengthOutOfRange`). Coverage of the crate's public
-surface is comfortably above the 75% Stage 4 bar
-(`AGENTS.md` §7).
+The protocol and the kernel host are tested in the crates that own
+them (`AGENTS.md` §7 — unit tests next to the code):
+
+- `cargo test -p rustos-virtio` covers the bus-agnostic protocol:
+  split-queue free-list initialisation, descriptor chaining (single
+  + multi), exhaustion, used-ring wrap-around, status progression,
+  mock-peer round-trip, sensitive-class scrub on drop, and the
+  `DmaSlab` ownership tests (round-trip; three simultaneous disjoint
+  writes; `drop` invokes the free shim once with the right
+  `(slot, len)`; `pool_id` distinguishes slabs across pools).
+- `cargo test -p rustos-drv-bus-virtio` covers the concrete
+  transports: the `transport_pci` tests (short-window rejection,
+  `num_queues` read, status write/read + reset, driver-feature
+  halves, queue-select range check, queue programming + notify-offset
+  recording, oversize and out-of-bounds-notify rejection, no-op
+  notify for an unprogrammed queue, device-config read with zero-fill
+  overflow, and a `SplitQueue`-drives-`PciTransport` integration
+  check) and the `transport_mmio` tests for the riscv64 / `AArch64`
+  virtio-MMIO transport (short-window, bad-magic, legacy-version and
+  empty-slot rejection, status write/read + reset, device/driver-
+  feature halves, queue-select register write, queue programming +
+  `QueueReady`, oversize rejection, single-register notify,
+  device-config read with zero-fill overflow, and a
+  `SplitQueue`-drives-`MmioTransport` integration check).
+- `cargo test -p rustos-kernel-virtio` covers the kernel host and
+  MMIO mapper: zero-initialisation + audit emit, drop routes through
+  `free_dma`, `CapabilityId::MEM_DMA` refusal returns
+  `PermissionDenied`, zero-size short-circuit, two simultaneous
+  disjoint slabs, the `notify_wait` IRQ-park paths, and oversize
+  collapsing to `LengthOutOfRange`.
+
+Coverage of each crate's public surface is comfortably above the 75%
+Stage 4 bar (`AGENTS.md` §7).

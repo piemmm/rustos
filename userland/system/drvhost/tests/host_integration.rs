@@ -473,7 +473,7 @@ impl rustos_drvhost::VirtioHostFactory for MockVirtioFactory {
         &'r self,
         _granted: &CapabilitySet,
     ) -> Option<Box<dyn rustos_abi::driver::VirtioHost + 'r>> {
-        Some(Box::new(rustos_drv_bus_virtio::MockHost::new()))
+        Some(Box::new(rustos_virtio::MockHost::new()))
     }
 }
 
