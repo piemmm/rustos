@@ -1,116 +1,68 @@
-# Next session — Stage 4.D Item 6 (acceptance gate)
+# Next session — Stage 4 remaining first-drivers (Stage 4.D is done)
 
 ## Where we are
 
-`PLAN.md` Stage 4.D Item 4 is **complete**. The most recent landings
-(newest first):
+**Stage 4.D is complete.** Its final item — Item 6, the acceptance gate
+— landed this session:
 
-- **riscv64 virtio-MMIO QEMU verticals + arch-neutral virtio crate —
-  landed (latest session).** `tests/integration/virtio_blk_mmio_riscv64`
-  and `virtio_net_mmio_riscv64` boot the riscv64 `virt`-board pipeline to
-  `AuditEvent::BootCompleted`, then drive a real virtio device over the
-  board's virtio-mmio bus end-to-end — the MMIO analogues of the gated
-  x86_64 PCI verticals. Both reach `SiFive` Test PASS under
-  `qemu-system-riscv64` (blk: sector-0 verify + sector-1 round-trip; net:
-  ARP-resolve `10.0.2.2` + ICMP echo; both after a `load → reload` cycle
-  and a clean `unload`), verified deterministic across repeated runs.
-  - **Crate extraction.** The arch-neutral `KernelVirtioFactory` + the
-    virtio-PCI / virtio-MMIO provisioning walks moved out of the
-    x86_64-only `rustos-kernel` bin crate (it can't build for riscv64)
-    into a new `kernel/virtio` (`rustos-kernel-virtio`) crate that names
-    no architecture port; `rustos-kernel` re-exports every item, so its
-    public API is unchanged (`AGENTS.md` §2.2 / §6).
-  - **Shared bring-up.** `tests/integration/virtio_qemu_support` is now
-    arch-generic: a `common` module owns the `QemuEnv` seam, the
-    signed-`.rxe` inputs, the generic `drive_driver_lifecycle<Tr>`, and
-    the generic device tails `virtio_blk_round_trip<Tr>` /
-    `virtio_net_ping<Tr>`; `imp_pci` (x86_64) + `imp_mmio` (riscv64)
-    supply the arch-specific bring-up and a `define_*_boot_harness!`
-    macro. Both arches re-export their transport as `ScenarioTransport`,
-    so the device-tail invocation text is identical. The x86_64
-    verticals were refactored onto the shared tails.
-  - **riscv64 MMIO scaffold (`imp_mmio`).** Consumes
-    `published_dtb`/`published_memory_map`; builds the bus via the new
-    public `rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb` (`unsafe`;
-    concrete `Mmio` type stays private behind `impl VirtioMmioBus`);
-    provisions the `MmioTransport` through the `CAP_MMIO_MAP`-gated
-    `KernelMmioMapper`; walks the DTB for the PLIC base + `riscv,ndev`
-    and the device's `interrupts` source; builds a `PlicController` +
-    `IrqTable`, arms the source, installs the S-mode trap dispatch (PLIC
-    claim → virtio-MMIO `InterruptACK` → `IrqTable::fire` → complete) +
-    `init_traps`; mints a `KernelVirtioHost`; runs the shared lifecycle.
-    The IRQ park is a race-free `wfi` (unmask source, clear `sstatus.SIE`,
-    re-check `IrqTable::ready_for`, `wfi` only if not ready, restore
-    `SIE`) — no lost wake-up, no bounding timer. The virtio-MMIO
-    `InterruptACK` in the dispatch is load-bearing (a level-high source
-    never re-edges otherwise).
-  - **Runner / enrolment.** The riscv64 QEMU runner passes `-global
-    virtio-mmio.force-legacy=false` (RustOS only drives modern
-    virtio-mmio); both verticals are enrolled in `cargo xtask test
-    --qemu` (blk: planted 2048-sector disk; net: SLIRP + pcap).
-  - Verified: both verticals PASS under QEMU; host `cargo test`
-    (`rustos-kernel-virtio` 12, `rustos-drv-bus-mmio` 13, `rustos-kernel`
-    33, `rustos-qemu` 51); `cargo clippy -- -D warnings` (host + x86_64 +
-    riscv64), `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (host +
-    riscv64), `cargo fmt --check`, `cargo build --workspace` all clean.
-    Docs: `docs/src/platform/riscv64.md` ("virtio-MMIO QEMU verticals");
-    `AGENTS.md` §3 (`kernel/virtio`). **Not run here:** the mdBook half
-    of `cargo xtask docs-check` (mdbook not installed) and `cargo deny
-    check`.
+- The gate was finished on a host carrying the two tools the prior
+  session lacked: `mdbook` (v0.5.3) + `mdbook-linkcheck` and `cargo-deny`
+  (0.19.7). (Note: they live in `~/.cargo/bin`, which is **not** on the
+  default non-interactive `PATH` — `export PATH="$HOME/.cargo/bin:$PATH"`
+  before invoking the gate.)
+- Two real defects the now-runnable steps surfaced were fixed:
+  1. **`deny.toml` licence policy.** All workspace crates declare the
+     canonical SPDX `license = "GPL-3.0-only"`, but `licenses.allow`
+     listed only the deprecated `GPL-3.0`, so `cargo deny check` failed
+     (`licenses FAILED`). The allow entry is now `GPL-3.0-only`.
+  2. **`cargo xtask coverage` tool probe.** It ran `cargo-llvm-cov
+     --version` directly; `cargo-llvm-cov` is a cargo subcommand whose
+     binary rejects a bare `--version`, so the probe always reported the
+     tool missing. `tools/xtask/src/commands.rs` now probes cargo
+     subcommands via `cargo <sub> --version`
+     (`cargo_subcommand_available`), used by both `run_coverage` and
+     `run_deny`; a fail-closed unit test guards it.
+- Verified green on this host: `cargo xtask ci`, `cargo xtask docs-check`,
+  `cargo deny check`, `cargo xtask test --qemu` (all 11 verticals),
+  `cargo xtask coverage` (workspace TOTAL 93.25% region). §7 high-bar
+  crates confirmed via targeted `cargo llvm-cov --summary-only`:
+  `kernel/sec` ≥97%, `lib/caps` ≥98%, `lib/crypto` ≥97.67%, and
+  `kernel/mem` + `kernel/ipc` + `kernel/irq` combined 95.18% region /
+  95.38% line. See the Item 6 *complete* entry in `PLAN.md`.
 
-- Earlier Item 4 landings (riscv64 boot-state publication, the PLIC +
-  S-mode trap glue, the virtio unload→reload→reuse cycle, the shared
-  virtio bring-up scaffolding, the x86_64 `virtio_blk_pci` /
-  `virtio_net_pci` verticals, the riscv64 boot port, the MMIO/PCI
-  transports, `provision_virtio_*`, the `KernelVirtioFactory`, Items
-  1/2-tail/3) — all complete (see `PLAN.md` Stage 4.D).
+Earlier Stage 4.D landings (Items 0–5, the virtio-PCI/MMIO QEMU
+verticals, the arch-neutral `kernel/virtio` crate, the riscv64 port) are
+all complete — see `PLAN.md` Stage 4.D.
 
-## What needs doing — Item 6 (acceptance gate)
+## What needs doing — remaining Stage 4 first drivers
 
-**Progress (latest session).** Every gate step reachable without `mdbook`
-or `cargo deny` was run and is green on this host, and three rustdoc
-defects the gate surfaced (intra-doc links left dangling by the Item-4
-`kernel/virtio` crate extraction, plus one redundant explicit link in
-`drivers/bus/pci`) were fixed — `cargo doc --workspace --no-deps
---document-private-items` with `RUSTDOCFLAGS="-D warnings"` is now clean.
-`cargo xtask test --qemu` ran all 11 verticals green; coverage meets
-`AGENTS.md` §7 on the high-bar crates. See the Item 6 follow-up entry in
-`PLAN.md`. **Still outstanding:** the mdBook half of `cargo xtask
-docs-check` and `cargo deny check` — neither tool is installed here.
+Stage 4's deliverable list (`PLAN.md` "Stage 4 — Driver Framework and
+First Drivers", **Status: in progress**) still has these per-class first
+drivers outstanding:
 
-This is the only Stage 4.D item left. Finish it on a host that has
-`mdbook` and `cargo deny` installed (this environment had neither):
+- `drivers/display/vesa` (x86_64 BIOS).
+- `drivers/display/framebuffer` (aarch64 Pi, riscv64 virt, wasm32 canvas).
+- `drivers/input/ps2` (x86_64).
 
-- Run `cargo xtask ci` and paste verbatim output in the PR body
-  (`cargo xtask docs-check` needs `mdbook`; the advisory/license audit
-  needs `cargo deny`).
-- Run `cargo xtask test` **including** `cargo xtask test --qemu` and
-  paste verbatim output. The `--qemu` matrix now includes the two new
-  riscv64 MMIO verticals (`rustos-test-virtio-blk-mmio-riscv64`,
-  `rustos-test-virtio-net-mmio-riscv64`) alongside the x86_64 PCI ones.
-- Confirm coverage with `cargo xtask coverage`: ≥ 75 % on each new QEMU
-  integration crate per `AGENTS.md` §7, and ≥ 95 % on `kernel/sec`,
-  `kernel/mem`, `kernel/ipc`, `kernel/irq`, `lib/caps`, `lib/crypto`.
+Each must, per `AGENTS.md` §8: implement the relevant
+`lib/abi/src/driver/<class>.rs` trait(s), expose only `pub fn
+register(...)`, ship a `README.md` (supported HW, caps, limits), carry
+mock-host unit tests, and — where the hardware is emulable — at least one
+QEMU integration test (load → use → unload → reload). Pick one driver,
+implement it fully (code + tests + rustdoc + `docs/src/drivers/` page),
+and land it before starting the next. Packed virtqueues (virtio 1.1
+§2.7) remain a Stage 5 follow-up.
 
 ## Verification commands
 
 ```
-# This session's surface:
-cargo build --workspace
-cargo test -p rustos-kernel-virtio -p rustos-drv-bus-mmio -p rustos-kernel --lib -p rustos-qemu
-cargo clippy -p rustos-test-virtio-qemu-support \
-             -p rustos-test-virtio-blk-mmio-riscv64 \
-             -p rustos-test-virtio-net-mmio-riscv64 \
-             -p rustos-drv-bus-mmio -p rustos-kernel-virtio -p rustos-arch-riscv64 \
-             --target riscv64gc-unknown-none-elf -- -D warnings
+export PATH="$HOME/.cargo/bin:$PATH"   # mdbook / cargo-deny / cargo-llvm-cov live here
 
-# Manual single-vertical reproduction under QEMU:
-qemu-system-riscv64 -M virt -no-reboot -display none -serial stdio -m 256M \
-    -smp 1 -bios default -global virtio-mmio.force-legacy=false \
-    -kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-virtio-net-mmio-riscv64 \
-    -netdev user,id=net0 -device virtio-net-device,netdev=net0
-
-# Item 6:
-cargo xtask test --qemu
+# Full gate (what a PR must pass):
 cargo xtask ci
+cargo xtask test --qemu
+
+# Coverage (workspace TOTAL + targeted high-bar confirmation):
+cargo xtask coverage
+cargo llvm-cov --summary-only -p rustos-kernel-mem -p rustos-kernel-ipc -p rustos-kernel-irq
 ```

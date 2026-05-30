@@ -1196,6 +1196,47 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 6 — acceptance gate, *complete*): finished the
+  gate on a host that has `mdbook` (v0.5.3) + `mdbook-linkcheck` and
+  `cargo-deny` (0.19.7) installed — the two tools the previous session
+  lacked — and fixed the two real defects the now-runnable steps surfaced.
+  **Defect 1 — `cargo deny check` licence policy.** Every workspace crate
+  declares the canonical SPDX `license = "GPL-3.0-only"` (matching
+  `AGENTS.md` §1 and `LICENSE`), but `deny.toml`'s `licenses.allow` listed
+  only the *deprecated* `GPL-3.0` identifier, so under `version = 2` SPDX
+  evaluation `cargo deny check` rejected all first-party crates
+  (`licenses FAILED`). Replaced `GPL-3.0` with `GPL-3.0-only` in the allow
+  list; `cargo deny check` is now `advisories ok, bans ok, licenses ok,
+  sources ok`. **Defect 2 — `cargo xtask coverage` tool probe.** The
+  availability check ran `cargo-llvm-cov --version` directly, but
+  `cargo-llvm-cov` is a *cargo subcommand* whose binary rejects a bare
+  `--version` (`error: expected subcommand 'llvm-cov'`), so `cargo xtask
+  coverage` always aborted with "cargo-llvm-cov is not installed" even when
+  it was. Added a `cargo_subcommand_available(ctx, sub)` helper that probes
+  via `cargo <sub> --version` (the same path the command is actually
+  invoked through) and routed both `run_coverage` (`llvm-cov`) and
+  `run_deny` (`deny`) through it; `mdbook` keeps the plain-binary probe. A
+  fail-closed unit test (`cargo_subcommand_probe_fails_closed_for_unknown_subcommand`)
+  guards the regression — xtask unit tests now 11 passing. **Verification
+  (this host).** `cargo xtask ci` (fmt → clippy → test `--qemu` → docs-check
+  → deny → abi-check) green end-to-end; `cargo xtask docs-check` (rustdoc
+  `-D warnings` + mdBook build + in-tree link check) green; `cargo deny
+  check` clean; `cargo xtask test --qemu` ran all 11 verticals green
+  (8 x86_64 boot/IRQ/syscall/drvhost/virtio-PCI + riscv64 boot +
+  `virtio-blk-mmio-riscv64` + `virtio-net-mmio-riscv64`); `cargo xtask
+  coverage` (`cargo llvm-cov --workspace --summary-only`) runs, workspace
+  TOTAL 93.25% region. Per-`AGENTS.md`-§7 high-bar crates confirmed via
+  targeted `cargo llvm-cov --summary-only` runs (identical to the prior
+  session's figures): `kernel/sec` ≥97%, `lib/caps` ≥98%, `lib/crypto`
+  ≥97.67%, and `kernel/mem` + `kernel/ipc` + `kernel/irq` combined 95.18%
+  region / 95.38% line. (As before, the bare `cargo llvm-cov --workspace`
+  view does not surface `kernel/{core,mem,ipc,irq}` rows — they carry no
+  in-`lib` unit tests, taking their coverage from `tests/` integration
+  binaries — so the high-bar subset is confirmed with the targeted
+  `--summary-only` runs the prior session also used.) Stage 4.D Item 6 — and
+  therefore the Stage 4.D acceptance gate — is now complete; the remaining
+  Stage 4 deliverables (`drivers/display/vesa`, `drivers/display/framebuffer`,
+  `drivers/input/ps2`) are unaffected by this item.
 - Stage 4.D follow-up (Item 6 — acceptance gate, *partial*): ran the full
   runnable `xtask` matrix on this host and fixed three rustdoc defects the
   gate surfaced. **rustdoc defects (`AGENTS.md` §13 — `docs-check`).** The

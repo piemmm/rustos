@@ -208,7 +208,10 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    if !tool_available("cargo-llvm-cov") {
+    // `cargo-llvm-cov` is a cargo subcommand: its binary rejects a bare
+    // `--version` and is only reachable as `cargo llvm-cov`. Probe it the
+    // same way it is invoked below so the availability check matches reality.
+    if !cargo_subcommand_available(ctx, "llvm-cov") {
         return Err(
             "cargo-llvm-cov is not installed; run `cargo install cargo-llvm-cov --locked`"
                 .to_string(),
@@ -237,7 +240,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
 }
 
 fn run_deny(ctx: &Context) -> Result<(), String> {
-    if !tool_available("cargo-deny") {
+    if !cargo_subcommand_available(ctx, "deny") {
         return Err(
             "cargo-deny is not installed; run `cargo install cargo-deny --locked`".to_string(),
         );
@@ -271,9 +274,42 @@ fn tool_available(name: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Probe for a cargo subcommand (`cargo <sub>`). Unlike a plain binary, a
+/// cargo-subcommand executable expects its subcommand name as the first
+/// argument, so it must be reached through `cargo` rather than invoked
+/// directly with `--version`.
+fn cargo_subcommand_available(ctx: &Context, sub: &str) -> bool {
+    ctx.cargo()
+        .args([sub, "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn relative(base: &Path, path: &Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cargo_subcommand_available;
+    use crate::Context;
+
+    /// The availability probe must fail closed: an unknown cargo subcommand
+    /// is reported absent rather than mistakenly present. This guards the
+    /// regression that motivated the probe — checking a cargo-subcommand
+    /// binary with a bare `--version` (e.g. `cargo-llvm-cov --version`)
+    /// errors out, so the probe routes through `cargo <sub>` instead.
+    #[test]
+    fn cargo_subcommand_probe_fails_closed_for_unknown_subcommand() {
+        let ctx = Context::discover().expect("workspace context");
+        assert!(!cargo_subcommand_available(
+            &ctx,
+            "definitely-not-a-real-cargo-subcommand"
+        ));
+    }
 }
