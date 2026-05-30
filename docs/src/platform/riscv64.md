@@ -23,7 +23,12 @@ SiFive Test device, eight virtio-mmio transports, and a generic PCIe
 host bridge. A backing image attached with `Spec::with_virtio_blk`
 surfaces as a `virtio-blk-device` on one of the virtio-mmio transports —
 the riscv64 analogue of the x86_64 `virtio-blk-pci` function, driven by
-`drivers/bus/virtio::MmioTransport`.
+`drivers/bus/virtio::MmioTransport`. A network interface attached with
+`Spec::with_virtio_net` / `with_virtio_net_pcap(path)` surfaces the same
+way as a `virtio-net-device` on a virtio-mmio transport, behind QEMU's
+user-mode (SLIRP) backend (`-netdev user`); the optional `pcap` path
+attaches a `filter-dump` so the host harness can verify the ARP/ICMP
+exchange after the run.
 
 ## Result protocol: SiFive Test device
 
@@ -61,13 +66,16 @@ the failure word is built by the pure `qemu_exit::fail_word(code)`
 The argv contract — `-M virt`, `-no-reboot`, `-display none`, `-serial
 stdio`, `-m {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-bios default`,
 `-kernel {elf}`, and one `-drive if=none,format=raw,id=blkN,file=…` +
-`-device virtio-blk-device,drive=blkN` pair per backing image — is
+`-device virtio-blk-device,drive=blkN` pair per backing image, plus one
+`-netdev user,id=netN` + `-device virtio-net-device,netdev=netN` pair
+(and an optional `-object filter-dump`) per network interface — is
 asserted by host unit tests in `tools/qemu/src/riscv64.rs::tests`. They
 use the same pure `build_argv` helper pattern as the x86_64 backend, so
 they run without spawning QEMU. The `Spec::for_riscv64_kernel`,
-`with_cpus`, `with_timeout`, `with_virtio_blk`, and `Runner::run` entry
-points are shared with x86_64; only the per-arch backend differs
-(`AGENTS.md` §2.4 — no interface creep).
+`with_cpus`, `with_timeout`, `with_virtio_blk`, `with_virtio_net`,
+`with_virtio_net_pcap`, and `Runner::run` entry points are shared with
+x86_64; only the per-arch backend differs (`AGENTS.md` §2.4 — no
+interface creep).
 
 ## Manual debugging
 

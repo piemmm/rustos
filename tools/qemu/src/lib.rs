@@ -142,6 +142,29 @@ pub struct BlockDevice {
     pub image: PathBuf,
 }
 
+/// A virtio network interface attached to the guest.
+///
+/// The attachment is a modern virtio-net device backed by QEMU's
+/// user-mode (SLIRP) network: a `virtio-net-pci` function on x86_64
+/// (driven by the Stage 4.D `PciTransport`) or a `virtio-net-device` on
+/// the riscv64 `virt` board's virtio-mmio bus (driven by
+/// `MmioTransport`). The user-mode backend needs no host privileges and
+/// gives the guest a fixed SLIRP topology (guest `10.0.2.15`, gateway
+/// `10.0.2.2`), so a kernel-side test can ARP for and ICMP-echo the
+/// gateway deterministically (`AGENTS.md` §7 — no flaky tests).
+///
+/// When [`NetDevice::pcap`] is set the runner attaches a
+/// `filter-dump` that writes every frame on the interface to that host
+/// path in `pcap` format, so the host harness can verify the on-wire
+/// exchange after the run without linking a packet-capture library into
+/// the guest.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetDevice {
+    /// Optional host path for a `pcap` capture of all traffic on this
+    /// interface. `None` attaches no capture.
+    pub pcap: Option<PathBuf>,
+}
+
 /// Tier-1 architecture this runner can target.
 ///
 /// `X86_64` and `Riscv64` ship today; Stage 3b/3d add the remaining
@@ -208,6 +231,9 @@ pub struct Spec {
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
     pub block_devices: Vec<BlockDevice>,
+    /// Virtio network interfaces attached over QEMU user-mode networking,
+    /// in declaration order. Empty for tests that need no network.
+    pub net_devices: Vec<NetDevice>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -226,6 +252,7 @@ impl Spec {
             cpus: 1,
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
+            net_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -256,6 +283,7 @@ impl Spec {
             cpus: 1,
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
+            net_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -269,6 +297,28 @@ impl Spec {
     pub fn with_virtio_blk(mut self, image: impl Into<PathBuf>) -> Self {
         self.block_devices.push(BlockDevice {
             image: image.into(),
+        });
+        self
+    }
+
+    /// Attach a virtio network interface backed by QEMU user-mode
+    /// networking, with no host-side capture. On x86_64 it surfaces as a
+    /// `virtio-net-pci` function; on riscv64 as a `virtio-net-device` on
+    /// the `virt` board's virtio-mmio bus.
+    #[must_use]
+    pub fn with_virtio_net(mut self) -> Self {
+        self.net_devices.push(NetDevice::default());
+        self
+    }
+
+    /// Attach a virtio network interface backed by QEMU user-mode
+    /// networking and capture every frame on it to `pcap` (in `pcap`
+    /// format) so the host harness can verify the on-wire exchange after
+    /// [`Runner::run`].
+    #[must_use]
+    pub fn with_virtio_net_pcap(mut self, pcap: impl Into<PathBuf>) -> Self {
+        self.net_devices.push(NetDevice {
+            pcap: Some(pcap.into()),
         });
         self
     }
@@ -456,6 +506,30 @@ mod tests {
     }
 
     #[test]
+    fn with_virtio_net_records_a_capture_free_interface() {
+        let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_net();
+        assert_eq!(s.net_devices.len(), 1);
+        assert_eq!(s.net_devices[0].pcap, None);
+    }
+
+    #[test]
+    fn with_virtio_net_pcap_records_the_capture_path() {
+        let s = Spec::for_riscv64_kernel("/tmp/k").with_virtio_net_pcap("/tmp/cap.pcap");
+        assert_eq!(s.net_devices.len(), 1);
+        assert_eq!(s.net_devices[0].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
+    }
+
+    #[test]
+    fn net_interfaces_accumulate_in_declaration_order() {
+        let s = Spec::for_x86_64_kernel("/tmp/k")
+            .with_virtio_net()
+            .with_virtio_net_pcap("/tmp/cap.pcap");
+        assert_eq!(s.net_devices.len(), 2);
+        assert_eq!(s.net_devices[0].pcap, None);
+        assert_eq!(s.net_devices[1].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
+    }
+
+    #[test]
     fn missing_backing_image_returns_not_found_before_spawning_qemu() {
         // Plant a real (empty) kernel file so the failure is attributable
         // to the missing backing image, not to a missing kernel.
@@ -470,6 +544,7 @@ mod tests {
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],
+            net_devices: Vec::new(),
             extra_args: Vec::new(),
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");

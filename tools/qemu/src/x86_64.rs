@@ -156,7 +156,7 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
     // makes OVMF assign every BAR — including 64-bit ones — inside the
     // 32-bit hole. Scope it to specs that actually attach a PCI device
     // so the bring-up-only tests keep the stock firmware configuration.
-    if !spec.block_devices.is_empty() {
+    if !spec.block_devices.is_empty() || !spec.net_devices.is_empty() {
         argv.push("-fw_cfg".into());
         argv.push("name=opt/ovmf/X-PciMmio64Mb,string=0".into());
     }
@@ -182,6 +182,28 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push(format!("virtio-blk-pci,drive=blk{i},disable-legacy=on").into());
     }
+
+    // Attach each network interface as a modern virtio-net-pci function
+    // behind a user-mode (SLIRP) backend. `-netdev user` needs no host
+    // privileges and presents the fixed `10.0.2.0/24` topology the
+    // kernel-side ARP/ICMP test relies on; `disable-legacy=on` pins the
+    // function to the modern virtio-1.x PCI layout the Stage 4.D boot
+    // walk decodes (device id 0x1041 = `0x1040 + virtio-net`), exactly
+    // as for virtio-blk above. An optional `filter-dump` mirrors every
+    // frame on the interface to a host pcap so the harness can verify
+    // the exchange after the run.
+    for (i, dev) in spec.net_devices.iter().enumerate() {
+        argv.push("-netdev".into());
+        argv.push(format!("user,id=net{i}").into());
+        argv.push("-device".into());
+        argv.push(format!("virtio-net-pci,netdev=net{i},disable-legacy=on").into());
+        if let Some(pcap) = &dev.pcap {
+            argv.push("-object".into());
+            let mut filter = OsString::from(format!("filter-dump,id=dump{i},netdev=net{i},file="));
+            filter.push(pcap.as_os_str());
+            argv.push(filter);
+        }
+    }
     argv
 }
 
@@ -198,6 +220,7 @@ mod tests {
             cpus,
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
+            net_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -393,6 +416,78 @@ mod tests {
         assert!(argv
             .iter()
             .any(|a| a == "virtio-blk-pci,drive=blk1,disable-legacy=on"));
+    }
+
+    #[test]
+    fn argv_without_net_devices_attaches_no_virtio_net() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+        assert!(
+            !argv.iter().any(|a| a.starts_with("virtio-net-pci")),
+            "a network-free spec must not attach a virtio-net device"
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("user,id=net")),
+            "a network-free spec must not attach a user netdev"
+        );
+    }
+
+    #[test]
+    fn argv_attaches_each_net_device_as_virtio_net_pci() {
+        let mut spec = fixture_spec(1);
+        spec.net_devices = vec![
+            crate::NetDevice::default(),
+            crate::NetDevice {
+                pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
+            },
+        ];
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+
+        // Each interface is a user-mode netdev bound to its own modern
+        // virtio-net-pci function by a matching id.
+        assert!(argv.iter().any(|a| a == "user,id=net0"));
+        assert!(argv.iter().any(|a| a == "user,id=net1"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-net-pci,netdev=net0,disable-legacy=on"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-net-pci,netdev=net1,disable-legacy=on"));
+        // Only the interface with a capture path gets a filter-dump.
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains("filter-dump") && a.contains("net0")),
+            "capture-free interface must not attach a filter-dump"
+        );
+        assert!(argv.iter().any(|a| a.contains("filter-dump")
+            && a.contains("netdev=net1")
+            && a.contains("/tmp/cap1.pcap")));
+    }
+
+    #[test]
+    fn argv_confines_pci_bars_below_4gib_for_net_only_specs() {
+        // A net-only spec still attaches a PCI function, so the
+        // X-PciMmio64Mb=0 fw_cfg that keeps BARs reachable from the boot
+        // identity map must fire even with no block devices.
+        let mut spec = fixture_spec(1);
+        spec.net_devices = vec![crate::NetDevice::default()];
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+        assert!(argv
+            .iter()
+            .any(|a| a == "name=opt/ovmf/X-PciMmio64Mb,string=0"));
     }
 
     #[test]

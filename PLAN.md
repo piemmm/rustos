@@ -1196,6 +1196,43 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — virtio-net user
+  networking in the QEMU runner, *complete*): the `tools/qemu` runner
+  could attach a backing disk (`with_virtio_blk` + `disk::plant_raw_disk`)
+  but had **no** network surface, so the virtio-net verticals
+  (`tests/integration/virtio_net_pci_x86_64`,
+  `virtio_net_mmio_riscv64`) had no device to drive. **Attach surface.**
+  New `NetDevice { pcap: Option<PathBuf> }` + `Spec.net_devices`, with
+  `Spec::with_virtio_net()` (no capture) and
+  `with_virtio_net_pcap(path)` builders (mirrors `BlockDevice` /
+  `with_virtio_blk`, `AGENTS.md` §2.4 — no interface creep). The x86_64
+  backend emits, per interface, `-netdev user,id=netN` +
+  `-device virtio-net-pci,netdev=netN,disable-legacy=on` (modern
+  virtio-1.x layout, device id `0x1041`, the same `disable-legacy=on`
+  pin the boot walk needs); the riscv64 backend emits the `virt`-board
+  analogue `-device virtio-net-device,netdev=netN`. The user-mode
+  (SLIRP) backend needs no host privileges and gives a fixed
+  `10.0.2.0/24` topology (guest `.15`, gateway `.2`) so an ARP/ICMP-echo
+  test is deterministic (`AGENTS.md` §7). When a `NetDevice` carries a
+  `pcap` path the backend attaches
+  `-object filter-dump,id=dumpN,netdev=netN,file=<path>` so the host
+  harness can verify the on-wire exchange after the run — the network
+  analogue of re-reading a planted disk. The x86_64 `X-PciMmio64Mb=0`
+  fw_cfg BAR-confinement guard now also fires for a net-only spec (a
+  virtio-net-pci function is a PCI BAR consumer too). **Tests.**
+  `rustos-qemu` 50 (+7: two builder records + accumulation order in
+  `lib.rs`, the no-net / per-device-attach / net-only-BAR cases in
+  `x86_64.rs`, the no-net / per-device-attach cases in `riscv64.rs`);
+  `cargo clippy -p rustos-qemu --all-targets -- -D warnings`,
+  `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings" cargo doc
+  --no-deps -p rustos-qemu` are clean. **Docs.**
+  `docs/src/platform/x86_64.md` ("virtio-net user networking in the QEMU
+  runner") + `docs/src/platform/riscv64.md`. **Deferred.** The
+  kernel-side virtio-net test bins that consume this surface (boot →
+  virtio-net PCI/MMIO walk → drive `rustos-net-icmp` → ARP + ICMP-echo
+  the gateway → verify against the captured pcap), the riscv64 boot
+  port + DTB walk, and the Item 6 acceptance gate remain outstanding;
+  see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 — `virtio_blk_pci_x86_64` real
   round-trip, *landed but not gated*): the test bin now drives the
   full x86_64 vertical end-to-end under QEMU — boot →

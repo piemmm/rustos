@@ -165,6 +165,26 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push(format!("virtio-blk-device,drive=blk{i}").into());
     }
+
+    // Attach each network interface as a virtio-mmio net device behind a
+    // user-mode (SLIRP) backend — the riscv64 analogue of the x86_64
+    // `virtio-net-pci` path. `virtio-net-device` binds to one of the
+    // `virt` board's virtio-mmio transports, which the Stage 4.D
+    // `MmioTransport` drives; `-netdev user` presents the fixed
+    // `10.0.2.0/24` topology the kernel-side ARP/ICMP test relies on. An
+    // optional `filter-dump` mirrors every frame to a host pcap.
+    for (i, dev) in spec.net_devices.iter().enumerate() {
+        argv.push("-netdev".into());
+        argv.push(format!("user,id=net{i}").into());
+        argv.push("-device".into());
+        argv.push(format!("virtio-net-device,netdev=net{i}").into());
+        if let Some(pcap) = &dev.pcap {
+            argv.push("-object".into());
+            let mut filter = OsString::from(format!("filter-dump,id=dump{i},netdev=net{i},file="));
+            filter.push(pcap.as_os_str());
+            argv.push(filter);
+        }
+    }
     argv
 }
 
@@ -182,6 +202,7 @@ mod tests {
             cpus,
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
+            net_devices: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -327,5 +348,45 @@ mod tests {
             && a.contains("/tmp/disk1.img")));
         assert!(argv.iter().any(|a| a == "virtio-blk-device,drive=blk0"));
         assert!(argv.iter().any(|a| a == "virtio-blk-device,drive=blk1"));
+    }
+
+    #[test]
+    fn argv_without_net_devices_attaches_no_virtio_net() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a.starts_with("virtio-net-device")),
+            "a network-free spec must not attach a virtio-net device"
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("user,id=net")),
+            "a network-free spec must not attach a user netdev"
+        );
+    }
+
+    #[test]
+    fn argv_attaches_each_net_device_as_virtio_net_mmio() {
+        let mut spec = fixture_spec(1);
+        spec.net_devices = vec![
+            crate::NetDevice::default(),
+            crate::NetDevice {
+                pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
+            },
+        ];
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+
+        assert!(argv.iter().any(|a| a == "user,id=net0"));
+        assert!(argv.iter().any(|a| a == "user,id=net1"));
+        assert!(argv.iter().any(|a| a == "virtio-net-device,netdev=net0"));
+        assert!(argv.iter().any(|a| a == "virtio-net-device,netdev=net1"));
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains("filter-dump") && a.contains("net0")),
+            "capture-free interface must not attach a filter-dump"
+        );
+        assert!(argv.iter().any(|a| a.contains("filter-dump")
+            && a.contains("netdev=net1")
+            && a.contains("/tmp/cap1.pcap")));
     }
 }

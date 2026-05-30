@@ -8,6 +8,30 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
+- **virtio-net user networking in the QEMU runner — landed
+  (latest session).** The `tools/qemu` runner could attach a backing
+  disk but had no network surface. New `NetDevice { pcap:
+  Option<PathBuf> }` + `Spec.net_devices` with
+  `Spec::with_virtio_net()` / `with_virtio_net_pcap(path)` builders
+  (mirrors `BlockDevice` / `with_virtio_blk`). The x86_64 backend emits
+  `-netdev user,id=netN` + `-device
+  virtio-net-pci,netdev=netN,disable-legacy=on` (modern, id 0x1041);
+  riscv64 emits the `virt` analogue `-device
+  virtio-net-device,netdev=netN`. The SLIRP backend gives the fixed
+  `10.0.2.0/24` topology (guest `.15`, gateway `.2`); a `pcap` path
+  attaches `-object filter-dump` so the host can verify the on-wire
+  exchange after the run. The x86_64 `X-PciMmio64Mb=0` BAR-confinement
+  fw_cfg now also fires for a net-only spec. Host-tested only:
+  `rustos-qemu` 50 (+7); clippy `-D warnings` / fmt / doc clean.
+  `docs/src/platform/{x86_64,riscv64}.md` updated. **Still TODO (the
+  kernel-side consumers):** `tests/integration/virtio_net_pci_x86_64`
+  and `virtio_net_mmio_riscv64` — boot → virtio-net PCI/MMIO walk →
+  drive `rustos-net-icmp` (Item 5) → ARP + ICMP-echo the `10.0.2.2`
+  gateway → verify against the captured pcap → `qemu_exit`. The
+  x86_64 one is fully on the existing runner (model it on
+  `virtio_blk_pci_x86_64`); the riscv64 one additionally needs the
+  riscv64 boot port + DTB walk.
+
 - **`virtio_blk_pci_x86_64` real round-trip — landed, not gated**
   (latest session). The test bin now drives the full x86_64 vertical
   end-to-end under QEMU: boot → `x86_mechanism_one()` PCI walk → map
@@ -415,7 +439,16 @@ remain), then the net tests.
 - `tests/integration/virtio_net_pci_x86_64` and
   `tests/integration/virtio_net_mmio_riscv64` — ARP + ICMP echo
   round-trip against `qemu user net`, driving `rustos-net-icmp`
-  (Item 5) over the live device.
+  (Item 5) over the live device. The runner half now exists
+  (latest session): `Spec::with_virtio_net()` /
+  `with_virtio_net_pcap(image)` attach a `virtio-net-pci` (x86_64) /
+  `virtio-net-device` (riscv64) function over a user-mode (SLIRP)
+  netdev and optionally `filter-dump` every frame to a host pcap.
+  Remaining is the kernel-side test bin: boot → virtio-net PCI/MMIO
+  walk → drive `rustos-net-icmp` → ARP for `10.0.2.2` + send/verify an
+  ICMP echo to the gateway → assert against the captured pcap →
+  `qemu_exit`. Enrol it in `tools/xtask/src/commands/qemu_tests.rs`
+  with a spec that calls `with_virtio_net_pcap`.
 - Add an unload → reload → reuse test for each driver.
 
 Wiring the kernel-binary side: thread `KernelVirtioFactory` into the
