@@ -67,6 +67,10 @@ rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
 rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+# The architecture-neutral virtio factory + provisioning walks (shared
+# with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so
+# no architecture port duplicates them (`AGENTS.md` §2.2).
+rustos-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
 rustos-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 # Stage 4.D Item 2-tail.4: the kernel-binary `VirtioHostFactory`
 # (`virtio_factory` module) mints a per-driver `KernelVirtioHost` and

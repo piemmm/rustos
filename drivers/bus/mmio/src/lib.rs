@@ -40,6 +40,7 @@
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use rustos_util::dtb::Dtb;
 
 pub(crate) mod enumerate;
 pub(crate) mod transport;
@@ -47,8 +48,8 @@ pub(crate) mod transport;
 #[cfg(test)]
 mod tests;
 
-use enumerate::Mmio;
-use transport::MmioRead;
+use enumerate::{Mmio, VIRTIO_MMIO_COMPATIBLE};
+use transport::{MmioRead, VolatileMmioRead};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///
@@ -96,4 +97,83 @@ impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
     ) -> Result<RegisterWindow, DriverError> {
         Mmio::map_slot_window(self, base, mapper)
     }
+}
+
+// --- `virt`-board construction seam ---------------------------------------
+
+/// The smallest physical span covering every `virtio,mmio` slot the
+/// device tree describes: `(base, length)` from the lowest slot base to
+/// the highest slot end.
+///
+/// Returns `Ok(None)` when the tree advertises no `virtio,mmio` node.
+/// The bring-up scaffold uses the span to size one volatile reader that
+/// covers every slot's identifier window during enumeration (the
+/// per-slot driver-facing register window is mapped separately, through
+/// the capability-gated [`MmioMapper`], by [`Mmio::map_slot_window`]).
+///
+/// # Errors
+///
+/// [`DriverError::DeviceFault`] if a `virtio,mmio` node carries a
+/// malformed `reg` property — failing closed exactly as
+/// [`enumerate::Mmio::enumerate_into`] does.
+fn virtio_mmio_aperture(dtb: &Dtb<'_>) -> Result<Option<(u64, u64)>, DriverError> {
+    let mut lo: Option<u64> = None;
+    let mut hi: Option<u64> = None;
+    for node in dtb.nodes() {
+        let node = node.map_err(|_| DriverError::DeviceFault)?;
+        if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+            continue;
+        }
+        let reg = node.property("reg").ok_or(DriverError::DeviceFault)?;
+        let base = reg.read_be_u64(0).map_err(|_| DriverError::DeviceFault)?;
+        let length = reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault)?;
+        let end = base.checked_add(length).ok_or(DriverError::DeviceFault)?;
+        lo = Some(lo.map_or(base, |l| l.min(base)));
+        hi = Some(hi.map_or(end, |h| h.max(end)));
+    }
+    match (lo, hi) {
+        (Some(base), Some(end)) => Ok(Some((base, end - base))),
+        _ => Ok(None),
+    }
+}
+
+/// Construct the `virt`-board virtio-MMIO bus over a flattened
+/// device-tree blob.
+///
+/// Parses `dtb`, computes the aperture spanning every `virtio,mmio`
+/// transport slot, and returns a bus that
+/// enumerates those slots and resolves per-slot register windows. The
+/// returned value is reached only through the frozen `abi-v1`
+/// [`VirtioMmioBus`] / [`Bus`] seams — the concrete `Mmio` type stays
+/// crate-private (`AGENTS.md` §8) — so the ring-0
+/// `provision_virtio_mmio` walk can drive it as `&dyn VirtioMmioBus`.
+///
+/// This is the MMIO analogue of `rustos_drv_bus_pci::x86_mechanism_one`:
+/// it is the sanctioned way for a `virt`-board boot pipeline to obtain
+/// the bus without naming the driver's internals.
+///
+/// # Errors
+///
+/// * [`DriverError::DeviceFault`] — the blob is not a valid device tree
+///   or a `virtio,mmio` node has a malformed `reg`.
+/// * [`DriverError::NotFound`] — the tree advertises no `virtio,mmio`
+///   transport slot.
+///
+/// # Safety
+///
+/// The MMIO aperture the device tree describes must be identity-mapped
+/// and readable for the lifetime of the returned bus, and nothing else
+/// may alias it. On the `virt` board entered in S-mode with paging off
+/// (`satp == 0`) this holds: physical addresses are accessed directly.
+/// The single volatile reader the constructor mints is confined to that
+/// aperture and performs only bounds-checked volatile loads.
+pub unsafe fn virtio_mmio_bus_from_dtb(dtb: &[u8]) -> Result<impl VirtioMmioBus + '_, DriverError> {
+    let parsed = Dtb::parse(dtb).map_err(|_| DriverError::DeviceFault)?;
+    let (base, len) = virtio_mmio_aperture(&parsed)?.ok_or(DriverError::NotFound)?;
+    // SAFETY: the function-level contract guarantees `[base, base+len)`
+    // is the identity-mapped, exclusively-owned virtio-MMIO aperture the
+    // device tree describes; `base` is therefore a valid `*const u32`
+    // for bounds-checked volatile reads for the bus's lifetime.
+    let reader = unsafe { VolatileMmioRead::new(base as *const u32, base, len) };
+    Ok(Mmio::new(parsed, reader))
 }

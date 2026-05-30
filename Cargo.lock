@@ -540,6 +540,7 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-kernel-sync",
  "rustos-kernel-syscall",
+ "rustos-kernel-virtio",
  "rustos-log",
 ]
 
@@ -637,6 +638,20 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-log",
  "rustos-util",
+]
+
+[[package]]
+name = "rustos-kernel-virtio"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drv-bus-virtio",
+ "rustos-drvhost",
+ "rustos-kernel-irq",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-log",
 ]
 
 [[package]]
@@ -747,6 +762,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-virtio-blk-mmio-riscv64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-virtio-blk-pci-x86-64"
 version = "0.0.0"
 dependencies = [
@@ -754,6 +779,16 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-virtio-net-mmio-riscv64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-network-virtio-net",
  "rustos-test-virtio-qemu-support",
 ]
 
@@ -774,17 +809,25 @@ name = "rustos-test-virtio-qemu-support"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-arch-riscv64",
  "rustos-arch-x86_64",
+ "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
+ "rustos-drv-bus-mmio",
  "rustos-drv-bus-pci",
  "rustos-drv-bus-virtio",
+ "rustos-drv-network-virtio-net",
+ "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
  "rustos-kernel",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
+ "rustos-kernel-virtio",
  "rustos-log",
+ "rustos-net-icmp",
+ "rustos-util",
 ]
 
 [[package]]

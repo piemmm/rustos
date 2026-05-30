@@ -351,3 +351,142 @@ fn map_slot_window_propagates_capability_denial() {
         DriverError::PermissionDenied
     );
 }
+
+// ---- `virtio_mmio_bus_from_dtb` construction seam ------------------------
+
+/// Build a minimal `virt`-style DTB whose `virtio,mmio` slots sit at the
+/// caller-supplied `bases`, each advertising a `length`-byte window. The
+/// constructor test points the bases at a host buffer so the volatile
+/// reader the constructor mints reads real memory.
+fn build_virt_dtb_at(bases: &[u64], length: u64) -> Vec<u8> {
+    let mut strings: Vec<u8> = Vec::new();
+    let off_compatible = u32::try_from(strings.len()).unwrap();
+    strings.extend_from_slice(b"compatible\0");
+    let off_reg = u32::try_from(strings.len()).unwrap();
+    strings.extend_from_slice(b"reg\0");
+
+    let mut structs: Vec<u8> = Vec::new();
+    structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
+    structs.extend_from_slice(&[0, 0, 0, 0]);
+    for base in bases {
+        structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
+        let mut name = alloc::format!("virtio_mmio@{base:x}\0").into_bytes();
+        while name.len() % 4 != 0 {
+            name.push(0);
+        }
+        structs.extend_from_slice(&name);
+        let compat = b"virtio,mmio\0";
+        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
+        structs.extend_from_slice(&u32::try_from(compat.len()).unwrap().to_be_bytes());
+        structs.extend_from_slice(&off_compatible.to_be_bytes());
+        structs.extend_from_slice(compat);
+        while structs.len() % 4 != 0 {
+            structs.push(0);
+        }
+        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
+        structs.extend_from_slice(&16u32.to_be_bytes());
+        structs.extend_from_slice(&off_reg.to_be_bytes());
+        structs.extend_from_slice(&base.to_be_bytes());
+        structs.extend_from_slice(&length.to_be_bytes());
+        structs.extend_from_slice(&FDT_END_NODE.to_be_bytes());
+    }
+    structs.extend_from_slice(&FDT_END_NODE.to_be_bytes());
+    structs.extend_from_slice(&FDT_END.to_be_bytes());
+
+    let off_struct = HEADER_LEN;
+    let size_struct = u32::try_from(structs.len()).unwrap();
+    let off_strings = off_struct + size_struct;
+    let size_strings = u32::try_from(strings.len()).unwrap();
+    let total = off_strings + size_strings;
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&FDT_MAGIC.to_be_bytes());
+    blob.extend_from_slice(&total.to_be_bytes());
+    blob.extend_from_slice(&off_struct.to_be_bytes());
+    blob.extend_from_slice(&off_strings.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&17u32.to_be_bytes());
+    blob.extend_from_slice(&16u32.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&size_strings.to_be_bytes());
+    blob.extend_from_slice(&size_struct.to_be_bytes());
+    blob.extend_from_slice(&structs);
+    blob.extend_from_slice(&strings);
+    blob
+}
+
+#[test]
+fn virtio_mmio_aperture_spans_all_slots() {
+    // Four slots on the canonical 0x0200 grid, each 0x200 long, span
+    // [0x0A00_0000, 0x0A00_0800).
+    let blob = build_virt_dtb(4);
+    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let span = crate::virtio_mmio_aperture(&dtb)
+        .expect("aperture ok")
+        .expect("some slots");
+    assert_eq!(span, (0x0A00_0000, 0x800));
+}
+
+#[test]
+fn virtio_mmio_aperture_none_without_slots() {
+    let blob = build_virt_dtb(0);
+    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    assert_eq!(
+        crate::virtio_mmio_aperture(&dtb).expect("aperture ok"),
+        None
+    );
+}
+
+#[test]
+fn virtio_mmio_bus_from_dtb_enumerates_attached_slots() {
+    // Host stand-in for the MMIO aperture: a word buffer whose address
+    // the DTB slot bases point at, so the volatile reader the
+    // constructor mints reads the stamped identifier registers (the
+    // host-buildable exercise of the constructor's `unsafe` reader,
+    // `AGENTS.md` §2.10).
+    let mut backing = vec![0u32; 0x400];
+    let base = backing.as_ptr() as u64;
+    let stride = 0x200u64;
+    let bases = [base, base + stride];
+
+    // Stamp slot 0 = virtio-net (DeviceID 1), slot 1 = virtio-blk (2).
+    let mut stamp = |slot_off: u64, device: u32| {
+        let w = usize::try_from(slot_off / 4).unwrap();
+        backing[w] = VIRTIO_MMIO_MAGIC;
+        backing[w + 1] = 2; // Version (modern).
+        backing[w + 2] = device;
+        backing[w + 3] = VIRTIO_MMIO_DEFAULT_VENDOR;
+    };
+    stamp(0, 1);
+    stamp(stride, 2);
+
+    let blob = build_virt_dtb_at(&bases, stride);
+    // SAFETY: `backing` outlives the bus and is exclusively owned here;
+    // the DTB bases address it, so the aperture is "identity-mapped" for
+    // the duration of the test.
+    let bus = unsafe { crate::virtio_mmio_bus_from_dtb(&blob) }.expect("bus constructs");
+
+    let mut out = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 8];
+    let n = bus.enumerate(&mut out).expect("enumerate ok");
+    assert_eq!(n, 2);
+    assert_eq!(out[0].device, 1);
+    assert_eq!(out[0].address, base);
+    assert_eq!(out[1].device, 2);
+    assert_eq!(out[1].address, base + stride);
+}
+
+#[test]
+fn virtio_mmio_bus_from_dtb_reports_not_found_without_slots() {
+    let blob = build_virt_dtb(0);
+    // SAFETY: no `virtio,mmio` slot exists, so the constructor returns
+    // before minting any reader; no memory is dereferenced.
+    let err = unsafe { crate::virtio_mmio_bus_from_dtb(&blob) }
+        .err()
+        .expect("no slots → error");
+    assert_eq!(err, DriverError::NotFound);
+}

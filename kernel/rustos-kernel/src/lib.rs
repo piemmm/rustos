@@ -67,9 +67,6 @@ pub mod bumpalloc;
 pub mod dispatch;
 pub mod ioapic_controller;
 pub mod virtio_boot;
-pub mod virtio_factory;
-pub mod virtio_mmio_walk;
-pub mod virtio_pci_walk;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod boot;
@@ -82,12 +79,14 @@ pub use arch_wrapper::BinArch;
 pub use bumpalloc::BumpAllocator;
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
 pub use virtio_boot::{provision_and_run, VirtioBootConfig};
-pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
-pub use virtio_mmio_walk::{
-    provision_virtio_mmio, VirtioMmioProvision, VirtioMmioWalkError, MAX_SLOTS,
-};
-pub use virtio_pci_walk::{
-    provision_virtio_pci, VirtioPciWalkError, VirtioProvision, MAX_FUNCTIONS,
+// The architecture-neutral virtio factory and provisioning walks now
+// live in `rustos-kernel-virtio` so every architecture port can reuse
+// them (`AGENTS.md` §2.2); re-exported here to keep this crate's public
+// API unchanged.
+pub use rustos_kernel_virtio::{
+    provision_virtio_mmio, provision_virtio_pci, KernelVirtioFactory, KernelVirtioFactoryConfig,
+    VirtioMmioProvision, VirtioMmioWalkError, VirtioPciWalkError, VirtioProvision, MAX_FUNCTIONS,
+    MAX_SLOTS,
 };
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

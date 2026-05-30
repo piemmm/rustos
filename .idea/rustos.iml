@@ -67,9 +67,12 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/system/drvhost/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/init/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/installer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/virtio/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/bumpalloc/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot_riscv64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_blk_mmio_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_blk_pci_x86_64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_net_mmio_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_net_pci_x86_64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_qemu_support/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/net/icmp/src" isTestSource="false" />

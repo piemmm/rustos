@@ -48,9 +48,10 @@ physical-memory map excludes it.
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 
-Sv39 paging, the ring-0 DTB virtio-mmio walk, and SMP bring-up are the
-remaining riscv64 deliverables (`PLAN.md` Stage 4.D Item 4); they are
-not needed for the boot-to-`BootCompleted` slice.
+Sv39 paging and SMP bring-up are the remaining riscv64 deliverables
+(`PLAN.md` Stage 4.D Item 4); they are not needed for the
+boot-to-`BootCompleted` slice. The ring-0 DTB virtio-mmio walk and the
+full device bring-up now land in the virtio-MMIO QEMU verticals (below).
 
 The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
 is what the test bin uses to report its result.
@@ -59,10 +60,11 @@ is what the test bin uses to report its result.
 
 `kernel/arch/riscv64::plic` and `kernel/arch/riscv64::trap` land the
 external-IRQ foundation the virtio-mmio verticals build on. They are
-implemented and host-tested but **not yet armed by the boot pipeline**
-(the boot-to-`BootCompleted` slice runs with interrupts disabled, so it
-neither calls `trap::init_traps` nor builds a `PlicController`); the
-first consumer is the virtio-mmio integration verticals.
+implemented and host-tested; the boot pipeline itself runs with
+interrupts disabled (it neither calls `trap::init_traps` nor builds a
+`PlicController`). The live consumer is the virtio-MMIO QEMU verticals
+(below), which `arm` the device source, install the trap dispatch, and
+`init_traps`.
 
 - **PLIC.** `plic::PlicController` wraps a `Plic<M>` register driver
   over the `PlicMmio` access seam (`VolatilePlicMmio` on the
@@ -106,6 +108,51 @@ disabled and hands the kernel `IrqRouting::unsupported`, so a vertical
 builds its own `PlicController` + `IrqTable` over the DTB-discovered PLIC
 base rather than reusing a `max_line == 0` kernel-core table.
 
+## virtio-MMIO QEMU verticals
+
+`tests/integration/virtio_blk_mmio_riscv64` and
+`virtio_net_mmio_riscv64` are the MMIO analogues of the x86_64
+`virtio_blk_pci_x86_64` / `virtio_net_pci_x86_64` verticals: they boot
+the production riscv64 pipeline and, on `AuditEvent::BootCompleted`,
+drive a real virtio device over the `virt` board's virtio-mmio bus
+end-to-end. The device-agnostic lifecycle and the per-device tails are
+shared with the x86_64 verticals through the
+`tests/integration/virtio_qemu_support` crate (`AGENTS.md` §2.2); only
+the arch-specific bring-up differs (`imp_mmio` vs. `imp_pci`).
+
+The riscv64 bring-up (`imp_mmio`):
+
+1. Reads `published_dtb` / `published_memory_map` (see *Boot-state
+   publication*) and carves a per-device DMA region from the top of RAM.
+2. Builds the `virt`-board virtio-MMIO bus via the public
+   `rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb` constructor (the MMIO
+   analogue of `rustos_drv_bus_pci::x86_mechanism_one`; the concrete bus
+   type stays crate-private behind `impl VirtioMmioBus`, §8) and
+   provisions an `MmioTransport` through the `CAP_MMIO_MAP`-gated
+   `KernelMmioMapper` (`kernel/virtio::provision_virtio_mmio`).
+3. Walks the DTB for the PLIC base + `riscv,ndev` and the device's
+   `interrupts` source, builds a `PlicController` + `IrqTable`, `arm`s
+   the source, installs the S-mode trap dispatch (PLIC claim →
+   virtio-MMIO `InterruptACK` → `IrqTable::fire` → complete), and calls
+   `init_traps`.
+4. Mints a `KernelVirtioHost` over the carved DMA pool and runs the
+   shared `drive_driver_lifecycle` (`load → reload → device round-trip →
+   unload`).
+
+The completion park is a race-free `wfi`: the waiter unmasks the PLIC
+source, clears `sstatus.SIE`, re-checks the line's ready flag, parks on
+`wfi` only if still not ready, then restores `SIE`. Clearing `SIE` holds
+a completion that lands in the check/`wfi` window *pending* (not taken)
+so `wfi` observes it — no lost wake-up, no bounding timer. The
+virtio-MMIO `InterruptACK` in the dispatch is load-bearing: a level-high
+virtio-mmio source never re-edges, so without the ACK the device raises
+no fresh interrupt for the next used buffer.
+
+The `kernel/virtio` (`rustos-kernel-virtio`) crate holds the
+architecture-neutral `KernelVirtioFactory` and the PCI/MMIO provisioning
+walks so both the x86_64 (PCI) and riscv64 (MMIO) verticals reuse the
+same code; it depends on no `kernel/arch/*` port (`AGENTS.md` §2.2, §6).
+
 ## Board model: `virt`
 
 The runner targets QEMU's generic `virt` board (`qemu-system-riscv64 -M
@@ -117,7 +164,11 @@ to the riscv64 argv builder.
 
 The `virt` board carries the devices the Stage 4.D drivers exercise: a
 SiFive Test device, eight virtio-mmio transports, and a generic PCIe
-host bridge. A backing image attached with `Spec::with_virtio_blk`
+host bridge. Every virtio-mmio transport is forced to the modern
+(virtio 1.x, version 2) interface with `-global
+virtio-mmio.force-legacy=false` — QEMU defaults to the legacy (version 1)
+interface, but RustOS' `MmioTransport` only drives the modern layout. A
+backing image attached with `Spec::with_virtio_blk`
 surfaces as a `virtio-blk-device` on one of the virtio-mmio transports —
 the riscv64 analogue of the x86_64 `virtio-blk-pci` function, driven by
 `drivers/bus/virtio::MmioTransport`. A network interface attached with
@@ -162,7 +213,8 @@ the failure word is built by the pure `qemu_exit::fail_word(code)`
 
 The argv contract — `-M virt`, `-no-reboot`, `-display none`, `-serial
 stdio`, `-m {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-bios default`,
-`-kernel {elf}`, and one `-drive if=none,format=raw,id=blkN,file=…` +
+`-global virtio-mmio.force-legacy=false`, `-kernel {elf}`, and one
+`-drive if=none,format=raw,id=blkN,file=…` +
 `-device virtio-blk-device,drive=blkN` pair per backing image, plus one
 `-netdev user,id=netN` + `-device virtio-net-device,netdev=netN` pair
 (and an optional `-object filter-dump`) per network interface — is

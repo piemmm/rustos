@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-virtio-qemu-support"
-description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests: the production boot pipeline runs to AuditEvent::BootCompleted, then a single re-usable scenario carves a per-device DMA region from the published memory map, walks PCI to the requested modern virtio function, maps its four register windows through the capability-gated KernelMmioMapper, routes MSI-X, mints a KernelVirtioHost over the carved pool, loads a signed `.rxe` through rustos_drvhost::Host, and hands the provisioned PciTransport + VirtioHost to a device-specific closure. Both the virtio-blk and virtio-net x86_64 verticals build on it (AGENTS.md §2.2)."
+description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through rustos_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The blk/net round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,16 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-# The crate carries no host-buildable code: every item is gated behind
-# `cfg(all(target_arch = "x86_64", target_os = "none"))` so that a host
-# `cargo build --workspace` compiles it to an empty library (it defines a
-# `#[global_allocator]` and bridges the freestanding panic handler, both of
-# which would conflict with `std`). Its dependencies are gated to the same
-# target for the same reason.
+# The crate carries no host-buildable code: every item is gated behind a
+# freestanding (`target_os = "none"`) target so a host `cargo build
+# --workspace` compiles it to an empty library (it defines a
+# `#[global_allocator]` and bridges the freestanding panic handler, both
+# of which would conflict with `std`). The dependencies are split into
+# the per-arch bring-up sets (x86_64 PCI, riscv64 MMIO); the
+# device-agnostic `common` module's deps appear in both tables because a
+# given test bin links exactly one arch.
+
+# --- x86_64 (PCI) ----------------------------------------------------
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
@@ -33,3 +37,26 @@ rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-drv-bus-pci = { path = "../../../drivers/bus/pci", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0", features = ["kernel-host"] }
+rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
+
+# --- riscv64 (`virt`-board MMIO) -------------------------------------
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0", features = ["kernel-host"] }
+rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }

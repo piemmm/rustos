@@ -1,0 +1,38 @@
+[package]
+name = "rustos-kernel-virtio"
+description = "RustOS architecture-neutral kernel-side virtio wiring (Stage 4.D Item 4): the per-driver KernelVirtioHost factory and the ring-0 virtio-PCI / virtio-MMIO transport-provisioning walks, shared by every architecture's boot pipeline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Architecture-neutral kernel virtio facilities extracted out of the
+# x86_64-only `rustos-kernel` binary crate so that every architecture's
+# boot pipeline — x86_64 (PCI) and riscv64 / aarch64 (`virt`-board MMIO)
+# — provisions a transport and mints a per-driver DMA host through the
+# *same* code (`AGENTS.md` §2.2 — no duplication, §6 — shared code).
+# This crate names no `kernel/arch/*` port, so it builds for every
+# Tier-1 freestanding target.
+[dependencies]
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0", features = [
+    "kernel-host",
+] }
+rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# The factory unit tests drive a real `DmaPool` through `kernel/mem`'s
+# in-memory `HostPageTable` / `SimPhysMap` test doubles, gated behind the
+# `host-tests` feature so production builds never link them
+# (`AGENTS.md` §2.3, mirrors `rustos-kernel`).
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

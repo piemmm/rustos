@@ -148,6 +148,12 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push(spec.cpus.to_string().into());
     argv.push("-bios".into());
     argv.push("default".into());
+    // Present every virtio-mmio transport as a *modern* (virtio 1.x,
+    // version 2) device. QEMU's virtio-mmio defaults to the legacy
+    // (version 1) interface for backwards compatibility; RustOS' MMIO
+    // transport only drives the modern layout, so force it board-wide.
+    argv.push("-global".into());
+    argv.push("virtio-mmio.force-legacy=false".into());
     argv.push("-kernel".into());
     argv.push(kernel.into());
 
@@ -291,6 +297,19 @@ mod tests {
             .position(|a| a == "-kernel")
             .expect("argv contains -kernel");
         assert_eq!(argv[kpos + 1], kernel.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn argv_forces_modern_virtio_mmio() {
+        // RustOS' MMIO transport only drives modern (version 2)
+        // virtio-mmio; the runner must override QEMU's legacy default.
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-global")
+            .expect("argv contains -global");
+        assert_eq!(argv[pos + 1], "virtio-mmio.force-legacy=false");
     }
 
     #[test]

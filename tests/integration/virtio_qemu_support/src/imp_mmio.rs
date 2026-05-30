@@ -1,0 +1,542 @@
+//! Freestanding (`riscv64gc-unknown-none-elf`) virtio-MMIO bring-up for
+//! the QEMU `virt` board.
+//!
+//! The device-agnostic lifecycle and the per-device tails live in
+//! [`crate::common`]; this module owns only the riscv64-specific bring-up
+//! that produces an [`MmioTransport`] and an interrupt path: build the
+//! `virt`-board virtio-MMIO bus from the published device tree, provision
+//! the transport through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`],
+//! walk the DTB for the PLIC base and the device's interrupt source,
+//! arm the [`PlicController`], wire the S-mode trap dispatch to an
+//! [`IrqTable`], and park on timer-bounded `wfi`.
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+
+use rustos_abi::{CapabilityId, IrqHandle};
+use rustos_arch_riscv64::plic::{s_mode_context, Plic, PlicController, VolatilePlicMmio};
+use rustos_arch_riscv64::publish::{published_dtb, published_memory_map};
+use rustos_arch_riscv64::{qemu_exit, trap, SERIAL_SINK};
+use rustos_caps::CapabilitySet;
+use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
+use rustos_drv_bus_virtio::{
+    KernelMmioMapper, KernelVirtioHost, MmioTransport, PoolId, VirtioHost,
+};
+use rustos_drvhost::VirtioHostFactory;
+use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter};
+use rustos_kernel_mem::{
+    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
+};
+use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
+use rustos_kernel_sec::identity::UserId;
+use rustos_kernel_virtio::{provision_virtio_mmio, KernelVirtioFactory, KernelVirtioFactoryConfig};
+use rustos_log::{Event, EventId, Level, Sink};
+use rustos_util::dtb::Dtb;
+
+/// Re-export so the verticals name the concrete transport for the shared
+/// device-tail turbofish under the same name as the PCI vertical.
+pub use rustos_drv_bus_virtio::MmioTransport as ScenarioTransport;
+
+// Re-exports the `define_mmio_boot_harness!` macro expands against via
+// `$crate::...`. (`BOOT_COMPLETED_EVENT_ID` is re-exported at the crate
+// root through `pub use common::*`.)
+#[doc(hidden)]
+pub use rustos_arch_riscv64::{boot, handle_panic_via_serial};
+#[doc(hidden)]
+pub use rustos_arch_riscv64::{
+    SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK,
+};
+#[doc(hidden)]
+pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as HarnessSink};
+
+use crate::common::{
+    carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
+};
+
+use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+
+// --- Bump-allocator-backed `#[global_allocator]` ---------------------
+
+/// Static boot heap for the bump allocator.
+///
+/// Placed in the linker's dedicated `.heap` (NOLOAD) section — same as
+/// the riscv64 boot test bin — so the boot trampoline does not zero its
+/// 64 MiB and the boot pipeline excludes it from the usable
+/// physical-memory map.
+#[link_section = ".heap"]
+static mut HEAP: Heap = Heap::ZERO;
+
+/// Global allocator backed by the module-private `HEAP` static, shared by
+/// every riscv64 virtio QEMU test that links this crate.
+///
+/// SAFETY: the page-aligned `HEAP` static outlives the binary; the
+/// allocator is its only consumer.
+#[global_allocator]
+static ALLOCATOR: BumpAllocator =
+    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+
+// --- Stable identifiers ----------------------------------------------
+
+/// Milestone event id namespace for the shared serial breadcrumbs.
+const MILESTONE_ID: EventId = EventId(9100);
+
+// --- Bring-up parameters ---------------------------------------------
+
+/// Synthetic owner task id for the bus-driver context.
+const TASK: TaskId = TaskId(0x5b2);
+
+/// Capacity, in pages, of each per-device DMA window.
+const POOL_PAGES: usize = 64;
+
+/// Pages carved from high RAM for the per-device DMA allocator. Sized
+/// like the x86_64 vertical: the direct-driving pool plus the transient
+/// pool the `.rxe` load mints, with slack. At 4 KiB pages this is 1 MiB,
+/// carved from the very top of RAM, comfortably above the firmware
+/// device-tree blob OpenSBI leaves near the top.
+const CARVE_PAGES: usize = 256;
+
+/// Base virtual address of each minted DMA window (bookkeeping only; the
+/// driver reaches buffers through the identity map, so this address only
+/// keys the pool's slot bitmap).
+const POOL_VBASE: u64 = 0x2000_0000;
+
+/// Base virtual address of the MMIO register-window map (bookkeeping; the
+/// window is reached through the identity map).
+const MMIO_VBASE: u64 = 0x6000_0000;
+
+/// Capacity, in pages, of the MMIO register-window map.
+const MMIO_CAP_PAGES: usize = 64;
+
+/// `sstatus.SIE` — supervisor global interrupt-enable (bit 1). The
+/// race-free `wfi` park clears it across the readiness check + `wfi` and
+/// restores it after, so a completion that lands in that window is held
+/// *pending* (not taken) until `wfi` has been entered — closing the
+/// lost-wake-up window without a bounding timer.
+const SSTATUS_SIE: u64 = 1 << 1;
+
+/// PLIC `compatible` string QEMU's `virt` board advertises.
+const PLIC_COMPATIBLE: &str = "riscv,plic0";
+
+/// virtio-MMIO transport `compatible` string.
+const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
+
+// --- QEMU environment ------------------------------------------------
+
+/// riscv64 [`QemuEnv`]: serial breadcrumbs over the SBI console sink,
+/// exit through the `SiFive` Test finisher device.
+struct MmioEnv;
+
+impl QemuEnv for MmioEnv {
+    fn log(&self, msg: &str) {
+        SERIAL_SINK.write_event(&Event {
+            level: Level::Info,
+            id: MILESTONE_ID,
+            message: msg,
+            fields: &[],
+        });
+    }
+
+    fn fail(&self, msg: &str) -> ! {
+        self.log(msg);
+        qemu_exit::exit_failure(1)
+    }
+
+    fn succeed(&self) -> ! {
+        qemu_exit::exit_success()
+    }
+
+    fn audit_sink(&self) -> &'static dyn Sink {
+        &SERIAL_SINK
+    }
+}
+
+// --- Device-tree helpers ---------------------------------------------
+
+/// PLIC parameters read from the device tree.
+struct PlicInfo {
+    /// Physical base of the PLIC register block.
+    base: u64,
+    /// Highest interrupt source id (`riscv,ndev`).
+    ndev: u32,
+}
+
+/// Read the flattened device tree's total size from its header
+/// (`totalsize`, a big-endian `u32` at byte offset 4) so a `&[u8]` of the
+/// exact blob length can be formed from the raw pointer.
+///
+/// # Safety
+///
+/// `ptr` must address a valid flattened device-tree blob (the verbatim
+/// OpenSBI `a1` hand-off, published by `boot`); the first 8 bytes must be
+/// readable.
+unsafe fn dtb_total_size(ptr: u64) -> usize {
+    let header = ptr as *const u8;
+    // SAFETY: the caller guarantees the 8-byte FDT header is readable.
+    let bytes = unsafe { core::slice::from_raw_parts(header, 8) };
+    u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize
+}
+
+/// Find the PLIC's register base and source count in `dtb`.
+fn plic_info(dtb: &Dtb<'_>) -> Option<PlicInfo> {
+    for node in dtb.nodes() {
+        let node = node.ok()?;
+        if !node.is_compatible(PLIC_COMPATIBLE) {
+            continue;
+        }
+        let reg = node.property("reg")?;
+        let base = reg.read_be_u64(0).ok()?;
+        let ndev = node.property("riscv,ndev")?.read_be_u32(0).ok()?;
+        return Some(PlicInfo { base, ndev });
+    }
+    None
+}
+
+/// Find the PLIC interrupt source of the `virtio,mmio` slot whose `reg`
+/// base equals `slot_base` (its single `interrupts` cell).
+fn device_interrupt(dtb: &Dtb<'_>, slot_base: u64) -> Option<u32> {
+    for node in dtb.nodes() {
+        let node = node.ok()?;
+        if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+            continue;
+        }
+        let reg = node.property("reg")?;
+        if reg.read_be_u64(0).ok()? != slot_base {
+            continue;
+        }
+        return node.property("interrupts")?.read_be_u32(0).ok();
+    }
+    None
+}
+
+// --- Trap dispatch ---------------------------------------------------
+
+/// The PLIC controller the trap dispatch claims/masks/completes through.
+/// Published once (from a leaked `'static` box) before traps are armed.
+static DISPATCH_PLIC: AtomicPtr<PlicController<VolatilePlicMmio>> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// The IRQ table the trap dispatch fires into. Published with
+/// [`DISPATCH_PLIC`].
+static DISPATCH_TABLE: AtomicPtr<IrqTable> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Physical base of the provisioned device's virtio-MMIO register window.
+/// Published with [`DISPATCH_PLIC`] so the trap dispatch can acknowledge
+/// the device-level interrupt (`0` until set).
+static DISPATCH_DEV_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// virtio-MMIO `InterruptStatus` register offset (virtio 1.1 §4.2.2).
+const VIRTIO_MMIO_INTERRUPT_STATUS: u64 = 0x060;
+
+/// virtio-MMIO `InterruptACK` register offset (virtio 1.1 §4.2.2).
+const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
+
+/// S-mode external-interrupt dispatcher: claim the pending PLIC source,
+/// forward it to [`IrqTable::fire`] (which masks the source before any
+/// waiter observes `ready`), then complete the claim. Installed via
+/// [`trap::set_trap_dispatch`].
+extern "C" fn trap_dispatch() {
+    let plic_ptr = DISPATCH_PLIC.load(Ordering::Acquire);
+    let table_ptr = DISPATCH_TABLE.load(Ordering::Acquire);
+    if plic_ptr.is_null() || table_ptr.is_null() {
+        return;
+    }
+    // SAFETY: both pointers were published once, before `init_traps`
+    // armed interrupts, from `Box::leak`ed `'static` allocations that
+    // are never freed or mutated; the dispatch only takes `&` to them.
+    let plic: &PlicController<VolatilePlicMmio> = unsafe { &*plic_ptr };
+    let table: &IrqTable = unsafe { &*table_ptr };
+    let source = plic.claim();
+    if source != 0 {
+        // Acknowledge the device-level virtio-MMIO interrupt: read
+        // `InterruptStatus` and write the same bits to `InterruptACK`
+        // so the device deasserts its line. Without this a level-high
+        // virtio-MMIO source never re-edges, so the device raises no
+        // fresh interrupt for the next used buffer (virtio 1.1 §4.2.2).
+        let dev_base = DISPATCH_DEV_BASE.load(Ordering::Acquire);
+        if dev_base != 0 {
+            // SAFETY: `dev_base` is the identity-mapped virtio-MMIO
+            // register window of the provisioned device, valid for the
+            // life of the guest; both registers are 4-byte aligned.
+            unsafe {
+                let isr = core::ptr::read_volatile(
+                    (dev_base + VIRTIO_MMIO_INTERRUPT_STATUS) as *const u32,
+                );
+                core::ptr::write_volatile((dev_base + VIRTIO_MMIO_INTERRUPT_ACK) as *mut u32, isr);
+            }
+        }
+        let _ = table.fire(source, plic as &dyn IrqController);
+        plic.complete(source);
+    }
+}
+
+// --- IRQ waiter ------------------------------------------------------
+
+/// [`IrqWaiter`] that parks the boot hart on a race-free `wfi`.
+///
+/// Before parking it unmasks the device's PLIC source (a prior
+/// [`IrqTable::fire`] dropped its priority to zero) so the next
+/// completion can deliver. The park itself clears `sstatus.SIE`, re-reads
+/// the line's ready flag, parks on `wfi` only if still not ready, then
+/// restores `SIE`. Clearing `SIE` makes a completion that lands between
+/// the check and the `wfi` *pending* rather than taken, so `wfi` observes
+/// it and wakes — no edge is lost and no bounding timer is needed
+/// (`AGENTS.md` §2 — no unbounded sleep loop, no hack).
+struct WfiWaiter {
+    plic: &'static PlicController<VolatilePlicMmio>,
+    source: u32,
+    table: &'static IrqTable,
+    handle: IrqHandle,
+}
+
+impl IrqWaiter for WfiWaiter {
+    fn now_ns(&self) -> u64 {
+        // The host waits with the `u64::MAX` unbounded sentinel, so the
+        // exact value is immaterial; a fixed reading never reaches the
+        // saturated deadline.
+        0
+    }
+
+    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        // The loop only yields when the line is not yet ready. Unmask the
+        // source so the next completion delivers.
+        let _ = self.plic.unmask(self.source);
+        // SAFETY: clearing `sstatus.SIE` masks interrupt *taking* (not
+        // pending); `wfi` still wakes on a pending enabled interrupt;
+        // restoring `SIE` lets the trap fire. The sequence is the
+        // canonical race-free park: a completion arriving after the
+        // ready re-check is held pending until `wfi` is entered.
+        unsafe {
+            core::arch::asm!("csrc sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+            if !self.table.ready_for(self.handle) {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+            core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+        }
+        Ok(())
+    }
+}
+
+/// Build the external-IRQ path the riscv64 verticals own: resolve the
+/// PLIC base + the device's interrupt source from the device tree, build
+/// a [`PlicController`] + [`IrqTable`] (leaked to `'static` so the trap
+/// dispatch and the waiter can hold them), bind + arm the source, publish
+/// the dispatch state, and install the S-mode trap vector.
+///
+/// The riscv64 boot hands the kernel `IrqRouting::unsupported`, so the
+/// verticals own this path. Any failure flips QEMU failure via `env`.
+fn arm_external_irq(
+    env: &MmioEnv,
+    dtb: &Dtb<'_>,
+    slot_base: u64,
+) -> (
+    &'static IrqTable,
+    &'static PlicController<VolatilePlicMmio>,
+    IrqHandle,
+    u32,
+) {
+    let Some(plic_info) = plic_info(dtb) else {
+        env.fail("no PLIC in DTB");
+    };
+    let Some(source) = device_interrupt(dtb, slot_base) else {
+        env.fail("no device interrupt in DTB");
+    };
+    let Ok(plic_base) = usize::try_from(plic_info.base) else {
+        env.fail("PLIC base out of range");
+    };
+    // SAFETY: `plic_base` is the PLIC register-block base read from the
+    // device tree, identity-mapped and exclusively ours on the
+    // single-hart `virt` board.
+    let plic_mmio = unsafe { VolatilePlicMmio::new(plic_base) };
+    let controller = PlicController::new(Plic::new(plic_mmio, s_mode_context(0)), plic_info.ndev);
+    let controller: &'static PlicController<VolatilePlicMmio> = Box::leak(Box::new(controller));
+    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(plic_info.ndev)));
+
+    let Ok(bind) = table.bind(source, TASK) else {
+        env.fail("bind device source");
+    };
+    if controller.arm(source).is_err() {
+        env.fail("arm PLIC source");
+    }
+    DISPATCH_PLIC.store(
+        (controller as *const PlicController<VolatilePlicMmio>).cast_mut(),
+        Ordering::Release,
+    );
+    DISPATCH_TABLE.store((table as *const IrqTable).cast_mut(), Ordering::Release);
+    if trap::set_trap_dispatch(trap_dispatch).is_err() {
+        env.fail("install trap dispatch");
+    }
+    // SAFETY: called once on the boot hart with a stack established and
+    // the dispatch installed; arms the S-mode trap vector + external
+    // interrupts.
+    unsafe { trap::init_traps() };
+    (table, controller, bind.handle, source)
+}
+
+// --- Shared scenario -------------------------------------------------
+
+/// Perform the riscv64 `virt`-board virtio-MMIO bring-up for the device
+/// whose bare virtio type id is `device_id` (block = 2, net = 1), then
+/// drive the shared `load → reload → device round-trip → unload`
+/// lifecycle with `body` as the per-device tail. Never returns.
+pub fn run_virtio_mmio_scenario<F>(device_id: u32, cfg: &ScenarioConfig<'_>, body: F) -> !
+where
+    F: FnOnce(&dyn QemuEnv, MmioTransport, &dyn VirtioHost) -> Result<(), &'static str>,
+{
+    let env = MmioEnv;
+    env.log(cfg.start_msg);
+
+    let Some(dtb_ptr) = published_dtb() else {
+        env.fail("no published DTB");
+    };
+    let Some(memmap) = published_memory_map() else {
+        env.fail("no published memory map");
+    };
+
+    // 1. Form a `&[u8]` over the exact device-tree blob.
+    // SAFETY: `dtb_ptr` is the verbatim OpenSBI `a1` the boot pipeline
+    // published; it addresses a valid flattened device tree that lives
+    // for the life of the guest, and the carved DMA region is taken from
+    // the top of RAM, clear of the blob.
+    let dtb_len = unsafe { dtb_total_size(dtb_ptr) };
+    // SAFETY: as above; `dtb_len` is the blob's self-described size.
+    let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, dtb_len) };
+    let Ok(dtb) = Dtb::parse(dtb_bytes) else {
+        env.fail("DTB parse");
+    };
+
+    // 2. Per-device DMA: carve high frames + the boot identity map.
+    let Some(dma_map) = carve_dma_map(memmap, CARVE_PAGES) else {
+        env.fail("no carveable DMA region");
+    };
+    let Ok(frames) = FrameAllocator::new(&dma_map) else {
+        env.fail("frame allocator build");
+    };
+    let phys = DirectPhysMap::identity(IDENTITY_LIMIT);
+
+    // 3. Bus-driver task capability context.
+    let mut grants = CapabilitySet::empty();
+    grants.insert(CapabilityId::MMIO_MAP);
+    grants.insert(CapabilityId::MEM_DMA);
+    grants.insert(CapabilityId::DRV_LOAD);
+    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+
+    // 4. Build the `virt`-board MMIO bus and provision the transport.
+    // SAFETY: the `virt` board enters S-mode with paging off (`satp == 0`),
+    // so the virtio-MMIO aperture the device tree describes is
+    // identity-mapped and exclusively the bus's to read.
+    let Ok(bus) = (unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }) else {
+        env.fail("virtio-MMIO bus construct");
+    };
+    let Ok(mut mmio) = MmioMap::new(
+        AddressSpace::new(HostPageTable::new()),
+        VirtAddr::new(MMIO_VBASE),
+        MMIO_CAP_PAGES,
+        &phys,
+    ) else {
+        env.fail("MMIO map construct");
+    };
+    let (transport, slot_base) = {
+        let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
+        let Ok(prov) = provision_virtio_mmio(&bus, device_id, &mapper) else {
+            env.fail("virtio-MMIO provisioning walk");
+        };
+        (prov.transport, prov.base)
+    };
+    DISPATCH_DEV_BASE.store(slot_base, Ordering::Release);
+    env.log("virtio-qemu: MMIO transport provisioned");
+
+    // 5. Build the external-IRQ path (PLIC + S-mode traps) from the DTB.
+    let (table, controller, handle, source) = arm_external_irq(&env, &dtb, slot_base);
+    env.log("virtio-qemu: PLIC armed, S-mode traps live");
+
+    // 6. Mint the per-device DMA host the driver allocates through.
+    let space = AddressSpace::new(HostPageTable::new());
+    let Ok(pool) = DmaPool::new(space, VirtAddr::new(POOL_VBASE), POOL_PAGES, &frames, &phys)
+    else {
+        env.fail("DMA pool construct");
+    };
+    let waiter = WfiWaiter {
+        plic: controller,
+        source,
+        table,
+        handle,
+    };
+    let vhost = KernelVirtioHost::new(
+        pool,
+        &caller,
+        &SERIAL_SINK,
+        PoolId::fresh(),
+        table,
+        handle,
+        &waiter,
+    );
+
+    // 7. Mint the per-driver factory, then drive the shared lifecycle
+    //    with `body` against the reloaded driver.
+    let factory = KernelVirtioFactory::new(
+        KernelVirtioFactoryConfig {
+            frames: &frames,
+            phys: &phys,
+            caller: &caller,
+            audit: &SERIAL_SINK,
+            irq: table,
+            irq_handle: handle,
+            waiter: &waiter,
+            pool_base: VirtAddr::new(POOL_VBASE),
+            pool_pages: POOL_PAGES,
+        },
+        HostPageTable::new,
+    );
+    let factory: &dyn VirtioHostFactory = &factory;
+    drive_driver_lifecycle(&env, cfg, factory, transport, &vhost, body)
+}
+
+// --- Boot harness ----------------------------------------------------
+
+/// Generate the freestanding boot harness for a riscv64 virtio-MMIO QEMU
+/// test bin: the audit-observer `Sink` that drives `$scenario` once on
+/// `BootCompleted`, the `#[panic_handler]` bridge, and the
+/// `kernel_main(hartid, dtb)` entry point that runs the production
+/// riscv64 boot pipeline with the observer installed.
+///
+/// `$scenario` must be a `fn() -> !`. Invoke exactly once at the crate
+/// root of the freestanding bin.
+#[macro_export]
+macro_rules! define_mmio_boot_harness {
+    ($scenario:path) => {
+        /// Latch so the scenario runs exactly once.
+        static SCENARIO_RAN: ::core::sync::atomic::AtomicBool =
+            ::core::sync::atomic::AtomicBool::new(false);
+
+        /// Audit observer: forwards every event to the serial sink and,
+        /// on `BootCompleted`, drives the scenario exactly once.
+        struct BootObserverSink;
+        impl $crate::HarnessSink for BootObserverSink {
+            fn write_event(&self, event: &$crate::HarnessEvent<'_>) {
+                $crate::HarnessSerialSink::new().write_event(event);
+                if event.id == $crate::BOOT_COMPLETED_EVENT_ID
+                    && !SCENARIO_RAN.swap(true, ::core::sync::atomic::Ordering::SeqCst)
+                {
+                    $scenario();
+                }
+            }
+        }
+
+        static AUDIT_SINK: BootObserverSink = BootObserverSink;
+
+        /// Forward to the shared riscv64 panic bridge.
+        #[panic_handler]
+        fn virtio_qemu_mmio_panic(info: &::core::panic::PanicInfo<'_>) -> ! {
+            $crate::handle_panic_via_serial(info)
+        }
+
+        /// Boot entry point — the production `rustos-arch-riscv64` surface
+        /// with the audit observer sink in place.
+        #[no_mangle]
+        pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
+            $crate::boot(hartid, dtb, &$crate::HARNESS_SERIAL_SINK, &AUDIT_SINK)
+        }
+    };
+}

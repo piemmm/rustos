@@ -31,8 +31,8 @@ use rustos_kernel_mem::{FrameAllocator, MmioMap, PageTableOps, PhysMap, VirtAddr
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 
-use crate::virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
-use crate::virtio_pci_walk::{provision_virtio_pci, VirtioPciWalkError};
+use rustos_kernel_virtio::virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
+use rustos_kernel_virtio::virtio_pci_walk::{provision_virtio_pci, VirtioPciWalkError};
 
 /// Borrowed boot resources [`provision_and_run`] needs to bring a
 /// virtio-PCI device all the way up to a loadable driver host.

@@ -89,6 +89,8 @@ rustos/
 │   ├── ipc/             # Capabilities, message ports.
 │   ├── sec/             # Users, groups, capabilities, MAC.
 │   ├── syscall/         # Syscall dispatch + ABI definitions.
+│   ├── virtio/          # Arch-neutral virtio host factory + transport-
+│   │                    #   provisioning walks (PCI + MMIO).
 │   └── arch/
 │       ├── x86_64/
 │       ├── aarch64/

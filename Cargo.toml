@@ -10,6 +10,7 @@ members = [
     "kernel/irq",
     "kernel/sec",
     "kernel/syscall",
+    "kernel/virtio",
 
     # Kernel — architecture ports
     "kernel/arch/x86_64",
@@ -85,6 +86,8 @@ members = [
     "tests/integration/virtio_qemu_support",
     "tests/integration/virtio_blk_pci_x86_64",
     "tests/integration/virtio_net_pci_x86_64",
+    "tests/integration/virtio_blk_mmio_riscv64",
+    "tests/integration/virtio_net_mmio_riscv64",
 ]
 
 # Settings that apply to every crate in the workspace.

@@ -211,6 +211,46 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
     },
+    // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
+    // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
+    // vertical — boot → build the virtio-MMIO bus from the device tree →
+    // provision an `MmioTransport` through the capability-gated
+    // `KernelMmioMapper` → arm the device's PLIC source + S-mode trap
+    // path → mint a `KernelVirtioHost` over a carved per-device DMA pool
+    // → load the signed virtio-blk `.rxe` → read sector 0 (verify the
+    // planted `byte[i] = i mod 256` pattern) → write+read-back sector 1 →
+    // `SiFive` Test PASS. The device-tail round-trip is the same shared
+    // code the x86_64 vertical runs. The 2048-sector backing image gives
+    // the planted sector-0 pattern plus headroom; single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-virtio-blk-mmio-riscv64",
+        binary: "rustos-test-virtio-blk-mmio-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: Some(2048),
+        virtio_net: false,
+    },
+    // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
+    // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
+    // vertical — same bring-up as the blk MMIO vertical, then drive
+    // `rustos-net-icmp` over the device: ARP-resolve the QEMU user-mode
+    // (SLIRP) gateway `10.0.2.2` from guest `10.0.2.15`, then send an
+    // ICMP echo and confirm the reply → `SiFive` Test PASS. The
+    // device-tail ping is the same shared code the x86_64 vertical runs.
+    // A user-mode netdev (no host privileges) plus a frame dump to
+    // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-virtio-net-mmio-riscv64",
+        binary: "rustos-test-virtio-net-mmio-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: true,
+    },
 ];
 
 /// Rust target triple for the riscv64 enrolments; selects the
