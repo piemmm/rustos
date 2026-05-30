@@ -8,6 +8,45 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
+- **`rustos-net-icmp` initiator (`Client`) + virtio-net host
+  lifetime — landed (latest session).** The virtio-net QEMU verticals
+  need the guest to *initiate* the exchange: under QEMU user-mode
+  (SLIRP) the gateway `10.0.2.2` answers ARP and replies to ICMP echo
+  but never pings the guest, so the passive `Responder` alone cannot
+  drive a round-trip. New `rustos_net_icmp::Client` (stateless,
+  `no_std`, `forbid(unsafe_code)`, mirrors `Responder`):
+  `write_arp_request`/`parse_arp_reply`,
+  `write_echo_request`/`is_echo_reply`, and `resolve(net, target, rx,
+  tx, max_polls)` / `ping(net, peer_mac, dest, id, seq, payload, rx,
+  tx, max_polls)` that drive any `Net` driver over **bounded** poll
+  loops. The Ethernet+ARP / Ethernet+IPv4+ICMP framing is now shared
+  `write_arp_frame`/`write_icmp_frame` helpers used by both
+  `Responder` and `Client` (no duplication). Separately,
+  `VirtioNet<'h, T>` now borrows `&'h dyn VirtioHost` (was
+  `&'static`), matching `VirtioBlk<'h, T>` verbatim, so a bring-up
+  scenario can drive it with a stack-minted `KernelVirtioHost`; the
+  change is a pure loosening and contained to the one crate.
+  Host-tested only: `rustos-net-icmp` 41 (+8),
+  `rustos-drv-network-virtio-net` 9 (unchanged); clippy `-D warnings`
+  / fmt / doc clean. `docs/src/userland/net_icmp.md` updated. **Still
+  TODO (the kernel-side consumers):** the virtio-net test bins below.
+  Note: before writing them, extract the shared virtio bring-up
+  scaffolding currently inline in
+  `tests/integration/virtio_blk_pci_x86_64/src/kernel.rs` (the
+  `carve_dma_map` high-RAM carve, the `DirectPhysMap::identity(4 GiB)`
+  + `MmioMap` + `KernelMmioMapper` set-up, the `provision_virtio_pci`
+  + `route_msix` + GSI-bind + `msi_message` MSI-X wiring, the
+  `HltWaiter`/`cli`/`rdtsc` IRQ-wait glue, and the signed-`.rxe`
+  `load_signed_rxe`) into a shared test-support crate (e.g.
+  `tests/integration/virtio_qemu_support`, a `lib`) and refactor the
+  *proven, gated* `virtio_blk_pci_x86_64` bin onto it **first** (re-run
+  its QEMU gate to confirm no regression) so the net bin reuses it
+  instead of duplicating ~250 lines (`AGENTS.md` §2.2). Only the
+  device-specific tail differs: blk reads/writes sectors; net builds a
+  `Client` from the device MAC + guest IP `10.0.2.15`, `resolve`s the
+  gateway `10.0.2.2`, then `ping`s it and asserts the reply. Budget
+  for first-time virtio-net RX-path bring-up under QEMU.
+
 - **virtio-net user networking in the QEMU runner — landed
   (latest session).** The `tools/qemu` runner could attach a backing
   disk but had no network surface. New `NetDevice { pcap:

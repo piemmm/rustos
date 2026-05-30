@@ -44,7 +44,7 @@
 
 # Userland
 
-- [Networking responder](./userland/net_icmp.md)
+- [Networking service](./userland/net_icmp.md)
 
 # ABI
 

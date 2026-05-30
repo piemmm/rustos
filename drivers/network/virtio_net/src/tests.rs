@@ -114,7 +114,7 @@ fn auto_host() -> &'static AutoDrainHost {
     Box::leak(Box::new(AutoDrainHost::new()))
 }
 
-fn open_net(t: MockTransport) -> Box<VirtioNet<MockTransport>> {
+fn open_net(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
     let host = auto_host();
     let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
     host.install_transport(net.transport_mut() as *mut MockTransport);

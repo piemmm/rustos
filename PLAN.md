@@ -1196,6 +1196,44 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 5 follow-up / Item 4 prerequisite —
+  `rustos-net-icmp` initiator + virtio-net host lifetime, *complete*):
+  the virtio-net QEMU verticals need the guest to *initiate* an
+  ARP+ICMP exchange with the SLIRP gateway (`10.0.2.2` replies to ARP
+  and ICMP echo; it never pings the guest), but `rustos-net-icmp`
+  shipped only a passive `Responder`, and `VirtioNet` demanded a
+  `&'static dyn VirtioHost` it could never get from a per-load,
+  stack-minted `KernelVirtioHost`. **Initiator.** New `Client`
+  (mirrors `Responder`: stateless, `no_std`, `forbid(unsafe_code)`)
+  with `write_arp_request` / `parse_arp_reply`, `write_echo_request` /
+  `is_echo_reply`, and `resolve(net, target, …)` /
+  `ping(net, peer_mac, dest, …)` driving any `Net` driver over bounded
+  poll loops (no retry-until, `AGENTS.md` §2.1). The Ethernet+ARP and
+  Ethernet+IPv4+ICMP framing was extracted into shared
+  `write_arp_frame` / `write_icmp_frame` helpers used by both
+  `Responder` and `Client` so no framing is duplicated (`AGENTS.md`
+  §2.2). **Host lifetime.** `VirtioNet<'h, T>` now borrows
+  `&'h dyn VirtioHost` (mirrors `VirtioBlk<'h, T>` verbatim), so a
+  bring-up scenario can drive it with a stack-minted host; the change
+  is purely a loosening (a `'static` host still satisfies `'h`) and is
+  contained to the one crate. **Tests.** `rustos-net-icmp` 41 (+8:
+  `Client` resolve happy/none/wrong-target, ping confirm/mismatched-
+  sequence, ARP-reply-rejects-request, output-too-small, driver-error
+  propagation); `rustos-drv-network-virtio-net` 9 (unchanged, all
+  green under the new lifetime). `cargo clippy -p rustos-net-icmp
+  -p rustos-drv-network-virtio-net --all-targets -- -D warnings`,
+  `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings" cargo doc
+  --no-deps` are clean. **Docs.** `docs/src/userland/net_icmp.md` (the
+  `Client` API + shared-framing helpers) and the crate rustdoc.
+  **Deferred.** The kernel-side virtio-net test bins that consume this
+  (`tests/integration/virtio_net_pci_x86_64`, `virtio_net_mmio_riscv64`)
+  remain outstanding; landing them cleanly requires extracting the
+  shared virtio bring-up scaffolding now embedded in
+  `virtio_blk_pci_x86_64`'s `kernel.rs` (carve DMA map, `HltWaiter`,
+  PCI walk + MSI-X routing, signed-`.rxe` load) into a shared
+  test-support crate so the net bin does not duplicate it (`AGENTS.md`
+  §2.2), then first-time virtio-net QEMU bring-up; see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — virtio-net user
   networking in the QEMU runner, *complete*): the `tools/qemu` runner
   could attach a backing disk (`with_virtio_blk` + `disk::plant_raw_disk`)
