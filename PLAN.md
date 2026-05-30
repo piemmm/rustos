@@ -1226,12 +1226,32 @@ follow-up is its own thread and is now also complete.
   and `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-qemu --no-deps`
   are all clean. **Docs.** New `docs/src/platform/riscv64.md` (board
   model, SiFive-test result protocol, per-arch runner module), wired
-  into `docs/src/SUMMARY.md`. **Deferred.** The kernel-side
-  `kernel/arch/riscv64::qemu_exit` (writing the finisher word), the
-  riscv64 boot pipeline + ring-0 DTB resolution feeding
-  `provision_virtio_mmio`, and the `virtio_blk_mmio_riscv64` /
-  net QEMU crates + acceptance gate (Items 4 / 6) remain outstanding —
-  see `.junie/next-session-prompt.md`.
+  into `docs/src/SUMMARY.md`. **Deferred.** The riscv64 boot pipeline
+  + ring-0 DTB resolution feeding `provision_virtio_mmio`, and the
+  `virtio_blk_mmio_riscv64` / net QEMU crates + acceptance gate
+  (Items 4 / 6) remain outstanding — see
+  `.junie/next-session-prompt.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — riscv64 `SiFive` Test
+  finisher, *complete*): the riscv64 QEMU runner expected the kernel to
+  report its result by writing to the `virt`-board `SiFive` Test device,
+  but the `kernel/arch/riscv64` crate was a `core`-only placeholder with
+  no way to do so. New module `kernel/arch/riscv64/src/qemu_exit.rs`
+  mirrors `kernel/arch/x86_64::qemu_exit`: the `SIFIVE_TEST_BASE`
+  (`0x10_0000`), `FINISHER_PASS` (`0x5555`), and `FINISHER_FAIL`
+  (`0x3333`) constants (pinned to `tools/qemu/src/riscv64.rs` by a
+  tie-down test, `AGENTS.md` §2.2), a pure `fail_word(code)` building
+  `(code << 16) | FINISHER_FAIL`, and the target-gated
+  `exit_success()` / `exit_failure(code)` (single volatile 32-bit store
+  to the device + a `wfi` park; no panic, `AGENTS.md` §2.9). **Tests.**
+  `rustos-arch-riscv64` 3 host tests. `cargo clippy
+  -p rustos-arch-riscv64 --target riscv64gc-unknown-none-elf
+  -- -D warnings`, `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings"
+  cargo doc --no-deps` are clean. **Docs.** `docs/src/platform/riscv64.md`
+  updated (the kernel-side finisher is no longer "staged"). **Deferred.**
+  The riscv64 boot pipeline + ring-0 DTB walk and the
+  `virtio_blk_mmio_riscv64` / net QEMU crates + acceptance gate
+  (Items 4 / 6) remain outstanding — see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — virtio-MMIO
   provisioning seam + ring-0 walk, *complete*): the PCI vertical had
   a frozen `VirtioPciBus` ABI seam and a host-tested

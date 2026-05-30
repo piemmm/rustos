@@ -3,7 +3,9 @@
 RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. The
 kernel port itself is staged work; what exists today is the host-side
 **QEMU runner** support that the Stage 4.D virtio-MMIO integration tests
-build on. This page documents that runner surface — the on-board boot
+build on, plus the kernel-side `SiFive` Test finisher
+(`kernel/arch/riscv64::qemu_exit`) those tests use to report their
+result. This page documents that runner surface — the on-board boot
 model, the result protocol, and the argv contract — so the kernel-side
 test bin can rely on a stable harness.
 
@@ -41,9 +43,13 @@ x86_64, the exit-status decode is per-architecture:
 `Arch::outcome_from_status` dispatches to `riscv64::outcome_from_status`
 (zero ⇒ `Pass`) or `Outcome::from_qemu_status` (x86_64 convention). The
 finisher constants live beside the argv builder in
-`tools/qemu/src/riscv64.rs` and are pinned by a unit test, so the
-runner and the kernel-side `kernel/arch/riscv64::qemu_exit` (staged)
-cannot drift.
+`tools/qemu/src/riscv64.rs` and are pinned by a unit test; the
+kernel-side `kernel/arch/riscv64::qemu_exit` mirrors the same values
+(`SIFIVE_TEST_BASE`, `FINISHER_PASS`, `FINISHER_FAIL`) with its own
+tie-down test, so the two sides cannot drift. The kernel writes the
+finisher word through `qemu_exit::exit_success` / `exit_failure(code)`;
+the failure word is built by the pure `qemu_exit::fail_word(code)`
+(`(code << 16) | FINISHER_FAIL`).
 
 ## Per-arch runner module
 
