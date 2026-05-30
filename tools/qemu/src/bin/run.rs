@@ -9,7 +9,8 @@
 //! ```text
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
 //!     --kernel path/to/kernel.elf [--cpus N] [--timeout-secs S] \
-//!     [--virtio-blk path/to/disk.img ...]
+//!     [--virtio-blk path/to/disk.img ...] \
+//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap]
 //! ```
 
 use std::env;
@@ -25,6 +26,8 @@ fn main() -> ExitCode {
     let mut cpus: u32 = 1;
     let mut timeout = Duration::from_secs(30);
     let mut block_images: Vec<PathBuf> = Vec::new();
+    let mut virtio_net = false;
+    let mut net_pcap: Option<PathBuf> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -53,6 +56,14 @@ fn main() -> ExitCode {
                 };
                 block_images.push(PathBuf::from(v));
             }
+            "--virtio-net" => virtio_net = true,
+            "--virtio-net-pcap" => {
+                let Some(v) = args.next() else {
+                    return usage_err("--virtio-net-pcap needs a path");
+                };
+                net_pcap = Some(PathBuf::from(v));
+                virtio_net = true;
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 return ExitCode::SUCCESS;
@@ -70,6 +81,11 @@ fn main() -> ExitCode {
         .with_timeout(timeout);
     for image in block_images {
         spec = spec.with_virtio_blk(image);
+    }
+    match net_pcap {
+        Some(pcap) => spec = spec.with_virtio_net_pcap(pcap),
+        None if virtio_net => spec = spec.with_virtio_net(),
+        None => {}
     }
     let _ = Arch::X86_64; // tie-down — the wrapper is currently x86_64-only
 
@@ -94,7 +110,7 @@ fn main() -> ExitCode {
 
 fn usage() -> &'static str {
     "usage: rustos-qemu-run --kernel <path> [--cpus N] [--timeout-secs S] \
-[--virtio-blk <image> ...]"
+[--virtio-blk <image> ...] [--virtio-net] [--virtio-net-pcap <path>]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {

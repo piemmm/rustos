@@ -28,6 +28,10 @@ struct QemuTest {
     /// image whose sector 0 carries the deterministic pattern
     /// `byte[i] = i mod 256` (which the kernel-side test verifies).
     disk_sectors: Option<u64>,
+    /// When `true`, attach a QEMU user-mode (SLIRP) virtio-net interface
+    /// and dump every frame to a `<binary>.pcap` capture beside the
+    /// kernel image so a host can inspect the on-wire exchange.
+    virtio_net: bool,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -37,6 +41,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -49,6 +54,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 4,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -69,6 +75,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -90,6 +97,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -103,6 +111,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -124,6 +133,7 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
+        virtio_net: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `x86_mechanism_one`
@@ -147,6 +157,28 @@ const TESTS: &[QemuTest] = &[
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
+        virtio_net: false,
+    },
+    // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
+    // full real virtio-net-pci round-trip on the same shared bring-up
+    // scaffolding as the virtio-blk vertical — boot → `x86_mechanism_one`
+    // PCI walk → map the four virtio register windows → route MSI-X →
+    // mint a `KernelVirtioHost` over a per-device DMA pool → load the
+    // signed virtio-net `.rxe` → drive `rustos-net-icmp` over the device:
+    // ARP-resolve the QEMU user-mode (SLIRP) gateway `10.0.2.2` from guest
+    // `10.0.2.15`, then send an ICMP echo and confirm the reply →
+    // `qemu_exit`. A user-mode netdev (no host privileges) plus a frame
+    // dump to `<binary>.pcap` lets a host inspect the exchange after the
+    // run. The guest must initiate (SLIRP never pings the guest), which
+    // the `rustos-net-icmp` `Client` does. Single CPU and a 60-second
+    // budget match the other Stage-3/4 boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-virtio-net-pci-x86-64",
+        binary: "rustos-test-virtio-net-pci-x86-64",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: true,
     },
 ];
 
@@ -193,6 +225,14 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
         rustos_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
             .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
         spec = spec.with_virtio_blk(&image);
+    }
+
+    // Attach a QEMU user-mode (SLIRP) virtio-net interface for networking
+    // tests, dumping every frame to a `<binary>.pcap` capture beside the
+    // kernel image so a failing run leaves the on-wire exchange to inspect.
+    if t.virtio_net {
+        let pcap = kernel.with_extension("pcap");
+        spec = spec.with_virtio_net_pcap(&pcap);
     }
 
     eprintln!(

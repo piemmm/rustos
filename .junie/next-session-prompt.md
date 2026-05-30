@@ -1,518 +1,136 @@
-# Next session — Stage 4.D Items 4 / 6
-# (carried over after the hardware-real direct-map DMA/MMIO data path
-#  landed, on top of the ring-0 virtio-PCI provisioning walk +
-#  `VirtioPciBus` ABI seam, the virtio-1.x PCI capability decode +
-#  register-window hand-off, and the modern virtio-PCI `PciTransport`)
+# Next session — Stage 4.D Items 4 / 6 (remaining)
+# (carried over after the shared virtio bring-up scaffolding extraction +
+#  the gated `virtio_net_pci_x86_64` vertical landed, on top of the
+#  proven/gated `virtio_blk_pci_x86_64` round-trip)
 
 ## Where we are
 
-`PLAN.md` Stage 4.D records the following as **complete**:
+`PLAN.md` Stage 4.D records the following as **complete** (most recent
+first):
 
-- **`rustos-net-icmp` initiator (`Client`) + virtio-net host
-  lifetime — landed (latest session).** The virtio-net QEMU verticals
-  need the guest to *initiate* the exchange: under QEMU user-mode
-  (SLIRP) the gateway `10.0.2.2` answers ARP and replies to ICMP echo
-  but never pings the guest, so the passive `Responder` alone cannot
-  drive a round-trip. New `rustos_net_icmp::Client` (stateless,
-  `no_std`, `forbid(unsafe_code)`, mirrors `Responder`):
-  `write_arp_request`/`parse_arp_reply`,
-  `write_echo_request`/`is_echo_reply`, and `resolve(net, target, rx,
-  tx, max_polls)` / `ping(net, peer_mac, dest, id, seq, payload, rx,
-  tx, max_polls)` that drive any `Net` driver over **bounded** poll
-  loops. The Ethernet+ARP / Ethernet+IPv4+ICMP framing is now shared
-  `write_arp_frame`/`write_icmp_frame` helpers used by both
-  `Responder` and `Client` (no duplication). Separately,
-  `VirtioNet<'h, T>` now borrows `&'h dyn VirtioHost` (was
-  `&'static`), matching `VirtioBlk<'h, T>` verbatim, so a bring-up
-  scenario can drive it with a stack-minted `KernelVirtioHost`; the
-  change is a pure loosening and contained to the one crate.
-  Host-tested only: `rustos-net-icmp` 41 (+8),
-  `rustos-drv-network-virtio-net` 9 (unchanged); clippy `-D warnings`
-  / fmt / doc clean. `docs/src/userland/net_icmp.md` updated. **Still
-  TODO (the kernel-side consumers):** the virtio-net test bins below.
-  Note: before writing them, extract the shared virtio bring-up
-  scaffolding currently inline in
-  `tests/integration/virtio_blk_pci_x86_64/src/kernel.rs` (the
-  `carve_dma_map` high-RAM carve, the `DirectPhysMap::identity(4 GiB)`
-  + `MmioMap` + `KernelMmioMapper` set-up, the `provision_virtio_pci`
-  + `route_msix` + GSI-bind + `msi_message` MSI-X wiring, the
-  `HltWaiter`/`cli`/`rdtsc` IRQ-wait glue, and the signed-`.rxe`
-  `load_signed_rxe`) into a shared test-support crate (e.g.
-  `tests/integration/virtio_qemu_support`, a `lib`) and refactor the
-  *proven, gated* `virtio_blk_pci_x86_64` bin onto it **first** (re-run
-  its QEMU gate to confirm no regression) so the net bin reuses it
-  instead of duplicating ~250 lines (`AGENTS.md` §2.2). Only the
-  device-specific tail differs: blk reads/writes sectors; net builds a
-  `Client` from the device MAC + guest IP `10.0.2.15`, `resolve`s the
-  gateway `10.0.2.2`, then `ping`s it and asserts the reply. Budget
-  for first-time virtio-net RX-path bring-up under QEMU.
+- **Shared virtio bring-up scaffolding + `virtio_net_pci_x86_64`
+  vertical — landed and gated (latest session).** The ~430 lines of
+  device-agnostic bring-up that were inline in
+  `tests/integration/virtio_blk_pci_x86_64/src/kernel.rs` now live once
+  in a new freestanding-only library crate
+  `tests/integration/virtio_qemu_support`
+  (`rustos-test-virtio-qemu-support`):
+  - `run_virtio_scenario(cfg, body)` carves the high-RAM per-device DMA
+    region from `published_memory_map()`, builds `DirectPhysMap` +
+    `MmioMap` + `KernelMmioMapper`, runs `provision_virtio_pci`, binds a
+    masked IO-APIC GSI + routes MSI-X (`msi_message` from the
+    boot-assigned vector), mints a `KernelVirtioHost` over the carved
+    pool, loads the signed `.rxe` through `rustos_drvhost::Host`, enables
+    MSI-X, then hands the `PciTransport` + `&dyn VirtioHost` to a
+    device-specific closure (`FnOnce(PciTransport, &dyn VirtioHost) ->
+    Result<(), &'static str>`).
+  - `define_boot_harness!(scenario)` generates the boot-observer `Sink`,
+    the `#[panic_handler]` bridge, and `kernel_main`; the crate owns the
+    shared bump `#[global_allocator]`. Everything is gated to
+    `x86_64-unknown-none`, so a host `cargo build --workspace` compiles
+    the crate to an empty library.
+  - `virtio_blk_pci_x86_64`'s `kernel.rs` was refactored onto it (device
+    tail only: `ToVirtioBlk` resolver + sector-0 verify + sector-1
+    write/read-back) and re-gated green — no regression.
+  - New `tests/integration/virtio_net_pci_x86_64` reuses the support
+    crate; its tail opens `VirtioNet`, builds a `rustos_net_icmp::Client`
+    from the device MAC + guest `10.0.2.15`, ARP-resolves the SLIRP
+    gateway `10.0.2.2`, then `ping`s it and asserts the echo reply.
+    First-try bring-up passed; the run's `<binary>.pcap` confirms the
+    on-wire `ARP request/reply` + `ICMP echo request/reply (id 0x1234,
+    seq 1)`.
+  - `rustos-qemu-run` gained `--virtio-net` / `--virtio-net-pcap`;
+    `tools/xtask/src/commands/qemu_tests.rs` gained a `virtio_net` field
+    and enrols the net test (single CPU, 60 s, frame dump to
+    `<binary>.pcap`).
+  - Verified: `cargo xtask test --qemu` (all 8 enrolled tests green
+    incl. blk + net), `cargo xtask clippy` / `test` / `abi-check`,
+    `cargo fmt --check`, and `RUSTDOCFLAGS="-D warnings" cargo doc
+    --no-deps` (the three new crates, `x86_64-unknown-none`) all clean.
+    Docs: `docs/src/platform/x86_64.md` ("virtio QEMU verticals (shared
+    bring-up)"). **Not run in this environment:** the mdBook half of
+    `cargo xtask docs-check` (mdbook not installed) and `cargo deny
+    check`; the Item 6 acceptance gate must run the full `xtask` matrix
+    on a host where both are available.
 
-- **virtio-net user networking in the QEMU runner — landed
-  (latest session).** The `tools/qemu` runner could attach a backing
-  disk but had no network surface. New `NetDevice { pcap:
-  Option<PathBuf> }` + `Spec.net_devices` with
-  `Spec::with_virtio_net()` / `with_virtio_net_pcap(path)` builders
-  (mirrors `BlockDevice` / `with_virtio_blk`). The x86_64 backend emits
-  `-netdev user,id=netN` + `-device
-  virtio-net-pci,netdev=netN,disable-legacy=on` (modern, id 0x1041);
-  riscv64 emits the `virt` analogue `-device
-  virtio-net-device,netdev=netN`. The SLIRP backend gives the fixed
-  `10.0.2.0/24` topology (guest `.15`, gateway `.2`); a `pcap` path
-  attaches `-object filter-dump` so the host can verify the on-wire
-  exchange after the run. The x86_64 `X-PciMmio64Mb=0` BAR-confinement
-  fw_cfg now also fires for a net-only spec. Host-tested only:
-  `rustos-qemu` 50 (+7); clippy `-D warnings` / fmt / doc clean.
-  `docs/src/platform/{x86_64,riscv64}.md` updated. **Still TODO (the
-  kernel-side consumers):** `tests/integration/virtio_net_pci_x86_64`
-  and `virtio_net_mmio_riscv64` — boot → virtio-net PCI/MMIO walk →
-  drive `rustos-net-icmp` (Item 5) → ARP + ICMP-echo the `10.0.2.2`
-  gateway → verify against the captured pcap → `qemu_exit`. The
-  x86_64 one is fully on the existing runner (model it on
-  `virtio_blk_pci_x86_64`); the riscv64 one additionally needs the
-  riscv64 boot port + DTB walk.
+- **`virtio_blk_pci_x86_64` real round-trip — landed and gated.** Boot →
+  `x86_mechanism_one()` PCI walk → map four virtio register windows →
+  `route_msix` → mint a `KernelVirtioHost` over a carved per-device DMA
+  pool → load the signed virtio-blk `.rxe` → read sector 0 (verify
+  planted `byte[i] = i mod 256`) → write+read-back sector 1 → `qemu_exit`.
+  The earlier ~30 % single-CPU MSI completion hang was eliminated by the
+  lock-free `IrqTable::fire` / `try_wait_step` rewrite; enrolled in
+  `cargo xtask test --qemu` with `disk_sectors: Some(2048)`.
 
-- **`virtio_blk_pci_x86_64` real round-trip — landed, not gated**
-  (latest session). The test bin now drives the full x86_64 vertical
-  end-to-end under QEMU: boot → `x86_mechanism_one()` PCI walk → map
-  the four virtio register windows via `KernelMmioMapper` →
-  `route_msix` → mint a `KernelVirtioHost` over a per-device DMA pool
-  carved from `published_memory_map()` → load the signed virtio-blk
-  `.rxe` → read sector 0 (verify the planted `byte[i] = i mod 256`
-  pattern) → write+read-back sector 1 (verify) → `qemu_exit` success.
-  Sub-fixes landed and host-tested green: `tools/qemu` attaches
-  `virtio-blk-pci` modern (`disable-legacy=on`) + forces BARs <4 GiB
-  via OVMF `X-PciMmio64Mb=0` (boot identity map is 0..4 GiB), debug
-  runner `--virtio-blk`; `PciTransport` programs `queue_msix_vector`;
-  `Pci::route_msix` sets command Memory-Space + Bus-Master enable;
-  `kernel/irq::IrqTable::fire` is now lock-free (atomic per-line
-  `bound`/`ready`) so an ISR cannot deadlock a parked `try_wait_step`
-  on one CPU, with a read-only `IrqTable::ready_for(handle)` poll
-  companion. Tests: `rustos-kernel-irq` 24, `rustos-drv-bus-pci` 28,
-  `rustos-drv-storage-virtio-blk` 8, `rustos-drv-bus-virtio`
-  (kernel-host) 75; clippy `-D warnings`/fmt/x86_64 build clean.
-  **Now enrolled in `cargo xtask test --qemu`** — see "Resolved" below.
-
-- **Resolved: the flaky single-CPU MSI completion hang.** The earlier
-  ~30% hang (guest spinning `IF=0` near
-  `rustos_kernel_irq::table::IrqTable::fire` after the device's first
-  completion interrupt) was the deadlock between the completion ISR's
-  `IrqTable::fire` and a parked `try_wait_step` holding the same
-  `IrqTable` lock — already eliminated by the lock-free `fire` /
-  `try_wait_step` rewrite (per-line `bound` / `ready` atomics, no
-  shared lock). Root-cause review confirmed no other ISR-reachable
-  blocking primitive can stall: the only one,
-  `IoApicController::mask`'s `SpinLock`, is acquired solely with
-  interrupts disabled (boot never `sti`s, the test bin `cli`s in task
-  context, `mask` runs only in-ISR), so no same-CPU IF=1 holder
-  exists; and `SerialSink` is lock-free. Stability re-verified across
-  90 consecutive runs (60 TCG through the exact `xtask` runner path +
-  30 KVM) plus 4 full `cargo xtask test --qemu` invocations, all green.
-  The crate is now enrolled in `tools/xtask/src/commands/qemu_tests.rs`
-  with `disk_sectors: Some(2048)`, and the stale `kernel.rs` comments
-  describing the no-longer-existent `IrqTable`-lock deadlock were
-  corrected. **Next focus** is the remaining Item 4 work below (the
-  riscv64 MMIO vertical, the net tests, and the Item 6 acceptance
-  gate).
-
-- **Live boot-wiring seams** (latest session). The
-  `tests/integration/virtio_blk_pci_x86_64` kernel test bin still
-  could not reach two things, both now landed as host-testable seams:
-  (1) a public real-hardware PCI constructor —
-  `rustos_drv_bus_pci::x86_mechanism_one()` (gated `target_arch =
-  "x86_64"`) returns the mechanism-#1 bus as `impl VirtioPciBus +
-  MsixBus` (also coerces to `&dyn Bus`); the concrete `Pci` /
-  `PortIoConfigSpace` / `X86PortIo` types stay crate-private
-  (`AGENTS.md` §8); construction does **no** port I/O so it is
-  host-safe to call; and (2) a read-only firmware-memory-map accessor —
-  `rustos_kernel::arch_wrapper::published_memory_map()` over a new
-  `MEMORY_MAP_SLOT` set-once cell that `boot::try_boot` fills via
-  `publish_memory_map(&map)` before the map is moved into the
-  `kernel_core` hand-off (mirrors `published_irq_table` /
-  `published_irq_controller`). Host-tested only: `rustos-drv-bus-pci`
-  27 (+1), `rustos-kernel --lib` 50 (+1); clippy `-D warnings` / fmt /
-  doc clean; `x86_64-unknown-none` pci lib + kernel lib/bin and
-  `aarch64-unknown-none` pci builds clean. **Still TODO (the test bin
-  that consumes them):** boot → `x86_mechanism_one()` as the `&dyn
-  VirtioPciBus` + `&dyn MsixBus`; build a per-device DMA
-  `FrameAllocator` from `published_memory_map()` (reserving / carving
-  a Usable region so it does not re-hand the live kernel allocator's
-  frames) + a `DirectPhysMap::identity(4 GiB)`; allocate + bind a free
-  external vector in the published `IrqTable` and build its
-  `MsiMessage` via `rustos_arch_x86_64::irq::msi_message`; then call
-  `provision_and_run` and drive the loaded virtio-blk `.rxe` (read
-  sector 0, write+read-back sector 1, verify) before `qemu_exit`.
-
-- **PCI MSI-X interrupt routing** (latest session). Scoping
-  `virtio_blk_pci_x86_64` surfaced a hard blocker: a real
-  virtio-blk-pci round-trip cannot complete without delivering the
-  device's interrupt (`VirtioBlk::run_request` parks on
-  `host.notify_wait()` → `block_until_ready` on a *pre-bound*
-  `IrqHandle`), yet the tree had **no** PCI interrupt-routing path
-  (MSI/MSI-X were *discovered* but never enabled; INTx would need an
-  ACPI `_PRT`/AML interpreter that does not exist). Landed the modern,
-  host-testable half: a frozen `abi-v1` seam
-  `lib/abi/src/driver/msix.rs` (`MsiMessage { address, data }` +
-  `MsixBus: Bus` with `route_msix(bdf, entry, message, mapper)`);
-  `Pci::route_msix` (find MSI-X cap → bounds-check entry → map the
-  16-byte table entry through the `CAP_MMIO_MAP`-gated `MmioMapper` →
-  write addr/data + unmask vector control → set MSI-X Enable + clear
-  function mask; fails closed NotFound/OutOfRange/Unsupported/
-  PermissionDenied) + `MsixBus for Pci<C>`; and
-  `rustos_arch_x86_64::irq::msi_message(vector, destination)` building
-  the x86 LAPIC message (physical/fixed/edge, SDM §11.11). Host-tested
-  only: `rustos-abi` 84 (+3), `rustos-drv-bus-pci` 26 (+5),
-  `rustos-arch-x86_64` 133 (+2); clippy/fmt/doc clean; abi+pci build
-  for `x86_64-unknown-none`. Legacy MSI and INTx routing remain
-  unimplemented.
-
-- **MSI-X routing wired into boot provisioning** (latest session).
-  `provision_and_run` now actually *calls* `route_msix`.
-  `provision_virtio_pci` returns `VirtioProvision { transport, bdf }`;
-  `VirtioBootConfig` gained `msix: &dyn MsixBus`, `msix_entry`, and the
-  arch-built `msi_message`, and `provision_and_run` routes MSI-X through
-  the same `KernelMmioMapper` after the four register windows are mapped
-  and before the driver host is built, failing closed with the new
-  `VirtioPciWalkError::RouteMsix`. The arch caller still owns binding
-  the line in `kernel/irq::IrqTable` and encoding the `MsiMessage`
-  (`virtio_boot` stays arch-neutral). Host-tested only: `rustos-kernel
-  --lib` 45 (+1); clippy/fmt/doc clean; `x86_64-unknown-none` lib build
-  clean. **Still TODO (the remaining IRQ-binding the QEMU test needs):**
-  in `boot.rs`, allocate a free external vector + bind it in
-  `IrqTable`, build the `MsiMessage` via `msi_message` from that
-  vector, and pass the `IrqHandle` + `msi_message` + `msix_entry` into
-  `provision_and_run` from the live boot pipeline.
-
-- **Live virtio-PCI boot wiring** (earlier session). The ring-0 walk
-  (`provision_virtio_pci`) and the per-driver DMA factory
-  (`KernelVirtioFactory`) existed but were reachable only from unit
-  tests; nothing joined them to a live `drvhost::Host`. New module
-  `kernel/rustos-kernel/src/virtio_boot.rs`: `VirtioBootConfig` (the
-  borrowed boot resources) + `provision_and_run(config, make_table,
-  body)` — it builds a `KernelMmioMapper`, provisions the
-  `PciTransport`, constructs a `KernelVirtioFactory`, and hands a live
-  `drvhost::Host` (factory wired into
-  `HostConfig::virtio_host_factory`) plus the transport to a `body`
-  closure. The scope/callback keeps the mapper/factory/host + every
-  minted per-driver `DmaPool` on one boot frame (reclaimed on return;
-  `AGENTS.md` §4); fails closed with `VirtioPciWalkError` without
-  building the host. Host-tested only: `rustos-kernel --lib` 44 (+2 —
-  a happy path that provisions the four register windows over a
-  `SimPhysMap`-backed `MmioMap`, loads a signed `.rxe` whose `register`
-  allocates a zeroed DMA slab through the minted `VirtioHost`, asserts
-  `mmio.live() == 4`; and a missing-device `NoVirtioFunction` path).
-  `rustos-crypto` is now a dep + `ed25519-dalek` a dev-dep (test
-  signing). Clippy/fmt/doc + `x86_64-unknown-none` lib+bin clean.
-  **What this unblocks:** the `tests/integration/virtio_blk_pci_x86_64`
-  kernel test bin now only has to *call* `provision_and_run` from the
-  boot pipeline against the live `Pci` + real `KernelMmioMapper` +
-  `DirectPhysMap`, and drive the loaded `virtio-blk` `.rxe` inside the
-  `body` closure. **Still TODO:** construct a `DirectPhysMap` in the
-  test bin (e.g. `DirectPhysMap::identity(4 GiB)` matching the boot
-  identity map) and a real `MmioMap`/`FrameAllocator` from `BootInfo`,
-  bind the device IRQ line, and feed it all into `provision_and_run`.
-
-- **Hardware-real direct-map DMA/MMIO data path** (earlier session).
-  Before this, the kernel DMA/MMIO primitives could not drive a *real*
-  device: `kernel/mem::DmaPool` served the driver's CPU-visible bytes
-  from a heap `Vec<u8>` decoupled from the physical frames it handed
-  the device, and both `DmaPool` and `MmioMap` mapped into a
-  freshly-minted `AddressSpace` never loaded into CR3. New
-  `kernel/mem::phys` module: `PhysMap` trait + production
-  `DirectPhysMap` (identity/offset over the boot low-memory direct
-  map — the x86_64 trampoline identity-maps 0..4 GiB) + test-only
-  `SimPhysMap`. `DmaPool::new` / `MmioMap::new` now take `&dyn
-  PhysMap`; `DmaPool::{bytes,bytes_mut,slot_base}` + zero-on-
-  alloc/free and `MmioMap::region_base` resolve the device `phys`
-  through it, so CPU view == device frame. The `0xCC` guard-byte
-  *simulation* is gone (unmapped guard pages remain the real
-  mechanism); new `DmaError::DirectMap` / `MmioError::DirectMap` fail
-  closed. Threaded through `kernel/sec::{dma,mmio}`,
-  `KernelMmioMapper` (`&'a mut MmioMap<'p,P>`), and
-  `KernelVirtioFactoryConfig` (new `phys` field). All host tests +
-  `x86_64-unknown-none` build + clippy/fmt/doc clean. **What this
-  unblocks:** a real virtio device can now round-trip data; the
-  remaining Item 4 work is purely *wiring* (construct a
-  `DirectPhysMap` in `boot.rs` — e.g. `DirectPhysMap::identity(4
-  GiB)` matching the boot identity map — and thread it into the live
-  `KernelMmioMapper` + `KernelVirtioFactoryConfig.phys` used by the
-  `virtio_blk_pci_x86_64` test).
-
-- **virtio-blk backing storage in the QEMU runner** (earlier session —
-  the `virtio_blk_pci_x86_64` prerequisite). `tools/qemu` could only
-  build a GRUB ISO + attach OVMF; it had no way to give the guest a
-  block device or to know its contents before boot. New module
-  `tools/qemu/src/disk.rs`: `plant_raw_disk(path, size_sectors,
-  sectors)` (+ `SECTOR_BYTES = 512`) lays down a zero-filled raw image
-  and stamps `(lba, bytes)` at `lba * SECTOR_BYTES` (raw, not qcow2, so
-  the host can re-read a guest-written block by byte offset), failing
-  closed on a zero-sector image / out-of-range `lba` / over-long slice.
-  `Spec` gained a `BlockDevice` field + `with_virtio_blk(image)`
-  builder; the x86_64 backend emits `-drive if=none,format=raw,id=blkN`
-  + `-device virtio-blk-pci,drive=blkN` per device, and `Runner::run`
-  fails closed (`NotFound`) on a missing image before spawning QEMU.
-  `rustos-qemu` 27 host tests (+10); clippy `-D warnings` / fmt / doc
-  clean; `docs/src/platform/x86_64.md` updated. **The kernel-side
-  `tests/integration/virtio_blk_pci_x86_64` crate that consumes this is
-  still TODO** (boot + driver host + signed `.rxe` + live
-  `KernelVirtioFactory`/`PciTransport`).
-
-- **Ring-0 virtio-PCI provisioning walk + `VirtioPciBus` ABI seam**
-  (latest session). The per-`cfg_type` window hand-offs were
-  `pub(crate)` on the concrete `Pci` type, so ring 0 (whose only
-  sanctioned PCI surface is `register`, §8) had no way to call them.
-  New frozen `abi-v1` seam `lib/abi/src/driver/virtio_pci.rs`:
-  `VirtioPciBus: Bus` (`map_virtio_window` + `notify_off_multiplier`)
-  + `VIRTIO_PCI_CFG_*` / `VIRTIO_PCI_VENDOR_ID` consts. `Pci<C>`
-  implements it (forwarding to its inherent methods); the PCI
-  `VIRTIO_CFG_*` consts now bind to the abi source of truth (§2.2).
-  New kernel module `kernel/rustos-kernel/src/virtio_pci_walk.rs`:
-  `provision_virtio_pci(bus: &dyn VirtioPciBus, device_id, mapper)`
-  enumerates into a bounded stack table (`MAX_FUNCTIONS = 64`, fails
-  closed on overflow), finds the virtio function, maps the four
-  windows through the `CAP_MMIO_MAP`-gated mapper, and builds a
-  `PciTransport` — driver-agnostic ring 0, no ambient authority, no
-  panics (`VirtioPciWalkError`). Host-tested only (mock
-  `VirtioPciBus` + `MmioMapper`); **not yet wired into a live
-  `drvhost::Host`** and **not yet run against a real QEMU device**.
-  `rustos-abi` 81 (+4), `rustos-kernel --lib` 42 (+5); full `cargo
-  test --workspace`, clippy/fmt/doc, and the `x86_64-unknown-none`
-  kernel build all clean.
-
-- Item 1 — kernel per-process-heap `DmaPool` + `kernel/sec::dma`
-  gate (`CAP_MEM_DMA`, audit 1030/1031).
-- Item 2-tail.2 (+ QEMU validation) — live IRQ end-to-end on
-  x86_64 QEMU.
-- Item 2-tail.3 — `KernelVirtioHost::notify_wait` blocks on a
-  pre-bound `IrqHandle` through `kernel/irq::block_until_ready`.
-- Item 2-tail.4 — kernel-binary `VirtioHostFactory`
-  (`kernel/rustos-kernel/src/virtio_factory.rs`:
-  `KernelVirtioFactory<'k, P, F>` + `KernelVirtioFactoryConfig<'k>`,
-  implementing `rustos_drvhost::VirtioHostFactory`; `mint` fails
-  closed without `CAP_MEM_DMA`, else mints a fresh `AddressSpace` via
-  a `make_table: Fn() -> P` closure + `DmaPool` + per-driver
-  `KernelVirtioHost`). `KernelVirtioHost::new` takes its `DmaPool`
-  **by value** (`RefCell<DmaPool<'a, P>>`), which is what makes a
-  `&self` factory sound.
-- Item 3 — capability-checked register-window hand-off
-  (`RegisterWindow` / `MmioMapper` ABI seam, `kernel/mem::MmioMap`,
-  `kernel/sec::map_mmio`, `Pci::map_bar_window` /
-  `Mmio::map_slot_window`, `KernelMmioMapper`).
-- Item 5 — userland ARP / IP / ICMP responder
-  (`userland/net/icmp`, `rustos-net-icmp`).
-- **virtio-1.x PCI capability decode + register-window hand-off**
-  (latest session — the boot-PCI-walk prerequisite). The PCI
-  capability walker decoded MSI / MSI-X but not the vendor-specific
-  virtio capability (`cap_id = 0x09`), so a boot-time walk had no way
-  to turn a device's virtio-1.x capabilities into `(BAR, offset,
-  length)` triples. `drivers/bus/pci` now decodes them into
-  `Capability::Virtio` / `Capability::VirtioNotify` (+ `VIRTIO_CFG_*`
-  / `CAP_ID_VENDOR` consts) and exposes
-  `Pci::map_virtio_window(bdf, cfg_type, mapper)` (resolves a config
-  structure to `bar.base + offset`, bounds-checks `offset + length`
-  against the BAR size, maps exactly `length` bytes through the
-  `CAP_MMIO_MAP`-gated `MmioMapper`) plus
-  `Pci::virtio_notify_off_multiplier(bdf)`. The four windows + the
-  multiplier are exactly what `PciTransport::new` consumes; the
-  ring-0 boot walk now only has to *call* these. `map_bar_window`
-  was refactored onto a shared `resolve_bar` helper (no
-  duplication). 26 `rustos-drv-bus-pci` tests (+5 new against a
-  `virtio-blk-pci` `1AF4:1042` fixture); clippy / fmt / doc /
-  `x86_64-unknown-none` build clean; PCI README +
-  `docs/src/drivers/bus.md` updated.
-- **Modern virtio-MMIO `MmioTransport`** (latest session — the
-  riscv64 / `AArch64` transport prerequisite). `PciTransport` covered
-  the `x86_64` bus, but the `-M virt` / device-tree MMIO path had no
-  concrete `Transport`. New module
-  `drivers/bus/virtio/src/transport_mmio.rs`: `MmioTransport` over the
-  single kernel-mapped `RegisterWindow` a bus driver resolves from the
-  boot DTB and maps through the `CAP_MMIO_MAP`-gated MMIO-map facility
-  (virtio 1.1 §4.2.2 register layout). Drives the §3.1 init sequence,
-  64-bit feature negotiation, per-queue `Low`/`High` address
-  programming + `QueueReady`, and single-register `QueueNotify`
-  notification — no pointer arithmetic, no ambient authority
-  (`AGENTS.md` §4). Fallible `new` validates magic/version/device-id
-  and a full-length window so the infallible `Transport` methods touch
-  only in-bounds constant offsets and never panic (§2.9). MMIO-only:
-  no num-queues register (`num_queues` = 16-bit max, probe via
-  `QueueNumMax`) and no notify offset/multiplier. Exported from
-  `lib.rs`; 12 new unit tests against a `RegisterWindow`-backed
-  `FakeMmioDevice`; `docs/src/drivers/virtio.md` + PLAN.md Stage 4.D
-  updated. `rustos-drv-bus-virtio` host tests now **73** (default and
-  `--features kernel-host`).
-- **Modern virtio-1.x PCI `PciTransport`** (earlier session — the
-  Item 4 transport prerequisite). Investigation found the only `Transport`
-  impl in-tree was the in-process `MockTransport`; `PciBackend` /
-  `MmioBackend` were thin `RegisterWindow` wrappers that decoded no
-  virtio capability layout, so a kernel-mapped BAR could not
-  actually drive a device. New module
-  `drivers/bus/virtio/src/transport_pci.rs`: `PciTransport` +
-  `PciTransportWindows` — a concrete `Transport` over four
-  capability-checked `RegisterWindow`s (common-cfg / notify / ISR /
-  device-cfg) plus `notify_off_multiplier`. It drives the virtio
-  §3.1 init sequence, 64-bit feature negotiation (u32 halves),
-  per-queue programming/enable, and `queue_notify_off *
-  multiplier` notification — no pointer arithmetic, no ambient
-  authority (`AGENTS.md` §4). Fallible `new` validates the
-  common-cfg window ≥ `0x38` and reads `num_queues`, so infallible
-  `Transport` methods touch only in-bounds constant offsets and
-  never panic (§2.9); the device-supplied notify offset is
-  bounds-checked on the fallible `queue_set` path and `notify`
-  fails closed for unprogrammed queues. Exported from `lib.rs`; 11
-  new unit tests against a `RegisterWindow`-backed `FakeDevice`;
-  `docs/src/drivers/virtio.md` + PLAN.md Stage 4.D updated.
-
-Baseline host tests after this session (all green): `rustos-abi`
-77, `rustos-kernel-mem` 101, `rustos-kernel-sec` 52,
-`rustos-drv-bus-virtio` **73** (default and `--features
-kernel-host`), `rustos-kernel --lib` 37, `rustos-drvhost` 19 lib;
-no regressions elsewhere (`rustos-drv-storage-virtio-blk`,
-`rustos-drv-network-virtio-net` green). Clippy (`-D warnings`,
-both feature sets), `cargo fmt --check`, and `RUSTDOCFLAGS="-D
-warnings" cargo doc --no-deps` are clean on every touched crate.
-The `rustos-drv-bus-virtio` crate builds for `x86_64-unknown-none`
-(default and `--features kernel-host`). Toolchain is pinned
-`nightly-2026-05-27`; QEMU (`qemu-system-x86_64` /
-`qemu-system-riscv64`) is available on the Linux host.
-
-`cargo xtask test`/`ci` were **not** run this session — the change
-is host-testable and additive — and the mdBook half of
-`docs-check` cannot run because `mdbook` is not installed in this
-environment (the rustdoc half passed). The acceptance gate (Item
-6) must run the full `xtask` matrix.
-
-## Assumptions to confirm at the top of the PR body
-
-1. `abi-v1` stays frozen. `PciTransport` is a new concrete
-   implementation of the existing `Transport` trait; no trait
-   signature changed.
-2. `KernelVirtioFactory` lives in the kernel binary (not `drvhost`)
-   so `userland/system/drvhost` keeps zero `kernel/*` dependencies.
-   The factory's `make_table` closure must return a **fresh, empty**
-   page table per call (per-process isolation, `AGENTS.md` §4).
-3. The production kernel binary does not yet construct a live
-   `drvhost::Host` (there is no filesystem / `.rxe` load path in
-   ring 0 yet). The factory and `PciTransport` are therefore
-   exercised by unit tests and will be threaded into a live `Host`
-   by the Item 4 QEMU crates, which is where boot + driver-host +
-   signed `.rxe` wiring exists.
-4. `PciTransport` is host-verified only (register-window-backed
-   `FakeDevice`); it has **not** yet driven a real QEMU device.
-   First on-hardware bring-up happens in the Item 4 vertical below,
-   so budget for first-try MMIO/DMA debugging there.
+- The `rustos-net-icmp` `Client` initiator + virtio-net `&'h dyn
+  VirtioHost` lifetime loosening; the virtio-net user-networking surface
+  in the QEMU runner (`Spec::with_virtio_net[_pcap]`); the riscv64 QEMU
+  runner (`tools/qemu/src/riscv64.rs`) + `kernel/arch/riscv64::qemu_exit`;
+  the modern virtio-MMIO `MmioTransport` and virtio-PCI `PciTransport`;
+  the ring-0 `provision_virtio_pci` walk + `virtio_boot.rs` wiring; the
+  `KernelVirtioFactory`; the capability-gated MMIO register-window
+  hand-off (Item 3); and Items 1 / 2-tail.* — all complete (see PLAN.md
+  Stage 4.D).
 
 ## What needs doing
 
-### Item 4 — QEMU integration tests
+### Item 4 — remaining QEMU integration tests
 
-The `PciTransport` (this session) supplies the missing
-real-hardware transport. What still does **not** exist:
+The x86_64 PCI verticals (blk + net) are done and gated. What remains:
 
-- The **boot-time PCI walk** now exists as
-  `rustos_kernel::provision_virtio_pci` (`virtio_pci_walk.rs`),
-  reaching the PCI driver through the `VirtioPciBus` ABI seam. The
-  remaining work is to **wire it into the live boot pipeline**:
-  construct a `Pci` (via the PCI driver's `register` path / driver
-  host), pass it as `&dyn VirtioPciBus` plus the real
-  `KernelMmioMapper` into `provision_virtio_pci`, and feed the
-  resulting `PciTransport` + a `KernelVirtioFactory`-minted
-  `KernelVirtioHost` into the `drvhost::Host` that runs the signed
-  `virtio-blk` `.rxe`. That wiring is what `tests/integration/
-  virtio_blk_pci_x86_64` exercises.
-- The **MMIO `Transport`** for `riscv64 -M virt` / `AArch64` now
-  exists (`drivers/bus/virtio::MmioTransport`, latest session). The
-  remaining MMIO work is the ring-0 DTB walk that resolves the
-  `virtio-mmio` slot, maps its register block via
-  `Mmio::map_slot_window` → `KernelMmioMapper`, and feeds the window
-  into `MmioTransport::new`.
-- riscv64 support in the **QEMU runner** now exists
-  (`tools/qemu/src/riscv64.rs`, latest session): `Arch::Riscv64`,
-  `Spec::for_riscv64_kernel`, the `virt`-board argv (`-M virt`,
-  `-bios default` + `-kernel`, `virtio-blk-device` on virtio-mmio), and
-  per-arch exit decode through the SiFive Test device (`FINISHER_PASS`
-  ⇒ QEMU exit `0`). Host-tested only (`rustos-qemu` 42, +15). The
-  kernel-side `kernel/arch/riscv64::qemu_exit` now **exists** (latest
-  session): `SIFIVE_TEST_BASE`/`FINISHER_PASS`/`FINISHER_FAIL` consts
-  (tie-down-tested against the runner), a pure `fail_word(code)`
-  (`(code << 16) | FINISHER_FAIL`), and target-gated
-  `exit_success()`/`exit_failure(code)` (one volatile 32-bit store +
-  `wfi` park, no panic). `rustos-arch-riscv64` 3 host tests;
-  clippy/fmt/doc + `riscv64gc-unknown-none-elf` build clean. The
-  riscv64 boot pipeline is still **TODO**.
-
-These need full boot wiring: kernel + driver host + signed `.rxe`,
-plus real device bring-up (walk PCI/DTB → `map_bar_window` /
-`map_slot_window` → `KernelMmioMapper` → `PciTransport` (PCI) /
-the new MMIO transport, a per-device `DmaPool` via
-`KernelVirtioFactory`, and the IRQ line bound alongside the
-register window). Model them on `tests/integration/drvhost_qemu`
-(boot to `AuditEvent::BootCompleted`, then drive the host) and
-`tests/integration/irq_qemu_x86_64`.
-
-Recommended order: land `tests/integration/virtio_blk_pci_x86_64`
-first — it is the one fully on the existing x86_64 runner and
-proves the `PciTransport` against a real device — then the riscv64
-MMIO vertical (the QEMU runner half **and** `kernel/arch/riscv64::
-qemu_exit` now exist; the kernel boot port + DTB walk are what
-remain), then the net tests.
-
-- `tests/integration/virtio_blk_pci_x86_64` — the runner half now
-  exists: `Spec::with_virtio_blk(image)` attaches a `virtio-blk-pci`
-  function and `rustos_qemu::disk::plant_raw_disk` plants a **raw**
-  backing image (sector 0 = known pattern) before boot. Remaining: the
-  kernel-side test bin — boot to `BootCompleted`, run
-  `provision_virtio_pci` against the live `Pci` + `KernelMmioMapper`,
-  mint a `KernelVirtioHost` via `KernelVirtioFactory`, load the signed
-  `virtio-blk` `.rxe` through `drvhost::Host`, read sector 0, write a
-  known pattern to sector 1, read it back, verify checksum, then exit
-  via `qemu_exit`. Enrol it in `tools/xtask/src/commands/qemu_tests.rs`
-  and have its runner spec call `with_virtio_blk` + `plant_raw_disk`.
-  **Also satisfies Item 3's deferred "walk PCI and hand a working
-  window to the virtio transport" check.**
-- `tests/integration/virtio_blk_mmio_riscv64` — same against
-  `qemu-system-riscv64 -M virt` with `virtio-blk-device`, exercising
-  `Mmio::map_slot_window`. The runner half is ready:
-  `Spec::for_riscv64_kernel(...).with_virtio_blk(image)` emits the
-  `virt`-board argv and decodes the SiFive-test exit status; the test
-  bin reports its result via `kernel/arch/riscv64::qemu_exit`
-  (`exit_success()` / `exit_failure(code)`), which now exists.
-- `tests/integration/virtio_net_pci_x86_64` and
-  `tests/integration/virtio_net_mmio_riscv64` — ARP + ICMP echo
-  round-trip against `qemu user net`, driving `rustos-net-icmp`
-  (Item 5) over the live device. The runner half now exists
-  (latest session): `Spec::with_virtio_net()` /
-  `with_virtio_net_pcap(image)` attach a `virtio-net-pci` (x86_64) /
-  `virtio-net-device` (riscv64) function over a user-mode (SLIRP)
-  netdev and optionally `filter-dump` every frame to a host pcap.
-  Remaining is the kernel-side test bin: boot → virtio-net PCI/MMIO
-  walk → drive `rustos-net-icmp` → ARP for `10.0.2.2` + send/verify an
-  ICMP echo to the gateway → assert against the captured pcap →
-  `qemu_exit`. Enrol it in `tools/xtask/src/commands/qemu_tests.rs`
-  with a spec that calls `with_virtio_net_pcap`.
-- Add an unload → reload → reuse test for each driver.
-
-Wiring the kernel-binary side: thread `KernelVirtioFactory` into the
-test bin's `HostConfig::virtio_host_factory` (the factory needs the
-device's bound `IrqHandle` + a `FrameAllocator` + the task's
-`TaskCapabilities` + an `IrqWaiter` — all already available in the
-boot pipeline). `make_table` returns the arch page table.
+- **riscv64 boot port + ring-0 DTB walk.** The riscv64 QEMU runner half
+  (`-M virt`, `virtio-*-device` on virtio-mmio, SiFive-test exit decode)
+  and `kernel/arch/riscv64::qemu_exit` already exist, and
+  `drivers/bus/virtio::MmioTransport` is the transport. The kernel
+  riscv64 boot pipeline (to `AuditEvent::BootCompleted`) and the ring-0
+  DTB walk that resolves the `virtio-mmio` slot and maps its register
+  block via `Mmio::map_slot_window` → `KernelMmioMapper` →
+  `MmioTransport::new` are what's missing. This is the large piece.
+- `tests/integration/virtio_blk_mmio_riscv64` and
+  `virtio_net_mmio_riscv64` — once the riscv64 boot port lands, these are
+  the MMIO analogues of the x86_64 verticals. Note the shared
+  `virtio_qemu_support` crate is currently **x86_64-only** (it uses
+  `x86_mechanism_one`, x86 MSI-X, `sti/hlt/cli`); the riscv64 verticals
+  will need either an arch-gated sibling module in that crate or a
+  parallel `*_mmio` support path (MMIO transport, DTB-resolved window, no
+  MSI-X). Keep the device-tail closures identical to the x86_64 ones
+  (blk: sector round-trip; net: `Client` resolve + ping) so the
+  device-specific code is not duplicated across arches (`AGENTS.md`
+  §2.2).
+- **unload → reload → reuse test** for each driver (per the original
+  Stage 4 deliverable list). `rustos_drvhost::Host` already supports
+  `load → snapshot → reload → unload` (exercised by `drvhost_qemu`); add
+  a virtio-device variant that re-drives the device after a reload.
 
 ### Item 6 — Acceptance gate
 
-- Run `cargo xtask ci` and paste verbatim output in the PR body.
+- Run `cargo xtask ci` on a host with `mdbook` + `cargo deny` available
+  and paste verbatim output in the PR body (this environment lacks both,
+  so only the rustdoc half of `docs-check` was run here).
 - Run `cargo xtask test` (incl. `--qemu`) and paste verbatim output.
 - Confirm coverage ≥ 75 % on each new QEMU integration crate per
-  `AGENTS.md` §7.
-- Confirm `kernel/sec`, `kernel/mem`, `kernel/ipc`, `kernel/irq`,
-  `lib/caps` coverage remain ≥ 95 % after every addition.
+  `AGENTS.md` §7, and ≥ 95 % on `kernel/sec`, `kernel/mem`, `kernel/ipc`,
+  `kernel/irq`, `lib/caps`.
 
 ## Verification commands
 
 ```
-# Item 2-tail.4 regression (this session's surface):
-cargo test -p rustos-kernel --lib
-cargo test -p rustos-drv-bus-virtio --features kernel-host
-cargo test -p rustos-abi -p rustos-kernel-mem -p rustos-kernel-sec \
-           -p rustos-drvhost
+# This session's surface (host + freestanding):
+cargo build --workspace
+cargo clippy -p rustos-test-virtio-qemu-support \
+             -p rustos-test-virtio-blk-pci-x86-64 \
+             -p rustos-test-virtio-net-pci-x86-64 \
+             --target x86_64-unknown-none -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps \
+             -p rustos-test-virtio-qemu-support \
+             -p rustos-test-virtio-blk-pci-x86-64 \
+             -p rustos-test-virtio-net-pci-x86-64 \
+             --target x86_64-unknown-none
+
+# Manual single-vertical reproduction (the runner plants/attaches):
+cargo run -p rustos-qemu --bin rustos-qemu-run -- \
+    --kernel target/x86_64-unknown-none/debug/rustos-test-virtio-net-pci-x86-64 \
+    --virtio-net-pcap /tmp/net.pcap --timeout-secs 60
 
 # Items 4 / 6:
 cargo xtask test --qemu

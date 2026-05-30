@@ -1196,6 +1196,50 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — shared virtio bring-up scaffolding +
+  `virtio_net_pci_x86_64` vertical, *complete*): the
+  `virtio_blk_pci_x86_64` bin carried ~430 lines of device-agnostic
+  bring-up inline in its `kernel.rs` (high-RAM DMA carve, the
+  `DirectPhysMap` + `MmioMap` + `KernelMmioMapper` set-up, the
+  `provision_virtio_pci` + `route_msix` + GSI-bind + `msi_message` MSI-X
+  wiring, the `HltWaiter` / `cli` / `rdtsc` IRQ-wait glue, and the
+  signed-`.rxe` `Host::load`), so a virtio-net vertical could not be
+  added without duplicating it (`AGENTS.md` §2.2). **Extraction.** New
+  freestanding-only library crate `tests/integration/virtio_qemu_support`
+  (`rustos-test-virtio-qemu-support`): `run_virtio_scenario(cfg, body)`
+  owns the entire bring-up on one boot frame and hands the provisioned
+  `PciTransport` + `&dyn VirtioHost` to a device-specific closure
+  (`MSI-X` is enabled before the closure so every queue's
+  `queue_msix_vector` is programmed during the driver's `open`); a
+  `define_boot_harness!(scenario)` macro generates the boot-observer
+  `Sink`, the `#[panic_handler]` bridge, and `kernel_main`; the crate
+  owns the shared bump `#[global_allocator]`. Every item is gated to
+  `x86_64-unknown-none` so a host `cargo build --workspace` compiles it
+  to an empty library (no `std`/allocator conflict). **Refactor.**
+  `virtio_blk_pci_x86_64`'s `kernel.rs` shrank to the device tail
+  (`ToVirtioBlk` resolver + sector verify) and its QEMU gate was re-run
+  green (no regression). **Net vertical.** New
+  `tests/integration/virtio_net_pci_x86_64` reuses the support crate; its
+  tail opens `VirtioNet`, builds a `rustos_net_icmp::Client` from the
+  device MAC + guest `10.0.2.15`, ARP-resolves the SLIRP gateway
+  `10.0.2.2`, then `ping`s it and asserts the echo reply. First-try
+  bring-up passed; the run's `<binary>.pcap` confirms the on-wire
+  `ARP request/reply` + `ICMP echo request/reply (id 0x1234, seq 1)`.
+  **Runner.** `rustos-qemu-run` gained `--virtio-net` / `--virtio-net-pcap`
+  for manual debugging; `tools/xtask/src/commands/qemu_tests.rs` gained a
+  `virtio_net` field and enrols the net test (single CPU, 60-second
+  budget, frame dump to `<binary>.pcap`). **Verification.** Both verticals
+  pass through `cargo xtask test --qemu` (all 8 enrolled tests green);
+  `cargo xtask clippy` / `test` / `abi-check`, `cargo fmt --check`, and
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (the three new crates,
+  `x86_64-unknown-none`) are clean. **Docs.** `docs/src/platform/x86_64.md`
+  ("virtio QEMU verticals (shared bring-up)"). **Deferred.** The riscv64
+  MMIO verticals (`virtio_blk_mmio_riscv64`, `virtio_net_mmio_riscv64`)
+  still need the riscv64 kernel boot port + DTB walk; the per-driver
+  unload → reload → reuse test and the Item 6 acceptance gate
+  (`cargo xtask ci` — its mdBook `docs-check` half + `cargo deny` could
+  not run in this environment) remain outstanding; see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 5 follow-up / Item 4 prerequisite —
   `rustos-net-icmp` initiator + virtio-net host lifetime, *complete*):
   the virtio-net QEMU verticals need the guest to *initiate* an

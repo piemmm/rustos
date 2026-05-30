@@ -1,0 +1,35 @@
+[package]
+name = "rustos-test-virtio-qemu-support"
+description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests: the production boot pipeline runs to AuditEvent::BootCompleted, then a single re-usable scenario carves a per-device DMA region from the published memory map, walks PCI to the requested modern virtio function, maps its four register windows through the capability-gated KernelMmioMapper, routes MSI-X, mints a KernelVirtioHost over the carved pool, loads a signed `.rxe` through rustos_drvhost::Host, and hands the provisioned PciTransport + VirtioHost to a device-specific closure. Both the virtio-blk and virtio-net x86_64 verticals build on it (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The crate carries no host-buildable code: every item is gated behind
+# `cfg(all(target_arch = "x86_64", target_os = "none"))` so that a host
+# `cargo build --workspace` compiles it to an empty library (it defines a
+# `#[global_allocator]` and bridges the freestanding panic handler, both of
+# which would conflict with `std`). Its dependencies are gated to the same
+# target for the same reason.
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-drv-bus-pci = { path = "../../../drivers/bus/pci", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0", features = ["kernel-host"] }
