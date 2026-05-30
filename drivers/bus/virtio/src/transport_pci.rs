@@ -6,14 +6,15 @@
 //! configuration* structure, a *notification* area, an *ISR status*
 //! byte, and a *device-specific configuration* area. The bus driver
 //! resolves each capability to a `(BAR, offset, length)` triple,
-//! asks the kernel MMIO-map facility for a [`RegisterWindow`] over
-//! it, and hands the four windows to [`PciTransport::new`].
+//! asks the kernel MMIO-map facility for a
+//! [`RegisterWindow`](rustos_abi::RegisterWindow) over it, and hands
+//! the four windows to [`PciTransport::new`].
 //!
 //! This type therefore performs **no** pointer arithmetic and holds
 //! **no** ambient authority: it can only touch registers the kernel
 //! chose to map for the owning driver task (`AGENTS.md` §4). Every
 //! register access goes through the bounds-checked accessors on
-//! [`RegisterWindow`].
+//! [`RegisterWindow`](rustos_abi::RegisterWindow).
 //!
 //! # No panics on the production path
 //!
@@ -29,9 +30,8 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use rustos_abi::RegisterWindow;
 
-use rustos_virtio::{Status, Transport, VirtioError};
+use rustos_virtio::{PciTransportWindows, Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
 /// to `queue_msix_vector` / `msix_config` tells the device not to
@@ -77,25 +77,6 @@ pub mod common {
     /// Minimum byte length a common-configuration window must have
     /// for every access in this module to be in bounds.
     pub const CFG_LEN: usize = 0x38;
-}
-
-/// The four kernel-mapped register windows that make up a modern
-/// virtio PCI device, plus the notify-offset multiplier the device
-/// advertised in its notification capability.
-#[derive(Debug)]
-pub struct PciTransportWindows {
-    /// Common-configuration structure window.
-    pub common: RegisterWindow,
-    /// Notification area window.
-    pub notify: RegisterWindow,
-    /// ISR-status window (one byte at offset 0).
-    pub isr: RegisterWindow,
-    /// Device-specific configuration window.
-    pub device: RegisterWindow,
-    /// `notify_off_multiplier` from the notification capability
-    /// (virtio 1.1 §4.1.4.4). The notify address for a queue is
-    /// `queue_notify_off * notify_off_multiplier`.
-    pub notify_off_multiplier: u32,
 }
 
 /// Modern virtio-1.x PCI transport.
@@ -366,6 +347,7 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use core::ptr::NonNull;
+    use rustos_abi::RegisterWindow;
     use rustos_virtio::{MockHost, SplitQueue};
 
     /// One device register region. The leaked, 8-byte-aligned

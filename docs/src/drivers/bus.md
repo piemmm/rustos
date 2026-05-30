@@ -228,14 +228,19 @@ concrete type: `Pci<C>` implements
 `rustos_abi::driver::virtio_pci::VirtioPciBus` (a supertrait of `Bus`),
 whose `map_virtio_window` / `notify_off_multiplier` methods forward to
 the inherent ones. The kernel's `provision_virtio_pci(bus, device_id,
-mapper)` (in `kernel/rustos-kernel/src/virtio_pci_walk.rs`) takes a
+mapper, build)` (in `kernel/virtio/src/virtio_pci_walk.rs`) takes a
 `&dyn VirtioPciBus`, enumerates the bus into a bounded table, picks the
 first function matching `VIRTIO_PCI_VENDOR_ID` and the requested device
 ID, maps the four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
-reads the notify multiplier, and builds a `PciTransport`. Ring 0 thus
-never names a concrete `drivers/bus/*` type and holds no ambient
-authority — the capability check lives in the mapper, and every failure
-is a typed `VirtioPciWalkError` rather than a panic (`AGENTS.md` §2.9).
+reads the notify multiplier, and assembles a `PciTransportWindows`
+(which lives in `lib/virtio`). It does not name a concrete transport
+itself: the caller passes `build` — in production
+`PciTransport::new` — so `kernel/virtio` depends only on `lib/*` and
+never on the `drivers/bus/virtio` crate (`AGENTS.md` §17.4:
+`kernel/* → lib/*`, never a driver). Ring 0 thus names no concrete
+`drivers/bus/*` type and holds no ambient authority — the capability
+check lives in the mapper, and every failure is a typed
+`VirtioPciWalkError` rather than a panic (`AGENTS.md` §2.9).
 The constants live once in `rustos_abi`; the driver's `VIRTIO_CFG_*`
 names bind to them rather than re-stating the literals (`AGENTS.md`
 §2.2).
@@ -251,20 +256,23 @@ the `CAP_MMIO_MAP`-gated `MmioMapper`. As with PCI, this hand-off is
 a frozen ABI seam: `Mmio<'_, T>` implements
 `rustos_abi::driver::virtio_mmio::VirtioMmioBus` (a supertrait of
 `Bus`), whose `map_slot_window` forwards to the inherent one. The
-kernel's `provision_virtio_mmio(bus, device_id, mapper)` (in
-`kernel/rustos-kernel/src/virtio_mmio_walk.rs`) takes a `&dyn
+kernel's `provision_virtio_mmio(bus, device_id, mapper, build)` (in
+`kernel/virtio/src/virtio_mmio_walk.rs`) takes a `&dyn
 VirtioMmioBus`, enumerates the bus into a bounded table, picks the
 first slot whose `DeviceID` matches the requested virtio device type
 (the bare type over MMIO, not the PCI `0x1040 + type` encoding), maps
-its single window, and builds an `MmioTransport`. Ring 0 never names a
-concrete `drivers/bus/*` type and holds no ambient authority; every
-failure is a typed `VirtioMmioWalkError` rather than a panic
-(`AGENTS.md` §2.9).
+its single window, and hands it to `build` (in production
+`MmioTransport::new`). As with the PCI walk, `kernel/virtio` names no
+concrete transport type, so it depends only on `lib/*` and never on the
+`drivers/bus/virtio` crate (`AGENTS.md` §17.4). Ring 0 holds no ambient
+authority; every failure is a typed `VirtioMmioWalkError` rather than a
+panic (`AGENTS.md` §2.9).
 
 ### Boot wiring
 
-`provision_virtio_pci` yields a transport, but a virtio-class driver
-also needs a per-process DMA host and a driver host to run its signed
+`provision_virtio_pci` yields the transport its `build` closure
+constructs, but a virtio-class driver also needs a per-process DMA host
+and a driver host to run its signed
 `.rxe`. `kernel/rustos-kernel/src/virtio_boot.rs` joins the three:
 `provision_and_run(config, make_table, body)` takes a
 `VirtioBootConfig` bundling the bus (reached through both the

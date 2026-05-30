@@ -47,7 +47,7 @@ pub mod transport_pci;
 
 pub use backend::{MmioBackend, PciBackend};
 pub use transport_mmio::MmioTransport;
-pub use transport_pci::{PciTransport, PciTransportWindows};
+pub use transport_pci::PciTransport;
 
 // The bus-agnostic protocol now lives in `lib/virtio`. Re-export it so
 // existing `rustos_drv_bus_virtio::{...}` import sites in the kernel-side
@@ -55,8 +55,9 @@ pub use transport_pci::{PciTransport, PciTransportWindows};
 // `rustos-virtio` crate directly (`AGENTS.md` §2.2 — one canonical
 // definition, re-exported, never duplicated).
 pub use rustos_virtio::{
-    BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MockHost, MockTransport, PoolId,
-    SlabFreeFn, SplitQueue, Status, Transport, UsedToken, VirtioError, VirtioHost,
+    BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MockHost, MockTransport,
+    PciTransportWindows, PoolId, SlabFreeFn, SplitQueue, Status, Transport, UsedToken, VirtioError,
+    VirtioHost,
 };
 
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};

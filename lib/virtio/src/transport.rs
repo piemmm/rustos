@@ -23,7 +23,7 @@ use crate::queue::ring_view::RingView;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_abi::DriverError;
+use rustos_abi::{DriverError, RegisterWindow};
 
 /// Virtio device-status bits.
 ///
@@ -175,6 +175,33 @@ pub trait Transport {
     /// Read `buf.len()` bytes from the device-configuration area
     /// starting at byte `offset`.
     fn read_config(&self, offset: usize, buf: &mut [u8]);
+}
+
+/// The kernel-mapped register windows that make up a modern virtio PCI
+/// device, plus the notify-offset multiplier the device advertised in
+/// its notification capability.
+///
+/// This is the *construction seam* for a PCI [`Transport`]: the ring-0
+/// provisioning walk in `kernel/virtio` maps each window through the
+/// capability-checked MMIO-map facility and assembles this descriptor,
+/// and the concrete `drivers/bus/virtio::PciTransport` is built from it.
+/// It lives here, beside the [`Transport`] trait, so the kernel-side
+/// walk can name the builder input without depending on the bus driver
+/// crate (`AGENTS.md` §17.4 — `kernel/* → lib/*`, never a driver).
+#[derive(Debug)]
+pub struct PciTransportWindows {
+    /// Common-configuration structure window.
+    pub common: RegisterWindow,
+    /// Notification area window.
+    pub notify: RegisterWindow,
+    /// ISR-status window (one byte at offset 0).
+    pub isr: RegisterWindow,
+    /// Device-specific configuration window.
+    pub device: RegisterWindow,
+    /// `notify_off_multiplier` from the notification capability
+    /// (virtio 1.1 §4.1.4.4). The notify address for a queue is
+    /// `queue_notify_off * notify_off_multiplier`.
+    pub notify_off_multiplier: u32,
 }
 
 /// Callback the test peer invokes for each chain the driver

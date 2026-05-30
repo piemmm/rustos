@@ -3221,12 +3221,6 @@ tracked defect; the burn-down removes them, and removing the last entry of
 a list collapses that list. No *new* violation may be added.
 
 **`deps-check` grandfathered edges (§17.4 / §17.1):**
-- `kernel/virtio` → `drivers/bus/virtio`: the kernel-side virtio host
-  still links the bus driver for the concrete PCI/MMIO transports.
-  Move the transport seam so the kernel stops depending on a driver.
-  (The `→ userland/system/drvhost` edge that sat here is *done* — the
-  `VirtioHostFactory` seam moved into `lib/virtio`; see the burn-down
-  below.)
 - `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`: the
   riscv64 port still names concrete kernel crates from its boot
   pipeline. The Arch HAL `kernel/arch/api` now exists (see burn-down
@@ -3356,7 +3350,7 @@ a list collapses that list. No *new* violation may be added.
   closed if any of them returns. `deps-check` and `cfg-check` are clean.
   The remaining virtio deps-check edge
   (`kernel/virtio → drivers/bus/virtio`, the concrete-transport thread)
-  is unchanged by this work.
+  was unchanged by this work and is resolved separately below.
 - `kernel/virtio` → `userland/system/drvhost` `VirtioHostFactory` seam
   relocation (deps-check §17.4) — *done*. The factory trait the driver
   host calls before a driver's `register()` — and which the kernel-side
@@ -3374,6 +3368,30 @@ a list collapses that list. No *new* violation may be added.
   edge has been removed and a regression test
   (`deps_check::tests::kernel_virtio_has_no_edge_to_drvhost`) fails
   closed if it returns. `deps-check` and `cfg-check` are clean.
+- `kernel/virtio` → `drivers/bus/virtio` concrete-transport seam
+  (deps-check §17.4) — *done*. The ring-0 provisioning walks
+  (`virtio_pci_walk` / `virtio_mmio_walk`) used to build the concrete
+  `PciTransport` / `MmioTransport` from `drivers/bus/virtio`, which made
+  `kernel/virtio` (a `KernelSubsystem`) depend on a driver crate. The
+  walks are now generic over a caller-supplied transport builder
+  (`FnOnce(PciTransportWindows) -> Result<T, VirtioError>` /
+  `FnOnce(RegisterWindow) -> Result<T, VirtioError>`) and return a
+  generic `VirtioProvision<T>` / `VirtioMmioProvision<T>`. The
+  transport-construction descriptor `PciTransportWindows` moved into
+  `lib/virtio` (beside the `Transport` trait); the bus driver imports
+  and re-exports it. `kernel/virtio` therefore names only `lib/*` types
+  and dropped its `rustos-drv-bus-virtio` Cargo dependency. The
+  production builders — `PciTransport::new` / `MmioTransport::new` — are
+  passed by the consumers that may legitimately name the bus driver:
+  the `rustos-kernel` binary (`virtio_boot.rs`, itself a separate
+  grandfather thread) and the Tooling-exempt QEMU integration verticals.
+  The walk unit tests use local identity builders, so `kernel/virtio`
+  has no dependency on the bus driver even under `[dev-dependencies]`.
+  The grandfather edge has been removed and a regression test
+  (`deps_check::tests::kernel_virtio_has_no_edge_to_bus_driver`) fails
+  closed if it returns. `deps-check` and `cfg-check` are clean. Docs
+  updated: `docs/src/drivers/{bus,virtio}.md` and
+  `docs/src/abi/driver_traits.md`.
 
 ---
 

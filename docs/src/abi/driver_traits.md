@@ -194,8 +194,10 @@ The `VIRTIO_PCI_CFG_*` constants name the four `cfg_type` discriminants
 kernel's `provision_virtio_pci` walk (see
 [Bus drivers](../drivers/bus.md#ring-0-virtio-pci-walk)) enumerates
 through the `Bus` supertrait, picks the matching function, maps the
-four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`, and builds
-a `PciTransport` — without naming the concrete `Pci` type.
+four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`, and hands
+the assembled `PciTransportWindows` (a `lib/virtio` type) to a
+caller-supplied builder — so it names neither the concrete `Pci` type
+nor the `PciTransport` it produces.
 
 ## Virtio-MMIO provisioning
 
@@ -216,8 +218,9 @@ slot's `BusDevice::address`. The kernel's `provision_virtio_mmio` walk
 (see [Bus drivers](../drivers/bus.md#ring-0-virtio-mmio-walk))
 enumerates through the `Bus` supertrait, picks the slot whose
 `DeviceID` matches, maps its window through the `CAP_MMIO_MAP`-gated
-`MmioMapper`, and builds an `MmioTransport` — without naming the
-concrete `Mmio` type.
+`MmioMapper`, and hands the window to a caller-supplied builder — so it
+names neither the concrete `Mmio` type nor the `MmioTransport` it
+produces.
 
 ## Versioning
 

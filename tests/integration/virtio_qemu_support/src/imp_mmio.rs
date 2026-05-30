@@ -440,7 +440,7 @@ where
     };
     let (transport, slot_base) = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
-        let Ok(prov) = provision_virtio_mmio(&bus, device_id, &mapper) else {
+        let Ok(prov) = provision_virtio_mmio(&bus, device_id, &mapper, MmioTransport::new) else {
             env.fail("virtio-MMIO provisioning walk");
         };
         (prov.transport, prov.base)

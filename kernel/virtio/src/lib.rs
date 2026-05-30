@@ -8,11 +8,20 @@
 //!   [`KernelVirtioHost`] over a
 //!   fresh per-process [`DmaPool`](rustos_kernel_mem::DmaPool) for every
 //!   loaded virtio-class driver.
-//! * [`virtio_pci_walk`] — the ring-0 walk that turns a virtio-PCI bus
-//!   into a [`PciTransport`](rustos_drv_bus_virtio::PciTransport).
-//! * [`virtio_mmio_walk`] — the ring-0 walk that turns a `virt`-board
-//!   virtio-MMIO slot into an
-//!   [`MmioTransport`](rustos_drv_bus_virtio::MmioTransport).
+//! * [`virtio_pci_walk`] — the ring-0 walk that maps a virtio-PCI
+//!   device's register windows into a
+//!   [`PciTransportWindows`](rustos_virtio::PciTransportWindows) and
+//!   hands them to a caller-supplied transport builder.
+//! * [`virtio_mmio_walk`] — the ring-0 walk that maps a `virt`-board
+//!   virtio-MMIO slot's register window and hands it to a
+//!   caller-supplied transport builder.
+//!
+//! Both walks are generic over the transport builder, so this crate
+//! names only `lib/*` types and never the concrete
+//! `drivers/bus/virtio` transports — keeping ring 0 off any
+//! `drivers/bus/*` crate (`AGENTS.md` §17.4: `kernel/* → lib/*`, never
+//! a driver). The production builders are
+//! `rustos_drv_bus_virtio::{PciTransport, MmioTransport}::new`.
 //!
 //! # Why a separate crate
 //!

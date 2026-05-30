@@ -142,7 +142,7 @@ where
 
     let transport = {
         let mapper = KernelMmioMapper::new(mmio, caller, audit);
-        let provision = provision_virtio_pci(bus, device_id, &mapper)?;
+        let provision = provision_virtio_pci(bus, device_id, &mapper, PciTransport::new)?;
         msix.route_msix(provision.bdf, msix_entry, msi_message, &mapper)
             .map_err(VirtioPciWalkError::RouteMsix)?;
         provision.transport

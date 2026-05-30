@@ -18,8 +18,8 @@
 
 use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
-use rustos_abi::{DriverError, MmioMapper};
-use rustos_drv_bus_virtio::{MmioTransport, VirtioError};
+use rustos_abi::{DriverError, MmioMapper, RegisterWindow};
+use rustos_virtio::VirtioError;
 
 /// Upper bound on the number of bus slots the walk will record while
 /// searching for the virtio device.
@@ -51,47 +51,60 @@ pub enum VirtioMmioWalkError {
     Transport(VirtioError),
 }
 
-/// A provisioned virtio-MMIO device: its driver-facing
-/// [`MmioTransport`] plus the physical base of the register block it
-/// was built from.
+/// A provisioned virtio-MMIO device: the transport `T` the caller's
+/// builder produced over the kernel-mapped register window, plus the
+/// physical base of the register block it was built from.
 #[derive(Debug)]
-pub struct VirtioMmioProvision {
-    /// Transport over the kernel-mapped virtio register window.
-    pub transport: MmioTransport,
+pub struct VirtioMmioProvision<T> {
+    /// Transport the builder constructed over the kernel-mapped
+    /// virtio register window.
+    pub transport: T,
     /// Physical base address of the provisioned slot's register block.
     pub base: u64,
 }
 
 /// Enumerate `bus`, locate the first populated slot whose virtio device
 /// ID equals `device_id`, map its register window through `mapper`, and
-/// build an [`MmioTransport`] over it.
+/// hand the window to `build` to construct the caller's transport.
 ///
 /// `device_id` is the virtio device type reported in the slot's
 /// `DeviceID` register (e.g. `2` for block, `1` for network) — over
 /// MMIO this is the bare device type, not the PCI `0x1040 + type`
 /// encoding.
 ///
+/// The walk maps the window but never names a concrete transport type:
+/// the caller passes `build` (in production
+/// `rustos_drv_bus_virtio::MmioTransport::new`), so ring 0 depends only
+/// on `lib/*` and never on a `drivers/bus/*` crate (`AGENTS.md`
+/// §17.4 — `kernel/* → lib/*`, never a driver).
+///
 /// # Errors
 ///
 /// See [`VirtioMmioWalkError`]; every failure mode is reported rather
 /// than panicking (`AGENTS.md` §2.9). The walk touches no device state
-/// until [`MmioTransport::new`] validates the identity registers.
+/// itself; any identity-register validation the transport performs
+/// happens inside `build`, whose [`VirtioError`] is surfaced as
+/// [`VirtioMmioWalkError::Transport`].
 ///
 /// # Capabilities
 ///
 /// The `mapper` enforces
 /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) on the
 /// window; this walk holds no ambient authority of its own.
-pub fn provision_virtio_mmio(
+pub fn provision_virtio_mmio<T, B>(
     bus: &dyn VirtioMmioBus,
     device_id: u32,
     mapper: &dyn MmioMapper,
-) -> Result<VirtioMmioProvision, VirtioMmioWalkError> {
+    build: B,
+) -> Result<VirtioMmioProvision<T>, VirtioMmioWalkError>
+where
+    B: FnOnce(RegisterWindow) -> Result<T, VirtioError>,
+{
     let base = find_virtio_slot(bus, device_id)?;
     let window = bus
         .map_slot_window(base, mapper)
         .map_err(VirtioMmioWalkError::MapWindow)?;
-    let transport = MmioTransport::new(window).map_err(VirtioMmioWalkError::Transport)?;
+    let transport = build(window).map_err(VirtioMmioWalkError::Transport)?;
     Ok(VirtioMmioProvision { transport, base })
 }
 
@@ -124,17 +137,24 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::RegisterWindow;
-    use rustos_drv_bus_virtio::transport_mmio::regs;
 
     const VIRTIO_BLK_DEVICE_ID: u32 = 2;
     const SLOT_BASE: u64 = 0x1000_4000;
-    /// Length the fake bus advertises for the slot — comfortably above
-    /// `regs::WINDOW_MIN_LEN` so `MmioTransport::new` accepts it.
+    /// Length the fake bus advertises for the slot. The walk only maps
+    /// the window; identity-register validation is the builder's job,
+    /// so any non-zero length exercises it.
     const SLOT_LEN: usize = 0x200;
 
+    /// Identity builder: keeps the mapped window so the test can assert
+    /// on it directly, standing in for a real transport constructor
+    /// without depending on a `drivers/bus/*` crate (`AGENTS.md`
+    /// §17.4).
+    fn keep_window() -> impl FnOnce(RegisterWindow) -> Result<RegisterWindow, VirtioError> {
+        |window| Ok(window)
+    }
+
     /// Mapper that hands out a window over freshly-leaked, aligned
-    /// backing storage pre-stamped with a valid modern virtio-MMIO
-    /// identity header, recording the `(phys, len)` it was asked for.
+    /// backing storage, recording the `(phys, len)` it was asked for.
     struct RecordingMapper {
         grant: bool,
         requests: RefCell<alloc::vec::Vec<(u64, usize)>>,
@@ -163,16 +183,6 @@ mod tests {
             // lives for the rest of the test process; nothing else
             // aliases it and the window only performs volatile access.
             let window = unsafe { RegisterWindow::from_mapping(phys_base, base, len) };
-            // Stamp the identity registers `MmioTransport::new` validates.
-            window
-                .write_u32(regs::MAGIC, regs::MAGIC_VALUE)
-                .expect("magic");
-            window
-                .write_u32(regs::VERSION, regs::VERSION_MODERN)
-                .expect("version");
-            window
-                .write_u32(regs::DEVICE_ID, VIRTIO_BLK_DEVICE_ID)
-                .expect("device id");
             Ok(window)
         }
     }
@@ -224,10 +234,10 @@ mod tests {
             slots: alloc::vec![slot(1, 0x1000_3000), slot(VIRTIO_BLK_DEVICE_ID, SLOT_BASE)],
         };
         let mapper = RecordingMapper::new(true);
-        let provision =
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect("provisioned");
+        let provision = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+            .expect("provisioned");
         assert_eq!(provision.base, SLOT_BASE);
-        assert_eq!(provision.transport.window().len(), SLOT_LEN);
+        assert_eq!(provision.transport.len(), SLOT_LEN);
         assert_eq!(
             mapper.requests.borrow().as_slice(),
             &[(SLOT_BASE, SLOT_LEN)]
@@ -241,7 +251,8 @@ mod tests {
         };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect_err("no slot"),
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+                .expect_err("no slot"),
             VirtioMmioWalkError::NoVirtioSlot
         );
         assert!(mapper.requests.borrow().is_empty());
@@ -254,7 +265,8 @@ mod tests {
         };
         let mapper = RecordingMapper::new(false);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect_err("map refused"),
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+                .expect_err("map refused"),
             VirtioMmioWalkError::MapWindow(DriverError::PermissionDenied)
         );
     }
@@ -268,7 +280,8 @@ mod tests {
         let bus = FakeBus { slots };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect_err("overflow"),
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+                .expect_err("overflow"),
             VirtioMmioWalkError::SlotTableOverflow
         );
     }

@@ -94,13 +94,6 @@ struct GrandfatheredEdge {
 /// is a tracked defect for the §17 burn-down (`PLAN.md`); this list may
 /// only shrink.
 const GRANDFATHERED: &[GrandfatheredEdge] = &[
-    // `kernel/virtio` still reaches down into the virtio *bus driver*
-    // (`drivers/bus/virtio`) for the concrete PCI/MMIO transports its
-    // kernel-side host drives. That edge is a separate, larger thread of
-    // the §17 burn-down. The former `kernel/virtio -> userland/drvhost`
-    // edge is resolved: the `VirtioHostFactory` seam now lives in
-    // `lib/virtio`, so both sides depend on `lib/*` instead of each other.
-    edge("rustos-kernel-virtio", "rustos-drv-bus-virtio"),
     // Architecture ports still name concrete kernel crates instead of
     // the Arch HAL `kernel/arch/api`. x86_64 has been migrated: it now
     // implements `rustos_arch_api::SchedulerArch` and no longer names a
@@ -546,6 +539,39 @@ mod tests {
         assert!(
             kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
             "kernel/virtio must consume the VirtioHostFactory seam from lib/virtio"
+        );
+    }
+
+    #[test]
+    fn kernel_virtio_has_no_edge_to_bus_driver() {
+        // Burn-down regression (§17.4): the ring-0 virtio provisioning
+        // walks no longer name the concrete `drivers/bus/virtio`
+        // transports. `PciTransportWindows` moved into `lib/virtio` and
+        // the walks are generic over a caller-supplied transport builder,
+        // so `kernel/virtio` (a `KernelSubsystem`) depends only on
+        // `lib/*` and never on the bus driver. The former
+        // `kernel/virtio -> drivers/bus/virtio` edge (a `KernelSubsystem
+        // -> Driver` inversion) must stay gone, not be re-grandfathered.
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let kernel_virtio = crates
+            .iter()
+            .find(|c| c.name == "rustos-kernel-virtio")
+            .expect("kernel-virtio present");
+        assert!(
+            !kernel_virtio
+                .deps
+                .iter()
+                .any(|d| d == "rustos-drv-bus-virtio"),
+            "kernel/virtio regained a dependency on the virtio bus driver"
+        );
+        assert!(
+            !is_grandfathered("rustos-kernel-virtio", "rustos-drv-bus-virtio"),
+            "stale grandfather entry for kernel/virtio -> drv-bus-virtio must stay removed"
+        );
+        assert!(
+            kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
+            "kernel/virtio must build its transports from the lib/virtio seam"
         );
     }
 

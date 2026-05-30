@@ -84,7 +84,11 @@ the four capability-checked `RegisterWindow`s the bus driver resolves
 from the device's virtio PCI capabilities (virtio 1.1 §4.1.4) —
 *common configuration*, *notification*, *ISR status*, and
 *device-specific configuration* — plus the notification
-capability's `notify_off_multiplier`:
+capability's `notify_off_multiplier`. These are bundled in
+`PciTransportWindows`, the transport-construction seam, which lives in
+`lib/virtio` (not the bus driver) so the ring-0 provisioning walk in
+`kernel/virtio` can assemble it and hand it to `PciTransport::new`
+without naming the `drivers/bus/virtio` crate (`AGENTS.md` §17.4):
 
 ```rust
 pub struct PciTransportWindows {

@@ -261,7 +261,9 @@ where
     };
     let mut transport = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
-        let Ok(prov) = rustos_kernel::provision_virtio_pci(&bus, device_id, &mapper) else {
+        let Ok(prov) =
+            rustos_kernel::provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
+        else {
             env.fail("virtio-PCI provisioning walk");
         };
         if bus.route_msix(prov.bdf, MSIX_ENTRY, msi, &mapper).is_err() {

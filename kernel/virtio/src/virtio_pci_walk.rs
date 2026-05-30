@@ -22,7 +22,7 @@ use rustos_abi::driver::virtio_pci::{
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
 };
 use rustos_abi::{DriverError, MmioMapper};
-use rustos_drv_bus_virtio::{PciTransport, PciTransportWindows, VirtioError};
+use rustos_virtio::{PciTransportWindows, VirtioError};
 
 /// Upper bound on the number of bus functions the walk will record
 /// while searching for the virtio device.
@@ -59,8 +59,9 @@ pub enum VirtioPciWalkError {
     RouteMsix(DriverError),
 }
 
-/// A provisioned virtio-PCI device: its driver-facing [`PciTransport`]
-/// plus the bus-local address of the function it was built from.
+/// A provisioned virtio-PCI device: the transport `T` the caller's
+/// builder produced over the four kernel-mapped register windows, plus
+/// the bus-local address of the function it was built from.
 ///
 /// The boot wiring needs the `bdf` after the walk to route the
 /// device's MSI-X interrupt
@@ -68,38 +69,52 @@ pub enum VirtioPciWalkError {
 /// which is keyed by function — the walk already located it, so it is
 /// returned here rather than re-enumerated (`AGENTS.md` §2.2).
 #[derive(Debug)]
-pub struct VirtioProvision {
-    /// Transport over the four kernel-mapped virtio register windows.
-    pub transport: PciTransport,
+pub struct VirtioProvision<T> {
+    /// Transport the builder constructed over the kernel-mapped
+    /// virtio register windows.
+    pub transport: T,
     /// Bus-local address of the provisioned virtio function.
     pub bdf: u64,
 }
 
 /// Enumerate `bus`, locate the first virtio function whose PCI device
 /// ID equals `device_id`, map its four virtio register windows through
-/// `mapper`, and build a [`PciTransport`] over them.
+/// `mapper`, and hand the assembled [`PciTransportWindows`] to `build`
+/// to construct the caller's transport.
 ///
 /// `device_id` is the modern virtio PCI device ID, `0x1040 +
 /// virtio_device_type` (e.g. `0x1042` for block, `0x1041` for
 /// network). Only functions reporting the virtio vendor ID
 /// ([`VIRTIO_PCI_VENDOR_ID`]) are considered.
 ///
+/// The walk maps the windows but never names a concrete transport
+/// type: the caller passes `build` (in production
+/// `rustos_drv_bus_virtio::PciTransport::new`), so ring 0 depends only
+/// on `lib/*` and never on a `drivers/bus/*` crate (`AGENTS.md`
+/// §17.4 — `kernel/* → lib/*`, never a driver).
+///
 /// # Errors
 ///
 /// See [`VirtioPciWalkError`]; every failure mode is reported rather
-/// than panicking (`AGENTS.md` §2.9), and the walk touches no device
-/// state until [`PciTransport::new`] drives the init sequence.
+/// than panicking (`AGENTS.md` §2.9). The walk touches no device state
+/// itself; any device init the transport drives happens inside `build`,
+/// whose [`VirtioError`] is surfaced as
+/// [`VirtioPciWalkError::Transport`].
 ///
 /// # Capabilities
 ///
 /// The `mapper` enforces
 /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) on
 /// every window; this walk holds no ambient authority of its own.
-pub fn provision_virtio_pci(
+pub fn provision_virtio_pci<T, B>(
     bus: &dyn VirtioPciBus,
     device_id: u16,
     mapper: &dyn MmioMapper,
-) -> Result<VirtioProvision, VirtioPciWalkError> {
+    build: B,
+) -> Result<VirtioProvision<T>, VirtioPciWalkError>
+where
+    B: FnOnce(PciTransportWindows) -> Result<T, VirtioError>,
+{
     let bdf = find_virtio_function(bus, device_id)?;
     let windows = PciTransportWindows {
         common: map(bus, bdf, VIRTIO_PCI_CFG_COMMON, mapper)?,
@@ -110,7 +125,7 @@ pub fn provision_virtio_pci(
             .notify_off_multiplier(bdf)
             .map_err(VirtioPciWalkError::MapWindow)?,
     };
-    let transport = PciTransport::new(windows).map_err(VirtioPciWalkError::Transport)?;
+    let transport = build(windows).map_err(VirtioPciWalkError::Transport)?;
     Ok(VirtioProvision { transport, bdf })
 }
 
@@ -155,22 +170,31 @@ mod tests {
     use core::cell::RefCell;
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::RegisterWindow;
-    use rustos_drv_bus_virtio::transport_pci::common;
 
     const VIRTIO_BLK_DEVICE_ID: u16 = 0x1042;
     const TARGET_BDF: u64 = 0x0000_0800;
 
     /// Length the fake device advertises for each virtio config
-    /// structure, keyed by `cfg_type`. Common is sized to satisfy
-    /// `PciTransport::new`'s minimum.
+    /// structure, keyed by `cfg_type`. The walk only maps the windows
+    /// and assembles them; it does not inspect their contents (that is
+    /// the builder's job), so any non-zero length exercises it.
     fn cfg_len(cfg_type: u8) -> usize {
         match cfg_type {
-            VIRTIO_PCI_CFG_COMMON => common::CFG_LEN,
+            VIRTIO_PCI_CFG_COMMON => 0x38,
             VIRTIO_PCI_CFG_NOTIFY => 0x10,
             VIRTIO_PCI_CFG_ISR => 0x4,
             VIRTIO_PCI_CFG_DEVICE => 0x8,
             _ => 0,
         }
+    }
+
+    /// Identity builder: keeps the assembled windows so the test can
+    /// assert on them directly, standing in for a real transport
+    /// constructor without depending on a `drivers/bus/*` crate
+    /// (`AGENTS.md` §17.4).
+    fn keep_windows() -> impl FnOnce(PciTransportWindows) -> Result<PciTransportWindows, VirtioError>
+    {
+        |windows| Ok(windows)
     }
 
     /// Mapper that hands out windows over freshly-leaked, aligned
@@ -264,13 +288,13 @@ mod tests {
             ],
         };
         let mapper = RecordingMapper::new(true);
-        let provision =
-            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).expect("transport");
+        let provision = provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_windows())
+            .expect("transport");
 
         // The located function and all four windows plus the
         // multiplier were provisioned.
         assert_eq!(provision.bdf, TARGET_BDF);
-        assert_eq!(provision.transport.windows().notify_off_multiplier, 4);
+        assert_eq!(provision.transport.notify_off_multiplier, 4);
         let reqs = mapper.requests.borrow();
         assert_eq!(reqs.len(), 4);
         // Each cfg_type was mapped exactly once at its synthetic base.
@@ -292,7 +316,7 @@ mod tests {
         };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).unwrap_err(),
+            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_windows()).unwrap_err(),
             VirtioPciWalkError::NoVirtioFunction
         );
         // No device matched, so no window was mapped.
@@ -307,7 +331,7 @@ mod tests {
         };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).unwrap_err(),
+            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_windows()).unwrap_err(),
             VirtioPciWalkError::NoVirtioFunction
         );
     }
@@ -319,7 +343,7 @@ mod tests {
         };
         let mapper = RecordingMapper::new(false);
         assert_eq!(
-            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).unwrap_err(),
+            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_windows()).unwrap_err(),
             VirtioPciWalkError::MapWindow(DriverError::PermissionDenied)
         );
     }
@@ -334,7 +358,7 @@ mod tests {
         let bus = FakeBus { devices };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper).unwrap_err(),
+            provision_virtio_pci(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_windows()).unwrap_err(),
             VirtioPciWalkError::DeviceTableOverflow
         );
     }
