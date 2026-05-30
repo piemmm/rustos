@@ -228,15 +228,20 @@ the bus-driver-minted `IrqHandle`, and the scheduler/clock
 ### Kernel-binary factory (`KernelVirtioFactory`)
 
 Stage 4.D Item 2-tail.4 wires the host into the userland driver
-host. The userland `drvhost` defines a `VirtioHostFactory` trait
-(`mint(&self, granted) -> Option<Box<dyn VirtioHost>>`) and calls
-it just before a driver's `register()`; `kernel/virtio` supplies
-the concrete implementation, `KernelVirtioFactory`, in
-`kernel/virtio/src/virtio_factory.rs`. Keeping the impl in
-`kernel/virtio` lets `drvhost` stay free of every `kernel/*`
-dependency (`AGENTS.md` §3 / §17.4): `kernel/virtio` depends on
-`drvhost` (for the factory trait) and on `kernel/{mem,sec,irq}`,
-while the bus driver and device drivers stay on `lib/*` only.
+host. The `VirtioHostFactory` trait
+(`mint(&self, granted: &dyn CapabilityQuery) -> Option<Box<dyn VirtioHost>>`)
+lives in the bus-agnostic `lib/virtio` host seam; the userland
+`drvhost` calls it just before a driver's `register()`, and
+`kernel/virtio` supplies the concrete implementation,
+`KernelVirtioFactory`, in `kernel/virtio/src/virtio_factory.rs`.
+Hosting the trait in `lib/virtio` lets both sides depend on `lib/*`
+instead of on each other (`AGENTS.md` §17.4): `drvhost` stays free
+of every `kernel/*` dependency and `kernel/virtio` stays free of
+every `userland/*` dependency. `kernel/virtio` links
+`kernel/{mem,sec,irq}` for the concrete host, while the bus driver
+and device drivers stay on `lib/*` only. `mint` gates on the
+driver's granted capabilities through `&dyn rustos_abi::CapabilityQuery`,
+so the seam never names `lib/caps`.
 
 Each `mint` call builds a brand-new `AddressSpace` (via a
 `make_table` closure) and `DmaPool`, then hands ownership to a fresh

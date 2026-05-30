@@ -94,10 +94,13 @@ struct GrandfatheredEdge {
 /// is a tracked defect for the §17 burn-down (`PLAN.md`); this list may
 /// only shrink.
 const GRANDFATHERED: &[GrandfatheredEdge] = &[
-    // `kernel/virtio` reaches down into a driver and a userland service
-    // for the shared virtio host factory. Moves behind `lib/abi` traits.
+    // `kernel/virtio` still reaches down into the virtio *bus driver*
+    // (`drivers/bus/virtio`) for the concrete PCI/MMIO transports its
+    // kernel-side host drives. That edge is a separate, larger thread of
+    // the §17 burn-down. The former `kernel/virtio -> userland/drvhost`
+    // edge is resolved: the `VirtioHostFactory` seam now lives in
+    // `lib/virtio`, so both sides depend on `lib/*` instead of each other.
     edge("rustos-kernel-virtio", "rustos-drv-bus-virtio"),
-    edge("rustos-kernel-virtio", "rustos-drvhost"),
     // Architecture ports still name concrete kernel crates instead of
     // the Arch HAL `kernel/arch/api`. x86_64 has been migrated: it now
     // implements `rustos_arch_api::SchedulerArch` and no longer names a
@@ -515,6 +518,34 @@ mod tests {
         assert!(
             !is_grandfathered("rustos-drvhost", "rustos-drv-bus-virtio"),
             "stale grandfather entry must stay removed"
+        );
+    }
+
+    #[test]
+    fn kernel_virtio_has_no_edge_to_drvhost() {
+        // Burn-down regression (§17.4): the `VirtioHostFactory` seam was
+        // hoisted into `lib/virtio`, so the kernel-side factory crate
+        // (`kernel/virtio`) and the userland driver host (`drvhost`) both
+        // depend on `lib/*` instead of on each other. The former
+        // `kernel/virtio -> userland/drvhost` edge (a `KernelSubsystem ->
+        // Userland` inversion) must stay gone, not be re-grandfathered.
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let kernel_virtio = crates
+            .iter()
+            .find(|c| c.name == "rustos-kernel-virtio")
+            .expect("kernel-virtio present");
+        assert!(
+            !kernel_virtio.deps.iter().any(|d| d == "rustos-drvhost"),
+            "kernel/virtio regained a dependency on userland/drvhost"
+        );
+        assert!(
+            !is_grandfathered("rustos-kernel-virtio", "rustos-drvhost"),
+            "stale grandfather entry for kernel/virtio -> drvhost must stay removed"
+        );
+        assert!(
+            kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
+            "kernel/virtio must consume the VirtioHostFactory seam from lib/virtio"
         );
     }
 

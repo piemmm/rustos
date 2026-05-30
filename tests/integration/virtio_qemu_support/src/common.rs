@@ -32,13 +32,11 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_network_virtio_net::VirtioNet;
 use rustos_drv_storage_virtio_blk::VirtioBlk;
-use rustos_drvhost::{
-    DriverEntry, EntryResolver, Host, HostConfig, ImageSource, VirtioHostFactory,
-};
+use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
 use rustos_net_icmp::{Client, Ipv4Address};
-use rustos_virtio::{Transport, VirtioHost};
+use rustos_virtio::{Transport, VirtioHost, VirtioHostFactory};
 
 /// Upper bound of the boot identity map both arches build
 /// (`DirectPhysMap::identity(IDENTITY_LIMIT)`): the bottom 4 GiB. Every

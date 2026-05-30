@@ -144,6 +144,16 @@ impl IntoIterator for &CapabilitySet {
     }
 }
 
+/// Expose a [`CapabilitySet`] to ABI-level host seams that gate on a
+/// granted capability through `&dyn rustos_abi::CapabilityQuery` without
+/// naming this crate (`AGENTS.md` §17.4 — the `lib/abi -> lib/caps`
+/// reverse edge is forbidden).
+impl rustos_abi::CapabilityQuery for CapabilitySet {
+    fn holds(&self, cap: CapabilityId) -> bool {
+        self.contains(cap)
+    }
+}
+
 /// Ascending iterator over the capabilities of a [`CapabilitySet`].
 #[derive(Clone, Debug)]
 pub struct CapabilitySetIter {
@@ -171,7 +181,20 @@ impl core::iter::FusedIterator for CapabilitySetIter {}
 #[cfg(test)]
 mod tests {
     use super::CapabilitySet;
-    use rustos_abi::{CapabilityId, Errno};
+    use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
+
+    #[test]
+    fn capability_query_matches_contains() {
+        let mut s = CapabilitySet::empty();
+        s.insert(CapabilityId::MEM_DMA);
+        let query: &dyn CapabilityQuery = &s;
+        assert!(query.holds(CapabilityId::MEM_DMA));
+        assert!(!query.holds(CapabilityId::NET_RAW));
+        assert_eq!(
+            query.holds(CapabilityId::MEM_DMA),
+            s.contains(CapabilityId::MEM_DMA)
+        );
+    }
 
     fn parent() -> CapabilitySet {
         let mut s = CapabilitySet::empty();

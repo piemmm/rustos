@@ -15,7 +15,6 @@ use rustos_arch_x86_64::smp::bsp_lapic_id;
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_pci::mechanism_one;
 use rustos_drv_bus_virtio::PciTransport;
-use rustos_drvhost::VirtioHostFactory;
 use rustos_kernel::arch_wrapper::{published_irq_table, published_memory_map};
 use rustos_kernel::SERIAL_SINK;
 use rustos_kernel::{KernelVirtioFactory, KernelVirtioFactoryConfig};
@@ -27,7 +26,7 @@ use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use rustos_log::{Event, EventId, Level, Sink};
-use rustos_virtio::{PoolId, VirtioHost};
+use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{
     carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,

@@ -109,10 +109,43 @@ impl CapabilityId {
     }
 }
 
+/// Read-only membership test over a principal's granted capabilities.
+///
+/// The set's concrete representation (`CapabilitySet` and its 256-bit
+/// bitmap) lives in `lib/caps`, which depends on this crate. ABI-level
+/// host seams — for example `VirtioHostFactory` in `lib/virtio` — must
+/// gate on a granted capability without naming `lib/caps`, because the reverse
+/// edge `lib/abi -> lib/caps` would invert the `lib/*` layering
+/// (`AGENTS.md` §17.4). They therefore accept `&dyn CapabilityQuery`;
+/// `lib/caps` implements this for its `CapabilitySet`.
+///
+/// The trait is object-safe so a seam can hold a `&dyn CapabilityQuery`
+/// without monomorphising over the caller's set type.
+pub trait CapabilityQuery {
+    /// `true` if the queried principal has been granted `cap`.
+    fn holds(&self, cap: CapabilityId) -> bool;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CapabilityId, CAPABILITY_ID_MAX};
+    use super::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
     use crate::Errno;
+
+    /// Minimal `CapabilityQuery` that grants exactly one capability,
+    /// proving the trait is object-safe and usable behind `&dyn`.
+    struct OneCap(CapabilityId);
+    impl CapabilityQuery for OneCap {
+        fn holds(&self, cap: CapabilityId) -> bool {
+            cap == self.0
+        }
+    }
+
+    #[test]
+    fn capability_query_is_object_safe_and_answers() {
+        let query: &dyn CapabilityQuery = &OneCap(CapabilityId::MEM_DMA);
+        assert!(query.holds(CapabilityId::MEM_DMA));
+        assert!(!query.holds(CapabilityId::NET_RAW));
+    }
 
     #[test]
     fn well_known_ids_are_frozen() {

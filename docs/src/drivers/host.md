@@ -12,6 +12,7 @@ the universal `CAP_DRV_LOAD`.
 
 ```rust
 use rustos_drvhost::{Host, HostConfig, HostError, ImageSource, EntryResolver};
+use rustos_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
 
 let cfg = HostConfig {
     trusted_signers: &[/* Ed25519PublicKey ... */],
@@ -79,7 +80,12 @@ cannot widen the host's authority.
 `HostConfig::virtio_host_factory: Option<&dyn VirtioHostFactory>` is
 the seam at which the host supplies a per-driver
 `rustos_abi::driver::VirtioHost` for the duration of a single
-`register()` call. The driver retrieves the host through the new
+`register()` call. The `VirtioHostFactory` trait itself lives in the
+bus-agnostic `lib/virtio` host seam, so both the userland host and any
+kernel-side implementation depend on `lib/*` rather than on each other
+(`AGENTS.md` §17.4); its `mint` is handed the driver's granted
+capabilities as a `&dyn rustos_abi::CapabilityQuery` so the seam need
+not name `lib/caps`. The driver retrieves the host through the new
 `DriverHost::virtio_host(&self) -> Option<&dyn VirtioHost>` accessor
 (an `abi-v1` internal addition; the public `register(host: &dyn
 DriverHost) -> Result<DriverHandle, DriverError>` entry point per
@@ -94,9 +100,11 @@ factory is `KernelVirtioFactory`
 (`kernel/virtio/src/virtio_factory.rs`, Stage 4.D Item
 2-tail.4): it mints a `KernelVirtioHost` (`kernel/virtio`) backed by
 a freshly-carved per-driver `DmaPool` and the calling task's
-`TaskCapabilities`. It lives in `kernel/virtio` rather than in
-`drvhost` so the host crate stays free of every `kernel/*`
-dependency (`AGENTS.md` §3 / §17.4). The mock factory
+`TaskCapabilities`. The concrete factory lives in `kernel/virtio`,
+not in `drvhost`, so the host crate stays free of every `kernel/*`
+dependency; and because the `VirtioHostFactory` trait it implements
+lives in `lib/virtio`, the kernel crate in turn never depends on the
+userland host (`AGENTS.md` §3 / §17.4). The mock factory
 used in unit tests mints a `MockHost` whose allocations leak for the
 duration of the test process.
 

@@ -24,7 +24,7 @@ pub mod manifest;
 pub mod syscall;
 pub mod syscalls;
 
-pub use capability::{CapabilityId, CAPABILITY_ID_MAX};
+pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
     BufferClass, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, MmioMapError,
     MmioMapper, MsiMessage, MsixBus, PortIo, RegisterWindow, VirtioMmioBus, VirtioPciBus,

@@ -5,7 +5,6 @@
 //! [`crate::events`]) and the per-record sensitive buffers are wiped
 //! through [`crate::zeroize::secure_clear`] on drop.
 
-use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -17,6 +16,7 @@ use rustos_abi::{
 use rustos_caps::CapabilitySet;
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
 use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use rustos_virtio::VirtioHostFactory;
 
 use crate::events;
 use crate::image::ParsedImage;
@@ -41,42 +41,6 @@ pub struct LoadedSnapshot {
     /// Capability set granted to the driver (subset of the caller's
     /// set at load time).
     pub granted: CapabilitySet,
-}
-
-/// Factory that mints a per-driver [`VirtioHost`] for the duration
-/// of a single `register()` call.
-///
-/// Drvhost calls [`Self::mint`] just before invoking the driver's
-/// `register` entry point; the returned host lives on the stack
-/// frame of `verify_and_bind` (boxed only because the concrete type
-/// is build-specific) and is dropped immediately after `register`
-/// returns. Stage 4.D Item 0-tail is the wire-up of a kernel-side
-/// implementation that mints a real `KernelVirtioHost` backed by a
-/// per-driver `DmaPool`; the default drvhost build keeps the
-/// factory slot empty and the [`DriverHost::virtio_host`] accessor
-/// reports `None`, which is the source-compatible behaviour for
-/// every existing test and integration site.
-///
-/// # Capabilities
-///
-/// Implementations are passed the already-intersected capability
-/// set granted to the driver. A capability-aware factory uses this
-/// to short-circuit the allocation path when the driver was not
-/// granted `CAP_MEM_DMA` (the [`VirtioHost::alloc_dma_zeroed`]
-/// fast-fail at the kernel boundary is still authoritative).
-pub trait VirtioHostFactory {
-    /// Construct a fresh virtio host for the upcoming `register()`
-    /// call.
-    ///
-    /// Returns `None` if the factory chooses not to expose a virtio
-    /// host to this driver (for example because the granted caps
-    /// do not include `CAP_MEM_DMA`, or because the host runs on a
-    /// platform without a virtio transport at all).
-    ///
-    /// The returned box is borrowed from the factory's lifetime; the
-    /// factory must remain live for as long as the returned host
-    /// is in use, which is at most the duration of `register()`.
-    fn mint<'r>(&'r self, granted: &CapabilitySet) -> Option<Box<dyn VirtioHost + 'r>>;
 }
 
 /// Configuration handed to [`Host::new`].

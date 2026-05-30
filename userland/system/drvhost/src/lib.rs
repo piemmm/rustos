@@ -54,7 +54,10 @@
 //! # Layering
 //!
 //! The crate is `no_std` (`AGENTS.md` §6) and pulls only the audited
-//! `rustos-abi`, `rustos-caps`, `rustos-crypto`, and `rustos-log` crates.
+//! `rustos-abi`, `rustos-caps`, `rustos-crypto`, `rustos-log`, and
+//! `rustos-virtio` crates — all under `lib/*`, so the host never links a
+//! kernel or driver crate (`AGENTS.md` §17.4). The `VirtioHostFactory`
+//! seam consumed by [`HostConfig`] lives in `rustos_virtio`.
 //! It exposes no `unsafe` across its crate boundary — the one in-tree
 //! `unsafe` block lives in [`zeroize::secure_clear`] and is covered by a
 //! unit test (`AGENTS.md` §2.10).
@@ -81,7 +84,7 @@ pub mod source;
 pub mod zeroize;
 
 pub use error::HostError;
-pub use host::{Host, HostConfig, LoadedSnapshot, VirtioHostFactory};
+pub use host::{Host, HostConfig, LoadedSnapshot};
 pub use image::ParsedImage;
 pub use resolver::{DriverEntry, EntryResolver};
 pub use source::ImageSource;

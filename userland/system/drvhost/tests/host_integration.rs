@@ -468,10 +468,10 @@ impl rustos_drvhost::EntryResolver for PinnedResolver {
 /// `MockHost` (the production seam mints a `KernelVirtioHost`
 /// instead; see `kernel_host.rs`).
 struct MockVirtioFactory;
-impl rustos_drvhost::VirtioHostFactory for MockVirtioFactory {
+impl rustos_virtio::VirtioHostFactory for MockVirtioFactory {
     fn mint<'r>(
         &'r self,
-        _granted: &CapabilitySet,
+        _granted: &dyn rustos_abi::CapabilityQuery,
     ) -> Option<Box<dyn rustos_abi::driver::VirtioHost + 'r>> {
         Some(Box::new(rustos_virtio::MockHost::new()))
     }

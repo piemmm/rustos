@@ -3221,9 +3221,12 @@ tracked defect; the burn-down removes them, and removing the last entry of
 a list collapses that list. No *new* violation may be added.
 
 **`deps-check` grandfathered edges (§17.4 / §17.1):**
-- `kernel/virtio` → `drivers/bus/virtio`, `userland/system/drvhost`:
-  move the shared virtio host factory behind `lib/abi` traits so the
-  kernel stops depending on a driver and a userland service.
+- `kernel/virtio` → `drivers/bus/virtio`: the kernel-side virtio host
+  still links the bus driver for the concrete PCI/MMIO transports.
+  Move the transport seam so the kernel stops depending on a driver.
+  (The `→ userland/system/drvhost` edge that sat here is *done* — the
+  `VirtioHostFactory` seam moved into `lib/virtio`; see the burn-down
+  below.)
 - `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`: the
   riscv64 port still names concrete kernel crates from its boot
   pipeline. The Arch HAL `kernel/arch/api` now exists (see burn-down
@@ -3351,9 +3354,26 @@ a list collapses that list. No *new* violation may be added.
   `rustos-drv-network-virtio-net → rustos-drv-bus-virtio`; a regression
   test (`deps_check::tests::virtio_driver_layer_is_on_lib_only`) fails
   closed if any of them returns. `deps-check` and `cfg-check` are clean.
-  The remaining virtio deps-check edges
-  (`kernel/virtio → drivers/bus/virtio` / `userland/system/drvhost`, part
-  of the single-selection-point thread) are unchanged by this work.
+  The remaining virtio deps-check edge
+  (`kernel/virtio → drivers/bus/virtio`, the concrete-transport thread)
+  is unchanged by this work.
+- `kernel/virtio` → `userland/system/drvhost` `VirtioHostFactory` seam
+  relocation (deps-check §17.4) — *done*. The factory trait the driver
+  host calls before a driver's `register()` — and which the kernel-side
+  `KernelVirtioFactory` implements — moved out of `userland/system/drvhost`
+  into the bus-agnostic `lib/virtio` host seam (`VirtioHostFactory`,
+  alongside `VirtioHost` / `MockHost`). Its `mint` now gates on the
+  driver's granted capabilities through a new object-safe
+  `rustos_abi::CapabilityQuery` trait (implemented for `lib/caps`'
+  `CapabilitySet`), so the seam never names `lib/caps` and the
+  `lib/abi → lib/caps` layering inversion is avoided. With the trait in
+  `lib/virtio`, both `drvhost` and `kernel/virtio` depend on `lib/*`
+  instead of on each other: `drvhost` dropped its trait definition and
+  re-export, and `kernel/virtio` dropped its `rustos-drvhost` Cargo
+  dependency. The `kernel/virtio → userland/system/drvhost` grandfather
+  edge has been removed and a regression test
+  (`deps_check::tests::kernel_virtio_has_no_edge_to_drvhost`) fails
+  closed if it returns. `deps-check` and `cfg-check` are clean.
 
 ---
 

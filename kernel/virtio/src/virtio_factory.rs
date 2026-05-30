@@ -3,23 +3,25 @@
 //! The userland driver host (`userland/system/drvhost`) calls
 //! [`VirtioHostFactory::mint`] just before invoking a driver's
 //! `register()` entry point. The production kernel binary plugs the
-//! [`KernelVirtioFactory`] defined here into
-//! [`rustos_drvhost::HostConfig::virtio_host_factory`] so that every
-//! loaded virtio-class driver receives a fresh, capability-checked
-//! [`KernelVirtioHost`] backed by its own per-process [`DmaPool`]
-//! (`AGENTS.md` §4 — per-process heaps, never a shared global pool).
+//! [`KernelVirtioFactory`] defined here into the host's
+//! `virtio_host_factory` slot so that every loaded virtio-class driver
+//! receives a fresh, capability-checked [`KernelVirtioHost`] backed by
+//! its own per-process [`DmaPool`] (`AGENTS.md` §4 — per-process heaps,
+//! never a shared global pool).
 //!
 //! # Why this lives in the kernel binary
 //!
-//! The factory trait is owned by `drvhost`, but a concrete
-//! implementation has to mention the kernel-side generics
-//! (`P: PageTableOps`, the audit [`Sink`], the [`IrqWaiter`] seam) and
-//! depend on the `kernel-host` build of `drivers/bus/virtio`. Keeping
-//! the implementation here lets `drvhost` stay free of any `kernel/*`
-//! dependency (`AGENTS.md` §3) while still handing loaded drivers a
-//! real DMA allocator. The factory is exposed from the crate's library
-//! half so the production binary and the QEMU integration tests share
-//! one implementation (`AGENTS.md` §2.2 — no duplication).
+//! The factory trait [`VirtioHostFactory`] is owned by the bus-agnostic
+//! `lib/virtio` host seam, but a concrete implementation has to mention
+//! the kernel-side generics (`P: PageTableOps`, the audit [`Sink`], the
+//! [`IrqWaiter`] seam) and depend on the `kernel-host` build of
+//! `drivers/bus/virtio`. Because both `drvhost` and this crate depend
+//! only on the `lib/virtio` seam — never on each other — the userland
+//! host stays free of any `kernel/*` dependency and the kernel stays
+//! free of any `userland/*` dependency (`AGENTS.md` §17.4). The factory
+//! is exposed from the crate's library half so the production binary
+//! and the QEMU integration tests share one implementation
+//! (`AGENTS.md` §2.2 — no duplication).
 //!
 //! # Per-driver freshness
 //!
@@ -34,21 +36,19 @@ use alloc::boxed::Box;
 
 use crate::kernel_host::KernelVirtioHost;
 use rustos_abi::driver::VirtioHost;
-use rustos_abi::{CapabilityId, IrqHandle};
-use rustos_caps::CapabilitySet;
-use rustos_drvhost::VirtioHostFactory;
+use rustos_abi::{CapabilityId, CapabilityQuery, IrqHandle};
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
 use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTableOps, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
-use rustos_virtio::PoolId;
+use rustos_virtio::{PoolId, VirtioHostFactory};
 
 /// Borrowed kernel resources and per-device parameters a
 /// [`KernelVirtioFactory`] needs to mint a [`KernelVirtioHost`].
 ///
 /// Every field is borrowed for `'k`; the factory (and the hosts it
-/// mints) outlive nothing beyond this borrow. The shape mirrors
-/// [`rustos_drvhost::HostConfig`]: one config value is built per loaded
+/// mints) outlive nothing beyond this borrow. The shape mirrors the
+/// driver host's per-load config: one config value is built per loaded
 /// driver and kept alive for the duration of its `register()` call.
 pub struct KernelVirtioFactoryConfig<'k> {
     /// Physical frame allocator the per-driver [`DmaPool`] draws from.
@@ -120,14 +120,14 @@ where
     P: PageTableOps,
     F: Fn() -> P,
 {
-    fn mint<'r>(&'r self, granted: &CapabilitySet) -> Option<Box<dyn VirtioHost + 'r>> {
+    fn mint<'r>(&'r self, granted: &dyn CapabilityQuery) -> Option<Box<dyn VirtioHost + 'r>> {
         // Fail closed: a driver that was not granted `CAP_MEM_DMA`
         // gets no virtio host at all. The kernel DMA gate would refuse
         // every allocation anyway (`KernelVirtioHost::alloc_dma_zeroed`
         // is authoritative), but short-circuiting here avoids minting a
         // pool the driver can never use (`AGENTS.md` §5.4 —
         // capability check before touching state).
-        if !granted.contains(CapabilityId::MEM_DMA) {
+        if !granted.holds(CapabilityId::MEM_DMA) {
             return None;
         }
 
@@ -160,6 +160,7 @@ mod tests {
     use core::cell::RefCell as StdRefCell;
 
     use alloc::vec::Vec;
+    use rustos_caps::CapabilitySet;
     use rustos_kernel_irq::IrqWaitAbort;
     use rustos_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},

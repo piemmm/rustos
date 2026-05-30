@@ -81,7 +81,7 @@ mod wire {
 ///
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
 /// its DMA regions through. The host is *minted per driver load* by
-/// the driver host's `VirtioHostFactory` (defined in `rustos_drvhost`)
+/// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
 /// and lives only for the duration of that load, so the driver borrows
 /// it for `'h` rather than demanding a `'static` host (`AGENTS.md`
 /// §4 — per-process pools are reclaimed when the driver unloads).

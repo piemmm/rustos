@@ -46,6 +46,6 @@ pub mod transport;
 mod tests;
 
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
-pub use host::{MockHost, VirtioHost};
+pub use host::{MockHost, VirtioHost, VirtioHostFactory};
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
