@@ -61,7 +61,7 @@ pub mod virtio_pci;
 pub use dma::{DmaSlab, PoolId, SlabFreeFn};
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};
-pub use port_io::PortIo;
+pub use port_io::{PortIo, PortIo8};
 pub use virtio::VirtioHost;
 pub use virtio_mmio::VirtioMmioBus;
 pub use virtio_pci::{

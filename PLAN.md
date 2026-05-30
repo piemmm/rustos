@@ -1075,6 +1075,42 @@ follow-up is its own thread and is now also complete.
 - Each driver crate ships a `README.md` (supported HW, caps, limits).
 
 **Status: in progress.**
+- `drivers/input/ps2` (x86_64) shipped — the first input-class driver.
+  It implements `rustos_abi::driver::input::Input` for a keyboard on the
+  Intel 8042 controller (status/command port `0x64`, data port `0x60`),
+  decoding a scancode-set-1 byte stream into platform-neutral
+  `InputEvent`s (base make code for unprefixed keys, `0xE000 | make` for
+  `E0`-extended keys; `value == 1` press / `0` release). Per `AGENTS.md`
+  §8 the only public function is `register` (gated on `CAP_DRV_LOAD`);
+  the `Ps2Keyboard` type + `new` constructor are re-exported so the host
+  can instantiate it and then reach it only through the `Input` trait.
+  The driver never issues `inb`/`outb` itself: it reaches the two ports
+  through a new 8-bit port seam, `rustos_abi::driver::port_io::PortIo8`
+  (`read8`/`write8`), added alongside the frozen 32-bit `PortIo` (which
+  is reserved for PCI mechanism #1) — a separate versioned trait rather
+  than an added method, per `AGENTS.md` §2.4, so the driver carries no
+  architecture `cfg` and no ambient authority over the I/O port space
+  (§4 / §17.2 / §17.4). The drain is bounded by a per-call read budget so
+  a stuck controller can never make `poll` spin (§2.1), stops
+  non-destructively at an auxiliary (mouse) byte, latches a trailing
+  `E0` prefix across polls, and skips detection-error / overrun markers.
+  No `unwrap` / `expect` / `panic!` / `unsafe` in the crate. Tests: 12
+  host-side unit tests against an in-process mock `PortIo8` controller
+  (register gate, empty-buffer rejection, empty-queue `Ok(0)`,
+  press/release + extended decode, prefix latching, error-marker skip,
+  auxiliary-byte stop, buffer-fill-and-resume, read-budget bound,
+  never-writes-controller, unload→reload) plus 2 new `PortIo8` seam
+  tests in `lib/abi`. `cargo xtask ci` (fmt → clippy → test `--qemu` →
+  docs-check → deny → abi-check) is green end-to-end; `deps-check` /
+  `cfg-check` clean. Docs: `docs/src/drivers/input.md` (wired into
+  `docs/src/SUMMARY.md`) + a `PortIo8` note in
+  `docs/src/abi/driver_traits.md` + the crate `README.md`. A QEMU
+  integration vertical depends on the kernel wiring a `PortIo8` backend
+  over the legacy ports and routing the i8042 IRQ (line 1) to the
+  user-space driver — the same boot hand-off prerequisite the
+  framebuffer and virtio-blk QEMU verticals waited on. The remaining
+  outstanding Stage 4 first driver is `drivers/display/vesa` (x86_64
+  BIOS).
 - `lib/abi/src/driver/` trait surface has landed: `DriverHost`,
   `DriverHandle`, `DriverError`, `DriverKind` (`UserSpace` / `InKernel`),
   and `DriverManifest` (frozen `abi-v1` wire layout — magic `"DRV1"`,

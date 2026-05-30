@@ -480,6 +480,13 @@ name = "rustos-drv-fs-rustfs"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-drv-input-ps2"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [

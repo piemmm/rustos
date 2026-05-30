@@ -1,0 +1,15 @@
+[package]
+name = "rustos-drv-input-ps2"
+description = "RustOS i8042 PS/2 keyboard input driver (x86_64)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -43,6 +43,7 @@
 - [Block drivers](./drivers/block.md)
 - [Network drivers](./drivers/network.md)
 - [Display drivers](./drivers/display.md)
+- [Input drivers](./drivers/input.md)
 
 # Userland
 

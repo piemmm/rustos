@@ -49,6 +49,9 @@ members = [
     "drivers/filesystem/fat32",
     "drivers/filesystem/rustfs",
 
+    # Drivers — input
+    "drivers/input/ps2",
+
     # Drivers — bus
     "drivers/bus/pci",
     "drivers/bus/usb",

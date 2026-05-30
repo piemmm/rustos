@@ -164,6 +164,17 @@ Buffer sizes must be a positive integer multiple of
 Event records are `InputEvent { kind, reserved0, code, value }`;
 `InputEventKind` is `Key`, `Pointer`, or `Scroll`.
 
+Legacy x86 input controllers are byte-addressed, so the
+`rustos_abi::driver::port_io` module ships an 8-bit port-access seam,
+`trait PortIo8 { read8, write8 }`, alongside the existing 32-bit
+`PortIo` (which is reserved for PCI mechanism #1 configuration access).
+`PortIo` is frozen, so per
+`AGENTS.md` §2.4 the byte width is a separate versioned trait rather
+than an added method. A driver names `PortIo8` without depending on an
+architecture port; the x86_64 port supplies the only real
+implementation (`AGENTS.md` §17.2 / §17.4). See
+[Input drivers](../drivers/input.md).
+
 ## Bus
 
 `trait Bus`. One method:
