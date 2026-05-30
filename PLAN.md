@@ -1192,10 +1192,40 @@ follow-up is its own thread and is now also complete.
   plus the unload→reload→reuse path;
   (5) the userland ARP/IP/ICMP responder required by the
   virtio-net QEMU integration. The remaining per-class first
-  drivers (`drivers/display/vesa`, `drivers/display/framebuffer`,
-  `drivers/input/ps2`) remain outstanding per the Stage 4
-  deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
-  a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+  drivers (`drivers/display/vesa`, `drivers/input/ps2`) remain
+  outstanding per the Stage 4 deliverable list above; packed
+  virtqueues (virtio 1.1 §2.7) are a Stage 5 follow-up documented
+  in `docs/src/drivers/virtio.md`.
+- `drivers/display/framebuffer` shipped (generic linear framebuffer
+  first driver): implements `rustos_abi::driver::display::Display`
+  over a firmware-provided linear pixel surface. Per `AGENTS.md` §8
+  the only public function is `register`; the `Framebuffer` type and
+  `FramebufferConfig` are re-exported so the driver host can
+  construct an instance, and the host reaches it only through the
+  `Display` trait. The driver never synthesises a pointer to the
+  surface — `Framebuffer::open` validates the firmware geometry,
+  then maps exactly `stride_bytes * height_px` bytes through the
+  host's capability-gated `MmioMapper` (`CAP_MMIO_MAP`), keeping the
+  driver free of ambient authority (`AGENTS.md` §4). `present` is
+  byte-preserving: it copies the caller's frame verbatim into the
+  mapped window through bounds-checked volatile writes (a `u32` bulk
+  path plus a byte tail), so a short frame fails closed with
+  `DriverError::BufferTooSmall` rather than panicking (`AGENTS.md`
+  §2.9). No `unwrap` / `expect` / `panic!` / `unsafe` in the crate.
+  Tests: 12 host-side unit tests against an in-process mock
+  `MmioMapper` (mode report, present byte-fidelity including a
+  non-word-multiple surface, short/oversized frame handling, the
+  `CAP_DRV_LOAD` / `CAP_MMIO_MAP` gates, absent-mapper and
+  region-too-large `Unsupported` paths, degenerate-geometry
+  rejection, and an unload→reload round-trip); `cargo clippy
+  -p rustos-drv-display-framebuffer --all-targets -- -D warnings` is
+  clean. Docs: `docs/src/drivers/display.md` (wired into
+  `docs/src/SUMMARY.md`) plus the crate `README.md`. A QEMU
+  integration vertical depends on kernel framebuffer hand-off
+  plumbing (a boot capability publishing the firmware
+  `FramebufferConfig` plus a kernel `MmioMapper` over the surface),
+  which is not yet in the tree — the same prerequisite pattern the
+  virtio-blk QEMU verticals waited on (deferral (4) above).
 - Stage 4.D follow-up (Item 6 — acceptance gate, *complete*): finished the
   gate on a host that has `mdbook` (v0.5.3) + `mdbook-linkcheck` and
   `cargo-deny` (0.19.7) installed — the two tools the previous session
@@ -1235,8 +1265,8 @@ follow-up is its own thread and is now also complete.
   binaries — so the high-bar subset is confirmed with the targeted
   `--summary-only` runs the prior session also used.) Stage 4.D Item 6 — and
   therefore the Stage 4.D acceptance gate — is now complete; the remaining
-  Stage 4 deliverables (`drivers/display/vesa`, `drivers/display/framebuffer`,
-  `drivers/input/ps2`) are unaffected by this item.
+  Stage 4 deliverables (`drivers/display/vesa`, `drivers/input/ps2`) are
+  unaffected by this item.
 - Stage 4.D follow-up (Item 6 — acceptance gate, *partial*): ran the full
   runnable `xtask` matrix on this host and fixed three rustdoc defects the
   gate surfaced. **rustdoc defects (`AGENTS.md` §13 — `docs-check`).** The
