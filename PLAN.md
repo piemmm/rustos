@@ -3234,9 +3234,12 @@ a list collapses that list. No *new* violation may be added.
   rather than a concrete scheduler.)
 - `drivers/bus/virtio` → `kernel/{mem,sec,irq}`;
   `drivers/storage/virtio_blk` & `drivers/network/virtio_net` →
-  `drivers/bus/virtio`; `userland/system/drvhost` →
   `drivers/bus/virtio`: route driver-to-kernel and driver-to-bus access
-  through `lib/abi` traits instead of direct crate links.
+  through `lib/abi` traits instead of direct crate links. (The
+  `userland/system/drvhost` → `drivers/bus/virtio` edge that sat here is
+  *done*: drvhost reaches the bus crate only from `[dev-dependencies]`
+  test fixtures, never from production code, so the build-graph edge does
+  not exist; see burn-down below.)
 - `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
   `userland/system/drvhost`, `drivers/bus/virtio`:
   collapse the production binary's bring-up into the single §17.4
@@ -3319,6 +3322,23 @@ a list collapses that list. No *new* violation may be added.
   `kernel/rustos-kernel → kernel/sched` — `rustos-kernel`/`riscv64` now
   name only `kernel/sched/api`. The remaining HAL-primitive and riscv64
   boot-orchestration threads are unchanged by this work.
+- `userland/system/drvhost` → `drivers/bus/virtio` stale edge removal
+  (deps-check) — *done*. The driver host's production code
+  (`userland/system/drvhost/src/`) never names the virtio bus crate; the
+  dependency exists solely under `[dev-dependencies]`, used by the
+  integration-test fixtures that mint a `MockHost`-backed
+  `VirtioHostFactory`. `deps-check` walks only build-graph dependencies
+  (dev-dependencies are test-only scaffolding, excluded by
+  `is_build_dependency_header`), so the §17.4 `Userland → Driver` edge
+  does not exist in the graph and was already compliant. The grandfather
+  entry was therefore stale: keeping it would have silently tolerated a
+  *future* production dependency. It has been removed and a regression
+  test (`deps_check::tests::drvhost_has_no_production_edge_to_virtio_bus`)
+  now fails closed if drvhost ever gains a real production edge to the bus
+  crate. The remaining virtio-bus deps-check edges
+  (`drivers/bus/virtio → kernel/{mem,sec,irq}`, the device drivers → bus,
+  and `kernel/virtio` → `drivers/bus/virtio` / `userland/system/drvhost`)
+  are unchanged by this work.
 
 ---
 

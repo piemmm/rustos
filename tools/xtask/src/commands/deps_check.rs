@@ -123,8 +123,6 @@ const GRANDFATHERED: &[GrandfatheredEdge] = &[
     // directly rather than through a bus trait in `lib/abi`.
     edge("rustos-drv-storage-virtio-blk", "rustos-drv-bus-virtio"),
     edge("rustos-drv-network-virtio-net", "rustos-drv-bus-virtio"),
-    // The driver host (userland) links the virtio bus driver directly.
-    edge("rustos-drvhost", "rustos-drv-bus-virtio"),
     // The x86_64 production kernel binary is a second integration point
     // beside `kernel/core`: it brings the allocator, the arch port, and
     // the boot-time drivers together. §17.4 allows exactly one selection
@@ -502,6 +500,30 @@ mod tests {
         assert!(
             violations.is_empty(),
             "unexpected §17 violations: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn drvhost_has_no_production_edge_to_virtio_bus() {
+        // Burn-down regression: `userland/system/drvhost` reaches the
+        // virtio bus crate only from its `[dev-dependencies]` (the
+        // integration-test fixtures), never from production code, so the
+        // §17.4 `Userland -> Driver` edge does not exist in the build
+        // graph and is no longer grandfathered. A future *production*
+        // dependency must be rejected, not silently tolerated.
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let drvhost = crates
+            .iter()
+            .find(|c| c.name == "rustos-drvhost")
+            .expect("drvhost present");
+        assert!(
+            !drvhost.deps.iter().any(|d| d == "rustos-drv-bus-virtio"),
+            "drvhost gained a production dependency on the virtio bus crate"
+        );
+        assert!(
+            !is_grandfathered("rustos-drvhost", "rustos-drv-bus-virtio"),
+            "stale grandfather entry must stay removed"
         );
     }
 
