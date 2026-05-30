@@ -290,8 +290,14 @@ real-hardware transport. What still does **not** exist:
   `virtio-mmio` slot, maps its register block via
   `Mmio::map_slot_window` → `KernelMmioMapper`, and feeds the window
   into `MmioTransport::new`.
-- riscv64 support in the **QEMU runner** (`tools/qemu` is x86_64-only
-  today: single `Arch::X86_64`, GRUB-ISO boot, `isa-debug-exit`).
+- riscv64 support in the **QEMU runner** now exists
+  (`tools/qemu/src/riscv64.rs`, latest session): `Arch::Riscv64`,
+  `Spec::for_riscv64_kernel`, the `virt`-board argv (`-M virt`,
+  `-bios default` + `-kernel`, `virtio-blk-device` on virtio-mmio), and
+  per-arch exit decode through the SiFive Test device (`FINISHER_PASS`
+  ⇒ QEMU exit `0`). Host-tested only (`rustos-qemu` 42, +15); the
+  kernel-side `kernel/arch/riscv64::qemu_exit` that writes the finisher
+  word and the riscv64 boot pipeline are still **TODO**.
 
 These need full boot wiring: kernel + driver host + signed `.rxe`,
 plus real device bring-up (walk PCI/DTB → `map_bar_window` /
@@ -304,8 +310,9 @@ register window). Model them on `tests/integration/drvhost_qemu`
 
 Recommended order: land `tests/integration/virtio_blk_pci_x86_64`
 first — it is the one fully on the existing x86_64 runner and
-proves the `PciTransport` against a real device — then build the
-riscv64 runner + MMIO transport, then the net tests.
+proves the `PciTransport` against a real device — then the riscv64
+MMIO vertical (the QEMU runner half now exists; the kernel boot port
++ DTB walk + `qemu_exit` are what remain), then the net tests.
 
 - `tests/integration/virtio_blk_pci_x86_64` — the runner half now
   exists: `Spec::with_virtio_blk(image)` attaches a `virtio-blk-pci`
@@ -322,7 +329,11 @@ riscv64 runner + MMIO transport, then the net tests.
   window to the virtio transport" check.**
 - `tests/integration/virtio_blk_mmio_riscv64` — same against
   `qemu-system-riscv64 -M virt` with `virtio-blk-device`, exercising
-  `Mmio::map_slot_window`.
+  `Mmio::map_slot_window`. The runner half is ready:
+  `Spec::for_riscv64_kernel(...).with_virtio_blk(image)` emits the
+  `virt`-board argv and decodes the SiFive-test exit status; the test
+  bin must write `riscv64::FINISHER_PASS`/`FINISHER_FAIL` to
+  `riscv64::SIFIVE_TEST_BASE` via `kernel/arch/riscv64::qemu_exit`.
 - `tests/integration/virtio_net_pci_x86_64` and
   `tests/integration/virtio_net_mmio_riscv64` — ARP + ICMP echo
   round-trip against `qemu user net`, driving `rustos-net-icmp`

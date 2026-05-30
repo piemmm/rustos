@@ -1196,6 +1196,42 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — riscv64 QEMU runner,
+  *complete*): the `tools/qemu` runner was x86_64-only (single
+  `Arch::X86_64`, GRUB-ISO boot, `isa-debug-exit`), so the
+  `tests/integration/virtio_blk_mmio_riscv64` crate had no harness to
+  build on. **Per-arch backend.** New module `tools/qemu/src/riscv64.rs`
+  targets the generic `virt` board: `-M virt`, `-bios default` (OpenSBI
+  loads the ELF directly via `-kernel`, so there is no ISO step — the
+  kernel ELF *is* the artifact), headless serial-over-stdio, and each
+  `Spec::with_virtio_blk` image attached as `-drive
+  if=none,format=raw,id=blkN` + `-device virtio-blk-device,drive=blkN`
+  on a virtio-mmio transport (the riscv64 analogue of x86_64's
+  `virtio-blk-pci`, driven by `MmioTransport`). **Result protocol.**
+  The `virt` board has no `isa-debug-exit`; results go through the
+  SiFive Test device at `0x10_0000` (`FINISHER_PASS = 0x5555` ⇒ QEMU
+  exit status `0`; `FINISHER_FAIL = 0x3333 | (code << 16)` ⇒ exit
+  `code`). Because success is a *zero* status on riscv64 versus a
+  *non-zero* status on x86_64, exit decoding is now per-arch:
+  `Arch::outcome_from_status` dispatches to `riscv64::outcome_from_status`
+  or the existing `Outcome::from_qemu_status`. **Generic seam.**
+  `Arch::Riscv64`, `Spec::for_riscv64_kernel`, and the new dispatch are
+  the only additions to `tools/qemu/src/lib.rs`; the shared
+  `with_cpus` / `with_timeout` / `with_virtio_blk` / `Runner::run`
+  entry points are unchanged (`AGENTS.md` §2.4 — no interface creep).
+  **Tests.** `rustos-qemu` 42 (+15: 13 riscv64-module argv/finisher/
+  decode tests + the lib-level per-arch decode, riscv64 defaults, and
+  missing-kernel guards). `cargo test -p rustos-qemu`, `cargo clippy
+  -p rustos-qemu --all-targets -- -D warnings`, `cargo fmt --check`,
+  and `RUSTDOCFLAGS="-D warnings" cargo doc -p rustos-qemu --no-deps`
+  are all clean. **Docs.** New `docs/src/platform/riscv64.md` (board
+  model, SiFive-test result protocol, per-arch runner module), wired
+  into `docs/src/SUMMARY.md`. **Deferred.** The kernel-side
+  `kernel/arch/riscv64::qemu_exit` (writing the finisher word), the
+  riscv64 boot pipeline + ring-0 DTB resolution feeding
+  `provision_virtio_mmio`, and the `virtio_blk_mmio_riscv64` /
+  net QEMU crates + acceptance gate (Items 4 / 6) remain outstanding —
+  see `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — virtio-MMIO
   provisioning seam + ring-0 walk, *complete*): the PCI vertical had
   a frozen `VirtioPciBus` ABI seam and a host-tested

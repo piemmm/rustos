@@ -56,6 +56,7 @@ use std::time::{Duration, Instant};
 
 pub mod disk;
 pub mod iso;
+pub mod riscv64;
 pub mod x86_64;
 
 /// Byte the kernel writes to its architecture-specific debug-exit device to
@@ -129,11 +130,12 @@ impl Outcome {
 
 /// A backing block device attached to the guest.
 ///
-/// Today the only attachment shape is a raw image surfaced to the guest
-/// as a modern `virtio-blk-pci` function — exactly the transport the
-/// Stage 4.D `PciTransport` drives. The host prepares the image with
-/// [`disk::plant_raw_disk`]; this type only records where it lives so
-/// the per-arch argv builder can attach it.
+/// The attachment is a raw image surfaced to the guest as a modern
+/// virtio block device: a `virtio-blk-pci` function on x86_64 (driven by
+/// the Stage 4.D `PciTransport`) or a `virtio-blk-device` on the riscv64
+/// `virt` board's virtio-mmio bus (driven by `MmioTransport`). The host
+/// prepares the image with [`disk::plant_raw_disk`]; this type only
+/// records where it lives so the per-arch argv builder can attach it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockDevice {
     /// Path to the raw backing image on the host.
@@ -142,13 +144,17 @@ pub struct BlockDevice {
 
 /// Tier-1 architecture this runner can target.
 ///
-/// Only `X86_64` ships today; Stage 3b/3c/3d add the remaining Tier-1
-/// targets behind their own per-arch modules.
+/// `X86_64` and `Riscv64` ship today; Stage 3b/3d add the remaining
+/// Tier-1 targets behind their own per-arch modules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Arch {
     /// `qemu-system-x86_64`, UEFI boot via OVMF, `isa-debug-exit` on port
     /// `0xf4`. See the [`x86_64`] module for the full argv contract.
     X86_64,
+    /// `qemu-system-riscv64`, `OpenSBI` boot on the `virt` board, result
+    /// reported through the `SiFive` Test device. See the [`riscv64`]
+    /// module for the full argv contract.
+    Riscv64,
 }
 
 impl Arch {
@@ -157,6 +163,24 @@ impl Arch {
     pub fn qemu_binary(self) -> &'static str {
         match self {
             Arch::X86_64 => x86_64::QEMU_BINARY,
+            Arch::Riscv64 => riscv64::QEMU_BINARY,
+        }
+    }
+
+    /// Decode a QEMU host-process exit status into an [`Outcome`] under
+    /// this architecture's result protocol.
+    ///
+    /// The convention is architecture-specific: x86_64 reports success
+    /// through `isa-debug-exit` as a *non-zero* status
+    /// ([`Outcome::from_qemu_status`]), whereas riscv64 reports success
+    /// through the `SiFive` Test device as a *zero* status
+    /// ([`riscv64::outcome_from_status`]). Keeping the rule beside the
+    /// per-arch argv builder means the two halves cannot drift.
+    #[must_use]
+    pub fn outcome_from_status(self, status: i32, serial: String) -> Outcome {
+        match self {
+            Arch::X86_64 => Outcome::from_qemu_status(status, serial),
+            Arch::Riscv64 => riscv64::outcome_from_status(status, serial),
         }
     }
 }
@@ -221,9 +245,26 @@ impl Spec {
         self
     }
 
-    /// Attach a raw backing image as an additional `virtio-blk-pci`
-    /// device. Prepare the image's contents with [`disk::plant_raw_disk`]
-    /// before [`Runner::run`].
+    /// Minimal riscv64 `virt`-board spec suitable for a QEMU integration
+    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM
+    /// and firmware come from the [`riscv64`] module.
+    #[must_use]
+    pub fn for_riscv64_kernel(kernel: impl Into<PathBuf>) -> Self {
+        Self {
+            arch: Arch::Riscv64,
+            kernel: kernel.into(),
+            cpus: 1,
+            timeout: Duration::from_secs(60),
+            block_devices: Vec::new(),
+            extra_args: Vec::new(),
+        }
+    }
+
+    /// Attach a raw backing image as an additional virtio block device.
+    /// On x86_64 it surfaces as a `virtio-blk-pci` function; on riscv64
+    /// as a `virtio-blk-device` on the `virt` board's virtio-mmio bus.
+    /// Prepare the image's contents with [`disk::plant_raw_disk`] before
+    /// [`Runner::run`].
     #[must_use]
     pub fn with_virtio_blk(mut self, image: impl Into<PathBuf>) -> Self {
         self.block_devices.push(BlockDevice {
@@ -272,17 +313,21 @@ impl Runner {
             }
         }
 
-        // Build the bootable artifact through the per-arch backend. Today
+        // Resolve the bootable artifact through the per-arch backend.
         // x86_64 wraps the kernel ELF in a GRUB BIOS ISO so QEMU's
-        // multiboot2 loader (via GRUB) can boot it. The ISO is built once
-        // per `run` next to the kernel; rebuilds are cheap (a few MiB).
+        // multiboot2 loader (via GRUB) can boot it (built once per `run`
+        // next to the kernel; rebuilds are cheap). The riscv64 `virt`
+        // board boots the ELF directly through OpenSBI (`-bios default` +
+        // `-kernel`), so the kernel ELF *is* the artifact.
         let boot_artifact = match spec.arch {
             Arch::X86_64 => x86_64::build_boot_artifact(spec)?,
+            Arch::Riscv64 => spec.kernel.clone(),
         };
 
         let mut cmd = Command::new(spec.arch.qemu_binary());
         match spec.arch {
             Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &boot_artifact)?,
+            Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &boot_artifact),
         }
         // Caller-supplied extras are appended *after* the per-arch defaults
         // so a developer can override them ad-hoc (e.g. `-d int,cpu_reset`).
@@ -310,7 +355,7 @@ impl Runner {
             if let Some(status) = child.try_wait()? {
                 let serial = read_to_string(child.stdout.take());
                 let code = status.code().unwrap_or(-1);
-                return Ok(Outcome::from_qemu_status(code, serial));
+                return Ok(spec.arch.outcome_from_status(code, serial));
             }
             if Instant::now() >= deadline {
                 // Strict, no-retry kill. `wait` afterwards is best
@@ -434,6 +479,41 @@ mod tests {
     #[test]
     fn qemu_binary_name_is_arch_specific() {
         assert_eq!(Arch::X86_64.qemu_binary(), "qemu-system-x86_64");
+        assert_eq!(Arch::Riscv64.qemu_binary(), "qemu-system-riscv64");
+    }
+
+    #[test]
+    fn spec_for_riscv64_defaults_are_architecture_neutral() {
+        let s = Spec::for_riscv64_kernel("/tmp/k");
+        assert_eq!(s.arch, Arch::Riscv64);
+        assert_eq!(s.cpus, 1);
+        assert_eq!(s.timeout, Duration::from_secs(60));
+        assert!(s.block_devices.is_empty());
+        assert!(s.extra_args.is_empty());
+    }
+
+    #[test]
+    fn outcome_decode_is_per_arch() {
+        // x86_64: success is the non-zero isa-debug-exit status.
+        let x86_pass = i32::from((SUCCESS_EXIT_CODE << 1) | 1);
+        assert!(Arch::X86_64
+            .outcome_from_status(x86_pass, String::new())
+            .is_pass());
+        assert!(!Arch::X86_64.outcome_from_status(0, String::new()).is_pass());
+        // riscv64: success is a zero SiFive-test status — the inverse.
+        assert!(Arch::Riscv64
+            .outcome_from_status(0, String::new())
+            .is_pass());
+        assert!(!Arch::Riscv64
+            .outcome_from_status(x86_pass, String::new())
+            .is_pass());
+    }
+
+    #[test]
+    fn missing_riscv64_kernel_returns_not_found() {
+        let s = Spec::for_riscv64_kernel("/definitely/not/a/real/path");
+        let err = Runner::run(&s).expect_err("missing kernel should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
