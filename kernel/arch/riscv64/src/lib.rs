@@ -16,6 +16,8 @@
 //! | ------------- | --------------------------------------------------------------- |
 //! | [`fdt`]       | Flattened-device-tree reader (`/memory`, `timebase-frequency`). |
 //! | [`kernel_arch`] | [`RiscvArch`] — the `KernelArch` impl + monotonic clock.      |
+//! | [`plic`]      | PLIC driver + the `IrqController` the kernel masks through.     |
+//! | [`trap`]      | S-mode trap vector + external-interrupt dispatch seam.          |
 //! | [`qemu_exit`] | `SiFive` Test finisher used by the integration tests.           |
 //! | `sbi`         | SBI legacy console output (freestanding only).                  |
 //! | `serial`      | SBI-backed `rustos_log::Sink` (freestanding only).              |
@@ -33,11 +35,13 @@
 //!
 //! # Not yet here
 //!
-//! Sv39 paging, the S-mode trap vector, the ring-0 DTB virtio-mmio
-//! walk, and SMP bring-up — the remaining riscv64 deliverables tracked
-//! in `PLAN.md` Stage 4.D Item 4. They are not needed to reach
-//! `BootCompleted` (the `virt` board enters S-mode with paging off and
-//! the init pipeline never faults).
+//! Sv39 paging, the ring-0 DTB virtio-mmio walk, and SMP bring-up — the
+//! remaining riscv64 deliverables tracked in `PLAN.md` Stage 4.D
+//! Item 4. The [`plic`] controller and the [`trap`] S-mode vector land
+//! the external-IRQ foundation the virtio-mmio verticals build on; they
+//! are not needed to reach `BootCompleted` (the `virt` board enters
+//! S-mode with paging off and the init pipeline never faults), so the
+//! boot pipeline does not arm them yet — the verticals will.
 #![no_std]
 #![deny(missing_docs)]
 
@@ -60,7 +64,9 @@ core::arch::global_asm!(include_str!("boot.s"));
 
 pub mod fdt;
 pub mod kernel_arch;
+pub mod plic;
 pub mod qemu_exit;
+pub mod trap;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod boot;

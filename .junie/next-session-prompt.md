@@ -8,6 +8,28 @@
 `PLAN.md` Stage 4.D records the following as **complete** (most recent
 first):
 
+- **riscv64 external-IRQ controller (PLIC + S-mode trap glue) — landed
+  (latest session).** `KernelVirtioHost::notify_wait` blocks on a real
+  IRQ line (`block_until_ready`, unbounded `u64::MAX` deadline — it does
+  *not* poll/time-out), so the riscv64 MMIO verticals need an actual
+  interrupt path to call `IrqTable::fire`. `kernel/arch/riscv64` now has
+  one: `plic.rs` (a `PlicMmio` seam + `VolatilePlicMmio`, a `Plic<M>`
+  SiFive-layout register driver, and `PlicController<M>: IrqController`
+  whose `mask` writes the source priority to zero + `SeqCst` fence — the
+  lock-free riscv64 mask-before-wake) and `trap.rs` + `trap.s` (an
+  S-mode trap vector installed by `init_traps`, which sets `stvec` +
+  `sie.SEIE` + `sstatus.SIE`; the Rust handler fails closed on a
+  synchronous exception and forwards a supervisor external interrupt to
+  a one-shot `set_trap_dispatch` callback that does the PLIC claim →
+  `IrqTable::fire` → complete handshake). All host-tested (32 crate
+  tests, +12 new). **Not yet armed:** the boot-to-`BootCompleted` slice
+  runs with interrupts disabled, so nothing calls `init_traps` or builds
+  a `PlicController` yet — the verticals are the first consumer.
+  Verified: `cargo test -p rustos-arch-riscv64` green; riscv64-target
+  build green; `clippy -D warnings` (host + riscv64) + `RUSTDOCFLAGS="-D
+  warnings" cargo doc --no-deps` + `cargo fmt --check` clean. Docs:
+  `docs/src/security/irq.md`, `docs/src/platform/riscv64.md`.
+
 - **virtio unload → reload → reuse — landed (latest session).** The
   shared `run_virtio_scenario` previously loaded the signed `.rxe` once
   and dropped the `rustos_drvhost::Host` before the device-tail ran. The
@@ -94,14 +116,29 @@ first):
 
 The x86_64 PCI verticals (blk + net) are done and gated. What remains:
 
-- **riscv64 boot port + ring-0 DTB walk.** The riscv64 QEMU runner half
+- **riscv64 boot port — done.** The kernel riscv64 boot pipeline (to
+  `AuditEvent::BootCompleted`) landed (commit `6b7875f`); the
+  external-IRQ controller + S-mode trap glue (PLIC, `trap.rs`) landed
+  this session (host-tested, not yet armed). The QEMU runner half
   (`-M virt`, `virtio-*-device` on virtio-mmio, SiFive-test exit decode)
   and `kernel/arch/riscv64::qemu_exit` already exist, and
-  `drivers/bus/virtio::MmioTransport` is the transport. The kernel
-  riscv64 boot pipeline (to `AuditEvent::BootCompleted`) and the ring-0
-  DTB walk that resolves the `virtio-mmio` slot and maps its register
-  block via `Mmio::map_slot_window` → `KernelMmioMapper` →
-  `MmioTransport::new` are what's missing. This is the large piece.
+  `drivers/bus/virtio::MmioTransport` is the transport.
+- **ring-0 DTB walk — primitives already exist.** Note: the
+  `drivers/bus/mmio::Mmio` bus driver already walks the DTB via
+  `rustos_util::dtb`, implements `VirtioMmioBus::map_slot_window`, and
+  `kernel/rustos-kernel::provision_virtio_mmio` already turns a matching
+  slot into an `MmioTransport` (all host-tested). So the remaining work
+  is **integration**, not new primitives: a freestanding riscv64/MMIO
+  bring-up scaffold that (a) publishes the DTB pointer + memory map for
+  the test, (b) builds the `Mmio` bus from that DTB and provisions the
+  transport, (c) builds a `PlicController` over the PLIC base, `arm`s the
+  device's virtio-mmio IRQ (its `interrupts` cell in the DTB),
+  `set_trap_dispatch`s a callback wired to that controller + the
+  `IrqTable`, and `init_traps`, then (d) mints a `KernelVirtioHost` over
+  a carved DMA pool and runs the shared `drive_driver_lifecycle`. The
+  riscv64 boot exposes neither a published DTB nor a memory-map/IRQ-table
+  accessor today (the `arch_wrapper` publish slots are x86_64-only), so
+  adding those riscv64 publish hooks is the first sub-task.
 - `tests/integration/virtio_blk_mmio_riscv64` and
   `virtio_net_mmio_riscv64` — once the riscv64 boot port lands, these are
   the MMIO analogues of the x86_64 verticals. Note the shared

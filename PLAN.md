@@ -1196,6 +1196,54 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — riscv64 external-IRQ controller: PLIC +
+  S-mode trap glue, *complete*): `KernelVirtioHost::notify_wait` blocks
+  on a real IRQ line (`block_until_ready` with an unbounded `u64::MAX`
+  deadline), so the riscv64 MMIO verticals need an actual interrupt path
+  to call `IrqTable::fire` — which `kernel/arch/riscv64` had none of.
+  **Change.** Two new modules land the external-IRQ foundation. (1)
+  `plic.rs` — a `PlicMmio` access seam (`VolatilePlicMmio` on the
+  freestanding target), a `Plic<M>` register driver (SiFive PLIC layout:
+  per-source priority, per-context enable bitmap, threshold, claim/
+  complete), and `PlicController<M>` implementing
+  `rustos_kernel_irq::IrqController`. The controller targets the boot
+  hart's S-mode context (`s_mode_context(h) = 2h + 1`), `arm`s a source
+  (enable + zero threshold + delivering priority), and exposes
+  `claim`/`complete`. Its `mask` (the kernel-neutral `IrqTable::fire`
+  seam) writes the source priority to zero — a single lock-free 32-bit
+  store, no read-modify-write — then a `SeqCst` fence, the riscv64
+  analogue of the IO-APIC redirection-entry mask-before-wake. (2)
+  `trap.rs` + `trap.s` — an S-mode trap vector installed into `stvec`
+  (direct mode) by `init_traps` (which also sets `sie.SEIE` +
+  `sstatus.SIE`); the vector saves caller-saved registers, calls the
+  Rust handler, and `sret`s. The handler decodes `scause`, fails closed
+  (parks) on a synchronous exception, and forwards a supervisor external
+  interrupt to a one-shot `set_trap_dispatch` callback (mirroring
+  x86_64's `set_external_irq_dispatch`) that performs the PLIC claim →
+  `IrqTable::fire` → complete handshake. The crate gained a
+  `rustos-kernel-irq` dependency. **Not yet armed.** The
+  boot-to-`BootCompleted` slice runs with interrupts disabled, so it
+  neither calls `init_traps` nor builds a `PlicController`; the
+  virtio-mmio verticals are the first consumer (they will `arm` the
+  device source, install the dispatch callback, and `init_traps`).
+  **Verification.** `cargo test -p rustos-arch-riscv64` (32 host unit
+  tests, +12 new covering the PLIC register math, S-mode context
+  interleaving, `arm`/`unmask`/mask/out-of-range, claim/complete, the
+  enable-bitmap toggle, mask-before-wake through a real `IrqTable`, the
+  `scause` decode, and the set-once dispatch slot) green; the crate
+  builds for `riscv64gc-unknown-none-elf` (freestanding asm + handler +
+  `VolatilePlicMmio`); `cargo clippy -- -D warnings` (host + riscv64
+  target), `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, and
+  `cargo fmt --check` all clean. **Docs.** `docs/src/security/irq.md`
+  (controller table row + "riscv64 trap glue" section + Test-coverage
+  bullets); `docs/src/platform/riscv64.md` ("External-interrupt
+  controller (PLIC) + S-mode trap glue"). **Deferred.** Sv39 paging, the
+  ring-0 DTB virtio-mmio walk, SMP, the riscv64 MMIO verticals
+  (`virtio_blk_mmio_riscv64`, `virtio_net_mmio_riscv64` — they reuse the
+  shared `drive_driver_lifecycle` once the walk lands), and arming the
+  controller from the boot/vertical path; the Item 6 acceptance gate
+  (`cargo xtask ci` — mdBook `docs-check` half + `cargo deny`) was not
+  runnable in this environment.
 - Stage 4.D follow-up (Item 4 — riscv64 kernel boot port to
   `BootCompleted`, *complete*): the riscv64 verticals were blocked on a
   kernel boot port that did not exist — `kernel/arch/riscv64` held only

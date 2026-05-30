@@ -37,24 +37,51 @@ Boot sequence:
    are written through the SBI legacy `console_putchar`, which OpenSBI
    routes to the same UART `-serial stdio` captures.
 
-No Sv39 paging or trap vector is required to reach `BootCompleted`: the
-board enters S-mode with paging off and the init pipeline never faults.
-The boot heap is a 64 MiB `.heap` (NOLOAD) section the linker places
-*after* `__kernel_end`, so the trampoline does not zero it and the
-usable physical-memory map excludes it.
+No Sv39 paging is required to reach `BootCompleted`: the board enters
+S-mode with paging off and the init pipeline never faults. The boot
+heap is a 64 MiB `.heap` (NOLOAD) section the linker places *after*
+`__kernel_end`, so the trampoline does not zero it and the usable
+physical-memory map excludes it.
 
 > The 64 MiB boot bump allocator itself lives in the shared
 > `lib/bumpalloc` crate (`rustos-bumpalloc`), registered as the test
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 
-Sv39 paging, the S-mode trap vector, the ring-0 DTB virtio-mmio walk,
-and SMP bring-up are the remaining riscv64 deliverables (`PLAN.md`
-Stage 4.D Item 4); they are not needed for the boot-to-`BootCompleted`
-slice.
+Sv39 paging, the ring-0 DTB virtio-mmio walk, and SMP bring-up are the
+remaining riscv64 deliverables (`PLAN.md` Stage 4.D Item 4); they are
+not needed for the boot-to-`BootCompleted` slice.
 
 The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
 is what the test bin uses to report its result.
+
+## External-interrupt controller (PLIC) + S-mode trap glue
+
+`kernel/arch/riscv64::plic` and `kernel/arch/riscv64::trap` land the
+external-IRQ foundation the virtio-mmio verticals build on. They are
+implemented and host-tested but **not yet armed by the boot pipeline**
+(the boot-to-`BootCompleted` slice runs with interrupts disabled, so it
+neither calls `trap::init_traps` nor builds a `PlicController`); the
+first consumer is the virtio-mmio integration verticals.
+
+- **PLIC.** `plic::PlicController` wraps a `Plic<M>` register driver
+  over the `PlicMmio` access seam (`VolatilePlicMmio` on the
+  freestanding target). It targets the boot hart's S-mode context
+  (`s_mode_context(hartid) = 2 * hartid + 1` on the `virt` layout),
+  `arm`s a source (enable bit + zero threshold + delivering priority),
+  and `claim`/`complete`s through the per-context claim register.
+- **Mask-before-wake.** The `IrqController::mask` the kernel-neutral
+  `IrqTable::fire` calls masks a source by writing its PLIC priority
+  register to zero (a single lock-free 32-bit store) followed by a
+  `SeqCst` fence — the riscv64 analogue of the x86_64 IO-APIC
+  redirection-entry mask. See `docs/src/security/irq.md`.
+- **S-mode trap vector.** `trap::init_traps` installs
+  `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode)
+  and enables `sie.SEIE` + `sstatus.SIE`. The vector saves
+  caller-saved registers, calls the Rust handler, and `sret`s; the
+  handler fails closed (parks) on a synchronous exception and forwards
+  a supervisor external interrupt to a one-shot dispatch callback that
+  performs the PLIC claim → `IrqTable::fire` → complete handshake.
 
 ## Board model: `virt`
 

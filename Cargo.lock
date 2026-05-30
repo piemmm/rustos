@@ -378,6 +378,7 @@ name = "rustos-arch-riscv64"
 version = "0.0.0"
 dependencies = [
  "rustos-kernel-core",
+ "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sched",
  "rustos-kernel-sec",

@@ -252,7 +252,7 @@ phase:
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
 | `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
 | `aarch64`    | GIC `ICACTIVE` / distributor mask                                                                      | Not wired; `UnsupportedController` installed. |
-| `riscv64`    | PLIC `claim` / `complete` priority gating                                                              | Not wired; `UnsupportedController` installed. |
+| `riscv64`    | `kernel/arch/riscv64::plic::PlicController` — masks a source by writing its PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The controller, the `scause` decode, and the one-shot dispatch slot are unit-tested (incl. mask-before-wake through `IrqTable`); the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
 The kernel binary records one `KERNEL_PHASE_STARTED` /
@@ -358,6 +358,53 @@ The crate is enrolled in `tools/xtask::commands::qemu_tests::TESTS`
 with a 60 s budget. `cargo xtask test --qemu` builds and runs it
 alongside the other five freestanding integration crates.
 
+### riscv64 trap glue (Stage 4.D Item 4 — riscv64 external-IRQ controller)
+
+The riscv64 port supplies the same `IrqController` seam through a
+PLIC, plus the S-mode trap vector that turns a hardware external
+interrupt into an `IrqTable::fire`. The pieces are implemented and
+host-tested; the boot-to-`BootCompleted` slice does not yet arm them
+(the `virt` board reaches `BootCompleted` with interrupts disabled),
+so the virtio-mmio verticals are the first consumer.
+
+1. **PLIC controller.** `kernel/arch/riscv64::plic::PlicController`
+   wraps a `Plic<M>` register driver over the `PlicMmio` access seam
+   (`VolatilePlicMmio` on the freestanding target, an in-memory mock
+   in host tests). `arm(source)` enables the source in the boot
+   hart's S-mode context bitmap, drops the context threshold to zero,
+   and sets a delivering priority; `claim` / `complete` wrap the
+   per-context claim register.
+2. **Mask-before-wake.** `IrqController::mask` masks a source by
+   writing its **priority register to zero** — a single 32-bit MMIO
+   store, after which the source can never out-prioritise the (zero)
+   threshold and so cannot re-fire — then issues a
+   `core::sync::atomic::fence` with `Ordering::SeqCst`. The
+   single-store strategy is lock-free: it never read-modify-writes a
+   shared word, so it races neither the trap handler's claim/complete
+   nor a concurrent arm/unmask on another source. The host test
+   `mask_before_wake_through_irq_table` drives `IrqTable::fire` with
+   the controller and asserts the priority-zero write is the last
+   register write before `fire` returns `Marked`.
+3. **S-mode trap vector.** `kernel/arch/riscv64::trap` publishes
+   `rustos_riscv64_trap_vector` (`trap.s`) and installs it into
+   `stvec` (direct mode) via `init_traps`, which also sets
+   `sie.SEIE` and `sstatus.SIE`. The vector saves the interrupted
+   context's caller-saved registers, calls the Rust handler, restores,
+   and `sret`s.
+4. **Dispatch.** The Rust handler reads `scause`. A synchronous
+   exception is unexpected in this slice and fails closed by parking
+   the hart (rather than `sret`-looping the faulting instruction). A
+   supervisor external interrupt
+   (`is_supervisor_external_interrupt`) forwards to the one-shot
+   `set_trap_dispatch` callback, which — like the x86_64 dispatcher —
+   holds the controller reference and performs the PLIC claim →
+   `IrqTable::fire` (mask-before-wake) → complete handshake.
+
+The `scause` decode, the `sie`/`sstatus`/`scause` bit constants, and
+the set-once dispatch slot build on the host so their unit tests run
+under `cargo test`; the trap vector, `init_traps`, the handler, and
+`VolatilePlicMmio` are gated to `riscv64-unknown-none-elf`.
+
 ### Test coverage
 
 * `kernel/irq` ships 18 unit tests covering bind / duplicate
@@ -378,5 +425,15 @@ alongside the other five freestanding integration crates.
   the set-once semantics of the `published_irq_controller` slot
   and the "still-None until installed" invariant of the
   `published_irq_table` slot.
+* `kernel/arch/riscv64::plic` adds host tests for the SiFive PLIC
+  register-offset arithmetic, the S-mode context interleaving,
+  `arm` / `unmask` / out-of-range refusal, `claim` / `complete`
+  round-trip, the enable-bitmap toggle, and the mask-before-wake
+  ordering through `IrqTable` against an in-memory `MockPlicMmio`.
+* `kernel/arch/riscv64::trap` adds host tests for the `scause`
+  supervisor-external-interrupt decode (incl. rejecting the same
+  code as a synchronous exception and other interrupt causes), the
+  `sie`/`sstatus`/`scause` bit constants, and the set-once
+  fail-closed semantics of the trap-dispatch slot.
 * `tests/integration/irq_qemu_x86_64` is the QEMU-validated
   end-to-end regression bound described above.
