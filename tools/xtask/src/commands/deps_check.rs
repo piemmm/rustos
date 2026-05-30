@@ -28,12 +28,13 @@
 //!
 //! ## Grandfathered violations
 //!
-//! The tree predates §17 and does not yet satisfy the layering. The
-//! [`GRANDFATHERED`] list pins every offending edge that exists *today*;
-//! each is a tracked defect scheduled for the §17 burn-down (`PLAN.md`).
-//! The list is append-never: it may only shrink, and a *new* violating
-//! edge is always rejected. The transitive non-GUI → GUI rule has no
-//! exceptions — the desktop boundary is clean and must stay clean.
+//! The [`GRANDFATHERED`] list pins every offending edge that exists
+//! *today*; each is a tracked defect scheduled for the §17 burn-down
+//! (`PLAN.md`). The list is append-never: it may only shrink, and a *new*
+//! violating edge is always rejected. It is now empty — the layering is
+//! satisfied (see [`GRANDFATHERED`] for how the last edges were retired).
+//! The transitive non-GUI → GUI rule has no exceptions — the desktop
+//! boundary is clean and must stay clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -84,29 +85,20 @@ pub struct Crate {
     pub deps: Vec<String>,
 }
 
-/// A grandfathered edge, pinned to today's tree.
-struct GrandfatheredEdge {
-    from: &'static str,
-    to: &'static str,
-}
-
-/// Edges that violate §17.4 / the concrete-scheduler rule *today*. Each
-/// is a tracked defect for the §17 burn-down (`PLAN.md`); this list may
-/// only shrink.
-const GRANDFATHERED: &[GrandfatheredEdge] = &[
-    // The x86_64 production kernel binary is a second integration point
-    // beside `kernel/core`: it brings the allocator, the arch port, and
-    // the boot-time drivers together. §17.4 allows exactly one selection
-    // point (`kernel/core`); collapsing the two is part of the burn-down.
-    edge("rustos-kernel", "rustos-kernel-core"),
-    edge("rustos-kernel", "rustos-arch-x86_64"),
-    edge("rustos-kernel", "rustos-drvhost"),
-    edge("rustos-kernel", "rustos-drv-bus-virtio"),
-];
-
-const fn edge(from: &'static str, to: &'static str) -> GrandfatheredEdge {
-    GrandfatheredEdge { from, to }
-}
+/// Edges that violate §17.4 / the concrete-scheduler rule *today*, pinned
+/// as `(from, to)` crate-name pairs. Each is a tracked defect for the §17
+/// burn-down (`PLAN.md`); this list is append-never and may only shrink —
+/// a *new* violating edge is always rejected.
+///
+/// Empty: every grandfathered edge has been burned down. The final
+/// entries were the x86_64 production binary's bring-up edges
+/// (`rustos-kernel → {rustos-kernel-core, rustos-arch-x86_64,
+/// rustos-drvhost, rustos-drv-bus-virtio}`). That binary is the
+/// image-assembly seam, not a kernel subsystem, so it is now classified
+/// as [`Layer::Tooling`] (see [`classify`]) — the x86_64 analogue of the
+/// downstream `tests/integration/riscv64_boot` consumer — rather than
+/// grandfathered.
+const GRANDFATHERED: &[(&str, &str)] = &[];
 
 /// Classify a crate by its workspace-relative directory.
 pub fn classify(rel_dir: &str) -> Layer {
@@ -114,6 +106,15 @@ pub fn classify(rel_dir: &str) -> Layer {
         Layer::Lib
     } else if rel_dir == "kernel/core" {
         Layer::KernelCore
+    } else if rel_dir == "kernel/rustos-kernel" {
+        // The final-image production binary is the x86_64 image-assembly
+        // seam, not a kernel subsystem. It is the one place that wires the
+        // arch port, `kernel/core`, the driver host, and the boot-time bus
+        // driver into a bootable image, so it legitimately names crates
+        // across strata — exactly like the downstream
+        // `tests/integration/riscv64_boot` consumer. It is therefore
+        // outside the product layering (§17.4).
+        Layer::Tooling
     } else if rel_dir == "kernel/arch/api" {
         Layer::ArchApi
     } else if rel_dir.starts_with("kernel/arch/") {
@@ -170,7 +171,7 @@ fn may_name_concrete_scheduler(rel_dir: &str) -> bool {
 }
 
 fn is_grandfathered(from: &str, to: &str) -> bool {
-    GRANDFATHERED.iter().any(|e| e.from == from && e.to == to)
+    GRANDFATHERED.iter().any(|&(f, t)| f == from && t == to)
 }
 
 /// Build the crate graph from the workspace manifests under `root`.
@@ -656,6 +657,47 @@ mod tests {
                 "{driver} must consume the virtio protocol from {expected_lib}"
             );
         }
+    }
+
+    #[test]
+    fn rustos_kernel_binary_is_tooling_integration_point() {
+        // §17 burn-down regression (§17.4): the x86_64 production binary
+        // `rustos-kernel` is the image-assembly seam, not a kernel
+        // subsystem. It is classified as `Tooling` (outside the product
+        // layering) so it may wire the arch port, `kernel/core`, the
+        // driver host, and the boot-time bus driver into a bootable image
+        // — the x86_64 analogue of `tests/integration/riscv64_boot`. None
+        // of those bring-up edges may be re-grandfathered, and the
+        // grandfather list as a whole stays empty.
+        assert_eq!(classify("kernel/rustos-kernel"), Layer::Tooling);
+        let root = workspace_root();
+        let crates = build_graph(&root).expect("graph");
+        let bin = crates
+            .iter()
+            .find(|c| c.name == "rustos-kernel")
+            .expect("production kernel binary present");
+        assert_eq!(bin.layer, Layer::Tooling);
+        for dep in ["rustos-kernel-core", "rustos-arch-x86_64"] {
+            assert!(
+                bin.deps.iter().any(|d| d == dep),
+                "production binary should integrate {dep}"
+            );
+        }
+        for to in [
+            "rustos-kernel-core",
+            "rustos-arch-x86_64",
+            "rustos-drvhost",
+            "rustos-drv-bus-virtio",
+        ] {
+            assert!(
+                !is_grandfathered("rustos-kernel", to),
+                "stale grandfather entry for rustos-kernel -> {to} must stay removed"
+            );
+        }
+        assert!(
+            GRANDFATHERED.is_empty(),
+            "the deps-check grandfather list may only shrink"
+        );
     }
 
     #[test]

@@ -31,11 +31,19 @@ test scaffolding and are excluded.
 
 ### Grandfathered edges
 
-The tree predates §17 and does not yet satisfy the full layering. Every
-offending edge that exists today is pinned in an explicit, commented
+Offending edges that predate §17 are pinned in an explicit, commented
 allow-list inside the checker. The list is append-never — it may only
 shrink — and a *new* violating edge is always rejected. Each pinned edge
 is a tracked defect scheduled for the §17 burn-down in `PLAN.md`.
+
+That list is now empty: the layering is satisfied with no exceptions. The
+final edges were the x86_64 production binary's bring-up dependencies
+(`rustos-kernel → kernel/core`, the arch port, the driver host, and the
+boot-time bus driver). `rustos-kernel` is the image-assembly seam, not a
+kernel subsystem, so it is classified as `Tooling` (outside the product
+layering) rather than grandfathered — the x86_64 analogue of the
+downstream `tests/integration/riscv64_boot` consumer, which wires the
+riscv64 image together the same way.
 
 ## The Arch HAL (`kernel/arch/api`)
 

@@ -3221,26 +3221,32 @@ tracked defect; the burn-down removes them, and removing the last entry of
 a list collapses that list. No *new* violation may be added.
 
 **`deps-check` grandfathered edges (§17.4 / §17.1):**
-- `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
-  `userland/system/drvhost`, `drivers/bus/virtio`:
-  collapse the production binary's bring-up into the single §17.4
-  selection point (`kernel/core`). (The `→ kernel/sched` edge is *done*:
-  the binary now names only the `kernel/sched/api` contract, a permitted
-  `KernelSubsystem → SchedApi` edge.) The agreed resolution is to
-  reclassify the final-image binary as a Tooling-exempt integration
-  point in `deps_check.rs` (it is the image-assembly seam, not a kernel
-  subsystem, and legitimately names the arch port, `kernel/core`, the
-  driver host, and the bus driver), mirroring how the riscv64 boot
-  consumer was handled in the burn-down below.
-  (The `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`
-  edges that sat here are *done* — see the riscv64 Arch HAL migration
-  in the burn-down below.)
+- *(none)* — the `kernel/rustos-kernel` entry has been burned down (see
+  below); the `deps-check` grandfather list is now empty.
 
 **`cfg-check` grandfathered directories (§17.2):**
 - *(none)* — the `kernel/rustos-kernel/` entry has been burned down (see
   below); the `cfg-check` grandfather list is now empty.
 
 **Burn-down progress:**
+- `kernel/rustos-kernel` production-binary bring-up edges (deps-check
+  §17.4) — *done*. The four edges `rustos-kernel → {rustos-kernel-core,
+  rustos-arch-x86_64, rustos-drvhost, rustos-drv-bus-virtio}` were the
+  last grandfathered entries. The agreed resolution (above) was applied:
+  the final-image binary is the x86_64 image-assembly seam, not a kernel
+  subsystem, so `deps_check.rs::classify` now maps `kernel/rustos-kernel`
+  to `Layer::Tooling` (outside the product layering), exactly mirroring
+  the downstream `tests/integration/riscv64_boot` consumer that wires the
+  riscv64 image together. As a `Tooling` integration point the binary may
+  legitimately name the arch port, `kernel/core`, the driver host, and
+  the boot-time bus driver. The `GRANDFATHERED` list is now empty (the
+  now-dead `edge`/`GrandfatheredEdge` helpers were removed and the list
+  switched to a `(from, to)` tuple representation), and a regression test
+  (`deps_check::tests::rustos_kernel_binary_is_tooling_integration_point`)
+  fails closed if the classification regresses or any edge is
+  re-grandfathered. `deps-check` and `cfg-check` are clean with the tree
+  scanned; the §17 grandfather lists for both checks are now empty. Docs
+  updated: `docs/src/architecture/modularity.md`.
 - `kernel/rustos-kernel/` freestanding `cfg` migration (cfg-check) —
   *done*. The production kernel binary no longer names the target
   instruction set inline. Its build script
