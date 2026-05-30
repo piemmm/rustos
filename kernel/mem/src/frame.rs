@@ -22,7 +22,7 @@
 //! # Concurrency
 //!
 //! The allocator's state is wrapped in
-//! [`rustos_kernel_sync::SpinLock`] at the [`FrameAllocator`] level.
+//! [`rustos_sync::SpinLock`] at the [`FrameAllocator`] level.
 //! Internal helpers operate on `&mut FrameAllocatorState` and are
 //! oblivious to locking.
 //!
@@ -36,7 +36,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_kernel_sync::SpinLock;
+use rustos_sync::SpinLock;
 
 use crate::bootinfo::{BootMemoryMap, RegionKind};
 use crate::error::AllocError;

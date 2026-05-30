@@ -1,40 +1,37 @@
-//! Architecture hook for the scheduler.
+//! Architecture hook for the scheduler, plus the host test double.
 //!
-//! The scheduler is architecture-neutral — it never reaches for an APIC, a
+//! A scheduler is architecture-neutral — it never reaches for an APIC, a
 //! GIC, a CLINT or `requestAnimationFrame` directly. Every architecture
-//! port (Stage 3 of `PLAN.md`) implements [`SchedulerArch`]; the host test
-//! binary uses [`TestArch`], gated behind the `test-arch` Cargo feature
-//! (`AGENTS.md` §1 — no hacks: production code never carries a fake
-//! IPI/timer implementation).
+//! port implements [`SchedulerArch`]; the host conformance suite and the
+//! implementations' unit tests use [`TestArch`], gated behind the
+//! `test-arch` Cargo feature (`AGENTS.md` §1 — no hacks: production code
+//! never carries a fake IPI/timer implementation).
 //!
-//! [`SchedulerArch`] and [`CpuId`] themselves are defined in the Arch
-//! HAL crate `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported here.
-//! This module owns only the host test double [`TestArch`]: keeping the
+//! [`SchedulerArch`] and [`CpuId`] are defined in the Arch HAL crate
+//! `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported here. Keeping the
 //! HAL trait in `kernel/arch/api` is what lets an architecture port
-//! implement it without depending on `kernel/sched` (§17.4).
+//! implement it without depending on a scheduler crate (§17.4).
 
-#[cfg(any(test, feature = "test-arch"))]
-use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
-
-// The scheduler-facing Arch HAL surface ([`CpuId`], [`SchedulerArch`])
-// is defined once in `kernel/arch/api` (`AGENTS.md` §17.2) and
-// re-exported here so existing `rustos_kernel_sched::{CpuId,
-// SchedulerArch}` paths — and the `kernel/core` `KernelArch:
-// SchedulerArch` super-trait — keep resolving to the single canonical
-// definition (`AGENTS.md` §2.2 — no duplication).
+// The scheduler-facing Arch HAL surface ([`CpuId`], [`SchedulerArch`]) is
+// defined once in `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported
+// here so the scheduler contract, every `kernel/sched/<impl>`, and
+// `kernel/core` all name the single canonical definition (`AGENTS.md`
+// §2.2 — no duplication).
 pub use rustos_arch_api::{CpuId, SchedulerArch};
 
-/// In-memory `SchedulerArch` implementation used by host-side tests.
+#[cfg(any(test, feature = "test-arch"))]
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// In-memory [`SchedulerArch`] implementation used by host-side tests and
+/// the `conformance` suite.
 ///
 /// `TestArch` is the *only* implementation produced by this crate. Real
-/// ports live in `kernel/arch/<arch>/` (Stage 3). It is gated behind the
-/// `test-arch` Cargo feature; the crate's own dev-dependency self-link
-/// enables it automatically for `cargo test`, and the feature is
-/// otherwise opt-in.
+/// ports live in `kernel/arch/<arch>/`. It is gated behind the
+/// `test-arch` Cargo feature.
 ///
 /// # Cooperative model
 ///
-/// The scheduler is deterministic on a single thread of execution: each
+/// A scheduler is deterministic on a single thread of execution: each
 /// host test drives it step-by-step. `TestArch` therefore stores the
 /// "current CPU" inside an [`AtomicU32`] that the test scaffolding
 /// updates via [`Self::set_current_cpu`] when it switches focus between

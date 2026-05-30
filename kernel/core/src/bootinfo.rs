@@ -24,9 +24,9 @@
 
 use alloc::sync::Arc;
 
+use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
 use rustos_kernel_mem::BootMemoryMap;
-use rustos_kernel_sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Level, Sink};
 
@@ -473,9 +473,9 @@ impl BootInfoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::SchedulerConfig;
     use crate::test_arch::TestArch;
     use alloc::sync::Arc;
-    use rustos_kernel_sched::SchedulerConfig;
     use rustos_log::Level;
 
     fn empty_sink() -> &'static crate::test_sink::TestSink {

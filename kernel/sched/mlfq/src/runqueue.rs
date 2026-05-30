@@ -1,6 +1,6 @@
 //! Per-CPU bounded work-stealing queue.
 //!
-//! Each CPU owns one [`RunDeque`] per [`crate::task::Priority`] band. The
+//! Each CPU owns one [`RunDeque`] per [`crate::Priority`] band. The
 //! queue is **SPMC**: a single owner CPU pushes at the *bottom* end;
 //! any CPU — including the owner itself — consumes via [`RunDeque::steal`]
 //! from the *top* end. The hot push path is wait-free; the consume path
@@ -29,7 +29,7 @@
 //!    (`AGENTS.md` §5). Overflow is signalled to the caller via
 //!    [`crate::SchedError::QueueFull`], which the scheduler handles by
 //!    routing the affected task to another CPU.
-//! 2. Slot payload is [`crate::task::TaskId`] (a `Copy` `u64`), not a
+//! 2. Slot payload is [`crate::TaskId`] (a `Copy` `u64`), not a
 //!    typed pointer. Lost-CAS races therefore cannot leak or
 //!    double-free a `Box`; the discarded read is simply ignored.
 //! 3. Atomics are routed through an internal loom-compat shim so the
@@ -63,7 +63,7 @@ pub enum Steal {
     Stolen(u64),
 }
 
-/// A bounded SPMC work-stealing deque of [`crate::task::TaskId`] values.
+/// A bounded SPMC work-stealing deque of [`crate::TaskId`] values.
 ///
 /// **Producer:** exactly one CPU calls [`Self::push`].
 ///
@@ -85,7 +85,7 @@ unsafe impl Sync for RunDeque {}
 
 impl RunDeque {
     /// Reserved task-id sentinel meaning "slot empty / never written".
-    /// Mirrors the reservation documented on [`crate::task::TaskId`].
+    /// Mirrors the reservation documented on [`crate::TaskId`].
     pub const EMPTY: u64 = 0;
 
     /// Construct a deque of `capacity` slots.
@@ -130,8 +130,9 @@ impl RunDeque {
     /// Number of items currently in the deque (approximate under concurrency).
     ///
     /// The result is exact in the absence of concurrent stealers and is
-    /// in `[0, capacity]` otherwise. Used by tests and the scheduler's
-    /// idle heuristic only — never to enforce safety.
+    /// in `[0, capacity]` otherwise. Used by the deque's own tests only —
+    /// never to enforce safety — so it is compiled only under `cfg(test)`.
+    #[cfg(test)]
     #[must_use]
     pub fn len_approx(&self) -> usize {
         let b = self.bottom.load(Ordering::Acquire);

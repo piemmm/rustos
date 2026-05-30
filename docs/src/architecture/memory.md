@@ -282,7 +282,7 @@ binaries that do not yet provide a `#[global_allocator]`.
   invariant.
 - **Loom tests** — `kernel/mem/tests/loom.rs` model-checks concurrent
   allocation, gated on `RUSTFLAGS="--cfg loom"` exactly like
-  `kernel/sync`.
+  `lib/sync`.
 
 [`BootMemoryMap`]: ../../rustos_kernel_mem/struct.BootMemoryMap.html
 [`AddressSpace<P: PageTableOps>`]: ../../rustos_kernel_mem/struct.AddressSpace.html

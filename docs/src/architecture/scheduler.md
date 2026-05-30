@@ -123,8 +123,8 @@ indefinitely block another).
 
 `step` reads the task registry through an `RwLock` and locks the
 overflow `SpinLock`; `spawn` writes the registry. Both lock kinds
-are explicitly forbidden from interrupt context by `kernel/sync`
-(see `kernel/sync/src/rwlock.rs` module docs: "Process /
+are explicitly forbidden from interrupt context by `lib/sync`
+(see `lib/sync/src/rwlock.rs` module docs: "Process /
 kernel-thread context only. Never from an interrupt handler.").
 An ISR-driven `step` would deadlock against the same CPU's in-
 progress `spawn` (writer-held registry lock) or a mid-
@@ -137,7 +137,7 @@ The integration test's per-CPU `preemption_count >= N` assertion
 is what proves the timer is actually firing on every CPU.
 
 A future commit that lands IRQ-safe locks (an `irq::SpinLock` from
-`kernel/sync`, plus an IRQ-safe `RwLock`) can extend
+`lib/sync`, plus an IRQ-safe `RwLock`) can extend
 `on_timer_tick` to drive a real preemption step without changing
 its public signature.
 
@@ -180,7 +180,7 @@ ground truth.
 * The slot is read in **process context** on the issuing CPU only.
   Interrupt-context reads are forbidden — they would race with a
   same-CPU `dispatch` set/clear pair under
-  `kernel/sync::RwLock`'s process-only contract
+  `lib/sync::RwLock`'s process-only contract
   (`AGENTS.md` §1).
 * The clear-by-id helper used by `park` / `exit` /
   `yield_current` is a per-slot compare-exchange; a concurrent
@@ -249,32 +249,54 @@ These hold at every API boundary:
    within a single scheduler instance. Stale references therefore
    produce `SchedError::NoSuchTask` rather than waking the wrong task.
 
+## Crate layout (§17.1)
+
+The scheduler is split per `AGENTS.md` §17.1 into a contract crate and
+one policy crate per implementation:
+
+* `kernel/sched/api` (`rustos-kernel-sched-api`) — the
+  `SchedulerPolicy` trait, the policy-neutral lifecycle vocabulary
+  (`Priority`, `TaskState`, `TaskAction`, `TaskContext`, `TaskId`,
+  `SchedError`, `StepOutcome`, `SchedulerConfig`), the re-exported
+  Arch HAL surface (`CpuId`, `SchedulerArch`), the host `TestArch`
+  double, and the shared `conformance` suite.
+* `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`) — the MLFQ policy
+  described above, implementing `SchedulerPolicy`. Adding another
+  policy means adding a sibling crate, never editing this one.
+* `kernel/core` is the single build-time selection point: the
+  `scheduler-mlfq` feature (default) selects exactly one concrete
+  policy and re-exports it as `crate::sched::Scheduler`. No other
+  crate names a concrete policy — they depend on `kernel/sched/api`.
+
 ## Test surface
 
-The scheduler ships with three host-side test binaries:
+The scheduler's behaviour is covered by:
 
-* `kernel/sched/tests/scheduler.rs` — fairness across ≥ 4 cores,
-  work-stealing, IPI-based preemption, starvation-freedom via
-  priority boost, cancellation safety, error surface.
-* `kernel/sched/tests/stress.rs` — 10 000 tasks across 4 cores;
-  asserts no deadlock, exact run counts, and bounded first-run
-  latency.
-* `kernel/sched/tests/loom.rs` — Loom model check over the
+* The shared conformance suite `kernel/sched/api/src/conformance.rs`
+  (`AGENTS.md` §17.1): generic over `SchedulerPolicy`, it asserts
+  correct spawn/dispatch/block/wake and yield semantics, starvation-
+  freedom via the priority boost, fairness across bands, and a
+  deadlock-free, lossless, bounded-latency stress of 10 000 tasks
+  across 4 simulated cores. `kernel/sched/api/tests/conformance.rs`
+  runs it against the in-tree policy; every concrete policy must pass
+  it.
+* `kernel/sched/mlfq/tests/scheduler.rs` — MLFQ-specific integration
+  tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
+  preemption, cancellation safety, error surface).
+* `kernel/sched/mlfq/tests/loom.rs` — Loom model check over the
   run-queue's lock-free fast path (single producer racing a single
   stealer for the last element). Compiled into an empty binary when
   `--cfg loom` is not set so default `cargo test` stays fast.
 
 In addition, every module carries `#[cfg(test)] mod tests` with
-focused unit coverage. The host test binary uses the in-memory
-[`TestArch`] (gated behind the `test-arch` Cargo feature, enabled by
-`kernel/sched`'s dev-dependency self-reference) — production builds
+focused unit coverage. The tests use the in-memory [`TestArch`]
+(gated behind the `test-arch` Cargo feature) — production builds
 never link the mock.
 
 ## Debugging
 
-* **Stuck CPU?** Check `Scheduler::live_task_count` and the per-band
-  approximate length via `RunDeque::len_approx`. A non-zero count with
-  no progress points at a missed IPI (`SchedulerArch::send_ipi`
+* **Stuck CPU?** Check `Scheduler::live_task_count`. A non-zero count
+  with no progress points at a missed IPI (`SchedulerArch::send_ipi`
   delivered to a CPU that never calls `step`).
 * **Task never runs?** Confirm its `home_cpu` matches a CPU that is
   actually being driven, and that the task is not stuck in

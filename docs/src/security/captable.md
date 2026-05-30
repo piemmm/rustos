@@ -22,7 +22,7 @@ lock-ordering policy and provides whichever reader/writer
 synchronisation primitive is appropriate. The same shape of access
 pattern already drives `Scheduler::tasks` (many concurrent syscall-
 context readers, occasional task-creation writers), so a
-reader-preferring `kernel/sync::RwLock` mirrors that policy.
+reader-preferring `lib/sync::RwLock` mirrors that policy.
 
 ### Lifecycle
 
@@ -73,7 +73,7 @@ synthesises capability state.
 
 Stage 2.7 follow-up (f4) wires `CapTable` into `KernelState`, the
 in-memory record `kernel_main` builds during the init phases. The
-table is placed under a reader-preferring `kernel/sync::RwLock`, the
+table is placed under a reader-preferring `lib/sync::RwLock`, the
 same primitive `Scheduler::tasks` uses, so the syscall dispatcher's
 hot path (the `cap_query` predicate and the IPC capability checks)
 takes only a shared lock:

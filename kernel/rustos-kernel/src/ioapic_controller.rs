@@ -51,7 +51,7 @@ use core::sync::atomic::{fence, Ordering};
 
 use rustos_arch_x86_64::apic::{IoApic, IoApicMmio};
 use rustos_kernel_irq::{IrqController, MaskError};
-use rustos_kernel_sync::spinlock::SpinLock;
+use rustos_sync::spinlock::SpinLock;
 
 /// Set-once typed publication of the production
 /// `IoApicController<VolatileIoApicMmio>` constructed by
@@ -76,9 +76,9 @@ use rustos_kernel_sync::spinlock::SpinLock;
 /// slot is set-once per boot; AGENTS.md §2.4 — the typed accessor is
 /// a *read* of already-published state, not a new writable surface.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static PUBLISHED_TYPED: rustos_kernel_sync::once::OnceCell<
+static PUBLISHED_TYPED: rustos_sync::once::OnceCell<
     &'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>,
-> = rustos_kernel_sync::once::OnceCell::new();
+> = rustos_sync::once::OnceCell::new();
 
 /// Publish the production controller into [`PUBLISHED_TYPED`].
 ///

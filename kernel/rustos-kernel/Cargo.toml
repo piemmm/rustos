@@ -64,8 +64,8 @@ rustos-kernel-core = { path = "../core", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
-rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
-rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
+rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # The architecture-neutral virtio factory + provisioning walks (shared
 # with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so

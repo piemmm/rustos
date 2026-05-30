@@ -98,25 +98,22 @@ const GRANDFATHERED: &[GrandfatheredEdge] = &[
     // for the shared virtio host factory. Moves behind `lib/abi` traits.
     edge("rustos-kernel-virtio", "rustos-drv-bus-virtio"),
     edge("rustos-kernel-virtio", "rustos-drvhost"),
-    // The concrete scheduler links `kernel/sync` for its run-queue locks.
-    // §17.4 lists neither `kernel/sync` nor this edge; it is reconciled
-    // when the scheduler `api`/`impl` split lands.
-    edge("rustos-kernel-sched", "rustos-kernel-sync"),
     // Architecture ports still name concrete kernel crates instead of
     // the Arch HAL `kernel/arch/api`. x86_64 has been migrated: it now
-    // implements `rustos_arch_api::SchedulerArch` and no longer names
-    // `kernel/sched`. riscv64 remains grandfathered because its boot
+    // implements `rustos_arch_api::SchedulerArch` and no longer names a
+    // scheduler crate. riscv64 remains grandfathered because its boot
     // pipeline (`boot.rs`) builds a `kernel_core::BootInfo` from
-    // `kernel/{mem,sec,sched}` types and calls `kernel_main` directly;
-    // removing those edges requires relocating the boot orchestration
-    // into `kernel/core` (the single §17.4 selection point) and is
-    // tracked in the §17 burn-down (`PLAN.md`).
+    // `kernel/{mem,sec}` types, names `SchedulerConfig` from the
+    // scheduler API, and calls `kernel_main` directly; removing those
+    // edges requires relocating the boot orchestration into `kernel/core`
+    // (the single §17.4 selection point) and is tracked in the §17
+    // burn-down (`PLAN.md`). The `kernel/sync` edge is resolved — those
+    // primitives now live in `lib/sync`, which an `ArchImpl` may name.
     edge("rustos-arch-riscv64", "rustos-kernel-core"),
-    edge("rustos-arch-riscv64", "rustos-kernel-sched"),
+    edge("rustos-arch-riscv64", "rustos-kernel-sched-api"),
     edge("rustos-arch-riscv64", "rustos-kernel-mem"),
     edge("rustos-arch-riscv64", "rustos-kernel-sec"),
     edge("rustos-arch-riscv64", "rustos-kernel-irq"),
-    edge("rustos-arch-riscv64", "rustos-kernel-sync"),
     // The virtio bus driver links kernel internals for its in-kernel host
     // mode (feature-gated). Moves behind `lib/abi` driver traits.
     edge("rustos-drv-bus-virtio", "rustos-kernel-mem"),
@@ -134,7 +131,6 @@ const GRANDFATHERED: &[GrandfatheredEdge] = &[
     // point (`kernel/core`); collapsing the two is part of the burn-down.
     edge("rustos-kernel", "rustos-kernel-core"),
     edge("rustos-kernel", "rustos-arch-x86_64"),
-    edge("rustos-kernel", "rustos-kernel-sched"),
     edge("rustos-kernel", "rustos-drvhost"),
     edge("rustos-kernel", "rustos-drv-bus-virtio"),
 ];

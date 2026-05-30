@@ -21,7 +21,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustos_kernel_sched::{
+use rustos_kernel_sched_mlfq::{
     Priority, SchedError, Scheduler, SchedulerConfig, TaskAction, TaskState, TestArch,
 };
 

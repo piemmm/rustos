@@ -22,7 +22,7 @@ host-tests = []
 
 [dependencies]
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
-rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
 # Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
 # per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The

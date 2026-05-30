@@ -9,65 +9,15 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_kernel_sync::{RwLock, SpinLock};
+use rustos_sync::{RwLock, SpinLock};
 
-use crate::arch::{CpuId, SchedulerArch};
-use crate::error::{SchedError, SchedResult};
 use crate::loom_compat::{AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
-use crate::task::{Priority, TaskAction, TaskBody, TaskContext, TaskId, TaskInner, TaskState};
-
-/// Static configuration for a [`Scheduler`].
-///
-/// The configuration is consumed at construction and is never mutated; all
-/// limits are therefore enforceable without locks. Defaults are tuned for
-/// kernel use (`AGENTS.md` §5 — security defaults): bounded queues, a
-/// short quantum, and a frequent priority boost.
-#[derive(Copy, Clone, Debug)]
-pub struct SchedulerConfig {
-    /// Number of CPUs the scheduler will manage. Must equal the count
-    /// reported by the underlying [`SchedulerArch`].
-    pub cpus: u32,
-    /// Per-band queue capacity. Must be a power of two ≥ 2 (see
-    /// [`RunDeque::try_new`]).
-    pub queue_capacity_per_band: usize,
-    /// Number of `Yield`s permitted at a single priority before MLFQ
-    /// demotion kicks in. A value of `1` matches the classical MLFQ
-    /// description; larger values make demotion gentler.
-    pub yields_before_demotion: u64,
-    /// Tick interval at which every non-exited task is promoted back to
-    /// [`Priority::High`]. Bounds the worst-case starvation latency to
-    /// this many ticks (`docs/src/architecture/scheduler.md` §"Starvation
-    /// freedom").
-    pub boost_interval_ticks: u64,
-}
-
-impl SchedulerConfig {
-    /// Reasonable defaults for host tests and small embedded ports.
-    ///
-    /// Production ports are expected to override these after measuring
-    /// their timer resolution and workload mix.
-    #[must_use]
-    pub const fn defaults_for(cpus: u32) -> Self {
-        Self {
-            cpus,
-            queue_capacity_per_band: 16_384,
-            yields_before_demotion: 1,
-            boost_interval_ticks: 256,
-        }
-    }
-}
-
-/// Outcome of one [`Scheduler::step`] call.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum StepOutcome {
-    /// A task was dispatched. The contained `TaskId` ran exactly once.
-    Ran(TaskId),
-    /// No runnable work for this CPU after both the local queues and
-    /// stealing were exhausted. The arch port should idle (HLT / WFI /
-    /// `yield_now`).
-    Idle,
-}
+use crate::task::{TaskBody, TaskInner};
+use crate::{
+    CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy,
+    StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+};
 
 /// Per-CPU scheduler state.
 ///
@@ -753,7 +703,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// voluntary syscall yield, not a quantum-expiry. The MLFQ demotion
     /// path lives in the scheduler's internal `dispatch` routine and is
     /// reached when the task body itself returns
-    /// [`crate::task::TaskAction::Yield`]; that keeps the two yield
+    /// [`crate::TaskAction::Yield`]; that keeps the two yield
     /// notions distinct, avoiding the interface creep `AGENTS.md` §2.4
     /// forbids.
     ///
@@ -810,10 +760,85 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 }
 
+/// MLFQ implements the architecture-neutral [`SchedulerPolicy`] contract.
+///
+/// Each method forwards to the inherent implementation above; the
+/// forwarding adapter is what lets `kernel/core` select this policy by
+/// the trait while the inherent surface stays available to this crate's
+/// own dispatch internals and tests (`AGENTS.md` §17.1).
+impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
+    fn new(config: SchedulerConfig, arch: Arc<A>) -> SchedResult<Self> {
+        Scheduler::new(config, arch)
+    }
+
+    fn cpu_count(&self) -> u32 {
+        Scheduler::cpu_count(self)
+    }
+
+    fn config(&self) -> SchedulerConfig {
+        Scheduler::config(self)
+    }
+
+    fn spawn<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        Scheduler::spawn(self, home_cpu, priority, body)
+    }
+
+    fn park(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::park(self, id)
+    }
+
+    fn unpark(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::unpark(self, id)
+    }
+
+    fn exit(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::exit(self, id)
+    }
+
+    fn on_timer_tick(&self, cpu: CpuId) -> SchedResult<()> {
+        Scheduler::on_timer_tick(self, cpu)
+    }
+
+    fn preemption_count(&self, cpu: CpuId) -> SchedResult<u64> {
+        Scheduler::preemption_count(self, cpu)
+    }
+
+    fn total_preemption_count(&self) -> u64 {
+        Scheduler::total_preemption_count(self)
+    }
+
+    fn step(&self, cpu: CpuId) -> SchedResult<StepOutcome> {
+        Scheduler::step(self, cpu)
+    }
+
+    fn run_count(&self, id: TaskId) -> SchedResult<u64> {
+        Scheduler::run_count(self, id)
+    }
+
+    fn state_of(&self, id: TaskId) -> TaskState {
+        Scheduler::state_of(self, id)
+    }
+
+    fn live_task_count(&self) -> usize {
+        Scheduler::live_task_count(self)
+    }
+
+    fn current_task(&self, cpu: CpuId) -> Option<TaskId> {
+        Scheduler::current_task(self, cpu)
+    }
+
+    fn yield_current(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::yield_current(self, id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::TestArch;
+    use crate::TestArch;
 
     fn mk(cpus: u32) -> (Arc<TestArch>, Scheduler<TestArch>) {
         let arch = Arc::new(TestArch::new(cpus).expect("arch"));

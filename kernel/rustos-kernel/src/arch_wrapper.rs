@@ -8,7 +8,7 @@
 //! Rust's coherence rules forbid implementing the trait for the type
 //! directly. The wrapper [`BinArch`] is the smallest possible local
 //! type that owns an `X86_64Arch`, implements the
-//! [`rustos_kernel_sched::SchedulerArch`] super-trait by delegation,
+//! [`rustos_kernel_sched_api::SchedulerArch`] super-trait by delegation,
 //! and implements [`rustos_kernel_core::KernelArch::halt`] by
 //! forwarding to the free function
 //! [`rustos_arch_x86_64::kernel_arch::halt`].
@@ -24,8 +24,8 @@ use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_kernel_core::{IrqRouting, KernelArch};
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::BootMemoryMap;
-use rustos_kernel_sched::{CpuId, SchedulerArch};
-use rustos_kernel_sync::once::OnceCell;
+use rustos_kernel_sched_api::{CpuId, SchedulerArch};
+use rustos_sync::once::OnceCell;
 
 /// Set-once slot for the `'static` [`IrqTable`] published by
 /// [`rustos_kernel_core::KernelArch::install_irq_dispatch`].

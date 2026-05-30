@@ -29,7 +29,7 @@
 //! a kernel image (`AGENTS.md` §1 — no fake primitives in production).
 
 use rustos_kernel_core::KernelArch;
-use rustos_kernel_sched::{CpuId, SchedulerArch};
+use rustos_kernel_sched_api::{CpuId, SchedulerArch};
 
 /// riscv64 architecture handle handed to `kernel_core::kernel_main`.
 #[derive(Debug)]

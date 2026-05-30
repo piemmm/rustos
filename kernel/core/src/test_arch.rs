@@ -22,7 +22,7 @@ extern crate std;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use rustos_kernel_sched::{CpuId, SchedulerArch};
+use crate::sched::{CpuId, SchedulerArch};
 
 use crate::bootinfo::KernelArch;
 

@@ -228,7 +228,7 @@ pub struct DmaPool<'a, P: PageTableOps> {
     /// Borrowed frame allocator used to back the data slots.
     ///
     /// `FrameAllocator` is internally synchronised via a
-    /// [`rustos_kernel_sync::SpinLock`], so multiple pools may share
+    /// [`rustos_sync::SpinLock`], so multiple pools may share
     /// one. The borrow is explicit (not `'static`) so the host-side
     /// tests do not need to leak their allocators and a future
     /// per-process kernel layout can carve the global allocator into

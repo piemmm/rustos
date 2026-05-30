@@ -5,7 +5,7 @@ must consult: the user/group identity tables, the per-task capability
 tables, the manifest verifier that gates binary loading, and the audit
 log writer that records every security-relevant decision.
 
-It depends only on `kernel/sync`, `kernel/mem`, and the shared
+It depends only on `lib/sync`, `kernel/mem`, and the shared
 `lib/abi`, `lib/caps`, `lib/crypto`, and `lib/log` crates (Stage 2.4
 brief). Filesystem ACLs, IPC dispatch checks, and syscall plumbing live
 in later stages and consume this crate's public API rather than

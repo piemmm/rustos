@@ -17,7 +17,7 @@ use rustos_arch_x86_64::smp::{
 };
 use rustos_arch_x86_64::{percpu, preempt};
 use rustos_arch_x86_64::{qemu_exit, serial};
-use rustos_kernel_sched::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
+use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
 
 // --- Workload sizing -----------------------------------------------
 

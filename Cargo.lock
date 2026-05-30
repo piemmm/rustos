@@ -384,10 +384,10 @@ dependencies = [
  "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
- "rustos-kernel-sched",
+ "rustos-kernel-sched-api",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-log",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -547,12 +547,12 @@ dependencies = [
  "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
- "rustos-kernel-sched",
+ "rustos-kernel-sched-api",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-kernel-syscall",
  "rustos-kernel-virtio",
  "rustos-log",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -565,11 +565,12 @@ dependencies = [
  "rustos-kernel-ipc",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
- "rustos-kernel-sched",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-mlfq",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-kernel-syscall",
  "rustos-log",
+ "rustos-sync",
  "rustos-util",
 ]
 
@@ -582,8 +583,8 @@ dependencies = [
  "rustos-caps",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-log",
+ "rustos-sync",
  "rustos-util",
 ]
 
@@ -593,8 +594,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-log",
+ "rustos-sync",
  "rustos-util",
 ]
 
@@ -604,18 +605,28 @@ version = "0.0.0"
 dependencies = [
  "loom",
  "proptest",
- "rustos-kernel-sync",
+ "rustos-sync",
  "zeroize",
 ]
 
 [[package]]
-name = "rustos-kernel-sched"
+name = "rustos-kernel-sched-api"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-kernel-sched-mlfq"
 version = "0.0.0"
 dependencies = [
  "loom",
  "rustos-arch-api",
- "rustos-kernel-sched",
- "rustos-kernel-sync",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-mlfq",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -630,14 +641,6 @@ dependencies = [
  "rustos-kernel-mem",
  "rustos-log",
  "rustos-util",
-]
-
-[[package]]
-name = "rustos-kernel-sync"
-version = "0.0.0"
-dependencies = [
- "loom",
- "proptest",
 ]
 
 [[package]]
@@ -688,6 +691,14 @@ version = "0.0.0"
 [[package]]
 name = "rustos-shell"
 version = "0.0.0"
+
+[[package]]
+name = "rustos-sync"
+version = "0.0.0"
+dependencies = [
+ "loom",
+ "proptest",
+]
 
 [[package]]
 name = "rustos-test-drvhost-qemu"
@@ -750,7 +761,7 @@ dependencies = [
 name = "rustos-test-scheduler-stress"
 version = "0.0.0"
 dependencies = [
- "rustos-kernel-sched",
+ "rustos-kernel-sched-mlfq",
 ]
 
 [[package]]
@@ -759,7 +770,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
- "rustos-kernel-sched",
+ "rustos-kernel-sched-mlfq",
 ]
 
 [[package]]
@@ -773,11 +784,11 @@ dependencies = [
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-irq",
- "rustos-kernel-sched",
+ "rustos-kernel-sched-mlfq",
  "rustos-kernel-sec",
- "rustos-kernel-sync",
  "rustos-kernel-syscall",
  "rustos-log",
+ "rustos-sync",
 ]
 
 [[package]]

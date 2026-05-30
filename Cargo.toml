@@ -4,8 +4,8 @@ members = [
     # Kernel — architecture-neutral subsystems
     "kernel/core",
     "kernel/mem",
-    "kernel/sched",
-    "kernel/sync",
+    "kernel/sched/api",
+    "kernel/sched/mlfq",
     "kernel/ipc",
     "kernel/irq",
     "kernel/sec",
@@ -35,6 +35,7 @@ members = [
     "lib/collections",
     "lib/crypto",
     "lib/log",
+    "lib/sync",
     "lib/util",
 
     # Drivers — display

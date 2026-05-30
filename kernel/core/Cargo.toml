@@ -12,12 +12,20 @@ publish.workspace = true
 workspace = true
 
 [features]
+default = ["scheduler-mlfq"]
+
+# Scheduler selection (`AGENTS.md` §17.1). `kernel/core` is the single
+# selection point: exactly one `scheduler-*` feature must be active per
+# image, pulling in that one concrete `kernel/sched/<impl>` crate. The
+# `compile_error!` guards in `src/sched.rs` enforce the "exactly one"
+# rule. Adding a policy adds a sibling crate and a feature here.
+scheduler-mlfq = ["dep:rustos-kernel-sched-mlfq"]
+
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # host-side init-order and panic-behaviour tests. It is intentionally
 # not in the default feature set so production (`no_std`) builds never
-# link the mock (`AGENTS.md` §1 — no hacks). Mirrors the convention
-# established by `kernel/sched`.
-test-arch = ["rustos-kernel-sched/test-arch"]
+# link the mock (`AGENTS.md` §1 — no hacks).
+test-arch = ["rustos-kernel-sched-api/test-arch"]
 
 [dependencies]
 # Stage 2.6 dependency rules (issue brief): kernel/core may depend on
@@ -26,10 +34,13 @@ test-arch = ["rustos-kernel-sched/test-arch"]
 # Nothing else.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
-rustos-kernel-sched = { path = "../sched", version = "=0.0.0" }
+# The scheduler contract (`SchedulerPolicy` + vocabulary) is always
+# present; the concrete policy is feature-selected above (§17.1).
+rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
+rustos-kernel-sched-mlfq = { path = "../sched/mlfq", version = "=0.0.0", optional = true }
 rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }

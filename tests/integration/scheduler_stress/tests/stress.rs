@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rustos_kernel_sched::{Priority, Scheduler, SchedulerConfig, TaskAction, TestArch};
+use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction, TestArch};
 use rustos_test_scheduler_stress::{DEFAULT_CPUS, DEFAULT_TASKS};
 
 #[test]

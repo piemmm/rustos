@@ -47,15 +47,15 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
+use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{CapabilityId, Errno, IrqHandle};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
-use rustos_kernel_sync::RwLock;
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Field, Sink};
+use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
 
 use crate::audit::AuditEvent;
@@ -191,7 +191,7 @@ where
         //   over-promising `PermissionDenied`.
         match self.sched.yield_current(caller.task_id.0) {
             Ok(()) => Ok(0),
-            Err(rustos_kernel_sched::SchedError::NoSuchTask) => Err(Errno::NotFound),
+            Err(crate::sched::SchedError::NoSuchTask) => Err(Errno::NotFound),
             Err(_) => Err(Errno::OutOfRange),
         }
     }
@@ -309,7 +309,7 @@ where
         // accept a caller-supplied CPU id — there is no syscall
         // argument for one, and a kernel-trusted lookup is the only
         // sanctioned source.
-        let cpu = rustos_kernel_sched::SchedulerArch::current_cpu(self.arch);
+        let cpu = crate::sched::SchedulerArch::current_cpu(self.arch);
         Ok(self.arch.monotonic_ns(cpu))
     }
 
@@ -569,6 +569,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::SchedulerConfig;
     use crate::test_arch::TestArch;
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
@@ -576,7 +577,6 @@ mod tests {
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
-    use rustos_kernel_sched::SchedulerConfig;
     use rustos_kernel_sec::{TaskCapabilities, UserId};
     use rustos_log::{set_max_level, Level};
 

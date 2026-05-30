@@ -40,7 +40,7 @@
 //! would be a misleading stub (`AGENTS.md` §15.1), so it is omitted.
 
 use rustos_kernel_mem::BootMemoryMap;
-use rustos_kernel_sync::once::OnceCell;
+use rustos_sync::once::OnceCell;
 
 /// Set-once slot for a clone of the firmware [`BootMemoryMap`] the boot
 /// pipeline assembled.

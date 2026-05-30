@@ -44,7 +44,7 @@ break the boot-timeline they key off (`AGENTS.md` §5.4, §2.4).
 | 1 | `log`   | `rustos_log::set_max_level(boot.log_level)`.                                          |
 | 2 | `mem`   | `rustos_kernel_mem::FrameAllocator::new(&boot.memory_map)`.                           |
 | 3 | `sec`   | `boot.identity.verify(boot.audit_sink)` → `IdentityTable`.                            |
-| 4 | `sched` | `rustos_kernel_sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))`. |
+| 4 | `sched` | `crate::sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))` — the build-time-selected policy (§17.1). |
 | 5 | `irq`   | `arch.irq_routing()` returns the architecture-installed `IrqRouting`; the kernel core builds `rustos_kernel_irq::IrqTable::new(routing.max_line)` and stores `routing.controller` in `KernelState`. Immediately after the leak, `arch.install_irq_dispatch(&state.irq)` publishes the `'static` table reference into the arch port's external-IRQ dispatcher slot (Stage 4.D Item 2-tail.2). |
 | 6 | `syscall` | Production `DispatchHook` published into `boot.dispatcher_callback_slot` (see [Syscall registration phase](#syscall-registration-phase)). |
 | 7 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
@@ -222,7 +222,7 @@ feature and never links into a production build.
   [`platform/x86_64.md`](../platform/x86_64.md).
 - `tests/integration/scheduler_stress/tests/stress.rs` — a 20 000-task
   / 4-simulated-core deadlock-free, bounded-latency stress over the
-  `rustos-kernel-sched` public surface. Runs as part of the host-side
+  `rustos-kernel-sched-mlfq` public surface. Runs as part of the host-side
   `cargo xtask test` pass today. Promoting it to QEMU is on the
   Stage 3a sub-checklist in `PLAN.md` (depends on SMP + APIC timer +
   IPI).
@@ -237,8 +237,8 @@ QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
 `kernel/arch/x86_64::kernel_arch::X86_64Arch` (Stage 3a (c7-arch),
 PLAN.md) is the first production implementation of the Arch HAL trait
 `rustos_arch_api::SchedulerArch` (`AGENTS.md` §17.2) in tree;
-`kernel/sched` re-exports that trait, so the impl also satisfies every
-`rustos_kernel_sched::SchedulerArch` bound. The trait impl is
+`kernel/sched/api` re-exports that trait, so the impl also satisfies
+every `rustos_kernel_sched_api::SchedulerArch` bound. The trait impl is
 feature-gated behind `rustos-arch-x86_64`'s opt-in `sched-arch`
 feature — see
 [`platform/x86_64.md`](../platform/x86_64.md#stage-3a-c7-arch--schedulerarch-impl-for-x86_64)

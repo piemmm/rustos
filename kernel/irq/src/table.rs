@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::IrqHandle;
 use rustos_kernel_sec::TaskId;
-use rustos_kernel_sync::RwLock;
+use rustos_sync::RwLock;
 
 use crate::error::{IrqError, MaskError};
 

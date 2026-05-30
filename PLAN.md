@@ -146,7 +146,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
   - `Result`-returning allocation API (no panic on OOM).
 - `kernel/sched`: SMP-aware scheduler (per-CPU run queues, work stealing,
   priority + fairness, IPI-based preemption).
-- `kernel/sync`: spinlocks, RW locks, MCS locks, RCU-equivalent, all
+- `lib/sync`: spinlocks, RW locks, MCS locks, RCU-equivalent, all
   documented with their use cases.
 - `kernel/ipc`: capability-checked message ports, shared memory objects,
   asynchronous notifications.
@@ -165,10 +165,10 @@ Do **not** begin a stage before all its listed dependencies are complete.
   `…/ipc.md`, `…/security.md`, `…/syscalls.md`.
 
 **Sub-stages**
-- [x] 2.1 — `kernel/sync`: spinlocks, IRQ-safe spinlock, writer-preference
+- [x] 2.1 — `lib/sync`: spinlocks, IRQ-safe spinlock, writer-preference
       RwLock, MCS queue lock, SeqLock, epoch-based reclamation, `Once`/
-      `OnceCell`. Loom-gated concurrency tests in `kernel/sync/tests/loom.rs`,
-      proptest fairness test in `kernel/sync/tests/rwlock_fairness.rs`,
+      `OnceCell`. Loom-gated concurrency tests in `lib/sync/tests/loom.rs`,
+      proptest fairness test in `lib/sync/tests/rwlock_fairness.rs`,
       decision tree in `docs/src/architecture/sync.md`.
 - [x] 2.2 — `kernel/mem`: buddy/bitmap `FrameAllocator` honouring a typed
       `BootMemoryMap`, per-process `AddressSpace<P: PageTableOps>` with a
@@ -532,7 +532,7 @@ Each sub-stage delivers one architecture. They share the same checklist:
           and returns. It does **not** call `Scheduler::step`: the
           task registry `RwLock` and the overflow `SpinLock` are
           explicitly forbidden from interrupt context by
-          `kernel/sync` (`rwlock.rs` module docs: "Process /
+          `lib/sync` (`rwlock.rs` module docs: "Process /
           kernel-thread context only. Never from an interrupt
           handler."), and an ISR-driven `step` would deadlock
           against the same CPU's in-progress `spawn` or mid-
@@ -818,7 +818,7 @@ one logical change per commit with the `Co-authored-by` trailer.
       28/28 integ + 1/1 stress, clippy `-D warnings` clean, fmt
       clean, full `cargo xtask ci` green at HEAD of this commit.
 
-      *Carry-over:* the `kernel/sync::RwLock` process-context rule
+      *Carry-over:* the `lib/sync::RwLock` process-context rule
       is documented at the new public API — syscall callers must
       read `current_task` from process context on the issuing CPU,
       never from an interrupt handler.
@@ -2720,7 +2720,7 @@ follow-up is its own thread and is now also complete.
   `Errno::TimedOut`) has landed. New `kernel/irq` crate
   (`rustos-kernel-irq`, `no_std`) ships an `IrqTable` carrying a
   `BTreeMap<u32 line, IrqEntry>` + `BTreeMap<u64 handle_raw, line>`
-  index behind a writer-preference `kernel/sync::RwLock` mirroring
+  index behind a writer-preference `lib/sync::RwLock` mirroring
   the `CapTable` lock-ordering policy. Surface: `bind(line, owner)`,
   `try_wait_step(handle, caller, now_ns, deadline_ns)`,
   `fire(line, &dyn IrqController)`, `release_for(task)`,
@@ -3224,22 +3224,25 @@ a list collapses that list. No *new* violation may be added.
 - `kernel/virtio` → `drivers/bus/virtio`, `userland/system/drvhost`:
   move the shared virtio host factory behind `lib/abi` traits so the
   kernel stops depending on a driver and a userland service.
-- `kernel/arch/riscv64` → `kernel/{core,sched,mem,sec,irq,sync}`: the
+- `kernel/arch/riscv64` → `kernel/{core,sched/api,mem,sec,irq}`: the
   riscv64 port still names concrete kernel crates from its boot
   pipeline. The Arch HAL `kernel/arch/api` now exists (see burn-down
   below); migrate the port onto it the way x86_64 was. (The
-  `kernel/arch/x86_64` → `kernel/sched` edge that sat here is *done*.)
-- `kernel/sched` → `kernel/sync`: resolved by the scheduler `api`/`impl`
-  split (`kernel/sched/api` + sibling impls).
+  `kernel/arch/x86_64` → `kernel/sched` edge that sat here is *done*;
+  the `→ kernel/sync` edge is *done* now that the primitives live in
+  `lib/sync`, and the port now names the `kernel/sched/api` contract
+  rather than a concrete scheduler.)
 - `drivers/bus/virtio` → `kernel/{mem,sec,irq}`;
   `drivers/storage/virtio_blk` & `drivers/network/virtio_net` →
   `drivers/bus/virtio`; `userland/system/drvhost` →
   `drivers/bus/virtio`: route driver-to-kernel and driver-to-bus access
   through `lib/abi` traits instead of direct crate links.
 - `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
-  `kernel/sched`, `userland/system/drvhost`, `drivers/bus/virtio`:
+  `userland/system/drvhost`, `drivers/bus/virtio`:
   collapse the production binary's bring-up into the single §17.4
-  selection point (`kernel/core`).
+  selection point (`kernel/core`). (The `→ kernel/sched` edge is *done*:
+  the binary now names only the `kernel/sched/api` contract, a permitted
+  `KernelSubsystem → SchedApi` edge.)
 
 **`cfg-check` grandfathered directories (§17.2):**
 - `kernel/rustos-kernel/`: select the arch through the Arch HAL selection
@@ -3269,6 +3272,24 @@ a list collapses that list. No *new* violation may be added.
   instead of `cfg(target_arch …, target_os = "none")`, so no test source
   names the target instruction set (§17.2). The grandfather entry has
   been removed and `cfg-check` is clean with the tree scanned.
+- Scheduler `api`/`impl` split + `kernel/sync` → `lib/sync` relocation
+  (§17.1) — *done*. The scheduler contract now lives in its own
+  `SchedApi` crate `kernel/sched/api` (`rustos-kernel-sched-api`): the
+  `SchedulerPolicy` trait, the lifecycle vocabulary, the re-exported
+  Arch HAL surface, and the shared conformance suite
+  (`kernel/sched/api/tests/conformance.rs`, exercised against the
+  in-tree policy). The MLFQ policy moved to the sibling crate
+  `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`), which implements
+  `SchedulerPolicy`. `kernel/core` is the single build-time selection
+  point: the default `scheduler-mlfq` feature selects the one concrete
+  policy and `src/sched.rs` `compile_error!`-guards that exactly one is
+  active per image. `kernel/sync` was relocated to `lib/sync` (renamed
+  `rustos-sync`) so a `SchedImpl` crate may name its primitives
+  (`AGENTS.md` §6 / §17.4); §3/§4 updated to match. Grandfather edges
+  removed: `kernel/sched → kernel/sync`, `riscv64 → kernel/sync`, and
+  `kernel/rustos-kernel → kernel/sched` — `rustos-kernel`/`riscv64` now
+  name only `kernel/sched/api`. The remaining HAL-primitive and riscv64
+  boot-orchestration threads are unchanged by this work.
 
 ---
 

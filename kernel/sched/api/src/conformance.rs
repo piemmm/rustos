@@ -1,0 +1,295 @@
+//! Shared `SchedulerPolicy` conformance suite (`AGENTS.md` §17.1).
+//!
+//! Every concrete scheduler must pass this suite. It is written purely
+//! against the [`SchedulerPolicy`] trait and the host [`TestArch`], so it
+//! drives any policy without naming a concrete type. The companion
+//! integration test `kernel/sched/api/tests/conformance.rs` runs
+//! [`run_all`] against the selected implementation, and each
+//! `kernel/sched/<impl>` crate runs it against itself.
+//!
+//! The suite is deterministic and single-threaded: it drives `cpus`
+//! simulated cores round-robin from one host thread, advancing
+//! [`TestArch`]'s tick counter explicitly. That keeps the assertions
+//! reproducible (`AGENTS.md` §7 — no flaky tests) while still exercising
+//! the ≥ 4-core SMP paths (per-CPU queues, work stealing, IPI bookkeeping).
+//!
+//! Only the public trait surface is used — no implementation internals —
+//! so the same source is a valid acceptance test for a future EEVDF, RT,
+//! or any other policy.
+
+#![cfg(feature = "conformance")]
+
+extern crate alloc;
+
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::arch::TestArch;
+use crate::config::SchedulerConfig;
+use crate::outcome::StepOutcome;
+use crate::policy::SchedulerPolicy;
+use crate::task::{Priority, TaskAction, TaskState};
+
+/// Run the entire conformance suite against scheduler policy `S`.
+///
+/// # Panics
+///
+/// Panics (failing the test) if any required property does not hold.
+pub fn run_all<S: SchedulerPolicy<TestArch>>() {
+    spawn_runs_and_exits::<S>();
+    block_wake_roundtrip::<S>();
+    lifecycle_error_codes::<S>();
+    yield_current_semantics::<S>();
+    no_starvation_under_priority_boost::<S>();
+    fairness_no_band_is_starved::<S>();
+    smp_stress_four_cores::<S>();
+}
+
+/// Build a policy with `cpus` cores and the given per-band capacity.
+fn make<S: SchedulerPolicy<TestArch>>(
+    cpus: u32,
+    queue_capacity_per_band: usize,
+) -> (Arc<TestArch>, S) {
+    let arch = Arc::new(TestArch::new(cpus).expect("test arch"));
+    let cfg = SchedulerConfig {
+        cpus,
+        queue_capacity_per_band,
+        yields_before_demotion: 1,
+        boost_interval_ticks: 2,
+    };
+    let sched = S::new(cfg, arch.clone()).expect("scheduler builds");
+    (arch, sched)
+}
+
+/// A spawned task runs exactly once and reaches `Exited`, sending an IPI.
+fn spawn_runs_and_exits<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(2, 64);
+    let counter = Arc::new(AtomicU64::new(0));
+    let c2 = counter.clone();
+    let id = sched
+        .spawn(0, Priority::Normal, move |_ctx| {
+            c2.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Exit
+        })
+        .expect("spawn");
+    arch.set_current_cpu(0);
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "task dispatched");
+    assert_eq!(counter.load(Ordering::Relaxed), 1, "body ran once");
+    assert_eq!(sched.state_of(id), TaskState::Exited, "task exited");
+    assert!(arch.ipi_count(0) >= 1, "spawn notifies the home CPU");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "no work remains");
+}
+
+/// `park` then `unpark` re-admits the task for dispatch (block/wake).
+fn block_wake_roundtrip<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Park)
+        .expect("spawn");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "body ran");
+    assert_eq!(sched.state_of(id), TaskState::Parked, "body parked it");
+    sched.unpark(id).expect("unpark a parked task");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "re-dispatched");
+}
+
+/// Lifecycle entry points report the documented typed errors and are
+/// idempotent where promised.
+fn lifecycle_error_codes<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    assert_eq!(
+        sched.park(999),
+        Err(crate::SchedError::NoSuchTask),
+        "park unknown"
+    );
+    assert_eq!(
+        sched.unpark(999),
+        Err(crate::SchedError::NoSuchTask),
+        "unpark unknown"
+    );
+    assert_eq!(
+        sched.exit(999),
+        Err(crate::SchedError::NoSuchTask),
+        "exit unknown"
+    );
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+        .expect("spawn");
+    sched.exit(id).expect("first exit");
+    sched.exit(id).expect("exit is idempotent");
+    assert_eq!(sched.state_of(id), TaskState::Exited);
+    assert_eq!(
+        sched.on_timer_tick(7),
+        Err(crate::SchedError::NoSuchCpu),
+        "tick rejects unknown cpu"
+    );
+}
+
+/// `yield_current` requeues a running task and rejects bad transitions.
+fn yield_current_semantics<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    assert_eq!(
+        sched.yield_current(999),
+        Err(crate::SchedError::NoSuchTask),
+        "yield unknown task"
+    );
+    // A freshly spawned, not-yet-running task is `Ready`, not `Running`,
+    // so a syscall-style `yield_current` against it must be rejected.
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+        .expect("spawn");
+    assert_eq!(
+        sched.yield_current(id),
+        Err(crate::SchedError::InvalidState),
+        "yield a non-running task"
+    );
+}
+
+/// A Low-priority task that keeps yielding still runs to completion within
+/// a bounded number of steps — the periodic priority boost prevents
+/// starvation. Uses only the public surface.
+fn no_starvation_under_priority_boost<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    let runs = Arc::new(AtomicU64::new(0));
+    let r2 = runs.clone();
+    let id = sched
+        .spawn(0, Priority::Low, move |_| {
+            if r2.fetch_add(1, Ordering::Relaxed) >= 4 {
+                TaskAction::Exit
+            } else {
+                TaskAction::Yield
+            }
+        })
+        .expect("spawn");
+    arch.set_current_cpu(0);
+    let mut steps = 0u64;
+    while sched.live_task_count() > 0 && steps < 1000 {
+        let _ = sched.step(0).expect("step");
+        arch.advance_ticks(1);
+        steps += 1;
+    }
+    assert_eq!(sched.state_of(id), TaskState::Exited, "low task completed");
+    assert_eq!(runs.load(Ordering::Relaxed), 5, "ran the expected times");
+    assert!(steps < 1000, "completed within the bound (no starvation)");
+}
+
+/// With one High-band and one Low-band perpetual yielder on a single CPU,
+/// neither band is starved over a fixed step budget: both accumulate runs.
+fn fairness_no_band_is_starved<S: SchedulerPolicy<TestArch>>() {
+    const BUDGET: u64 = 200;
+    let (arch, sched) = make::<S>(1, 64);
+    let high_runs = Arc::new(AtomicU64::new(0));
+    let low_runs = Arc::new(AtomicU64::new(0));
+    let hr = high_runs.clone();
+    let lr = low_runs.clone();
+    sched
+        .spawn(0, Priority::High, move |_| {
+            hr.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Yield
+        })
+        .expect("spawn high");
+    sched
+        .spawn(0, Priority::Low, move |_| {
+            lr.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Yield
+        })
+        .expect("spawn low");
+    arch.set_current_cpu(0);
+    for _ in 0..BUDGET {
+        let _ = sched.step(0).expect("step");
+        arch.advance_ticks(1);
+    }
+    assert!(high_runs.load(Ordering::Relaxed) > 0, "high-band task ran");
+    assert!(
+        low_runs.load(Ordering::Relaxed) > 0,
+        "low-band task is not starved (priority boost gives it turns)"
+    );
+}
+
+/// Deadlock-free, lossless, bounded-latency dispatch of a large task
+/// population across ≥ 4 simulated cores.
+#[allow(clippy::cast_possible_truncation)]
+fn smp_stress_four_cores<S: SchedulerPolicy<TestArch>>() {
+    const TASKS: u64 = 10_000;
+    const CPUS: u32 = 4;
+    const MAX_FIRST_RUN_LATENCY_STEPS: u64 = 10 * TASKS / CPUS as u64;
+
+    let arch = Arc::new(TestArch::new(CPUS).expect("arch"));
+    let cfg = SchedulerConfig {
+        cpus: CPUS,
+        queue_capacity_per_band: 4096,
+        yields_before_demotion: 4,
+        boost_interval_ticks: 256,
+    };
+    let sched = S::new(cfg, arch.clone()).expect("sched");
+
+    let executions = Arc::new(AtomicU64::new(0));
+    let global_step = Arc::new(AtomicU64::new(0));
+    let spawn_step: Arc<Vec<AtomicU64>> =
+        Arc::new((0..TASKS).map(|_| AtomicU64::new(u64::MAX)).collect());
+    let first_run_step: Arc<Vec<AtomicU64>> =
+        Arc::new((0..TASKS).map(|_| AtomicU64::new(u64::MAX)).collect());
+
+    for i in 0..TASKS {
+        let exec = executions.clone();
+        let gstep = global_step.clone();
+        let first = first_run_step.clone();
+        let idx = i as usize;
+        spawn_step[idx].store(global_step.load(Ordering::Relaxed), Ordering::Relaxed);
+        let yielded = AtomicU64::new(0);
+        sched
+            .spawn(
+                (i % u64::from(CPUS)) as u32,
+                Priority::Normal,
+                move |_ctx| {
+                    exec.fetch_add(1, Ordering::Relaxed);
+                    let _ = first[idx].compare_exchange(
+                        u64::MAX,
+                        gstep.load(Ordering::Relaxed),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    if yielded.fetch_add(1, Ordering::Relaxed) == 0 {
+                        TaskAction::Yield
+                    } else {
+                        TaskAction::Exit
+                    }
+                },
+            )
+            .expect("spawn");
+    }
+
+    let max_rounds: u64 = TASKS * 8;
+    let mut rounds = 0u64;
+    while sched.live_task_count() > 0 && rounds < max_rounds {
+        for cpu in 0..CPUS {
+            arch.set_current_cpu(cpu);
+            let _ = sched.step(cpu).expect("step");
+        }
+        arch.advance_ticks(1);
+        global_step.fetch_add(1, Ordering::Relaxed);
+        rounds += 1;
+    }
+    assert_eq!(
+        sched.live_task_count(),
+        0,
+        "all tasks completed (no deadlock)"
+    );
+    assert_eq!(
+        executions.load(Ordering::Relaxed),
+        TASKS * 2,
+        "each task ran exactly twice (yield + exit)"
+    );
+
+    let mut worst = 0u64;
+    for i in 0..TASKS {
+        let first = first_run_step[i as usize].load(Ordering::Relaxed);
+        let spawn = spawn_step[i as usize].load(Ordering::Relaxed);
+        assert!(first != u64::MAX, "task {i} never ran");
+        worst = worst.max(first.saturating_sub(spawn));
+    }
+    assert!(
+        worst <= MAX_FIRST_RUN_LATENCY_STEPS,
+        "worst-case first-run latency {worst} exceeds bound {MAX_FIRST_RUN_LATENCY_STEPS}"
+    );
+}

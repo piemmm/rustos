@@ -26,6 +26,6 @@ workspace = true
 # minimum surface).
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
-rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }

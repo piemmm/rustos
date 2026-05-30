@@ -23,7 +23,8 @@
 //! 1. **log** — install the global level filter.
 //! 2. **mem** — build the physical [`rustos_kernel_mem::FrameAllocator`].
 //! 3. **sec** — verify the bootstrap [`rustos_kernel_sec::IdentityTable`].
-//! 4. **sched** — construct the SMP [`rustos_kernel_sched::Scheduler`].
+//! 4. **sched** — construct the SMP [`crate::sched::Scheduler`] (the
+//!    build-time-selected scheduler policy, `AGENTS.md` §17.1).
 //! 5. **ipc** — `kernel/ipc` has no global state at this stage; the
 //!    phase event still fires so external log consumers see a uniform
 //!    boot timeline.
@@ -73,6 +74,10 @@ pub mod bootinfo;
 pub mod dispatch_slot;
 pub mod init;
 pub mod panic;
+// The single scheduler selection point (`AGENTS.md` §17.1). Internal:
+// the concrete policy must not leak to crates that should depend on the
+// `rustos_kernel_sched_api` contract instead.
+pub(crate) mod sched;
 pub mod syscalls;
 
 #[cfg(any(test, feature = "test-arch"))]

@@ -33,8 +33,8 @@ use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::sensitive::alloc_sensitive;
 use rustos_kernel_mem::SensitiveBuffer;
 use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_kernel_sync::RwLock;
 use rustos_log::{Field, Sink};
+use rustos_sync::RwLock;
 use rustos_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};

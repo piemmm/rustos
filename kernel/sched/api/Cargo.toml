@@ -1,0 +1,42 @@
+[package]
+name = "rustos-kernel-sched-api"
+description = "RustOS scheduler contract (AGENTS.md §17.1): the SchedulerPolicy trait, the lifecycle vocabulary every policy shares, and the conformance suite every concrete scheduler must pass."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `test-arch` exposes the host-only `TestArch` mock used by the
+# conformance suite and by every scheduler implementation's tests. It is
+# not in the default set so production (`no_std`) builds never link the
+# mock (`AGENTS.md` §1 — no hacks).
+test-arch = []
+# `conformance` exposes the shared `SchedulerPolicy` conformance suite
+# (`AGENTS.md` §17.1). It pulls in `std` for the multi-core stress
+# driver, so it is opt-in and consumed only from test targets.
+conformance = ["test-arch"]
+
+# The `kernel/sched/api/tests/conformance.rs` acceptance test runs the
+# shared suite against the in-tree concrete policy. The self dev-dep with
+# `conformance` turns the suite (and `TestArch`) on for the API crate's
+# own integration tests; the `mlfq` dev-dep supplies a concrete
+# `SchedulerPolicy` to drive. Dev-dependency cycles are permitted by
+# Cargo and are excluded from the §17.4 build graph (`deps-check`).
+[dev-dependencies]
+rustos-kernel-sched-api = { path = ".", version = "=0.0.0", features = ["conformance"] }
+rustos-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
+
+[dependencies]
+# The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) is the
+# single canonical definition in the Arch HAL crate `kernel/arch/api`
+# (`AGENTS.md` §17.2). The scheduler API re-exports it so the contract,
+# the implementations, and `kernel/core` all name one type (`AGENTS.md`
+# §2.2). `kernel/sched/api` is a §17.4 `SchedApi` crate and so may name
+# `kernel/arch/api` and `lib/*` only.
+rustos-arch-api = { path = "../../arch/api", version = "=0.0.0" }

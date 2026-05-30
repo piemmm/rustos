@@ -26,12 +26,12 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+use crate::sched::{SchedError, Scheduler};
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator};
-use rustos_kernel_sched::{SchedError, Scheduler};
 use rustos_kernel_sec::{CapTable, IdentityTable};
-use rustos_kernel_sync::RwLock;
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
+use rustos_sync::RwLock;
 
 use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
@@ -502,12 +502,12 @@ fn phase_ready(sink: &(dyn Sink + Sync), phase: Phase) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::SchedulerConfig;
     use crate::test_arch::TestArch;
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
-    use rustos_kernel_sched::SchedulerConfig;
     use rustos_kernel_sec::IdentityTableBuilder;
     use rustos_log::Level;
 

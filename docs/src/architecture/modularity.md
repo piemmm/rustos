@@ -49,8 +49,8 @@ the surface (`CpuId`, `SchedulerArch`); the remaining HAL primitives
 boot discovery) migrate here as the §17 burn-down advances.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
-`X86_64Arch` and no longer names `kernel/sched`; `kernel/sched`
-re-exports the HAL trait so existing `rustos_kernel_sched::SchedulerArch`
+`X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
+re-exports the HAL trait so existing `rustos_kernel_sched_api::SchedulerArch`
 paths resolve to the single canonical definition. The riscv64 port still
 reaches concrete kernel crates through its boot pipeline and remains a
 tracked grandfathered defect.

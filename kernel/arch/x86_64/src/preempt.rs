@@ -92,7 +92,7 @@ pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
 /// Install the per-CPU timer callback.
 ///
 /// The callback is invoked from the timer ISR on every tick with the
-/// calling CPU's `rustos_kernel_sched::CpuId` (the LAPIC ID as
+/// calling CPU's `rustos_arch_api::CpuId` (the LAPIC ID as
 /// determined by the `id` register read at install time of the BSP's
 /// scheduler, mapped to a dense `CpuId` by the binary; the callback
 /// receives the `CpuId` directly because the ISR cannot afford to
@@ -141,7 +141,7 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
 
 // --- Per-CPU ID hook ------------------------------------------------
 
-/// Per-CPU mapping from LAPIC ID to dense `rustos_kernel_sched::CpuId`.
+/// Per-CPU mapping from LAPIC ID to dense `rustos_arch_api::CpuId`.
 ///
 /// The scheduler addresses CPUs with a dense `0..config.cpus` range;
 /// the LAPIC ID on QEMU is sparse (`0`, `1`, `2`, …) but on real
@@ -170,7 +170,7 @@ static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
     [ZERO; 256]
 };
 
-/// Record the dense `rustos_kernel_sched::CpuId` this `lapic_id` maps to.
+/// Record the dense `rustos_arch_api::CpuId` this `lapic_id` maps to.
 ///
 /// Called from each CPU's bring-up path *before* it enables interrupts.
 /// `u32::MAX` is reserved as the "unmapped" sentinel; passing it is

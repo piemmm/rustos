@@ -1,10 +1,12 @@
-//! RustOS kernel synchronisation primitives.
+//! RustOS synchronisation primitives.
 //!
-//! This crate ships the foundational synchronisation primitives every
-//! other kernel crate depends on. It is intentionally landed *before*
-//! `kernel/mem`, `kernel/sched`, `kernel/ipc`, etc., so callers can
-//! pick the right primitive on first use and never have to retrofit one
-//! later (`AGENTS.md` §2.4).
+//! This `lib/` crate ships the foundational synchronisation primitives
+//! consumed across the workspace. They carry no kernel dependency, so
+//! per `AGENTS.md` §6 / §17.4 they live in `lib/` where every layer —
+//! kernel subsystems (`kernel/mem`, `kernel/ipc`, `kernel/irq`), the
+//! scheduler implementations under `kernel/sched/`, and the
+//! architecture ports — may consume the one deduplicated surface
+//! (`AGENTS.md` §2.2, §2.4).
 //!
 //! # Primitive catalogue
 //!

@@ -87,7 +87,7 @@ pub struct Port {
     // Mailbox under a spinlock. We use `kernel/sync`'s `SpinLock`
     // because IPC sends never block on I/O and contention is bounded
     // by the mailbox capacity.
-    mailbox: rustos_kernel_sync::SpinLock<VecDeque<Message>>,
+    mailbox: rustos_sync::SpinLock<VecDeque<Message>>,
 }
 
 impl Port {
@@ -157,7 +157,7 @@ impl Port {
             max_payload,
             mailbox_capacity,
             state: AtomicU32::new(state::OPEN),
-            mailbox: rustos_kernel_sync::SpinLock::new(VecDeque::new()),
+            mailbox: rustos_sync::SpinLock::new(VecDeque::new()),
         })
     }
 

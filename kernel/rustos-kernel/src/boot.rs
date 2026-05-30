@@ -60,7 +60,7 @@ use rustos_arch_x86_64::{percpu, preempt, smp, syscall_entry};
 use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use rustos_kernel_irq::IrqController;
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
-use rustos_kernel_sched::SchedulerConfig;
+use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
 

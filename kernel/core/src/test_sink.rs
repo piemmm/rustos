@@ -10,8 +10,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_kernel_sync::SpinLock;
 use rustos_log::{Event, EventId, Level, Sink};
+use rustos_sync::SpinLock;
 
 /// One captured event. The contents mirror the public fields of
 /// [`Event`] but in owned form so the test can assert against them

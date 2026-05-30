@@ -1,6 +1,6 @@
-# `kernel/sync` — synchronisation primitives
+# `lib/sync` — synchronisation primitives
 
-`kernel/sync` is delivered by **Stage 2.1** of [`PLAN.md`](../../../PLAN.md). It
+`lib/sync` is delivered by **Stage 2.1** of [`PLAN.md`](../../../PLAN.md). It
 provides the synchronisation primitives every other kernel crate depends
 on, so they land first and never need to be retrofitted (`AGENTS.md`
 §2.4).
@@ -88,14 +88,14 @@ queue); the rest is pure `core`.
 
 ## Testing
 
-- **Unit tests** live next to the code (`kernel/sync/src/lib.rs`,
+- **Unit tests** live next to the code (`lib/sync/src/lib.rs`,
   `#[cfg(test)] mod tests`).
 - **Property tests** for the `RwLock` writer-preference fairness
   invariant live in
-  [`kernel/sync/tests/rwlock_fairness.rs`](../../../kernel/sync/tests/rwlock_fairness.rs).
+  [`lib/sync/tests/rwlock_fairness.rs`](../../../lib/sync/tests/rwlock_fairness.rs).
 - **Loom-based concurrency tests** for `SpinLock`, `RwLock`, `McsLock`,
   `SeqLock`, `OnceCell` and `Epoch` live in
-  [`kernel/sync/tests/loom.rs`](../../../kernel/sync/tests/loom.rs).
+  [`lib/sync/tests/loom.rs`](../../../lib/sync/tests/loom.rs).
   They are gated behind `#[cfg(loom)]`:
 
   ```text
@@ -111,7 +111,7 @@ queue); the rest is pure `core`.
 
 Every `unsafe` block in the crate carries a `// SAFETY:` comment per
 `AGENTS.md` §2.10. The `SyncUnsafeCell` wrapper in
-`kernel/sync/src/loom_compat.rs` is the *only* place that re-exports the
+`lib/sync/src/loom_compat.rs` is the *only* place that re-exports the
 underlying `core::cell::UnsafeCell` (or `loom::cell::UnsafeCell`) so that
 the loom interleaving instrumentation is the single source of truth for
 all primitives in the crate.

@@ -32,7 +32,7 @@
 //! (see `kernel/rustos-kernel::dispatch` rustdoc and
 //! `AGENTS.md` §5.4.5 "fail closed"). The slot only ever transitions
 //! `Empty → Installed`; no re-installation, no mutation after
-//! publish. [`rustos_kernel_sync::OnceCell`] is exactly that
+//! publish. [`rustos_sync::OnceCell`] is exactly that
 //! transition with the right memory ordering for cross-CPU
 //! observation, no extra primitive needed
 //! (`AGENTS.md` §2.3 — no bloat).
@@ -47,8 +47,8 @@
 //! `kernel/sync::once`). Per-CPU syscalls observe `Some(hook)` from
 //! the moment `set` returns.
 
-use rustos_kernel_sync::OnceCell;
 use rustos_kernel_syscall::{RawArgs, SyscallResult};
+use rustos_sync::OnceCell;
 
 /// Result of one [`DispatchHook::dispatch`] call.
 ///
@@ -268,13 +268,13 @@ mod tests {
     /// handed. Used to verify the slot returns the registered hook
     /// untouched.
     struct RecordingHook {
-        log: rustos_kernel_sync::SpinLock<alloc::vec::Vec<(u16, RawArgs)>>,
+        log: rustos_sync::SpinLock<alloc::vec::Vec<(u16, RawArgs)>>,
     }
 
     impl RecordingHook {
         fn new() -> Self {
             Self {
-                log: rustos_kernel_sync::SpinLock::new(alloc::vec::Vec::new()),
+                log: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }

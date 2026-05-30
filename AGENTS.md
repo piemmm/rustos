@@ -142,6 +142,7 @@ rustos/
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── log/             # Structured logging.
+│   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   └── util/            # Strictly justified utilities.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
@@ -192,7 +193,7 @@ an update to this section.
   scheduling, memory, IPC, capabilities, and the minimum architecture glue
   live in ring 0 / EL1 / M-mode.
 - **SMP from day one.** No "single-CPU first, parallelize later" patches.
-  All shared state uses explicit synchronization primitives from `kernel/sync`.
+  All shared state uses explicit synchronization primitives from `lib/sync`.
 - **Memory isolation is enforced by hardware** (page tables / MMU / WASM
   sandboxing). A process can only reach another process's memory through an
   explicit, capability-checked shared-memory IPC object.

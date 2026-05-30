@@ -32,7 +32,7 @@ use alloc::sync::Arc;
 
 use rustos_kernel_core::{kernel_main, BootInfo, DispatchCallbackSlot};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
-use rustos_kernel_sched::{CpuId, SchedulerConfig};
+use rustos_kernel_sched_api::{CpuId, SchedulerConfig};
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 

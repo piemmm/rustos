@@ -32,7 +32,7 @@ stages of [`PLAN.md`][plan] that introduce them.
   operation is capability-checked. `uid = 0` is not all-powerful; powers
   come from capabilities granted by signed manifests.
 - **SMP from day one.** Shared state uses explicit primitives from
-  `kernel/sync`; there is no "single-CPU first" path.
+  `lib/sync`; there is no "single-CPU first" path.
 - **One executable format.** The `rxe` envelope wraps ELF with a signed
   manifest declaring required capabilities and ABI version.
 

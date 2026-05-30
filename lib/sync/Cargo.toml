@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-sync"
-description = "RustOS kernel synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
+name = "rustos-sync"
+description = "RustOS synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

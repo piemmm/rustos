@@ -16,7 +16,7 @@ workspace = true
 # kernel/{sync, mem, sched, sec} and lib/{abi, caps, log} (plus `lib/util`
 # for the formatters extracted out of `kernel/sec` in this same stage,
 # `AGENTS.md` §2.2). Nothing more is needed.
-rustos-kernel-sync = { path = "../sync", version = "=0.0.0" }
+rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }

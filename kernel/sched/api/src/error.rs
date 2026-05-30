@@ -1,4 +1,4 @@
-//! Error types for the scheduler.
+//! Error types for the scheduler contract.
 //!
 //! All scheduler entry points return a typed `Result` — `panic!` / `unwrap`
 //! are forbidden in production paths (`AGENTS.md` §2.9). Each variant
@@ -22,10 +22,11 @@ pub enum SchedError {
     /// used as a `DoS` amplifier against the kernel. The caller may retry on
     /// another CPU (work-stealing path) or back-pressure the task source.
     QueueFull,
-    /// No task is registered under the given [`crate::task::TaskId`].
+    /// No task is registered under the given [`crate::TaskId`].
     ///
-    /// Returned by [`crate::Scheduler::park`], [`crate::Scheduler::unpark`],
-    /// and [`crate::Scheduler::exit`] when the supplied identifier has
+    /// Returned by [`crate::SchedulerPolicy::park`],
+    /// [`crate::SchedulerPolicy::unpark`], and
+    /// [`crate::SchedulerPolicy::exit`] when the supplied identifier has
     /// already exited or was never spawned.
     NoSuchTask,
     /// The task is not in a state that allows the requested transition.

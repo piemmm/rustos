@@ -21,7 +21,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use rustos_kernel_sync::{Epoch, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
+use rustos_sync::{Epoch, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
 
 #[test]
 fn loom_spinlock_mutual_exclusion() {
