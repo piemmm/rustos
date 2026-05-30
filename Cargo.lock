@@ -759,6 +759,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-ps2-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-input-ps2",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-riscv64-boot"
 version = "0.0.0"
 dependencies = [

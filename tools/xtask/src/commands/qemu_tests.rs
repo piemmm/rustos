@@ -124,6 +124,28 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
     },
+    // Stage 4 first-driver vertical: boot the production kernel
+    // pipeline, then on `AuditEvent::BootCompleted` load the signed
+    // PS/2 input driver (`drivers/input/ps2`) through
+    // `rustos_drvhost::Host` and drive it through load -> use ->
+    // unload -> reload. "Use" injects a deterministic scancode into the
+    // emulated i8042 output buffer via the controller's `0xD2`
+    // ("write keyboard output buffer") command — using the same
+    // `X86PortIo8` backend the driver reads through — and decodes the
+    // resulting press then release into platform-neutral `InputEvent`s.
+    // Any deviation flips `qemu_exit::exit_failure`. The default `q35`
+    // machine exposes the i8042, so no extra QEMU device is needed.
+    // Single CPU suffices and the 60-second budget matches the other
+    // Stage-3/4 boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-ps2-qemu-x86-64",
+        binary: "rustos-test-ps2-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+    },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
     // trip on the legacy IRQ-0 GSI through the IO-APIC + PIT. The

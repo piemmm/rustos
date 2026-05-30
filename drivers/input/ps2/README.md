@@ -8,9 +8,9 @@ scancode-set-1 byte stream into platform-neutral `InputEvent`s.
 
 ## Supported hardware
 
-| Platform | Controller                   | Ports          | Stage 4 status       |
-|----------|------------------------------|----------------|----------------------|
-| x86_64   | Intel 8042 keyboard port     | `0x60`, `0x64` | mock-host tests only |
+| Platform | Controller                   | Ports          | Stage 4 status              |
+|----------|------------------------------|----------------|-----------------------------|
+| x86_64   | Intel 8042 keyboard port     | `0x60`, `0x64` | mock-host + QEMU integration |
 
 This is a **keyboard** driver. The controller's auxiliary (mouse) port
 is out of scope: when `poll` sees a byte tagged as auxiliary it stops
@@ -67,11 +67,21 @@ mock `PortIo8` controller:
 - The driver never writing the controller.
 - Unload → reload round-trip.
 
-12/12 host-side tests pass. A QEMU integration vertical depends on the
-kernel wiring a `PortIo8` backend over the legacy ports and routing the
-i8042 IRQ (line 1) to the user-space driver; that boot hand-off is not
-yet in the tree, exactly as the framebuffer and virtio-blk QEMU
-verticals waited on their kernel prerequisites.
+12/12 host-side tests pass.
+
+The QEMU integration vertical `tests/integration/ps2_input_qemu_x86_64`
+(`rustos-test-ps2-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
+boots the production kernel, loads this driver's signed `.rxe` through
+`rustos_drvhost::Host`, and drives it through load → use → unload →
+reload. The boot hand-off it needed is the x86_64 8-bit port seam
+`rustos_arch_x86_64::pio::X86PortIo8` (the byte-wide sibling of the PCI
+bus driver's `X86PortIo`). "Use" is made deterministic without a
+physical keypress by the i8042 `0xD2` ("write keyboard output buffer")
+command: the test injects a scancode into the controller's output
+buffer through the same `PortIo8` backend the driver reads through, then
+confirms the driver decodes the resulting press and, after reload, the
+matching release. Keyboard-IRQ (line 1) routing is not required because
+the driver polls; an interrupt-driven path remains a later follow-up.
 
 ## Public surface
 

@@ -1075,6 +1075,40 @@ follow-up is its own thread and is now also complete.
 - Each driver crate ships a `README.md` (supported HW, caps, limits).
 
 **Status: in progress.**
+- `drivers/input/ps2` QEMU integration vertical shipped — the first
+  per-driver `load → use device → unload → reload` vertical for a
+  display/input driver (the virtio storage/net verticals already cover
+  that lifecycle for their classes). It lives in
+  `tests/integration/ps2_input_qemu_x86_64`
+  (`rustos-test-ps2-qemu-x86-64`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60-second
+  budget). The boot hand-off prerequisite the ps2 driver had been
+  waiting on is now in the tree: `kernel/arch/x86_64/src/pio.rs` gained
+  `X86PortIo8` + `x86_port_io8()`, the byte-wide sibling of the PCI bus
+  driver's 32-bit `X86PortIo` and the only in-tree implementor of the
+  `rustos_abi::PortIo8` seam (`in al, dx` / `out dx, al` behind the safe
+  trait, each with a `// SAFETY:` block; a zero-sized-handle +
+  trait-object-coercion unit test). The vertical boots the production
+  kernel, on `AuditEvent::BootCompleted` loads the signed ps2 `.rxe`
+  through `rustos_drvhost::Host` (exercising the §8 load gate against
+  the real `rustos_drv_input_ps2::register`, with the fixture manifest
+  declaring `CAP_DRV_LOAD` so the host-installed grant — manifest ∩
+  caller — actually carries it), then mints `X86PortIo8` and drives a
+  real `Ps2Keyboard` through load → use → unload → reload. "Use" is made
+  deterministic without a physical keypress via the i8042 `0xD2` ("write
+  keyboard output buffer") command: the test injects a scancode into the
+  controller's output buffer through the same `PortIo8` backend the
+  driver reads through, then confirms the driver decodes the injected
+  press and, after reload, the matching release. Polling means no IRQ
+  routing is required for the vertical; an interrupt-driven delivery
+  path remains a later follow-up. No `unwrap` / `expect` / `panic!` in
+  the test bin; the only `unsafe` is the arch port's two PIO
+  instructions and the shared bumpalloc `#[global_allocator]` the other
+  QEMU verticals use. Docs: refreshed `docs/src/drivers/input.md`
+  + `drivers/input/ps2/README.md`. The remaining Stage 4 QEMU verticals
+  (`drivers/display/vesa`, `drivers/display/framebuffer`) still await
+  their own framebuffer boot hand-off (a `MmioMapper` over the linear
+  framebuffer).
 - `drivers/display/vesa` (x86_64 BIOS) shipped — the VBE
   linear-framebuffer display driver, and the last outstanding Stage 4
   first driver. It implements `rustos_abi::driver::display::Display`

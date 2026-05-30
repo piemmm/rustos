@@ -1,57 +1,67 @@
-# Next session — Stage 4 remaining first-drivers (Stage 4.D is done)
+# Next session — Stage 4 remaining QEMU verticals (ps2 vertical is done)
 
 ## Where we are
 
-**Stage 4.D is complete.** Its final item — Item 6, the acceptance gate
-— landed this session:
+All per-class Stage 4 **first drivers** are implemented with mock-host
+unit tests, rustdoc, and `docs/` pages (`PLAN.md` Stage 4 deliverable
+list): `drivers/display/{vesa,framebuffer}`, `drivers/input/ps2`,
+`drivers/bus/{pci,mmio,virtio}`, `drivers/storage/virtio_blk`,
+`drivers/network/virtio_net`. The userland driver host
+(`userland/system/drvhost`) loads/unloads/reloads signed `.rxe` modules
+with capability enforcement.
 
-- The gate was finished on a host carrying the two tools the prior
-  session lacked: `mdbook` (v0.5.3) + `mdbook-linkcheck` and `cargo-deny`
-  (0.19.7). (Note: they live in `~/.cargo/bin`, which is **not** on the
-  default non-interactive `PATH` — `export PATH="$HOME/.cargo/bin:$PATH"`
-  before invoking the gate.)
-- Two real defects the now-runnable steps surfaced were fixed:
-  1. **`deny.toml` licence policy.** All workspace crates declare the
-     canonical SPDX `license = "GPL-3.0-only"`, but `licenses.allow`
-     listed only the deprecated `GPL-3.0`, so `cargo deny check` failed
-     (`licenses FAILED`). The allow entry is now `GPL-3.0-only`.
-  2. **`cargo xtask coverage` tool probe.** It ran `cargo-llvm-cov
-     --version` directly; `cargo-llvm-cov` is a cargo subcommand whose
-     binary rejects a bare `--version`, so the probe always reported the
-     tool missing. `tools/xtask/src/commands.rs` now probes cargo
-     subcommands via `cargo <sub> --version`
-     (`cargo_subcommand_available`), used by both `run_coverage` and
-     `run_deny`; a fail-closed unit test guards it.
-- Verified green on this host: `cargo xtask ci`, `cargo xtask docs-check`,
-  `cargo deny check`, `cargo xtask test --qemu` (all 11 verticals),
-  `cargo xtask coverage` (workspace TOTAL 93.25% region). §7 high-bar
-  crates confirmed via targeted `cargo llvm-cov --summary-only`:
-  `kernel/sec` ≥97%, `lib/caps` ≥98%, `lib/crypto` ≥97.67%, and
-  `kernel/mem` + `kernel/ipc` + `kernel/irq` combined 95.18% region /
-  95.38% line. See the Item 6 *complete* entry in `PLAN.md`.
+**This session landed the first display/input-class QEMU integration
+vertical**, closing the `load → use device → unload → reload` gap for an
+input driver:
 
-Earlier Stage 4.D landings (Items 0–5, the virtio-PCI/MMIO QEMU
-verticals, the arch-neutral `kernel/virtio` crate, the riscv64 port) are
-all complete — see `PLAN.md` Stage 4.D.
+- `kernel/arch/x86_64/src/pio.rs` gained `X86PortIo8` + `x86_port_io8()`
+  — the byte-wide sibling of the PCI bus driver's 32-bit `X86PortIo` and
+  the only in-tree implementor of the `rustos_abi::PortIo8` seam
+  (`in al, dx` / `out dx, al` behind the safe trait, each `// SAFETY:`-
+  documented; unit-tested). This is the boot hand-off prerequisite the
+  ps2 driver had been waiting on.
+- `tests/integration/ps2_input_qemu_x86_64`
+  (`rustos-test-ps2-qemu-x86-64`) boots the production kernel, loads the
+  signed ps2 `.rxe` through `rustos_drvhost::Host`, then mints
+  `X86PortIo8` and drives a real `Ps2Keyboard` through load → use →
+  unload → reload. "Use" is deterministic without a keypress via the
+  i8042 `0xD2` ("write keyboard output buffer") command: the test
+  injects a scancode through the same `PortIo8` backend the driver reads
+  through and confirms the decoded press, then the matching release
+  after reload. Enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
+- Docs refreshed: `docs/src/drivers/input.md`,
+  `drivers/input/ps2/README.md`, `PLAN.md` Stage 4 status.
 
-## What needs doing — remaining Stage 4 first drivers
+Verified green on this host: `cargo xtask ci` (fmt → clippy → test
+`--qemu` → docs-check → deny → abi-check) plus `deps-check` / `cfg-check`,
+and the ps2 vertical PASSes standalone via `rustos-qemu-run`.
 
-Stage 4's deliverable list (`PLAN.md` "Stage 4 — Driver Framework and
-First Drivers", **Status: in progress**) still has these per-class first
-drivers outstanding:
+(Note: `mdbook`/`mdbook-linkcheck`, `cargo-deny`, `cargo-llvm-cov` live
+in `~/.cargo/bin`, which is **not** on the default non-interactive
+`PATH` — `export PATH="$HOME/.cargo/bin:$PATH"` before invoking the
+gate.)
 
-- `drivers/display/vesa` (x86_64 BIOS).
-- `drivers/display/framebuffer` (aarch64 Pi, riscv64 virt, wasm32 canvas).
-- `drivers/input/ps2` (x86_64).
+## What needs doing — remaining Stage 4 QEMU verticals
 
-Each must, per `AGENTS.md` §8: implement the relevant
-`lib/abi/src/driver/<class>.rs` trait(s), expose only `pub fn
-register(...)`, ship a `README.md` (supported HW, caps, limits), carry
-mock-host unit tests, and — where the hardware is emulable — at least one
-QEMU integration test (load → use → unload → reload). Pick one driver,
-implement it fully (code + tests + rustdoc + `docs/src/drivers/` page),
-and land it before starting the next. Packed virtqueues (virtio 1.1
-§2.7) remain a Stage 5 follow-up.
+Per `AGENTS.md` §8, every emulable driver needs at least one QEMU
+integration test (load → use → unload → reload). Still outstanding for
+the display class:
+
+- `drivers/display/framebuffer` — needs a framebuffer boot hand-off: the
+  kernel publishing an already-parsed geometry record + a `MmioMapper`
+  over the linear framebuffer the driver can `map_window` through. Most
+  tractable on a target with a simple linear framebuffer (e.g. aarch64
+  Pi / riscv64 virt ramfb, or x86_64 via a bochs/ramfb device).
+- `drivers/display/vesa` — needs the bootloader-captured VBE
+  `ModeInfoBlock` published as a boot capability plus a `MmioMapper`
+  over `PhysBasePtr` (the same framebuffer hand-off shape as above).
+
+Pick one, implement its boot hand-off + QEMU vertical fully (code +
+tests + rustdoc + `docs/` refresh), and land it before the next. Model
+the vertical on `tests/integration/ps2_input_qemu_x86_64` (boot the
+production kernel via the audit-sink hook, load the signed `.rxe`
+through `rustos_drvhost::Host`, exercise the device, then `qemu_exit`).
+Packed virtqueues (virtio 1.1 §2.7) remain a Stage 5 follow-up.
 
 ## Verification commands
 
@@ -62,7 +72,9 @@ export PATH="$HOME/.cargo/bin:$PATH"   # mdbook / cargo-deny / cargo-llvm-cov li
 cargo xtask ci
 cargo xtask test --qemu
 
-# Coverage (workspace TOTAL + targeted high-bar confirmation):
-cargo xtask coverage
-cargo llvm-cov --summary-only -p rustos-kernel-mem -p rustos-kernel-ipc -p rustos-kernel-irq
+# Run a single QEMU vertical standalone (fast iteration):
+cargo build --locked -p rustos-test-ps2-qemu-x86-64 --target x86_64-unknown-none
+cargo run -p rustos-qemu --bin rustos-qemu-run -- \
+    --kernel target/x86_64-unknown-none/debug/rustos-test-ps2-qemu-x86-64 \
+    --cpus 1 --timeout-secs 60      # runner exit 0 == PASS (serial dumped only on failure)
 ```

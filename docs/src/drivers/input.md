@@ -22,9 +22,9 @@ maps to `DriverError::BufferTooSmall`.
 
 ## Shipped drivers
 
-| Driver | Crate                    | Hardware                         | Stage 4 status        |
-|--------|--------------------------|----------------------------------|------------------------|
-| ps2    | `rustos-drv-input-ps2`   | Intel 8042 keyboard controller   | host-side tests only  |
+| Driver | Crate                    | Hardware                         | Stage 4 status                 |
+|--------|--------------------------|----------------------------------|--------------------------------|
+| ps2    | `rustos-drv-input-ps2`   | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
 
 ### `rustos-drv-input-ps2`
 
@@ -57,9 +57,19 @@ the `Ps2Keyboard` releases the backend (unload); constructing a fresh
 instance reloads. The driver issues the controller no commands, so
 unload leaves no state to quiesce.
 
-QEMU integration on a live controller depends on the kernel wiring a
-`PortIo8` backend over the legacy I/O ports and routing the i8042 IRQ
-(line 1) to the user-space driver — the same boot hand-off prerequisite
-the framebuffer and block drivers' QEMU verticals waited on. Until that
-plumbing lands the driver is covered by host-side mock-controller unit
-tests.
+QEMU integration on a live controller is exercised by
+`tests/integration/ps2_input_qemu_x86_64` (`rustos-test-ps2-qemu-x86-64`,
+enrolled in `cargo xtask test --qemu`). It boots the production kernel,
+loads this driver's signed `.rxe` through `rustos_drvhost::Host`, and
+drives it through load → use → unload → reload. The boot hand-off it
+needed is the x86_64 8-bit port seam
+`rustos_arch_x86_64::pio::X86PortIo8` — the byte-wide sibling of the PCI
+bus driver's 32-bit `X86PortIo`, supplying the only in-tree
+`PortIo8` implementation (`AGENTS.md` §17.2 / §17.4). "Use" is made
+deterministic without a physical keypress by the i8042 `0xD2` ("write
+keyboard output buffer") command: the test injects a scancode into the
+controller's output buffer through the same `PortIo8` backend the driver
+reads through, then confirms the driver decodes the resulting press and,
+after reload, the matching release. Because the driver polls, keyboard
+IRQ (line 1) routing is not required for the vertical; an
+interrupt-driven delivery path remains a later follow-up.

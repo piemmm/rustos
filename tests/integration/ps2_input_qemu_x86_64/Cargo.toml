@@ -1,0 +1,51 @@
+[package]
+name = "rustos-test-ps2-qemu-x86-64"
+description = "Stage 4 QEMU integration test: boot the rustos-kernel pipeline, load the signed PS/2 input driver through `rustos-drvhost::Host`, mint the x86_64 `PortIo8` backend, inject a deterministic i8042 scancode, drive the driver through load -> use -> unload -> reload, and signal QEMU success."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Stage 4 QEMU integration test for the first input-class driver
+# (`drivers/input/ps2`). The binary reuses the production boot pipeline
+# from `rustos-kernel`'s library half and replaces only the audit sink
+# so that on observing `AuditEvent::BootCompleted` (`EventId(4004)`) it:
+#
+#   1. loads the signed PS/2 driver `.rxe` through `rustos_drvhost::Host`
+#      (exercising the §8 load gate against the real
+#      `rustos_drv_input_ps2::register` entry point), then
+#   2. mints the x86_64 `PortIo8` backend (`rustos_arch_x86_64::pio`),
+#      injects a deterministic scancode into the i8042 output buffer via
+#      the controller's `0xD2` "write keyboard output buffer" command,
+#      and drives a real `Ps2Keyboard` through load -> use -> unload ->
+#      reload, decoding the injected press then release.
+#
+# Anything other than the exact decoded events flips QEMU's
+# `isa-debug-exit` device to failure; success is signalled only when
+# every step clears. The mock driver manifest bytes and trust-anchor
+# public key are generated at build time by `build.rs` so the test bin
+# itself stays `no_std` + `no_main`.
+
+[[bin]]
+name = "rustos-test-ps2-qemu-x86-64"
+path = "src/main.rs"
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drv-input-ps2 = { path = "../../../drivers/input/ps2", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

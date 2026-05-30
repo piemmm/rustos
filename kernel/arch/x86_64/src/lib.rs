@@ -92,10 +92,12 @@ pub mod irq;
 pub mod kernel_arch;
 pub mod multiboot2;
 pub mod percpu;
-/// x86_64 implementation of the Arch HAL [`rustos_abi::PortIo`] seam,
-/// supplying the legacy PCI configuration-port backend the
-/// `drivers/bus/pci` bus driver consumes through `&dyn PortIo`
-/// (`AGENTS.md` §17.2 / §17.4).
+/// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit
+/// [`rustos_abi::PortIo`] backend the `drivers/bus/pci` bus driver
+/// consumes for PCI configuration access, and the 8-bit
+/// [`rustos_abi::PortIo8`](rustos_abi::driver::port_io::PortIo8) backend
+/// the `drivers/input/ps2` i8042 driver consumes — both reached only
+/// through `&dyn` (`AGENTS.md` §17.2 / §17.4).
 pub mod pio;
 pub mod preempt;
 pub mod qemu_exit;

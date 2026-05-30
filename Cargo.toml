@@ -95,6 +95,7 @@ members = [
     "tests/integration/riscv64_boot",
     "tests/integration/syscall_dispatch_qemu",
     "tests/integration/drvhost_qemu",
+    "tests/integration/ps2_input_qemu_x86_64",
     "tests/integration/irq_qemu_x86_64",
     "tests/integration/virtio_qemu_support",
     "tests/integration/virtio_blk_pci_x86_64",
