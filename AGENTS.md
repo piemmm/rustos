@@ -67,6 +67,22 @@ These are absolute. They override any local convenience.
     comment. Comments are reserved for *why* (rationale, invariants, references,
     `// SAFETY:`), never for restating *what* the code already says. This does
     not relax §2.8: rustdoc and `docs/` pages remain mandatory.
+12. **Roll your own; do not trust external code.** Where it is feasible to do
+    so cleanly, prefer a first-party implementation in this workspace over a
+    dependency on an external crate. Every external dependency is code we
+    neither wrote nor fully control: it widens the trusted computing base,
+    the attack surface, and the audit burden, and it can disappear, regress,
+    or turn hostile. Default to writing it ourselves.
+    - Each external dependency must justify its existence in review and be
+      pinned, license-checked, and advisory-audited (`cargo deny`, §7).
+    - A dependency is acceptable only when rolling our own would be *less*
+      safe or correct than a vetted, audited implementation. The sole standing
+      example is cryptography: never hand-roll cryptographic primitives — use
+      the audited crates wrapped behind `lib/crypto` (§6, §16.4). This
+      exception does not generalise; "it's easier" is not a justification.
+    - This rule never overrides §2.1 (no hacks), §2.5 (tests), or §2.6
+      (senior-developer quality). Reinventing a wheel badly is worse than a
+      well-chosen, audited dependency.
 
 ---
 
