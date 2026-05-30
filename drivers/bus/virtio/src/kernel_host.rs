@@ -646,10 +646,12 @@ mod tests {
         // the first poll.
         assert_eq!(waiter.yields(), 0);
         // The ready flag was consumed exactly once: a second wait
-        // would block (so we do not call it), but the entry is no
+        // would block (so we do not call it), but the binding is no
         // longer ready.
-        let entry = irq.lookup(handle).expect("binding present");
-        assert!(!entry.ready, "notify_wait must consume the ready flag");
+        assert!(
+            !irq.ready_for(handle),
+            "notify_wait must consume the ready flag"
+        );
     }
 
     /// `notify_wait` blocks across cooperative yields until the
@@ -671,8 +673,10 @@ mod tests {
         // The loop parked three times before the injected fire
         // released it.
         assert_eq!(waiter.yields(), 3);
-        let entry = irq.lookup(handle).expect("binding present");
-        assert!(!entry.ready, "notify_wait must consume the ready flag");
+        assert!(
+            !irq.ready_for(handle),
+            "notify_wait must consume the ready flag"
+        );
     }
 
     /// Mask-before-wake: the controller mask is installed *before*
@@ -692,8 +696,8 @@ mod tests {
         }
         impl IrqController for Probe<'_> {
             fn mask(&self, _line: u32) -> Result<(), MaskError> {
-                let entry = self.table.lookup(self.handle);
-                self.ready_during_mask.set(entry.map(|e| e.ready));
+                self.ready_during_mask
+                    .set(Some(self.table.ready_for(self.handle)));
                 Ok(())
             }
         }
@@ -744,8 +748,10 @@ mod tests {
             Some(false),
             "ready must still be false while the controller mask runs"
         );
-        let entry = irq.lookup(handle).expect("binding present");
-        assert!(!entry.ready, "notify_wait consumed the ready flag");
+        assert!(
+            !irq.ready_for(handle),
+            "notify_wait consumed the ready flag"
+        );
     }
 
     /// `notify_wait` returns without hanging when the binding has

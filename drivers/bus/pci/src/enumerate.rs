@@ -52,6 +52,17 @@ const MSIX_CTRL_ENABLE: u32 = 1 << 31;
 /// entries deliver.
 const MSIX_CTRL_FUNCTION_MASK: u32 = 1 << 30;
 
+/// PCI Command register "Memory Space Enable" bit (PCI Local Bus 3.0
+/// §6.2.2). Set so the function decodes accesses to its memory BARs —
+/// required to reach the virtio register windows and the MSI-X table.
+const CMD_MEMORY_SPACE: u32 = 1 << 1;
+
+/// PCI Command register "Bus Master Enable" bit (PCI Local Bus 3.0
+/// §6.2.2). Set so the function may issue upstream memory transactions
+/// — required both for virtqueue DMA and for MSI-X message delivery
+/// (an MSI-X interrupt is itself an upstream memory write).
+const CMD_BUS_MASTER: u32 = 1 << 2;
+
 /// The PCI bus driver instance.
 ///
 /// Holds the [`ConfigSpace`] backend; everything else is
@@ -449,6 +460,21 @@ impl<C: ConfigSpace> Pci<C> {
         message: MsiMessage,
         mapper: &dyn MmioMapper,
     ) -> Result<(), DriverError> {
+        // Activate the function before touching its MSI-X table: enable
+        // memory-space decoding (so the table BAR responds) and bus
+        // mastering (so both virtqueue DMA and the MSI-X message write
+        // can reach the host bridge). Firmware leaves bus mastering off
+        // by default, so a device whose interrupt was "routed" but whose
+        // bus-master bit is clear would never deliver — fold the enable
+        // into the same activation step (PCI Local Bus 3.0 §6.2.2).
+        let cmd_addr = addr_with_reg(unpack_bdf(bdf, 0), 1);
+        let command = self.config.read32(cmd_addr);
+        // Preserve the low-16 command bits, drop the high-16 status
+        // bits to 0 (RW1C: a 0 write never clears a status bit), then
+        // OR in memory-space + bus-master enable.
+        let command = (command & 0xFFFF) | CMD_MEMORY_SPACE | CMD_BUS_MASTER;
+        self.config.write32(cmd_addr, command);
+
         let (cap_offset, table_size, table_bar, table_offset) = self.find_msix(bdf)?;
         if entry >= table_size {
             return Err(DriverError::OutOfRange);

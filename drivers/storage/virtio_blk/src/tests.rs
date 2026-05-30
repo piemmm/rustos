@@ -137,7 +137,7 @@ fn auto_host() -> &'static AutoDrainHost {
     Box::leak(Box::new(AutoDrainHost::new()))
 }
 
-fn open_with_autodrain(t: MockTransport) -> Box<VirtioBlk<MockTransport>> {
+fn open_with_autodrain(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport>> {
     // Pin the driver behind a `Box` so the raw pointer we hand the
     // host stays valid across the test function's stack frame
     // (`Box` provides a stable heap address that `install_transport`

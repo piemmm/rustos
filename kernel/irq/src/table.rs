@@ -5,6 +5,8 @@
 //! is the implementation.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::IrqHandle;
 use rustos_kernel_sec::TaskId;
@@ -25,18 +27,12 @@ pub struct IrqEntry {
     /// Architecture-defined IRQ line. Stable for the lifetime of
     /// the binding.
     pub line: u32,
-    /// Whether the line has fired since the last consume.
-    ///
-    /// `IrqTable::try_wait_step` clears this on a successful
-    /// consume; `IrqTable::fire` sets it after masking the line
-    /// at the controller.
-    pub ready: bool,
 }
 
 /// Controller-mask seam.
 ///
 /// The production [`IrqTable::fire`] path calls
-/// [`Self::mask`] before it sets [`IrqEntry::ready`] — the
+/// [`Self::mask`] before it sets the per-line ready flag — the
 /// load-bearing safety property of the user-space IRQ contract
 /// (`docs/src/security/irq.md`). Architecture ports without a
 /// programmable controller return [`MaskError::Unsupported`].
@@ -157,6 +153,21 @@ pub struct ReleaseOutcome {
 pub struct IrqTable {
     inner: RwLock<Inner>,
     max_line: u32,
+    /// Per-line "fired since last consume" flags, kept **outside**
+    /// [`Inner`]'s [`RwLock`] so [`IrqTable::fire`] — which runs in
+    /// interrupt context — can record a wake-up with a single atomic
+    /// store and **never** blocks on the lock. A task parked in
+    /// [`IrqTable::try_wait_step`] (which holds only a *read* guard)
+    /// can therefore be woken by the same-CPU completion ISR without
+    /// the ISR spinning on a lock the parked task holds (`AGENTS.md`
+    /// §4 — no hacks; this is the interrupt-reentrancy-safe design).
+    /// Indexed by line; length is `max_line + 1`.
+    ready: Vec<AtomicBool>,
+    /// Per-line "a binding exists" flags, maintained under the same
+    /// `Inner` write lock as [`Inner::entries`] but readable lock-free
+    /// by [`IrqTable::fire`] so a stray edge on an unbound line is
+    /// reported as [`FireOutcome::Stray`] without taking the lock.
+    bound: Vec<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -186,6 +197,16 @@ impl IrqTable {
     /// state is touched (`AGENTS.md` §5.4.5 — fail closed).
     #[must_use]
     pub fn new(max_line: u32) -> Self {
+        // One flag slot per addressable line (`0..=max_line`). `bind`
+        // rejects any line above `max_line`, so every bound line
+        // indexes a valid slot.
+        let slots = (max_line as usize).saturating_add(1);
+        let mut ready = Vec::with_capacity(slots);
+        let mut bound = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            ready.push(AtomicBool::new(false));
+            bound.push(AtomicBool::new(false));
+        }
         Self {
             inner: RwLock::new(Inner {
                 next_handle: 1,
@@ -193,6 +214,8 @@ impl IrqTable {
                 by_handle: BTreeMap::new(),
             }),
             max_line,
+            ready,
+            bound,
         }
     }
 
@@ -241,10 +264,15 @@ impl IrqTable {
             handle,
             owner,
             line,
-            ready: false,
         };
         g.entries.insert(line, entry);
         g.by_handle.insert(raw, line);
+        // Reset the lock-free flags for this line, then publish the
+        // binding. The store order (clear `ready`, set `bound` last)
+        // means `fire` only ever observes `bound == true` for a line
+        // whose `ready` slot was already initialised.
+        self.ready[line as usize].store(false, Ordering::SeqCst);
+        self.bound[line as usize].store(true, Ordering::SeqCst);
         Ok(BindOutcome { handle, line })
     }
 
@@ -285,21 +313,34 @@ impl IrqTable {
         now_ns: u64,
         deadline_ns: u64,
     ) -> WaitStep {
-        let mut g = self.inner.write();
-        let raw = handle.as_u64();
-        let Some(&line) = g.by_handle.get(&raw) else {
-            return WaitStep::NotFound;
+        // Only a *read* guard is needed: the forgery check reads the
+        // immutable `by_handle` / `entries` maps, and the ready flag
+        // lives in the lock-free `self.ready` array. Holding a read
+        // guard (rather than a write guard) is what lets the same-CPU
+        // completion ISR run `fire` — which takes no `Inner` lock at
+        // all — without deadlocking against a parked waiter.
+        let line = {
+            let g = self.inner.read();
+            let raw = handle.as_u64();
+            let Some(&line) = g.by_handle.get(&raw) else {
+                return WaitStep::NotFound;
+            };
+            let Some(entry) = g.entries.get(&line) else {
+                // by_handle and entries are kept consistent; this is a
+                // belt-and-braces fail-closed (`AGENTS.md` §5.4.5).
+                return WaitStep::NotFound;
+            };
+            if entry.owner != caller {
+                return WaitStep::NotFound;
+            }
+            line
         };
-        let Some(entry) = g.entries.get_mut(&line) else {
-            // by_handle and entries are kept consistent; this is a
-            // belt-and-braces fail-closed (`AGENTS.md` §5.4.5).
-            return WaitStep::NotFound;
-        };
-        if entry.owner != caller {
-            return WaitStep::NotFound;
-        }
-        if entry.ready {
-            entry.ready = false;
+        // The ready flag wins over a near-simultaneous deadline: a
+        // wake-up that happened must not be masked by `TimedOut`. The
+        // `swap` consumes the flag with `SeqCst`, pairing with the
+        // `SeqCst` fence `IrqController::mask` issues before `fire`
+        // sets it, so the mask-before-wake ordering holds.
+        if self.ready[line as usize].swap(false, Ordering::SeqCst) {
             return WaitStep::Ready;
         }
         if now_ns >= deadline_ns {
@@ -334,14 +375,26 @@ impl IrqTable {
             MaskError::Unsupported => IrqError::ArchUnsupported,
             MaskError::OutOfRange => IrqError::LineOutOfRange,
         })?;
-        let mut g = self.inner.write();
-        let Some(entry) = g.entries.get_mut(&line) else {
-            // No binding — the mask still happened, the stray edge
-            // is contained. Surface to the caller so an arch-port
-            // audit observer can record stray-IRQ rate.
+        // Interrupt-context fast path: consult only the lock-free
+        // per-line flags. Taking `Inner`'s lock here would deadlock a
+        // single CPU whose parked task already holds it in
+        // `try_wait_step`; the `bound` / `ready` atoms exist precisely
+        // so `fire` never blocks (`AGENTS.md` §4).
+        let Some(bound) = self.bound.get(line as usize) else {
+            // Line outside the addressable range — the mask still
+            // happened (or failed above); treat as a contained stray.
             return Ok(FireOutcome::Stray);
         };
-        entry.ready = true;
+        if !bound.load(Ordering::SeqCst) {
+            // No binding — the mask still happened, the stray edge is
+            // contained. Surface to the caller so an arch-port audit
+            // observer can record stray-IRQ rate.
+            return Ok(FireOutcome::Stray);
+        }
+        // `mask` issued a `SeqCst` fence before returning; setting
+        // `ready` after it preserves the mask-before-wake invariant a
+        // `try_wait_step` consumer observes through the paired load.
+        self.ready[line as usize].store(true, Ordering::SeqCst);
         Ok(FireOutcome::Marked)
     }
 
@@ -361,6 +414,10 @@ impl IrqTable {
         for line in to_drop {
             if let Some(entry) = g.entries.remove(&line) {
                 g.by_handle.remove(&entry.handle.as_u64());
+                // Clear the binding's lock-free flags so a late edge
+                // on the now-unbound line is reported as a stray.
+                self.bound[line as usize].store(false, Ordering::SeqCst);
+                self.ready[line as usize].store(false, Ordering::SeqCst);
             }
         }
         ReleaseOutcome { released }
@@ -373,6 +430,33 @@ impl IrqTable {
         let g = self.inner.read();
         let line = *g.by_handle.get(&handle.as_u64())?;
         g.entries.get(&line).copied()
+    }
+
+    /// Whether the line bound to `handle` has a pending, *un-consumed*
+    /// fire.
+    ///
+    /// Read-only poll/diagnostic companion to [`Self::lookup`]: it
+    /// reports the lock-free per-line ready flag without clearing it
+    /// (only [`Self::try_wait_step`] consumes the flag). Returns
+    /// `false` for an unknown handle. Taking only a read guard, it is
+    /// safe to call from any context, including alongside an
+    /// in-flight [`Self::fire`] (`AGENTS.md` §2.4 — a narrow read-only
+    /// query, not a new mutation surface).
+    #[must_use]
+    pub fn ready_for(&self, handle: IrqHandle) -> bool {
+        let g = self.inner.read();
+        let Some(&line) = g.by_handle.get(&handle.as_u64()) else {
+            return false;
+        };
+        self.ready[line as usize].load(Ordering::SeqCst)
+    }
+
+    /// Current value of the lock-free ready flag for `line`. Test-only
+    /// observer for the mask-before-wake ordering assertions.
+    #[cfg(test)]
+    #[must_use]
+    fn ready_flag(&self, line: u32) -> bool {
+        self.ready[line as usize].load(Ordering::SeqCst)
     }
 }
 
@@ -451,7 +535,7 @@ mod tests {
         let entry = t.lookup(out.handle).expect("present");
         assert_eq!(entry.line, 7);
         assert_eq!(entry.owner, TaskId(42));
-        assert!(!entry.ready);
+        assert!(!t.ready_flag(7));
     }
 
     #[test]
@@ -590,9 +674,9 @@ mod tests {
                 // *while* the mask is in flight. If the table set
                 // `ready = true` before calling us, this test
                 // fails.
-                let g = self.table.inner.read();
-                let entry = g.entries.get(&self.line).copied();
-                *self.observed_ready_during_mask.borrow_mut() = entry.map(|e| e.ready);
+                let bound = self.table.bound.get(self.line as usize).is_some();
+                *self.observed_ready_during_mask.borrow_mut() =
+                    bound.then(|| self.table.ready_flag(self.line));
                 Ok(())
             }
         }
@@ -610,8 +694,7 @@ mod tests {
             "ready must still be false while mask is executing"
         );
         // And after fire returns, ready is set.
-        let entry = t.lookup(IrqHandle::from_raw(1)).expect("entry");
-        assert!(entry.ready);
+        assert!(t.ready_flag(7));
     }
 
     #[test]

@@ -724,6 +724,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-virtio-blk-pci-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-bus-pci",
+ "rustos-drv-bus-virtio",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-drvhost",
+ "rustos-kernel",
+ "rustos-kernel-irq",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-util"
 version = "0.0.0"
 

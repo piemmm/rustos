@@ -78,15 +78,22 @@ mod wire {
 }
 
 /// Block device backed by a cross-arch virtio transport.
-pub struct VirtioBlk<T: Transport> {
+///
+/// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
+/// its DMA regions through. The host is *minted per driver load* by
+/// the driver host's `VirtioHostFactory` (defined in `rustos_drvhost`)
+/// and lives only for the duration of that load, so the driver borrows
+/// it for `'h` rather than demanding a `'static` host (`AGENTS.md`
+/// §4 — per-process pools are reclaimed when the driver unloads).
+pub struct VirtioBlk<'h, T: Transport> {
     transport: T,
     queue: SplitQueue,
-    host: &'static dyn VirtioHost,
+    host: &'h dyn VirtioHost,
     block_size: u32,
     block_count: u64,
 }
 
-impl<T: Transport> VirtioBlk<T> {
+impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// Bring the device online.
     ///
     /// Implements the virtio-1.1 §3.1 initialisation sequence:
@@ -101,7 +108,7 @@ impl<T: Transport> VirtioBlk<T> {
     /// The constructor returns [`VirtioError::FeaturesRejected`] if
     /// the device clears [`Status::FEATURES_OK`] after the driver
     /// completed negotiation.
-    pub fn open(mut transport: T, host: &'static dyn VirtioHost) -> Result<Self, VirtioError> {
+    pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, VirtioError> {
         transport.reset();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
@@ -254,7 +261,7 @@ impl<T: Transport> VirtioBlk<T> {
     }
 }
 
-impl<T: Transport> Block for VirtioBlk<T> {
+impl<T: Transport> Block for VirtioBlk<'_, T> {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
             block_size: self.block_size,

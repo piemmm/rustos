@@ -8,7 +8,8 @@
 //! Usage:
 //! ```text
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-//!     --kernel path/to/kernel.elf [--cpus N] [--timeout-secs S]
+//!     --kernel path/to/kernel.elf [--cpus N] [--timeout-secs S] \
+//!     [--virtio-blk path/to/disk.img ...]
 //! ```
 
 use std::env;
@@ -23,6 +24,7 @@ fn main() -> ExitCode {
     let mut kernel: Option<PathBuf> = None;
     let mut cpus: u32 = 1;
     let mut timeout = Duration::from_secs(30);
+    let mut block_images: Vec<PathBuf> = Vec::new();
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -45,6 +47,12 @@ fn main() -> ExitCode {
                 };
                 timeout = Duration::from_secs(n);
             }
+            "--virtio-blk" => {
+                let Some(v) = args.next() else {
+                    return usage_err("--virtio-blk needs a path");
+                };
+                block_images.push(PathBuf::from(v));
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 return ExitCode::SUCCESS;
@@ -57,9 +65,12 @@ fn main() -> ExitCode {
         return usage_err("--kernel is required");
     };
 
-    let spec = Spec::for_x86_64_kernel(kernel)
+    let mut spec = Spec::for_x86_64_kernel(kernel)
         .with_cpus(cpus)
         .with_timeout(timeout);
+    for image in block_images {
+        spec = spec.with_virtio_blk(image);
+    }
     let _ = Arch::X86_64; // tie-down — the wrapper is currently x86_64-only
 
     match Runner::run(&spec) {
@@ -82,7 +93,8 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "usage: rustos-qemu-run --kernel <path> [--cpus N] [--timeout-secs S]"
+    "usage: rustos-qemu-run --kernel <path> [--cpus N] [--timeout-secs S] \
+[--virtio-blk <image> ...]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {

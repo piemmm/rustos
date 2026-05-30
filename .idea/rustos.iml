@@ -67,6 +67,7 @@
       <sourceFolder url="file://$MODULE_DIR$/userland/system/drvhost/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/init/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/system/installer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/virtio_blk_pci_x86_64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/userland/net/icmp/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>

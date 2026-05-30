@@ -80,6 +80,7 @@ members = [
     "tests/integration/syscall_dispatch_qemu",
     "tests/integration/drvhost_qemu",
     "tests/integration/irq_qemu_x86_64",
+    "tests/integration/virtio_blk_pci_x86_64",
 ]
 
 # Settings that apply to every crate in the workspace.

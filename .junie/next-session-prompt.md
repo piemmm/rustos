@@ -8,6 +8,39 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
+- **`virtio_blk_pci_x86_64` real round-trip — landed, not gated**
+  (latest session). The test bin now drives the full x86_64 vertical
+  end-to-end under QEMU: boot → `x86_mechanism_one()` PCI walk → map
+  the four virtio register windows via `KernelMmioMapper` →
+  `route_msix` → mint a `KernelVirtioHost` over a per-device DMA pool
+  carved from `published_memory_map()` → load the signed virtio-blk
+  `.rxe` → read sector 0 (verify the planted `byte[i] = i mod 256`
+  pattern) → write+read-back sector 1 (verify) → `qemu_exit` success.
+  Sub-fixes landed and host-tested green: `tools/qemu` attaches
+  `virtio-blk-pci` modern (`disable-legacy=on`) + forces BARs <4 GiB
+  via OVMF `X-PciMmio64Mb=0` (boot identity map is 0..4 GiB), debug
+  runner `--virtio-blk`; `PciTransport` programs `queue_msix_vector`;
+  `Pci::route_msix` sets command Memory-Space + Bus-Master enable;
+  `kernel/irq::IrqTable::fire` is now lock-free (atomic per-line
+  `bound`/`ready`) so an ISR cannot deadlock a parked `try_wait_step`
+  on one CPU, with a read-only `IrqTable::ready_for(handle)` poll
+  companion. Tests: `rustos-kernel-irq` 24, `rustos-drv-bus-pci` 28,
+  `rustos-drv-storage-virtio-blk` 8, `rustos-drv-bus-virtio`
+  (kernel-host) 75; clippy `-D warnings`/fmt/x86_64 build clean.
+  **NOT enrolled in `cargo xtask test --qemu`** — see "Next focus".
+
+- **Next focus: the flaky single-CPU MSI completion hang.** ~30% of
+  runs hang: the guest spins with `IF=0` in a tight loop near
+  `rustos_kernel_irq::table::IrqTable::fire` right after the device's
+  *first* completion interrupt is delivered (`-d int` shows the `v=40`
+  MSI-X vector arrives, then no further `v=20` timer ticks). Suspected:
+  a silent panic-or-spin in ISR context, possibly the serial lock held
+  by the task's DMA-alloc logging when the ISR fires. Root-cause and
+  fix it, then re-enrol by setting `disk_sectors: Some(2048)` in
+  `tools/xtask/src/commands/qemu_tests.rs` (the plumbing is already in
+  place). AGENTS.md §7 forbids gating CI on a flaky test, so do not
+  enrol until it is provably stable.
+
 - **Live boot-wiring seams** (latest session). The
   `tests/integration/virtio_blk_pci_x86_64` kernel test bin still
   could not reach two things, both now landed as host-testable seams:

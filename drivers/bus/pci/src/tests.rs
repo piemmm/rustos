@@ -841,6 +841,37 @@ fn route_msix_programs_entry_and_enables_function() {
 }
 
 #[test]
+fn route_msix_enables_memory_space_and_bus_master() {
+    let config = q35_fixture();
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    let mapper = MockMapper::new(true);
+    let message = MsiMessage {
+        address: 0xFEE0_1000,
+        data: 0x0000_0030,
+    };
+
+    pci.route_msix(virtio_bdf(), 0, message, &mapper)
+        .expect("routes entry 0");
+
+    // The function's Command register (dword 1) was written with
+    // Memory Space Enable (bit 1) and Bus Master Enable (bit 2) set:
+    // without bus mastering the device could neither DMA the
+    // virtqueues nor deliver the MSI-X message it was just handed.
+    let st = state.borrow();
+    let command = st
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.bus == 0 && a.device == 3 && a.function == 0 && a.register == 1)
+        .map(|(_, v)| *v)
+        .expect("command register written");
+    assert_eq!(command & 0b110, 0b110, "memory-space + bus-master enabled");
+    // The high-16 status bits were not re-asserted (RW1C safety).
+    assert_eq!(command >> 16, 0, "status half written as zero");
+}
+
+#[test]
 fn route_msix_reports_not_found_without_msix_capability() {
     let pci = Pci::new(q35_fixture());
     let mapper = MockMapper::new(true);

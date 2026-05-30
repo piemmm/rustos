@@ -1196,6 +1196,42 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — `virtio_blk_pci_x86_64` real
+  round-trip, *landed but not gated*): the test bin now drives the
+  full x86_64 vertical end-to-end under QEMU — boot →
+  `x86_mechanism_one()` PCI walk → map the four virtio register
+  windows through `KernelMmioMapper` → `route_msix` → mint a
+  `KernelVirtioHost` over a per-device DMA pool carved from
+  `published_memory_map()` → load the signed virtio-blk `.rxe` → read
+  sector 0 (verify the planted `byte[i] = i mod 256` pattern) →
+  write+read-back sector 1 (verify). On a clean run the serial log
+  reaches "sector 1 round-trip verified" and QEMU exits success.
+  **Sub-fixes (all host-tested, green).** `tools/qemu` x86_64 attaches
+  `virtio-blk-pci` as modern (`disable-legacy=on`) and forces BARs
+  below 4 GiB via the OVMF `X-PciMmio64Mb=0` fw_cfg knob (the boot
+  identity map only covers 0..4 GiB); the debug runner gained
+  `--virtio-blk`. `PciTransport` now programs `queue_msix_vector`
+  (MSI-X was never enabled at the queue level). `Pci::route_msix`
+  also sets the command-register Memory-Space + Bus-Master enable bits
+  (required for DMA and MSI delivery). `kernel/irq::IrqTable::fire`
+  was made lock-free (atomic per-line `bound`/`ready` flags) so an ISR
+  cannot deadlock a parked `try_wait_step` on a single CPU — a genuine
+  pre-existing hazard — and a read-only `IrqTable::ready_for(handle)`
+  poll companion replaces the former test-only flag observer
+  (`AGENTS.md` §2.4 — a narrow query, not new mutation surface); the
+  kernel-host tests poll through it. **Tests.** `rustos-kernel-irq`
+  24, `rustos-drv-bus-pci` 28, `rustos-drv-storage-virtio-blk` 8,
+  `rustos-drv-bus-virtio` (kernel-host) 75; clippy `-D warnings`,
+  `cargo fmt --check`, and the `x86_64-unknown-none` test-bin build are
+  clean. **Deferred (the gate).** The crate is **not** enrolled in
+  `cargo xtask test --qemu`: a ~30% intermittent single-CPU hang in the
+  MSI completion-wait path (guest spins `IF=0` near `IrqTable::fire`
+  right after the device's first completion interrupt) is still under
+  investigation, and `AGENTS.md` §7 forbids gating CI on a flaky test.
+  The `disk_sectors` plumbing in `tools/xtask/src/commands/qemu_tests.rs`
+  stays so re-enrolment is a one-line `QemuTest { … disk_sectors:
+  Some(2048) }` once the hang is root-caused — see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — live boot-wiring seams,
   *complete*): scoping the `tests/integration/virtio_blk_pci_x86_64`
   kernel test bin found two seams it still could not reach. The PCI

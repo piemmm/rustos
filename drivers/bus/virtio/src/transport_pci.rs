@@ -33,6 +33,12 @@ use rustos_abi::RegisterWindow;
 
 use crate::transport::{Status, Transport, VirtioError};
 
+/// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
+/// to `queue_msix_vector` / `msix_config` tells the device not to
+/// raise an MSI-X interrupt for that source. Every vector register
+/// reads back this value after a device reset.
+pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
+
 /// Byte offsets within the virtio-1.x PCI *common configuration*
 /// structure (virtio 1.1 §4.1.4.3, `struct virtio_pci_common_cfg`).
 pub mod common {
@@ -52,6 +58,12 @@ pub mod common {
     pub const QUEUE_SELECT: usize = 0x16;
     /// `queue_size` (`le16`).
     pub const QUEUE_SIZE: usize = 0x18;
+    /// `queue_msix_vector` (`le16`) — the MSI-X table entry the
+    /// device signals when the selected queue's used ring advances
+    /// (virtio 1.1 §4.1.4.3). Defaults to
+    /// [`VIRTIO_MSI_NO_VECTOR`](super::VIRTIO_MSI_NO_VECTOR) on reset,
+    /// which suppresses queue interrupts entirely.
+    pub const QUEUE_MSIX_VECTOR: usize = 0x1A;
     /// `queue_enable` (`le16`).
     pub const QUEUE_ENABLE: usize = 0x1C;
     /// `queue_notify_off` (`le16`).
@@ -96,6 +108,11 @@ pub struct PciTransport {
     /// recorded by [`Transport::queue_set`] and consumed by
     /// [`Transport::notify`]. `None` until the queue is programmed.
     notify_offsets: Vec<Option<u32>>,
+    /// MSI-X table entry programmed into every queue's
+    /// `queue_msix_vector` by [`Transport::queue_set`].
+    /// [`VIRTIO_MSI_NO_VECTOR`] (the default) leaves queue interrupts
+    /// suppressed; [`PciTransport::enable_msix`] selects a real entry.
+    msix_vector: u16,
 }
 
 impl PciTransport {
@@ -124,7 +141,26 @@ impl PciTransport {
             num_queues,
             selected_queue: 0,
             notify_offsets: vec![None; num_queues as usize],
+            msix_vector: VIRTIO_MSI_NO_VECTOR,
         })
+    }
+
+    /// Select the MSI-X table entry the device signals on queue
+    /// completion.
+    ///
+    /// Must be called **before** the queue is programmed (i.e. before
+    /// [`Transport::queue_set`] runs, which the driver drives from
+    /// `VirtioBlk::open`): [`Transport::queue_set`] copies this entry
+    /// into the selected queue's `queue_msix_vector` register and
+    /// validates the device accepted it. The matching PCI MSI-X table
+    /// entry must already have been routed by the kernel
+    /// ([`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix)).
+    ///
+    /// Config-change interrupts are intentionally left disabled
+    /// (`msix_config` stays [`VIRTIO_MSI_NO_VECTOR`]): a block device's
+    /// configuration is static for the lifetime of this transport.
+    pub fn enable_msix(&mut self, entry: u16) {
+        self.msix_vector = entry;
     }
 
     /// Borrow the underlying windows (host-side test access; not part
@@ -268,6 +304,24 @@ impl Transport for PciTransport {
         self.write_u64(common::QUEUE_DESC, desc)?;
         self.write_u64(common::QUEUE_DRIVER, avail)?;
         self.write_u64(common::QUEUE_DEVICE, used)?;
+        // Program the queue's MSI-X vector before enabling it. A device
+        // that cannot honour the request reflects `VIRTIO_MSI_NO_VECTOR`
+        // back on read (virtio 1.1 §4.1.4.3); fail closed so the driver
+        // never parks on an interrupt the device will not raise.
+        if self.msix_vector != VIRTIO_MSI_NO_VECTOR {
+            self.windows
+                .common
+                .write_u16(common::QUEUE_MSIX_VECTOR, self.msix_vector)
+                .map_err(|_| VirtioError::DeviceFault)?;
+            let echoed = self
+                .windows
+                .common
+                .read_u16(common::QUEUE_MSIX_VECTOR)
+                .map_err(|_| VirtioError::DeviceFault)?;
+            if echoed != self.msix_vector {
+                return Err(VirtioError::DeviceFault);
+            }
+        }
         // Resolve and validate the notify address for this queue
         // before it is ever used by the infallible `notify`.
         let notify_off = self
@@ -474,6 +528,41 @@ mod tests {
         // notify(0) writes the queue index to off * multiplier = 8.
         t.notify(0);
         assert_eq!(dev.dev_notify().read_u16(2 * 4).unwrap(), 0);
+    }
+
+    #[test]
+    fn queue_set_skips_msix_vector_by_default() {
+        // Without `enable_msix`, the transport leaves `queue_msix_vector`
+        // at the device's reset default (`VIRTIO_MSI_NO_VECTOR`).
+        let dev = FakeDevice::new(64, 8, 4);
+        let c = dev.dev_common();
+        c.write_u16(common::NUM_QUEUES, 1).unwrap();
+        c.write_u16(common::QUEUE_SIZE, 8).unwrap();
+        c.write_u16(common::QUEUE_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR)
+            .unwrap();
+        let mut t = dev.transport();
+        t.queue_select(0).unwrap();
+        t.queue_set(8, 1, 2, 3).unwrap();
+        assert_eq!(
+            c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(),
+            VIRTIO_MSI_NO_VECTOR
+        );
+    }
+
+    #[test]
+    fn queue_set_programs_enabled_msix_vector() {
+        // `enable_msix(entry)` programs the queue's `queue_msix_vector`
+        // and validates the device echoed the entry back.
+        let dev = FakeDevice::new(64, 8, 4);
+        let c = dev.dev_common();
+        c.write_u16(common::NUM_QUEUES, 1).unwrap();
+        c.write_u16(common::QUEUE_SIZE, 8).unwrap();
+        let mut t = dev.transport();
+        t.enable_msix(0);
+        t.queue_select(0).unwrap();
+        t.queue_set(8, 1, 2, 3).unwrap();
+        assert_eq!(c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(), 0);
+        assert_eq!(c.read_u16(common::QUEUE_ENABLE).unwrap(), 1);
     }
 
     #[test]

@@ -144,18 +144,43 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
     argv.push("-cdrom".into());
     argv.push(iso.into());
 
+    // Confine all PCI BARs to the 32-bit MMIO hole below 4 GiB. The
+    // kernel's boot trampoline identity-maps only `0..4 GiB`, and the
+    // Stage 4.D `DirectPhysMap` the driver host resolves register
+    // windows through covers the same range; a virtio function whose
+    // 64-bit BAR firmware placed above 4 GiB would be unreachable.
+    //
+    // OVMF performs its own PCI enumeration and ignores the host
+    // bridge's `pci-hole64-size`, so the knob that matters is OVMF's
+    // own `X-PciMmio64Mb` fw_cfg: sizing the 64-bit MMIO window to 0
+    // makes OVMF assign every BAR — including 64-bit ones — inside the
+    // 32-bit hole. Scope it to specs that actually attach a PCI device
+    // so the bring-up-only tests keep the stock firmware configuration.
+    if !spec.block_devices.is_empty() {
+        argv.push("-fw_cfg".into());
+        argv.push("name=opt/ovmf/X-PciMmio64Mb,string=0".into());
+    }
+
     // Attach each backing image as a modern virtio-blk-pci function.
     // `if=none` detaches the drive from any automatic controller so the
     // explicit `-device virtio-blk-pci,drive=blkN` is the only thing that
     // surfaces it to the guest — that is the PCI function the Stage 4.D
     // boot walk discovers and `PciTransport` drives.
+    //
+    // `disable-legacy=on` forces the function to be a *non-transitional*
+    // (modern, virtio-1.0+) device: it reports PCI device id 0x1042
+    // (`0x1040 + virtio-blk`) and exposes its registers exclusively
+    // through the virtio-1.x PCI capability layout the boot walk decodes
+    // (`rustos_kernel::provision_virtio_pci`). Without it QEMU's default
+    // `pc`/`q35` machine presents a *transitional* device (id 0x1001) on
+    // the legacy PCI bus, which the modern-only walk would not match.
     for (i, dev) in spec.block_devices.iter().enumerate() {
         argv.push("-drive".into());
         let mut drive = OsString::from(format!("if=none,format=raw,id=blk{i},file="));
         drive.push(dev.image.as_os_str());
         argv.push(drive);
         argv.push("-device".into());
-        argv.push(format!("virtio-blk-pci,drive=blk{i}").into());
+        argv.push(format!("virtio-blk-pci,drive=blk{i},disable-legacy=on").into());
     }
     argv
 }
@@ -360,8 +385,14 @@ mod tests {
         assert!(argv.iter().any(|a| a.contains("if=none")
             && a.contains("id=blk1")
             && a.contains("/tmp/disk1.img")));
-        assert!(argv.iter().any(|a| a == "virtio-blk-pci,drive=blk0"));
-        assert!(argv.iter().any(|a| a == "virtio-blk-pci,drive=blk1"));
+        // `disable-legacy=on` pins the function to the modern
+        // (non-transitional) virtio-1.x layout the boot walk decodes.
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-blk-pci,drive=blk0,disable-legacy=on"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-blk-pci,drive=blk1,disable-legacy=on"));
     }
 
     #[test]

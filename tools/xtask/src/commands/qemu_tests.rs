@@ -24,6 +24,10 @@ struct QemuTest {
     cpus: u32,
     /// Hard wall-clock budget.
     timeout: Duration,
+    /// When `Some(n)`, attach an `n`-sector raw virtio-blk backing
+    /// image whose sector 0 carries the deterministic pattern
+    /// `byte[i] = i mod 256` (which the kernel-side test verifies).
+    disk_sectors: Option<u64>,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -32,6 +36,7 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-memory-isolation",
         cpus: 1,
         timeout: Duration::from_secs(60),
+        disk_sectors: None,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -43,6 +48,7 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-scheduler-stress-qemu",
         cpus: 4,
         timeout: Duration::from_secs(120),
+        disk_sectors: None,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -62,6 +68,7 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-kernel-arch-boot",
         cpus: 1,
         timeout: Duration::from_secs(60),
+        disk_sectors: None,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -82,6 +89,7 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-syscall-dispatch-qemu",
         cpus: 1,
         timeout: Duration::from_secs(60),
+        disk_sectors: None,
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -94,6 +102,7 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-drvhost-qemu",
         cpus: 1,
         timeout: Duration::from_secs(60),
+        disk_sectors: None,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -114,7 +123,17 @@ const TESTS: &[QemuTest] = &[
         binary: "rustos-test-irq-qemu-x86-64",
         cpus: 1,
         timeout: Duration::from_secs(60),
+        disk_sectors: None,
     },
+    // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` exists and
+    // performs a full real virtio-blk-pci round-trip (PCI walk → MSI-X
+    // → DMA → read sector 0 / write+read-back sector 1), but it is
+    // **not enrolled here yet**: a ~30% intermittent single-CPU hang in
+    // the MSI completion-wait path remains under investigation, and
+    // AGENTS.md §7 forbids gating CI on a flaky test. The
+    // `disk_sectors` plumbing below stays so re-enrolment is a one-line
+    // `QemuTest { … disk_sectors: Some(2048) }` once the hang is fixed.
+    // See `PLAN.md` / `.junie/next-session-prompt.md`.
 ];
 
 const TARGET: &str = "x86_64-unknown-none";
@@ -143,9 +162,24 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
         .join(TARGET)
         .join("debug")
         .join(t.binary);
-    let spec = Spec::for_x86_64_kernel(&kernel)
+    let mut spec = Spec::for_x86_64_kernel(&kernel)
         .with_cpus(t.cpus)
         .with_timeout(t.timeout);
+
+    // Attach a planted raw backing image for storage tests. Sector 0
+    // carries the deterministic `byte[i] = i mod 256` pattern the
+    // kernel-side test reads back and verifies; every other sector
+    // reads as zero, so the test's write+read-back of sector 1 cannot
+    // pass on stale data.
+    if let Some(sectors) = t.disk_sectors {
+        let image = kernel.with_extension("blk.img");
+        let sector0: Vec<u8> = (0..rustos_qemu::disk::SECTOR_BYTES)
+            .map(|i| u8::try_from(i % 256).unwrap_or(0))
+            .collect();
+        rustos_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
+            .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
+        spec = spec.with_virtio_blk(&image);
+    }
 
     eprintln!(
         "xtask: [test --qemu (run {})] kernel={} cpus={} timeout={:?}",
