@@ -1,7 +1,7 @@
 //! Live virtio-PCI boot wiring (Stage 4.D Item 4).
 //!
-//! [`virtio_pci_walk`](crate::virtio_pci_walk) turns a bus into a
-//! [`PciTransport`], [`virtio_factory`](crate::virtio_factory) mints a
+//! [`provision_virtio_pci`] turns a bus into a
+//! [`PciTransport`], [`KernelVirtioFactory`] mints a
 //! per-driver DMA host, and `userland/system/drvhost` runs the signed
 //! `.rxe`. This module is the seam that joins the three into the single
 //! sequence the production boot pipeline performs for a virtio-class

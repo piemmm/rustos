@@ -67,8 +67,19 @@
 
 ## What needs doing — Item 6 (acceptance gate)
 
-This is the only Stage 4.D item left. Run it on a host that has `mdbook`
-and `cargo deny` installed (this environment had neither):
+**Progress (latest session).** Every gate step reachable without `mdbook`
+or `cargo deny` was run and is green on this host, and three rustdoc
+defects the gate surfaced (intra-doc links left dangling by the Item-4
+`kernel/virtio` crate extraction, plus one redundant explicit link in
+`drivers/bus/pci`) were fixed — `cargo doc --workspace --no-deps
+--document-private-items` with `RUSTDOCFLAGS="-D warnings"` is now clean.
+`cargo xtask test --qemu` ran all 11 verticals green; coverage meets
+`AGENTS.md` §7 on the high-bar crates. See the Item 6 follow-up entry in
+`PLAN.md`. **Still outstanding:** the mdBook half of `cargo xtask
+docs-check` and `cargo deny check` — neither tool is installed here.
+
+This is the only Stage 4.D item left. Finish it on a host that has
+`mdbook` and `cargo deny` installed (this environment had neither):
 
 - Run `cargo xtask ci` and paste verbatim output in the PR body
   (`cargo xtask docs-check` needs `mdbook`; the advisory/license audit

@@ -1196,6 +1196,37 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 6 — acceptance gate, *partial*): ran the full
+  runnable `xtask` matrix on this host and fixed three rustdoc defects the
+  gate surfaced. **rustdoc defects (`AGENTS.md` §13 — `docs-check`).** The
+  real `docs-check` rustdoc step is `cargo doc --workspace --no-deps
+  --document-private-items` on the host target with `RUSTDOCFLAGS="-D
+  warnings"`; it failed on intra-doc links left dangling by the Item-4
+  crate extraction (the `KernelVirtioFactory` + virtio walks moving from
+  `rustos-kernel` to `kernel/virtio`): `kernel/rustos-kernel/src/virtio_boot.rs`
+  module docs linked `crate::virtio_pci_walk` / `crate::virtio_factory`
+  (modules no longer in `rustos_kernel`) — repointed to the re-exported
+  `provision_virtio_pci` / `KernelVirtioFactory`;
+  `tests/integration/virtio_qemu_support/src/lib.rs` module docs linked
+  `virtio_blk_round_trip` / `virtio_net_ping` / `rustos_drv_bus_virtio::Transport`,
+  none of which resolve on the host target where every module is
+  `cfg`-gated out — demoted to plain code spans; and
+  `drivers/bus/pci/src/enumerate.rs` carried a redundant explicit
+  `VIRTIO_CFG_NOTIFY` link target (in scope via the module import) flagged
+  under `--document-private-items` — target removed. After the fixes
+  rustdoc is clean across the workspace. **Verification (this host).**
+  `cargo build --workspace`, `cargo fmt --all --check`, `cargo xtask
+  clippy` (host all-targets), `cargo xtask abi-check`, `cargo xtask test`
+  (host) and `cargo xtask test --qemu` (all 11 verticals — the 8 x86_64
+  boot/IRQ/syscall/drvhost/virtio-PCI plus the riscv64 boot,
+  `virtio-blk-mmio-riscv64`, `virtio-net-mmio-riscv64`) all green; coverage
+  via `cargo llvm-cov --summary-only` meets `AGENTS.md` §7 on the high-bar
+  crates (kernel/sec ≥97%, lib/caps ≥98%, lib/crypto ≥97.67%; kernel/mem +
+  ipc + irq combined 95.18% region / 95.38% line; workspace TOTAL 93.28%).
+  **Not run here (tooling absent):** the mdBook half of `cargo xtask
+  docs-check` (no `mdbook`) and `cargo deny check` (no `cargo-deny`); the
+  gate's `cargo xtask ci` must still be completed on a host with both, but
+  every step reachable in this environment passes.
 - Stage 4.D follow-up (Item 4 — riscv64 virtio-MMIO QEMU verticals +
   arch-neutral virtio crate, *complete*): the two remaining Item 4
   deliverables — `virtio_blk_mmio_riscv64` and `virtio_net_mmio_riscv64`

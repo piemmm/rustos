@@ -9,8 +9,8 @@
 //! interrupt, mint a `KernelVirtioHost`, load a signed `.rxe`) and runs
 //! the *shared* device-agnostic `load → reload → device round-trip →
 //! unload` lifecycle. Only the per-device tail differs, and even that is
-//! shared across arches: the [`virtio_blk_round_trip`] / [`virtio_net_ping`]
-//! tails are generic over the [`Transport`](rustos_drv_bus_virtio::Transport)
+//! shared across arches: the `virtio_blk_round_trip` / `virtio_net_ping`
+//! tails are generic over the `rustos_drv_bus_virtio::Transport` trait
 //! so the PCI and MMIO verticals run identical device code.
 //!
 //! The crate is freestanding-only: every item is gated to a

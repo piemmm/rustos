@@ -333,7 +333,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// the bus driver walks the function's capability list, locates
     /// the vendor-specific virtio capability of the requested
     /// `cfg_type` (one of [`VIRTIO_CFG_COMMON`](crate::config::VIRTIO_CFG_COMMON),
-    /// [`VIRTIO_CFG_NOTIFY`](crate::config::VIRTIO_CFG_NOTIFY),
+    /// [`VIRTIO_CFG_NOTIFY`],
     /// [`VIRTIO_CFG_ISR`](crate::config::VIRTIO_CFG_ISR), or
     /// [`VIRTIO_CFG_DEVICE`](crate::config::VIRTIO_CFG_DEVICE)),
     /// resolves the `(bar, bar_offset, length)` triple to a physical
