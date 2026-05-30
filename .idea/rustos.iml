@@ -83,6 +83,7 @@
       <sourceFolder url="file://$MODULE_DIR$/kernel/sched/mlfq/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/lib/sync/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/lib/sync/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/lib/virtio/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/harness/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
