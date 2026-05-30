@@ -75,7 +75,7 @@ use rustos_sync::spinlock::SpinLock;
 /// [`rustos_kernel_irq::IrqTable::fire`] runs. AGENTS.md §2.1 — the
 /// slot is set-once per boot; AGENTS.md §2.4 — the typed accessor is
 /// a *read* of already-published state, not a new writable surface.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 static PUBLISHED_TYPED: rustos_sync::once::OnceCell<
     &'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>,
 > = rustos_sync::once::OnceCell::new();
@@ -85,7 +85,7 @@ static PUBLISHED_TYPED: rustos_sync::once::OnceCell<
 /// Called once during [`crate::boot::try_boot`]'s
 /// `discover_and_program_io_apics` step. A second publish is silently
 /// ignored — production code reaches this path exactly once.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub fn publish_typed(
     controller: &'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>,
 ) {
@@ -98,7 +98,7 @@ pub fn publish_typed(
 /// `tests/integration/irq_qemu_x86_64` integration test calls this
 /// from its `AuditEvent::BootCompleted` observer to obtain typed
 /// access to the production [`IoApicController`].
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 #[must_use]
 pub fn published_typed(
 ) -> Option<&'static IoApicController<rustos_arch_x86_64::apic::VolatileIoApicMmio>> {

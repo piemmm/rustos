@@ -25,12 +25,12 @@ const ALLOWED: &[&str] = &["kernel/arch/", ".cargo/", "tools/mkimage/", "tools/x
 /// Directory prefixes that violate §17.2 *today* and are tolerated until
 /// the §17 burn-down lands (`PLAN.md`). This list is append-never: it may
 /// only shrink. Each entry is a tracked defect, not a sanctioned pattern.
-const GRANDFATHERED: &[&str] = &[
-    // The x86_64-only production kernel binary still selects its arch
-    // inline rather than through the (not-yet-existing) Arch HAL
-    // selection point. Burned down when `kernel/arch/api` lands.
-    "kernel/rustos-kernel/",
-];
+///
+/// Empty: every directory that named the target instruction set inline has
+/// been migrated. `kernel/rustos-kernel` was the last entry; it now gates
+/// its freestanding body on the build-script-emitted `freestanding` cfg
+/// (`kernel/rustos-kernel/build.rs`) instead of `cfg(target_arch = …)`.
+const GRANDFATHERED: &[&str] = &[];
 
 /// The cfg predicates §17.2 forbids outside the allow-list.
 const FORBIDDEN_KEYS: &[&str] = &["target_arch", "target_pointer_width"];

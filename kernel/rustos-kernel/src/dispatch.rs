@@ -172,7 +172,7 @@ pub extern "C" fn production_dispatch(
 /// the test scaffolding can observe. `AGENTS.md` §2.9 — production
 /// halts are bottom-typed; the test variant carries the same `!`
 /// return type.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 fn halt_fail_closed() -> ! {
     rustos_arch_x86_64::kernel_arch::halt()
 }
@@ -184,7 +184,7 @@ fn halt_fail_closed() -> ! {
 /// matches `kernel_core::test_arch::HALT_SENTINEL` so the existing
 /// `kernel_arch_boot`-style integration tests can re-use the same
 /// detection logic.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(freestanding))]
 fn halt_fail_closed() -> ! {
     panic!("kernel halted (production_dispatch fail-closed branch)")
 }

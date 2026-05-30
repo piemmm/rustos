@@ -3245,10 +3245,27 @@ a list collapses that list. No *new* violation may be added.
   `KernelSubsystem → SchedApi` edge.)
 
 **`cfg-check` grandfathered directories (§17.2):**
-- `kernel/rustos-kernel/`: select the arch through the Arch HAL selection
-  point rather than inline `cfg(target_arch …)`.
+- *(none)* — the `kernel/rustos-kernel/` entry has been burned down (see
+  below); the `cfg-check` grandfather list is now empty.
 
 **Burn-down progress:**
+- `kernel/rustos-kernel/` freestanding `cfg` migration (cfg-check) —
+  *done*. The production kernel binary no longer names the target
+  instruction set inline. Its build script
+  (`kernel/rustos-kernel/build.rs`) derives the bare-metal condition
+  from `CARGO_CFG_TARGET_OS`/`CARGO_CFG_TARGET_ARCH` and emits a single
+  custom `freestanding` cfg (declared via `rustc-check-cfg`); the crate
+  gates its `#![no_std]`/`#![no_main]` attributes, the
+  `boot`/`panic_ctx`/`serial_sink` modules, the IO-APIC typed
+  publication slot, and the fail-closed `halt` on `cfg(freestanding)`
+  instead of `cfg(all(target_arch = "x86_64", target_os = "none"))`.
+  Target selection now lives in the one audited build-glue file
+  (`AGENTS.md` §17.2). The `kernel/rustos-kernel/` cfg-check grandfather
+  entry has been removed and `cfg-check` is clean with the tree scanned.
+  (The remaining `kernel/rustos-kernel` *deps-check* edges — the
+  inline bring-up of `kernel/core`, `kernel/arch/x86_64`, the driver
+  host, and the virtio bus into the single §17.4 selection point — are a
+  separate thread and unchanged by this work.)
 - Arch HAL `kernel/arch/api` + x86_64 migration (deps-check) — *done*.
   The §17.2 architecture surface now lives in its own `no_std`,
   dependency-free crate `kernel/arch/api` (`rustos-arch-api`), carrying

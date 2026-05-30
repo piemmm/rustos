@@ -12,13 +12,13 @@
 //! (`tests/integration/kernel_arch_boot`) can re-use the same boot
 //! pipeline with a different audit sink.
 
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "x86_64", target_os = "none"), no_main)]
+#![cfg_attr(freestanding, no_std)]
+#![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
 // --- Freestanding production bin (`x86_64-unknown-none`) -----------
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 mod kernel {
     use core::panic::PanicInfo;
 
@@ -83,10 +83,10 @@ mod kernel {
 // builds only for `x86_64-unknown-none`. The host stub keeps the
 // crate compilable on the host so the workspace `cargo build` /
 // `cargo test` invocations the rest of the project does succeed.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(freestanding))]
 fn main() {}
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(freestanding))]
 #[allow(dead_code)]
 fn _suppress_unused_lib() {
     // Reference the library half from the host build so cargo's

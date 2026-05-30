@@ -49,8 +49,8 @@
 // constructs an `Arc<BinArch>` for `kernel_core::BootInfo`. The
 // `extern crate` declaration must live here at the crate root for the
 // `boot` module to resolve `alloc::sync::Arc`; on host builds the
-// declaration shows up as unused (`boot` is `cfg`-gated to
-// `target_os = "none"`) but stripping it would break the bare-metal
+// declaration shows up as unused (`boot` is gated to the
+// `freestanding` build) but stripping it would break the bare-metal
 // build. `AGENTS.md` §15.10 — every `#[allow]` carries a justifying
 // comment.
 #[allow(unused_extern_crates)]
@@ -68,11 +68,11 @@ pub mod dispatch;
 pub mod ioapic_controller;
 pub mod virtio_boot;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub mod boot;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub mod panic_ctx;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub mod serial_sink;
 
 pub use arch_wrapper::BinArch;
@@ -89,9 +89,9 @@ pub use rustos_kernel_virtio::{
     MAX_SLOTS,
 };
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub use boot::{boot, BootError};
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub use panic_ctx::handle_panic_via_kernel_core;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(freestanding)]
 pub use serial_sink::{SerialSink, SERIAL_SINK};

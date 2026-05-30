@@ -62,8 +62,9 @@ Scans every workspace `.rs` file and fails if a `cfg` predicate names
 the architecture ports under `kernel/arch/<target>/` and the build glue
 (`.cargo/`, `tools/mkimage/`, `tools/xtask/`). Target-conditional code
 anywhere else means the Arch HAL boundary has leaked. As with
-`deps-check`, the directories that violate the rule today are listed in a
-shrink-only grandfather set.
+`deps-check`, any directory that violates the rule today is listed in a
+shrink-only grandfather set; that set is currently empty — no workspace
+source names the target instruction set outside the allow-list.
 
 ### Freestanding integration-test harness
 
@@ -88,6 +89,21 @@ Every binary and the shared `virtio_qemu_support` library gate on those
 names (`#[cfg(itest_x86_64)]`, `#[cfg(not(itest_x86_64))]`, …) rather
 than on `cfg(target_arch …, target_os = "none")`, so `cfg-check` scans
 the tree with no grandfather entry for it.
+
+### Freestanding production kernel binary
+
+The `rustos-kernel` crate has the same two-form shape: a bare-metal
+`no_std`/`no_main` kernel for `x86_64-unknown-none` and an inert host
+stub for `cargo build --workspace` / `cargo test`. Choosing between them
+is a target decision, so it lives in the crate's build glue rather than
+in the source. `kernel/rustos-kernel/build.rs` derives the bare-metal
+condition from `CARGO_CFG_TARGET_OS`/`CARGO_CFG_TARGET_ARCH` and emits a
+single custom `freestanding` cfg (declared with `rustc-check-cfg`). The
+crate gates its `#![no_std]`/`#![no_main]` attributes, the
+`boot`/`panic_ctx`/`serial_sink` modules, the IO-APIC typed publication
+slot, and the fail-closed `halt` on `#[cfg(freestanding)]` rather than
+`cfg(all(target_arch = "x86_64", target_os = "none"))`, so the target
+choice stays in the one audited build-glue file.
 
 ## Headless builds
 
