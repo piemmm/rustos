@@ -16,6 +16,7 @@
 - [Kernel security subsystem](./architecture/security.md)
 - [Kernel IPC subsystem](./architecture/ipc.md)
 - [Kernel syscall subsystem](./architecture/syscalls.md)
+- [Modularity contracts and enforcement](./architecture/modularity.md)
 
 # Security
 

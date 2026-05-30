@@ -15,9 +15,14 @@
 //! - `docs-check`   — rustdoc (deny warnings) + mdBook build + link check
 //! - `abi-check`    — verifies the generated kernel syscall table matches
 //!   its source of truth in `lib/abi`
+//! - `deps-check`   — enforces the §17.4 modularity dependency graph
+//!   (layering, concrete-scheduler naming, optional-desktop boundary)
+//! - `cfg-check`    — rejects target-conditional compilation (§17.2)
+//!   outside the architecture ports and build glue
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
-//!   `clippy`, `test`, `docs-check`, `cargo deny check`
+//!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
+//!   `cargo deny check`, `abi-check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and

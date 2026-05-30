@@ -26,7 +26,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `.cargo/config.toml` declaring per-target build flags and linker scripts.
 - `rustfmt.toml`, `clippy.toml`, `deny.toml` (license + advisory rules).
 - `tools/xtask/` with subcommands: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `coverage`, `ci`, `image`.
+  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `image`.
 - `docs/` mdBook scaffold.
 - CI definition (`.github/workflows/ci.yml` or equivalent) running
   `cargo xtask ci` on every push.
@@ -56,10 +57,12 @@ Do **not** begin a stage before all its listed dependencies are complete.
   `cargo xtask ci`; the deny policy passes `advisories + bans + licenses +
   sources` on the bumped toolchain.
 - `tools/xtask` exposes the closed set of subcommands required by
-  `AGENTS.md` §7 / §14: `build`, `test`, `clippy`, `fmt`, `docs-check`,
-  `abi-check`, `coverage`, `ci`, `image`. `abi-check` deliberately fails
-  loudly if only one half of the `lib/abi/src/syscalls.rs` ↔
-  `kernel/syscall/src/table.rs` pair appears.
+  `AGENTS.md` §7 / §14 / §17.5: `build`, `test`, `clippy`, `fmt`,
+  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `image`. `abi-check` deliberately fails loudly if only one half of the
+  `lib/abi/src/syscalls.rs` ↔ `kernel/syscall/src/table.rs` pair appears;
+  `deps-check` and `cfg-check` enforce the §17 modularity contracts (see
+  the §17 burn-down section below).
 - `docs/` ships a mdBook scaffold (`book.toml`, `src/SUMMARY.md`,
   `introduction.md`, `contributing.md`, `architecture/overview.md`) and the
   Stage 1 per-crate `lib/*` pages.
@@ -3195,8 +3198,55 @@ These never "finish"; they are part of every PR.
 - **Coverage:** thresholds from `AGENTS.md` §7 are enforced.
 - **ABI checks:** `cargo xtask abi-check` runs on every PR; ABI changes
   require a version bump and a migration note in `docs/src/abi/`.
+- **Modularity checks:** `cargo xtask deps-check` and `cargo xtask
+  cfg-check` run on every PR and enforce `AGENTS.md` §17 (layering,
+  concrete-scheduler naming, optional-desktop boundary, and
+  target-conditional-`cfg` confinement). See the §17 burn-down below.
 - **No duplication:** code reviewers reject duplication; refactor into
   `lib/` instead.
+
+---
+
+## §17 Modularity Enforcement and Burn-down
+
+**Status:** enforcement delivered. `cargo xtask deps-check` and
+`cargo xtask cfg-check` (`tools/xtask/src/commands/{deps_check,cfg_check}.rs`)
+implement the §17.5 checks and are wired into `cargo xtask ci`;
+`cargo xtask build --headless` exercises the §17.3 headless image.
+Documented in `docs/src/architecture/modularity.md`.
+
+The tree predates §17, so both checks ship with explicit, shrink-only
+grandfather allow-lists pinning today's violations. Each entry below is a
+tracked defect; the burn-down removes them, and removing the last entry of
+a list collapses that list. No *new* violation may be added.
+
+**`deps-check` grandfathered edges (§17.4 / §17.1):**
+- `kernel/virtio` → `drivers/bus/virtio`, `userland/system/drvhost`:
+  move the shared virtio host factory behind `lib/abi` traits so the
+  kernel stops depending on a driver and a userland service.
+- `kernel/arch/x86_64` → `kernel/sched`; `kernel/arch/riscv64` →
+  `kernel/{core,sched,mem,sec,irq,sync}`: introduce `kernel/arch/api`
+  (the Arch HAL) so arch ports name only the HAL, never concrete kernel
+  crates.
+- `kernel/sched` → `kernel/sync`: resolved by the scheduler `api`/`impl`
+  split (`kernel/sched/api` + sibling impls).
+- `drivers/bus/virtio` → `kernel/{mem,sec,irq}`;
+  `drivers/storage/virtio_blk` & `drivers/network/virtio_net` →
+  `drivers/bus/virtio`; `userland/system/drvhost` →
+  `drivers/bus/virtio`: route driver-to-kernel and driver-to-bus access
+  through `lib/abi` traits instead of direct crate links.
+- `kernel/rustos-kernel` → `kernel/core`, `kernel/arch/x86_64`,
+  `kernel/sched`, `userland/system/drvhost`, `drivers/bus/virtio`:
+  collapse the production binary's bring-up into the single §17.4
+  selection point (`kernel/core`).
+
+**`cfg-check` grandfathered directories (§17.2):**
+- `kernel/rustos-kernel/`: select the arch through the Arch HAL selection
+  point rather than inline `cfg(target_arch …)`.
+- `tests/integration/`: move the freestanding `no_std`/`no_main` boot
+  gating behind a shared test harness.
+- `drivers/bus/pci/`: move the x86_64 port-I/O mechanism behind an Arch
+  HAL port-I/O capability.
 
 ---
 

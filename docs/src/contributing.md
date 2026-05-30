@@ -21,6 +21,8 @@ rules, it points to them.
 | ------------- | ----------------------------------------------------------- |
 | `fmt`         | `cargo fmt --all -- --check`                                |
 | `clippy`      | `cargo clippy --workspace --all-targets -- -D warnings`     |
+| `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
+| `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
 | `test`        | `cargo test --workspace --all-targets`                      |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
@@ -31,3 +33,4 @@ release flows; they are documented by `cargo xtask --help`.
 
 [agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
 [plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md
+[modularity]: ./architecture/modularity.md

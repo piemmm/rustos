@@ -10,6 +10,8 @@ use std::path::Path;
 use crate::Context;
 
 mod abi_check;
+mod cfg_check;
+mod deps_check;
 mod linkcheck;
 mod qemu_tests;
 
@@ -22,6 +24,8 @@ pub enum Command {
     Fmt,
     DocsCheck,
     AbiCheck,
+    DepsCheck,
+    CfgCheck,
     Coverage,
     Ci,
     Image,
@@ -36,6 +40,8 @@ impl Command {
         Command::Fmt,
         Command::DocsCheck,
         Command::AbiCheck,
+        Command::DepsCheck,
+        Command::CfgCheck,
         Command::Coverage,
         Command::Ci,
         Command::Image,
@@ -49,6 +55,8 @@ impl Command {
             "fmt" => Command::Fmt,
             "docs-check" => Command::DocsCheck,
             "abi-check" => Command::AbiCheck,
+            "deps-check" => Command::DepsCheck,
+            "cfg-check" => Command::CfgCheck,
             "coverage" => Command::Coverage,
             "ci" => Command::Ci,
             "image" => Command::Image,
@@ -64,6 +72,8 @@ impl Command {
             Command::Fmt => "fmt",
             Command::DocsCheck => "docs-check",
             Command::AbiCheck => "abi-check",
+            Command::DepsCheck => "deps-check",
+            Command::CfgCheck => "cfg-check",
             Command::Coverage => "coverage",
             Command::Ci => "ci",
             Command::Image => "image",
@@ -78,6 +88,8 @@ impl Command {
             Command::Fmt => "Check formatting (`--fix` to apply).",
             Command::DocsCheck => "Build rustdoc and the mdBook with link checking.",
             Command::AbiCheck => "Verify generated ABI artefacts match their source of truth.",
+            Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
+            Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
@@ -92,6 +104,8 @@ impl Command {
             Command::Fmt => run_fmt(ctx, args),
             Command::DocsCheck => run_docs_check(ctx, args),
             Command::AbiCheck => run_abi_check(ctx, args),
+            Command::DepsCheck => run_deps_check(ctx),
+            Command::CfgCheck => run_cfg_check(ctx),
             Command::Coverage => run_coverage(ctx, args),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
@@ -100,11 +114,41 @@ impl Command {
 }
 
 fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // `--headless` builds the first-class headless configuration required
+    // by AGENTS.md §17.3 / §17.5: every `userland/gui/*` crate is excluded
+    // from the image so the system must remain buildable without the
+    // desktop. The flag is consumed here; everything else is forwarded.
+    let mut headless = false;
+    let mut forward = Vec::with_capacity(args.len());
+    for a in args {
+        if a == "--headless" {
+            headless = true;
+        } else {
+            forward.push(a.clone());
+        }
+    }
+
     let mut cmd = ctx.cargo();
     cmd.args(["build", "--workspace", "--all-targets", "--locked"]);
-    cmd.args(args);
-    ctx.run("build", cmd)
+    if headless {
+        for gui in GUI_CRATES {
+            cmd.arg("--exclude");
+            cmd.arg(gui);
+        }
+    }
+    cmd.args(&forward);
+    ctx.run(
+        if headless {
+            "build --headless"
+        } else {
+            "build"
+        },
+        cmd,
+    )
 }
+
+/// The `userland/gui/*` crates excluded from the headless image (§17.3).
+const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-iconbar"];
 
 fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `--qemu` opts in to the bare-metal QEMU integration tests in
@@ -207,6 +251,21 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     abi_check::check_sync(&ctx.workspace_root, &syscalls, &table)
 }
 
+fn run_deps_check(ctx: &Context) -> Result<(), String> {
+    // §17.4 / §17.5: walk the workspace dependency graph and reject any
+    // layering violation, concrete-scheduler naming outside the sanctioned
+    // crates, or a non-GUI crate reaching the optional desktop.
+    eprintln!("xtask: [deps-check] {}", ctx.workspace_root.display());
+    deps_check::run(&ctx.workspace_root)
+}
+
+fn run_cfg_check(ctx: &Context) -> Result<(), String> {
+    // §17.2 / §17.5: reject target-conditional compilation outside the
+    // architecture ports and the build glue.
+    eprintln!("xtask: [cfg-check] {}", ctx.workspace_root.display());
+    cfg_check::run(&ctx.workspace_root)
+}
+
 fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `cargo-llvm-cov` is a cargo subcommand: its binary rejects a bare
     // `--version` and is only reachable as `cargo llvm-cov`. Probe it the
@@ -232,6 +291,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // `docs/src/platform/x86_64.md`.
     run_fmt(ctx, &[])?;
     run_clippy(ctx, &[])?;
+    // Modularity gates (§17.5) are static, deterministic, and cheap, so
+    // they run before the test matrix to fail a non-conforming PR fast.
+    run_deps_check(ctx)?;
+    run_cfg_check(ctx)?;
     run_test(ctx, &[OsString::from("--qemu")])?;
     run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
