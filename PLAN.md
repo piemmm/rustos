@@ -3247,8 +3247,6 @@ a list collapses that list. No *new* violation may be added.
 **`cfg-check` grandfathered directories (§17.2):**
 - `kernel/rustos-kernel/`: select the arch through the Arch HAL selection
   point rather than inline `cfg(target_arch …)`.
-- `drivers/bus/pci/`: move the x86_64 port-I/O mechanism behind an Arch
-  HAL port-I/O capability.
 
 **Burn-down progress:**
 - Arch HAL `kernel/arch/api` + x86_64 migration (deps-check) — *done*.
@@ -3272,6 +3270,20 @@ a list collapses that list. No *new* violation may be added.
   instead of `cfg(target_arch …, target_os = "none")`, so no test source
   names the target instruction set (§17.2). The grandfather entry has
   been removed and `cfg-check` is clean with the tree scanned.
+- `drivers/bus/pci/` port-I/O behind a `lib/abi` seam (cfg-check) —
+  *done*. The legacy mechanism-#1 port-I/O contract is now the
+  architecture-neutral `PortIo` seam in `lib/abi`
+  (`lib/abi/src/driver/port_io.rs`, re-exported as `rustos_abi::PortIo`),
+  mirroring the `MmioMapper` register-window seam. The x86_64 `in`/`out`
+  implementation (and its only `unsafe`) moved into the architecture
+  port `kernel/arch/x86_64::pio` (`X86PortIo` + `x86_port_io()`); the
+  PCI bus driver dropped its crate-local `PortIo` trait and `X86PortIo`
+  asm and now exposes the cfg-free generic constructor
+  `rustos_drv_bus_pci::mechanism_one<P: PortIo>(pio)`. The x86_64 QEMU
+  vertical feeds it `x86_port_io()`; the unit test uses a mock backend.
+  The `drivers/bus/pci/` cfg-check grandfather entry has been removed
+  and `cfg-check` is clean with the tree scanned (`AGENTS.md`
+  §17.2 / §17.4).
 - Scheduler `api`/`impl` split + `kernel/sync` → `lib/sync` relocation
   (§17.1) — *done*. The scheduler contract now lives in its own
   `SchedApi` crate `kernel/sched/api` (`rustos-kernel-sched-api`): the

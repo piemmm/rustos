@@ -148,7 +148,7 @@ fn virtio_mmio_aperture(dtb: &Dtb<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// crate-private (`AGENTS.md` §8) — so the ring-0
 /// `provision_virtio_mmio` walk can drive it as `&dyn VirtioMmioBus`.
 ///
-/// This is the MMIO analogue of `rustos_drv_bus_pci::x86_mechanism_one`:
+/// This is the MMIO analogue of `rustos_drv_bus_pci::mechanism_one`:
 /// it is the sanctioned way for a `virt`-board boot pipeline to obtain
 /// the bus without naming the driver's internals.
 ///

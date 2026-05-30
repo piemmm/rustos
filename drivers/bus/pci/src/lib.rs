@@ -26,11 +26,11 @@
 //!
 //! # Safety
 //!
-//! The real-hardware `ConfigSpace` implementation
-//! (`mech_one::PortIoConfigSpace`) issues `in`/`out` instructions
-//! against I/O ports `0xCF8`/`0xCFC`. Every `unsafe` block carries a
-//! `// SAFETY:` justification and is covered by a unit test against a
-//! mock `mech_one::PortIo` implementation.
+//! This crate contains no `unsafe`: the `in`/`out` instructions that
+//! reach I/O ports `0xCF8`/`0xCFC` live in the architecture port behind
+//! the [`rustos_abi::PortIo`] seam (`AGENTS.md` §17.2). The driver only
+//! ever drives that seam through `mech_one::PortIoConfigSpace`, which
+//! the unit tests exercise against a recording mock.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -40,7 +40,8 @@ use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, MsiMessage, RegisterWindow,
+    CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, MsiMessage, PortIo,
+    RegisterWindow,
 };
 
 pub(crate) mod config;
@@ -83,11 +84,12 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 
 // --- Real-hardware construction seam --------------------------------------
 
-/// Construct the real-hardware x86_64 PCI root bus over configuration
+/// Construct a real-hardware PCI root bus over configuration
 /// **mechanism #1** (PCI Local Bus 3.0 §3.2.2.3.2): the address word
 /// at I/O port `0xCF8` selects a `(bus, device, function, register)`
 /// tuple and the data word at `0xCFC` reads/writes the corresponding
-/// configuration dword.
+/// configuration dword. The `pio` backend issues the port accesses
+/// (the x86_64 architecture port supplies [`rustos_abi::PortIo`]).
 ///
 /// The returned value is the bus the ring-0 boot pipeline drives
 /// through the three frozen `abi-v1` seams — [`Bus`] (enumeration),
@@ -99,21 +101,25 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// crate-private (`AGENTS.md` §8): callers borrow the result as
 /// `&dyn Bus` / `&dyn VirtioPciBus` / `&dyn MsixBus` and never name it.
 ///
-/// Construction performs **no** I/O — it only stores the zero-sized
+/// Construction performs **no** I/O — it only stores the supplied
 /// port-I/O backend — so it is sound to call before the PCI host
 /// bridge has been probed. Configuration access happens lazily on the
-/// trait methods, each of which issues `in`/`out` against the two
-/// legacy configuration ports.
+/// trait methods, each of which drives the [`PortIo`] backend against
+/// the two legacy configuration ports.
 ///
 /// # Platform
 ///
-/// Mechanism #1 is x86-only; the constructor is therefore gated to
-/// `target_arch = "x86_64"`. Other architectures reach `PCIe` through
-/// memory-mapped ECAM, which is a separate seam.
-#[cfg(target_arch = "x86_64")]
+/// Mechanism #1 is x86-only, but that architecture knowledge lives
+/// entirely in the [`PortIo`] backend the caller supplies — the
+/// architecture port (`kernel/arch/x86_64`) provides the only
+/// real implementation. This constructor is therefore
+/// architecture-neutral and carries no target-conditional `cfg` gate
+/// (`AGENTS.md` §17.2 / §17.4); architectures without an I/O port
+/// space simply never call it and reach `PCIe` through memory-mapped
+/// ECAM, a separate seam.
 #[must_use]
-pub fn x86_mechanism_one() -> impl VirtioPciBus + MsixBus {
-    Pci::new(mech_one::PortIoConfigSpace::new(mech_one::X86PortIo))
+pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus {
+    Pci::new(mech_one::PortIoConfigSpace::new(pio))
 }
 
 // --- Public re-exports through the `Bus` trait ----------------------------

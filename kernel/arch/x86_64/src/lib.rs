@@ -92,6 +92,11 @@ pub mod irq;
 pub mod kernel_arch;
 pub mod multiboot2;
 pub mod percpu;
+/// x86_64 implementation of the Arch HAL [`rustos_abi::PortIo`] seam,
+/// supplying the legacy PCI configuration-port backend the
+/// `drivers/bus/pci` bus driver consumes through `&dyn PortIo`
+/// (`AGENTS.md` §17.2 / §17.4).
+pub mod pio;
 pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;

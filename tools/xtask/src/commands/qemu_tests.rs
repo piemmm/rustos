@@ -148,7 +148,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
-    // full real virtio-blk-pci round-trip — boot → `x86_mechanism_one`
+    // full real virtio-blk-pci round-trip — boot → `mechanism_one`
     // PCI walk → map the four virtio register windows → route MSI-X →
     // mint a `KernelVirtioHost` over a per-device DMA pool → load the
     // signed virtio-blk `.rxe` → read sector 0 (verify the planted
@@ -174,7 +174,7 @@ const TESTS: &[QemuTest] = &[
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
     // full real virtio-net-pci round-trip on the same shared bring-up
-    // scaffolding as the virtio-blk vertical — boot → `x86_mechanism_one`
+    // scaffolding as the virtio-blk vertical — boot → `mechanism_one`
     // PCI walk → map the four virtio register windows → route MSI-X →
     // mint a `KernelVirtioHost` over a per-device DMA pool → load the
     // signed virtio-net `.rxe` → drive `rustos-net-icmp` over the device:

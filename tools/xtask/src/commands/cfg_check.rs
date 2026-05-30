@@ -30,10 +30,6 @@ const GRANDFATHERED: &[&str] = &[
     // inline rather than through the (not-yet-existing) Arch HAL
     // selection point. Burned down when `kernel/arch/api` lands.
     "kernel/rustos-kernel/",
-    // The PCI bus driver gates its x86_64 mechanism-#1 port I/O impl on
-    // the target. It moves behind the Arch HAL port-I/O capability in the
-    // §17 burn-down.
-    "drivers/bus/pci/",
 ];
 
 /// The cfg predicates §17.2 forbids outside the allow-list.

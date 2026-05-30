@@ -3,16 +3,17 @@
 //! The device-agnostic lifecycle and the per-device tails live in
 //! [`crate::common`]; this module owns only the x86_64-specific bring-up
 //! that produces a [`PciTransport`] and an interrupt path: the
-//! `x86_mechanism_one` PCI walk, the four virtio register-window maps
+//! `mechanism_one(x86_port_io())` PCI walk, the four virtio register-window maps
 //! through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`], MSI-X routing
 //! off the boot-assigned vector, and the `sti; hlt; cli` IRQ park.
 
 use rustos_abi::CapabilityId;
 use rustos_arch_x86_64::irq::{global_routing, msi_message};
+use rustos_arch_x86_64::pio::x86_port_io;
 use rustos_arch_x86_64::qemu_exit;
 use rustos_arch_x86_64::smp::bsp_lapic_id;
 use rustos_caps::CapabilitySet;
-use rustos_drv_bus_pci::x86_mechanism_one;
+use rustos_drv_bus_pci::mechanism_one;
 use rustos_drv_bus_virtio::{KernelMmioMapper, KernelVirtioHost, PciTransport, PoolId, VirtioHost};
 use rustos_drvhost::VirtioHostFactory;
 use rustos_kernel::arch_wrapper::{published_irq_table, published_memory_map};
@@ -245,7 +246,10 @@ where
     let msi = msi_message(vector, bsp_lapic_id());
 
     // 4. Walk PCI, map the four virtio register windows, route MSI-X.
-    let bus = x86_mechanism_one();
+    //    The x86_64 architecture port supplies the `PortIo` backend the
+    //    bus driver drives through the `rustos_abi::PortIo` seam
+    //    (`AGENTS.md` §17.2 / §17.4).
+    let bus = mechanism_one(x86_port_io());
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

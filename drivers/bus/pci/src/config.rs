@@ -78,10 +78,10 @@ impl ConfigAddress {
 ///
 /// Implementations:
 ///
-/// * [`crate::mech_one::PortIoConfigSpace`] — real hardware, x86_64
-///   PIO; behind a [`crate::mech_one::PortIo`] seam so the unit
-///   tests can drive it without touching the actual `in`/`out`
-///   instructions.
+/// * [`crate::mech_one::PortIoConfigSpace`] — real hardware PIO,
+///   behind the [`rustos_abi::PortIo`] seam so the unit tests can
+///   drive it without touching the actual `in`/`out` instructions
+///   (the x86_64 backend lives in the architecture port).
 /// * `tests::MockConfigSpace` — table-driven fixture for the
 ///   in-crate enumeration tests.
 ///

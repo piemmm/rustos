@@ -330,26 +330,36 @@ implemented.
 ## Constructing the real-hardware bus
 
 The boot pipeline reaches PCI through a single public constructor,
-`rustos_drv_bus_pci::x86_mechanism_one()` (gated to
-`target_arch = "x86_64"`). It builds the bus over configuration
-**mechanism #1** — the `0xCF8` address word / `0xCFC` data word port
-pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
+`rustos_drv_bus_pci::mechanism_one(pio)`. It builds the bus over
+configuration **mechanism #1** — the `0xCF8` address word / `0xCFC`
+data word port pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
 `impl VirtioPciBus + MsixBus`. Both traits have `Bus` as a supertrait,
 so the value also coerces to `&dyn Bus`; the concrete `Pci` type stays
-crate-private (`AGENTS.md` §8). Construction performs no I/O — it only
-stores the zero-sized port-I/O backend — so it is sound to call before
-the host bridge has been probed; configuration access happens lazily on
-the trait methods. Ring 0 hands the result to
-`rustos_kernel::provision_virtio_pci` / `provision_and_run` as the
-`&dyn VirtioPciBus` + `&dyn MsixBus` device bus. Non-x86 architectures
-reach PCIe through memory-mapped ECAM, which is a separate seam.
+crate-private (`AGENTS.md` §8). The constructor is
+architecture-neutral and carries no `cfg(target_arch …)` gate: the
+`pio` argument is a `rustos_abi::PortIo` backend, and the only `in`/
+`out` instructions live inside the architecture port that supplies it
+(for x86_64, `rustos_arch_x86_64::pio::x86_port_io()`). This keeps the
+driver free of inline assembly and target gates (`AGENTS.md` §17.2 /
+§17.4). Construction performs no I/O — it only stores the supplied
+backend — so it is sound to call before the host bridge has been
+probed; configuration access happens lazily on the trait methods. Ring
+0 hands the result to `rustos_kernel::provision_virtio_pci` /
+`provision_and_run` as the `&dyn VirtioPciBus` + `&dyn MsixBus` device
+bus. Non-x86 architectures reach PCIe through memory-mapped ECAM, which
+is a separate seam.
 
 ## Shared types
 
-There is no copy-paste between the two drivers; the only shared
-pieces of code are the FDT parser (`lib/util::dtb`) and the
-`RegisterWindow` / `MmioMapper` register-window seam (`lib/abi`),
-both of which live below the drivers because more than one crate
-needs them (`AGENTS.md` §2.3). PCI and MMIO each keep their own
-configuration-access abstraction inside the crate because no second
-caller has materialised.
+There is no copy-paste between the two drivers; the shared pieces of
+code are the FDT parser (`lib/util::dtb`), the `RegisterWindow` /
+`MmioMapper` register-window seam (`lib/abi`), and the `PortIo`
+port-I/O seam (`lib/abi`), all of which live below the drivers because
+more than one crate needs them (`AGENTS.md` §2.3). The `PortIo` seam
+crossed into `lib/abi` once a second caller materialised — the x86_64
+architecture port that implements it (`AGENTS.md` §17.2 / §17.4) — so
+the PCI driver no longer carries the `in`/`out` instructions or a
+target gate. PCI and MMIO still each keep their own
+configuration-access abstraction (`ConfigSpace` / the MMIO slot
+reader) inside their crate because no second caller for those has
+materialised.

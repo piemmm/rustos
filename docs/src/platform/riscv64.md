@@ -126,7 +126,7 @@ The riscv64 bring-up (`imp_mmio`):
    publication*) and carves a per-device DMA region from the top of RAM.
 2. Builds the `virt`-board virtio-MMIO bus via the public
    `rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb` constructor (the MMIO
-   analogue of `rustos_drv_bus_pci::x86_mechanism_one`; the concrete bus
+   analogue of `rustos_drv_bus_pci::mechanism_one`; the concrete bus
    type stays crate-private behind `impl VirtioMmioBus`, §8) and
    provisions an `MmioTransport` through the `CAP_MMIO_MAP`-gated
    `KernelMmioMapper` (`kernel/virtio::provision_virtio_mmio`).

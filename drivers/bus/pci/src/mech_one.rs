@@ -1,41 +1,31 @@
-//! PCI configuration-access mechanism #1 (PIO bridge for x86_64).
+//! PCI configuration-access mechanism #1 (PIO bridge).
 //!
-//! Splits the `in`/`out` instructions behind a [`PortIo`] trait so
-//! the unit tests can drive the bridge without touching real I/O
-//! ports. The single `unsafe` block lives inside
-//! `X86PortIo::read32` / `X86PortIo::write32` and carries the
-//! invariants required by `AGENTS.md` §2.10; the cfg gate confines
-//! those impls to `target_arch = "x86_64"`.
+//! The bridge drives the legacy configuration ports `0xCF8`/`0xCFC`
+//! through the architecture-neutral [`PortIo`] seam
+//! ([`rustos_abi::PortIo`], `AGENTS.md` §17.2 / §17.4). The seam keeps
+//! the `in`/`out` instructions — and the only `unsafe` they require —
+//! inside the architecture port (`kernel/arch/x86_64`), so this driver
+//! carries neither inline assembly nor a target-conditional `cfg` gate:
+//! the unit tests drive the bridge through a recording mock and the
+//! ring-0 bring-up path hands it the x86_64 backend.
 //
 // Same `dead_code` rationale as `config.rs`: the production reach
 // path is through `dyn Bus` dispatch wired up by the driver host;
 // the in-crate test module covers every helper directly.
 #![allow(dead_code)]
 
+use rustos_abi::driver::port_io::PortIo;
+
 use crate::config::{ConfigAddress, ConfigSpace};
 
 const PCI_CONFIG_ADDRESS_PORT: u16 = 0xCF8;
 const PCI_CONFIG_DATA_PORT: u16 = 0xCFC;
 
-/// Minimal 32-bit PIO seam.
-///
-/// The trait is *not* `unsafe` to implement — implementors are
-/// responsible for whatever invariants their backing transport
-/// needs, and the only in-tree implementor is
-/// [`X86PortIo`] which encapsulates the only `unsafe` block in
-/// the crate.
-pub trait PortIo {
-    /// Read 32 bits from port `port`.
-    fn read32(&self, port: u16) -> u32;
-    /// Write 32 bits to port `port`.
-    fn write32(&self, port: u16, value: u32);
-}
-
 /// Concrete [`ConfigSpace`] using a [`PortIo`] backend.
 ///
 /// The bridge is parameterised on `P: PortIo` so the test suite
-/// substitutes a recording mock; the production wiring uses
-/// [`X86PortIo`].
+/// substitutes a recording mock; the production wiring uses the
+/// x86_64 backend supplied by the architecture port.
 pub struct PortIoConfigSpace<P: PortIo> {
     pio: P,
 }
@@ -69,67 +59,6 @@ impl<P: PortIo> ConfigSpace for PortIoConfigSpace<P> {
         };
         self.pio.write32(PCI_CONFIG_ADDRESS_PORT, cf8);
         self.pio.write32(PCI_CONFIG_DATA_PORT, value);
-    }
-}
-
-/// Real-hardware x86_64 PIO implementation.
-///
-/// The two `unsafe` blocks below are the only `unsafe` in the
-/// crate; both are exercised against a mock [`PortIo`] in the
-/// in-crate test suite to validate the address / data interleaving
-/// (the `unsafe` *instructions* themselves are excluded from host
-/// tests by the `cfg` gate, which is the standard way to test a
-/// driver's logic without booting the target).
-//
-// `X86PortIo` is only constructed when the driver runs on real
-// (or QEMU-emulated) x86_64 hardware; on a host (x86_64 Linux
-// build of the test binary) the symbol is reachable but unused
-// because the test substitutes a mock `PortIo`.
-#[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
-pub struct X86PortIo;
-
-#[cfg(target_arch = "x86_64")]
-impl PortIo for X86PortIo {
-    fn read32(&self, port: u16) -> u32 {
-        let value: u32;
-        // SAFETY: `in dx, eax` is a side-effect-only 32-bit PIO
-        // read against `port`. The PCI configuration ports
-        // (`0xCF8`/`0xCFC`) are documented as legacy 32-bit I/O
-        // ports per the PCI Local Bus 3.0 specification §3.2.2.3.2;
-        // no caller of this function passes any other port. The
-        // instruction has no memory side effects and clobbers no
-        // registers outside `eax`. The covering test
-        // (`tests::port_io_config_space_round_trips_address_data`)
-        // exercises this method through a [`PortIo`] mock and
-        // verifies the address/data sequence; on non-x86_64 hosts
-        // the gate above removes both this impl and its tests.
-        unsafe {
-            core::arch::asm!(
-                "in eax, dx",
-                in("dx") port,
-                out("eax") value,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-        value
-    }
-
-    fn write32(&self, port: u16, value: u32) {
-        // SAFETY: `out dx, eax` is a side-effect-only 32-bit PIO
-        // write to `port`. Same justification as `read32`: only
-        // the documented PCI configuration ports are used; the
-        // instruction touches no memory and the assembler template
-        // declares the conservative `nomem`, `nostack`, and
-        // `preserves_flags` options.
-        unsafe {
-            core::arch::asm!(
-                "out dx, eax",
-                in("dx") port,
-                in("eax") value,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
     }
 }
 

@@ -941,17 +941,30 @@ fn route_msix_propagates_capability_denial() {
     );
 }
 
-/// The real-hardware constructor yields a value usable through all
+/// The mechanism-#1 constructor yields a value usable through all
 /// three frozen `abi-v1` bus seams without naming the concrete `Pci`
-/// type. Construction issues no port I/O, so this is sound to run on
-/// the host (no `0xCF8`/`0xCFC` access happens here).
+/// type. Construction stores the [`PortIo`] backend and issues no port
+/// I/O, so it is sound to run on the host with the inert mock below
+/// (no `0xCF8`/`0xCFC` access happens here); the real x86_64 backend
+/// lives in `kernel/arch/x86_64::pio` (`AGENTS.md` §17.2 / §17.4).
 #[test]
-fn x86_mechanism_one_exposes_the_frozen_bus_seams() {
+fn mechanism_one_exposes_the_frozen_bus_seams() {
     use rustos_abi::driver::msix::MsixBus;
     use rustos_abi::driver::virtio_pci::VirtioPciBus;
+    use rustos_abi::PortIo;
+
+    /// Inert backend: the seam-coercion assertions never read or write
+    /// a port, so the methods are never reached.
+    struct NoopPortIo;
+    impl PortIo for NoopPortIo {
+        fn read32(&self, _port: u16) -> u32 {
+            0xFFFF_FFFF
+        }
+        fn write32(&self, _port: u16, _value: u32) {}
+    }
 
     fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
 
-    let bus = crate::x86_mechanism_one();
+    let bus = crate::mechanism_one(NoopPortIo);
     assert_seams(&bus, &bus, &bus);
 }
