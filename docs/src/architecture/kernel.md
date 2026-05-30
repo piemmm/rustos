@@ -235,8 +235,10 @@ QEMU integration test (multiboot2 ISO via `grub-mkrescue`,
 ## Stage 3a (c7) — first production `KernelArch` impl
 
 `kernel/arch/x86_64::kernel_arch::X86_64Arch` (Stage 3a (c7-arch),
-PLAN.md) is the first production implementation of
-`rustos_kernel_sched::SchedulerArch` in tree. The trait impl is
+PLAN.md) is the first production implementation of the Arch HAL trait
+`rustos_arch_api::SchedulerArch` (`AGENTS.md` §17.2) in tree;
+`kernel/sched` re-exports that trait, so the impl also satisfies every
+`rustos_kernel_sched::SchedulerArch` bound. The trait impl is
 feature-gated behind `rustos-arch-x86_64`'s opt-in `sched-arch`
 feature — see
 [`platform/x86_64.md`](../platform/x86_64.md#stage-3a-c7-arch--schedulerarch-impl-for-x86_64)

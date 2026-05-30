@@ -18,6 +18,14 @@ workspace = true
 test-arch = []
 
 [dependencies]
+# The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) lives
+# in `kernel/arch/api` (`AGENTS.md` §17.2). The scheduler is a
+# `kernel/sched/<impl>` per §17.4 and so may name `kernel/arch/api`,
+# `kernel/sched/api`, and `lib/*` — naming the HAL here is exactly the
+# dependency §17.4 sanctions, and it is what lets the architecture ports
+# implement `SchedulerArch` without depending on `kernel/sched`.
+rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
+
 # Stage 2.3 — kernel/sched is permitted to depend on kernel/sync and
 # kernel/mem only (PLAN.md Stage 2.3, AGENTS.md §3, §4). No transitive
 # dependency on kernel/ipc, kernel/sec, or kernel/syscall is permitted at

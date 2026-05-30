@@ -37,6 +37,24 @@ allow-list inside the checker. The list is append-never — it may only
 shrink — and a *new* violating edge is always rejected. Each pinned edge
 is a tracked defect scheduled for the §17 burn-down in `PLAN.md`.
 
+## The Arch HAL (`kernel/arch/api`)
+
+The §17.2 architecture surface lives in its own crate, `kernel/arch/api`
+(`rustos-arch-api`). It is `no_std` and dependency-free, so the kernel
+can name the HAL without inheriting an architecture, and a port can
+implement the HAL without naming a concrete kernel crate — the two sides
+meet only here. Today the crate carries the scheduler-facing slice of
+the surface (`CpuId`, `SchedulerArch`); the remaining HAL primitives
+(context switch, MMU/TLB, timer, interrupt entry/exit, per-CPU storage,
+boot discovery) migrate here as the §17 burn-down advances.
+
+`kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
+`X86_64Arch` and no longer names `kernel/sched`; `kernel/sched`
+re-exports the HAL trait so existing `rustos_kernel_sched::SchedulerArch`
+paths resolve to the single canonical definition. The riscv64 port still
+reaches concrete kernel crates through its boot pipeline and remains a
+tracked grandfathered defect.
+
 ## `cargo xtask cfg-check`
 
 Scans every workspace `.rs` file and fails if a `cfg` predicate names

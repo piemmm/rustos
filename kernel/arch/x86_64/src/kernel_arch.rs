@@ -1,11 +1,11 @@
 //! Stage 3a (c7-arch): the x86_64 `SchedulerArch` implementation.
 //!
 //! `X86_64Arch` is the concrete handle the architecture-neutral
-//! kernel reaches for through `rustos_kernel_sched::SchedulerArch`.
-//! It is the only production implementation of that trait inside
-//! the workspace (the host-side `TestArch` shipped by
-//! `kernel/sched` is feature-gated to `test-arch` per
-//! `AGENTS.md` §1).
+//! kernel reaches for through the Arch HAL
+//! [`rustos_arch_api::SchedulerArch`] (`AGENTS.md` §17.2). It is the
+//! only production implementation of that trait inside the workspace
+//! (the host-side `TestArch` shipped by `kernel/sched` is
+//! feature-gated to `test-arch` per `AGENTS.md` §1).
 //!
 //! # Surface
 //!
@@ -44,7 +44,7 @@ use core::sync::atomic::AtomicU64;
 #[cfg(any(test, not(target_os = "none")))]
 use core::sync::atomic::Ordering;
 
-use rustos_kernel_sched::{CpuId, SchedulerArch};
+use rustos_arch_api::{CpuId, SchedulerArch};
 
 use crate::percpu::MAX_CPUS;
 

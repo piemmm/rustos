@@ -20,15 +20,14 @@ path = "src/lib.rs"
 #   consumed by `syscall_entry.rs`. Re-declaring it locally would
 #   violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
 #   truth).
-# - `rustos-kernel-sched` provides the `SchedulerArch` / `CpuId`
-#   trait surface that Stage 3a (c7-arch) implements in
-#   `kernel_arch.rs`. The scheduler crate's own dependency tree is
-#   `kernel/sync` only and is alloc-free, so depending on it does
-#   **not** pull a `#[global_allocator]` requirement into the arch
-#   crate. This is load-bearing for the two pre-existing freestanding
-#   Stage-2 QEMU bins (`tests/integration/memory_isolation` and
-#   `tests/integration/scheduler_stress_qemu`), which link the arch
-#   crate without providing an allocator.
+# - `rustos-arch-api` is the Arch HAL (`AGENTS.md` §17.2). It provides
+#   the `SchedulerArch` / `CpuId` trait surface that `kernel_arch.rs`
+#   implements for [`X86_64Arch`]. §17.4 lets an architecture port
+#   name `kernel/arch/api` and `lib/*` only; naming the HAL here —
+#   rather than the concrete `kernel/sched` crate — is exactly what
+#   keeps this port off a concrete kernel subsystem. The HAL crate is
+#   `no_std` and dependency-free, so depending on it pulls **no**
+#   `#[global_allocator]` requirement into the arch crate.
 #
 # The `kernel/core::KernelArch` super-trait (`SchedulerArch + halt()`)
 # is **not** implemented inside the arch crate — pulling
@@ -37,30 +36,24 @@ path = "src/lib.rs"
 # and would force the existing freestanding test bins to ship a
 # `#[global_allocator]` they do not currently need. Instead, the arch
 # crate exports a free `halt() -> !` function on this side of the
-# boundary and the downstream `rustos-kernel` bin crate (landed in
-# Stage 3a (c7-bin), a companion commit) brings the allocator,
-# implements `KernelArch` for `X86_64Arch`, and wires both halves
-# together. AGENTS.md §3 / §6 — drivers, kernel/mem, kernel/sec,
-# kernel/ipc remain forbidden as arch-crate deps.
+# boundary and the downstream `rustos-kernel` bin crate brings the
+# allocator, implements `KernelArch` for `X86_64Arch`, and wires both
+# halves together. AGENTS.md §3 / §6 / §17.4 — drivers, kernel/mem,
+# kernel/sec, kernel/ipc remain forbidden as arch-crate deps.
 [features]
-# `sched-arch` opts the crate into providing the
-# `rustos_kernel_sched::SchedulerArch` impl for [`X86_64Arch`] and
-# pulls `rustos-kernel-sched` into the dependency graph. It is gated
-# because `rustos-kernel-sched` (and its `rustos-kernel-sync`
-# transitive dep) use `extern crate alloc`, and the two pre-existing
-# freestanding Stage-2 QEMU test bins
-# (`tests/integration/memory_isolation`,
-# `tests/integration/scheduler_stress_qemu`) link this crate without
-# providing a `#[global_allocator]`. Keeping the dep optional means
-# those bins continue to link with the default (alloc-free) feature
-# set, while the Stage 3a (c7-bin) `rustos-kernel` bin opts in
-# explicitly. AGENTS.md §2.3 (no bloat) — pay only for what you use.
+# `sched-arch` opts the crate into compiling the `kernel_arch` module
+# (the [`X86_64Arch`] `SchedulerArch` impl) and pulls the Arch HAL
+# `rustos-arch-api` into the dependency graph. It stays optional so a
+# freestanding consumer that does not need the arch handle (e.g.
+# `tests/integration/memory_isolation`, which exercises page-table
+# isolation, not scheduling) compiles neither the module nor the dep.
+# AGENTS.md §2.3 (no bloat) — pay only for what you use.
 default = []
-sched-arch = ["dep:rustos-kernel-sched"]
+sched-arch = ["dep:rustos-arch-api"]
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-kernel-sched = { path = "../../sched", version = "=0.0.0", optional = true }
+rustos-arch-api = { path = "../api", version = "=0.0.0", optional = true }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical

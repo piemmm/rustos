@@ -12,6 +12,10 @@ members = [
     "kernel/syscall",
     "kernel/virtio",
 
+    # Kernel — architecture HAL (the §17.2 trait surface every port
+    # implements; the §17.4 boundary between arch-neutral kernel and ports)
+    "kernel/arch/api",
+
     # Kernel — architecture ports
     "kernel/arch/x86_64",
     "kernel/arch/aarch64",

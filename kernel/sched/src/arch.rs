@@ -3,58 +3,26 @@
 //! The scheduler is architecture-neutral — it never reaches for an APIC, a
 //! GIC, a CLINT or `requestAnimationFrame` directly. Every architecture
 //! port (Stage 3 of `PLAN.md`) implements [`SchedulerArch`]; the host test
-//! binary uses `TestArch`, gated behind the `test-arch` Cargo feature
+//! binary uses [`TestArch`], gated behind the `test-arch` Cargo feature
 //! (`AGENTS.md` §1 — no hacks: production code never carries a fake
 //! IPI/timer implementation).
 //!
-//! The trait is deliberately tiny. Anything more elaborate (per-core
-//! timer programming, deep sleep, frequency scaling) belongs in the arch
-//! crate itself, not in this surface. Growing the trait would constitute
-//! interface creep (`AGENTS.md` §2.4).
+//! [`SchedulerArch`] and [`CpuId`] themselves are defined in the Arch
+//! HAL crate `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported here.
+//! This module owns only the host test double [`TestArch`]: keeping the
+//! HAL trait in `kernel/arch/api` is what lets an architecture port
+//! implement it without depending on `kernel/sched` (§17.4).
 
 #[cfg(any(test, feature = "test-arch"))]
 use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
 
-/// Identifier for a logical CPU (hardware thread) the scheduler manages.
-///
-/// Stable for the lifetime of the kernel image. Architecture ports map
-/// these to APIC IDs / MPIDR / hart IDs / worker indices in their boot
-/// code; the scheduler treats them as opaque indices into its per-CPU
-/// array.
-pub type CpuId = u32;
-
-/// Architecture surface the scheduler needs to drive an SMP system.
-///
-/// Implementations must be both [`Send`] and [`Sync`] because the
-/// scheduler stores them inside `Arc`s shared between every CPU.
-///
-/// # Required semantics
-///
-/// * [`Self::current_cpu`] must return the calling CPU's [`CpuId`]. On a
-///   real port this comes from a per-CPU register or an APIC read; the
-///   value must be stable for the duration of the call.
-/// * [`Self::ticks_now`] returns a monotonically non-decreasing tick
-///   counter. The unit is arbitrary but consistent within a single port
-///   (typically 1 ms or one timer tick). Wraparound at `u64::MAX` is
-///   permitted but not expected in any realistic kernel uptime.
-/// * [`Self::send_ipi`] must arrange for the target CPU to enter the
-///   scheduler's preemption entry point "soon" — the exact latency is
-///   port-defined. Sending an IPI to the calling CPU is allowed and is a
-///   no-op equivalent to setting a self-reschedule flag.
-pub trait SchedulerArch: Send + Sync {
-    /// Returns the calling CPU's identifier.
-    fn current_cpu(&self) -> CpuId;
-
-    /// Returns the current monotonic tick.
-    fn ticks_now(&self) -> u64;
-
-    /// Asks `target` to enter the scheduler at its next safe point.
-    ///
-    /// Real ports raise a hardware IPI; the host-side `TestArch` (gated behind the
-    /// `test-arch` feature) records the request in an in-memory ledger so
-    /// host tests can assert that preemption was requested.
-    fn send_ipi(&self, target: CpuId);
-}
+// The scheduler-facing Arch HAL surface ([`CpuId`], [`SchedulerArch`])
+// is defined once in `kernel/arch/api` (`AGENTS.md` §17.2) and
+// re-exported here so existing `rustos_kernel_sched::{CpuId,
+// SchedulerArch}` paths — and the `kernel/core` `KernelArch:
+// SchedulerArch` super-trait — keep resolving to the single canonical
+// definition (`AGENTS.md` §2.2 — no duplication).
+pub use rustos_arch_api::{CpuId, SchedulerArch};
 
 /// In-memory `SchedulerArch` implementation used by host-side tests.
 ///

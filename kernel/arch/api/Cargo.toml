@@ -1,0 +1,23 @@
+[package]
+name = "rustos-arch-api"
+description = "RustOS Arch HAL: the closed trait surface every architecture port implements and the rest of the kernel consumes (AGENTS.md §17.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The Arch HAL is the §17.4 boundary between the architecture-neutral
+# kernel and the per-target ports. It is deliberately `no_std` and free
+# of any kernel-subsystem dependency: §17.4 permits `kernel/arch/api`
+# to name `lib/*` only, so the ports that implement it (and the kernel
+# crates that consume it) never acquire a transitive edge to a concrete
+# kernel crate through the HAL.
+[dependencies]

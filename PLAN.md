@@ -3224,10 +3224,11 @@ a list collapses that list. No *new* violation may be added.
 - `kernel/virtio` → `drivers/bus/virtio`, `userland/system/drvhost`:
   move the shared virtio host factory behind `lib/abi` traits so the
   kernel stops depending on a driver and a userland service.
-- `kernel/arch/x86_64` → `kernel/sched`; `kernel/arch/riscv64` →
-  `kernel/{core,sched,mem,sec,irq,sync}`: introduce `kernel/arch/api`
-  (the Arch HAL) so arch ports name only the HAL, never concrete kernel
-  crates.
+- `kernel/arch/riscv64` → `kernel/{core,sched,mem,sec,irq,sync}`: the
+  riscv64 port still names concrete kernel crates from its boot
+  pipeline. The Arch HAL `kernel/arch/api` now exists (see burn-down
+  below); migrate the port onto it the way x86_64 was. (The
+  `kernel/arch/x86_64` → `kernel/sched` edge that sat here is *done*.)
 - `kernel/sched` → `kernel/sync`: resolved by the scheduler `api`/`impl`
   split (`kernel/sched/api` + sibling impls).
 - `drivers/bus/virtio` → `kernel/{mem,sec,irq}`;
@@ -3247,6 +3248,18 @@ a list collapses that list. No *new* violation may be added.
   HAL port-I/O capability.
 
 **Burn-down progress:**
+- Arch HAL `kernel/arch/api` + x86_64 migration (deps-check) — *done*.
+  The §17.2 architecture surface now lives in its own `no_std`,
+  dependency-free crate `kernel/arch/api` (`rustos-arch-api`), carrying
+  the scheduler-facing slice (`CpuId`, `SchedulerArch`). `kernel/sched`
+  re-exports the trait (single canonical definition, §2.2), and
+  `kernel/arch/x86_64` now implements `rustos_arch_api::SchedulerArch`
+  and no longer names `kernel/sched` — its `sched-arch` feature pulls
+  the HAL instead. The `kernel/arch/x86_64` → `kernel/sched`
+  grandfather edge has been removed and `deps-check` is clean.
+  Remaining HAL primitives (MMU/TLB, context switch, timer, interrupt
+  entry/exit, per-CPU storage, boot discovery) and the riscv64 port
+  migration are the next steps on this thread.
 - `tests/integration/` (cfg-check) — *done*. Target selection for the
   freestanding QEMU bins now lives in one audited build-glue crate,
   `tests/integration/harness` (`rustos-itest-harness`), whose

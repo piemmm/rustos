@@ -102,9 +102,15 @@ const GRANDFATHERED: &[GrandfatheredEdge] = &[
     // §17.4 lists neither `kernel/sync` nor this edge; it is reconciled
     // when the scheduler `api`/`impl` split lands.
     edge("rustos-kernel-sched", "rustos-kernel-sync"),
-    // Architecture ports still name concrete kernel crates instead of the
-    // (not-yet-existing) Arch HAL `kernel/arch/api`.
-    edge("rustos-arch-x86_64", "rustos-kernel-sched"),
+    // Architecture ports still name concrete kernel crates instead of
+    // the Arch HAL `kernel/arch/api`. x86_64 has been migrated: it now
+    // implements `rustos_arch_api::SchedulerArch` and no longer names
+    // `kernel/sched`. riscv64 remains grandfathered because its boot
+    // pipeline (`boot.rs`) builds a `kernel_core::BootInfo` from
+    // `kernel/{mem,sec,sched}` types and calls `kernel_main` directly;
+    // removing those edges requires relocating the boot orchestration
+    // into `kernel/core` (the single §17.4 selection point) and is
+    // tracked in the §17 burn-down (`PLAN.md`).
     edge("rustos-arch-riscv64", "rustos-kernel-core"),
     edge("rustos-arch-riscv64", "rustos-kernel-sched"),
     edge("rustos-arch-riscv64", "rustos-kernel-mem"),

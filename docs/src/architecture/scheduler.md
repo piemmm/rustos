@@ -5,6 +5,12 @@ scheduler. It owns the run queues and the dispatch policy; the
 architecture ports (Stage 3 of [`PLAN.md`](../../../PLAN.md)) plug in the
 real IPI and timer surfaces through the [`SchedulerArch`] trait.
 
+`SchedulerArch` (and `CpuId`) are defined in the Arch HAL crate
+`kernel/arch/api` (`AGENTS.md` §17.2) and re-exported from `kernel/sched`
+so the architecture-neutral kernel keeps a single canonical definition
+while the ports implement the trait without depending on `kernel/sched`
+(§17.4). See [Modularity contracts](./modularity.md#the-arch-hal-kernelarchapi).
+
 This page is the source of truth for the *behaviour* the implementation
 must preserve. Read it together with the rustdoc on `kernel/sched`'s
 public items, and with [`AGENTS.md`](../../../AGENTS.md) §4 ("SMP from
