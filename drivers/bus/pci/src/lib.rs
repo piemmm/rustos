@@ -81,6 +81,41 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
+// --- Real-hardware construction seam --------------------------------------
+
+/// Construct the real-hardware x86_64 PCI root bus over configuration
+/// **mechanism #1** (PCI Local Bus 3.0 §3.2.2.3.2): the address word
+/// at I/O port `0xCF8` selects a `(bus, device, function, register)`
+/// tuple and the data word at `0xCFC` reads/writes the corresponding
+/// configuration dword.
+///
+/// The returned value is the bus the ring-0 boot pipeline drives
+/// through the three frozen `abi-v1` seams — [`Bus`] (enumeration),
+/// [`VirtioPciBus`] (virtio register-window provisioning), and
+/// [`MsixBus`] (MSI-X interrupt routing). [`VirtioPciBus`] and
+/// [`MsixBus`] both have [`Bus`] as a supertrait, so the return bound
+/// names only the two leaf seams; the opaque type still implements
+/// [`Bus`] and coerces to `&dyn Bus`. The concrete `Pci` type stays
+/// crate-private (`AGENTS.md` §8): callers borrow the result as
+/// `&dyn Bus` / `&dyn VirtioPciBus` / `&dyn MsixBus` and never name it.
+///
+/// Construction performs **no** I/O — it only stores the zero-sized
+/// port-I/O backend — so it is sound to call before the PCI host
+/// bridge has been probed. Configuration access happens lazily on the
+/// trait methods, each of which issues `in`/`out` against the two
+/// legacy configuration ports.
+///
+/// # Platform
+///
+/// Mechanism #1 is x86-only; the constructor is therefore gated to
+/// `target_arch = "x86_64"`. Other architectures reach `PCIe` through
+/// memory-mapped ECAM, which is a separate seam.
+#[cfg(target_arch = "x86_64")]
+#[must_use]
+pub fn x86_mechanism_one() -> impl VirtioPciBus + MsixBus {
+    Pci::new(mech_one::PortIoConfigSpace::new(mech_one::X86PortIo))
+}
+
 // --- Public re-exports through the `Bus` trait ----------------------------
 //
 // The trait impl below is the only post-`register` surface a host may

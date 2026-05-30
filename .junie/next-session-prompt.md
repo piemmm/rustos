@@ -8,6 +8,34 @@
 
 `PLAN.md` Stage 4.D records the following as **complete**:
 
+- **Live boot-wiring seams** (latest session). The
+  `tests/integration/virtio_blk_pci_x86_64` kernel test bin still
+  could not reach two things, both now landed as host-testable seams:
+  (1) a public real-hardware PCI constructor —
+  `rustos_drv_bus_pci::x86_mechanism_one()` (gated `target_arch =
+  "x86_64"`) returns the mechanism-#1 bus as `impl VirtioPciBus +
+  MsixBus` (also coerces to `&dyn Bus`); the concrete `Pci` /
+  `PortIoConfigSpace` / `X86PortIo` types stay crate-private
+  (`AGENTS.md` §8); construction does **no** port I/O so it is
+  host-safe to call; and (2) a read-only firmware-memory-map accessor —
+  `rustos_kernel::arch_wrapper::published_memory_map()` over a new
+  `MEMORY_MAP_SLOT` set-once cell that `boot::try_boot` fills via
+  `publish_memory_map(&map)` before the map is moved into the
+  `kernel_core` hand-off (mirrors `published_irq_table` /
+  `published_irq_controller`). Host-tested only: `rustos-drv-bus-pci`
+  27 (+1), `rustos-kernel --lib` 50 (+1); clippy `-D warnings` / fmt /
+  doc clean; `x86_64-unknown-none` pci lib + kernel lib/bin and
+  `aarch64-unknown-none` pci builds clean. **Still TODO (the test bin
+  that consumes them):** boot → `x86_mechanism_one()` as the `&dyn
+  VirtioPciBus` + `&dyn MsixBus`; build a per-device DMA
+  `FrameAllocator` from `published_memory_map()` (reserving / carving
+  a Usable region so it does not re-hand the live kernel allocator's
+  frames) + a `DirectPhysMap::identity(4 GiB)`; allocate + bind a free
+  external vector in the published `IrqTable` and build its
+  `MsiMessage` via `rustos_arch_x86_64::irq::msi_message`; then call
+  `provision_and_run` and drive the loaded virtio-blk `.rxe` (read
+  sector 0, write+read-back sector 1, verify) before `qemu_exit`.
+
 - **PCI MSI-X interrupt routing** (latest session). Scoping
   `virtio_blk_pci_x86_64` surfaced a hard blocker: a real
   virtio-blk-pci round-trip cannot complete without delivering the

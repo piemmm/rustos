@@ -111,6 +111,29 @@ audit_sink: &SERIAL_SINK }`. A pre-init panic (before `boot()`
 finishes building the arch handle) emits a single "panic before init"
 record on COM1 and halts.
 
+## Published boot-state accessors
+
+`src/arch_wrapper.rs` exposes a small set of read-only accessors over
+`kernel/sync::OnceCell` set-once slots, so a driver-bring-up observer
+(e.g. a future `tests/integration/virtio_blk_pci_x86_64` integration
+test) can reach live boot state without re-borrowing the `pub(crate)`
+`KernelState`:
+
+* `published_irq_table()` / `published_irq_controller()` — the live
+  `IrqTable` and `IoApicController` (Stage 4.D Item 2-tail.2).
+* `published_memory_map()` — a `'static` clone of the firmware
+  `BootMemoryMap`. `boot::try_boot` calls `publish_memory_map(&map)`
+  once, before the original is moved into the `kernel_core` hand-off.
+  A bring-up observer builds its per-device DMA
+  `rustos_kernel_mem::FrameAllocator` from this map; it draws frames
+  from the same firmware description as the live kernel allocator, so
+  the observer must reserve / partition the region it uses rather than
+  re-hand the live allocator's frames.
+
+Each slot enforces one-shot publication (`AGENTS.md` §2.1); a second
+`set` is a rejected no-op and the accessors never expose a writable
+surface (`AGENTS.md` §2.4).
+
 ## Tests
 
 * **Host unit tests** (`cargo test -p rustos-kernel --lib`):

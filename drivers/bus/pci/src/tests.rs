@@ -909,3 +909,18 @@ fn route_msix_propagates_capability_denial() {
         DriverError::PermissionDenied
     );
 }
+
+/// The real-hardware constructor yields a value usable through all
+/// three frozen `abi-v1` bus seams without naming the concrete `Pci`
+/// type. Construction issues no port I/O, so this is sound to run on
+/// the host (no `0xCF8`/`0xCFC` access happens here).
+#[test]
+fn x86_mechanism_one_exposes_the_frozen_bus_seams() {
+    use rustos_abi::driver::msix::MsixBus;
+    use rustos_abi::driver::virtio_pci::VirtioPciBus;
+
+    fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
+
+    let bus = crate::x86_mechanism_one();
+    assert_seams(&bus, &bus, &bus);
+}

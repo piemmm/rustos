@@ -1196,6 +1196,43 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 prerequisite — live boot-wiring seams,
+  *complete*): scoping the `tests/integration/virtio_blk_pci_x86_64`
+  kernel test bin found two seams it still could not reach. The PCI
+  driver kept its concrete `Pci` type + the `PortIoConfigSpace` /
+  `X86PortIo` mechanism-#1 backend `pub(crate)`, so ring 0 (whose only
+  sanctioned driver surface is `register`, `AGENTS.md` §8) had no way
+  to *construct* a live bus; and the firmware `BootMemoryMap` was moved
+  into the `kernel_core` hand-off and buried in the `pub(crate)`
+  `KernelState`, so a bring-up observer could not build a per-device
+  DMA `FrameAllocator`. **PCI constructor.** New public
+  `rustos_drv_bus_pci::x86_mechanism_one()` (gated `target_arch =
+  "x86_64"`) returns the bus as `impl VirtioPciBus + MsixBus` (both
+  have `Bus` as a supertrait, so it also coerces to `&dyn Bus`); the
+  concrete `Pci` type stays crate-private. Construction issues no port
+  I/O — it only stores the zero-sized backend — so it is host-safe to
+  call. **Memory-map seam.** `kernel/rustos-kernel/src/arch_wrapper.rs`
+  adds a `MEMORY_MAP_SLOT` `OnceCell<BootMemoryMap>` with
+  `publish_memory_map(&map)` (called once from `boot::try_boot` before
+  the map moves into the hand-off) + a read-only `published_memory_map()`
+  accessor, mirroring the existing `published_irq_table` /
+  `published_irq_controller` set-once slots (`AGENTS.md` §2.1 / §2.4).
+  **Tests.** `rustos-drv-bus-pci` 27 (+1: the constructor exposes all
+  three frozen seams without naming the concrete type), `rustos-kernel
+  --lib` 50 (+1: publish → read → second-publish-no-op). `cargo clippy
+  -p rustos-drv-bus-pci -p rustos-kernel --all-targets -- -D warnings`,
+  `cargo fmt --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`,
+  the `x86_64-unknown-none` (pci lib + kernel lib/bin) build, and the
+  `aarch64-unknown-none` pci build (constructor cfg-absent) are clean.
+  **Docs.** `docs/src/drivers/bus.md` ("Constructing the real-hardware
+  bus") + the `rustos-kernel` README ("Published boot-state accessors").
+  **Deferred.** The `tests/integration/virtio_blk_pci_x86_64` kernel
+  test bin that *consumes* these seams — boot → `x86_mechanism_one` +
+  `published_memory_map`-built `FrameAllocator` + `DirectPhysMap` +
+  external-vector bind → `provision_and_run` → drive a live virtio-blk
+  `.rxe` — plus the riscv64 MMIO vertical, the net tests, and the
+  Item 6 acceptance gate remain outstanding; see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 prerequisite — riscv64 QEMU runner,
   *complete*): the `tools/qemu` runner was x86_64-only (single
   `Arch::X86_64`, GRUB-ISO boot, `isa-debug-exit`), so the

@@ -327,6 +327,23 @@ built — so a routing failure fails the whole bring-up closed
 `notify_wait` could never wake. Legacy MSI and INTx routing are not
 implemented.
 
+## Constructing the real-hardware bus
+
+The boot pipeline reaches PCI through a single public constructor,
+`rustos_drv_bus_pci::x86_mechanism_one()` (gated to
+`target_arch = "x86_64"`). It builds the bus over configuration
+**mechanism #1** — the `0xCF8` address word / `0xCFC` data word port
+pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
+`impl VirtioPciBus + MsixBus`. Both traits have `Bus` as a supertrait,
+so the value also coerces to `&dyn Bus`; the concrete `Pci` type stays
+crate-private (`AGENTS.md` §8). Construction performs no I/O — it only
+stores the zero-sized port-I/O backend — so it is sound to call before
+the host bridge has been probed; configuration access happens lazily on
+the trait methods. Ring 0 hands the result to
+`rustos_kernel::provision_virtio_pci` / `provision_and_run` as the
+`&dyn VirtioPciBus` + `&dyn MsixBus` device bus. Non-x86 architectures
+reach PCIe through memory-mapped ECAM, which is a separate seam.
+
 ## Shared types
 
 There is no copy-paste between the two drivers; the only shared

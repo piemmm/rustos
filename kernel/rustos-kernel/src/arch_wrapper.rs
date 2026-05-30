@@ -23,6 +23,7 @@ use rustos_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_kernel_core::{IrqRouting, KernelArch};
 use rustos_kernel_irq::{IrqController, IrqTable};
+use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sched::{CpuId, SchedulerArch};
 use rustos_kernel_sync::once::OnceCell;
 
@@ -40,6 +41,20 @@ static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
 /// the [`IrqRouting`]) and read by
 /// [`production_external_irq_dispatch`].
 static IRQ_CONTROLLER_SLOT: OnceCell<&'static (dyn IrqController + Send + Sync)> = OnceCell::new();
+
+/// Set-once slot for the firmware [`BootMemoryMap`] the boot pipeline
+/// assembled, published by [`publish_memory_map`] during `try_boot`
+/// before the map is moved into the `kernel_core` hand-off.
+///
+/// A driver-bring-up observer (e.g. the planned
+/// `tests/integration/virtio_blk_pci_x86_64` integration test) reads
+/// this through [`published_memory_map`] to build the per-device DMA
+/// [`rustos_kernel_mem::FrameAllocator`] it needs, without re-borrowing
+/// the `pub(crate)` `KernelState`. The slot stores its own clone of
+/// the map, so the live kernel allocator and any observer-built
+/// allocator draw from the same firmware description but never share a
+/// mutable handle (`AGENTS.md` §2.1 — one-shot publish).
+static MEMORY_MAP_SLOT: OnceCell<BootMemoryMap> = OnceCell::new();
 
 /// Production external-IRQ dispatcher.
 ///
@@ -113,6 +128,32 @@ pub fn published_irq_controller() -> Option<&'static (dyn IrqController + Send +
         Ok(slot) => slot.copied(),
         Err(_) => None,
     }
+}
+
+/// Publish a clone of the firmware [`BootMemoryMap`] into
+/// `MEMORY_MAP_SLOT`.
+///
+/// Called once from `boot::try_boot` with the assembled map, before
+/// the original is moved into the `kernel_core` hand-off. A second
+/// call is a no-op (`OnceCell::set` rejects it); the boot pipeline
+/// only ever calls this once, so the discarded `Err` cannot mask a
+/// real defect (`AGENTS.md` §2.1 — one-shot publish).
+pub fn publish_memory_map(map: &BootMemoryMap) {
+    let _ = MEMORY_MAP_SLOT.set(map.clone());
+}
+
+/// Read the [`BootMemoryMap`] published into `MEMORY_MAP_SLOT` by
+/// [`publish_memory_map`].
+///
+/// Returns `None` until `boot::try_boot` has published the map. The
+/// returned reference is to the `'static` slot-owned clone; the
+/// accessor exposes no writable surface (`AGENTS.md` §2.4). A
+/// driver-bring-up observer uses it to construct a per-device DMA
+/// [`rustos_kernel_mem::FrameAllocator`] from the same firmware
+/// description the live kernel allocator was built against.
+#[must_use]
+pub fn published_memory_map() -> Option<&'static BootMemoryMap> {
+    MEMORY_MAP_SLOT.get().unwrap_or_default()
 }
 
 /// Local wrapper around [`X86_64Arch`] so the bin crate can implement
@@ -437,5 +478,45 @@ mod tests {
         // construction — `IRQ_TABLE_SLOT` is independent of
         // `IRQ_CONTROLLER_SLOT`.
         assert!(published_irq_table().is_none());
+    }
+
+    /// [`publish_memory_map`] hands [`published_memory_map`] a stable,
+    /// `'static` clone of the firmware map. This test is the only
+    /// publisher of `MEMORY_MAP_SLOT` in the process, so the set-once
+    /// slot deterministically reflects the map published here
+    /// (`AGENTS.md` §2.1 — one-shot publish).
+    #[test]
+    fn published_memory_map_returns_the_published_clone() {
+        use rustos_kernel_mem::{MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
+
+        // Before any publish the slot is empty.
+        assert!(published_memory_map().is_none());
+
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new(PAGE_SIZE as u64 * 16),
+            length: (PAGE_SIZE * 32) as u64,
+        });
+        publish_memory_map(&map);
+
+        let published = published_memory_map().expect("map published");
+        assert_eq!(published.regions().len(), 1);
+        assert_eq!(
+            published.regions()[0].start,
+            PhysAddr::new(PAGE_SIZE as u64 * 16)
+        );
+        // A second publish is a no-op: the slot keeps its first value.
+        let mut other = BootMemoryMap::new();
+        other.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new(PAGE_SIZE as u64 * 1000),
+            length: PAGE_SIZE as u64,
+        });
+        publish_memory_map(&other);
+        assert_eq!(
+            published_memory_map().expect("still set").regions().len(),
+            1
+        );
     }
 }
