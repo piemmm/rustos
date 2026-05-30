@@ -1075,6 +1075,51 @@ follow-up is its own thread and is now also complete.
 - Each driver crate ships a `README.md` (supported HW, caps, limits).
 
 **Status: in progress.**
+- `drivers/display/vesa` (x86_64 BIOS) shipped — the VBE
+  linear-framebuffer display driver, and the last outstanding Stage 4
+  first driver. It implements `rustos_abi::driver::display::Display`
+  over the linear framebuffer a VESA BIOS Extensions (VBE) mode exposes
+  on a legacy PC. Because the kernel cannot re-enter real mode to issue
+  VBE BIOS calls, mode selection happens in the bootloader; the boot
+  stub captures the 256-byte VBE `ModeInfoBlock` (VBE function `0x4F01`)
+  and hands it to the driver host as a boot capability. `VbeModeInfo`
+  `::parse` decodes and validates that block — accepting only a
+  supported mode whose linear-framebuffer attribute is set
+  (`ModeAttributes` bits 0 + 7), the direct-colour memory model
+  (`MemoryModel == 6`), 32 bpp with 8-bit channel masks, and a channel
+  layout that maps to `DisplayFormat::Bgra8888` (red at bit 16) or
+  `Rgba8888` (red at bit 0); a zero `PhysBasePtr`, a stride too small
+  for one scanline, or any other layout fails closed (`DeviceFault` /
+  `LengthOutOfRange` / `Unsupported`). This VBE decode is the deliberate
+  sibling distinction from the generic `framebuffer` driver, which
+  consumes an already-parsed geometry record (`AGENTS.md` §2.2
+  carve-out — not duplication). `VesaFramebuffer::open` then maps
+  exactly `stride_bytes * height_px` bytes at the reported `PhysBasePtr`
+  through the host's `MmioMapper` (enforcing `CAP_MMIO_MAP`), so the
+  framebuffer is reached only through a kernel-installed mapping, never
+  a pointer the driver synthesises (§4 — no ambient authority). Per
+  `AGENTS.md` §8 the only public function is `register` (gated on
+  `CAP_DRV_LOAD`); the `VbeModeInfo` and `VesaFramebuffer` types are
+  re-exported so the host can decode a block and construct an instance,
+  then reach it only through the `Display` trait. `present` is
+  byte-preserving and bounds-checked at every window write; dropping the
+  `VesaFramebuffer` releases the window (unload), and `open` again
+  reloads. No `unwrap` / `expect` / `panic!` / `unsafe` in the crate; no
+  architecture `cfg`. Tests: 23 host-side unit tests against an
+  in-process mock `MmioMapper` (register gate; `VbeModeInfo::parse`
+  Bgra/Rgba decode + every rejection path; `open` mode report; `present`
+  byte fidelity incl. a non-word-multiple surface; short-frame /
+  oversized-frame handling; host + mapper `CAP_MMIO_MAP` gates; absent
+  mapper; unmappable region; parse failure before mapping;
+  unload→reload). Docs: a new `rustos-drv-display-vesa` section in
+  `docs/src/drivers/display.md` (already wired into `docs/src/SUMMARY.md`
+  under the existing display page) + the crate `README.md`. A QEMU
+  integration vertical depends on the kernel publishing the
+  boot-captured `ModeInfoBlock` as a capability and exposing a
+  `MmioMapper` over the linear framebuffer — the same boot hand-off
+  prerequisite the framebuffer, ps2, and virtio-blk QEMU verticals
+  waited on. With this driver every per-class Stage 4 first driver
+  listed in the deliverables is now implemented.
 - `drivers/input/ps2` (x86_64) shipped — the first input-class driver.
   It implements `rustos_abi::driver::input::Input` for a keyboard on the
   Intel 8042 controller (status/command port `0x64`, data port `0x60`),
@@ -1108,9 +1153,7 @@ follow-up is its own thread and is now also complete.
   integration vertical depends on the kernel wiring a `PortIo8` backend
   over the legacy ports and routing the i8042 IRQ (line 1) to the
   user-space driver — the same boot hand-off prerequisite the
-  framebuffer and virtio-blk QEMU verticals waited on. The remaining
-  outstanding Stage 4 first driver is `drivers/display/vesa` (x86_64
-  BIOS).
+  framebuffer and virtio-blk QEMU verticals waited on.
 - `lib/abi/src/driver/` trait surface has landed: `DriverHost`,
   `DriverHandle`, `DriverError`, `DriverKind` (`UserSpace` / `InKernel`),
   and `DriverManifest` (frozen `abi-v1` wire layout — magic `"DRV1"`,
