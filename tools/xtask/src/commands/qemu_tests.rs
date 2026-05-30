@@ -20,6 +20,12 @@ struct QemuTest {
     package: &'static str,
     /// Binary name produced by the package (`[[bin]].name`).
     binary: &'static str,
+    /// Rust target triple the binary is built for. Selects both the
+    /// `cargo build --target` value and the per-arch QEMU `Spec`
+    /// constructor (`x86_64-unknown-none` → `isa-debug-exit`;
+    /// `riscv64gc-unknown-none-elf` → the `virt` board + `SiFive`
+    /// Test finisher).
+    target: &'static str,
     /// Number of emulated CPUs.
     cpus: u32,
     /// Hard wall-clock budget.
@@ -38,6 +44,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-memory-isolation",
         binary: "rustos-test-memory-isolation",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
@@ -51,6 +58,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-scheduler-stress-qemu",
         binary: "rustos-test-scheduler-stress-qemu",
+        target: "x86_64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(120),
         disk_sectors: None,
@@ -72,6 +80,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-kernel-arch-boot",
         binary: "rustos-test-kernel-arch-boot",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
@@ -94,6 +103,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-syscall-dispatch-qemu",
         binary: "rustos-test-syscall-dispatch-qemu",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
@@ -108,6 +118,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-drvhost-qemu",
         binary: "rustos-test-drvhost-qemu",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
@@ -130,6 +141,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-irq-qemu-x86-64",
         binary: "rustos-test-irq-qemu-x86-64",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
@@ -154,6 +166,7 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-virtio-blk-pci-x86-64",
         binary: "rustos-test-virtio-blk-pci-x86-64",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
@@ -175,14 +188,34 @@ const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-virtio-net-pci-x86-64",
         binary: "rustos-test-virtio-net-pci-x86-64",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: true,
     },
+    // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
+    // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
+    // FDT `/memory` parse → `RiscvArch` → `BootInfo` →
+    // `kernel_core::kernel_main`) and asserts `AuditEvent::BootCompleted`
+    // (`EventId(4004)`). The bin's audit sink writes the `SiFive` Test
+    // PASS finisher on observing it. Single CPU suffices (the slice
+    // brings up one hart) and a 60-second budget matches the x86_64
+    // `kernel_arch_boot` bring-up test.
+    QemuTest {
+        package: "rustos-test-kernel-arch-boot-riscv64",
+        binary: "rustos-test-kernel-arch-boot-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+    },
 ];
 
-const TARGET: &str = "x86_64-unknown-none";
+/// Rust target triple for the riscv64 enrolments; selects the
+/// `Spec::for_riscv64_kernel` constructor in [`run_one`].
+const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 
 /// Build and execute every enrolled QEMU test. Returns the first failure.
 pub fn run_all(ctx: &Context) -> Result<(), String> {
@@ -197,7 +230,7 @@ pub fn run_all(ctx: &Context) -> Result<(), String> {
 
 fn build_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     let mut cmd = ctx.cargo();
-    cmd.args(["build", "--locked", "-p", t.package, "--target", TARGET]);
+    cmd.args(["build", "--locked", "-p", t.package, "--target", t.target]);
     ctx.run(&format!("test --qemu (build {})", t.package), cmd)
 }
 
@@ -205,12 +238,18 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     let kernel: PathBuf = ctx
         .workspace_root
         .join("target")
-        .join(TARGET)
+        .join(t.target)
         .join("debug")
         .join(t.binary);
-    let mut spec = Spec::for_x86_64_kernel(&kernel)
-        .with_cpus(t.cpus)
-        .with_timeout(t.timeout);
+    // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
+    // `virt` board through OpenSBI; everything else uses the x86_64
+    // `isa-debug-exit` convention.
+    let base = if t.target == RISCV64_TARGET {
+        Spec::for_riscv64_kernel(&kernel)
+    } else {
+        Spec::for_x86_64_kernel(&kernel)
+    };
+    let mut spec = base.with_cpus(t.cpus).with_timeout(t.timeout);
 
     // Attach a planted raw backing image for storage tests. Sector 0
     // carries the deterministic `byte[i] = i mod 256` pattern the

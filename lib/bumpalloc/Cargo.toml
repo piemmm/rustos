@@ -1,0 +1,15 @@
+[package]
+name = "rustos-bumpalloc"
+description = "RustOS shared no_std forward-only bump allocator for freestanding boot heaps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

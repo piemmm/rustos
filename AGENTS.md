@@ -111,6 +111,7 @@ rustos/
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
+│   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.

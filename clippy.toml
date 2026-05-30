@@ -28,6 +28,8 @@ doc-valid-idents = [
     "GIC",
     "PLIC",
     "CLINT",
+    "OpenSBI",
+    "SiFive",
     "QEMU",
     "PID",
     "ABI",

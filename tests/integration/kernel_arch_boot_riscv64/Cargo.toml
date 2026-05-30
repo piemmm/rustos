@@ -1,0 +1,33 @@
+[package]
+name = "rustos-test-kernel-arch-boot-riscv64"
+description = "Stage 4.D Item 4 QEMU integration test: boot the riscv64 virt-board pipeline to AuditEvent::BootCompleted under QEMU."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the riscv64 kernel pipeline and observe the final
+# `AuditEvent::BootCompleted` audit record" integration test (the
+# riscv64 analogue of `tests/integration/kernel_arch_boot`). It links
+# the `rustos-arch-riscv64` boot pipeline and only supplies its own
+# audit Sink — one that, on observing `EventId(4004)`
+# (`AuditEvent::BootCompleted`), writes the `SiFive` Test PASS finisher
+# so the host-side `tools/qemu::Runner` registers `Outcome::Pass`.
+# Keeping the audit-observer behaviour in a separate bin (not a Cargo
+# feature on the arch crate) prevents feature unification from leaking
+# the QEMU-exit shortcut into any production build
+# (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-kernel-arch-boot-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

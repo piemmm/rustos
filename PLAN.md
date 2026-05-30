@@ -1196,6 +1196,52 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — riscv64 kernel boot port to
+  `BootCompleted`, *complete*): the riscv64 verticals were blocked on a
+  kernel boot port that did not exist — `kernel/arch/riscv64` held only
+  `qemu_exit`. **Change.** `kernel/arch/riscv64` now carries the full
+  QEMU `virt`-board boot pipeline to `AuditEvent::BootCompleted`: an
+  S-mode `_start` trampoline (`boot.s`, load address 0x80200000 via the
+  new `link/riscv64-virt.ld`) that sets up a stack, zeroes `.bss`, and
+  tail-calls the Rust entry (`entry.rs`) with the OpenSBI hand-off
+  (`a0 = hartid`, `a1 = DTB`); a bounds-checked flattened-device-tree
+  reader (`fdt.rs`, host-tested) that extracts the first `/memory` `reg`
+  and the `/cpus` `timebase-frequency`; `RiscvArch` (`kernel_arch.rs`),
+  the `kernel_core::KernelArch` impl whose monotonic clock reads the
+  `time` CSR via `rdtime`; an SBI legacy-console log `Sink`
+  (`sbi.rs` + `serial.rs`); a panic bridge (`panic.rs`); and `boot.rs`,
+  which builds the `BootMemoryMap` (reserving `[ram_base,
+  __kernel_end)`, marking `[__kernel_end, ram_end)` usable), assembles
+  a `kernel_core::BootInfo`, and hands it to `kernel_core::kernel_main`.
+  No Sv39 paging or trap vector is needed for this slice (the board
+  enters S-mode with paging off and the init pipeline never faults).
+  Unlike x86_64, the arch crate depends on `kernel/core` directly and
+  owns its boot pipeline (no pre-existing freestanding bin to protect);
+  the rationale is in its `Cargo.toml`. **Shared allocator.** The
+  64 MiB boot bump allocator was extracted from `rustos-kernel` into a
+  new shared `lib/bumpalloc` crate (`rustos-bumpalloc`) so the x86_64
+  and riscv64 boot bins register one implementation (`AGENTS.md` §2.2,
+  §6); `rustos-kernel::bumpalloc` re-exports it, so existing call sites
+  are unchanged. The boot heap lives in a `.heap` (NOLOAD) section after
+  `__kernel_end` so the trampoline does not zero it and the usable map
+  excludes it. **Test.** New `tests/integration/kernel_arch_boot_riscv64`
+  (the riscv64 analogue of `kernel_arch_boot`) flips the `SiFive` Test
+  PASS finisher on observing `BootCompleted` (`EventId(4004)`);
+  `tools/xtask/src/commands/qemu_tests.rs` gained a per-test `target`
+  field + a `Spec::for_riscv64_kernel` branch and enrols it (single
+  CPU, 60 s). **Verification.** `cargo test -p rustos-arch-riscv64`
+  (16 host unit tests for the FDT reader + `RiscvArch`) green; the bin
+  builds for `riscv64gc-unknown-none-elf`; a direct
+  `qemu-system-riscv64 -M virt … -bios default -kernel <elf>` run prints
+  the full phase timeline + `id=4004 kernel boot completed` and exits
+  status 0 (PASS). **Docs.** `docs/src/platform/riscv64.md` ("Kernel
+  boot pipeline"); `AGENTS.md` §3 (added `lib/bumpalloc`). **Deferred.**
+  Sv39 paging, the S-mode trap vector, the ring-0 DTB virtio-mmio walk,
+  SMP, and the riscv64 MMIO verticals (`virtio_blk_mmio_riscv64`,
+  `virtio_net_mmio_riscv64`) — they reuse the shared
+  `drive_driver_lifecycle` once the walk lands; the Item 6 acceptance
+  gate (`cargo xtask ci` — mdBook `docs-check` half + `cargo deny`) was
+  not runnable in this environment.
 - Stage 4.D follow-up (Item 4 — virtio unload → reload → reuse,
   *complete*): the shared `run_virtio_scenario` previously loaded the
   signed `.rxe` once and dropped the `rustos_drvhost::Host` before the

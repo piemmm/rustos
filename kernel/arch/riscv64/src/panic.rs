@@ -1,0 +1,33 @@
+//! Panic-handler bridge for the riscv64 boot binaries.
+//!
+//! Rust forbids library-defined `#[panic_handler]`s, so each binary
+//! declares its own one-liner that forwards to
+//! [`handle_panic_via_serial`]. The bridge emits a single best-effort
+//! record through the SBI console and parks the hart forever
+//! (`AGENTS.md` §2 — fail closed, never silently reset; §2.9 — no
+//! panic recovery in production paths).
+//!
+//! Unlike the x86_64 bridge, this does not route through
+//! `kernel_core::handle_panic`: the boot-to-`BootCompleted` slice has
+//! no post-init arch handle to publish for a richer panic context, and
+//! adding the `AtomicPtr<RiscvArch>` dance now would be unused
+//! machinery (`AGENTS.md` §2.3 — no bloat). A panic before
+//! `BootCompleted` therefore parks the hart, the QEMU integration test
+//! times out, and the harness reports `Outcome::Timeout` — the
+//! documented fail-loud behaviour (`AGENTS.md` §7).
+
+use core::fmt::Write as _;
+use core::panic::PanicInfo;
+
+use crate::kernel_arch::halt_current_hart;
+use crate::serial::SbiWriter;
+
+/// Shared `#[panic_handler]` body for the riscv64 boot binaries.
+///
+/// Always returns `!`: emits one record on the SBI console, then parks
+/// the hart via [`halt_current_hart`].
+pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
+    let mut w = SbiWriter;
+    let _ = writeln!(w, "[rustos-kernel] riscv64 panic: {info}");
+    halt_current_hart()
+}

@@ -376,6 +376,13 @@ version = "0.0.0"
 [[package]]
 name = "rustos-arch-riscv64"
 version = "0.0.0"
+dependencies = [
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched",
+ "rustos-kernel-sec",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-arch-wasm32"
@@ -390,6 +397,10 @@ dependencies = [
  "rustos-kernel-mem",
  "rustos-kernel-sched",
 ]
+
+[[package]]
+name = "rustos-bumpalloc"
+version = "0.0.0"
 
 [[package]]
 name = "rustos-caps"
@@ -515,6 +526,7 @@ dependencies = [
  "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-x86_64",
+ "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-drv-bus-virtio",
@@ -681,6 +693,15 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
  "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-kernel-arch-boot-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
  "rustos-log",
 ]
 

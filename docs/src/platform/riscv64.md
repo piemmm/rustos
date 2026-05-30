@@ -1,13 +1,60 @@
 # riscv64
 
-RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. The
-kernel port itself is staged work; what exists today is the host-side
-**QEMU runner** support that the Stage 4.D virtio-MMIO integration tests
-build on, plus the kernel-side `SiFive` Test finisher
-(`kernel/arch/riscv64::qemu_exit`) those tests use to report their
-result. This page documents that runner surface — the on-board boot
-model, the result protocol, and the argv contract — so the kernel-side
-test bin can rely on a stable harness.
+RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. Two
+halves exist today: the kernel-side **boot pipeline** that brings the
+QEMU `virt` board up to `AuditEvent::BootCompleted`, and the host-side
+**QEMU runner** that launches it (and the Stage 4.D virtio-MMIO
+integration tests that build on the same harness). This page documents
+both — the boot pipeline, the on-board boot model, the result protocol,
+and the argv contract.
+
+## Kernel boot pipeline
+
+`kernel/arch/riscv64` owns the riscv64 boot path (Stage 4.D Item 4). It
+boots to `AuditEvent::BootCompleted` and is exercised by the
+`tests/integration/kernel_arch_boot_riscv64` QEMU test — the riscv64
+analogue of the x86_64 `kernel_arch_boot` bin.
+
+Boot sequence:
+
+1. **Entry (`boot.s` → `entry.rs`).** OpenSBI enters the ELF in S-mode
+   with paging off (`satp = 0`, bare addressing), `a0 = hartid`, and
+   `a1 =` the flattened device tree pointer. The `_start` trampoline
+   sets up the boot stack, zeroes `.bss`, and tail-calls
+   `rustos_arch_riscv64_main(hartid, dtb)`, which forwards to the
+   binary-supplied `kernel_main`.
+2. **Device-tree parse (`fdt.rs`).** A minimal, bounds-checked FDT
+   reader extracts the first `/memory` node's `reg` (base/size) and the
+   `/cpus` `timebase-frequency`. It is host-tested against a hand-built
+   DTB fixture.
+3. **Boot pipeline (`boot.rs`).** Builds a `BootMemoryMap` reserving
+   `[ram_base, __kernel_end)` (firmware + kernel image + boot heap) and
+   marking `[__kernel_end, ram_end)` usable, constructs `RiscvArch`
+   (`kernel_arch.rs`, the `kernel_core::KernelArch` impl whose monotonic
+   clock reads the `time` CSR via `rdtime`), assembles a
+   `kernel_core::BootInfo`, and hands it to `kernel_core::kernel_main`.
+4. **Console (`sbi.rs`, `serial.rs`).** The boot log and audit records
+   are written through the SBI legacy `console_putchar`, which OpenSBI
+   routes to the same UART `-serial stdio` captures.
+
+No Sv39 paging or trap vector is required to reach `BootCompleted`: the
+board enters S-mode with paging off and the init pipeline never faults.
+The boot heap is a 64 MiB `.heap` (NOLOAD) section the linker places
+*after* `__kernel_end`, so the trampoline does not zero it and the
+usable physical-memory map excludes it.
+
+> The 64 MiB boot bump allocator itself lives in the shared
+> `lib/bumpalloc` crate (`rustos-bumpalloc`), registered as the test
+> binary's `#[global_allocator]` — the same allocator the x86_64 boot
+> bins use, defined once (`AGENTS.md` §2.2, §6).
+
+Sv39 paging, the S-mode trap vector, the ring-0 DTB virtio-mmio walk,
+and SMP bring-up are the remaining riscv64 deliverables (`PLAN.md`
+Stage 4.D Item 4); they are not needed for the boot-to-`BootCompleted`
+slice.
+
+The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
+is what the test bin uses to report its result.
 
 ## Board model: `virt`
 
@@ -80,6 +127,16 @@ interface creep).
 ## Manual debugging
 
 The `rustos-qemu-run` wrapper is x86_64-only today; riscv64 runs go
-through `Runner::run` (or `cargo xtask test --qemu` once a riscv64 test
-crate is enrolled). Set `RUSTOS_QEMU_DEBUG=1` to print the exact QEMU
-invocation the runner constructs.
+through `Runner::run` or `cargo xtask test --qemu` (which builds and
+launches the enrolled `rustos-test-kernel-arch-boot-riscv64` bin for
+`riscv64gc-unknown-none-elf`). A run can also be reproduced by hand:
+
+```text
+qemu-system-riscv64 -M virt -no-reboot -display none -serial stdio \
+    -m 256M -smp 1 -bios default \
+    -kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-kernel-arch-boot-riscv64
+```
+
+A clean boot prints the phase timeline and `id=4004 kernel boot
+completed`, after which the `SiFive` Test finisher exits QEMU with
+status `0`.

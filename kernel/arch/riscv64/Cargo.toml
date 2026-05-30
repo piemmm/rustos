@@ -1,6 +1,6 @@
 [package]
 name = "rustos-arch-riscv64"
-description = "RustOS placeholder: riscv64 architecture port."
+description = "RustOS architecture port: riscv64 (Stage 4.D Item 4 — virt-board boot pipeline to AuditEvent::BootCompleted)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,31 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Unlike `kernel/arch/x86_64`, this crate depends on `rustos-kernel-core`
+# directly and houses the whole riscv64 boot pipeline (entry trampoline,
+# SBI console, FDT memory-map parse, `RiscvArch: KernelArch`, and the
+# `boot()` that builds a `kernel_core::BootInfo` and hands it to
+# `kernel_core::kernel_main`).
+#
+# The x86_64 port keeps `KernelArch` out of the arch crate so the two
+# *pre-existing* freestanding Stage-2 QEMU bins
+# (`memory_isolation`, `scheduler_stress_qemu`) can link it without a
+# `#[global_allocator]`. riscv64 has no such bins to protect: its only
+# freestanding consumer is the boot harness, which provides an allocator
+# anyway. Housing the pipeline here therefore avoids threading riscv64
+# through the heavily x86_64-coupled `rustos-kernel` crate
+# (`AGENTS.md` §2.2 — no duplication, §3 — arch ports own their boot
+# path). The boot/SBI/serial/entry modules are gated to
+# `cfg(all(target_arch = "riscv64", target_os = "none"))`; the FDT
+# parser and the `RiscvArch` struct build on the host so their unit
+# tests run under `cargo test`.
+[dependencies]
+rustos-kernel-core = { path = "../../core", version = "=0.0.0" }
+rustos-kernel-sched = { path = "../../sched", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
