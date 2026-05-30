@@ -1,12 +1,28 @@
 # Next session — Stage 4.D Items 4 / 6 (remaining)
-# (carried over after the shared virtio bring-up scaffolding extraction +
-#  the gated `virtio_net_pci_x86_64` vertical landed, on top of the
-#  proven/gated `virtio_blk_pci_x86_64` round-trip)
+# (carried over after the virtio unload → reload → reuse cycle landed in
+#  the shared bring-up, on top of the gated `virtio_net_pci_x86_64` +
+#  `virtio_blk_pci_x86_64` verticals)
 
 ## Where we are
 
 `PLAN.md` Stage 4.D records the following as **complete** (most recent
 first):
+
+- **virtio unload → reload → reuse — landed (latest session).** The
+  shared `run_virtio_scenario` previously loaded the signed `.rxe` once
+  and dropped the `rustos_drvhost::Host` before the device-tail ran. The
+  host lifecycle now lives in a `drive_driver_lifecycle(cfg, &dyn
+  VirtioHostFactory, transport, vhost, body)` helper
+  (`tests/integration/virtio_qemu_support/src/imp.rs`) that drives
+  `load → snapshot → reload → unload` against the live
+  `KernelVirtioFactory`, running the device-tail closure *after* the
+  reload and *before* the unload. Both the blk and net verticals funnel
+  through it, so each proves a reloaded driver still brings its device
+  online and round-trips I/O — with no duplicated per-driver reload test
+  (`AGENTS.md` §2.2). Verified: `cargo xtask test --qemu` green (all 8
+  enrolled tests), `clippy -D warnings`, `RUSTDOCFLAGS="-D warnings"
+  cargo doc --no-deps`, host `cargo build --workspace`. Docs:
+  `docs/src/platform/x86_64.md`.
 
 - **Shared virtio bring-up scaffolding + `virtio_net_pci_x86_64`
   vertical — landed and gated (latest session).** The ~430 lines of
@@ -97,10 +113,10 @@ The x86_64 PCI verticals (blk + net) are done and gated. What remains:
   (blk: sector round-trip; net: `Client` resolve + ping) so the
   device-specific code is not duplicated across arches (`AGENTS.md`
   §2.2).
-- **unload → reload → reuse test** for each driver (per the original
-  Stage 4 deliverable list). `rustos_drvhost::Host` already supports
-  `load → snapshot → reload → unload` (exercised by `drvhost_qemu`); add
-  a virtio-device variant that re-drives the device after a reload.
+- **unload → reload → reuse** — *done* this session for the x86_64 PCI
+  verticals (see "Where we are"). The riscv64 MMIO verticals will inherit
+  the same `drive_driver_lifecycle` path once the riscv64 boot port lands
+  (keep them on the shared helper — do not re-implement the cycle).
 
 ### Item 6 — Acceptance gate
 

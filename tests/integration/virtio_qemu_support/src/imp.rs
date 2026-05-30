@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_abi::{CapabilityId, Errno, IrqHandle};
+use rustos_abi::{CapabilityId, Errno};
 use rustos_arch_x86_64::irq::{global_routing, msi_message};
 use rustos_arch_x86_64::qemu_exit;
 use rustos_arch_x86_64::smp::bsp_lapic_id;
@@ -13,15 +13,15 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_pci::x86_mechanism_one;
 use rustos_drv_bus_virtio::{KernelMmioMapper, KernelVirtioHost, PciTransport, PoolId, VirtioHost};
-use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
+use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource, VirtioHostFactory};
 use rustos_kernel::arch_wrapper::{published_irq_table, published_memory_map};
 use rustos_kernel::SERIAL_SINK;
 use rustos_kernel::{provision_virtio_pci, KernelVirtioFactory, KernelVirtioFactoryConfig};
-use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
+use rustos_kernel_irq::{IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, PhysAddr,
-    PhysMap, VirtAddr, PAGE_SIZE,
+    VirtAddr, PAGE_SIZE,
 };
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
@@ -270,61 +270,6 @@ pub struct ScenarioConfig<'a> {
     pub start_msg: &'a str,
 }
 
-/// Load the signed `.rxe` through `rustos_drvhost::Host`, exercising
-/// signature verification, capability gating, and the kernel virtio-host
-/// factory. Any failure flips `qemu_exit::exit_failure`.
-#[allow(clippy::too_many_arguments)]
-fn load_signed_rxe(
-    cfg: &ScenarioConfig<'_>,
-    frames: &FrameAllocator,
-    phys: &dyn PhysMap,
-    caller: &TaskCapabilities,
-    irq: &IrqTable,
-    handle: IrqHandle,
-    waiter: &dyn IrqWaiter,
-) {
-    let Ok(pubkey) = Ed25519PublicKey::from_bytes(&cfg.trusted_pubkey) else {
-        fail("trust anchor decode");
-    };
-    let trusted = [pubkey];
-    let mut load_caps = CapabilitySet::empty();
-    load_caps.insert(CapabilityId::DRV_LOAD);
-    load_caps.insert(CapabilityId::MEM_DMA);
-
-    let source = BakedSource {
-        bytes: cfg.rxe_image,
-    };
-    let factory = KernelVirtioFactory::new(
-        KernelVirtioFactoryConfig {
-            frames,
-            phys,
-            caller,
-            audit: &SERIAL_SINK,
-            irq,
-            irq_handle: handle,
-            waiter,
-            pool_base: VirtAddr::new(POOL_VBASE),
-            pool_pages: POOL_PAGES,
-        },
-        HostPageTable::new,
-    );
-    let mut host = Host::new(HostConfig {
-        trusted_signers: &trusted,
-        syscall_table_hash: cfg.syscall_table_hash,
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
-        source: &source,
-        resolver: cfg.resolver,
-        sink: &SERIAL_SINK,
-        virtio_host_factory: Some(&factory),
-    });
-    if host.load(DRIVER_PATH, &load_caps).is_err() {
-        fail("signed .rxe load");
-    }
-    if host.loaded_count() != 1 {
-        fail("unexpected loaded driver count");
-    }
-}
-
 // --- Shared scenario -------------------------------------------------
 
 /// Perform the device-agnostic virtio bring-up, then hand the
@@ -332,6 +277,16 @@ fn load_signed_rxe(
 /// the concrete driver and exercises the device. `body` returns `Ok(())`
 /// on success or `Err(msg)` to flip QEMU failure with a breadcrumb; the
 /// scenario flips success only when `body` returns `Ok`. Never returns.
+///
+/// The signed `.rxe` is driven through the full `rustos_drvhost::Host`
+/// lifecycle — `load → snapshot → reload → unload` — against the live
+/// [`KernelVirtioFactory`]. `body` runs *after* the reload and *before*
+/// the unload, so every vertical that links this crate proves a reloaded
+/// driver still brings its real device online and round-trips I/O (the
+/// Stage 4.D Item 4 unload→reload→reuse deliverable, shared once here per
+/// `AGENTS.md` §2.2). Any lifecycle transition that misbehaves flips QEMU
+/// failure with a breadcrumb rather than failing silently (`AGENTS.md`
+/// §7 — no weakened tests).
 ///
 /// MSI-X is enabled on the transport *before* `body` runs so the per-queue
 /// `queue_msix_vector` is programmed during the driver's `open`-time queue
@@ -423,19 +378,96 @@ where
         &waiter,
     );
 
-    // 6. Load the signed `.rxe` (signature + factory path).
-    load_signed_rxe(cfg, &frames, &phys, &caller, table, handle, &waiter);
-    log("virtio-qemu: signed .rxe loaded");
-
-    // 7. Enable MSI-X on every queue, then drive the device. Interrupts
-    //    stay disabled in task context and are enabled only inside the
-    //    waiter's `sti; hlt` park (see `HltWaiter::yield_now`).
+    // 6. Mint the per-driver virtio host factory, enable MSI-X on every
+    //    queue, then drive the full load → snapshot → reload → unload
+    //    lifecycle with `body` (the device round-trip) running against
+    //    the reloaded driver. See [`drive_driver_lifecycle`].
+    let factory = KernelVirtioFactory::new(
+        KernelVirtioFactoryConfig {
+            frames: &frames,
+            phys: &phys,
+            caller: &caller,
+            audit: &SERIAL_SINK,
+            irq: table,
+            irq_handle: handle,
+            waiter: &waiter,
+            pool_base: VirtAddr::new(POOL_VBASE),
+            pool_pages: POOL_PAGES,
+        },
+        HostPageTable::new,
+    );
     transport.enable_msix(MSIX_ENTRY);
+    drive_driver_lifecycle(cfg, &factory, transport, &vhost, body)
+}
 
-    match body(transport, &vhost) {
-        Ok(()) => qemu_exit::exit_success(),
-        Err(msg) => fail(msg),
+/// Build the driver host over the signed `.rxe` and exercise the full
+/// `load → snapshot → reload → unload` cycle against `factory`, running
+/// `body` (the device round-trip) *after* the reload and *before* the
+/// unload. Every transition that misbehaves flips QEMU failure with a
+/// breadcrumb (`AGENTS.md` §7). Never returns.
+fn drive_driver_lifecycle<F>(
+    cfg: &ScenarioConfig<'_>,
+    factory: &dyn VirtioHostFactory,
+    transport: PciTransport,
+    vhost: &dyn VirtioHost,
+    body: F,
+) -> !
+where
+    F: FnOnce(PciTransport, &dyn VirtioHost) -> Result<(), &'static str>,
+{
+    let Ok(pubkey) = Ed25519PublicKey::from_bytes(&cfg.trusted_pubkey) else {
+        fail("trust anchor decode");
+    };
+    let trusted = [pubkey];
+    let mut load_caps = CapabilitySet::empty();
+    load_caps.insert(CapabilityId::DRV_LOAD);
+    load_caps.insert(CapabilityId::MEM_DMA);
+    let source = BakedSource {
+        bytes: cfg.rxe_image,
+    };
+    let mut host = Host::new(HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: cfg.syscall_table_hash,
+        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        source: &source,
+        resolver: cfg.resolver,
+        sink: &SERIAL_SINK,
+        virtio_host_factory: Some(factory),
+    });
+    let Ok(first) = host.load(DRIVER_PATH, &load_caps) else {
+        fail("signed .rxe load");
+    };
+    if host.loaded_count() != 1 {
+        fail("loaded count after load");
     }
+    if host.snapshot().first().map(|s| s.handle) != Some(first) {
+        fail("snapshot handle mismatch");
+    }
+    let Ok(reloaded) = host.reload(first, &load_caps) else {
+        fail("signed .rxe reload");
+    };
+    if reloaded == first {
+        fail("reload returned stale handle");
+    }
+    if host.loaded_count() != 1 {
+        fail("loaded count after reload");
+    }
+    log("virtio-qemu: signed .rxe loaded, reloaded");
+
+    // Drive the device through the reloaded driver.
+    if let Err(msg) = body(transport, vhost) {
+        fail(msg);
+    }
+
+    // Unload and confirm the host returns to a clean state.
+    if host.unload(reloaded).is_err() {
+        fail("driver unload");
+    }
+    if host.loaded_count() != 0 {
+        fail("loaded count after unload");
+    }
+    log("virtio-qemu: driver unloaded after device reuse");
+    qemu_exit::exit_success()
 }
 
 // --- Boot harness ----------------------------------------------------

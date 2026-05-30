@@ -1196,6 +1196,38 @@ follow-up is its own thread and is now also complete.
   `drivers/input/ps2`) remain outstanding per the Stage 4
   deliverable list above; packed virtqueues (virtio 1.1 §2.7) are
   a Stage 5 follow-up documented in `docs/src/drivers/virtio.md`.
+- Stage 4.D follow-up (Item 4 — virtio unload → reload → reuse,
+  *complete*): the shared `run_virtio_scenario` previously loaded the
+  signed `.rxe` once and dropped the `rustos_drvhost::Host` before the
+  device-tail closure ran, so the per-driver **unload → reload → reuse**
+  deliverable was still outstanding. **Change.** The host lifecycle is
+  now extracted into a `drive_driver_lifecycle(cfg, &dyn
+  VirtioHostFactory, transport, vhost, body)` helper in
+  `tests/integration/virtio_qemu_support/src/imp.rs` that drives the full
+  `load → snapshot → reload → unload` cycle against the live
+  `KernelVirtioFactory`, running the device-tail closure *after* the
+  reload and *before* the unload. Because every vertical funnels through
+  this one helper, both the blk and net verticals now prove a reloaded
+  driver still brings its real (emulated) device online and round-trips
+  I/O — with **no** duplicated per-driver reload test (`AGENTS.md` §2.2).
+  The factory mints a 64-page DMA pool per load, so the load + reload +
+  direct-driving pools fit inside the existing 256-page carve. Each
+  lifecycle transition that misbehaves (bad load/reload/unload, wrong
+  `loaded_count`, stale handle, snapshot mismatch) flips QEMU failure
+  with a serial breadcrumb (`AGENTS.md` §7 — no weakened tests). The
+  helper erases the factory's generics via `&dyn VirtioHostFactory` so it
+  stays under the clippy line limit without an `#[allow]`. **Verification.**
+  `cargo xtask test --qemu` is green (all 8 enrolled tests, incl. blk +
+  net exercising the new cycle); `cargo clippy -- -D warnings`,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` (the three crates,
+  `x86_64-unknown-none`), and host `cargo build --workspace` are clean.
+  **Docs.** `docs/src/platform/x86_64.md` ("virtio QEMU verticals (shared
+  bring-up)"). **Deferred.** The riscv64 MMIO verticals
+  (`virtio_blk_mmio_riscv64`, `virtio_net_mmio_riscv64`) still need the
+  riscv64 kernel boot port + DTB walk; the Item 6 acceptance gate
+  (`cargo xtask ci` — its mdBook `docs-check` half + `cargo deny` could
+  not run in this environment) remains outstanding; see
+  `.junie/next-session-prompt.md`.
 - Stage 4.D follow-up (Item 4 — shared virtio bring-up scaffolding +
   `virtio_net_pci_x86_64` vertical, *complete*): the
   `virtio_blk_pci_x86_64` bin carried ~430 lines of device-agnostic
