@@ -27,19 +27,29 @@
   companion. Tests: `rustos-kernel-irq` 24, `rustos-drv-bus-pci` 28,
   `rustos-drv-storage-virtio-blk` 8, `rustos-drv-bus-virtio`
   (kernel-host) 75; clippy `-D warnings`/fmt/x86_64 build clean.
-  **NOT enrolled in `cargo xtask test --qemu`** — see "Next focus".
+  **Now enrolled in `cargo xtask test --qemu`** — see "Resolved" below.
 
-- **Next focus: the flaky single-CPU MSI completion hang.** ~30% of
-  runs hang: the guest spins with `IF=0` in a tight loop near
-  `rustos_kernel_irq::table::IrqTable::fire` right after the device's
-  *first* completion interrupt is delivered (`-d int` shows the `v=40`
-  MSI-X vector arrives, then no further `v=20` timer ticks). Suspected:
-  a silent panic-or-spin in ISR context, possibly the serial lock held
-  by the task's DMA-alloc logging when the ISR fires. Root-cause and
-  fix it, then re-enrol by setting `disk_sectors: Some(2048)` in
-  `tools/xtask/src/commands/qemu_tests.rs` (the plumbing is already in
-  place). AGENTS.md §7 forbids gating CI on a flaky test, so do not
-  enrol until it is provably stable.
+- **Resolved: the flaky single-CPU MSI completion hang.** The earlier
+  ~30% hang (guest spinning `IF=0` near
+  `rustos_kernel_irq::table::IrqTable::fire` after the device's first
+  completion interrupt) was the deadlock between the completion ISR's
+  `IrqTable::fire` and a parked `try_wait_step` holding the same
+  `IrqTable` lock — already eliminated by the lock-free `fire` /
+  `try_wait_step` rewrite (per-line `bound` / `ready` atomics, no
+  shared lock). Root-cause review confirmed no other ISR-reachable
+  blocking primitive can stall: the only one,
+  `IoApicController::mask`'s `SpinLock`, is acquired solely with
+  interrupts disabled (boot never `sti`s, the test bin `cli`s in task
+  context, `mask` runs only in-ISR), so no same-CPU IF=1 holder
+  exists; and `SerialSink` is lock-free. Stability re-verified across
+  90 consecutive runs (60 TCG through the exact `xtask` runner path +
+  30 KVM) plus 4 full `cargo xtask test --qemu` invocations, all green.
+  The crate is now enrolled in `tools/xtask/src/commands/qemu_tests.rs`
+  with `disk_sectors: Some(2048)`, and the stale `kernel.rs` comments
+  describing the no-longer-existent `IrqTable`-lock deadlock were
+  corrected. **Next focus** is the remaining Item 4 work below (the
+  riscv64 MMIO vertical, the net tests, and the Item 6 acceptance
+  gate).
 
 - **Live boot-wiring seams** (latest session). The
   `tests/integration/virtio_blk_pci_x86_64` kernel test bin still

@@ -235,18 +235,24 @@ impl IrqWaiter for HltWaiter {
 
     fn yield_now(&self) -> Result<(), IrqWaitAbort> {
         // Park with the canonical race-free `sti; hlt` idiom, then
-        // disable interrupts again on wake. Interrupts are kept
-        // *disabled* everywhere except this halt: the device's
-        // completion interrupt fires `IrqTable::fire`, which takes the
-        // same `IrqTable` lock that `try_wait_step` holds in the
-        // surrounding `block_until_ready` loop. On a single CPU, an
-        // interrupt landing while the parked task holds that lock would
-        // deadlock the ISR; confining interrupt-enabled time to the
-        // `hlt` (when no lock is held) makes the wait reentrancy-safe.
-        // x86 guarantees an interrupt pending at `sti` is not taken
-        // until after the following `hlt` is entered, so no wake-up is
-        // lost between the two; the periodic LAPIC timer additionally
-        // bounds every park so a missed edge still re-checks readiness.
+        // disable interrupts again on wake. The completion path is
+        // lock-free on the IRQ side — `IrqTable::fire` and
+        // `try_wait_step` synchronise only through per-line atomics
+        // (`bound`/`ready`), so the ISR can never deadlock a parked
+        // waiter on a shared `IrqTable` lock. Interrupts are
+        // nonetheless kept *disabled* in task context and re-enabled
+        // only across this halt: on a single CPU that confines every
+        // delivery (the routed MSI-X completion vector and the periodic
+        // LAPIC timer) to a well-defined point where the task holds no
+        // lock — in particular the completion ISR runs
+        // `IoApicController::mask`, which takes a plain spinlock — and
+        // makes the wake-up deterministic: the edge is taken inside the
+        // `hlt`, and the very next loop iteration's `try_wait_step`
+        // observes the `ready` flag `fire` set. x86 guarantees an
+        // interrupt pending at `sti` is not taken until after the
+        // following `hlt` is entered, so no wake-up is lost between the
+        // two; the periodic LAPIC timer additionally bounds every park
+        // so a missed edge still re-checks readiness.
         //
         // SAFETY: `sti`/`hlt`/`cli` are privileged but well-defined in
         // ring 0; the IDT is fully populated by the boot pipeline and
@@ -262,11 +268,14 @@ impl IrqWaiter for HltWaiter {
 
 /// Disable maskable interrupts on the current CPU.
 ///
-/// The boot pipeline leaves interrupts enabled (the periodic LAPIC
-/// timer is live). The scenario disables them so every task-context
-/// access to the shared `IrqTable` lock runs uninterruptible; the
-/// waiter re-enables them only across its `hlt` park, when no lock is
-/// held (see [`HltWaiter::yield_now`]).
+/// The boot pipeline runs with `IF` clear and never `sti`s (the
+/// periodic LAPIC timer is armed but its ticks stay pending), so
+/// interrupts are already disabled when the `BootCompleted` observer
+/// hijacks this CPU; this call is the defensive re-assertion. The
+/// scenario keeps interrupts disabled in task context so that on a
+/// single CPU every delivery is confined to the waiter's `hlt` park —
+/// when the task holds no lock — and re-enables them only there (see
+/// [`HltWaiter::yield_now`]).
 ///
 /// # Safety
 ///
@@ -365,9 +374,11 @@ fn run_scenario() -> ! {
     log("virtio-blk-pci: scenario start");
 
     // Disable interrupts for the whole scenario; the waiter re-enables
-    // them only across its `hlt` park. This closes the single-CPU
-    // window in which the completion ISR's `IrqTable::fire` could
-    // preempt a `try_wait_step` that holds the same `IrqTable` lock.
+    // them only across its `hlt` park. `IrqTable::fire`/`try_wait_step`
+    // are lock-free (per-line atomics), so this is not needed to avoid
+    // an IrqTable-lock deadlock; it keeps the single-CPU completion
+    // wait deterministic by confining every interrupt delivery to the
+    // park, where the task holds no lock.
     // SAFETY: see `cli`.
     unsafe { cli() };
 
@@ -452,10 +463,10 @@ fn run_scenario() -> ! {
 
     // 7. Drive the device. Interrupts stay disabled in task context and
     //    are enabled only inside the waiter's `sti; hlt` park (see
-    //    `HltWaiter::yield_now`): the completion ISR shares the
-    //    `IrqTable` lock with `try_wait_step`, so enabling interrupts
-    //    only while parked (lock released) keeps the single-CPU wait
-    //    free of an ISR-vs-task lock deadlock.
+    //    `HltWaiter::yield_now`): the IRQ completion path is lock-free,
+    //    so confining delivery to the park is what makes the single-CPU
+    //    wait deterministic — the completion edge lands at the `hlt`
+    //    and the next `try_wait_step` consumes the `ready` flag.
     transport.enable_msix(MSIX_ENTRY);
     let mut blk = match VirtioBlk::open(transport, &vhost) {
         Ok(b) => b,

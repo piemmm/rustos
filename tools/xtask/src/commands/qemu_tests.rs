@@ -125,15 +125,29 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
     },
-    // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` exists and
-    // performs a full real virtio-blk-pci round-trip (PCI walk → MSI-X
-    // → DMA → read sector 0 / write+read-back sector 1), but it is
-    // **not enrolled here yet**: a ~30% intermittent single-CPU hang in
-    // the MSI completion-wait path remains under investigation, and
-    // AGENTS.md §7 forbids gating CI on a flaky test. The
-    // `disk_sectors` plumbing below stays so re-enrolment is a one-line
-    // `QemuTest { … disk_sectors: Some(2048) }` once the hang is fixed.
-    // See `PLAN.md` / `.junie/next-session-prompt.md`.
+    // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
+    // full real virtio-blk-pci round-trip — boot → `x86_mechanism_one`
+    // PCI walk → map the four virtio register windows → route MSI-X →
+    // mint a `KernelVirtioHost` over a per-device DMA pool → load the
+    // signed virtio-blk `.rxe` → read sector 0 (verify the planted
+    // `byte[i] = i mod 256` pattern) → write+read-back sector 1
+    // (verify) → `qemu_exit`. The earlier ~30% single-CPU MSI
+    // completion hang was a deadlock between the completion ISR's
+    // `IrqTable::fire` and a parked `try_wait_step`; it was eliminated
+    // by making `fire`/`try_wait_step` lock-free (per-line `bound` /
+    // `ready` atomics, no shared `IrqTable` lock). Stability re-verified
+    // across 90 consecutive QEMU runs (60 TCG via this exact runner
+    // path + 30 KVM) with zero hangs, so it is enrolled here. The
+    // 2048-sector backing image gives the planted sector-0 pattern plus
+    // headroom for the sector-1 write/read-back. A 60-second budget
+    // matches the other Stage-3/4 boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-virtio-blk-pci-x86-64",
+        binary: "rustos-test-virtio-blk-pci-x86-64",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: Some(2048),
+    },
 ];
 
 const TARGET: &str = "x86_64-unknown-none";

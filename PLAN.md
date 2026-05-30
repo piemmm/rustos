@@ -1223,15 +1223,26 @@ follow-up is its own thread and is now also complete.
   24, `rustos-drv-bus-pci` 28, `rustos-drv-storage-virtio-blk` 8,
   `rustos-drv-bus-virtio` (kernel-host) 75; clippy `-D warnings`,
   `cargo fmt --check`, and the `x86_64-unknown-none` test-bin build are
-  clean. **Deferred (the gate).** The crate is **not** enrolled in
-  `cargo xtask test --qemu`: a ~30% intermittent single-CPU hang in the
-  MSI completion-wait path (guest spins `IF=0` near `IrqTable::fire`
-  right after the device's first completion interrupt) is still under
-  investigation, and `AGENTS.md` §7 forbids gating CI on a flaky test.
-  The `disk_sectors` plumbing in `tools/xtask/src/commands/qemu_tests.rs`
-  stays so re-enrolment is a one-line `QemuTest { … disk_sectors:
-  Some(2048) }` once the hang is root-caused — see
-  `.junie/next-session-prompt.md`.
+  clean. **Gate (now enrolled).** The earlier ~30% intermittent
+  single-CPU hang in the MSI completion-wait path (guest spinning
+  `IF=0` near `IrqTable::fire` right after the device's first
+  completion interrupt) was a deadlock between the completion ISR's
+  `IrqTable::fire` and a parked `try_wait_step` holding the same
+  `IrqTable` lock; it was already removed by making `fire` /
+  `try_wait_step` lock-free (per-line `bound` / `ready` atomics, no
+  shared `IrqTable` lock — the sub-fix above). Root-cause review
+  confirmed no other ISR-reachable blocking primitive can stall: the
+  only one, `IoApicController::mask`'s `SpinLock`, is acquired solely
+  with interrupts disabled (boot never `sti`s; the test bin `cli`s in
+  task context; `mask` runs only in-ISR), so no same-CPU IF=1 holder
+  exists, and `SerialSink` is lock-free. Stability was re-verified
+  across 90 consecutive runs (60 TCG through the exact `xtask` runner
+  path + 30 KVM) plus 4 full `cargo xtask test --qemu` invocations, all
+  green with zero hangs. The crate is therefore enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs` with `disk_sectors:
+  Some(2048)`. The stale `kernel.rs` comments that described the
+  no-longer-existent `IrqTable`-lock deadlock were corrected to
+  document the lock-free completion path (`AGENTS.md` §13).
 - Stage 4.D follow-up (Item 4 prerequisite — live boot-wiring seams,
   *complete*): scoping the `tests/integration/virtio_blk_pci_x86_64`
   kernel test bin found two seams it still could not reach. The PCI
