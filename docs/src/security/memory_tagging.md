@@ -101,6 +101,23 @@ and is rejected with `SlabError::TagMismatch`. This is the architecture-
 neutral analogue of what Arm MTE faults on, and it slots in front of the
 existing guard pages and zero-on-free.
 
+The software check is **on by default** on every port that does not
+enforce use-after-free in hardware — which today is every Tier-1 target.
+It is not free, though: it costs a tag rotation on every allocation and a
+tag comparison on every free and slot access. On a port whose silicon
+*already* enforces UAF in hardware — Arm MTE with **both** `tag_storage`
+and `tag_check_faults` supported and enabled
+(`TaggingProfile::enforces_uaf_in_hardware`) — repeating that work in
+software is pure duplicated CPU overhead. So the slab stands the software
+check down there: `Slab::with_tag_check(.., SoftwareTagCheck::for_tagging(handle))`
+returns `SoftwareTagCheck::Disabled` exactly when the port's
+`MemoryTagging` profile enforces UAF in hardware, and `SoftwareTagCheck::Enabled`
+otherwise. `Slab::new` keeps the check enabled — the default — so the
+software path stays on everywhere the hardware does not cover it
+(`AGENTS.md` §19.10). Standing the *tag* check down never weakens the
+other slab invariants: double-free, unknown-handle, and guard-page
+checks still fail closed (`AGENTS.md` §5.4).
+
 ## Remaining §19.10 work
 
 The aarch64 `Pending` slots close with the Stage 6 process model: the

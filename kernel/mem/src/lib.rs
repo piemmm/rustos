@@ -66,7 +66,7 @@ pub use loader::{map_flags_for, map_image, LoadError};
 pub use mmio::{MmioError, MmioMap, MmioRegion};
 pub use phys::{DirectPhysMap, PhysMap};
 pub use sensitive::SensitiveBuffer;
-pub use slab::{Slab, SlabError, SlabHandle};
+pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
 pub use vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
 
 #[cfg(any(test, feature = "host-tests"))]

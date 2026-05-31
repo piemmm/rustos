@@ -20,7 +20,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_arch_api::{next_free_tag, MemTag, TAG_COUNT};
+use rustos_arch_api::{next_free_tag, MemTag, MemoryTagging, TAG_COUNT};
 
 use crate::error::AllocError;
 use crate::frame::PAGE_SIZE;
@@ -108,6 +108,67 @@ impl SlabHandle {
     }
 }
 
+/// Whether the slab runs the architecture-neutral *software*
+/// use-after-free tag check (`AGENTS.md` §19.10).
+///
+/// The software check costs a tag rotation on every allocation and a
+/// tag comparison on every free and slot access. On a port whose
+/// silicon already enforces use-after-free in hardware — Arm MTE with
+/// *both* `tag_storage` and `tag_check_faults` supported and enabled
+/// ([`TaggingProfile::enforces_uaf_in_hardware`]) — that work is pure
+/// duplicated CPU overhead: the hardware tag checker already faults on
+/// a dangling access. There the slab stands the software check down.
+///
+/// Everywhere else — every port that does **not** enforce UAF in
+/// hardware, which today is every Tier-1 target — the software check is
+/// on. That is the default ([`Slab::new`]); only an explicit
+/// hardware-tagging port flips it off via [`Slab::with_tag_check`].
+///
+/// [`TaggingProfile::enforces_uaf_in_hardware`]:
+///     rustos_arch_api::TaggingProfile::enforces_uaf_in_hardware
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SoftwareTagCheck {
+    /// Rotate the slot tag on every allocation and reject a handle whose
+    /// tag no longer matches its slot. The default, used on every port
+    /// that does not enforce UAF in hardware.
+    #[default]
+    Enabled,
+    /// Skip the software tag rotation and comparison entirely: the
+    /// port's hardware tag checker already faults on a use-after-free,
+    /// so the software check would only duplicate the cost.
+    Disabled,
+}
+
+impl SoftwareTagCheck {
+    /// Choose the software-tag-check policy for a slab on a port that
+    /// exposes `tagging`.
+    ///
+    /// Returns [`SoftwareTagCheck::Disabled`] exactly when the port
+    /// enforces use-after-free in hardware
+    /// ([`TaggingProfile::enforces_uaf_in_hardware`]), and
+    /// [`SoftwareTagCheck::Enabled`] otherwise. This keeps the software
+    /// check on by default (`AGENTS.md` §19.10) yet steps aside — for
+    /// performance — precisely when redundant hardware tagging is
+    /// available and enabled.
+    ///
+    /// [`TaggingProfile::enforces_uaf_in_hardware`]:
+    ///     rustos_arch_api::TaggingProfile::enforces_uaf_in_hardware
+    #[must_use]
+    pub fn for_tagging(tagging: &dyn MemoryTagging) -> Self {
+        if tagging.profile().enforces_uaf_in_hardware() {
+            Self::Disabled
+        } else {
+            Self::Enabled
+        }
+    }
+
+    /// `true` if the software tag check is active.
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 /// Fixed-size object slab.
 ///
 /// One slab manages objects of a single `object_size` and yields up to
@@ -125,10 +186,20 @@ pub struct Slab {
     /// allocation so a reused slot never carries the tag a previously
     /// issued (now dangling) handle still holds.
     tags: Vec<MemTag>,
+    /// Whether the software use-after-free tag check runs, or is stood
+    /// down because the port enforces UAF in hardware.
+    tag_check: SoftwareTagCheck,
 }
 
 impl Slab {
-    /// Construct a new slab.
+    /// Construct a new slab with the software use-after-free tag check
+    /// **enabled** (`AGENTS.md` §19.10) — the default on every port that
+    /// does not enforce UAF in hardware.
+    ///
+    /// A port whose silicon enforces UAF in hardware constructs the slab
+    /// through [`Slab::with_tag_check`] instead, passing
+    /// [`SoftwareTagCheck::for_tagging`] so the redundant software check
+    /// is stood down.
     ///
     /// # Errors
     ///
@@ -136,6 +207,23 @@ impl Slab {
     /// - [`AllocError::SizeUnsupported`] if the storage would overflow
     ///   `usize` (i.e. `object_size * slot_count + 2 * GUARD_BYTES`).
     pub fn new(object_size: usize, slot_count: usize) -> Result<Self, AllocError> {
+        Self::with_tag_check(object_size, slot_count, SoftwareTagCheck::Enabled)
+    }
+
+    /// Construct a new slab with an explicit software-tag-check policy.
+    ///
+    /// Pass [`SoftwareTagCheck::for_tagging`] with the port's
+    /// [`MemoryTagging`] handle so the software check disables itself
+    /// only where hardware tagging already enforces use-after-free.
+    ///
+    /// # Errors
+    ///
+    /// As [`Slab::new`].
+    pub fn with_tag_check(
+        object_size: usize,
+        slot_count: usize,
+        tag_check: SoftwareTagCheck,
+    ) -> Result<Self, AllocError> {
         if object_size == 0 || slot_count == 0 {
             return Err(AllocError::ZeroSize);
         }
@@ -162,7 +250,14 @@ impl Slab {
             storage,
             in_use: vec![false; slot_count],
             tags: vec![MemTag::INITIAL; slot_count],
+            tag_check,
         })
+    }
+
+    /// The software-tag-check policy this slab was constructed with.
+    #[must_use]
+    pub fn tag_check(&self) -> SoftwareTagCheck {
+        self.tag_check
     }
 
     /// Reserve one slot and return its handle.
@@ -181,9 +276,17 @@ impl Slab {
                 self.in_use[i] = true;
                 // Rotate the slot's tag so any handle still holding the
                 // previous tag (a dangling pointer into this slot) will
-                // mismatch and be rejected (`AGENTS.md` §19.10).
-                let tag = next_free_tag(self.tags[i], TAG_COUNT);
-                self.tags[i] = tag;
+                // mismatch and be rejected (`AGENTS.md` §19.10). When the
+                // port enforces UAF in hardware the software rotation is
+                // redundant overhead, so it is skipped and the slot keeps
+                // its resting tag.
+                let tag = if self.tag_check.is_enabled() {
+                    let rotated = next_free_tag(self.tags[i], TAG_COUNT);
+                    self.tags[i] = rotated;
+                    rotated
+                } else {
+                    self.tags[i]
+                };
                 return Ok(SlabHandle { slot: i, tag });
             }
         }
@@ -207,7 +310,7 @@ impl Slab {
         if !self.in_use[h.slot] {
             return Err(SlabError::DoubleFree);
         }
-        if h.tag != self.tags[h.slot] {
+        if self.tag_check.is_enabled() && h.tag != self.tags[h.slot] {
             return Err(SlabError::TagMismatch);
         }
         self.verify_guards_internal()?;
@@ -247,7 +350,7 @@ impl Slab {
         if !self.in_use[h.slot] {
             return Err(SlabError::DoubleFree);
         }
-        if h.tag != self.tags[h.slot] {
+        if self.tag_check.is_enabled() && h.tag != self.tags[h.slot] {
             return Err(SlabError::TagMismatch);
         }
         let off = GUARD_BYTES + h.slot * self.object_size;
@@ -331,6 +434,53 @@ impl Slab {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
+
+    /// Minimal [`MemoryTagging`] stub for exercising
+    /// [`SoftwareTagCheck::for_tagging`]: it reports a fixed profile and
+    /// the Arm-MTE-like 16-byte / 16-value geometry.
+    struct StubTagging {
+        profile: TaggingProfile,
+    }
+
+    impl MemoryTagging for StubTagging {
+        fn profile(&self) -> TaggingProfile {
+            self.profile
+        }
+        fn granule_bytes(&self) -> usize {
+            16
+        }
+        fn tag_count(&self) -> u8 {
+            TAG_COUNT
+        }
+    }
+
+    fn hardware_enforcing() -> StubTagging {
+        StubTagging {
+            profile: TaggingProfile {
+                tag_storage: Tagging::Supported,
+                tag_check_faults: Tagging::Supported,
+            },
+        }
+    }
+
+    fn pending_port() -> StubTagging {
+        StubTagging {
+            profile: TaggingProfile {
+                tag_storage: Tagging::Supported,
+                tag_check_faults: Tagging::Pending("Tagged page attribute lands in Stage 6"),
+            },
+        }
+    }
+
+    fn untagged_port() -> StubTagging {
+        StubTagging {
+            profile: TaggingProfile {
+                tag_storage: Tagging::Unsupported("no memory-tagging silicon"),
+                tag_check_faults: Tagging::Unsupported("no memory-tagging silicon"),
+            },
+        }
+    }
 
     #[test]
     fn new_rejects_zero_size() {
@@ -475,6 +625,74 @@ mod tests {
         let s = Slab::new(64, 5).unwrap();
         assert_eq!(s.capacity(), 5);
         assert_eq!(s.object_size(), 64);
+    }
+
+    #[test]
+    fn new_defaults_to_software_tag_check_enabled() {
+        // The software UAF check is on by default on every port that
+        // does not enforce UAF in hardware (`AGENTS.md` §19.10).
+        let s = Slab::new(16, 1).unwrap();
+        assert_eq!(s.tag_check(), SoftwareTagCheck::Enabled);
+        assert!(s.tag_check().is_enabled());
+        assert_eq!(SoftwareTagCheck::default(), SoftwareTagCheck::Enabled);
+    }
+
+    #[test]
+    fn for_tagging_disables_only_under_hardware_enforcement() {
+        // Hardware that both stores tags and faults on a mismatch makes
+        // the software check redundant overhead: stand it down.
+        assert_eq!(
+            SoftwareTagCheck::for_tagging(&hardware_enforcing()),
+            SoftwareTagCheck::Disabled
+        );
+        // A port that can store tags but does not yet fault (Pending) is
+        // not enforcing UAF in hardware, so the software check stays on.
+        assert_eq!(
+            SoftwareTagCheck::for_tagging(&pending_port()),
+            SoftwareTagCheck::Enabled
+        );
+        // No tagging silicon at all: software check stays on.
+        assert_eq!(
+            SoftwareTagCheck::for_tagging(&untagged_port()),
+            SoftwareTagCheck::Enabled
+        );
+    }
+
+    #[test]
+    fn disabled_check_skips_rotation_and_tag_mismatch() {
+        // With the software check stood down (hardware enforces UAF) the
+        // slab does no tag rotation and never reports TagMismatch — the
+        // hardware tag checker is the line of defence, and the redundant
+        // software work is skipped for performance.
+        let mut s =
+            Slab::with_tag_check(16, 1, SoftwareTagCheck::for_tagging(&hardware_enforcing()))
+                .unwrap();
+        assert_eq!(s.tag_check(), SoftwareTagCheck::Disabled);
+
+        let stale = s.alloc().unwrap();
+        s.free(stale).unwrap();
+        let fresh = s.alloc().unwrap();
+        // No rotation happened: the slot's resting tag is unchanged.
+        assert_eq!(stale.tag(), fresh.tag());
+        // The software check does not fire; the (stale) handle is
+        // accepted because tag comparison is skipped.
+        assert!(s.slot_mut(stale).is_ok());
+        s.free(fresh).unwrap();
+    }
+
+    #[test]
+    fn disabled_check_still_detects_double_free_and_unknown_handle() {
+        // Standing down the *tag* check must not weaken the other slab
+        // invariants (`AGENTS.md` §5.4 fail closed).
+        let mut s = Slab::with_tag_check(16, 1, SoftwareTagCheck::Disabled).unwrap();
+        let h = s.alloc().unwrap();
+        s.free(h).unwrap();
+        assert!(matches!(s.free(h), Err(SlabError::DoubleFree)));
+        let bogus = SlabHandle {
+            slot: 99,
+            tag: MemTag::INITIAL,
+        };
+        assert!(matches!(s.free(bogus), Err(SlabError::UnknownHandle)));
     }
 
     #[test]

@@ -4260,10 +4260,19 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
     tag-carrying `SlabHandle` whose slot was freed and reallocated
     mismatches the slot's rotated tag and is rejected with
     `SlabError::TagMismatch`, sharing the HAL's `next_free_tag`. ~16 api +
-    14 per-port + 3 new slab unit tests. Docs:
+    14 per-port + 7 slab unit tests (3 tag rotation + 4 software-check
+    policy). Docs:
     `docs/src/security/memory_tagging.md`. The software UAF tag check is
-    the **on-by-default** mechanism today (`AGENTS.md` §19.10): it is
-    unconditional on every target with no opt-in feature gate. Remaining:
+    the **on-by-default** mechanism today (`AGENTS.md` §19.10): `Slab::new`
+    enables it on every port. Because it costs a tag rotation per alloc
+    and a comparison per free/access, the slab stands it down — for
+    performance — exactly where it is redundant: `SoftwareTagCheck::for_tagging`
+    returns `Disabled` when the port's `MemoryTagging` profile
+    `enforces_uaf_in_hardware()` (both `tag_storage` and `tag_check_faults`
+    `Supported`), and `Slab::with_tag_check` then skips the rotation and
+    comparison while the other slab invariants (double-free, unknown-handle,
+    guard pages) still fail closed. No port enforces UAF in hardware yet, so
+    the software check is active everywhere today. Remaining:
     once the Stage 6 page-table work lands the `FEAT_MTE` probe
     (`ID_AA64PFR1_EL1.MTE`) and the `Normal Tagged` mapping, switch the
     aarch64 default constructor to **auto-enable MTE whenever the silicon
