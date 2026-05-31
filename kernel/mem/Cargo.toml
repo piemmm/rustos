@@ -24,6 +24,11 @@ host-tests = []
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
+# The stable ABI types: `kernel/mem` consumes the `rxe` load-image format
+# (`AGENTS.md` §9 / §19.2) so the loader can map a validated image into an
+# `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+
 # Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
 # per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The
 # `derive` feature is intentionally omitted: we use the `Zeroize` trait

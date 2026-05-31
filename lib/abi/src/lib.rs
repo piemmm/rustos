@@ -21,6 +21,7 @@ pub mod driver;
 pub mod error;
 pub mod ipc;
 pub mod manifest;
+pub mod rxe;
 pub mod syscall;
 pub mod syscalls;
 
@@ -35,6 +36,10 @@ pub use driver::{
 pub use error::Errno;
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
 pub use manifest::{ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES};
+pub use rxe::{
+    kaslr_bias, LoadHeader, LoadImage, RxeError, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
+};
 pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,

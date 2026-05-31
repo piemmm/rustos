@@ -3977,13 +3977,16 @@ rxe loader item below lands.
   microarchitectural-buffer flush). The §17.2 conformance suite has no
   side-channel vertical. `lib/crypto` has no constant-time-under-`-O3`
   test for its secret-handling consumers.
-- **§19.2 W^X / ASLR / CFI** — *partially scaffolded*. `lib/abi` defines
-  the signed `rxe` `ManifestHeader` (magic, abi-version, syscall-table
-  hash, signer, signature), but there is **no rxe loader** anywhere that
-  (a) enforces R/RX/RW segments and refuses `RWX`, (b) requires PIE and
-  applies KASLR with a per-boot entropy seed, or (c) checks the
-  type-tagged CFI table against the §9 syscall-interface hash. Stack
-  canaries / shadow-stack in the arch `unsafe` cores are not declared.
+- **§19.2 W^X / ASLR / CFI** — *loader landed (item 7)*. `lib/abi/src/rxe.rs`
+  now defines the `rxe` load image (`LoadHeader` + `Segment` table) and the
+  load-time policy: `LoadImage::parse` (a) enforces R/RX/RW segments and
+  refuses `RWX` (`RxePermission::from_segment_flags`), (b) requires PIE and
+  exposes `kaslr_bias` for a per-boot entropy seed, and (c) checks the CFI
+  type-tag against the §9 syscall-interface hash (constant-time). The
+  `kernel/mem` loader (`map_image`) maps a validated image into an
+  `AddressSpace`, W^X holding twice over. Still open: copying segment file
+  contents into mapped frames and stack-canary / shadow-stack in the arch
+  `unsafe` cores (Stage 6 process model + real arch page tables).
 - **§19.3 supply-chain integrity** — *in progress*. `cargo xtask sbom`
   now emits a deterministic CycloneDX 1.5 SBOM from `Cargo.lock` (every
   workspace + external crate with version, source URL, and pinned
@@ -4105,9 +4108,28 @@ rxe loader item below lands.
    already-audited dev-dependency (no new external crate; §2.12). Docs:
    `docs/src/security/proptest_models.md`. Remaining for §19.7: the
    Silver TLA+ model and the Gold Verus contracts (burn-down item 11).
-7. **§19.2 rxe loader** — enforce R/RX/RW (refuse `RWX`), PIE + per-boot
-   KASLR seed, and the CFI type-tag check against the syscall-interface
-   hash. Depends on `kernel/mem` paging primitives.
+7. **§19.2 rxe loader** — *done (load-time policy + mapping)*. The `rxe`
+   load image — a fixed `LoadHeader` plus a `Segment` table — and its
+   §19.2 load-time policy live in `lib/abi/src/rxe.rs`:
+   `RxePermission::from_segment_flags` admits only read-only / read-execute
+   / read-write (refusing `RWX` via `WriteExecSegment`, non-readable, and
+   unknown-flag segments), `LoadImage::parse` refuses a non-PIE image
+   (`NotPositionIndependent`) and a CFI-tag mismatch
+   (`InterfaceHashMismatch`, constant-time compare against the
+   syscall-interface hash), and validates segment alignment, sizes,
+   ordering/overlap, and that the entry point lies in an executable
+   segment. `kaslr_bias` derives a page-aligned, bounded, seed-deterministic
+   load bias; `Segment::relocated_vaddr` / `LoadImage::relocated_entry`
+   apply it with checked arithmetic. The `kernel/mem` side
+   (`kernel/mem/src/loader.rs`, the crate's first `lib/abi` consumer)
+   adds `map_flags_for` (never `WRITE|EXEC`) and `map_image`, which maps a
+   validated image into an `AddressSpace` via an injected frame allocator
+   and returns the relocated entry — W^X holding twice over (loader +
+   `PageTableOps`). ~25 `rxe` unit tests + 4 loader tests; all `no_std`,
+   clippy `-D warnings` clean. Docs: `docs/src/security/rxe_loader.md`.
+   Remaining for later stages: copying segment file contents into mapped
+   frames and stack-canary / shadow-stack selection (Stage 6 process model
+   + real arch page tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — extend
    `kernel/arch/api` and each `kernel/arch/<target>` per its errata; add
    the side-channel vertical to the §17.2 suite.
