@@ -854,6 +854,8 @@ dependencies = [
  "rustos-drvhost",
  "rustos-itest-harness",
  "rustos-kernel",
+ "rustos-kernel-irq",
+ "rustos-kernel-sec",
  "rustos-log",
 ]
 

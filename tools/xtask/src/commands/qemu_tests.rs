@@ -137,15 +137,23 @@ const TESTS: &[QemuTest] = &[
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
     // PS/2 input driver (`drivers/input/ps2`) through
     // `rustos_drvhost::Host` and drive it through load -> use ->
-    // unload -> reload. "Use" injects a deterministic scancode into the
-    // emulated i8042 output buffer via the controller's `0xD2`
-    // ("write keyboard output buffer") command — using the same
-    // `X86PortIo8` backend the driver reads through — and decodes the
-    // resulting press then release into platform-neutral `InputEvent`s.
-    // Any deviation flips `qemu_exit::exit_failure`. The default `q35`
-    // machine exposes the i8042, so no extra QEMU device is needed.
-    // Single CPU suffices and the 60-second budget matches the other
-    // Stage-3/4 boot-then-do-fixed-work tests.
+    // unload -> reload. "Use" is interrupt-driven: it binds the
+    // keyboard line (ISA IRQ-1 -> GSI 1) in the production
+    // `rustos_kernel_irq::IrqTable`, enables the i8042 keyboard-
+    // interrupt config bit, masks the legacy PIC, unmasks GSI 1 at the
+    // IO-APIC, then injects a deterministic scancode via the
+    // controller's `0xD2` ("write keyboard output buffer") command —
+    // using the same `X86PortIo8` backend the driver reads through —
+    // which asserts the real IRQ-1 line. After `sti` it waits on
+    // `IrqTable::try_wait_step` for the IO-APIC -> LAPIC -> IDT ->
+    // dispatcher -> `IrqTable::fire` round-trip to report
+    // `WaitStep::Ready`, then drains and decodes the resulting press
+    // then release into platform-neutral `InputEvent`s through the
+    // driver's `poll`. Any deviation flips `qemu_exit::exit_failure`.
+    // The default `q35` machine exposes the i8042 and a 24-pin
+    // IO-APIC, so no extra QEMU device is needed. Single CPU suffices
+    // and the 60-second budget matches the other Stage-3/4
+    // boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-ps2-qemu-x86-64",
         binary: "rustos-test-ps2-qemu-x86-64",

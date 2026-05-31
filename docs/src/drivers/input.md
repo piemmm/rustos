@@ -65,11 +65,20 @@ drives it through load → use → unload → reload. The boot hand-off it
 needed is the x86_64 8-bit port seam
 `rustos_arch_x86_64::pio::X86PortIo8` — the byte-wide sibling of the PCI
 bus driver's 32-bit `X86PortIo`, supplying the only in-tree
-`PortIo8` implementation (`AGENTS.md` §17.2 / §17.4). "Use" is made
-deterministic without a physical keypress by the i8042 `0xD2` ("write
-keyboard output buffer") command: the test injects a scancode into the
-controller's output buffer through the same `PortIo8` backend the driver
-reads through, then confirms the driver decodes the resulting press and,
-after reload, the matching release. Because the driver polls, keyboard
-IRQ (line 1) routing is not required for the vertical; an
-interrupt-driven delivery path remains a later follow-up.
+`PortIo8` implementation (`AGENTS.md` §17.2 / §17.4).
+
+"Use" is **interrupt-driven**. The vertical binds the keyboard line
+(ISA IRQ-1 → GSI 1) in the production `rustos_kernel_irq::IrqTable`,
+sets the i8042 keyboard-interrupt config bit, masks the legacy 8259
+PIC, and unmasks GSI 1 through the published `IoApicController`. It then
+makes a keypress deterministic without physical hardware via the i8042
+`0xD2` ("write keyboard output buffer") command — injecting a scancode
+through the same `PortIo8` backend the driver reads through asserts the
+real IRQ-1 line. After `sti` the test waits on `IrqTable::try_wait_step`
+until the IO-APIC → LAPIC → IDT → dispatcher → `IrqTable::fire`
+round-trip reports `WaitStep::Ready`, then drains the byte through the
+driver's `poll`, confirming the decoded press and — after reload — the
+matching release. The driver itself stays read-only and polled; the
+interrupt only signals *when* a byte is waiting. This shares the
+external-IRQ trap glue that `tests/integration/irq_qemu_x86_64`
+validates against the PIT.
