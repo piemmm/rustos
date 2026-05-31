@@ -9,7 +9,10 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
 - **I/O** — reading and writing blocks and parsing an on-disk format —
   lives in the `drivers/filesystem/*` crates (`rustfs`, `ext4`, `fat32`)
   behind the [`Filesystem`] trait in `lib/abi`. The VFS never duplicates a
-  driver's block I/O.
+  driver's block I/O. The frozen `Filesystem` trait is mount/unmount only;
+  path I/O delegates to a driver through the separate versioned
+  `FilesystemRead` trait (`AGENTS.md` §2.4 / §9). The first block-backed
+  driver is the read-only [FAT32 driver](./fat32.md).
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in

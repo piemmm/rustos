@@ -131,6 +131,162 @@ pub trait Filesystem {
     fn unmount(&mut self) -> Result<(), DriverError>;
 }
 
+/// Opaque identifier for a node (file or directory) within a single
+/// mounted filesystem.
+///
+/// A `NodeId` is minted by a [`FilesystemRead`] implementation and is
+/// meaningful only to the implementation that issued it; the VFS treats
+/// it as an opaque token. The all-zero value is reserved as
+/// [`NodeId::NONE`] and is never returned for a live node.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct NodeId(u64);
+
+impl NodeId {
+    /// The reserved "no node" sentinel.
+    pub const NONE: Self = Self(0);
+
+    /// Wrap a driver-defined raw value as a [`NodeId`].
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The driver-defined raw value behind this [`NodeId`].
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// The kind of a filesystem node.
+///
+/// `abi-v1` distinguishes only the two kinds the read surface needs;
+/// special-file kinds are introduced by a later trait version rather
+/// than by widening this enum (`AGENTS.md` §2.4 / §9).
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NodeKind {
+    /// A directory whose children are enumerable with
+    /// [`FilesystemRead::read_dir`].
+    Directory = 0,
+    /// A regular file whose bytes are readable with
+    /// [`FilesystemRead::read_at`].
+    RegularFile = 1,
+}
+
+/// Structural metadata about a node, returned by
+/// [`FilesystemRead::node_info`].
+///
+/// This is *structural* information only — its `size` and `kind` come
+/// from the on-disk layout. Ownership, mode bits, ACLs, and the §5.3
+/// capability gate live in the VFS metadata, not here; a read driver
+/// never makes a permission decision (`AGENTS.md` §5.4 — the VFS is
+/// the policy point, the driver is raw structural I/O).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NodeInfo {
+    /// Whether the node is a directory or a regular file.
+    pub kind: NodeKind,
+    /// File length in bytes. Always `0` for a directory.
+    pub size: u64,
+}
+
+/// A single entry yielded by [`FilesystemRead::read_dir`].
+///
+/// The entry's name is written into the caller-provided buffer; this
+/// struct carries the entry's identity and the number of name bytes
+/// written, keeping the read surface allocation-free.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DirEntry {
+    /// The child node's identifier.
+    pub node: NodeId,
+    /// Whether the child is a directory or a regular file.
+    pub kind: NodeKind,
+    /// Number of name bytes written into the caller's buffer.
+    pub name_len: usize,
+}
+
+/// Read-only structural access to a mounted filesystem.
+///
+/// This is the **versioned `abi-v1` extension** the VFS uses to
+/// delegate path-resolution I/O to a block-backed
+/// `drivers/filesystem/*` driver. It is deliberately a *separate*
+/// trait from [`Filesystem`] (which remains mount/unmount only and
+/// frozen): new behaviour ships as a new trait, never by widening a
+/// shipped one (`AGENTS.md` §2.4 / §9). A future `FilesystemWrite`
+/// trait will add the mutating surface.
+///
+/// Implementations expose raw structural access and make **no**
+/// permission decisions: the VFS authorises every traversal against
+/// the §5.3 model before calling here (`AGENTS.md` §5.4). Names are
+/// raw on-disk bytes; case-folding and Unicode normalisation policy
+/// belong to the VFS, not the driver.
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at
+/// load time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
+pub trait FilesystemRead {
+    /// The identifier of the filesystem's root directory.
+    fn root(&self) -> NodeId;
+
+    /// Report the structural metadata of `node`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError>;
+
+    /// Resolve a single path component `name` within directory `dir`.
+    ///
+    /// `name` is a single component: it contains no path separator and
+    /// is neither `.` nor `..` (the VFS resolves those itself, §16).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError>;
+
+    /// Read up to `buf.len()` bytes from `file` starting at byte
+    /// `offset`, returning the number of bytes read.
+    ///
+    /// A return value shorter than `buf.len()` indicates end-of-file;
+    /// reading at or past the file's size returns `0`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `file` is a directory.
+    /// * [`DriverError::NotFound`] if `file` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError>;
+
+    /// Yield the `index`-th child of directory `dir`, writing the
+    /// child's name into `name_out`.
+    ///
+    /// Iteration order is the implementation's stable on-disk order.
+    /// Returns `Ok(None)` once `index` is past the last child, which is
+    /// how a caller detects the end of the directory.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::BufferTooSmall`] if the child's name does not
+    ///   fit in `name_out`.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        index: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +364,143 @@ mod tests {
         );
         assert!(fs.unmount().is_ok());
         assert_eq!(fs.unmount(), Err(DriverError::NotFound));
+    }
+
+    #[test]
+    fn node_id_round_trips_raw_value() {
+        let id = NodeId::from_raw(0xDEAD_BEEF);
+        assert_eq!(id.raw(), 0xDEAD_BEEF);
+        assert_eq!(NodeId::NONE.raw(), 0);
+        assert_ne!(id, NodeId::NONE);
+    }
+
+    /// A fixed, allocation-free `FilesystemRead` over a root directory
+    /// holding a single regular file `"readme"` with three bytes of
+    /// content. Exercises the whole `abi-v1` read surface.
+    struct MockReadFs;
+
+    const ROOT: NodeId = NodeId::from_raw(1);
+    const FILE: NodeId = NodeId::from_raw(2);
+    const FILE_NAME: &[u8] = b"readme";
+    const FILE_BODY: &[u8] = b"abc";
+
+    impl FilesystemRead for MockReadFs {
+        fn root(&self) -> NodeId {
+            ROOT
+        }
+
+        fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+            if node == ROOT {
+                Ok(NodeInfo {
+                    kind: NodeKind::Directory,
+                    size: 0,
+                })
+            } else if node == FILE {
+                Ok(NodeInfo {
+                    kind: NodeKind::RegularFile,
+                    size: FILE_BODY.len() as u64,
+                })
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
+        fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+            if dir != ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if name == FILE_NAME {
+                Ok(FILE)
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
+        fn read_at(
+            &mut self,
+            file: NodeId,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, DriverError> {
+            if file != FILE {
+                return Err(DriverError::Unsupported);
+            }
+            let Ok(start) = usize::try_from(offset) else {
+                return Ok(0);
+            };
+            if start >= FILE_BODY.len() {
+                return Ok(0);
+            }
+            let n = core::cmp::min(buf.len(), FILE_BODY.len() - start);
+            buf[..n].copy_from_slice(&FILE_BODY[start..start + n]);
+            Ok(n)
+        }
+
+        fn read_dir(
+            &mut self,
+            dir: NodeId,
+            index: u64,
+            name_out: &mut [u8],
+        ) -> Result<Option<DirEntry>, DriverError> {
+            if dir != ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if index != 0 {
+                return Ok(None);
+            }
+            if name_out.len() < FILE_NAME.len() {
+                return Err(DriverError::BufferTooSmall);
+            }
+            name_out[..FILE_NAME.len()].copy_from_slice(FILE_NAME);
+            Ok(Some(DirEntry {
+                node: FILE,
+                kind: NodeKind::RegularFile,
+                name_len: FILE_NAME.len(),
+            }))
+        }
+    }
+
+    #[test]
+    fn mock_read_fs_lookup_and_read() {
+        let mut fs = MockReadFs;
+        assert_eq!(fs.root(), ROOT);
+        let file = fs.lookup(fs.root(), FILE_NAME).expect("file present");
+        assert_eq!(file, FILE);
+        let info = fs.node_info(file).expect("info");
+        assert_eq!(info.kind, NodeKind::RegularFile);
+        assert_eq!(info.size, 3);
+
+        let mut buf = [0u8; 8];
+        let n = fs.read_at(file, 0, &mut buf).expect("read");
+        assert_eq!(&buf[..n], FILE_BODY);
+        // Reading at EOF yields zero bytes.
+        assert_eq!(fs.read_at(file, 3, &mut buf), Ok(0));
+    }
+
+    #[test]
+    fn mock_read_fs_dir_iteration_terminates() {
+        let mut fs = MockReadFs;
+        let mut name = [0u8; 16];
+        let first = fs.read_dir(ROOT, 0, &mut name).expect("entry 0");
+        let entry = first.expect("one entry");
+        assert_eq!(entry.node, FILE);
+        assert_eq!(&name[..entry.name_len], FILE_NAME);
+        assert_eq!(fs.read_dir(ROOT, 1, &mut name), Ok(None));
+    }
+
+    #[test]
+    fn mock_read_fs_rejects_small_dir_buffer() {
+        let mut fs = MockReadFs;
+        let mut tiny = [0u8; 2];
+        assert_eq!(
+            fs.read_dir(ROOT, 0, &mut tiny),
+            Err(DriverError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn mock_read_fs_lookup_in_non_dir_is_unsupported() {
+        let mut fs = MockReadFs;
+        assert_eq!(fs.lookup(FILE, FILE_NAME), Err(DriverError::Unsupported));
     }
 }

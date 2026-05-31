@@ -129,6 +129,30 @@ a `DisplayFormat` (`Rgba8888` or `Bgra8888`).
 `NOEXEC`. The installer's secure default layout (`AGENTS.md` §11.3,
 §16.3) sets `NOSUID | NODEV` on `/Users` and `/Apps` via this type.
 
+`Filesystem` carries only mount/unmount and a `DriverHandle`, so it
+cannot perform path I/O. The read surface the VFS uses to delegate
+path resolution to a driver is therefore a **separate versioned
+trait**, `FilesystemRead`, not an added method on the frozen one
+(`AGENTS.md` §2.4 / §9 — same discipline as the `PortIo8` split):
+
+| Method                            | Capability gate                       |
+|-----------------------------------|---------------------------------------|
+| `root()`                          | Driver handle.                        |
+| `node_info(node)`                 | Driver handle.                        |
+| `lookup(dir, name)`               | Driver handle.                        |
+| `read_at(file, offset, &mut)`     | Driver handle.                        |
+| `read_dir(dir, index, &mut name)` | Driver handle.                        |
+
+The surface is allocation-free: a `NodeId` is an opaque,
+implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
+reports `{ kind, size }`, and `read_dir` writes the entry name into a
+caller-provided buffer alongside a `DirEntry { node, kind, name_len }`.
+Implementations expose raw structural access only and make **no**
+permission decisions — the VFS authorises every traversal against the
+§5.3 model before calling here (`AGENTS.md` §5.4). The first
+implementation is the read-only [FAT32 driver](../filesystem/fat32.md);
+a future `FilesystemWrite` trait adds the mutating surface.
+
 ## Block
 
 `trait Block`. Methods:

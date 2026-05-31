@@ -3566,13 +3566,43 @@ device list.
   `0644` without the capability) + 1 new `MountFlags::union` test.
 - Docs: `docs/src/filesystem/{overview,layout,permissions}.md`
   (linked in `SUMMARY.md`).
-- **Remaining for Stage 5** (out of scope this session, dependency-gated):
-  the block-backed `drivers/filesystem/{rustfs,ext4,fat32}` drivers and
-  their on-disk formats (need a Stage 4 block driver), the
-  `pjdfstest`-equivalent suite + `rustfs` crash-consistency tests under
-  QEMU, and the matching `rustfs`/`ext4`/`fat32` doc pages. The VFS wires a
-  block-backed mount in through `Vfs::mounts_mut` + the `Filesystem` trait
-  when those land.
+- The block-backed **FAT32 driver** (`drivers/filesystem/fat32`,
+  `rustos-drv-fs-fat32`) is implemented read-only over the Stage 4
+  `Block` trait — the first block-backed `drivers/filesystem/*` crate
+  (FAT32 first per §11, for the EFI system partition / SD cards):
+  - Validates the FAT32 boot sector / BPB (signature, power-of-two
+    sector & cluster sizes, FAT32 markers — zero 16-bit FAT size and
+    zero root-entry count, so FAT12/FAT16 is rejected), walks the FAT
+    cluster chain, lists directories, and reads files. All device I/O is
+    staged one logical block at a time, decoupling the device block size
+    from the FAT bytes-per-sector. No `unwrap`/`expect`/`panic!` and no
+    `unsafe`.
+  - The frozen `Filesystem` trait is mount/unmount only and cannot do
+    I/O, so the read surface is a **new versioned trait**
+    `FilesystemRead` (`NodeId`/`NodeKind`/`NodeInfo`/`DirEntry`) added to
+    `lib/abi/src/driver/filesystem.rs` — additive, not a widening of the
+    shipped trait (§2.4 / §9). `NodeId` is a self-describing packed token
+    (first cluster + dir flag + size), so there is no in-memory inode
+    table.
+  - Tests: 15 host-side unit tests against a hand-built, allocation-free
+    in-memory FAT32 image + mock `Block` (open/validation incl.
+    bad-signature & non-FAT32 rejection, ordered listing, case-
+    insensitive lookup, subdirectory traversal, cross-cluster and
+    boundary-straddling reads, offset/EOF, `Unsupported`/`BufferTooSmall`
+    paths, `register` cap-gate), plus 5 new `lib/abi` tests for the read
+    trait. Full `cargo xtask ci` green.
+  - Docs: `docs/src/filesystem/fat32.md` (+ SUMMARY link), the
+    `FilesystemRead` section in `docs/src/abi/driver_traits.md`, the
+    filesystem overview note, and `drivers/filesystem/fat32/README.md`.
+- **Remaining for Stage 5** (dependency-gated — next sessions):
+  - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
+    inode) and **`ext4`** drivers, and FAT32 **write** support behind a
+    future `FilesystemWrite` trait (the symmetric versioned extension to
+    `FilesystemRead`); FAT32 long-file-name (VFAT) reconstruction.
+  - Wiring a block-backed mount into the VFS through `Vfs::mounts_mut`
+    so path resolution delegates I/O to a `FilesystemRead` driver.
+  - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency
+    tests under QEMU, and the `rustfs`/`ext4` doc pages.
 
 ---
 
