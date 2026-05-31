@@ -4001,11 +4001,14 @@ rxe loader item below lands.
   decoders run in-process; there is no minimum-capability sandbox
   process model and no "parser must link into a sandbox" check.
 - **§19.6 fuzzing** — *in progress*. The in-tree deterministic harnesses
-  exist (`lib/abi/tests/fuzz_decode.rs` for the wire decoders,
-  `kernel/syscall/tests/fuzz_args.rs` for the dispatcher) and are now
-  driven for a wall-clock budget by `cargo xtask fuzz` (`--quick` ≥ 60 s
-  / `--soak` ≥ 24 h), wired into `ci`. Still missing: harnesses for the
-  remaining IPC endpoints and the `userland/net` parsers.
+  cover the wire decoders (`lib/abi/tests/fuzz_decode.rs`), the syscall
+  dispatcher (`kernel/syscall/tests/fuzz_args.rs`), the `userland/net`
+  protocol parsers (`userland/net/icmp/tests/fuzz_parse.rs`), and the
+  capability-checked IPC port endpoint
+  (`kernel/ipc/tests/fuzz_port.rs`); all four are driven for a wall-clock
+  budget by `cargo xtask fuzz` (`--quick` ≥ 60 s / `--soak` ≥ 24 h),
+  wired into `ci`. Remaining for later stages: harnesses for the future
+  font/image/archive/media parsers (§19.5) as those parsers land.
 - **§19.7 verified capability core** — *not started*. No `cargo xtask
   proptest` / `verify` / `spec-review`, no `proptest` stateful models in
   `lib/caps` / `kernel/sec` / the IPC + syscall dispatch paths, no TLA+
@@ -4056,7 +4059,7 @@ rxe loader item below lands.
    `docs/src/security/supply_chain.md`. (`deny.toml` is `cargo deny`'s
    own format and has no per-crate hash field, so the allow-list lives
    in the dedicated `supply-chain.toml` that the gate reads.)
-5. **§19.6 fuzzing harnesses + `cargo xtask fuzz`** — *in progress*. The
+5. **§19.6 fuzzing harnesses + `cargo xtask fuzz`** — *done*. The
    `lib/abi` decoder harness (`lib/abi/tests/fuzz_decode.rs`) and the
    syscall-dispatcher harness (`kernel/syscall/tests/fuzz_args.rs`)
    already existed as fixed-iteration `cargo test` smoke sweeps; they
@@ -4066,10 +4069,17 @@ rxe loader item below lands.
    per-PR floor) or `--soak` (≥ 24 h/harness, nightly) — and fails
    closed on any crash, hang, or invariant failure. Self-contained, no
    external fuzz runner (`AGENTS.md` §2.12 / §19.6 "equivalent in-tree
-   harness"); 13 unit tests cover the target registry, budget floors,
-   and arg parser. Docs: `docs/src/security/fuzzing.md`. Still to come:
-   harnesses for the remaining IPC endpoints and the `userland/net`
-   protocol parsers (the next increment of this item).
+   harness"); 16 unit tests cover the target registry, budget floors,
+   and arg parser. The target set now also includes the `userland/net`
+   protocol parsers (`userland/net/icmp/tests/fuzz_parse.rs` — Ethernet/
+   ARP/IPv4/ICMP + the composed `handle_frame` and `Client` classifiers,
+   no-panic + encoder round-trip + bounded-reply invariants) and the
+   capability-checked IPC port endpoint
+   (`kernel/ipc/tests/fuzz_port.rs` — `Port::send` fail-closed against an
+   independent caps→size→capacity mirror, FIFO `recv` byte-fidelity,
+   capacity bound, and a closed-port fast-path refusal). Docs:
+   `docs/src/security/fuzzing.md`. Remaining for later stages: harnesses
+   for the future font/image/archive/media parsers (§19.5) as they land.
 6. **§19.7 `proptest` models + `cargo xtask proptest`** — Bronze tier:
    stateful models for `lib/caps`, `kernel/sec`, and the IPC + syscall
    dispatch paths; `// SPEC-DRAFT:` marker discipline + `spec-review`.

@@ -18,7 +18,7 @@ deterministic `cargo test` integration test driven by a small, seeded,
 allocation-free PRNG. A fixed seed makes any failure reproducible — a
 flaky fuzz target is a bug (`AGENTS.md` §7).
 
-Two harnesses exist today, the first increment of the §19.6 burn-down:
+Four harnesses exist today:
 
 * `lib/abi/tests/fuzz_decode.rs` — the `lib/abi` wire decoders
   (`IpcMessageHeader::from_bytes`, `ManifestHeader::from_bytes`). It
@@ -27,9 +27,24 @@ Two harnesses exist today, the first increment of the §19.6 burn-down:
 * `kernel/syscall/tests/fuzz_args.rs` — the syscall dispatcher's
   per-argument validation. It cross-checks the dispatcher against an
   independent acceptance mirror over random `(syscall, RawArgs)` pairs.
+* `userland/net/icmp/tests/fuzz_parse.rs` — the `userland/net` protocol
+  parsers (Ethernet, ARP, IPv4, ICMP echo) plus the composed
+  `Responder::handle_frame` and `Client` classifiers. It asserts no
+  input panics, that any accepted decode round-trips through its
+  encoder, and that any reply the responder emits fits the caller's
+  buffer and is itself a well-formed frame.
+* `kernel/ipc/tests/fuzz_port.rs` — the capability-checked IPC port
+  endpoint. It drives random `(sender capabilities, payload)` pairs at
+  `Port::send` and asserts the fail-closed decision against an
+  independent mirror (the dispatcher's capability → size → capacity
+  precedence), that a delivered message round-trips through `recv`
+  byte-for-byte in FIFO order, and that the mailbox never exceeds its
+  capacity. A separate test proves a closed port refuses every sender,
+  however privileged.
 
-The burn-down extends this set next to the remaining IPC endpoints and
-the `userland/net` protocol parsers.
+This completes the §19.6 burn-down's coverage of the IPC endpoints and
+the `userland/net` protocol parsers. Future untrusted-input parsers
+(font, image, archive, media — §19.5) each gain a harness as they land.
 
 ## Two run modes
 

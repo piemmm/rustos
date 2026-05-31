@@ -14,9 +14,10 @@
 //! fixed-iteration smoke sweep instead). A harness that crashes, hangs, or
 //! fails its invariant fails the command — §19.6 fails closed.
 //!
-//! Adding a harness (the §19.6 burn-down extends coverage to every IPC
-//! endpoint and the `userland/net` parsers next) means adding a [`Target`]
-//! here, never teaching `ci` about it directly.
+//! Adding a harness means adding a [`Target`] here, never teaching `ci`
+//! about it directly. The §19.6 burn-down now covers the wire decoders,
+//! the syscall dispatcher, the `userland/net` protocol parsers, and the
+//! capability-checked IPC port endpoint.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -36,8 +37,10 @@ pub struct Target {
 
 /// The closed set of fuzz harnesses, in run order.
 ///
-/// Both entries already exist as deterministic `cargo test` harnesses; this
-/// registry is what wires them into the §19.6 budgeted runs.
+/// Every entry is a deterministic `cargo test` harness; this registry is
+/// what wires them into the §19.6 budgeted runs. The set covers the wire
+/// decoders (`lib/abi`), the syscall dispatcher, the `userland/net`
+/// protocol parsers, and the capability-checked IPC port endpoint.
 pub const TARGETS: &[Target] = &[
     Target {
         package: "rustos-abi",
@@ -48,6 +51,16 @@ pub const TARGETS: &[Target] = &[
         package: "rustos-kernel-syscall",
         test: "fuzz_args",
         description: "syscall dispatcher argument validation",
+    },
+    Target {
+        package: "rustos-net-icmp",
+        test: "fuzz_parse",
+        description: "userland/net ARP/IPv4/ICMP/Ethernet parsers",
+    },
+    Target {
+        package: "rustos-kernel-ipc",
+        test: "fuzz_port",
+        description: "IPC port send dispatch (capability + size + capacity)",
     },
 ];
 
@@ -304,6 +317,33 @@ mod tests {
             for b in &TARGETS[i + 1..] {
                 assert_ne!(a.test, b.test, "duplicate fuzz target name");
             }
+        }
+    }
+
+    #[test]
+    fn net_parser_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_parse"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-net-icmp");
+    }
+
+    #[test]
+    fn ipc_port_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_port"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-kernel-ipc");
+    }
+
+    #[test]
+    fn registry_covers_the_burn_down_endpoints() {
+        // §19.6: wire decoders, dispatcher, userland/net parsers, IPC port.
+        for required in ["fuzz_decode", "fuzz_args", "fuzz_parse", "fuzz_port"] {
+            assert!(
+                TARGETS.iter().any(|t| t.test == required),
+                "missing required fuzz harness {required}"
+            );
         }
     }
 }
