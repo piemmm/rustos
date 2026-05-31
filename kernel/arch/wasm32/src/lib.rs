@@ -61,6 +61,10 @@ extern crate std;
 pub mod isolation;
 pub mod kernel_arch;
 pub mod preempt;
+/// wasm32 implementation of the Arch HAL side-channel mitigation
+/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
+/// §19.1).
+pub mod sidechannel;
 pub mod syscall_entry;
 
 #[cfg(target_arch = "wasm32")]

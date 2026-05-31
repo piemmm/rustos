@@ -117,6 +117,10 @@ pub mod qemu_exit;
 // `hart_mask_for` helper build on the host so their unit tests run
 // under `cargo test`.
 pub mod sbi;
+/// riscv64 implementation of the Arch HAL side-channel mitigation
+/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
+/// §19.1).
+pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 pub mod trap;

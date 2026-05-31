@@ -104,6 +104,16 @@ pub mod pio;
 pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;
+/// x86_64 implementation of the Arch HAL side-channel mitigation
+/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
+/// §19.1).
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in — so a
+/// freestanding consumer that does not need the Arch HAL compiles
+/// neither this module nor the dependency (`AGENTS.md` §2.3).
+#[cfg(feature = "sched-arch")]
+pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 

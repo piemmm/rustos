@@ -27,6 +27,7 @@
 - [Fuzzing the untrusted-input surface](./security/fuzzing.md)
 - [Stateful models for the capability core](./security/proptest_models.md)
 - [The rxe loader: W^X, PIE, KASLR, CFI](./security/rxe_loader.md)
+- [Side-channel mitigations (Arch HAL)](./security/side_channels.md)
 
 # Shared libraries
 

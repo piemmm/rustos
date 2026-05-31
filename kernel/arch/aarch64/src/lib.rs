@@ -80,6 +80,10 @@ pub mod kernel_arch;
 pub mod paging;
 pub mod preempt;
 pub mod qemu_exit;
+/// aarch64 implementation of the Arch HAL side-channel mitigation
+/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
+/// §19.1).
+pub mod sidechannel;
 pub mod syscall_entry;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]

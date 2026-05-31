@@ -12,7 +12,10 @@
 //! This crate currently hosts the **scheduler-facing** slice of the
 //! HAL — the per-CPU identity, the monotonic tick source, and the
 //! inter-processor preemption hook the SMP scheduler drives through
-//! [`SchedulerArch`]. The remaining HAL surface enumerated by
+//! [`SchedulerArch`] — and the **side-channel mitigation** slice
+//! (`AGENTS.md` §19.1): the [`SideChannelMitigation`] trait and its
+//! [`sidechannel::conformance`] vertical. The remaining HAL surface
+//! enumerated by
 //! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
 //! shootdown, timer programming, interrupt entry/exit, per-CPU
 //! storage, and early-boot platform discovery) is migrated here as the
@@ -31,6 +34,13 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+
+pub mod sidechannel;
+
+pub use sidechannel::{
+    conformance as sidechannel_conformance, Mitigation, MitigationEntry, MitigationProfile,
+    ProfileError, SideChannelMitigation,
+};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

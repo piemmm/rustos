@@ -3971,12 +3971,26 @@ presently breached; they become enforced (not merely observed) when the
 rxe loader item below lands.
 
 **Gap report (per subsection, as of this review):**
-- **§19.1 microarchitectural side channels** — *not started*. The Arch
-  HAL (`kernel/arch/api`) has no side-channel mitigation trait set
-  (KPTI-equivalent, syscall-entry speculation barriers, context-switch
-  microarchitectural-buffer flush). The §17.2 conformance suite has no
-  side-channel vertical. `lib/crypto` has no constant-time-under-`-O3`
-  test for its secret-handling consumers.
+- **§19.1 microarchitectural side channels** — *HAL trait set + conformance
+  vertical landed (item 8)*. `kernel/arch/api/src/sidechannel.rs` defines
+  the closed side-channel surface: the `SideChannelMitigation` trait
+  (the syscall entry/exit speculation barriers + the context-switch
+  microarchitectural-buffer/indirect-branch barrier) and a declarative
+  `MitigationProfile` (KPTI-equivalent isolation + the four barriers),
+  each slot one of `Applied` / `NotVulnerable(reason)` /
+  `Pending(note)`. `MitigationProfile::validate` is the honesty gate
+  (every non-applied slot justified) and `is_release_ready` is the
+  stricter §19.1 "cannot ship" gate (no `Pending`). The
+  `sidechannel::conformance::run_all` vertical (the §17.2 suite) is run
+  by every port from a host test, and each of x86_64 (`lfence`/`verw`;
+  KPTI+IBPB `Pending`), aarch64 (`csdb`; MDS `NotVulnerable`;
+  KPTI+Spectre-v2 `Pending`), riscv64 (`fence`; rest `NotVulnerable`,
+  release-ready), and wasm32 (host-owned `NotVulnerable`, release-ready)
+  declares its honest profile. Docs: `docs/src/security/side_channels.md`.
+  Still missing: the KPTI / IBPB `Pending` gaps close with the Stage 6
+  user/kernel boundary + CPUID/MIDR feature probes, and `lib/crypto`
+  still has no constant-time-under-`-O3` test for its secret-handling
+  consumers (a separate piece needing a non-flaky harness, §7).
 - **§19.2 W^X / ASLR / CFI** — *loader landed (item 7)*. `lib/abi/src/rxe.rs`
   now defines the `rxe` load image (`LoadHeader` + `Segment` table) and the
   load-time policy: `LoadImage::parse` (a) enforces R/RX/RW segments and
@@ -4132,9 +4146,30 @@ rxe loader item below lands.
    Remaining for later stages: copying segment file contents into mapped
    frames and stack-canary / shadow-stack selection (Stage 6 process model
    + real arch page tables).
-8. **§19.1 side-channel HAL trait set + conformance vertical** — extend
-   `kernel/arch/api` and each `kernel/arch/<target>` per its errata; add
-   the side-channel vertical to the §17.2 suite.
+8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
+   `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
+   surface: `SideChannelMitigation` (syscall entry/exit speculation
+   barriers + the context-switch microarchitectural-buffer/indirect-
+   branch barrier) and a declarative `MitigationProfile` whose five slots
+   (KPTI-equivalent isolation + the four barriers) are each `Applied`,
+   `NotVulnerable(reason)`, or tracked `Pending(note)`. `validate` is the
+   honesty gate (no unjustified omission) and `is_release_ready` the
+   §19.1 "cannot ship" gate (no `Pending`). The portable
+   `sidechannel::conformance::run_all` vertical (the §17.2 suite) is run
+   by every port from a host test; each port also pins its exact honest
+   profile so it cannot silently downgrade. Per target: x86_64 applies
+   `lfence` (entry/exit) and `verw` (MDS buffer clear) and tracks
+   KPTI + IBPB as `Pending` (Stage 6 page tables / CPUID probe); aarch64
+   applies `csdb` and declares the MDS buffer flush `NotVulnerable`
+   (Intel-only) with KPTI + the MIDR-specific Spectre-v2 sequence
+   `Pending`; riscv64 applies a conservative `fence` and is release-ready
+   (the in-order cores RustOS targets are not Meltdown/MDS/Spectre-v2
+   vulnerable); wasm32 is release-ready (every control host-owned). All
+   barrier instructions are `cfg`-gated to the bare-metal target under a
+   `// SAFETY:` block; ~14 api + 12 per-port unit tests. Docs:
+   `docs/src/security/side_channels.md`. Remaining for §19.1: closing the
+   KPTI / IBPB `Pending` gaps (Stage 6) and the `lib/crypto`
+   constant-time-under-`-O3` test (a separate, non-flaky harness, §7).
 9. **§19.3 `cargo xtask build --reproducible`** — bit-reproducible image
    verification on release tags. Depends on Stage 8 image builders.
 10. **§19.5 parser sandbox model** — minimum-capability sandbox process
