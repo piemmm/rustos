@@ -3,6 +3,7 @@
 
 use crate::dma::{BounceBuffer, DmaSlab};
 use crate::host::{MockHost, VirtioHost};
+use crate::packed::PackedQueue;
 use crate::queue::{ChainSegment, SplitQueue};
 use crate::transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
 use alloc::boxed::Box;
@@ -238,4 +239,206 @@ fn bounce_buffer_zeroises_on_sensitive_path() {
     // sensitive-class drop they must be zero.
     let view: &[u8] = unsafe { core::slice::from_raw_parts(phys as *const u8, 16) };
     assert!(view.iter().all(|b| *b == 0));
+}
+
+// --- Packed virtqueue (virtio 1.1 §2.7) ------------------------------
+
+#[test]
+fn packed_queue_initialises_and_programs_transport() {
+    let mut t = MockTransport::new(1, 8, 0, 0);
+    let host = static_host();
+    let q = PackedQueue::new(&mut t, host, 0, 8).expect("setup");
+    assert_eq!(q.index(), 0);
+    assert_eq!(q.size(), 8);
+    assert_eq!(q.free_count(), 8);
+    // Driver- and device-event areas are distinct allocations.
+    assert_ne!(q.driver_event_phys(), q.device_event_phys());
+    assert_ne!(q.driver_event_phys(), 0);
+}
+
+#[test]
+fn packed_queue_rejects_non_power_of_two() {
+    let mut t = MockTransport::new(1, 16, 0, 0);
+    let host = static_host();
+    assert_eq!(
+        PackedQueue::new(&mut t, host, 0, 7).map(|_| ()),
+        Err(VirtioError::QueueSizeTooLarge)
+    );
+}
+
+#[test]
+fn packed_add_chain_consumes_slots() {
+    let mut t = MockTransport::new(1, 8, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 8).unwrap();
+    let phys = host.alloc_dma_zeroed(8).unwrap().phys();
+    let id = q
+        .add_chain(&[
+            ChainSegment {
+                phys,
+                len: 4,
+                direction: Direction::DeviceRead,
+            },
+            ChainSegment {
+                phys,
+                len: 4,
+                direction: Direction::DeviceWrite,
+            },
+        ])
+        .unwrap();
+    assert_eq!(id, 0);
+    assert_eq!(q.free_count(), 6);
+}
+
+#[test]
+fn packed_chain_round_trip_through_mock_peer() {
+    let mut t = MockTransport::new(1, 8, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 8).unwrap();
+    let mut input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
+    input.as_bytes_mut()[..4].copy_from_slice(b"PING");
+    let output: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
+    let segs = [
+        ChainSegment {
+            phys: input.phys(),
+            len: 4,
+            direction: Direction::DeviceRead,
+        },
+        ChainSegment {
+            phys: output.phys(),
+            len: 8,
+            direction: Direction::DeviceWrite,
+        },
+    ];
+    let id = q.add_chain(&segs).unwrap();
+    t.install_shim(
+        0,
+        Box::new(|chain: &mut ChainView<'_>| {
+            assert_eq!(chain.device_read.len(), 1);
+            assert_eq!(chain.device_write.len(), 1);
+            assert_eq!(&chain.device_read[0][..4], b"PING");
+            let out = &mut chain.device_write[0];
+            out[..4].copy_from_slice(b"PONG");
+            out[4..].fill(0);
+            Ok(u32::try_from(out.len()).unwrap_or(0))
+        }),
+    );
+    q.kick(&mut t);
+    let drained = t.drain_packed_queue(0).unwrap();
+    assert_eq!(drained, 1);
+    let used = q.poll_used().unwrap();
+    assert_eq!(used.head, id);
+    assert_eq!(used.written, 8);
+    // SAFETY: `output.phys()` is the leaked host buffer pointer, alive
+    // for `'static`.
+    let response: &[u8] = unsafe { core::slice::from_raw_parts(output.phys() as *const u8, 8) };
+    assert_eq!(&response[..4], b"PONG");
+    // Slots reclaimed.
+    assert_eq!(q.free_count(), 8);
+}
+
+#[test]
+fn packed_add_chain_rejects_empty_and_too_long() {
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 4).unwrap();
+    assert_eq!(q.add_chain(&[]), Err(VirtioError::DescriptorTableOverflow));
+    let phys = host.alloc_dma_zeroed(1).unwrap().phys();
+    let too_long = [ChainSegment {
+        phys,
+        len: 1,
+        direction: Direction::DeviceRead,
+    }; 5];
+    assert_eq!(
+        q.add_chain(&too_long),
+        Err(VirtioError::DescriptorTableOverflow)
+    );
+}
+
+#[test]
+fn packed_add_chain_exhausts_free_pool() {
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 4).unwrap();
+    let phys = host.alloc_dma_zeroed(1).unwrap().phys();
+    for _ in 0..4 {
+        q.add_chain(&[ChainSegment {
+            phys,
+            len: 1,
+            direction: Direction::DeviceRead,
+        }])
+        .unwrap();
+    }
+    assert_eq!(q.free_count(), 0);
+    assert_eq!(
+        q.add_chain(&[ChainSegment {
+            phys,
+            len: 1,
+            direction: Direction::DeviceRead,
+        }]),
+        Err(VirtioError::QueueFull)
+    );
+}
+
+#[test]
+fn packed_ring_wraps_with_reclaim() {
+    // Cycle ten 2-descriptor chains through a four-slot packed ring.
+    // Each pass crosses the ring boundary, toggling both wrap
+    // counters; reclamation must recycle slots so we never see
+    // QueueFull and the in-band AVAIL/USED flags must stay coherent.
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 4).unwrap();
+    let in_region = host.alloc_dma_zeroed(4).unwrap();
+    let out_region = host.alloc_dma_zeroed(4).unwrap();
+    t.install_shim(
+        0,
+        Box::new(|chain: &mut ChainView<'_>| {
+            if let Some(out) = chain.device_write.get_mut(0) {
+                if !out.is_empty() {
+                    out[0] = 0x42;
+                }
+            }
+            Ok(1)
+        }),
+    );
+    for i in 0..10 {
+        let id = q
+            .add_chain(&[
+                ChainSegment {
+                    phys: in_region.phys(),
+                    len: 4,
+                    direction: Direction::DeviceRead,
+                },
+                ChainSegment {
+                    phys: out_region.phys(),
+                    len: 4,
+                    direction: Direction::DeviceWrite,
+                },
+            ])
+            .unwrap_or_else(|_| panic!("chain {i} should fit after reclaim"));
+        q.kick(&mut t);
+        assert_eq!(t.drain_packed_queue(0).unwrap(), 1);
+        let token = q.poll_used().unwrap();
+        assert_eq!(token.head, id);
+        assert_eq!(token.written, 1);
+    }
+    assert_eq!(q.free_count(), 4);
+}
+
+#[test]
+fn packed_poll_used_returns_no_completion_when_empty() {
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = PackedQueue::new(&mut t, host, 0, 4).unwrap();
+    assert_eq!(q.poll_used(), Err(VirtioError::NoCompletion));
+}
+
+#[test]
+fn packed_drain_is_noop_without_available_chain() {
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let _q = PackedQueue::new(&mut t, host, 0, 4).unwrap();
+    t.install_shim(0, Box::new(|_chain: &mut ChainView<'_>| Ok(0)));
+    assert_eq!(t.drain_packed_queue(0).unwrap(), 0);
 }

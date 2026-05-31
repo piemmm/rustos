@@ -65,10 +65,34 @@ Browser-headless vertical: `tests/integration/kernel_arch_boot_wasm32`
   `tests/integration/sched_drive_qemu_riscv64`), and route a real
   user→kernel host call through `syscall_entry::dispatch_syscall`.
 
+## Landed this session — packed virtqueues (virtio 1.1 §2.7)
+
+`lib/virtio` gained a packed-ring sibling to `SplitQueue`:
+`kernel`-agnostic `PackedQueue` in `lib/virtio/src/packed.rs`
+(single descriptor ring + driver/device event-suppression structs,
+in-band `AVAIL`/`USED` flag bits against per-side wrap counters,
+`add_chain`/`kick`/`poll_used` reusing the existing `ChainSegment` /
+`UsedToken` / `Transport` vocabulary — no transport-interface change).
+The in-process peer gained `MockTransport::drain_packed_queue` plus a
+packed `PackedRingView` mirroring the split `ring_view`. 11 new tests
+(3 helper + 8 end-to-end, incl. ring-wrap-with-reclaim across the ring
+boundary) bring `cargo test -p rustos-virtio` to 42 passing; clippy
+`-D warnings`, `cargo fmt`, `cargo xtask docs-check / cfg-check /
+deps-check`, the `riscv64` no_std build, and all four virtio consumer
+crates' tests are green. Docs: new "Packed virtqueue" section in
+`docs/src/drivers/virtio.md` (the §2.7 out-of-scope row is removed).
+
+### packed-ring follow-ups
+- Negotiate `VIRTIO_F_RING_PACKED` in `virtio_blk` / `virtio_net` and
+  pick `PackedQueue` vs `SplitQueue` from the negotiated feature bit
+  (the queues are already drop-in compatible at the `ChainSegment` /
+  `UsedToken` seam).
+- Exercise the packed peer in the QEMU integration verticals once the
+  boot-time bus walk (Stage 4.D item 4) lands.
+
 ## What needs doing next — resume Stage 5 follow-ups
 
 (Previously queued, still valid now that Stage 3 is complete.)
-- Packed virtqueues (virtio 1.1 §2.7) for the virtio transport.
 - Interrupt-driven (rather than polled) delivery for the ps2 input
   vertical.
 - Begin the Stage 5 deliverables in `PLAN.md`.

@@ -16,7 +16,10 @@
 //!   The concrete PCI / MMIO implementations live in
 //!   `drivers/bus/virtio`; [`MockTransport`] is the in-process peer the
 //!   driver unit tests drive.
-//! * [`SplitQueue`] — split-virtqueue descriptor/avail/used management.
+//! * [`SplitQueue`] — split-virtqueue descriptor/avail/used management
+//!   (virtio 1.1 §2.6).
+//! * [`PackedQueue`] — packed-virtqueue single-ring management
+//!   (virtio 1.1 §2.7).
 //! * [`VirtioHost`] — the DMA-allocation seam (re-exported from
 //!   [`rustos_abi`]); [`MockHost`] is the in-process implementation, and
 //!   `rustos_kernel_virtio::KernelVirtioHost` is the capability-checked
@@ -24,12 +27,17 @@
 //! * [`DmaSlab`] / [`BounceBuffer`] — owned device-visible memory and
 //!   the zero-on-free staging wrapper (`AGENTS.md` §4).
 //!
-//! # Split queues only
+//! # Ring formats
 //!
-//! Stage 4 deliberately implements only the **split** virtqueue variant
-//! (virtio 1.1 §2.6). Packed queues (virtio 1.1 §2.7) are documented as
-//! a Stage 5 follow-up in `docs/src/drivers/virtio.md`; they are
-//! intentionally not started here (`AGENTS.md` §2.3 — no bloat).
+//! Both virtqueue wire formats are implemented as parallel siblings
+//! (the `AGENTS.md` §2.2 carve-out): [`SplitQueue`] for the split ring
+//! (virtio 1.1 §2.6) and [`PackedQueue`] for the packed ring
+//! (virtio 1.1 §2.7). A device advertises the packed format through the
+//! `VIRTIO_F_RING_PACKED` feature bit; the two queues share the
+//! [`ChainSegment`] / [`UsedToken`] vocabulary and the [`Transport`]
+//! seam (whose `queue_set` programs the descriptor / driver-area /
+//! device-area addresses for either layout). See
+//! `docs/src/drivers/virtio.md`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -39,6 +47,7 @@ extern crate alloc;
 
 pub mod dma;
 pub mod host;
+pub mod packed;
 pub mod queue;
 pub mod transport;
 
@@ -47,6 +56,7 @@ mod tests;
 
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
 pub use host::{MockHost, VirtioHost, VirtioHostFactory};
+pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{
     ChainView, Direction, MockTransport, PciTransportWindows, Status, Transport, VirtioError,

@@ -232,6 +232,11 @@ struct MockQueue {
     avail_phys: u64,
     used_phys: u64,
     last_seen_avail_idx: u16,
+    /// Packed-ring device cursor: next ring position the mock device
+    /// will inspect, and its Device Ring Wrap Counter (virtio 1.1
+    /// §2.7.1). Unused by the split drain path.
+    packed_dev_idx: u16,
+    packed_dev_wrap: bool,
     shim: Option<DeviceShim>,
 }
 
@@ -244,6 +249,8 @@ impl MockQueue {
             avail_phys: 0,
             used_phys: 0,
             last_seen_avail_idx: 0,
+            packed_dev_idx: 0,
+            packed_dev_wrap: true,
             shim: None,
         }
     }
@@ -315,6 +322,55 @@ impl MockTransport {
         self.driver_features
     }
 
+    /// Drive the **packed** peer once: drain every newly-available
+    /// packed descriptor chain on `queue` through the shim, writing
+    /// completions back in-band (virtio 1.1 §2.7).
+    ///
+    /// Returns the number of chains the peer drained.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the shim's [`VirtioError`].
+    pub fn drain_packed_queue(&mut self, queue: u16) -> Result<usize, VirtioError> {
+        use crate::packed::packed_ring_view::PackedRingView;
+        let idx = queue as usize;
+        if idx >= self.queues.len() {
+            return Err(VirtioError::QueueIndexOutOfRange);
+        }
+        let q = &mut self.queues[idx];
+        if q.size == 0 || q.desc_phys == 0 {
+            return Err(VirtioError::DeviceFault);
+        }
+        // SAFETY-INVARIANT: as in `drain_queue`, the descriptor-ring
+        // phys the driver programmed is an identity-mapped pointer to
+        // driver-owned storage; `PackedRingView` validates chain
+        // lengths against `q.size`.
+        let view = PackedRingView::from_phys(q.size, q.desc_phys);
+        let mut drained = 0usize;
+        loop {
+            if !view.is_available(q.packed_dev_idx, q.packed_dev_wrap) {
+                break;
+            }
+            let head = q.packed_dev_idx;
+            let head_wrap = q.packed_dev_wrap;
+            let collected = view.collect_chain(head, head_wrap)?;
+            let mut chain = collected.chain;
+            let shim = q.shim.as_mut().ok_or(VirtioError::DeviceFault)?;
+            let written = shim(&mut chain)?;
+            view.publish_used(head, head_wrap, collected.buffer_id, written);
+            for _ in 0..collected.len {
+                if q.packed_dev_idx + 1 == q.size {
+                    q.packed_dev_idx = 0;
+                    q.packed_dev_wrap = !q.packed_dev_wrap;
+                } else {
+                    q.packed_dev_idx += 1;
+                }
+            }
+            drained += 1;
+        }
+        Ok(drained)
+    }
+
     /// Drive the peer once: drain every new avail-ring entry on
     /// `queue` through the shim, populating the used ring.
     ///
@@ -368,6 +424,8 @@ impl Transport for MockTransport {
             q.avail_phys = 0;
             q.used_phys = 0;
             q.last_seen_avail_idx = 0;
+            q.packed_dev_idx = 0;
+            q.packed_dev_wrap = true;
         }
     }
     fn status(&self) -> Status {
@@ -411,6 +469,8 @@ impl Transport for MockTransport {
         q.avail_phys = avail;
         q.used_phys = used;
         q.last_seen_avail_idx = 0;
+        q.packed_dev_idx = 0;
+        q.packed_dev_wrap = true;
         Ok(())
     }
     fn notify(&mut self, queue: u16) {

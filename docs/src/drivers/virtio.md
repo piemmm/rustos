@@ -1,8 +1,11 @@
 # Virtio transport
 
-The bus-agnostic **split-virtqueue** protocol lives in `lib/virtio`
+The bus-agnostic virtqueue protocol lives in `lib/virtio`
 (crate `rustos-virtio`); `drivers/bus/virtio` adds only the concrete
-PCI / MMIO `Transport` implementations on top of it. The device
+PCI / MMIO `Transport` implementations on top of it. Both wire
+formats are implemented as parallel siblings (`AGENTS.md` §2.2): the
+**split virtqueue** (virtio 1.1 §2.6, `SplitQueue`) and the **packed
+virtqueue** (virtio 1.1 §2.7, `PackedQueue`). The device
 drivers `drivers/storage/virtio_blk` and `drivers/network/virtio_net`
 depend on `lib/virtio` and never on the bus driver crate — a driver
 may depend on `lib/*` but not on another driver (`AGENTS.md` §17.4).
@@ -22,8 +25,16 @@ and the device drivers carry only the device-specific wire format.
   (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
   (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
-- The virtio 1.1 §2.6 **split virtqueue**: descriptor table, avail
-  ring, used ring, free-descriptor pool, descriptor chaining.
+- The virtio 1.1 §2.6 **split virtqueue** (`SplitQueue`): descriptor
+  table, avail ring, used ring, free-descriptor pool, descriptor
+  chaining.
+- The virtio 1.1 §2.7 **packed virtqueue** (`PackedQueue`): a single
+  descriptor ring plus the driver- and device-event-suppression
+  structures, with availability and completion signalled in-band
+  through each descriptor's `AVAIL`/`USED` flag bits against the
+  per-side wrap counters (see [Packed virtqueue](#packed-virtqueue)).
+  Both queues share the `ChainSegment` / `UsedToken` vocabulary and
+  the same `Transport` seam.
 - A `VirtioHost` trait through which a driver requests DMA-backed
   bounce buffers (`alloc_dma_zeroed`) and parks pending completion
   (`notify_wait`). `alloc_dma_zeroed` returns an **owned**
@@ -41,7 +52,6 @@ and the device drivers carry only the device-specific wire format.
 
 | Feature                                    | Why deferred                                                                       | Tracked in                                  |
 |--------------------------------------------|------------------------------------------------------------------------------------|---------------------------------------------|
-| Packed virtqueues (virtio 1.1 §2.7)        | Split queues meet the Stage 4 acceptance bar; packed is Stage 5 follow-up          | this page                                    |
 | Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `.junie/next-session-prompt.md` item 0      |
 | IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `.junie/next-session-prompt.md` item 2      |
 | Boot-time PCI/MMIO walk → live driver host | The kernel binary does not yet enumerate the bus and construct a live `drvhost::Host` | `.junie/next-session-prompt.md` item 4   |
@@ -57,7 +67,8 @@ and the device drivers carry only the device-specific wire format.
                     | Transport, SplitQueue, BounceBuffer, VirtioHost
                     v
 +-------------------------------------+
-|  lib/virtio                         |  virtio 1.1 §2.6 split queues, §3.1 init
+|  lib/virtio                         |  virtio 1.1 §2.6 split + §2.7 packed
+|                                     |  queues, §3.1 init
 +-------------------+-----------------+
                     ^ implemented by PciTransport / MmioTransport
                     |
@@ -153,6 +164,46 @@ differences from the PCI transport:
 The 64-bit queue-address registers (`QueueDesc`, `QueueDriver`,
 `QueueDevice`) are written as `Low`/`High` `u32` pairs, and
 `QueueReady` is set to `1` to bring a programmed queue online.
+
+## Packed virtqueue
+
+`PackedQueue` (`lib/virtio/src/packed.rs`) implements the packed-ring
+format (virtio 1.1 §2.7) as a parallel sibling of `SplitQueue`, not a
+replacement: a device advertises it through the
+`VIRTIO_F_RING_PACKED` feature bit. Where the split format spreads
+state across three structures, the packed format uses **one**
+descriptor ring (`PackedQueue::desc_ring_size` bytes — 16 per entry)
+plus two 4-byte event-suppression structures, programmed through the
+*same* `Transport::queue_set(size, desc, driver_area, device_area)`
+seam the split queue uses (the three address registers map to
+`queue_desc` / `queue_driver` / `queue_device` either way, so no
+transport-interface change was needed).
+
+Availability and completion are signalled **in-band** in each
+descriptor's `flags`:
+
+- `VRING_PACKED_DESC_F_AVAIL (1 << 7)` and
+  `VRING_PACKED_DESC_F_USED (1 << 15)` are interpreted relative to a
+  single-bit wrap counter held independently by the driver
+  (`avail_wrap`) and tracked for the device (`used_wrap`), both
+  initialised to `1`.
+- The driver marks a descriptor available by setting `AVAIL` to its
+  wrap counter and `USED` to the inverse (`AVAIL != USED`). The
+  device marks it used by setting both to its own wrap counter
+  (`AVAIL == USED`). A wrap counter toggles each time its cursor
+  steps off the last ring slot.
+
+`add_chain` writes the chain across consecutive ring entries, sets
+`VRING_PACKED_DESC_F_NEXT` on every entry but the last, stores the
+buffer id in the last entry, and publishes the head descriptor's
+flags last so the device never observes a partial scatter/gather
+list (virtio 1.1 §2.7.6). It returns the buffer id (the chain's head
+ring position); `poll_used` reads the in-band `USED` marker at its
+cursor, reclaims the chain's slots, and returns a `UsedToken` —
+the same `ChainSegment` / `UsedToken` vocabulary the split queue
+uses. The in-process `MockTransport::drain_packed_queue` is the
+packed peer the unit tests drive, mirroring `drain_queue` for the
+split ring.
 
 ## DMA ownership model
 
@@ -280,7 +331,14 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   mock-peer round-trip, sensitive-class scrub on drop, and the
   `DmaSlab` ownership tests (round-trip; three simultaneous disjoint
   writes; `drop` invokes the free shim once with the right
-  `(slot, len)`; `pool_id` distinguishes slabs across pools).
+  `(slot, len)`; `pool_id` distinguishes slabs across pools). The
+  packed ring (virtio 1.1 §2.7) is covered alongside the split ring:
+  the `AVAIL`/`USED` flag truth table and descriptor byte round-trip,
+  plus end-to-end queue initialisation, non-power-of-two rejection,
+  slot consumption, mock-peer round-trip, empty/too-long and
+  free-pool-exhaustion rejection, ring-wrap-with-reclaim across the
+  ring boundary (toggling both wrap counters), and the empty
+  no-completion / no-op-drain paths.
 - `cargo test -p rustos-drv-bus-virtio` covers the concrete
   transports: the `transport_pci` tests (short-window rejection,
   `num_queues` read, status write/read + reset, driver-feature
