@@ -42,6 +42,11 @@ rustos_riscv64_trap_vector:
     sd      a6, 112(sp)
     sd      a7, 120(sp)
 
+    # Pass the saved-frame pointer (sp) to the Rust handler as its first
+    # argument so it can read the user's `ecall` registers and write the
+    # syscall return value back into the saved a0 slot. a0 was already
+    # spilled to 64(sp) above, so clobbering it here is safe.
+    mv      a0, sp
     call    rustos_riscv64_trap_handler
 
     ld      ra, 0(sp)

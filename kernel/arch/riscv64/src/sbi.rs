@@ -15,8 +15,37 @@
 //! (`qemu_exit`), so console availability is not load-bearing for the
 //! test outcome.
 
+/// SBI legacy extension id for `set_timer`.
+const SBI_SET_TIMER: usize = 0x00;
+
 /// SBI legacy extension id for `console_putchar`.
 const SBI_CONSOLE_PUTCHAR: usize = 0x01;
+
+/// Program the next supervisor timer interrupt for absolute `time`
+/// (in `time`-CSR ticks).
+///
+/// Issues the legacy `set_timer` `ecall` (extension id `0x00`). On
+/// RV64 the 64-bit `stime_value` is passed whole in `a0`. The call
+/// also clears any pending supervisor timer interrupt (`sip.STIP`), so
+/// the timer trap handler re-arms the timer through this call to
+/// acknowledge the tick. Errors are not observable through the legacy
+/// ABI, so it never panics (`AGENTS.md` §2.9).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub fn set_timer(time: u64) {
+    // SAFETY: an `ecall` with `a7 = 0x00` is the documented SBI legacy
+    // `set_timer` service. It reads `a0` (the absolute deadline), writes
+    // no guest memory, and clobbers only the SBI return registers
+    // `a0`/`a1`, which are marked `lateout`.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") SBI_SET_TIMER,
+            inout("a0") time => _,
+            lateout("a1") _,
+            options(nostack),
+        );
+    }
+}
 
 /// Write one byte to the SBI console.
 ///

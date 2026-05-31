@@ -381,6 +381,7 @@ version = "0.0.0"
 name = "rustos-arch-riscv64"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-arch-api",
  "rustos-log",
 ]
@@ -848,6 +849,16 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-log",
  "rustos-sync",
+]
+
+[[package]]
+name = "rustos-test-timer-preempt-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-itest-harness",
+ "rustos-log",
 ]
 
 [[package]]

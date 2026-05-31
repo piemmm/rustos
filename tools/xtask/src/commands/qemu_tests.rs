@@ -247,6 +247,28 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
     },
+    // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
+    // half of the Stage-3 "timer interrupt drives the scheduler"
+    // per-sub-stage deliverable. It boots the `virt` board, reads the
+    // device-tree `timebase-frequency`, installs a `preempt`
+    // scheduler-tick callback, arms the SBI timer at 100 Hz + enables
+    // `sie.STIE`, and idles on `wfi` until the supervisor-timer trap path
+    // has driven the callback 20 times — proving the timer repeatedly
+    // delivers and re-arms — then writes the `SiFive` Test PASS finisher.
+    // A revert to no-timer scheduling never reaches the count, so the run
+    // times out and the harness reports the failure. Single CPU (the
+    // slice brings up one hart) and a 60-second budget match the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-timer-preempt-qemu-riscv64",
+        binary: "rustos-test-timer-preempt-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
     // vertical — boot → build the virtio-MMIO bus from the device tree →

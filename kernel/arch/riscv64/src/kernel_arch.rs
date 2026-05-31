@@ -104,7 +104,7 @@ impl SchedulerArch for RiscvArch {
 /// Read the architectural `time` CSR (nanosecond-resolution monotonic
 /// tick source on the `virt` board).
 #[cfg(target_arch = "riscv64")]
-fn read_time() -> u64 {
+pub(crate) fn read_time() -> u64 {
     let ticks: u64;
     // SAFETY: `rdtime` reads the unprivileged `time` CSR; it has no
     // side effects and is available to S-mode on every riscv64 platform
@@ -119,7 +119,7 @@ fn read_time() -> u64 {
 /// the unit tests below observe a monotonic clock. Never linked into a
 /// kernel image (the riscv64 build uses [`read_time`] above).
 #[cfg(not(target_arch = "riscv64"))]
-fn read_time() -> u64 {
+pub(crate) fn read_time() -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed) + 1

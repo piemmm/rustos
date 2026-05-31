@@ -768,9 +768,61 @@ Each sub-stage delivers one architecture. They share the same checklist:
   as sub-items (f1)..(f7). The `_DISPATCH_SIGNATURE_PINNED`
   const-assert in `kernel/rustos-kernel::dispatch` still pins the
   callback ABI so the eventual swap cannot silently drift.
-- Stage 3b/3c/3d (aarch64 / riscv64 / wasm32) remain outstanding
-  per their own checklists; each follows the same per-arch
-  template (a)..(d) the x86_64 sub-stage just completed.
+- Stage 3b/3d (aarch64 / wasm32) remain outstanding per their own
+  checklists; each follows the same per-arch template (a)..(d) the
+  x86_64 sub-stage just completed. Stage 3c (riscv64) status is
+  tracked separately below.
+
+**Stage 3c status: in progress — arch primitives landed.**
+- The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
+  (`SchedulerArch` + monotonic `time`-CSR clock), PLIC driver, and
+  S-mode external-IRQ trap glue were already in tree (Stage 4.D
+  Item 4). This session added the remaining Stage-3 per-sub-stage
+  arch primitives, each host-unit-tested and clippy/rustdoc clean on
+  both the host and the `riscv64gc-unknown-none-elf` target:
+    - [x] **MMU / page-table primitives** — `kernel/arch/riscv64::paging`:
+          Sv39 PTE PPN encode/decode, per-level VPN extraction, the
+          `satp` Sv39 selector, a `.bss` `PageTablePool`, and an
+          `AddressSpace` (gigapage identity map + 4 KiB walk +
+          `satp`/`sfence.vma` `switch`). 12 host tests including a
+          host-side three-level translate cross-check.
+    - [x] **Context switch** — `kernel/arch/riscv64::context` +
+          `context.s`: `TaskCtx { sp }`, `prepare` (first-run frame:
+          `ra = entry`, `a0 = arg`), and `rustos_arch_riscv64_switch`
+          saving `ra` + `s0`–`s11` + `a0`. `const _` layout/frame
+          asserts; 6 host tests.
+    - [x] **Timer + scheduler tick** — `kernel/arch/riscv64::preempt`:
+          set-once tick callback, `sie.STIE` enable, `interval_for_hz`,
+          `init_local_preempt` (arm SBI `set_timer` + enable STIE),
+          and `on_timer_interrupt` (callback → re-arm/ack). The trap
+          handler routes the supervisor-timer `scause` here. 8 host
+          tests. **QEMU vertical
+          `tests/integration/timer_preempt_qemu_riscv64`** (enrolled
+          in `tools/xtask/src/commands/qemu_tests.rs`, single CPU,
+          60 s budget) boots the `virt` board, arms the timer at
+          100 Hz, and asserts the supervisor-timer trap path drives
+          the callback ≥ 20 times before `SiFive` Test PASS — the
+          "timer interrupt drives scheduler" deliverable, **verified
+          green under QEMU on this host**.
+    - [x] **Per-arch syscall entry** — `kernel/arch/riscv64::syscall_entry`
+          + `trap::TrapFrame`: the U-mode `ecall` path. `pack_raw_args`
+          marshals `a0`–`a5` into the frozen `rustos_abi`
+          `[u64; SYSCALL_MAX_ARGS]` layout (shared with x86_64,
+          §2.2); `dispatch_ecall` forwards `(a7, &args)` to a set-once
+          dispatch callback and writes the result to `a0`; the trap
+          handler advances `sepc` past the 4-byte `ecall` and fails
+          closed without a callback. 8 host tests; the existing
+          riscv64 boot vertical still PASSES after the trap-frame
+          change.
+    - The boot stub, console, and QEMU run script (`tools/qemu`)
+      pre-existed, so 3c's per-sub-stage checklist is satisfied
+      except the items below.
+- **Remaining for 3c completion (next session):** the
+  memory-isolation QEMU vertical exercising `paging::AddressSpace`
+  (two hierarchies disagreeing on one VA → MMU fault), multi-hart
+  SMP bring-up (SBI `IPI` + per-hart timer/identity), and wiring the
+  new address space + context switch into the live scheduler. These
+  are scoped in `.junie/next-session-prompt.md`.
 
 ---
 

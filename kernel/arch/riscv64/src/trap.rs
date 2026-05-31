@@ -41,6 +41,54 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+/// Caller-saved integer registers saved by `rustos_riscv64_trap_vector`
+/// before it calls the Rust handler, laid out to match the store/load
+/// offsets in `trap.s` exactly.
+///
+/// The asm reserves a 144-byte frame and stores `ra`, `t0`–`t6`, and
+/// `a0`–`a7` at the byte offsets the field order below reproduces. The
+/// Rust handler receives a `*mut TrapFrame` (the saved-frame `sp`) so it
+/// can read the user's `ecall` arguments from `a0`–`a7` and write the
+/// return value back into `a0` before the asm epilogue restores them.
+/// The `offset_of!` asserts in the unit tests pin the layout against
+/// `trap.s`; a desync fails the host build.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrapFrame {
+    /// Return address (x1).
+    pub ra: u64,
+    /// Temporary t0 (x5).
+    pub t0: u64,
+    /// Temporary t1 (x6).
+    pub t1: u64,
+    /// Temporary t2 (x7).
+    pub t2: u64,
+    /// Temporary t3 (x28).
+    pub t3: u64,
+    /// Temporary t4 (x29).
+    pub t4: u64,
+    /// Temporary t5 (x30).
+    pub t5: u64,
+    /// Temporary t6 (x31).
+    pub t6: u64,
+    /// Argument / return register a0 (x10).
+    pub a0: u64,
+    /// Argument register a1 (x11).
+    pub a1: u64,
+    /// Argument register a2 (x12).
+    pub a2: u64,
+    /// Argument register a3 (x13).
+    pub a3: u64,
+    /// Argument register a4 (x14).
+    pub a4: u64,
+    /// Argument register a5 (x15).
+    pub a5: u64,
+    /// Argument register a6 (x16).
+    pub a6: u64,
+    /// Argument register / syscall number a7 (x17).
+    pub a7: u64,
+}
+
 /// `scause` bit set when the trap is an interrupt (cleared for a
 /// synchronous exception). The remaining bits hold the cause code.
 pub const SCAUSE_INTERRUPT_BIT: u64 = 1 << 63;
@@ -150,20 +198,34 @@ pub unsafe fn init_traps() {
 
 /// Rust entry invoked by the asm trap vector.
 ///
-/// Reads `scause`; on a supervisor external interrupt it forwards to the
-/// installed dispatcher (which performs the PLIC claim → `IrqTable::fire`
-/// → complete handshake). Any synchronous exception is unexpected in the
-/// boot-to-`BootCompleted` slice and fails closed by parking the hart
-/// rather than `sret`-looping on the faulting instruction (`AGENTS.md`
-/// §2 — never silently reset; §5.4.5 — fail closed).
+/// Reads `scause` and dispatches:
+///
+/// * A U-mode environment call (`ecall`) is forwarded to the installed
+///   [`crate::syscall_entry`] dispatch callback, after which `sepc` is
+///   advanced past the 4-byte `ecall` so `sret` resumes at the next
+///   instruction. If no syscall dispatcher is installed the hart fails
+///   closed (`AGENTS.md` §5.4.5) rather than returning an unspecified
+///   value to user space.
+/// * A supervisor external interrupt forwards to the installed PLIC
+///   dispatcher (claim → `IrqTable::fire` → complete).
+/// * A supervisor timer interrupt drives the scheduler tick.
+/// * Any other synchronous exception is unexpected in this slice and
+///   fails closed by parking the hart rather than `sret`-looping on the
+///   faulting instruction (`AGENTS.md` §2 — never silently reset).
+///
+/// `frame` is the saved-register frame the asm vector built; the
+/// syscall path reads the user's `a0`–`a7` from it and writes the
+/// return value back into `a0`.
 ///
 /// # Safety
 ///
 /// Only callable from `rustos_riscv64_trap_vector`, which has saved the
-/// interrupted context's caller-saved registers.
+/// interrupted context's caller-saved registers and passes `sp` as
+/// `frame`. `frame` therefore points at a valid [`TrapFrame`] live for
+/// the duration of the call.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_riscv64_trap_handler() {
+unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
     let scause: u64;
     // SAFETY: reading `scause` has no side effects.
     unsafe {
@@ -171,9 +233,43 @@ unsafe extern "C" fn rustos_riscv64_trap_handler() {
     }
 
     if (scause & SCAUSE_INTERRUPT_BIT) == 0 {
-        // Synchronous exception: nothing in this slice should fault, and
-        // returning would re-execute the faulting instruction forever.
+        if crate::syscall_entry::is_ecall_from_user(scause) {
+            // SAFETY: `frame` is the live saved-register frame the asm
+            // vector passed; the syscall path reads `a0`–`a7` and writes
+            // the result into `a0`.
+            let dispatched = crate::syscall_entry::dispatch_ecall(unsafe { &mut *frame });
+            if !dispatched {
+                // A syscall reached the handler before the binary
+                // installed its dispatcher — fail closed.
+                crate::kernel_arch::halt_current_hart();
+            }
+            // Advance `sepc` past the `ecall` so `sret` resumes at the
+            // following instruction instead of re-trapping.
+            // SAFETY: reading and rewriting `sepc` has no side effect
+            // beyond the CSR; the new value is the address after the
+            // 4-byte `ecall`.
+            unsafe {
+                let sepc: u64;
+                core::arch::asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack));
+                core::arch::asm!(
+                    "csrw sepc, {}",
+                    in(reg) sepc.wrapping_add(crate::syscall_entry::ECALL_INSTR_LEN),
+                    options(nomem, nostack),
+                );
+            }
+            return;
+        }
+        // Any other synchronous exception is unexpected in this slice
+        // and returning would re-execute the faulting instruction
+        // forever.
         crate::kernel_arch::halt_current_hart();
+    }
+
+    if crate::preempt::is_supervisor_timer_interrupt(scause) {
+        // Supervisor timer interrupt: drive the scheduler tick and
+        // re-arm the SBI timer (which acknowledges `sip.STIP`).
+        crate::preempt::on_timer_interrupt();
+        return;
     }
 
     if is_supervisor_external_interrupt(scause) {

@@ -58,10 +58,15 @@ physical-memory map excludes it.
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 
-Sv39 paging and SMP bring-up are the remaining riscv64 deliverables
-(`PLAN.md` Stage 4.D Item 4); they are not needed for the
-boot-to-`BootCompleted` slice. The ring-0 DTB virtio-mmio walk and the
-full device bring-up now land in the virtio-MMIO QEMU verticals (below).
+The Sv39 paging primitives, the context-switch primitive, the
+supervisor-timer preemption surface, and the `ecall` syscall entry now
+exist as host-tested arch primitives (Stage 3c — see *Stage 3
+architecture primitives* below); they are not needed for the
+boot-to-`BootCompleted` slice, which runs with paging off in a single
+hart. Multi-hart SMP bring-up (and wiring the new address space and
+context switch into the live scheduler) remain riscv64 follow-ups. The
+ring-0 DTB virtio-mmio walk and the full device bring-up land in the
+virtio-MMIO QEMU verticals (below).
 
 The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
 is what the test bin uses to report its result.
@@ -92,11 +97,57 @@ interrupts disabled (it neither calls `trap::init_traps` nor builds a
   `docs/src/security/irq.md`.
 - **S-mode trap vector.** `trap::init_traps` installs
   `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode)
-  and enables `sie.SEIE` + `sstatus.SIE`. The vector saves
-  caller-saved registers, calls the Rust handler, and `sret`s; the
-  handler fails closed (parks) on a synchronous exception and forwards
-  a supervisor external interrupt to a one-shot dispatch callback that
-  performs the PLIC claim → `IrqTable::fire` → complete handshake.
+  and enables `sie.SEIE` + `sstatus.SIE`. The vector saves the
+  caller-saved registers into a `trap::TrapFrame` and passes its pointer
+  to the Rust handler, which dispatches by `scause`: a U-mode `ecall`
+  goes to the syscall path, a supervisor external interrupt forwards to
+  the one-shot PLIC dispatch callback (claim → `IrqTable::fire` →
+  complete), a supervisor timer interrupt drives the scheduler tick, and
+  any other synchronous exception fails closed (parks the hart).
+
+## Stage 3 architecture primitives
+
+These are the host-tested arch primitives the Stage-3 per-sub-stage
+checklist requires (`PLAN.md` Stage 3). Each mirrors its x86_64
+counterpart and keeps the pure bit/encoding math host-testable, gating
+only the CSR/assembly operations to the freestanding riscv64 target.
+
+- **Sv39 paging (`paging.rs`).** The three-level, 39-bit page-table
+  primitives: PTE PPN encode/decode (`pte_from_phys` / `phys_from_pte`),
+  per-level VPN extraction (`vpn_index`), the `satp` Sv39 selector
+  (`satp_sv39`), a `.bss` `PageTablePool`, and an `AddressSpace` that
+  identity-maps the low gigabytes with 1 GiB leaves, adds 4 KiB mappings
+  through `map_4k`, and activates via `satp` + `sfence.vma` in `switch`.
+  This is the architectural mechanism the memory-isolation vertical
+  (a remaining follow-up) exercises: two hierarchies disagreeing on one
+  VA so the MMU faults a cross-address-space access (`AGENTS.md` §4).
+- **Context switch (`context.rs` + `context.s`).** `TaskCtx { sp }` plus
+  `rustos_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
+  onto the outgoing kernel stack, swaps `sp` through `TaskCtx`, and
+  restores symmetrically. `TaskCtx::prepare` seeds a first-run frame
+  (`ra = entry`, `a0 = arg`); a `const _` assert pins the 112-byte frame
+  to a 16-byte multiple and `TaskCtx` to a single `sp` field at offset 0.
+- **Supervisor-timer preemption (`preempt.rs`).** A set-once tick
+  callback (`set_timer_callback`), the `sie.STIE` enable and the
+  supervisor-timer `scause` decode, `interval_for_hz` (timebase →
+  ticks), `init_local_preempt` (arm the SBI timer + enable `STIE`), and
+  `on_timer_interrupt` (invoke the callback, then re-arm via SBI
+  `set_timer`, which acknowledges `sip.STIP`). The kernel-side run-queue
+  mutation stays in `kernel/sched::Scheduler::on_timer_tick`; this module
+  only wires the riscv64 timer to it. The
+  `tests/integration/timer_preempt_qemu_riscv64` QEMU vertical proves the
+  path end-to-end: it arms the timer at 100 Hz and confirms the callback
+  is driven repeatedly before reporting PASS.
+- **`ecall` syscall entry (`syscall_entry.rs`).** riscv64 has no
+  dedicated syscall instruction pair; a U-mode `ecall` raises a
+  synchronous exception the trap handler routes here. `pack_raw_args`
+  marshals `a0`–`a5` into the frozen `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
+  layout (the same one x86_64 builds — `AGENTS.md` §2.2), `dispatch_ecall`
+  forwards `(a7, &args)` to the set-once dispatch callback and writes the
+  result into the frame's `a0`, and the handler advances `sepc` past the
+  4-byte `ecall`. Absent a callback it fails closed. The
+  architecture-neutral validation/capability/audit dispatcher lives in
+  `kernel/syscall` and is installed by the downstream binary.
 
 ## Boot-state publication
 
