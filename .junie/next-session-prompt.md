@@ -1,11 +1,12 @@
-# Next session — finish Stage 3c (riscv64), then Stage 3b/3d, then resume Stage 5
+# Next session — Stage 3b/3d, then resume Stage 5
 
 ## Where we are
 
 Stage 3 (Architecture Ports) had been skipped: only 3a (x86_64) was
 complete. Earlier sessions advanced **Stage 3c (riscv64)** with the
-per-sub-stage arch primitives below; **this session landed multi-hart
-SMP bring-up** (see "Landed this session").
+per-sub-stage arch primitives below; **this session landed the final
+3c item — wiring the arch primitives into the live `kernel/sched`
+scheduler — so Stage 3c is now complete** (see "Landed this session").
 
 ### Earlier-session arch primitives
 Each host-unit-tested and clippy/rustdoc-clean on both the host and
@@ -41,58 +42,46 @@ in `~/.cargo/bin`, which is **not** on the default non-interactive
 `PATH` — `export PATH="$HOME/.cargo/bin:$PATH"` before invoking the
 gate.)
 
-## Landed this session — multi-hart SMP bring-up (Stage 3c)
+## Landed this session — arch primitives drive the live scheduler (Stage 3c complete)
 
-The second of the two remaining 3c items is now done and green:
+The last remaining 3c item is now done and green, completing Stage 3c:
 
-- `kernel/arch/riscv64/src/sbi.rs` — added the SBI v0.2 **IPI** (sPI)
-  `send_ipi` and **HSM** `hart_start` calls returning a typed `SbiRet`,
-  plus host-tested extension-id constants and `hart_mask_for`.
-- `kernel/arch/riscv64/src/smp.rs` + `smp.s` — `MAX_HARTS`, a
-  `tp`-derived `current_hartid`, a set-once secondary-entry callback,
-  and `start_secondary` (SBI HSM `hart_start` → the `smp.s` trampoline,
-  which seeds each hart's `tp` and a private `.bss` stack slice).
-  `boot.s` now also seeds `tp = hartid` on the boot hart.
-- `RiscvArch` (`kernel_arch.rs`) — carries a `CpuId`↔hart-id map
-  (`new`/`with_harts`/`hartid_of`/`cpu_for_hartid`); `current_cpu`
-  reverse-maps the `tp` hart id and `send_ipi` raises a supervisor
-  software interrupt on the target hart (replacing the former no-op).
-- `preempt.rs` — per-hart timer interval/`CpuId` slots, `enable_ipi`,
-  a set-once IPI callback, and `on_software_interrupt` (clears
-  `sip.SSIP`, runs the callback); `trap.rs` routes the
-  supervisor-software-interrupt cause there.
+- **New QEMU vertical** `tests/integration/sched_drive_qemu_riscv64`
+  (`rustos-test-sched-drive-qemu-riscv64`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`, **1 CPU**, 60 s). It connects
+  the arch `preempt` (timer + IPI) and `context` primitives to the
+  architecture-neutral `kernel/sched` `Scheduler`, rather than the
+  test-local counting callbacks the `timer_preempt` / `ipi_smp`
+  verticals use. On the `virt` board it:
+  1. performs a real bidirectional `context::switch` round-trip with
+     interrupts disabled — an inbound task seeded by `TaskCtx::prepare`
+     records that it ran and `switch`es straight back;
+  2. builds a real `rustos-kernel-sched-mlfq::Scheduler` over
+     `RiscvArch`, publishes it (leaked `Arc` → `AtomicPtr`), and installs
+     **both** the `preempt::set_timer_callback` and
+     `preempt::set_ipi_callback` handlers so each drives
+     `Scheduler::on_timer_tick`;
+  3. arms the 100 Hz SBI timer + IPI (`init_traps`/`enable_ipi`/
+     `init_local_preempt`), spawns 64 tasks, sends itself a directed IPI,
+     and drives the cooperative `step` loop until every task has run.
+  PASS once the supervisor-timer trap has driven the live scheduler ≥ 20
+  times and the IPI software-interrupt path has driven it at least once;
+  any missing path trips a dedicated `SiFive` failure finisher or times
+  out. Verified green via `cargo xtask ci` (which runs
+  `cargo xtask test --qemu`).
 
-**QEMU vertical landed:** `tests/integration/ipi_smp_qemu_riscv64`
-(`rustos-test-ipi-smp-qemu-riscv64`, enrolled in
-`tools/xtask/src/commands/qemu_tests.rs`, **2 CPUs**, 60 s) — boots the
-`virt` board, derives the boot hart at runtime (OpenSBI may boot on
-either hart), starts the other hart via `smp::start_secondary`, and
-after that hart enables interrupts delivers it a directed IPI through
-`RiscvArch::send_ipi`; PASS once the secondary hart's `sip.SSIP` trap
-path runs the IPI callback with the secondary's id. Verified green via
-`cargo xtask ci` (which runs `cargo xtask test --qemu`).
+Note: the live scheduler is driven from this dedicated vertical rather
+than `kernel_core::kernel_main` because the latter halts after
+`BootCompleted` and keeps its `Scheduler` private (an `init.rs`
+internal); mirrors how x86_64's `scheduler_stress_qemu` drives the real
+`Scheduler` from the LAPIC-timer ISR.
 
-## What needs doing next — finish Stage 3c (riscv64)
+## What needs doing next — Stage 3b/3d
 
-The memory-isolation and timer-preempt QEMU verticals plus multi-hart
-SMP are all landed and green, so only **one** 3c item remains:
-
-1. **Wire the new primitives into the live scheduler/kernel** — drive a
-   real `kernel/sched` `Scheduler::on_timer_tick` from the riscv64
-   `preempt` timer callback (and the `smp`/IPI software-interrupt
-   callback) in the boot pipeline (`tests/integration/riscv64_boot`),
-   and exercise `context::switch` for an actual task switch. The arch
-   primitives (`preempt` per-hart timers, `smp` hart start + IPI,
-   `paging::AddressSpace`, `context`) are all in place and host/QEMU
-   tested; this item connects them to the architecture-neutral
-   `Scheduler` rather than the test-local callbacks the verticals use.
-
-3c's per-sub-stage tests ("boots to init", "memory-isolation test
-passes", "timer interrupt drives scheduler") and multi-hart SMP are now
-all satisfied; the remaining item wires the primitives into the live
-kernel scheduler.
-
-## Then — Stage 3b/3d
+Stage 3c (riscv64) is **complete**: all per-sub-stage tests ("boots to
+init", "memory-isolation test passes", "timer interrupt drives
+scheduler"), multi-hart SMP, and the live-scheduler wiring are landed
+and green. The next architecture work is:
 
 - **3b `kernel/arch/aarch64`** is a bare 6-line stub: boot stub, UART
   console, MMU, GIC, generic timer, context switch, EL0 syscall entry,

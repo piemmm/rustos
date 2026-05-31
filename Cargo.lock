@@ -837,6 +837,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-sched-drive-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-sched-mlfq",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-scheduler-stress"
 version = "0.0.0"
 dependencies = [

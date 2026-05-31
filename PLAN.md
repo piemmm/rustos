@@ -773,7 +773,7 @@ Each sub-stage delivers one architecture. They share the same checklist:
   x86_64 sub-stage just completed. Stage 3c (riscv64) status is
   tracked separately below.
 
-**Stage 3c status: in progress — arch primitives landed.**
+**Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
   (`SchedulerArch` + monotonic `time`-CSR clock), PLIC driver, and
   S-mode external-IRQ trap glue were already in tree (Stage 4.D
@@ -862,11 +862,34 @@ Each sub-stage delivers one architecture. They share the same checklist:
           once the secondary hart's `sip.SSIP` trap path runs the IPI
           callback with the secondary's id — **verified green under QEMU
           on this host**.
-- **Remaining for 3c completion (next session):** wiring the new
-  `preempt`/`smp` primitives and the `paging` address space + `context`
-  switch into the *live* `kernel/sched` scheduler (drive a real
-  `Scheduler::on_timer_tick` from the riscv64 boot pipeline and run an
-  actual task switch). Scoped in `.junie/next-session-prompt.md`.
+    - [x] **Arch primitives drive the *live* scheduler** —
+          `tests/integration/sched_drive_qemu_riscv64`
+          (`rustos-test-sched-drive-qemu-riscv64`, enrolled in
+          `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s).
+          This is the final 3c item: it connects the `preempt` (timer +
+          IPI) and `context` primitives to the architecture-neutral
+          `kernel/sched` `Scheduler` rather than the test-local counting
+          callbacks the `timer_preempt` / `ipi_smp` verticals use. On the
+          `virt` board it (1) performs a real bidirectional
+          `context::switch` round-trip with interrupts disabled (an
+          inbound task seeded by `TaskCtx::prepare` records that it ran
+          and `switch`es straight back), (2) builds a real
+          `rustos-kernel-sched-mlfq::Scheduler` over `RiscvArch`,
+          publishes it, and installs both the `preempt` timer callback
+          and the IPI software-interrupt callback so each drives
+          `Scheduler::on_timer_tick`, then (3) arms the 100 Hz SBI timer
+          + IPI, spawns 64 tasks, sends itself a directed IPI, and drives
+          the cooperative `step` loop until every task has run. PASS once
+          the supervisor-timer trap has driven the live scheduler ≥ 20
+          times and the IPI software-interrupt path has driven it at
+          least once; any missing path trips a dedicated failure finisher
+          or times out. **Verified green under QEMU on this host** (and
+          via the full `cargo xtask ci`).
+- 3c's per-sub-stage checklist ("boots to init", "memory-isolation test
+  passes", "timer interrupt drives scheduler"), multi-hart SMP, and the
+  live-scheduler wiring are all satisfied, so **Stage 3c is complete**.
+  Stage 3b (aarch64) and 3d (wasm32) remain outstanding per their own
+  checklists.
 
 ---
 

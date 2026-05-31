@@ -292,6 +292,35 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
     },
+    // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
+    // "arch primitives drive the live scheduler" deliverable — the wiring
+    // that connects the `preempt` (timer + IPI) and `context` primitives
+    // into the architecture-neutral `kernel/sched` `Scheduler`, rather
+    // than the test-local counting callbacks the `timer_preempt` /
+    // `ipi_smp` verticals use. It boots the `virt` board, performs a real
+    // bidirectional `context::switch` round-trip (interrupts off), builds
+    // a real `rustos-kernel-sched-mlfq::Scheduler` over `RiscvArch`,
+    // installs the `preempt` timer callback and the IPI software-interrupt
+    // callback so both drive `Scheduler::on_timer_tick`, arms the 100 Hz
+    // SBI timer + IPI, spawns a batch of tasks, sends itself a directed
+    // IPI, and drives the cooperative `step` loop until every task has
+    // run. PASS once the supervisor-timer trap has driven the live
+    // scheduler >= 20 times and the IPI software-interrupt path has driven
+    // it at least once. A regression that fails to switch, dispatch,
+    // tick, or deliver the IPI either trips a dedicated failure finisher
+    // or never reaches PASS, so the run fails loudly. Single CPU (the
+    // slice brings up one hart) and a 60-second budget match the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-sched-drive-qemu-riscv64",
+        binary: "rustos-test-sched-drive-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
     // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`

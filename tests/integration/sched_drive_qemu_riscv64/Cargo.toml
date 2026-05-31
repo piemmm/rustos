@@ -1,0 +1,37 @@
+[package]
+name = "rustos-test-sched-drive-qemu-riscv64"
+description = "Stage 3c QEMU integration test: the riscv64 arch primitives drive the live kernel/sched scheduler. Boots the virt board, performs a real bidirectional context::switch round-trip, builds a real rustos-kernel-sched-mlfq Scheduler over RiscvArch, routes the preempt timer callback and the IPI software-interrupt callback into Scheduler::on_timer_tick, spawns and dispatches tasks via the cooperative step loop, and PASSes once the timer + IPI have driven the live scheduler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "the riscv64 arch primitives drive the live scheduler"
+# integration test — the remaining riscv64 deliverable of Stage 3
+# (`PLAN.md` Stage 3c). It links the `rustos-arch-riscv64` port and the
+# `rustos-kernel-sched-mlfq` policy: the boot hart performs a real
+# `context::switch` round-trip, builds a real `Scheduler`, wires the
+# `preempt` timer + IPI callbacks into `Scheduler::on_timer_tick`, and
+# drives a cooperative `step` loop over spawned tasks. Keeping the
+# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
+# crate) prevents feature unification from leaking it into any production
+# build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-sched-drive-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
