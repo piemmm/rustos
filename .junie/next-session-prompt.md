@@ -1,94 +1,76 @@
-# Next session — Stage 3b/3d, then resume Stage 5
+# Next session — Stage 3d (wasm32), then resume Stage 5
 
 ## Where we are
 
-Stage 3 (Architecture Ports) had been skipped: only 3a (x86_64) was
-complete. Earlier sessions advanced **Stage 3c (riscv64)** with the
-per-sub-stage arch primitives below; **this session landed the final
-3c item — wiring the arch primitives into the live `kernel/sched`
-scheduler — so Stage 3c is now complete** (see "Landed this session").
+Stage 3 (Architecture Ports) is now complete for **three of four**
+Tier-1 targets:
 
-### Earlier-session arch primitives
-Each host-unit-tested and clippy/rustdoc-clean on both the host and
-`riscv64gc-unknown-none-elf`:
-
-- `kernel/arch/riscv64/src/paging.rs` — Sv39 page-table primitives
-  (PTE/VPN/`satp` encoders, `.bss` `PageTablePool`, `AddressSpace` with
-  gigapage identity map + 4 KiB walk + `satp`/`sfence.vma` `switch`).
-- `kernel/arch/riscv64/src/context.rs` + `context.s` — `TaskCtx { sp }`,
-  `prepare`, and `rustos_arch_riscv64_switch` (saves `ra`+`s0`–`s11`+`a0`).
-- `kernel/arch/riscv64/src/preempt.rs` — supervisor-timer scheduler-tick
-  callback, `sie.STIE`, SBI `set_timer` arm/re-arm, `interval_for_hz`.
-- `kernel/arch/riscv64/src/syscall_entry.rs` + `trap::TrapFrame` — the
-  U-mode `ecall` path (arg marshalling into `rustos_abi`'s
-  `[u64; SYSCALL_MAX_ARGS]`, dispatch callback, `sepc += 4`, fail-closed).
-- `trap.rs`/`trap.s` extended: the vector now passes a `*mut TrapFrame`;
-  the handler routes ecall / supervisor-timer / external causes.
-
-**QEMU vertical landed:** `tests/integration/timer_preempt_qemu_riscv64`
-(`rustos-test-timer-preempt-qemu-riscv64`, enrolled in
-`tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s) — boots the
-`virt` board, arms the timer at 100 Hz, and asserts the supervisor-timer
-trap path drives the tick callback ≥ 20 times before `SiFive` PASS. This
-is the Stage-3 "timer interrupt drives scheduler" deliverable for
-riscv64.
+- **3a x86_64** — complete.
+- **3b aarch64** — **complete (landed this session)**, see below.
+- **3c riscv64** — complete.
+- **3d wasm32** — still a bare 6-line stub. This is the next
+  architecture deliverable.
 
 Verified green on this host: `cargo xtask ci` and `cargo xtask test
---qemu` (the full suite, including every riscv64 vertical — the
-trap-frame change is non-breaking) both pass.
+--qemu` (the full suite, including all three new aarch64 verticals).
 
 (Note: `mdbook`/`mdbook-linkcheck`, `cargo-deny`, `cargo-llvm-cov` live
 in `~/.cargo/bin`, which is **not** on the default non-interactive
 `PATH` — `export PATH="$HOME/.cargo/bin:$PATH"` before invoking the
 gate.)
 
-## Landed this session — arch primitives drive the live scheduler (Stage 3c complete)
+## Landed this session — Stage 3b (aarch64) complete
 
-The last remaining 3c item is now done and green, completing Stage 3c:
+`kernel/arch/aarch64` went from a placeholder to a full Arch HAL
+implementation for the QEMU `virt` board, mirroring the riscv64 port.
+Pure bit/encoding/layout math is host-unit-tested (39 host tests),
+clippy/rustdoc clean on host + `aarch64-unknown-none`; the boot /
+console / exception / GIC / timer / MMU system-register and assembly
+operations are gated to `cfg(all(target_arch = "aarch64", target_os =
+"none"))`.
 
-- **New QEMU vertical** `tests/integration/sched_drive_qemu_riscv64`
-  (`rustos-test-sched-drive-qemu-riscv64`, enrolled in
-  `tools/xtask/src/commands/qemu_tests.rs`, **1 CPU**, 60 s). It connects
-  the arch `preempt` (timer + IPI) and `context` primitives to the
-  architecture-neutral `kernel/sched` `Scheduler`, rather than the
-  test-local counting callbacks the `timer_preempt` / `ipi_smp`
-  verticals use. On the `virt` board it:
-  1. performs a real bidirectional `context::switch` round-trip with
-     interrupts disabled — an inbound task seeded by `TaskCtx::prepare`
-     records that it ran and `switch`es straight back;
-  2. builds a real `rustos-kernel-sched-mlfq::Scheduler` over
-     `RiscvArch`, publishes it (leaked `Arc` → `AtomicPtr`), and installs
-     **both** the `preempt::set_timer_callback` and
-     `preempt::set_ipi_callback` handlers so each drives
-     `Scheduler::on_timer_tick`;
-  3. arms the 100 Hz SBI timer + IPI (`init_traps`/`enable_ipi`/
-     `init_local_preempt`), spawns 64 tasks, sends itself a directed IPI,
-     and drives the cooperative `step` loop until every task has run.
-  PASS once the supervisor-timer trap has driven the live scheduler ≥ 20
-  times and the IPI software-interrupt path has driven it at least once;
-  any missing path trips a dedicated `SiFive` failure finisher or times
-  out. Verified green via `cargo xtask ci` (which runs
-  `cargo xtask test --qemu`).
+Modules: `boot.s` (EL2→EL1 drop, stack, `.bss` zero, DTB hand-off),
+`entry.rs`, `serial.rs` (PL011 UART `Sink`), `panic.rs`, `qemu_exit.rs`
+(ARM semihosting `SYS_EXIT`), `kernel_arch.rs` (`Aarch64Arch` +
+`CNTPCT`/`CNTFRQ` clock), `paging.rs` (stage-1 4 KiB / 3-level MMU,
+`T0SZ=25` 39-bit VA — the Sv39 mirror), `context.rs`/`context.s`
+(AAPCS64 task switch), `preempt.rs` (EL1 physical timer + GIC PPI 30),
+`vectors.s` + `exceptions.rs` (EL1 vector table + IRQ/sync dispatch),
+`gic.rs` (GICv2 driver), `syscall_entry.rs` (`svc` marshalling),
+`fault.rs` (`ESR_EL1` abort hook). Linker: `link/aarch64-virt.ld`.
 
-Note: the live scheduler is driven from this dedicated vertical rather
-than `kernel_core::kernel_main` because the latter halts after
-`BootCompleted` and keeps its `Scheduler` private (an `init.rs`
-internal); mirrors how x86_64's `scheduler_stress_qemu` drives the real
-`Scheduler` from the LAPIC-timer ISR.
+Three Stage-3 per-sub-stage QEMU verticals, enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` (single CPU, 60 s) and verified
+green under QEMU:
 
-## What needs doing next — Stage 3b/3d
+- `tests/integration/kernel_arch_boot_aarch64` — boots to init.
+- `tests/integration/timer_preempt_qemu_aarch64` — the GICv2 timer PPI
+  drives the `preempt` callback ≥ 20 times.
+- `tests/integration/memory_isolation_qemu_aarch64` — an attacker
+  `AddressSpace` faults on a victim-only page.
 
-Stage 3c (riscv64) is **complete**: all per-sub-stage tests ("boots to
-init", "memory-isolation test passes", "timer interrupt drives
-scheduler"), multi-hart SMP, and the live-scheduler wiring are landed
-and green. The next architecture work is:
+Host runner: new `Arch::Aarch64` + `tools/qemu/src/aarch64.rs` (`virt`,
+`cortex-a72`, semihosting result protocol) + `Spec::for_aarch64_kernel`;
+the integration harness gained the `itest_aarch64` cfg; docs in
+`docs/src/platform/aarch64.md`.
 
-- **3b `kernel/arch/aarch64`** is a bare 6-line stub: boot stub, UART
-  console, MMU, GIC, generic timer, context switch, EL0 syscall entry,
-  QEMU `virt` script, and the three per-sub-stage tests.
+### aarch64 follow-ups (mirrors how riscv64 was staged)
+- Multi-hart SMP bring-up: `MPIDR_EL1` → dense `CpuId` map and
+  secondary-core start (PSCI `CPU_ON`). `send_ipi` already raises a
+  GICv2 SGI.
+- Wire the `paging::AddressSpace` / `context::switch` primitives into the
+  *live* `kernel/sched` `Scheduler` (the aarch64 analogue of
+  `tests/integration/sched_drive_qemu_riscv64`), and route the live EL0
+  `svc` register frame through to `syscall_entry::dispatch_svc`.
+
+## What needs doing next — Stage 3d (wasm32)
+
 - **3d `kernel/arch/wasm32`** is a bare 6-line stub: cooperative
   scheduling via `requestAnimationFrame`/`MessageChannel`, WASM-memory
-  isolation, browser headless harness.
+  isolation between worker contexts, and a browser headless harness.
+  This is structurally different from the bare-metal ports (no QEMU; a
+  browser/`wasm32-unknown-unknown` test environment), so plan the test
+  harness first.
 
 ## Then — resume the earlier Stage 5 follow-ups
 
@@ -107,27 +89,18 @@ export PATH="$HOME/.cargo/bin:$PATH"   # mdbook / cargo-deny / cargo-llvm-cov li
 cargo xtask ci
 cargo xtask test --qemu
 
-# Run the riscv64 timer-preempt vertical standalone (fast iteration):
-cargo build --locked -p rustos-test-timer-preempt-qemu-riscv64 \
-    --target riscv64gc-unknown-none-elf
+# aarch64 arch-crate host tests (paging/context/preempt/syscall/fault/gic/kernel_arch):
+cargo test -p rustos-arch-aarch64
+
+# Run an aarch64 vertical standalone (fast iteration):
+cargo build --locked -p rustos-test-timer-preempt-qemu-aarch64 \
+    --target aarch64-unknown-none
+cargo run -p rustos-qemu --bin rustos-qemu-run -- \
+    --kernel target/aarch64-unknown-none/debug/rustos-test-timer-preempt-qemu-aarch64 \
+    --arch aarch64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
+
+# riscv64 verticals (unchanged, still green):
 cargo run -p rustos-qemu --bin rustos-qemu-run -- \
     --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-timer-preempt-qemu-riscv64 \
-    --arch riscv64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
-
-# riscv64 arch-crate host tests (paging/context/preempt/syscall/fault/smp/sbi):
-cargo test -p rustos-arch-riscv64
-
-# Run the riscv64 multi-hart IPI/SMP vertical standalone (fast iteration):
-cargo build --locked -p rustos-test-ipi-smp-qemu-riscv64 \
-    --target riscv64gc-unknown-none-elf
-cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-    --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-ipi-smp-qemu-riscv64 \
-    --arch riscv64 --cpus 2 --timeout-secs 60   # runner exit 0 == PASS
-
-# Run the riscv64 memory-isolation vertical standalone (fast iteration):
-cargo build --locked -p rustos-test-memory-isolation-qemu-riscv64 \
-    --target riscv64gc-unknown-none-elf
-cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-    --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-memory-isolation-qemu-riscv64 \
-    --arch riscv64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
+    --arch riscv64 --cpus 1 --timeout-secs 60
 ```

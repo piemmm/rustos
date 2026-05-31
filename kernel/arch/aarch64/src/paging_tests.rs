@@ -1,0 +1,141 @@
+//! Host unit tests for the aarch64 stage-1 paging primitives.
+//!
+//! These cover the pure descriptor/index arithmetic and the host-side
+//! table walk (the `&mut`-recovering `map_4k` + a manual translate
+//! cross-check). The `TTBR0_EL1`/`SCTLR_EL1` activation is freestanding
+//! and is exercised by the memory-isolation QEMU vertical, not here.
+
+use super::*;
+
+#[test]
+fn table_index_extracts_each_level() {
+    // VA whose L1/L2/L3 indices are 1, 2, 3 with a 0x40 offset.
+    let va = (1u64 << 30) | (2u64 << 21) | (3u64 << 12) | 0x40;
+    assert_eq!(table_index(va, 1), 1);
+    assert_eq!(table_index(va, 2), 2);
+    assert_eq!(table_index(va, 3), 3);
+}
+
+#[test]
+fn descriptor_round_trips_the_output_address() {
+    let pa = 0x4_1234_5000;
+    let d = descriptor(pa, normal_leaf_attrs(false));
+    assert_eq!(phys_from_descriptor(d), pa);
+    // The offset bits are masked off the output address.
+    let d2 = descriptor(pa | 0xABC, normal_leaf_attrs(false));
+    assert_eq!(phys_from_descriptor(d2), pa);
+}
+
+#[test]
+fn block_vs_table_low_bits() {
+    // Block descriptor: valid set, bit 1 clear (0b01).
+    let block = descriptor(0x4000_0000, normal_leaf_attrs(true));
+    assert!(is_block(block));
+    assert_eq!(block & 0b11, 0b01);
+    // Table descriptor: 0b11.
+    let table = table_descriptor(0x4_0000_0000);
+    assert!(!is_block(table));
+    assert_eq!(table & 0b11, 0b11);
+    // Page (L3) descriptor: 0b11.
+    let page = descriptor(0x4000_0000, normal_leaf_attrs(false));
+    assert!(!is_block(page));
+    assert_eq!(page & 0b11, 0b11);
+}
+
+#[test]
+fn leaf_attrs_select_the_right_mair_index() {
+    assert_eq!(
+        normal_leaf_attrs(true) & (0b111 << 2),
+        attrs::ATTR_IDX_NORMAL
+    );
+    assert_eq!(
+        device_leaf_attrs(true) & (0b111 << 2),
+        attrs::ATTR_IDX_DEVICE
+    );
+    // Both set the access flag so first touch does not fault.
+    assert_ne!(normal_leaf_attrs(true) & attrs::AF, 0);
+    assert_ne!(device_leaf_attrs(true) & attrs::AF, 0);
+}
+
+#[test]
+fn tcr_value_encodes_a_39_bit_region() {
+    // T0SZ field (bits [5:0]) is 25 → 64 - 25 = 39-bit VA.
+    assert_eq!(TCR_VALUE & 0x3F, 25);
+    // TTBR1 walks disabled (EPD1, bit 23).
+    assert_ne!(TCR_VALUE & (1 << 23), 0);
+}
+
+#[test]
+fn mair_pairs_normal_and_device() {
+    // Attr0 = 0xFF (Normal WB RW-allocate), Attr1 = 0x04 (Device-nGnRE).
+    assert_eq!(MAIR_VALUE & 0xFF, 0xFF);
+    assert_eq!((MAIR_VALUE >> 8) & 0xFF, 0x04);
+}
+
+#[test]
+fn identity_gigapages_map_device_then_normal() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("two gigapages");
+    // The host walk reads the root through its identity-mapped address.
+    let root = space.root_phys() as *const u64;
+    // SAFETY: `root_phys` is the address of a live table page from the
+    // process-static pool; reading the first two entries is sound.
+    let (e0, e1) = unsafe { (*root, *root.add(1)) };
+    // GiB 0 is Device, GiB 1 is Normal; both are valid blocks.
+    assert!(is_block(e0));
+    assert!(is_block(e1));
+    assert_eq!(e0 & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
+    assert_eq!(e1 & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_eq!(phys_from_descriptor(e0), 0);
+    assert_eq!(phys_from_descriptor(e1), 1 << 30);
+}
+
+#[test]
+fn map_4k_walks_and_translates() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // Map a 4 KiB page well above the identity window (64 GiB) so the
+    // walk allocates fresh L2/L3 tables rather than shattering a block.
+    let va: u64 = 64u64 << 30;
+    let pa: u64 = 0x4123_4000;
+    space.map_4k(&POOL, va, pa).expect("map the page");
+
+    // Manually walk the just-built hierarchy and confirm it translates
+    // `va` to `pa` (the host analogue of an MMU lookup).
+    let translated = host_translate(space.root_phys(), va).expect("va is mapped");
+    assert_eq!(translated, pa);
+
+    // A neighbouring page in the same L3 table is absent.
+    assert!(host_translate(space.root_phys(), va + PAGE_SIZE as u64).is_none());
+}
+
+#[test]
+fn map_4k_rejects_misaligned_inputs() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("identity map");
+    assert!(space.map_4k(&POOL, 0x1_0001, 0x4000_0000).is_none());
+    assert!(space.map_4k(&POOL, 0x1_0000, 0x4000_0001).is_none());
+}
+
+/// Host-side translation of `va` through the table hierarchy rooted at
+/// `root_phys`, following table descriptors and returning the output
+/// physical address of the leaf (block or page) that maps `va`, or
+/// `None` if no valid leaf is reached.
+fn host_translate(root_phys: u64, va: u64) -> Option<u64> {
+    let mut table = root_phys as *const u64;
+    for level in 1..=LEVELS {
+        let idx = table_index(va, level);
+        // SAFETY: `table` points at a live, identity-addressed table page
+        // built by `map_4k`/`new_identity_gigapages`; `idx < 512`.
+        let entry = unsafe { *table.add(idx) };
+        if (entry & attrs::VALID) == 0 {
+            return None;
+        }
+        if is_block(entry) || level == LEVELS {
+            return Some(phys_from_descriptor(entry));
+        }
+        table = phys_from_descriptor(entry) as *const u64;
+    }
+    None
+}

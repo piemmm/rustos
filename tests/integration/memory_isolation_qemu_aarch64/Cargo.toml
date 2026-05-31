@@ -1,0 +1,34 @@
+[package]
+name = "rustos-test-memory-isolation-qemu-aarch64"
+description = "Stage 3b QEMU integration test: the aarch64 MMU enforces memory isolation between two stage-1 address spaces on the virt board."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "build a victim and an attacker stage-1 address space that
+# disagree on one page, switch to the attacker, and prove the MMU faults
+# the access to the victim-only page" integration test — the aarch64 half
+# of the Stage-3 "memory-isolation test passes" per-sub-stage deliverable
+# (`PLAN.md` Stage 3), the analogue of the x86_64 and riscv64 verticals.
+# It links only the `rustos-arch-aarch64` port and reports the result
+# through the ARM semihosting finisher. Keeping the QEMU-exit shortcut in
+# a dedicated bin (not a Cargo feature on the arch crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md`
+# §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-memory-isolation-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

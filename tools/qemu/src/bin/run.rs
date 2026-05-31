@@ -8,7 +8,7 @@
 //! Usage:
 //! ```text
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-//!     --kernel path/to/kernel.elf [--arch x86_64|riscv64] [--cpus N] \
+//!     --kernel path/to/kernel.elf [--arch x86_64|riscv64|aarch64] [--cpus N] \
 //!     [--timeout-secs S] [--virtio-blk path/to/disk.img ...] \
 //!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap] [--ramfb]
 //! ```
@@ -38,7 +38,8 @@ fn main() -> ExitCode {
                 arch = match args.next().as_deref() {
                     Some("x86_64") => Arch::X86_64,
                     Some("riscv64") => Arch::Riscv64,
-                    _ => return usage_err("--arch must be x86_64 or riscv64"),
+                    Some("aarch64") => Arch::Aarch64,
+                    _ => return usage_err("--arch must be x86_64, riscv64, or aarch64"),
                 };
             }
             "--ramfb" => ramfb = true,
@@ -89,6 +90,7 @@ fn main() -> ExitCode {
     let base = match arch {
         Arch::X86_64 => Spec::for_x86_64_kernel(kernel),
         Arch::Riscv64 => Spec::for_riscv64_kernel(kernel),
+        Arch::Aarch64 => Spec::for_aarch64_kernel(kernel),
     };
     let mut spec = base.with_cpus(cpus).with_timeout(timeout);
     for image in block_images {
@@ -123,7 +125,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64] [--cpus N] \
+    "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64|aarch64] [--cpus N] \
 [--timeout-secs S] [--virtio-blk <image> ...] [--virtio-net] \
 [--virtio-net-pcap <path>] [--ramfb]"
 }

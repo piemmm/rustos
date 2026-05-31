@@ -1,0 +1,33 @@
+[package]
+name = "rustos-test-kernel-arch-boot-aarch64"
+description = "Stage 3b QEMU integration test: boot the aarch64 virt-board to a placeholder init and report PASS via ARM semihosting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the aarch64 `virt` board through the arch crate's
+# trampoline and reach a placeholder init" integration test — the
+# aarch64 half of the Stage-3 "boots to init" per-sub-stage deliverable
+# (`PLAN.md` Stage 3). It links only the `rustos-arch-aarch64` port (the
+# boot path needs no `kernel/*` subsystem), logs over the PL011 UART, and
+# reports PASS through the ARM semihosting finisher. Keeping the
+# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
+# crate) prevents feature unification from leaking it into any production
+# build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-kernel-arch-boot-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

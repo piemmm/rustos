@@ -433,11 +433,72 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: true,
     },
+    // Stage 3b: `rustos-test-kernel-arch-boot-aarch64` is the aarch64
+    // half of the Stage-3 "boots to init" per-sub-stage deliverable. It
+    // boots the `virt` board through the arch crate's EL1 trampoline
+    // (EL2->EL1 drop, stack, `.bss` zero), logs over the PL011 UART, and
+    // reports PASS through the ARM semihosting `SYS_EXIT` finisher.
+    // Single CPU and a 60-second budget match the other boot-then-do-
+    // fixed-work tests.
+    QemuTest {
+        package: "rustos-test-kernel-arch-boot-aarch64",
+        binary: "rustos-test-kernel-arch-boot-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
+    // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
+    // half of the Stage-3 "timer interrupt drives the scheduler"
+    // per-sub-stage deliverable. It installs the EL1 vectors, brings up
+    // the GICv2, arms the EL1 physical generic timer at 100 Hz, unmasks
+    // IRQs, and idles on `wfi` until the generic-timer IRQ path has
+    // driven the `preempt` callback 20 times — proving the timer
+    // repeatedly delivers and re-arms — then reports PASS via semihosting.
+    // Single CPU and a 60-second budget.
+    QemuTest {
+        package: "rustos-test-timer-preempt-qemu-aarch64",
+        binary: "rustos-test-timer-preempt-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
+    // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
+    // aarch64 half of the Stage-3 "memory-isolation test passes"
+    // per-sub-stage deliverable — the analogue of the x86_64 and riscv64
+    // verticals. It builds a victim and an attacker stage-1
+    // `paging::AddressSpace` (each identity-maps the low 2 GiB) that
+    // disagree on a single 64 GiB page, installs the EL1 vectors and a
+    // `fault` handler, switches `TTBR0_EL1` to the attacker (enabling the
+    // MMU), and reads that page: the MMU raises a data abort, the handler
+    // confirms the cause / faulting address, and reports PASS via
+    // semihosting. A regression that fails to isolate the page reads it
+    // without faulting and reports FAILURE explicitly. Single CPU and a
+    // 60-second budget.
+    QemuTest {
+        package: "rustos-test-memory-isolation-qemu-aarch64",
+        binary: "rustos-test-memory-isolation-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
 ];
 
 /// Rust target triple for the riscv64 enrolments; selects the
 /// `Spec::for_riscv64_kernel` constructor in [`run_one`].
 const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
+
+/// Rust target triple for the aarch64 enrolments; selects the
+/// `Spec::for_aarch64_kernel` constructor in [`run_one`].
+const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 /// Build and execute every enrolled QEMU test. Returns the first failure.
 pub fn run_all(ctx: &Context) -> Result<(), String> {
@@ -468,6 +529,8 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     // `isa-debug-exit` convention.
     let base = if t.target == RISCV64_TARGET {
         Spec::for_riscv64_kernel(&kernel)
+    } else if t.target == AARCH64_TARGET {
+        Spec::for_aarch64_kernel(&kernel)
     } else {
         Spec::for_x86_64_kernel(&kernel)
     };

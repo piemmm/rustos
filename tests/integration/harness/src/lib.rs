@@ -16,6 +16,7 @@
 //!   (`os = "none"`) target and should compile its kernel body.
 //! * `itest_x86_64` — freestanding on the 64-bit x86 port.
 //! * `itest_riscv64` — freestanding on the 64-bit RISC-V port.
+//! * `itest_aarch64` — freestanding on the 64-bit Arm port.
 //!
 //! Binaries gate on those names instead of a raw target predicate, so the
 //! instruction-set choice lives in this one audited place.
@@ -28,7 +29,12 @@ const TARGET_ARCH_KEY: &str = "CARGO_CFG_TARGET_ARCH";
 /// Every conditional-compilation name this crate may enable. Declared to
 /// the compiler unconditionally so `--cfg`-aware lints accept the gates
 /// even on host builds where none of them are active.
-pub const KNOWN_CFGS: &[&str] = &["freestanding", "itest_x86_64", "itest_riscv64"];
+pub const KNOWN_CFGS: &[&str] = &[
+    "freestanding",
+    "itest_x86_64",
+    "itest_riscv64",
+    "itest_aarch64",
+];
 
 /// Classify a target into the conditional-compilation names its
 /// freestanding integration binary should enable.
@@ -46,6 +52,7 @@ pub fn active_cfgs(os: &str, arch: &str) -> Vec<&'static str> {
     match arch {
         "x86_64" => cfgs.push("itest_x86_64"),
         "riscv64" => cfgs.push("itest_riscv64"),
+        "aarch64" => cfgs.push("itest_aarch64"),
         _ => {}
     }
     cfgs
@@ -94,8 +101,16 @@ mod tests {
     }
 
     #[test]
+    fn bare_metal_aarch64_is_freestanding() {
+        assert_eq!(
+            active_cfgs("none", "aarch64"),
+            ["freestanding", "itest_aarch64"]
+        );
+    }
+
+    #[test]
     fn unknown_bare_metal_arch_is_freestanding_only() {
-        assert_eq!(active_cfgs("none", "aarch64"), ["freestanding"]);
+        assert_eq!(active_cfgs("none", "wasm32"), ["freestanding"]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "rustos-arch-aarch64"
-description = "RustOS placeholder: aarch64 architecture port."
+description = "RustOS architecture port: aarch64 (Arch HAL implementation + QEMU virt-board boot / generic-timer / GIC primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,27 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Like `kernel/arch/x86_64` and `kernel/arch/riscv64`, this crate is a
+# pure Arch HAL implementation (`AGENTS.md` §17.2 / §17.4): it names only
+# the Arch HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
+# subsystem. `Aarch64Arch` implements `rustos_arch_api::SchedulerArch`;
+# the downstream boot consumer wraps it in its own `KernelArch` type.
+#
+# The boot / console / panic / exception / timer / GIC modules are gated
+# to `cfg(all(target_arch = "aarch64", target_os = "none"))`; the pure
+# bit/encoding/layout helpers (paging, context `prepare`, syscall arg
+# marshalling, the generic-timer interval math, the semihosting finisher
+# encoding, the `Aarch64Arch` struct) build on the host so their unit
+# tests run under `cargo test`.
+[dependencies]
+rustos-arch-api = { path = "../api", version = "=0.0.0" }
+# `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
+# `svc` entry path marshals user arguments into — the same dependency
+# the x86_64 and riscv64 ports take. It is a `lib/*` crate, so this edge
+# is permitted by `AGENTS.md` §17.4.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

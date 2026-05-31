@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod aarch64;
 pub mod disk;
 pub mod iso;
 pub mod riscv64;
@@ -178,6 +179,10 @@ pub enum Arch {
     /// reported through the `SiFive` Test device. See the [`riscv64`]
     /// module for the full argv contract.
     Riscv64,
+    /// `qemu-system-aarch64`, `-kernel` boot on the `virt` board, result
+    /// reported through ARM semihosting (`SYS_EXIT`). See the
+    /// [`aarch64`] module for the full argv contract.
+    Aarch64,
 }
 
 impl Arch {
@@ -187,6 +192,7 @@ impl Arch {
         match self {
             Arch::X86_64 => x86_64::QEMU_BINARY,
             Arch::Riscv64 => riscv64::QEMU_BINARY,
+            Arch::Aarch64 => aarch64::QEMU_BINARY,
         }
     }
 
@@ -204,6 +210,7 @@ impl Arch {
         match self {
             Arch::X86_64 => Outcome::from_qemu_status(status, serial),
             Arch::Riscv64 => riscv64::outcome_from_status(status, serial),
+            Arch::Aarch64 => aarch64::outcome_from_status(status, serial),
         }
     }
 }
@@ -288,6 +295,23 @@ impl Spec {
     pub fn for_riscv64_kernel(kernel: impl Into<PathBuf>) -> Self {
         Self {
             arch: Arch::Riscv64,
+            kernel: kernel.into(),
+            cpus: 1,
+            timeout: Duration::from_secs(60),
+            block_devices: Vec::new(),
+            net_devices: Vec::new(),
+            display_ramfb: false,
+            extra_args: Vec::new(),
+        }
+    }
+
+    /// Minimal aarch64 `virt`-board spec suitable for a QEMU integration
+    /// test. Defaults: single CPU, 60 s timeout. The default guest RAM,
+    /// CPU model, and result protocol come from the [`aarch64`] module.
+    #[must_use]
+    pub fn for_aarch64_kernel(kernel: impl Into<PathBuf>) -> Self {
+        Self {
+            arch: Arch::Aarch64,
             kernel: kernel.into(),
             cpus: 1,
             timeout: Duration::from_secs(60),
@@ -390,13 +414,17 @@ impl Runner {
         // `-kernel`), so the kernel ELF *is* the artifact.
         let boot_artifact = match spec.arch {
             Arch::X86_64 => x86_64::build_boot_artifact(spec)?,
-            Arch::Riscv64 => spec.kernel.clone(),
+            // The `virt` board boots the ELF directly (riscv64 via
+            // OpenSBI, aarch64 via QEMU's `-kernel` loader), so the
+            // kernel ELF *is* the artifact.
+            Arch::Riscv64 | Arch::Aarch64 => spec.kernel.clone(),
         };
 
         let mut cmd = Command::new(spec.arch.qemu_binary());
         match spec.arch {
             Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &boot_artifact)?,
             Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &boot_artifact),
+            Arch::Aarch64 => aarch64::push_argv(&mut cmd, spec, &boot_artifact),
         }
         // Caller-supplied extras are appended *after* the per-arch defaults
         // so a developer can override them ad-hoc (e.g. `-d int,cpu_reset`).

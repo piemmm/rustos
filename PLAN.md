@@ -768,10 +768,74 @@ Each sub-stage delivers one architecture. They share the same checklist:
   as sub-items (f1)..(f7). The `_DISPATCH_SIGNATURE_PINNED`
   const-assert in `kernel/rustos-kernel::dispatch` still pins the
   callback ABI so the eventual swap cannot silently drift.
-- Stage 3b/3d (aarch64 / wasm32) remain outstanding per their own
-  checklists; each follows the same per-arch template (a)..(d) the
-  x86_64 sub-stage just completed. Stage 3c (riscv64) status is
-  tracked separately below.
+- Stage 3d (wasm32) remains outstanding per its own checklist; it
+  follows the same per-arch template (a)..(d) the x86_64 sub-stage
+  completed. Stage 3b (aarch64) and 3c (riscv64) status is tracked
+  separately below.
+
+**Stage 3b status: complete.**
+- `kernel/arch/aarch64` is now a full Arch HAL implementation for the
+  QEMU `virt` board, mirroring the riscv64 port. Every module is
+  host-unit-tested where it carries pure bit/encoding/layout math
+  (39 host tests) and clippy/rustdoc clean on both the host and the
+  `aarch64-unknown-none` target; the boot/console/exception/GIC/timer/MMU
+  system-register and assembly operations are gated to
+  `cfg(all(target_arch = "aarch64", target_os = "none"))`:
+    - [x] **Boot stub + console** — `boot.s` (EL2→EL1 drop, stack,
+          `.bss` zero, DTB hand-off) → `entry.rs`
+          (`rustos_arch_aarch64_main`), a PL011 UART `rustos_log::Sink`
+          (`serial.rs`), the `#[panic_handler]` bridge (`panic.rs`), the
+          ARM-semihosting `SYS_EXIT` finisher (`qemu_exit.rs`), and the
+          `aarch64-virt.ld` linker script.
+    - [x] **Arch HAL** — `kernel_arch.rs`'s `Aarch64Arch` implements
+          `rustos_arch_api::SchedulerArch`; the monotonic clock reads
+          `CNTPCT_EL0` and converts against `CNTFRQ_EL0`.
+    - [x] **MMU / page-table primitives** — `paging.rs`: stage-1, 4 KiB
+          granule, three levels over a 39-bit VA (`TCR_EL1.T0SZ = 25`,
+          the aarch64 mirror of Sv39), block/page/table descriptor
+          encoders, a `.bss` `PageTablePool`, and an `AddressSpace`
+          (1 GiB identity blocks — device-0 / Normal — + 4 KiB walk +
+          `MAIR`/`TCR`/`TTBR0`/`SCTLR.M` `switch`). Host translate
+          cross-check.
+    - [x] **Context switch** — `context.rs` + `context.s`:
+          `TaskCtx { sp }`, `prepare`, and `rustos_arch_aarch64_switch`
+          saving the AAPCS64 callee-saved set (`x19`–`x28`, FP, LR) plus
+          `x0`. `const _` layout/frame asserts.
+    - [x] **Timer + scheduler tick** — `preempt.rs`: set-once tick
+          callback, `interval_for_hz`, `init_local_preempt` (enable the
+          EL1 physical-timer PPI 30 at the GIC + arm `CNTP_TVAL_EL0` +
+          enable `CNTP_CTL_EL0`), and `on_timer_interrupt`
+          (callback → re-arm), driven by the IRQ vector.
+    - [x] **Interrupts** — `vectors.s` (16-entry EL1 vector table) +
+          `exceptions.rs` (`VBAR_EL1` install, IRQ → GIC ack/timer/EOI,
+          sync → `fault` hook, `enable_irq`) + `gic.rs` (GICv2
+          distributor / CPU-interface / SGI driver).
+    - [x] **Per-arch syscall entry** — `syscall_entry.rs`: the `svc`
+          exception-class decode plus the `x8`/`x0`–`x5` → frozen
+          `rustos_abi` `[u64; SYSCALL_MAX_ARGS]` marshalling and a
+          set-once dispatch callback (the x86_64/riscv64 shape). Wiring
+          the live EL0 register frame through to the dispatcher is the
+          remaining aarch64 follow-up; the marshalling is host-tested.
+    - [x] **Memory isolation** — `fault.rs`: set-once
+          synchronous-exception hook (`FaultHandlerFn(esr, far, elr) -> !`,
+          `ESR_EL1.EC` abort decode) the EL1 vector invokes.
+    - The three Stage-3 per-sub-stage QEMU verticals are enrolled in
+      `tools/xtask/src/commands/qemu_tests.rs` and **verified green under
+      QEMU on this host** (single CPU, 60 s each):
+      `tests/integration/kernel_arch_boot_aarch64` ("boots to init"),
+      `tests/integration/timer_preempt_qemu_aarch64` ("timer interrupt
+      drives scheduler" — GICv2 PPI 30 drives the callback ≥ 20 times),
+      and `tests/integration/memory_isolation_qemu_aarch64`
+      ("memory-isolation test passes" — an attacker `AddressSpace`
+      faults on a victim-only page). The host-side QEMU runner gained an
+      `Arch::Aarch64` backend (`tools/qemu/src/aarch64.rs`: `virt` +
+      `cortex-a72` + semihosting result protocol) and
+      `Spec::for_aarch64_kernel`; the integration-test harness gained the
+      `itest_aarch64` cfg. Docs: `docs/src/platform/aarch64.md`.
+    - Multi-hart SMP bring-up (MPIDR `CpuId` mapping + secondary start)
+      and wiring the new `AddressSpace`/`context` switch into the *live*
+      scheduler remain aarch64 follow-ups, exactly as they were staged
+      for riscv64; `send_ipi` already raises a GICv2 SGI.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

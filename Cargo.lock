@@ -372,6 +372,11 @@ version = "0.0.0"
 [[package]]
 name = "rustos-arch-aarch64"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-arch-api"
@@ -777,6 +782,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-kernel-arch-boot-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-kernel-arch-boot-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -793,6 +807,15 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
+]
+
+[[package]]
+name = "rustos-test-memory-isolation-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-itest-harness",
+ "rustos-log",
 ]
 
 [[package]]
@@ -880,6 +903,16 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-log",
  "rustos-sync",
+]
+
+[[package]]
+name = "rustos-test-timer-preempt-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-itest-harness",
+ "rustos-log",
 ]
 
 [[package]]
