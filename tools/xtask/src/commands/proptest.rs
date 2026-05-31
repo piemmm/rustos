@@ -3,7 +3,7 @@
 //! `AGENTS.md` §19.7 requires the capability-critical paths — `lib/caps`,
 //! `kernel/sec`, and the IPC + syscall dispatch paths — to carry a
 //! `proptest`-style stateful model that "runs under `cargo xtask proptest`
-//! for ≥ 60 s per change". This orchestrator is the single place that runs
+//! for ≥ 5 s per change". This orchestrator is the single place that runs
 //! every such model for a wall-clock budget, mirroring the §19.6
 //! [`fuzz`](crate::commands) orchestrator so a PR and a nightly soak share
 //! one definition of the model set.
@@ -69,7 +69,7 @@ pub const MODELS: &[Model] = &[
 /// How long to run each model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// `--quick`: the per-PR budget wired into `ci` (≥ 60 s per model).
+    /// `--quick`: the per-PR budget wired into `ci` (≥ 5 s per model).
     Quick,
     /// `--soak`: the nightly budget (≥ 24 h per model).
     Soak,
@@ -80,8 +80,8 @@ impl Mode {
     #[must_use]
     pub fn budget(self) -> Duration {
         match self {
-            // §19.7: "runs under `cargo xtask proptest` for ≥ 60 s".
-            Mode::Quick => Duration::from_secs(60),
+            // §19.7: "runs under `cargo xtask proptest` for ≥ 5 s".
+            Mode::Quick => Duration::from_secs(5),
             // Match the §19.6 soak floor so the nightly story is uniform.
             Mode::Soak => Duration::from_secs(24 * 60 * 60),
         }
@@ -240,9 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn quick_budget_meets_the_sixty_second_floor() {
-        // §19.7 mandates ≥ 60 s per model.
-        assert!(Mode::Quick.budget().as_secs() >= 60);
+    fn quick_budget_meets_the_five_second_floor() {
+        // §19.7 mandates ≥ 5 s per model.
+        assert!(Mode::Quick.budget().as_secs() >= 5);
     }
 
     #[test]

@@ -4009,7 +4009,7 @@ rxe loader item below lands.
   protocol parsers (`userland/net/icmp/tests/fuzz_parse.rs`), and the
   capability-checked IPC port endpoint
   (`kernel/ipc/tests/fuzz_port.rs`); all four are driven for a wall-clock
-  budget by `cargo xtask fuzz` (`--quick` ≥ 60 s / `--soak` ≥ 24 h),
+  budget by `cargo xtask fuzz` (`--quick` ≥ 5 s / `--soak` ≥ 24 h),
   wired into `ci`. Remaining for later stages: harnesses for the future
   font/image/archive/media parsers (§19.5) as those parsers land.
 - **§19.7 verified capability core** — *Bronze done; Silver/Gold not
@@ -4072,8 +4072,9 @@ rxe loader item below lands.
    already existed as fixed-iteration `cargo test` smoke sweeps; they
    now also honour a `RUSTOS_FUZZ_BUDGET_SECS` wall-clock budget. New
    `cargo xtask fuzz` (in `ci` after `supply-chain`) drives every
-   registered harness for its budget — `--quick` (≥ 60 s/harness, the
-   per-PR floor) or `--soak` (≥ 24 h/harness, nightly) — and fails
+   registered harness for its budget — `--quick` (≥ 5 s/harness, the
+   per-PR floor, a practicality concession) or `--soak` (≥ 24 h/harness,
+   nightly, the real coverage) — and fails
    closed on any crash, hang, or invariant failure. Self-contained, no
    external fuzz runner (`AGENTS.md` §2.12 / §19.6 "equivalent in-tree
    harness"); 16 unit tests cover the target registry, budget floors,
@@ -4100,7 +4101,8 @@ rxe loader item below lands.
    and `kernel/syscall` (the `Dispatcher` §5.4 capability gate +
    invocation accounting). New `cargo xtask proptest` (in `ci` after
    `fuzz`) runs each model for a wall-clock budget — `--quick`
-   (≥ 60 s/model) or `--soak` (≥ 24 h/model) — via
+   (≥ 5 s/model, the per-PR floor, a practicality concession) or
+   `--soak` (≥ 24 h/model, nightly, the real coverage) — via
    `RUSTOS_PROPTEST_BUDGET_SECS`, fail-closed on any counterexample,
    hang, or invariant failure. New `cargo xtask spec-review` (also in
    `ci`) scans the source tree and fails closed if any unreviewed

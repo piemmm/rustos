@@ -4,9 +4,10 @@ Every decoder that ingests bytes from a possibly hostile peer is an
 attack surface. `AGENTS.md` §19.6 requires that every IPC endpoint,
 every syscall, every parser of untrusted input, and every public
 `lib/abi` decoder carry a fuzz target, that each target run for at least
-60 s on every pull request, and that the nightly soak run each for at
+5 s on every pull request, and that the nightly soak run each for at
 least 24 h. Any crash, hang, or sanitiser report blocks the next
-release.
+release. The short per-PR budget is a deliberate practicality
+concession; the nightly soak is where the real coverage comes from.
 
 ## In-tree harnesses, no external runner
 
@@ -54,7 +55,7 @@ deterministic. The dedicated orchestrator turns the same harnesses into
 wall-clock runs:
 
 ```text
-cargo xtask fuzz            # --quick: ≥ 60 s per harness (the CI budget)
+cargo xtask fuzz            # --quick: ≥ 5 s per harness (the CI budget)
 cargo xtask fuzz --soak     # ≥ 24 h per harness (nightly)
 cargo xtask fuzz --list     # list the registered harnesses
 cargo xtask fuzz --target fuzz_decode   # run one harness

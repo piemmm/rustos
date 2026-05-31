@@ -386,7 +386,7 @@ fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
 fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // §19.7 Bronze: drive the stateful capability models for a wall-clock
-    // budget. `--quick` (the default and the `ci` budget) runs each ≥ 60 s;
+    // budget. `--quick` (the default and the `ci` budget) runs each ≥ 5 s;
     // `--soak` runs each ≥ 24 h for the nightly job. The model set and the
     // budget live in `commands/proptest.rs`.
     let opts = proptest::parse(args)?;
@@ -428,7 +428,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // --soak`, run outside `ci`.
     run_fuzz(ctx, &[OsString::from("--quick")])?;
     // §19.7 Bronze: the per-PR stateful-model budget. Runs each capability
-    // model for its ≥ 60 s `--quick` budget; a counterexample, hang, or
+    // model for its ≥ 5 s `--quick` budget; a counterexample, hang, or
     // invariant failure fails the gate (fail-closed). The nightly soak is
     // `cargo xtask proptest --soak`, run outside `ci`.
     run_proptest(ctx, &[OsString::from("--quick")])?;

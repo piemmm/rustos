@@ -19,8 +19,8 @@
 //! A plain `cargo test` runs [`SMOKE_CASES`] sequences. When `cargo xtask
 //! proptest` exports `RUSTOS_PROPTEST_BUDGET_SECS`, [`drive`] keeps running
 //! batches from the same deterministic RNG until the budget elapses — the
-//! "≥ 60 s per model" contract — while the fixed seed keeps any
-//! counterexample reproducible.
+//! "≥ 5 s per model" per-PR contract (the nightly `--soak` is the real
+//! coverage) — while the fixed seed keeps any counterexample reproducible.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};

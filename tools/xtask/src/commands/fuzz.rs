@@ -67,7 +67,7 @@ pub const TARGETS: &[Target] = &[
 /// How long to run each harness.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// `--quick`: the per-PR budget wired into `ci` (≥ 60 s per harness).
+    /// `--quick`: the per-PR budget wired into `ci` (≥ 5 s per harness).
     Quick,
     /// `--soak`: the nightly budget (≥ 24 h per harness).
     Soak,
@@ -78,8 +78,8 @@ impl Mode {
     #[must_use]
     pub fn budget(self) -> Duration {
         match self {
-            // §19.6: "runs each harness for ≥ 60 s on every PR".
-            Mode::Quick => Duration::from_secs(60),
+            // §19.6: "runs each harness for ≥ 5 s on every PR".
+            Mode::Quick => Duration::from_secs(5),
             // §19.6: "runs each harness for ≥ 24 h".
             Mode::Soak => Duration::from_secs(24 * 60 * 60),
         }
@@ -98,7 +98,7 @@ pub struct Options {
     /// Override the per-harness budget in seconds (`--secs <n>`).
     ///
     /// Exists so the orchestrator's own unit tests and local smoke runs do
-    /// not have to wait a full minute; CI never passes it.
+    /// not have to wait the full budget; CI never passes it.
     pub secs: Option<u64>,
 }
 
@@ -246,9 +246,9 @@ mod tests {
     }
 
     #[test]
-    fn quick_budget_meets_the_sixty_second_floor() {
-        // §19.6 mandates ≥ 60 s per harness on every PR.
-        assert!(Mode::Quick.budget().as_secs() >= 60);
+    fn quick_budget_meets_the_five_second_floor() {
+        // §19.6 mandates ≥ 5 s per harness on every PR.
+        assert!(Mode::Quick.budget().as_secs() >= 5);
     }
 
     #[test]

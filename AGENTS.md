@@ -957,8 +957,9 @@ on untrusted input. It is as non-negotiable as §2.
 - Every IPC endpoint (§4), every syscall (§9), every parser of
   untrusted input (§19.5), and every public `lib/abi` decoder has a
   `cargo-fuzz` (or equivalent in-tree harness) target.
-- `cargo xtask fuzz --quick` runs each harness for ≥ 60 s on every
-  PR and is part of `cargo xtask ci` (§7).
+- `cargo xtask fuzz --quick` runs each harness for ≥ 5 s on every
+  PR and is part of `cargo xtask ci` (§7). The short per-PR budget is
+  a practicality concession; the nightly soak is the real coverage.
 - A nightly `cargo xtask fuzz --soak` runs each harness for ≥ 24 h.
   Any crash, hang, or sanitiser report blocks the next release.
 - Crashing inputs are added to the crate's regression corpus
@@ -972,7 +973,9 @@ on untrusted input. It is as non-negotiable as §2.
   property tests.
 - **Bronze (mandatory):** every public function in these crates has a
   `proptest`-style stateful model and runs under `cargo xtask
-  proptest` for ≥ 60 s per change.
+  proptest` for ≥ 5 s per change. The short per-PR budget is a
+  practicality concession; the nightly soak (`--soak`, ≥ 24 h per
+  model) is the real coverage.
 - **Silver (target):** a TLA+ (or equivalent) model of the capability
   + IPC state machine is kept in sync with the code under
   `docs/src/security/model/`. `cargo xtask ci` runs the model

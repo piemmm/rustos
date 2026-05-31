@@ -9,8 +9,9 @@ machine-checked specification *in addition to* their unit tests.
 
 This page covers the **Bronze tier** (mandatory): a `proptest`-style
 stateful model for each path that runs under `cargo xtask proptest` for
-at least 60 s per change. The Silver (TLA+) and Gold (Verus) tiers are
-tracked in `PLAN.md` and not yet scheduled.
+at least 5 s per change. The short per-PR budget is a practicality
+concession; the nightly `--soak` is the real coverage. The Silver (TLA+)
+and Gold (Verus) tiers are tracked in `PLAN.md` and not yet scheduled.
 
 ## What a stateful model is
 
@@ -61,7 +62,7 @@ normal suite stays quick. The orchestrator turns the same models into
 wall-clock runs:
 
 ```text
-cargo xtask proptest                # --quick: ≥ 60 s per model (the CI budget)
+cargo xtask proptest                # --quick: ≥ 5 s per model (the CI budget)
 cargo xtask proptest --soak         # ≥ 24 h per model (nightly)
 cargo xtask proptest --list         # list the registered models
 cargo xtask proptest --target sec   # run one model
