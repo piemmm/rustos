@@ -20,6 +20,9 @@
 //! - `cfg-check`    — rejects target-conditional compilation (§17.2)
 //!   outside the architecture ports and build glue
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset
+//! - `sbom`         — emit a `CycloneDX` SBOM from `Cargo.lock` (§19.3):
+//!   every workspace and external crate with its version, source URL,
+//!   and pinned source checksum
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
 //!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
 //!   `cargo deny check`, `abi-check`

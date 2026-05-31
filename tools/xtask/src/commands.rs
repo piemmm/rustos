@@ -14,6 +14,7 @@ mod cfg_check;
 mod deps_check;
 mod linkcheck;
 mod qemu_tests;
+mod sbom;
 mod wasm_tests;
 
 /// One sanctioned developer workflow.
@@ -28,6 +29,7 @@ pub enum Command {
     DepsCheck,
     CfgCheck,
     Coverage,
+    Sbom,
     Ci,
     Image,
 }
@@ -44,6 +46,7 @@ impl Command {
         Command::DepsCheck,
         Command::CfgCheck,
         Command::Coverage,
+        Command::Sbom,
         Command::Ci,
         Command::Image,
     ];
@@ -59,6 +62,7 @@ impl Command {
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "coverage" => Command::Coverage,
+            "sbom" => Command::Sbom,
             "ci" => Command::Ci,
             "image" => Command::Image,
             _ => return None,
@@ -76,6 +80,7 @@ impl Command {
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::Coverage => "coverage",
+            Command::Sbom => "sbom",
             Command::Ci => "ci",
             Command::Image => "image",
         }
@@ -92,6 +97,7 @@ impl Command {
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
+            Command::Sbom => "Emit a CycloneDX SBOM from Cargo.lock (§19.3).",
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
         }
@@ -108,6 +114,7 @@ impl Command {
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::Coverage => run_coverage(ctx, args),
+            Command::Sbom => run_sbom(ctx, args),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
         }
@@ -290,6 +297,29 @@ fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     cmd.args(["llvm-cov", "--workspace", "--locked", "--summary-only"]);
     cmd.args(args);
     ctx.run("coverage", cmd)
+}
+
+fn run_sbom(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // §19.3: emit a CycloneDX SBOM from the committed `Cargo.lock`. The
+    // default is stdout (composes with redirection and signing); an
+    // explicit `--output PATH` (or `-o PATH`) writes the document to disk,
+    // creating any missing parent directories (e.g. the gitignored
+    // `images/`). The generator itself lives in `commands/sbom.rs`.
+    let mut output: Option<std::path::PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--output" || arg == "-o" {
+            let path = iter
+                .next()
+                .ok_or_else(|| "sbom: `--output` requires a path argument".to_string())?;
+            output = Some(std::path::PathBuf::from(path));
+        } else {
+            return Err(format!(
+                "sbom: unexpected argument {arg:?}; usage: cargo xtask sbom [--output PATH]"
+            ));
+        }
+    }
+    sbom::run(&ctx.workspace_root, output.as_deref())
 }
 
 fn run_ci(ctx: &Context) -> Result<(), String> {

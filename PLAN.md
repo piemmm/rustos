@@ -3984,10 +3984,13 @@ rxe loader item below lands.
   applies KASLR with a per-boot entropy seed, or (c) checks the
   type-tagged CFI table against the §9 syscall-interface hash. Stack
   canaries / shadow-stack in the arch `unsafe` cores are not declared.
-- **§19.3 supply-chain integrity** — *not started*. `tools/xtask` has no
-  `sbom`, no `build --reproducible`, and no advisory-SLA gate. `deny.toml`
-  is not configured with a source-hash allow-list. No "no post-install
-  network fetch" enforcement exists.
+- **§19.3 supply-chain integrity** — *in progress*. `cargo xtask sbom`
+  now emits a deterministic CycloneDX 1.5 SBOM from `Cargo.lock` (every
+  workspace + external crate with version, source URL, and pinned
+  source checksum); signing it with the per-installation key is deferred
+  behind the not-yet-existing signing API. Still missing: `build
+  --reproducible`, the advisory-SLA gate, a `deny.toml` source-hash
+  allow-list, and "no post-install network fetch" enforcement.
 - **§19.4 audit-log integrity** — *in progress (core landing this
   session)*. `lib/log` was an in-memory facade with no hash-chaining,
   signed anchors, or per-service `CAP_LOG_WRITE` partitioning.
@@ -4022,9 +4025,16 @@ rxe loader item below lands.
    persisted log store (Stage 5)*. Periodically sign the chain root to
    `/System/Logs/Anchors/`; partition `CAP_LOG_WRITE` per service;
    `CAP_LOG_ROTATE` for truncation.
-3. **§19.3 `cargo xtask sbom`** — emit a signed CycloneDX SBOM from
-   `cargo metadata` (workspace + external crates, source URL + checksum).
-   Pure tooling, host-testable, no kernel dependency.
+3. **§19.3 `cargo xtask sbom`** — *done (unsigned)*. Emits a
+   deterministic CycloneDX 1.5 SBOM (workspace + external crates, each
+   with version, source URL, and pinned source checksum) from the
+   committed `Cargo.lock` — a self-contained lockfile parser +
+   hand-written JSON serialiser, no `serde`/`cyclonedx` dependency and no
+   `cargo metadata` shell-out (`AGENTS.md` §2.12). Pure tooling,
+   host-tested in `tools/xtask/src/commands/sbom.rs`. Docs:
+   `docs/src/security/supply_chain.md`. *Signing* the SBOM with the
+   per-installation key (§11) is deferred with item 2's signing: no
+   private-key signing API exists yet (`rustos-crypto` is verify-only).
 4. **§19.3 source-hash allow-list + advisory SLA** — pin external-crate
    registry hashes in `deny.toml`; add the 7-day (`lib/crypto` deps) /
    30-day advisory-SLA gate to `cargo xtask ci`.
