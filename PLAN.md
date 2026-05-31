@@ -4026,14 +4026,17 @@ rxe loader item below lands.
   budget by `cargo xtask fuzz` (`--quick` ≥ 5 s / `--soak` ≥ 24 h),
   wired into `ci`. Remaining for later stages: harnesses for the future
   font/image/archive/media parsers (§19.5) as those parsers land.
-- **§19.7 verified capability core** — *Bronze done; Silver/Gold not
+- **§19.7 verified capability core** — *Bronze + Silver done; Gold not
   started*. `cargo xtask proptest` drives an in-tree `proptest`-style
   stateful model for each capability-critical path (`lib/caps`,
   `kernel/sec`, the IPC port dispatch, and the syscall dispatch gate),
-  and `cargo xtask spec-review` enforces the draft-marker discipline;
-  both are wired into `ci`. Still missing: the Silver TLA+ model under
-  `docs/src/security/model/` and the Gold Verus contracts (`cargo xtask
-  verify`).
+  and `cargo xtask spec-review` enforces the draft-marker discipline.
+  The Silver tier landed (item 11 below): `cargo xtask model-check` is an
+  in-tree exhaustive explicit-state model checker (the sanctioned TLA+
+  equivalent, §2.12 / §19.6 precedent) of the combined capability + IPC
+  state machine, with the formal Init/Next/Inv narrative under
+  `docs/src/security/model/capability_ipc.md`. All three are wired into
+  `ci`. Still missing: the Gold Verus contracts (`cargo xtask verify`).
 - **§19.8 hardware-enforced capabilities (Tier-2)** — *not started*. No
   `kernel/arch/cheri-*` crate; deferred behind the Tier-1 conformance
   suites by charter.
@@ -4174,8 +4177,32 @@ rxe loader item below lands.
    verification on release tags. Depends on Stage 8 image builders.
 10. **§19.5 parser sandbox model** — minimum-capability sandbox process
     for every untrusted-input parser. Depends on Stage 6 process model.
-11. **§19.7 Silver/Gold + §19.8 CHERI** — TLA+ model, Verus contracts,
-    `kernel/arch/cheri-*`. Aspirational; tracked here, not yet scheduled.
+11. **§19.7 Silver model checker** — *done*. `cargo xtask model-check`
+    (wired into `ci` right after `proptest`) is an in-tree exhaustive
+    explicit-state model checker — the sanctioned TLA+ *equivalent*
+    (`AGENTS.md` §2.12 forbids trusting an external Java tool; §19.6 set
+    the "equivalent in-tree harness" precedent). A generic breadth-first
+    `check` enumerates every reachable state of a finite abstract state
+    machine and verifies the safety invariants at each state and on each
+    transition, failing closed on the first counterexample with a minimal
+    action trace. The modelled machine is the combined capability + IPC
+    core: a subject task's authority under derive/delegate/revoke
+    (`kernel/sec::TaskCapabilities`, `lib/caps`) and the capability-checked
+    bounded port under send/recv/destroy (`kernel/ipc::Port`). Invariants:
+    no-ambient-authority/unforgeability (effective ⊆ user_grant ∩
+    manifest), authority-monotone (delegate-never-widens +
+    revoke-only-shrinks), ipc-fail-closed (no unauthorised/oversize message
+    queued), fail-closed-admission, mailbox-capacity, and
+    closed-port-drained. Two fault-injection unit tests (a widening
+    delegate and a port that skips the cap check) prove the checker rejects
+    a broken model — the verifier is the oracle (§19.7). The production run
+    explores 100 states / 2400 transitions in milliseconds. The formal
+    Init/Next/Inv narrative is kept in sync under
+    `docs/src/security/model/capability_ipc.md`. 11 unit tests in
+    `tools/xtask`.
+12. **§19.7 Gold + §19.8 CHERI** — Verus contracts on `lib/caps` /
+    `kernel/sec` (`cargo xtask verify`) and `kernel/arch/cheri-*`.
+    Aspirational; tracked here, not yet scheduled.
 
 ---
 

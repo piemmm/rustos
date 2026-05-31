@@ -29,9 +29,13 @@
 //! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
 //!   budget (§19.6): `--quick` (≥ 60 s each, the `ci` budget) or
 //!   `--soak` (≥ 24 h each, nightly)
+//! - `model-check`  — exhaustively model-check the §19.7 Silver capability +
+//!   IPC state machine (an in-tree explicit-state checker; the TLA+
+//!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
 //!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
-//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `abi-check`
+//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `proptest --quick`,
+//!   `model-check`, `spec-review`, `abi-check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and

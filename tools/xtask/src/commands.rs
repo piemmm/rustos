@@ -14,6 +14,7 @@ mod cfg_check;
 mod deps_check;
 mod fuzz;
 mod linkcheck;
+mod model_check;
 mod proptest;
 mod qemu_tests;
 mod sbom;
@@ -37,6 +38,7 @@ pub enum Command {
     SupplyChain,
     Fuzz,
     Proptest,
+    ModelCheck,
     SpecReview,
     Ci,
     Image,
@@ -58,6 +60,7 @@ impl Command {
         Command::SupplyChain,
         Command::Fuzz,
         Command::Proptest,
+        Command::ModelCheck,
         Command::SpecReview,
         Command::Ci,
         Command::Image,
@@ -78,6 +81,7 @@ impl Command {
             "supply-chain" => Command::SupplyChain,
             "fuzz" => Command::Fuzz,
             "proptest" => Command::Proptest,
+            "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
             "ci" => Command::Ci,
             "image" => Command::Image,
@@ -100,6 +104,7 @@ impl Command {
             Command::SupplyChain => "supply-chain",
             Command::Fuzz => "fuzz",
             Command::Proptest => "proptest",
+            Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
             Command::Ci => "ci",
             Command::Image => "image",
@@ -125,6 +130,9 @@ impl Command {
             Command::Proptest => {
                 "Drive the §19.7 stateful capability models for a wall-clock budget."
             }
+            Command::ModelCheck => {
+                "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
+            }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
@@ -146,6 +154,7 @@ impl Command {
             Command::SupplyChain => run_supply_chain(ctx, args),
             Command::Fuzz => run_fuzz(ctx, args),
             Command::Proptest => run_proptest(ctx, args),
+            Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
@@ -394,6 +403,17 @@ fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     proptest::run(ctx, &opts)
 }
 
+fn run_model_check(args: &[OsString]) -> Result<(), String> {
+    // §19.7 Silver: exhaustively model-check the capability + IPC state
+    // machine. The model and the explicit-state checker live in
+    // `commands/model_check.rs`; the formal narrative is in
+    // `docs/src/security/model/capability_ipc.md`. Fails closed on any
+    // reachable state or transition that violates an invariant.
+    let opts = model_check::parse(args)?;
+    eprintln!("xtask: [model-check] exhaustive capability + IPC state machine");
+    model_check::run(&opts)
+}
+
 fn run_spec_review(ctx: &Context) -> Result<(), String> {
     // §19.7: fail closed if any unreviewed AI-drafted artefact marker
     // reaches the tree. The scanner lives in `commands/spec_review.rs`.
@@ -432,6 +452,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // invariant failure fails the gate (fail-closed). The nightly soak is
     // `cargo xtask proptest --soak`, run outside `ci`.
     run_proptest(ctx, &[OsString::from("--quick")])?;
+    // §19.7 Silver: exhaustively model-check the capability + IPC state
+    // machine on every PR. The check is exhaustive (not budgeted) and fast,
+    // so it always runs; a reachable invariant violation fails closed.
+    run_model_check(&[])?;
     // §19.7: reject any unreviewed AI-drafted artefact marker that reached
     // the tree. Static and cheap; fails closed.
     run_spec_review(ctx)?;
