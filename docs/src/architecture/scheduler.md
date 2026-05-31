@@ -170,11 +170,35 @@ homogeneous machine and any port that has not wired discovery behave
 exactly as before, and the surface stays free of dynamic
 power-management concerns (frequency scaling, deep sleep) which remain
 out of the HAL (`AGENTS.md` §2.4, §17.2). The architecture port
-discovers the class during early-boot enumeration; the x86_64 port reads
-it from CPUID **leaf 0x1A** (`kernel/arch/x86_64::hybrid`), records each
-core's class as it comes online, and serves it through the override. The
-host `TestArch` lets a unit test model an asymmetric machine via
-`TestArch::set_core_class`.
+discovers the class during early-boot enumeration (`kernel/arch/x86_64::hybrid`),
+records each core's class as it comes online, and serves it through the
+override. The host `TestArch` lets a unit test model an asymmetric
+machine via `TestArch::set_core_class`.
+
+The two x86_64 vendors expose the per-core class through different CPUID
+surfaces, so the port reads the vendor string from CPUID leaf 0 and
+dispatches:
+
+* **Intel** — the core type is read from CPUID **leaf 0x1A** (Hybrid
+  Information Enumeration). Bits 31:24 of `EAX` carry the type; an Atom
+  byte (`0x20`) is an efficiency core, and any other value — including
+  the `0` a non-hybrid part reports — is a performance core.
+* **AMD** — there is no leaf-0x1A equivalent. The class comes from the
+  Extended CPU Topology **leaf 0x80000026**, probed only after bounding
+  the maximum extended leaf via leaf 0x80000000. At the Core level
+  (`ECX[15:8] == 1`), a part that advertises a heterogeneous topology
+  (`EAX[30]`) with an available efficiency ranking (`EAX[29]`) reports a
+  per-core power/efficiency ranking in `EBX[23:16]`; the lowest tier is
+  an efficiency core and every higher tier is a performance core.
+
+Both decoders **fail conservative**: anything that is not an encoding the
+vendor has actually published — an unknown core type, a non-heterogeneous
+part, a reserved value — is treated as `CoreClass::Performance`, the safe
+homogeneous default. Neither guesses a class from family/model heuristics
+or frequency tables. The AMD topology encoding is newer than Intel's and
+is still settling across CPU generations, so the AMD decoder recognises
+only the published ranking field and defers any future encoding change to
+a deliberate, reviewed addition rather than a silent reinterpretation.
 
 ### Placing work by class
 

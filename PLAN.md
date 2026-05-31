@@ -3948,7 +3948,7 @@ a list collapses that list. No *new* violation may be added.
   `docs/src/architecture/scheduler.md`. clippy `-D warnings`,
   host + `x86_64-unknown-none` builds clean.
 - AMD vendor + heterogeneous-core (`Zen`/`Zen-c`) detection for x86_64
-  (§17.2 / §18.2) — *planned*. The heterogeneous-CPU item above wired the
+  (§17.2 / §18.2) — *done*. The heterogeneous-CPU item above wired the
   `CoreClass` Arch-HAL hook and a *complete* detector **only for Intel**:
   `kernel/arch/x86_64::hybrid` gates on CPUID leaf 0x07 `EDX[15]` ("Hybrid")
   and decodes the core type from **leaf 0x1A**. AMD parts never set that
@@ -4002,6 +4002,27 @@ a list collapses that list. No *new* violation may be added.
     gain the AMD path and the evolving-APM caveat. No scheduler, no
     `lib/*`, and no other arch crate changes — the `CoreClass` contract
     already exists, so this is detector work, not interface creep (§2.4).
+
+  Landed: `kernel/arch/x86_64::hybrid` now reads the CPUID leaf-0 vendor
+  string and dispatches — `is_amd_vendor` routes AMD parts to the new
+  pure `classify_amd_core` decoder (a parallel implementation alongside
+  the unchanged Intel `classify_core_type`, §2.2 carve-out), while every
+  other vendor keeps the Intel leaf-0x1A path. `detect_current_core_class`
+  splits into vendor-specific bare-metal probes: the AMD probe bounds the
+  maximum extended leaf via CPUID `0x80000000`, then walks the bounded
+  leaf-`0x80000026` sub-leaves for the Core level (`ECX[15:8] == 1`) and
+  decodes the published power/efficiency ranking (`EBX[23:16]`) under the
+  heterogeneous (`EAX[30]`) + ranking-available (`EAX[29]`) gates; the
+  lowest tier is `Efficiency`, every other case is the conservative
+  `Performance` default. No scheduler, `lib/*`, or other arch-crate edits.
+  Tests: AMD decoder (lowest-ranking → `Efficiency`, higher-ranking →
+  `Performance`, non-heterogeneous / no-ranking / non-Core /
+  unknown-reserved → `Performance`) + vendor-string parse; the host
+  `host_detection_reports_homogeneous_default` stays valid. Docs: the
+  `hybrid.rs` module docs and the "Heterogeneous CPUs" section of
+  `docs/src/architecture/scheduler.md` gained the AMD path and the
+  evolving-encoding caveat. Verified: host + `x86_64-unknown-none` clippy
+  `-D warnings` clean, crate tests green.
 
 ---
 
