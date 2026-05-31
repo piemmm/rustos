@@ -4044,6 +4044,17 @@ rxe loader item below lands.
   `kernel/arch/cheri-*` crate; deferred behind the Tier-1 conformance
   suites by charter.
 
+**Standing directive (owner, 2026-05-31):** every *independent* item of
+this burn-down (1, 3, 4, 5, 6, 7, 8, 11) is **landed and verified green**;
+the implementable portion of §19 is complete. The only remaining items
+(2, 9, 10, 12) are **stage-blocked or aspirational**, not deferred by
+choice. They carry a binding **[DO IMMEDIATELY ON UNBLOCK]** order: the
+session that lands the prerequisite stage (Stage 2 signing API, Stage 5
+log store, Stage 6 process model, Stage 8 image builders) must complete
+the corresponding §19 item in the same or the very next session, before
+any other Stage work proceeds. §19 is not "finished" until items 2, 9,
+and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
+
 **Burn-down plan (ordered; each item is one task, with tests + docs):**
 1. **§19.4 hash-chain core** — *in progress*. A no-alloc, fixed-buffer
    SHA-256 hash-chain primitive in `lib/log` (`chain.rs`): a per-CPU
@@ -4056,7 +4067,8 @@ rxe loader item below lands.
    (item 2) build on it. Docs: `docs/src/security/audit_log.md`.
 2. **§19.4 signed anchors + `CAP_LOG_WRITE` partitioning** — *blocked on
    a private-key signing API (Stage 2 capability authority) and the
-   persisted log store (Stage 5)*. Periodically sign the chain root to
+   persisted log store (Stage 5)* — **[DO IMMEDIATELY ON UNBLOCK]**.
+   Periodically sign the chain root to
    `/System/Logs/Anchors/`; partition `CAP_LOG_WRITE` per service;
    `CAP_LOG_ROTATE` for truncation.
 3. **§19.3 `cargo xtask sbom`** — *done (unsigned)*. Emits a
@@ -4181,9 +4193,11 @@ rxe loader item below lands.
    crate's tests under the release profile (`-C opt-level=3`). Remaining
    for §19.1: closing the KPTI / IBPB `Pending` gaps (Stage 6).
 9. **§19.3 `cargo xtask build --reproducible`** — bit-reproducible image
-   verification on release tags. Depends on Stage 8 image builders.
+   verification on release tags. Depends on Stage 8 image builders —
+   **[DO IMMEDIATELY ON UNBLOCK]**.
 10. **§19.5 parser sandbox model** — minimum-capability sandbox process
-    for every untrusted-input parser. Depends on Stage 6 process model.
+    for every untrusted-input parser. Depends on Stage 6 process model —
+    **[DO IMMEDIATELY ON UNBLOCK]**.
 11. **§19.7 Silver model checker** — *done*. `cargo xtask model-check`
     (wired into `ci` right after `proptest`) is an in-tree exhaustive
     explicit-state model checker — the sanctioned TLA+ *equivalent*
