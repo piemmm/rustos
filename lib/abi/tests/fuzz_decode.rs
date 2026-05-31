@@ -8,11 +8,50 @@
 //! without panicking and without ever producing an `Ok` result that
 //! disagrees with the round-trip encoder.
 //!
-//! The same set of decoder functions is the entry point a `libfuzzer`-style
-//! harness would call once Stage 2 wires `cargo fuzz` up; the helper
-//! [`exercise`] keeps the contract centralised so the two cannot drift.
+//! The same set of decoder functions is the entry point the `cargo xtask
+//! fuzz` orchestrator drives for ≥ 60 s per PR (`AGENTS.md` §19.6); the
+//! helper [`exercise`] keeps the contract centralised so the two cannot
+//! drift.
+//!
+//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//!
+//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep so the
+//! suite stays fast and deterministic. When `cargo xtask fuzz` sets
+//! `RUSTOS_FUZZ_BUDGET_SECS`, [`budget`] returns a deadline and the
+//! PRNG-driven harness keeps drawing fresh inputs from the *same
+//! continuing* stream until it elapses — the §19.6 "run each harness for
+//! ≥ 60 s" contract. The seed is fixed, so a crash at draw N stays
+//! reproducible regardless of how far a given machine got. The
+//! bit-flip harness is an exhaustive boundary sweep, not a random one,
+//! so it runs once regardless of the budget.
 
 use rustos_abi::{IpcMessageHeader, ManifestHeader};
+
+/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+const SMOKE_ITERATIONS: u64 = 100_000;
+
+/// Deadline for the current run, or `None` for the fixed smoke sweep.
+///
+/// `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`; a positive value
+/// turns the PRNG-driven harness into a wall-clock loop. An unset,
+/// empty, zero, or unparsable value preserves the deterministic smoke
+/// behaviour.
+fn budget() -> Option<std::time::Instant> {
+    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
+        .ok()?
+        .parse()
+        .ok()?;
+    if secs == 0 {
+        return None;
+    }
+    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
+}
+
+/// `true` while the wall-clock budget has time left; always `false` for
+/// the fixed smoke sweep so the loop body runs exactly once.
+fn within_budget(deadline: Option<std::time::Instant>) -> bool {
+    matches!(deadline, Some(end) if std::time::Instant::now() < end)
+}
 
 /// Drive every ABI decoder on `bytes`.
 ///
@@ -71,14 +110,20 @@ impl Lcg {
 fn random_short_inputs_never_panic() {
     let mut rng = Lcg::new(0xCAFE_F00D_DEAD_BEEF);
     let mut buf = [0u8; 256];
-    for _ in 0..100_000 {
-        // Random size in [0, buf.len()].
-        // Mask to a width that fits any usize then range-reduce. The
-        // bitmask makes the cast lossless without depending on
-        // target-pointer width.
-        let size = ((rng.next_u64() & 0xFFFF) as usize) % (buf.len() + 1);
-        rng.fill(&mut buf[..size]);
-        exercise(&buf[..size]);
+    let deadline = budget();
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            // Random size in [0, buf.len()].
+            // Mask to a width that fits any usize then range-reduce. The
+            // bitmask makes the cast lossless without depending on
+            // target-pointer width.
+            let size = ((rng.next_u64() & 0xFFFF) as usize) % (buf.len() + 1);
+            rng.fill(&mut buf[..size]);
+            exercise(&buf[..size]);
+        }
+        if !within_budget(deadline) {
+            break;
+        }
     }
 }
 

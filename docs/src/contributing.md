@@ -26,6 +26,8 @@ rules, it points to them.
 | `test`        | `cargo test --workspace --all-targets`                      |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
+| `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
+| `fuzz --quick`| Runs each in-tree fuzz harness ≥ 60 s ([§19.6][fz])         |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 
 Other subcommands (`build`, `coverage`, `image`) exist for development and
@@ -34,3 +36,5 @@ release flows; they are documented by `cargo xtask --help`.
 [agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
 [plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md
 [modularity]: ./architecture/modularity.md
+[sc]: ./security/supply_chain.md
+[fz]: ./security/fuzzing.md

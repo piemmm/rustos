@@ -24,6 +24,7 @@
 - [Hardware interrupts: capability-gated wake-ups](./security/irq.md)
 - [Audit-log integrity](./security/audit_log.md)
 - [Supply-chain integrity: the SBOM](./security/supply_chain.md)
+- [Fuzzing the untrusted-input surface](./security/fuzzing.md)
 
 # Shared libraries
 

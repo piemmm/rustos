@@ -12,6 +12,7 @@ use crate::Context;
 mod abi_check;
 mod cfg_check;
 mod deps_check;
+mod fuzz;
 mod linkcheck;
 mod qemu_tests;
 mod sbom;
@@ -32,6 +33,7 @@ pub enum Command {
     Coverage,
     Sbom,
     SupplyChain,
+    Fuzz,
     Ci,
     Image,
 }
@@ -50,6 +52,7 @@ impl Command {
         Command::Coverage,
         Command::Sbom,
         Command::SupplyChain,
+        Command::Fuzz,
         Command::Ci,
         Command::Image,
     ];
@@ -67,6 +70,7 @@ impl Command {
             "coverage" => Command::Coverage,
             "sbom" => Command::Sbom,
             "supply-chain" => Command::SupplyChain,
+            "fuzz" => Command::Fuzz,
             "ci" => Command::Ci,
             "image" => Command::Image,
             _ => return None,
@@ -86,6 +90,7 @@ impl Command {
             Command::Coverage => "coverage",
             Command::Sbom => "sbom",
             Command::SupplyChain => "supply-chain",
+            Command::Fuzz => "fuzz",
             Command::Ci => "ci",
             Command::Image => "image",
         }
@@ -106,6 +111,7 @@ impl Command {
             Command::SupplyChain => {
                 "Verify source-hash pins against Cargo.lock and the advisory SLA (§19.3)."
             }
+            Command::Fuzz => "Drive the in-tree fuzz harnesses for a wall-clock budget (§19.6).",
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
         }
@@ -124,6 +130,7 @@ impl Command {
             Command::Coverage => run_coverage(ctx, args),
             Command::Sbom => run_sbom(ctx, args),
             Command::SupplyChain => run_supply_chain(ctx, args),
+            Command::Fuzz => run_fuzz(ctx, args),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
         }
@@ -351,6 +358,16 @@ fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     supply_chain::run(&ctx.workspace_root, write_pins)
 }
 
+fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // §19.6: drive the in-tree fuzz harnesses for a wall-clock budget.
+    // `--quick` (the default and the `ci` budget) runs each ≥ 60 s;
+    // `--soak` runs each ≥ 24 h for the nightly job. The harness set and
+    // the budget live in `commands/fuzz.rs`.
+    let opts = fuzz::parse(args)?;
+    eprintln!("xtask: [fuzz] {}", ctx.workspace_root.display());
+    fuzz::run(ctx, &opts)
+}
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
@@ -372,6 +389,11 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // advisory immediately); this gate caps how long one may be accepted
     // and fails closed when a pin drifts from `Cargo.lock`.
     run_supply_chain(ctx, &[])?;
+    // §19.6: the per-PR fuzz budget. Runs each in-tree harness for its
+    // ≥ 60 s `--quick` budget; a crash, hang, or invariant failure fails
+    // the gate (fail-closed). The nightly soak is `cargo xtask fuzz
+    // --soak`, run outside `ci`.
+    run_fuzz(ctx, &[OsString::from("--quick")])?;
     run_abi_check(ctx, &[])?;
     Ok(())
 }

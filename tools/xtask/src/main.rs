@@ -26,9 +26,12 @@
 //! - `supply-chain` — verify the committed source-hash allow-list
 //!   against `Cargo.lock` and enforce the RUSTSEC advisory SLA (§19.3);
 //!   `--write-pins` regenerates the pins from the lockfile
+//! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
+//!   budget (§19.6): `--quick` (≥ 60 s each, the `ci` budget) or
+//!   `--soak` (≥ 24 h each, nightly)
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
 //!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
-//!   `cargo deny check`, `supply-chain`, `abi-check`
+//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `abi-check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
