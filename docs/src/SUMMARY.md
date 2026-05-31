@@ -22,6 +22,7 @@
 
 - [Per-task capability registry](./security/captable.md)
 - [Hardware interrupts: capability-gated wake-ups](./security/irq.md)
+- [Audit-log integrity](./security/audit_log.md)
 
 # Shared libraries
 

@@ -23,6 +23,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod chain;
+
+pub use chain::{
+    verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
+};
+
 use core::sync::atomic::{AtomicU8, Ordering};
 
 /// Severity of a logged event.

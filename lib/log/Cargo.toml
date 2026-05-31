@@ -10,3 +10,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# §19.4 hash-chained audit log. SHA-256 comes from the audited wrapper in
+# `lib/crypto` (`AGENTS.md` §2.12 / §16.4 — no hand-rolled cryptography);
+# this crate never names an upstream crypto crate directly.
+rustos-crypto = { path = "../crypto", version = "=0.0.0" }

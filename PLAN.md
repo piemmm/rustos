@@ -3950,6 +3950,105 @@ a list collapses that list. No *new* violation may be added.
 
 ---
 
+## §19 Threat Model and Hardening Burn-down
+
+**Status:** newly binding (`AGENTS.md` §19) and largely **unimplemented**.
+§19 supersedes and makes binding the loose "Stage 9 — Security Hardening
+and Audit" deliverables: where they conflict, §19 wins, and Stage 9 is
+delivered by completing this burn-down. This section is the authoritative
+gap report and staged plan; it follows the same shrink-only, fail-closed
+discipline as the §17 burn-down above. No *new* §19 violation may be
+added, and each item lands with its own tests and docs (`AGENTS.md`
+§2.5 / §7 / §13) before it is marked *done*.
+
+This burn-down was opened by a §19 conformance review. The review found
+no code that *violates* §19 (the charter clauses are largely additive
+infrastructure that does not yet exist) — so there is nothing to revert;
+the work is to *build* the missing mechanisms. The one exception worth
+restating is that nothing in the tree currently emits an `RWX` mapping
+or a `/proc`-style surface, so §19.2's W^X invariant and §16.1 are not
+presently breached; they become enforced (not merely observed) when the
+rxe loader item below lands.
+
+**Gap report (per subsection, as of this review):**
+- **§19.1 microarchitectural side channels** — *not started*. The Arch
+  HAL (`kernel/arch/api`) has no side-channel mitigation trait set
+  (KPTI-equivalent, syscall-entry speculation barriers, context-switch
+  microarchitectural-buffer flush). The §17.2 conformance suite has no
+  side-channel vertical. `lib/crypto` has no constant-time-under-`-O3`
+  test for its secret-handling consumers.
+- **§19.2 W^X / ASLR / CFI** — *partially scaffolded*. `lib/abi` defines
+  the signed `rxe` `ManifestHeader` (magic, abi-version, syscall-table
+  hash, signer, signature), but there is **no rxe loader** anywhere that
+  (a) enforces R/RX/RW segments and refuses `RWX`, (b) requires PIE and
+  applies KASLR with a per-boot entropy seed, or (c) checks the
+  type-tagged CFI table against the §9 syscall-interface hash. Stack
+  canaries / shadow-stack in the arch `unsafe` cores are not declared.
+- **§19.3 supply-chain integrity** — *not started*. `tools/xtask` has no
+  `sbom`, no `build --reproducible`, and no advisory-SLA gate. `deny.toml`
+  is not configured with a source-hash allow-list. No "no post-install
+  network fetch" enforcement exists.
+- **§19.4 audit-log integrity** — *in progress (core landing this
+  session)*. `lib/log` was an in-memory facade with no hash-chaining,
+  signed anchors, or per-service `CAP_LOG_WRITE` partitioning.
+- **§19.5 parser sandboxing** — *not started*. `userland/net/icmp`
+  (arp/ethernet/ipv4/icmp) and the future font/image/archive/media
+  decoders run in-process; there is no minimum-capability sandbox
+  process model and no "parser must link into a sandbox" check.
+- **§19.6 fuzzing** — *not started*. No `cargo-fuzz` (or in-tree)
+  harnesses for IPC endpoints, syscalls, parsers, or `lib/abi` decoders;
+  no `cargo xtask fuzz` (`--quick` / `--soak`); Stage 1's promised
+  `lib/abi` fuzz target does not yet exist.
+- **§19.7 verified capability core** — *not started*. No `cargo xtask
+  proptest` / `verify` / `spec-review`, no `proptest` stateful models in
+  `lib/caps` / `kernel/sec` / the IPC + syscall dispatch paths, no TLA+
+  model under `docs/src/security/model/`, no `// SPEC-DRAFT:` discipline.
+- **§19.8 hardware-enforced capabilities (Tier-2)** — *not started*. No
+  `kernel/arch/cheri-*` crate; deferred behind the Tier-1 conformance
+  suites by charter.
+
+**Burn-down plan (ordered; each item is one task, with tests + docs):**
+1. **§19.4 hash-chain core** — *in progress*. A no-alloc, fixed-buffer
+   SHA-256 hash-chain primitive in `lib/log` (`chain.rs`): a per-CPU
+   `LogChain` issuing monotonic-sequenced `ChainedEntry` records each
+   binding the previous entry's hash, plus a `verify_chain` that
+   re-derives every entry hash, checks linkage and the monotonic
+   sequence, and returns the chain root hash. Payload-agnostic (operates
+   over a caller-supplied payload digest) so the crate stays no-alloc and
+   the persisted `/System/Logs` writer (Stage 5) and signed anchors
+   (item 2) build on it. Docs: `docs/src/security/audit_log.md`.
+2. **§19.4 signed anchors + `CAP_LOG_WRITE` partitioning** — *blocked on
+   a private-key signing API (Stage 2 capability authority) and the
+   persisted log store (Stage 5)*. Periodically sign the chain root to
+   `/System/Logs/Anchors/`; partition `CAP_LOG_WRITE` per service;
+   `CAP_LOG_ROTATE` for truncation.
+3. **§19.3 `cargo xtask sbom`** — emit a signed CycloneDX SBOM from
+   `cargo metadata` (workspace + external crates, source URL + checksum).
+   Pure tooling, host-testable, no kernel dependency.
+4. **§19.3 source-hash allow-list + advisory SLA** — pin external-crate
+   registry hashes in `deny.toml`; add the 7-day (`lib/crypto` deps) /
+   30-day advisory-SLA gate to `cargo xtask ci`.
+5. **§19.6 fuzzing harnesses + `cargo xtask fuzz`** — start with the
+   `lib/abi` decoders (manifest, syscall) promised in Stage 1, then IPC
+   and the `userland/net` parsers; wire `--quick` (≥ 60 s/PR) into `ci`.
+6. **§19.7 `proptest` models + `cargo xtask proptest`** — Bronze tier:
+   stateful models for `lib/caps`, `kernel/sec`, and the IPC + syscall
+   dispatch paths; `// SPEC-DRAFT:` marker discipline + `spec-review`.
+7. **§19.2 rxe loader** — enforce R/RX/RW (refuse `RWX`), PIE + per-boot
+   KASLR seed, and the CFI type-tag check against the syscall-interface
+   hash. Depends on `kernel/mem` paging primitives.
+8. **§19.1 side-channel HAL trait set + conformance vertical** — extend
+   `kernel/arch/api` and each `kernel/arch/<target>` per its errata; add
+   the side-channel vertical to the §17.2 suite.
+9. **§19.3 `cargo xtask build --reproducible`** — bit-reproducible image
+   verification on release tags. Depends on Stage 8 image builders.
+10. **§19.5 parser sandbox model** — minimum-capability sandbox process
+    for every untrusted-input parser. Depends on Stage 6 process model.
+11. **§19.7 Silver/Gold + §19.8 CHERI** — TLA+ model, Verus contracts,
+    `kernel/arch/cheri-*`. Aspirational; tracked here, not yet scheduled.
+
+---
+
 ## Assignment Notes for Task Dispatchers
 
 When handing a stage to an implementing agent, the task brief **must**:
