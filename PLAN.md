@@ -3947,6 +3947,61 @@ a list collapses that list. No *new* violation may be added.
   policies). Docs: new "Heterogeneous CPUs" section in
   `docs/src/architecture/scheduler.md`. clippy `-D warnings`,
   host + `x86_64-unknown-none` builds clean.
+- AMD vendor + heterogeneous-core (`Zen`/`Zen-c`) detection for x86_64
+  (§17.2 / §18.2) — *planned*. The heterogeneous-CPU item above wired the
+  `CoreClass` Arch-HAL hook and a *complete* detector **only for Intel**:
+  `kernel/arch/x86_64::hybrid` gates on CPUID leaf 0x07 `EDX[15]` ("Hybrid")
+  and decodes the core type from **leaf 0x1A**. AMD parts never set that
+  bit and never implement leaf 0x1A, so every AMD core — including the
+  genuinely heterogeneous ones (two `Zen 4` performance cores + four
+  density/efficiency-optimised `Zen 4c` cores on Phoenix 2 / Family 0x19
+  Model 0x78, and the Zen-5/5c successors) — currently falls through to the
+  homogeneous `CoreClass::Performance` default. That default is *safe*
+  (the scheduler simply treats the machine as homogeneous; no
+  misclassification, no panic — `AGENTS.md` §2.9), but it is *incomplete*:
+  on a hybrid AMD client the efficiency cores are not recognised, so
+  background work is never steered onto them. Closing this means, in the
+  x86_64 port only (§17.2 — no `cfg(target_arch …)` leaks elsewhere, and
+  no edits outside `kernel/arch/x86_64/`):
+  - **Vendor identification.** Read the 12-byte vendor string from CPUID
+    leaf 0 (`EBX`/`EDX`/`ECX` = `"AuthenticAMD"`) and branch the core-class
+    probe on it, rather than assuming Intel's leaf semantics on every
+    x86_64 part. Today `detect_current_core_class` consults the Intel
+    leaves unconditionally; that must become vendor-dispatched. The
+    `classify_core_type` (Intel leaf 0x1A) decoder stays as-is and a
+    sibling pure, host-testable AMD decoder is added next to it — a
+    parallel implementation, not a `cfg` fork (§2.2 carve-out).
+  - **AMD heterogeneous source.** AMD does **not** expose an Intel-0x1A
+    equivalent. The per-core class comes from the **Extended CPU Topology
+    leaf `0x80000026`** (`Core::X86::Cpuid::ExtCpuTopology`), which on
+    heterogeneous parts reports a per-core *core type* and *power/efficiency
+    ranking* (this is the leaf the Linux 6.13 AMD heterogeneous-topology
+    series parses). Probe it only after bounding the maximum *extended*
+    leaf via CPUID `0x80000000`, mirroring the existing leaf-0 bound for
+    the Intel path, so an unsupported sub-leaf is never executed.
+  - **APM is still evolving — fail conservative.** AMD's documentation of
+    the `0x80000026` core-type / efficiency-ranking encoding is newer than
+    Intel's leaf 0x1A and is still settling across CPU generations; the
+    field layout and reserved values may change on later parts. The AMD
+    decoder must therefore recognise only the encodings AMD has actually
+    published, treat every unknown/reserved value as
+    `CoreClass::Performance` (the safe homogeneous default, exactly as the
+    Intel decoder treats an unknown core-type byte), and never guess from
+    family/model heuristics or frequency tables. A part that does not
+    advertise leaf `0x80000026` is homogeneous and reports `Performance`.
+    Each recognised encoding is pinned to the AMD APM / PPR revision it
+    came from in the source so a future encoding change is a deliberate,
+    reviewed addition, not a silent reinterpretation.
+  - **Tests + docs (lands with the change, §2.5 / §7 / §13).** Host-side
+    unit tests for the AMD decoder (a Zen-c value → `Efficiency`, a Zen
+    value → `Performance`, and unknown/reserved → `Performance`) plus a
+    vendor-string-parse test; the existing host
+    `host_detection_reports_homogeneous_default` stays valid (no real
+    topology on the host). `hybrid.rs`'s module docs and the
+    "Heterogeneous CPUs" section of `docs/src/architecture/scheduler.md`
+    gain the AMD path and the evolving-APM caveat. No scheduler, no
+    `lib/*`, and no other arch crate changes — the `CoreClass` contract
+    already exists, so this is detector work, not interface creep (§2.4).
 
 ---
 
