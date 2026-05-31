@@ -20,6 +20,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use rustos_arch_api::{next_free_tag, MemTag, TAG_COUNT};
+
 use crate::error::AllocError;
 use crate::frame::PAGE_SIZE;
 #[cfg(test)]
@@ -55,6 +57,12 @@ pub enum SlabError {
     /// detected. Real hardware would have faulted; the host check
     /// surfaces it through this variant.
     GuardViolation,
+    /// The handle's memory tag did not match the slot's current tag — a
+    /// use-after-free was detected (`AGENTS.md` §19.10). The slot was
+    /// freed and reallocated since this handle was issued, so the handle
+    /// is dangling. On a hardware-tagged port (Arm MTE) the access would
+    /// have faulted; this is the architecture-neutral software check.
+    TagMismatch,
 }
 
 impl From<AllocError> for SlabError {
@@ -70,17 +78,35 @@ impl fmt::Display for SlabError {
             Self::UnknownHandle => f.write_str("slab handle not from this slab"),
             Self::DoubleFree => f.write_str("slab double free"),
             Self::GuardViolation => f.write_str("slab guard-page violation"),
+            Self::TagMismatch => f.write_str("slab use-after-free: handle tag mismatch"),
         }
     }
 }
 
 /// Opaque handle returned by [`Slab::alloc`].
 ///
-/// Internally an index into the slab's slot table. We hand out indices
-/// instead of raw pointers so the host test double can revoke them on
-/// drop and detect double-frees without unsafe gymnastics.
+/// Pairs an index into the slab's slot table with the *memory tag*
+/// (`AGENTS.md` §19.10) the slot carried when the handle was issued. We
+/// hand out indices instead of raw pointers so the host test double can
+/// revoke them on drop and detect double-frees without unsafe
+/// gymnastics; the tag is the software analogue of an Arm-MTE pointer
+/// tag, so a handle that outlives its allocation (a use-after-free)
+/// mismatches the slot's rotated tag and is rejected — exactly what the
+/// hardware would fault on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SlabHandle(usize);
+pub struct SlabHandle {
+    slot: usize,
+    tag: MemTag,
+}
+
+impl SlabHandle {
+    /// The memory tag this handle carries (the tag the slot held when the
+    /// handle was issued).
+    #[must_use]
+    pub fn tag(self) -> MemTag {
+        self.tag
+    }
+}
 
 /// Fixed-size object slab.
 ///
@@ -95,6 +121,10 @@ pub struct Slab {
     storage: Vec<u8>,
     /// Per-slot allocation state.
     in_use: Vec<bool>,
+    /// Per-slot current memory tag (`AGENTS.md` §19.10). Rotated on every
+    /// allocation so a reused slot never carries the tag a previously
+    /// issued (now dangling) handle still holds.
+    tags: Vec<MemTag>,
 }
 
 impl Slab {
@@ -131,6 +161,7 @@ impl Slab {
             slot_count,
             storage,
             in_use: vec![false; slot_count],
+            tags: vec![MemTag::INITIAL; slot_count],
         })
     }
 
@@ -145,10 +176,15 @@ impl Slab {
         // detected over-run. If guards have been clobbered the alloc
         // must fail closed (`AGENTS.md` §5.4).
         self.verify_guards_internal()?;
-        for (i, used) in self.in_use.iter_mut().enumerate() {
-            if !*used {
-                *used = true;
-                return Ok(SlabHandle(i));
+        for i in 0..self.slot_count {
+            if !self.in_use[i] {
+                self.in_use[i] = true;
+                // Rotate the slot's tag so any handle still holding the
+                // previous tag (a dangling pointer into this slot) will
+                // mismatch and be rejected (`AGENTS.md` §19.10).
+                let tag = next_free_tag(self.tags[i], TAG_COUNT);
+                self.tags[i] = tag;
+                return Ok(SlabHandle { slot: i, tag });
             }
         }
         Err(SlabError::Alloc(AllocError::OutOfMemory))
@@ -160,21 +196,26 @@ impl Slab {
     ///
     /// - [`SlabError::UnknownHandle`] if the handle is out of range.
     /// - [`SlabError::DoubleFree`] if the slot is not currently in use.
+    /// - [`SlabError::TagMismatch`] if the handle's tag no longer matches
+    ///   the slot's current tag (a use-after-free; `AGENTS.md` §19.10).
     /// - [`SlabError::GuardViolation`] if either guard region was
     ///   tampered with while the slot was live.
     pub fn free(&mut self, h: SlabHandle) -> Result<(), SlabError> {
-        if h.0 >= self.slot_count {
+        if h.slot >= self.slot_count {
             return Err(SlabError::UnknownHandle);
         }
-        if !self.in_use[h.0] {
+        if !self.in_use[h.slot] {
             return Err(SlabError::DoubleFree);
+        }
+        if h.tag != self.tags[h.slot] {
+            return Err(SlabError::TagMismatch);
         }
         self.verify_guards_internal()?;
         // Zero the slot's bytes — keeps the slab clean between uses
         // and means freed slots don't leak their previous contents to
         // the *next* allocator caller (cheap defence-in-depth, not
         // the same thing as `sensitive` zero-on-free).
-        let off = GUARD_BYTES + h.0 * self.object_size;
+        let off = GUARD_BYTES + h.slot * self.object_size;
         let base = self.storage.as_mut_ptr();
         let total = self.storage.len();
         // SAFETY: `base..base+total` is the live `storage` Vec; we hold
@@ -186,7 +227,7 @@ impl Slab {
         for b in slot.iter_mut() {
             *b = 0;
         }
-        self.in_use[h.0] = false;
+        self.in_use[h.slot] = false;
         Ok(())
     }
 
@@ -196,14 +237,20 @@ impl Slab {
     ///
     /// - [`SlabError::UnknownHandle`] / [`SlabError::DoubleFree`] for
     ///   stale handles.
+    /// - [`SlabError::TagMismatch`] if the handle outlived its allocation
+    ///   and the slot has since been reused (a use-after-free;
+    ///   `AGENTS.md` §19.10).
     pub fn slot_mut(&mut self, h: SlabHandle) -> Result<&mut [u8], SlabError> {
-        if h.0 >= self.slot_count {
+        if h.slot >= self.slot_count {
             return Err(SlabError::UnknownHandle);
         }
-        if !self.in_use[h.0] {
+        if !self.in_use[h.slot] {
             return Err(SlabError::DoubleFree);
         }
-        let off = GUARD_BYTES + h.0 * self.object_size;
+        if h.tag != self.tags[h.slot] {
+            return Err(SlabError::TagMismatch);
+        }
+        let off = GUARD_BYTES + h.slot * self.object_size;
         let base = self.storage.as_mut_ptr();
         let total = self.storage.len();
         // SAFETY: as in `free` — the slice stays inside `storage`, no
@@ -331,10 +378,44 @@ mod tests {
     #[test]
     fn unknown_handle_rejected() {
         let mut s = Slab::new(16, 2).unwrap();
-        assert!(matches!(
-            s.free(SlabHandle(99)),
-            Err(SlabError::UnknownHandle)
-        ));
+        let bogus = SlabHandle {
+            slot: 99,
+            tag: MemTag::INITIAL,
+        };
+        assert!(matches!(s.free(bogus), Err(SlabError::UnknownHandle)));
+    }
+
+    #[test]
+    fn use_after_free_then_realloc_is_a_tag_mismatch() {
+        // One slot, so a free + alloc reuses it. The stale handle keeps
+        // the tag the slot held before it was freed; the realloc rotates
+        // the slot's tag, so the stale handle now mismatches and any
+        // access through it is rejected as a use-after-free.
+        let mut s = Slab::new(16, 1).unwrap();
+        let stale = s.alloc().unwrap();
+        s.free(stale).unwrap();
+        let fresh = s.alloc().unwrap();
+        assert_ne!(stale.tag(), fresh.tag());
+        assert!(matches!(s.slot_mut(stale), Err(SlabError::TagMismatch)));
+        assert!(matches!(s.free(stale), Err(SlabError::TagMismatch)));
+        // The live handle for the reused slot still works.
+        s.slot_mut(fresh).unwrap();
+    }
+
+    #[test]
+    fn each_reallocation_rotates_the_tag() {
+        // Repeated alloc/free of the same slot must keep changing the tag
+        // so no two consecutive lifetimes share one (`AGENTS.md` §19.10).
+        let mut s = Slab::new(8, 1).unwrap();
+        let mut previous = None;
+        for _ in 0..TAG_COUNT {
+            let h = s.alloc().unwrap();
+            if let Some(p) = previous {
+                assert_ne!(p, h.tag());
+            }
+            previous = Some(h.tag());
+            s.free(h).unwrap();
+        }
     }
 
     #[test]
@@ -402,6 +483,7 @@ mod tests {
         use std::format;
         assert!(format!("{}", SlabError::DoubleFree).contains("double"));
         assert!(format!("{}", SlabError::UnknownHandle).contains("handle"));
+        assert!(format!("{}", SlabError::TagMismatch).contains("use-after-free"));
         assert!(format!("{}", SlabError::GuardViolation).contains("guard"));
         assert!(format!("{}", SlabError::Alloc(AllocError::OutOfMemory)).contains("memory"));
     }

@@ -625,6 +625,7 @@ dependencies = [
  "loom",
  "proptest",
  "rustos-abi",
+ "rustos-arch-api",
  "rustos-sync",
  "zeroize",
 ]

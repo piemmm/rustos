@@ -92,6 +92,15 @@ pub mod interrupts;
 pub mod irq;
 #[cfg(feature = "sched-arch")]
 pub mod kernel_arch;
+/// x86_64 implementation of the Arch HAL memory-tagging surface
+/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10). Mainstream
+/// x86_64 has no per-granule memory tagging, so the port declares it an
+/// honest `Unsupported` (see the module docs).
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in.
+#[cfg(feature = "sched-arch")]
+pub mod memtag;
 pub mod multiboot2;
 pub mod percpu;
 /// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit

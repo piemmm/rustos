@@ -4043,9 +4043,28 @@ rxe loader item below lands.
 - **§19.8 hardware-enforced capabilities (Tier-2)** — *not started*. No
   `kernel/arch/cheri-*` crate; deferred behind the Tier-1 conformance
   suites by charter.
+- **§19.10 hardware memory tagging** — *HAL trait set + conformance
+  vertical + per-arch profiles + software slab UAF check landed (item
+  13)*. `kernel/arch/api/src/memtag.rs` defines the closed memory-tagging
+  surface: the `MemoryTagging` trait (granule geometry +
+  capability-checked `set_region_tag`), the honest `TaggingProfile`
+  (`tag_storage` / `tag_check_faults`, each `Supported` /
+  `Unsupported(reason)` / `Pending(note)`), the architecture-neutral
+  `MemTag` / `next_free_tag` rotation, and the `memtag::conformance`
+  vertical every port runs from a host test. Per target: aarch64 drives
+  Arm MTE (the `stg` store sequence, 16-byte / 4-bit granule, gated
+  behind a default-off `mte_enabled` flag) with both slots honestly
+  `Pending` on the Stage 6 MTE enable; x86_64 / riscv64 / wasm32 declare
+  a justified `Unsupported` (no tagging silicon). The `kernel/mem` slab
+  hardens use-after-free **today** on every target in software: a
+  tag-carrying `SlabHandle` is rejected with `SlabError::TagMismatch`
+  once its slot is freed and reallocated, sharing the HAL's
+  `next_free_tag` rotation. Docs: `docs/src/security/memory_tagging.md`.
+  Still open: switching the aarch64 `stg` store path live and the
+  hardware tag-check fault with the Stage 6 page-table work.
 
 **Standing directive (owner, 2026-05-31):** every *independent* item of
-this burn-down (1, 3, 4, 5, 6, 7, 8, 11) is **landed and verified green**;
+this burn-down (1, 3, 4, 5, 6, 7, 8, 11, 13) is **landed and verified green**;
 the implementable portion of §19 is complete. The only remaining items
 (2, 9, 10, 12) are **stage-blocked or aspirational**, not deferred by
 choice. They carry a binding **[DO IMMEDIATELY ON UNBLOCK]** order: the
@@ -4224,6 +4243,34 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
 12. **§19.7 Gold + §19.8 CHERI** — Verus contracts on `lib/caps` /
     `kernel/sec` (`cargo xtask verify`) and `kernel/arch/cheri-*`.
     Aspirational; tracked here, not yet scheduled.
+13. **§19.10 hardware memory tagging** — *done (HAL surface + per-arch
+    profiles + software slab UAF check)*. `kernel/arch/api/src/memtag.rs`
+    adds the closed memory-tagging surface: the `MemoryTagging` trait
+    (granule geometry + capability-checked `set_region_tag`), the honest
+    `TaggingProfile` (`tag_storage` / `tag_check_faults`, each `Supported`
+    / `Unsupported(reason)` / `Pending(note)`, with `validate` /
+    `is_release_ready` honesty + release gates), the architecture-neutral
+    `MemTag` / `next_free_tag` rotation, and the `memtag::conformance`
+    vertical every port runs from a host test. aarch64 implements Arm MTE
+    (the `stg` store sequence under `#[target_feature(enable = "mte")]`,
+    16-byte / 4-bit granule, gated behind a default-off `mte_enabled`
+    flag) and declares both slots `Pending` on the Stage 6 MTE enable;
+    x86_64 / riscv64 / wasm32 declare a justified `Unsupported`. The
+    `kernel/mem` slab hardens use-after-free now in software: a
+    tag-carrying `SlabHandle` whose slot was freed and reallocated
+    mismatches the slot's rotated tag and is rejected with
+    `SlabError::TagMismatch`, sharing the HAL's `next_free_tag`. ~16 api +
+    14 per-port + 3 new slab unit tests. Docs:
+    `docs/src/security/memory_tagging.md`. The software UAF tag check is
+    the **on-by-default** mechanism today (`AGENTS.md` §19.10): it is
+    unconditional on every target with no opt-in feature gate. Remaining:
+    once the Stage 6 page-table work lands the `FEAT_MTE` probe
+    (`ID_AA64PFR1_EL1.MTE`) and the `Normal Tagged` mapping, switch the
+    aarch64 default constructor to **auto-enable MTE whenever the silicon
+    reports `FEAT_MTE`** (so hardware MTE is on by default where supported,
+    never executing an `UNDEFINED` `stg` on a core without it), wire the
+    `stg` store path live, and decode the hardware tag-check fault —
+    **[DO IMMEDIATELY ON UNBLOCK]**.
 
 ---
 

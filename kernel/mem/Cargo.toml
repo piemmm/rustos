@@ -24,6 +24,13 @@ host-tests = []
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
+# The Arch HAL surface. §17.4 permits `kernel/mem` to name `kernel/arch/api`.
+# The slab allocator's software use-after-free tag check (`AGENTS.md` §19.10)
+# shares the architecture-neutral `MemTag` / `next_free_tag` rotation defined
+# there, so a tagged hardware port (Arm MTE) and the software check agree on
+# the tag space — no duplicated tag algebra (`AGENTS.md` §2.2).
+rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
+
 # The stable ABI types: `kernel/mem` consumes the `rxe` load-image format
 # (`AGENTS.md` §9 / §19.2) so the loader can map a validated image into an
 # `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.

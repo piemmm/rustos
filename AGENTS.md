@@ -1019,6 +1019,37 @@ prevents false claims:
 - Bugs in `rustc` / LLVM / the wasm host. §2.12's "roll your own"
   does not extend to the compiler.
 
+### 19.10 Hardware memory tagging (use-after-free hardening)
+
+- Use-after-free (and a class of buffer over-runs) is turned into a
+  deterministic fault by **memory tagging**: every aligned granule of
+  memory carries a small tag, every pointer carries a matching tag, and
+  an access whose pointer tag does not match the granule tag faults.
+  Rotating the tag when a region is freed — so a dangling pointer keeps
+  the stale tag — is what hardens use-after-free.
+- Only the architecture port can drive the tag-storage and tag-check
+  silicon (Arm MTE, SPARC ADI, the RISC-V tagging proposals), so this is
+  a **closed trait set on the Arch HAL**, alongside the §19.1
+  side-channel set, in `kernel/arch/api` (`rustos_arch_api::memtag`). It
+  defines the `MemoryTagging` per-port handle, the honest
+  `TaggingProfile` (`tag_storage` and `tag_check_faults`, each
+  `Supported` / `Unsupported(reason)` / `Pending(note)`, same honesty
+  discipline as §19.1), the architecture-neutral `MemTag` /
+  `next_free_tag` tag rotation, and the `memtag::conformance` vertical
+  every port runs (§17.2). A `Pending` slot is honest but not
+  release-ready; an `Unsupported` claim is permitted **only** where the
+  silicon genuinely lacks tagging, and must be justified.
+- The tag rotation has exactly one definition (`next_free_tag`), shared
+  by the hardware ports and the architecture-neutral *software* tag
+  check, so they agree on the tag space (§2.2 — no duplicated algebra).
+- Because hardware tag checking depends on the Stage 6 page-table work
+  and most targets lack tagging silicon, the slab allocator in
+  `kernel/mem` hardens use-after-free **today**, on every target, in
+  software: a `SlabHandle` carries the tag its slot held when issued, the
+  slot's tag is rotated on every allocation, and a handle that outlives
+  its allocation mismatches the rotated tag and is rejected. This never
+  weakens to "trust the caller" (§5.4) and never panics (§2.9).
+
 ---
 
 Violation of any rule in this document is a defect, regardless of whether

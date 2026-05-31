@@ -77,6 +77,11 @@ pub mod exceptions;
 pub mod fault;
 pub mod gic;
 pub mod kernel_arch;
+/// aarch64 implementation of the Arch HAL memory-tagging surface
+/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10) — Arm MTE
+/// (`stg` store sequence, 16-byte / 4-bit tag granule); both slots are
+/// honestly `Pending` on the Stage 6 MTE enable (see the module docs).
+pub mod memtag;
 pub mod paging;
 pub mod preempt;
 pub mod qemu_exit;

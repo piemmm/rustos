@@ -108,6 +108,11 @@ pub mod context;
 pub mod fault;
 pub mod fdt;
 pub mod kernel_arch;
+/// riscv64 implementation of the Arch HAL memory-tagging surface
+/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10). The RISC-V
+/// cores RustOS targets implement no ratified memory-tagging extension,
+/// so the port declares it an honest `Unsupported` (see the module docs).
+pub mod memtag;
 pub mod paging;
 pub mod plic;
 pub mod preempt;

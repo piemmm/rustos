@@ -60,6 +60,12 @@ extern crate std;
 
 pub mod isolation;
 pub mod kernel_arch;
+/// wasm32 implementation of the Arch HAL memory-tagging surface
+/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10). WebAssembly
+/// exposes no per-granule tagging primitive — spatial safety is the host
+/// sandbox's per-worker linear memory — so the port declares it an honest
+/// `Unsupported` (see the module docs).
+pub mod memtag;
 pub mod preempt;
 /// wasm32 implementation of the Arch HAL side-channel mitigation
 /// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`

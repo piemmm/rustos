@@ -29,6 +29,7 @@
 - [The capability + IPC model (Silver)](./security/model/capability_ipc.md)
 - [The rxe loader: W^X, PIE, KASLR, CFI](./security/rxe_loader.md)
 - [Side-channel mitigations (Arch HAL)](./security/side_channels.md)
+- [Memory tagging (Arch HAL)](./security/memory_tagging.md)
 
 # Shared libraries
 
