@@ -3988,9 +3988,12 @@ rxe loader item below lands.
   release-ready), and wasm32 (host-owned `NotVulnerable`, release-ready)
   declares its honest profile. Docs: `docs/src/security/side_channels.md`.
   Still missing: the KPTI / IBPB `Pending` gaps close with the Stage 6
-  user/kernel boundary + CPUID/MIDR feature probes, and `lib/crypto`
-  still has no constant-time-under-`-O3` test for its secret-handling
-  consumers (a separate piece needing a non-flaky harness, §7).
+  user/kernel boundary + CPUID/MIDR feature probes. The `lib/crypto`
+  constant-time-under-`-O3` test landed: `rustos_crypto::ct_eq`
+  (`lib/crypto/src/constant_time.rs`) is the sanctioned secret-comparison
+  primitive, its no-early-exit property is proved by an instrumented
+  full-traversal test (no wall-clock timing, §7), and `cargo xtask ci`
+  re-runs the crate's tests under the release profile (`-C opt-level=3`).
 - **§19.2 W^X / ASLR / CFI** — *loader landed (item 7)*. `lib/abi/src/rxe.rs`
   now defines the `rxe` load image (`LoadHeader` + `Segment` table) and the
   load-time policy: `LoadImage::parse` (a) enforces R/RX/RW segments and
@@ -4170,9 +4173,13 @@ rxe loader item below lands.
    vulnerable); wasm32 is release-ready (every control host-owned). All
    barrier instructions are `cfg`-gated to the bare-metal target under a
    `// SAFETY:` block; ~14 api + 12 per-port unit tests. Docs:
-   `docs/src/security/side_channels.md`. Remaining for §19.1: closing the
-   KPTI / IBPB `Pending` gaps (Stage 6) and the `lib/crypto`
-   constant-time-under-`-O3` test (a separate, non-flaky harness, §7).
+   `docs/src/security/side_channels.md`. The `lib/crypto`
+   constant-time-under-`-O3` test also landed: `rustos_crypto::ct_eq`
+   (`lib/crypto/src/constant_time.rs`) folds every byte pair with no
+   early exit, an instrumented full-traversal test proves the property
+   without wall-clock timing (§7), and `cargo xtask ci` re-runs the
+   crate's tests under the release profile (`-C opt-level=3`). Remaining
+   for §19.1: closing the KPTI / IBPB `Pending` gaps (Stage 6).
 9. **§19.3 `cargo xtask build --reproducible`** — bit-reproducible image
    verification on release tags. Depends on Stage 8 image builders.
 10. **§19.5 parser sandbox model** — minimum-capability sandbox process

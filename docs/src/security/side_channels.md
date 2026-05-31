@@ -86,7 +86,14 @@ build checks the instructions.
 
 The KPTI and indirect-branch-predictor `Pending` gaps close with the
 Stage 6 process model (the user/kernel boundary and the `CPUID`/MIDR
-feature probes). The §19.1 constant-time-under-`-O3` test for
-`lib/crypto`'s secret-handling consumers is a separate piece tracked in
-`PLAN.md`'s §19 burn-down; it needs a non-flaky harness (`AGENTS.md` §7
-forbids wall-clock timing tests) rather than the side-channel HAL.
+feature probes).
+
+The §19.1 constant-time requirement for `lib/crypto`'s secret-handling
+code is **landed**: `rustos_crypto::ct_eq` compares secret byte strings
+in content-independent time, and its tests prove the no-early-exit
+property without the wall-clock timing `AGENTS.md` §7 forbids — an
+instrumented iterator asserts that equal, first-byte-differing,
+last-byte-differing, and all-differing inputs all traverse the full
+length. `cargo xtask ci` re-runs the `rustos-crypto` tests under the
+release profile (`-C opt-level=3`) so an optimiser-introduced branch
+would fail the gate. See [`rustos-crypto`](../lib/crypto.md).

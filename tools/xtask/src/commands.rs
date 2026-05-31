@@ -459,8 +459,25 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // §19.7: reject any unreviewed AI-drafted artefact marker that reached
     // the tree. Static and cheap; fails closed.
     run_spec_review(ctx)?;
+    // §19.1: re-run `lib/crypto`'s unit tests under release optimisation
+    // (`[profile.release]` is `opt-level = 3`). The constant-time
+    // comparison guarantee can be broken by the optimiser, so the charter
+    // requires the secret-handling tests to pass under `-C opt-level=3`,
+    // not only the debug profile the main test phase uses.
+    run_crypto_constant_time(ctx)?;
     run_abi_check(ctx, &[])?;
     Ok(())
+}
+
+/// §19.1: run `lib/crypto`'s unit tests under the release profile so the
+/// constant-time comparison tests are exercised at `-C opt-level=3`. A
+/// data-dependent branch introduced by the optimiser would surface here, in
+/// the `constant_time` module's full-traversal assertions, rather than at
+/// the debug optimisation level the main test phase uses.
+fn run_crypto_constant_time(ctx: &Context) -> Result<(), String> {
+    let mut cmd = ctx.cargo();
+    cmd.args(["test", "--release", "--locked", "-p", "rustos-crypto"]);
+    ctx.run("crypto-constant-time (release)", cmd)
 }
 
 fn run_deny(ctx: &Context) -> Result<(), String> {

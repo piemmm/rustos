@@ -15,8 +15,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod constant_time;
 pub mod hash;
 pub mod sign;
 
+pub use constant_time::ct_eq;
 pub use hash::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
 pub use sign::{Ed25519PublicKey, Ed25519Signature, SignatureError};

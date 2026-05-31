@@ -18,6 +18,10 @@ general-purpose callers. Test code in `lib/caps` exercises signing via a
 dev-only dependency on `ed25519-dalek`, keeping the audited build's
 attack surface to verification alone.
 
+A first-party constant-time comparison, `ct_eq(&[u8], &[u8]) -> bool`,
+also ships here (see below); it is the one sanctioned home for comparing
+secret byte strings.
+
 ## Pinning
 
 Versions are pinned exactly (`= x.y.z`). Bumping a pin is a deliberate
@@ -25,8 +29,34 @@ change that requires a fresh audit pass; the rationale must be recorded
 in the commit message and in `deny.toml` if the licence or advisory
 posture changes.
 
+## Constant-time comparison (§19.1)
+
+`constant_time::ct_eq` compares two byte slices in time that depends only
+on their (public) lengths, never on their contents: every overlapping
+byte pair is folded into a single difference accumulator with no
+data-dependent branch and no early return. Comparing a secret — a MAC
+tag, a capability-token signature, a key fingerprint — with `==` would
+leak, through early-exit timing, how many leading bytes matched, which is
+enough to forge the value one byte at a time. `AGENTS.md` §19.1 forbids
+that, and this is the only sanctioned place to compare secret material.
+
+The constant-time property is *tested*, not merely asserted, and without
+the wall-clock timing that `AGENTS.md` §7 forbids as flaky: the
+no-early-exit core is driven through an instrumented iterator that
+records how many byte pairs it yields, and the tests assert that equal
+inputs, a difference in the first byte, a difference in the last byte,
+and an all-bytes difference all traverse exactly `len` pairs. A
+short-circuiting comparison would visit only one pair on a first-byte
+mismatch and fail the assertion. Because an optimiser can turn a
+branchless compare into a branching one, `cargo xtask ci` re-runs the
+`rustos-crypto` unit tests under the release profile (`-C opt-level=3`)
+as a dedicated step.
+
 ## Test vectors
 
 * SHA-256: FIPS 180-4 §A.1 vectors for the empty message and `"abc"`.
 * Ed25519: RFC 8032 §7.1 test vector 1 (empty message); plus tampered
   signature and tampered message rejections.
+* `ct_eq`: a per-position single-byte-flip sweep, a content-independent
+  traversal-count check, and a fixed-seed randomised differential against
+  the reference `==`.
