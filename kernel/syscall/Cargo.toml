@@ -23,3 +23,9 @@ rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+
+[dev-dependencies]
+# The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
+# dispatch capability gate under randomised call sequences. Same pinned,
+# already-audited version the other kernel crates use; dev-only.
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

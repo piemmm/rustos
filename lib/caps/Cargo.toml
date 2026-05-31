@@ -21,3 +21,8 @@ rustos-crypto = { path = "../crypto", version = "=0.0.0" }
 # never sign — they only verify via `rustos-crypto`. The dev-only dependency
 # keeps the signing surface out of the audited build.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
+# The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
+# capability-critical paths under randomised command sequences. Same pinned,
+# already-audited version `kernel/sec` uses; dev-only, so it never reaches
+# the production capability surface.
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

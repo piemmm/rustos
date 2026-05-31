@@ -419,6 +419,7 @@ name = "rustos-caps"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
+ "proptest",
  "rustos-abi",
  "rustos-collections",
  "rustos-crypto",
@@ -596,6 +597,7 @@ name = "rustos-kernel-ipc"
 version = "0.0.0"
 dependencies = [
  "loom",
+ "proptest",
  "rustos-abi",
  "rustos-caps",
  "rustos-kernel-mem",
@@ -674,6 +676,7 @@ dependencies = [
 name = "rustos-kernel-syscall"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "rustos-abi",
  "rustos-caps",
  "rustos-crypto",

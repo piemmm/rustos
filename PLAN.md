@@ -4009,10 +4009,14 @@ rxe loader item below lands.
   budget by `cargo xtask fuzz` (`--quick` ≥ 60 s / `--soak` ≥ 24 h),
   wired into `ci`. Remaining for later stages: harnesses for the future
   font/image/archive/media parsers (§19.5) as those parsers land.
-- **§19.7 verified capability core** — *not started*. No `cargo xtask
-  proptest` / `verify` / `spec-review`, no `proptest` stateful models in
-  `lib/caps` / `kernel/sec` / the IPC + syscall dispatch paths, no TLA+
-  model under `docs/src/security/model/`, no `// SPEC-DRAFT:` discipline.
+- **§19.7 verified capability core** — *Bronze done; Silver/Gold not
+  started*. `cargo xtask proptest` drives an in-tree `proptest`-style
+  stateful model for each capability-critical path (`lib/caps`,
+  `kernel/sec`, the IPC port dispatch, and the syscall dispatch gate),
+  and `cargo xtask spec-review` enforces the draft-marker discipline;
+  both are wired into `ci`. Still missing: the Silver TLA+ model under
+  `docs/src/security/model/` and the Gold Verus contracts (`cargo xtask
+  verify`).
 - **§19.8 hardware-enforced capabilities (Tier-2)** — *not started*. No
   `kernel/arch/cheri-*` crate; deferred behind the Tier-1 conformance
   suites by charter.
@@ -4080,9 +4084,27 @@ rxe loader item below lands.
    capacity bound, and a closed-port fast-path refusal). Docs:
    `docs/src/security/fuzzing.md`. Remaining for later stages: harnesses
    for the future font/image/archive/media parsers (§19.5) as they land.
-6. **§19.7 `proptest` models + `cargo xtask proptest`** — Bronze tier:
-   stateful models for `lib/caps`, `kernel/sec`, and the IPC + syscall
-   dispatch paths; `// SPEC-DRAFT:` marker discipline + `spec-review`.
+6. **§19.7 `proptest` models + `cargo xtask proptest`** — *Bronze tier
+   done*. Each capability-critical path carries an in-tree
+   `proptest`-style stateful model in `tests/proptest_model.rs`,
+   replaying a randomised command sequence against an independent
+   reference model and letting `proptest` shrink any counterexample:
+   `lib/caps` (`CapabilitySet` algebra + delegation invariant, plus a
+   signed-`CapabilityToken` verify oracle), `kernel/sec` (`CapTable` /
+   `TaskCapabilities` derive=intersection, delegate-never-widens,
+   revoke-only-shrinks), `kernel/ipc` (the capability-checked `Port`
+   send/recv/destroy lifecycle, fail-closed precedence + FIFO fidelity),
+   and `kernel/syscall` (the `Dispatcher` §5.4 capability gate +
+   invocation accounting). New `cargo xtask proptest` (in `ci` after
+   `fuzz`) runs each model for a wall-clock budget — `--quick`
+   (≥ 60 s/model) or `--soak` (≥ 24 h/model) — via
+   `RUSTOS_PROPTEST_BUDGET_SECS`, fail-closed on any counterexample,
+   hang, or invariant failure. New `cargo xtask spec-review` (also in
+   `ci`) scans the source tree and fails closed if any unreviewed
+   AI-draft marker reaches `main`. `proptest` is the already-pinned,
+   already-audited dev-dependency (no new external crate; §2.12). Docs:
+   `docs/src/security/proptest_models.md`. Remaining for §19.7: the
+   Silver TLA+ model and the Gold Verus contracts (burn-down item 11).
 7. **§19.2 rxe loader** — enforce R/RX/RW (refuse `RWX`), PIE + per-boot
    KASLR seed, and the CFI type-tag check against the syscall-interface
    hash. Depends on `kernel/mem` paging primitives.

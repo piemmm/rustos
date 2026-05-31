@@ -24,6 +24,12 @@ rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
+# The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
+# capability-checked port endpoint under randomised command sequences. Same
+# pinned, already-audited version the other kernel crates use; dev-only.
+[dev-dependencies]
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+
 # Loom is only pulled in when the caller opts in with
 # `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors `kernel/sync` and
 # `kernel/sched`.

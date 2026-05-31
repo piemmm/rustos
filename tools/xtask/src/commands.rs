@@ -14,8 +14,10 @@ mod cfg_check;
 mod deps_check;
 mod fuzz;
 mod linkcheck;
+mod proptest;
 mod qemu_tests;
 mod sbom;
+mod spec_review;
 mod supply_chain;
 mod wasm_tests;
 
@@ -34,6 +36,8 @@ pub enum Command {
     Sbom,
     SupplyChain,
     Fuzz,
+    Proptest,
+    SpecReview,
     Ci,
     Image,
 }
@@ -53,6 +57,8 @@ impl Command {
         Command::Sbom,
         Command::SupplyChain,
         Command::Fuzz,
+        Command::Proptest,
+        Command::SpecReview,
         Command::Ci,
         Command::Image,
     ];
@@ -71,6 +77,8 @@ impl Command {
             "sbom" => Command::Sbom,
             "supply-chain" => Command::SupplyChain,
             "fuzz" => Command::Fuzz,
+            "proptest" => Command::Proptest,
+            "spec-review" => Command::SpecReview,
             "ci" => Command::Ci,
             "image" => Command::Image,
             _ => return None,
@@ -91,6 +99,8 @@ impl Command {
             Command::Sbom => "sbom",
             Command::SupplyChain => "supply-chain",
             Command::Fuzz => "fuzz",
+            Command::Proptest => "proptest",
+            Command::SpecReview => "spec-review",
             Command::Ci => "ci",
             Command::Image => "image",
         }
@@ -112,6 +122,10 @@ impl Command {
                 "Verify source-hash pins against Cargo.lock and the advisory SLA (§19.3)."
             }
             Command::Fuzz => "Drive the in-tree fuzz harnesses for a wall-clock budget (§19.6).",
+            Command::Proptest => {
+                "Drive the §19.7 stateful capability models for a wall-clock budget."
+            }
+            Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
         }
@@ -131,6 +145,8 @@ impl Command {
             Command::Sbom => run_sbom(ctx, args),
             Command::SupplyChain => run_supply_chain(ctx, args),
             Command::Fuzz => run_fuzz(ctx, args),
+            Command::Proptest => run_proptest(ctx, args),
+            Command::SpecReview => run_spec_review(ctx),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
         }
@@ -368,6 +384,23 @@ fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     fuzz::run(ctx, &opts)
 }
 
+fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // §19.7 Bronze: drive the stateful capability models for a wall-clock
+    // budget. `--quick` (the default and the `ci` budget) runs each ≥ 60 s;
+    // `--soak` runs each ≥ 24 h for the nightly job. The model set and the
+    // budget live in `commands/proptest.rs`.
+    let opts = proptest::parse(args)?;
+    eprintln!("xtask: [proptest] {}", ctx.workspace_root.display());
+    proptest::run(ctx, &opts)
+}
+
+fn run_spec_review(ctx: &Context) -> Result<(), String> {
+    // §19.7: fail closed if any unreviewed AI-drafted artefact marker
+    // reaches the tree. The scanner lives in `commands/spec_review.rs`.
+    eprintln!("xtask: [spec-review] {}", ctx.workspace_root.display());
+    spec_review::run(&ctx.workspace_root)
+}
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
@@ -394,6 +427,14 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // the gate (fail-closed). The nightly soak is `cargo xtask fuzz
     // --soak`, run outside `ci`.
     run_fuzz(ctx, &[OsString::from("--quick")])?;
+    // §19.7 Bronze: the per-PR stateful-model budget. Runs each capability
+    // model for its ≥ 60 s `--quick` budget; a counterexample, hang, or
+    // invariant failure fails the gate (fail-closed). The nightly soak is
+    // `cargo xtask proptest --soak`, run outside `ci`.
+    run_proptest(ctx, &[OsString::from("--quick")])?;
+    // §19.7: reject any unreviewed AI-drafted artefact marker that reached
+    // the tree. Static and cheap; fails closed.
+    run_spec_review(ctx)?;
     run_abi_check(ctx, &[])?;
     Ok(())
 }
