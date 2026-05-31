@@ -38,6 +38,10 @@ struct QemuTest {
     /// and dump every frame to a `<binary>.pcap` capture beside the
     /// kernel image so a host can inspect the on-wire exchange.
     virtio_net: bool,
+    /// When `true`, attach a QEMU `ramfb` display device (a
+    /// firmware-programmed linear framebuffer in guest RAM). Used by the
+    /// framebuffer-display vertical on the riscv64 `virt` board.
+    ramfb: bool,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -49,6 +53,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -63,6 +68,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(120),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -85,6 +91,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -108,6 +115,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -123,6 +131,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
@@ -145,6 +154,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -168,6 +178,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
@@ -193,6 +204,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
     // full real virtio-net-pci round-trip on the same shared bring-up
@@ -215,6 +227,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: true,
+        ramfb: false,
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
@@ -232,6 +245,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
@@ -253,6 +267,7 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
         virtio_net: false,
+        ramfb: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
@@ -272,6 +287,30 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         virtio_net: true,
+        ramfb: false,
+    },
+    // Stage 4 first-driver vertical (display class):
+    // `rustos-test-framebuffer-display-qemu-riscv64` boots the riscv64
+    // `virt`-board pipeline, programs QEMU's `ramfb` over the `fw_cfg`
+    // MMIO DMA interface so a static guest-RAM surface becomes a real
+    // scan-out framebuffer, publishes the geometry as a
+    // `FramebufferConfig` boot hand-off, then loads the signed
+    // framebuffer display `.rxe` through `rustos_drvhost::Host` and
+    // drives it through load -> use -> unload -> reload. "Use" maps the
+    // surface through the capability-gated `KernelMmioMapper` and
+    // `present`s a frame; a second independently-mapped window reads the
+    // pixels back to confirm they reached the scan-out memory. Any
+    // deviation flips the `SiFive` Test failure finisher. Single CPU and
+    // a 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-framebuffer-display-qemu-riscv64",
+        binary: "rustos-test-framebuffer-display-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: true,
     },
 ];
 
@@ -334,6 +373,11 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     if t.virtio_net {
         let pcap = kernel.with_extension("pcap");
         spec = spec.with_virtio_net_pcap(&pcap);
+    }
+
+    // Attach a QEMU `ramfb` display device for the framebuffer vertical.
+    if t.ramfb {
+        spec = spec.with_ramfb();
     }
 
     eprintln!(

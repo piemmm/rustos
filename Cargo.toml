@@ -102,6 +102,7 @@ members = [
     "tests/integration/virtio_net_pci_x86_64",
     "tests/integration/virtio_blk_mmio_riscv64",
     "tests/integration/virtio_net_mmio_riscv64",
+    "tests/integration/framebuffer_display_qemu_riscv64",
 ]
 
 # Settings that apply to every crate in the workspace.

@@ -234,6 +234,14 @@ pub struct Spec {
     /// Virtio network interfaces attached over QEMU user-mode networking,
     /// in declaration order. Empty for tests that need no network.
     pub net_devices: Vec<NetDevice>,
+    /// When `true`, attach a QEMU `ramfb` display device. `ramfb` is a
+    /// firmware-programmed linear framebuffer whose scan-out surface
+    /// lives in guest RAM; the guest programs its geometry over the
+    /// `fw_cfg` interface. The riscv64 `virt` board carries the
+    /// `fw_cfg` device `ramfb` rides on, so this is the display-class
+    /// analogue of [`Spec::with_virtio_blk`] for the framebuffer
+    /// vertical. x86_64 ignores it today.
+    pub display_ramfb: bool,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -253,6 +261,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
             net_devices: Vec::new(),
+            display_ramfb: false,
             extra_args: Vec::new(),
         }
     }
@@ -284,6 +293,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
             net_devices: Vec::new(),
+            display_ramfb: false,
             extra_args: Vec::new(),
         }
     }
@@ -320,6 +330,15 @@ impl Spec {
         self.net_devices.push(NetDevice {
             pcap: Some(pcap.into()),
         });
+        self
+    }
+
+    /// Attach a QEMU `ramfb` display device so the guest can program a
+    /// linear framebuffer over `fw_cfg`. Used by the framebuffer-display
+    /// vertical on the riscv64 `virt` board.
+    #[must_use]
+    pub fn with_ramfb(mut self) -> Self {
+        self.display_ramfb = true;
         self
     }
 }
@@ -545,6 +564,7 @@ mod tests {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],
             net_devices: Vec::new(),
+            display_ramfb: false,
             extra_args: Vec::new(),
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");

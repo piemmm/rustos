@@ -24,7 +24,7 @@ maps to `DriverError::BufferTooSmall`.
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
-| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests only |
+| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 `ramfb` QEMU vertical |
 | vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests only |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
@@ -50,11 +50,29 @@ Lifecycle: `register` clears `CAP_DRV_LOAD`; `Framebuffer::open` maps
 the surface; dropping the `Framebuffer` releases the window (unload);
 calling `open` again reloads.
 
-QEMU integration on a real surface depends on the kernel framebuffer
-hand-off plumbing (a boot capability that publishes the firmware
-`FramebufferConfig` plus a kernel `MmioMapper` over the surface),
-which is not yet in the tree — the same prerequisite pattern the
-block drivers' QEMU verticals waited on.
+#### QEMU integration vertical
+
+`tests/integration/framebuffer_display_qemu_riscv64`
+(`rustos-test-framebuffer-display-qemu-riscv64`, enrolled in `cargo
+xtask test --qemu`) drives the driver against a **real** emulated
+framebuffer on the riscv64 `virt` board, closing the `load → use →
+unload → reload` loop for a display driver.
+
+The boot hand-off is synthesised the way QEMU exposes one: the test
+harness attaches a QEMU `ramfb` device (`-device ramfb`) and programs
+a static, page-aligned guest-RAM scan-out surface into it over the
+`fw_cfg` MMIO DMA interface (find `etc/ramfb` in the file directory,
+DMA-write the big-endian `RAMFBCfg`). The resulting geometry is the
+`FramebufferConfig` boot hand-off. The harness then loads the signed
+framebuffer `.rxe` through `rustos_drvhost::Host` (the §8 load gate)
+and, for the "use" step, maps the surface through the
+capability-gated `rustos_kernel_virtio::KernelMmioMapper` — the same
+real kernel MMIO-map facility the bus drivers use — and calls
+`present`. A second window mapped over the same physical range reads
+the pixels back to confirm they reached the scan-out memory QEMU
+consumes, before and after the reload. The `ramfb`/`fw_cfg` bring-up
+is test-harness code, mirroring how the virtio verticals own their
+PLIC/trap bring-up rather than placing it in the production kernel.
 
 ### `rustos-drv-display-vesa`
 

@@ -221,6 +221,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             block_devices: Vec::new(),
             net_devices: Vec::new(),
+            display_ramfb: false,
             extra_args: Vec::new(),
         }
     }

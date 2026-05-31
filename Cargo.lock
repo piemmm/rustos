@@ -716,6 +716,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-framebuffer-display-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-display-framebuffer",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-kernel-virtio",
+ "rustos-log",
+ "rustos-test-riscv64-boot",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-test-irq-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

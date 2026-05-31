@@ -8,9 +8,9 @@
 //! Usage:
 //! ```text
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-//!     --kernel path/to/kernel.elf [--cpus N] [--timeout-secs S] \
-//!     [--virtio-blk path/to/disk.img ...] \
-//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap]
+//!     --kernel path/to/kernel.elf [--arch x86_64|riscv64] [--cpus N] \
+//!     [--timeout-secs S] [--virtio-blk path/to/disk.img ...] \
+//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap] [--ramfb]
 //! ```
 
 use std::env;
@@ -28,10 +28,20 @@ fn main() -> ExitCode {
     let mut block_images: Vec<PathBuf> = Vec::new();
     let mut virtio_net = false;
     let mut net_pcap: Option<PathBuf> = None;
+    let mut arch = Arch::X86_64;
+    let mut ramfb = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
             "--kernel" => kernel = args.next().map(PathBuf::from),
+            "--arch" => {
+                arch = match args.next().as_deref() {
+                    Some("x86_64") => Arch::X86_64,
+                    Some("riscv64") => Arch::Riscv64,
+                    _ => return usage_err("--arch must be x86_64 or riscv64"),
+                };
+            }
+            "--ramfb" => ramfb = true,
             "--cpus" => {
                 let Some(v) = args.next() else {
                     return usage_err("--cpus needs a value");
@@ -76,9 +86,11 @@ fn main() -> ExitCode {
         return usage_err("--kernel is required");
     };
 
-    let mut spec = Spec::for_x86_64_kernel(kernel)
-        .with_cpus(cpus)
-        .with_timeout(timeout);
+    let base = match arch {
+        Arch::X86_64 => Spec::for_x86_64_kernel(kernel),
+        Arch::Riscv64 => Spec::for_riscv64_kernel(kernel),
+    };
+    let mut spec = base.with_cpus(cpus).with_timeout(timeout);
     for image in block_images {
         spec = spec.with_virtio_blk(image);
     }
@@ -87,7 +99,9 @@ fn main() -> ExitCode {
         None if virtio_net => spec = spec.with_virtio_net(),
         None => {}
     }
-    let _ = Arch::X86_64; // tie-down — the wrapper is currently x86_64-only
+    if ramfb {
+        spec = spec.with_ramfb();
+    }
 
     match Runner::run(&spec) {
         Ok(Outcome::Pass) => ExitCode::SUCCESS,
@@ -109,8 +123,9 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "usage: rustos-qemu-run --kernel <path> [--cpus N] [--timeout-secs S] \
-[--virtio-blk <image> ...] [--virtio-net] [--virtio-net-pcap <path>]"
+    "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64] [--cpus N] \
+[--timeout-secs S] [--virtio-blk <image> ...] [--virtio-net] \
+[--virtio-net-pcap <path>] [--ramfb]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {

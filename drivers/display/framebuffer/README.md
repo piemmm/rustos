@@ -11,7 +11,7 @@ capability discovered and handed to the driver host.
 | Platform              | Surface source                  | Stage 4 status            |
 |-----------------------|---------------------------------|----------------------------|
 | aarch64 (Raspberry Pi)| VideoCore mailbox framebuffer   | mock-host tests only       |
-| riscv64 `virt`        | QEMU `ramfb`                    | mock-host tests only       |
+| riscv64 `virt`        | QEMU `ramfb`                    | mock-host + QEMU vertical   |
 | x86_64 (UEFI)         | GOP linear frame buffer         | mock-host tests only       |
 | wasm32                | browser canvas (via host)       | mock-host tests only       |
 
@@ -66,12 +66,24 @@ in-process mock `MmioMapper`:
 - Degenerate-geometry rejection (`LengthOutOfRange`).
 - Unload → reload round-trip.
 
-12/12 host-side tests pass. A QEMU integration vertical depends on the
-kernel framebuffer hand-off plumbing (a boot capability that publishes
-the firmware `FramebufferConfig` and a `KernelMmioMapper` over the
-surface), which is not yet in the tree; it is tracked as a follow-up
-exactly as the virtio-blk QEMU verticals were before their kernel
-prerequisites landed.
+12/12 host-side tests pass.
+
+### QEMU integration vertical
+
+`tests/integration/framebuffer_display_qemu_riscv64`
+(`rustos-test-framebuffer-display-qemu-riscv64`, enrolled in `cargo
+xtask test --qemu`) drives the driver against a **real** emulated
+framebuffer on the riscv64 `virt` board. The test harness synthesises
+the device with QEMU `ramfb`: it programs a static guest-RAM scan-out
+surface into the device over the `fw_cfg` MMIO DMA interface, then
+publishes the geometry as the `FramebufferConfig` boot hand-off. It
+loads the signed framebuffer `.rxe` through `rustos_drvhost::Host`
+(the §8 load gate) and drives `load → use → unload → reload`, where
+"use" maps the surface through the capability-gated
+`rustos_kernel_virtio::KernelMmioMapper` and `present`s a frame; a
+second independently-mapped window reads the pixels back to confirm
+they reached the scan-out memory QEMU consumes. See
+`docs/src/drivers/display.md`.
 
 ## Public surface
 

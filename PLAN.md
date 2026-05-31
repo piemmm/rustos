@@ -1105,10 +1105,37 @@ follow-up is its own thread and is now also complete.
   the test bin; the only `unsafe` is the arch port's two PIO
   instructions and the shared bumpalloc `#[global_allocator]` the other
   QEMU verticals use. Docs: refreshed `docs/src/drivers/input.md`
-  + `drivers/input/ps2/README.md`. The remaining Stage 4 QEMU verticals
-  (`drivers/display/vesa`, `drivers/display/framebuffer`) still await
-  their own framebuffer boot hand-off (a `MmioMapper` over the linear
-  framebuffer).
+  + `drivers/input/ps2/README.md`.
+- `drivers/display/framebuffer` QEMU integration vertical shipped — the
+  first display-class `load → use device → unload → reload` vertical. It
+  lives in `tests/integration/framebuffer_display_qemu_riscv64`
+  (`rustos-test-framebuffer-display-qemu-riscv64`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60-second
+  budget) and runs on the riscv64 `virt` board against a **real**
+  emulated framebuffer. Rather than fabricate a device, the test harness
+  attaches QEMU `ramfb` (`-device ramfb`, threaded through
+  `rustos_qemu::Spec::with_ramfb` → `tools/qemu/src/riscv64.rs`) and
+  programs a static, page-aligned guest-RAM scan-out surface into it
+  over the `fw_cfg` MMIO DMA interface (locate `etc/ramfb` in the file
+  directory, DMA-write the big-endian `RAMFBCfg`); the resulting
+  geometry is the `FramebufferConfig` boot hand-off. The vertical boots
+  the production kernel, and on `AuditEvent::BootCompleted` loads the
+  signed framebuffer `.rxe` through `rustos_drvhost::Host` (the §8 load
+  gate, fixture manifest declaring `CAP_DRV_LOAD`), then maps the surface
+  through the capability-gated `rustos_kernel_virtio::KernelMmioMapper`
+  — the real kernel MMIO-map facility the bus drivers use — and
+  `present`s a frame; a second window mapped over the same physical
+  range reads the pixels back to confirm they reached the scan-out
+  memory QEMU consumes, before and after the reload. The `ramfb`/`fw_cfg`
+  bring-up is test-harness code (mirroring how the virtio verticals own
+  their PLIC/trap bring-up rather than placing it in the production
+  kernel). No `unwrap`/`expect`/`panic!` in the test bin; the `unsafe`
+  is confined to the documented `fw_cfg` MMIO/DMA accesses, the DTB
+  span, and the shared bumpalloc `#[global_allocator]`. Docs:
+  `docs/src/drivers/display.md` + `drivers/display/framebuffer/README.md`.
+  The one remaining Stage 4 QEMU vertical (`drivers/display/vesa`) still
+  awaits the kernel publishing the boot-captured VBE `ModeInfoBlock` as a
+  capability plus a `MmioMapper` over `PhysBasePtr`.
 - `drivers/display/vesa` (x86_64 BIOS) shipped — the VBE
   linear-framebuffer display driver, and the last outstanding Stage 4
   first driver. It implements `rustos_abi::driver::display::Display`
