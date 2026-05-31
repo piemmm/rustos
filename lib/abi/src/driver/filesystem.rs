@@ -287,6 +287,111 @@ pub trait FilesystemRead {
     ) -> Result<Option<DirEntry>, DriverError>;
 }
 
+/// Mutating structural access to a mounted filesystem.
+///
+/// This is the **versioned `abi-v1` extension** the VFS uses to delegate
+/// write-path I/O to a block-backed `drivers/filesystem/*` driver, the
+/// symmetric counterpart to [`FilesystemRead`]. Like that trait it is a
+/// *separate* trait, never a widening of the frozen [`Filesystem`]
+/// mount/unmount surface or of [`FilesystemRead`]: new behaviour ships as
+/// a new trait (`AGENTS.md` §2.4 / §9).
+///
+/// # The `(dir, name)` model
+///
+/// Every mutating method names its target as a (`dir`, `name`) pair rather
+/// than by an opaque [`NodeId`]. A [`NodeId`] minted by [`FilesystemRead`]
+/// is self-describing but carries no back-pointer to the directory entry
+/// that stores a file's length and starting location; filesystems such as
+/// FAT keep that metadata *in the parent directory*, so a mutation that
+/// grows, shrinks, or unlinks a node must address it through its parent.
+/// `name` is a single path component containing no separator and is
+/// neither `.` nor `..` (the VFS resolves those itself, §16).
+///
+/// # No permission decisions
+///
+/// As with [`FilesystemRead`], implementations expose raw structural
+/// mutation and make **no** permission decision: the VFS authorises every
+/// write against the §5.3 model before calling here (`AGENTS.md` §5.4).
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// time, and the VFS additionally requires the mount to be writable (a
+/// mount carrying [`MountFlags::READ_ONLY`] is never delegated a write).
+pub trait FilesystemWrite {
+    /// Create an empty child `name` of kind `kind` in directory `dir`,
+    /// returning the new node's [`NodeId`].
+    ///
+    /// The child is created with zero length and (for a directory) with
+    /// its `.`/`..` links in place. Implementations need not allocate
+    /// on-disk data for a zero-length regular file.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer
+    ///   than the filesystem's maximum component length.
+    /// * [`DriverError::DeviceFault`] if the volume is full or a block
+    ///   write fails.
+    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError>;
+
+    /// Write `data` into the regular file `name` in directory `dir`
+    /// starting at byte `offset`, returning the number of bytes written.
+    ///
+    /// Writing past the current end of the file extends it, allocating
+    /// backing storage as needed and updating the recorded length. A
+    /// write whose `offset` is beyond the current length zero-fills the
+    /// gap.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
+    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::DeviceFault`] if the volume is full or a block
+    ///   write fails.
+    fn write_at(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, DriverError>;
+
+    /// Set the length of the regular file `name` in directory `dir` to
+    /// `size`, freeing or zero-extending its backing storage as needed.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
+    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::DeviceFault`] if the volume is full or a block
+    ///   write fails.
+    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError>;
+
+    /// Unlink the child `name` from directory `dir`, freeing its backing
+    /// storage.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::Busy`] if `name` is a non-empty directory.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
+    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError>;
+
+    /// Flush any buffered metadata or data to the backing device.
+    ///
+    /// A driver that writes through to the block device synchronously may
+    /// implement this as a no-op returning `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
+    fn flush(&mut self) -> Result<(), DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +607,145 @@ mod tests {
     fn mock_read_fs_lookup_in_non_dir_is_unsupported() {
         let mut fs = MockReadFs;
         assert_eq!(fs.lookup(FILE, FILE_NAME), Err(DriverError::Unsupported));
+    }
+
+    /// A minimal `(dir, name)`-addressed `FilesystemWrite` holding one
+    /// regular file directly under a root directory. It exercises the
+    /// whole `abi-v1` write surface: create, extend via `write_at`,
+    /// `truncate`, and `remove`.
+    struct MockWriteFs {
+        present: bool,
+        body: [u8; 8],
+        len: usize,
+    }
+
+    const W_ROOT: NodeId = NodeId::from_raw(1);
+    const W_FILE: NodeId = NodeId::from_raw(2);
+    const W_NAME: &[u8] = b"data";
+
+    impl FilesystemWrite for MockWriteFs {
+        fn create(
+            &mut self,
+            dir: NodeId,
+            name: &[u8],
+            kind: NodeKind,
+        ) -> Result<NodeId, DriverError> {
+            if dir != W_ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if name != W_NAME || kind != NodeKind::RegularFile {
+                return Err(DriverError::Unsupported);
+            }
+            if self.present {
+                return Err(DriverError::Busy);
+            }
+            self.present = true;
+            self.len = 0;
+            Ok(W_FILE)
+        }
+
+        fn write_at(
+            &mut self,
+            dir: NodeId,
+            name: &[u8],
+            offset: u64,
+            data: &[u8],
+        ) -> Result<usize, DriverError> {
+            if dir != W_ROOT || name != W_NAME {
+                return Err(DriverError::Unsupported);
+            }
+            if !self.present {
+                return Err(DriverError::NotFound);
+            }
+            let start = usize::try_from(offset).map_err(|_| DriverError::LengthOutOfRange)?;
+            let end = start
+                .checked_add(data.len())
+                .ok_or(DriverError::LengthOutOfRange)?;
+            if end > self.body.len() {
+                return Err(DriverError::DeviceFault);
+            }
+            for byte in &mut self.body[self.len..start] {
+                *byte = 0;
+            }
+            self.body[start..end].copy_from_slice(data);
+            self.len = self.len.max(end);
+            Ok(data.len())
+        }
+
+        fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+            if dir != W_ROOT || name != W_NAME {
+                return Err(DriverError::Unsupported);
+            }
+            if !self.present {
+                return Err(DriverError::NotFound);
+            }
+            let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
+            if new > self.body.len() {
+                return Err(DriverError::DeviceFault);
+            }
+            for byte in &mut self.body[self.len.min(new)..new] {
+                *byte = 0;
+            }
+            self.len = new;
+            Ok(())
+        }
+
+        fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+            if dir != W_ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if name != W_NAME || !self.present {
+                return Err(DriverError::NotFound);
+            }
+            self.present = false;
+            self.len = 0;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mock_write_fs_round_trip() {
+        let mut fs = MockWriteFs {
+            present: false,
+            body: [0u8; 8],
+            len: 0,
+        };
+        assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
+        // Creating it again is rejected as busy.
+        assert_eq!(
+            fs.create(W_ROOT, W_NAME, NodeKind::RegularFile),
+            Err(DriverError::Busy)
+        );
+        assert_eq!(fs.write_at(W_ROOT, W_NAME, 0, b"abc"), Ok(3));
+        assert_eq!(fs.len, 3);
+        // Writing past the end zero-fills the gap and extends.
+        assert_eq!(fs.write_at(W_ROOT, W_NAME, 5, b"Z"), Ok(1));
+        assert_eq!(&fs.body[..fs.len], b"abc\0\0Z");
+        fs.truncate(W_ROOT, W_NAME, 2).expect("shrink");
+        assert_eq!(&fs.body[..fs.len], b"ab");
+        assert!(fs.flush().is_ok());
+        fs.remove(W_ROOT, W_NAME).expect("unlink");
+        assert_eq!(
+            fs.write_at(W_ROOT, W_NAME, 0, b"x"),
+            Err(DriverError::NotFound)
+        );
+    }
+
+    #[test]
+    fn mock_write_fs_rejects_non_root_dir() {
+        let mut fs = MockWriteFs {
+            present: false,
+            body: [0u8; 8],
+            len: 0,
+        };
+        assert_eq!(
+            fs.create(W_FILE, W_NAME, NodeKind::RegularFile),
+            Err(DriverError::Unsupported)
+        );
+        assert_eq!(fs.remove(W_FILE, W_NAME), Err(DriverError::Unsupported));
     }
 }

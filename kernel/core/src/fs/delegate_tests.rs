@@ -394,3 +394,378 @@ fn non_utf8_directory_name_surfaces_as_io() {
         Err(VfsError::Io)
     );
 }
+
+// ---------------------------------------------------------------------
+// Write-path delegation tests.
+//
+// `RwMockFs` is a small in-memory filesystem implementing *both*
+// `FilesystemRead` and `FilesystemWrite` with the same `(dir, name)`
+// mutation model the ABI defines, standing in for a block-backed driver
+// (kernel/core may not depend on `drivers/*`, AGENTS.md §17.4).
+// ---------------------------------------------------------------------
+
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use rustos_abi::driver::filesystem::FilesystemWrite;
+
+enum RwNode {
+    Dir(BTreeMap<String, usize>),
+    File(Vec<u8>),
+}
+
+struct RwMockFs {
+    nodes: Vec<RwNode>,
+}
+
+impl RwMockFs {
+    fn new() -> Self {
+        Self {
+            nodes: alloc::vec![RwNode::Dir(BTreeMap::new())],
+        }
+    }
+
+    fn index(node: NodeId) -> Result<usize, DriverError> {
+        let raw = node.raw();
+        if raw == 0 {
+            return Err(DriverError::NotFound);
+        }
+        usize::try_from(raw - 1).map_err(|_| DriverError::NotFound)
+    }
+
+    fn child_index(&self, dir: NodeId, name: &[u8]) -> Result<Option<usize>, DriverError> {
+        let idx = Self::index(dir)?;
+        let RwNode::Dir(children) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
+            return Err(DriverError::Unsupported);
+        };
+        let needle = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
+        for (k, &v) in children {
+            if k.eq_ignore_ascii_case(needle) {
+                return Ok(Some(v));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl FilesystemRead for RwMockFs {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(1)
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        let idx = Self::index(node)?;
+        match self.nodes.get(idx).ok_or(DriverError::NotFound)? {
+            RwNode::Dir(_) => Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                size: 0,
+            }),
+            RwNode::File(data) => Ok(NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: data.len() as u64,
+            }),
+        }
+    }
+
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        match self.child_index(dir, name)? {
+            Some(i) => Ok(NodeId::from_raw(i as u64 + 1)),
+            None => Err(DriverError::NotFound),
+        }
+    }
+
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        let idx = Self::index(file)?;
+        let RwNode::File(data) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
+            return Err(DriverError::Unsupported);
+        };
+        let Ok(start) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let n = core::cmp::min(buf.len(), data.len() - start);
+        buf[..n].copy_from_slice(&data[start..start + n]);
+        Ok(n)
+    }
+
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        index: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        let idx = Self::index(dir)?;
+        let RwNode::Dir(children) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
+            return Err(DriverError::Unsupported);
+        };
+        let Ok(i) = usize::try_from(index) else {
+            return Ok(None);
+        };
+        let Some((name, &child)) = children.iter().nth(i) else {
+            return Ok(None);
+        };
+        if name_out.len() < name.len() {
+            return Err(DriverError::BufferTooSmall);
+        }
+        name_out[..name.len()].copy_from_slice(name.as_bytes());
+        let kind = match self.nodes[child] {
+            RwNode::Dir(_) => NodeKind::Directory,
+            RwNode::File(_) => NodeKind::RegularFile,
+        };
+        Ok(Some(DirEntry {
+            node: NodeId::from_raw(child as u64 + 1),
+            kind,
+            name_len: name.len(),
+        }))
+    }
+}
+
+impl FilesystemWrite for RwMockFs {
+    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        if self.child_index(dir, name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        let name = core::str::from_utf8(name)
+            .map_err(|_| DriverError::LengthOutOfRange)?
+            .to_string();
+        let node = match kind {
+            NodeKind::Directory => RwNode::Dir(BTreeMap::new()),
+            NodeKind::RegularFile => RwNode::File(Vec::new()),
+        };
+        let new_index = self.nodes.len();
+        self.nodes.push(node);
+        let dir_idx = Self::index(dir)?;
+        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
+            children.insert(name, new_index);
+        }
+        Ok(NodeId::from_raw(new_index as u64 + 1))
+    }
+
+    fn write_at(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, DriverError> {
+        let child = self.child_index(dir, name)?.ok_or(DriverError::NotFound)?;
+        let RwNode::File(body) = &mut self.nodes[child] else {
+            return Err(DriverError::Unsupported);
+        };
+        let start = usize::try_from(offset).map_err(|_| DriverError::LengthOutOfRange)?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or(DriverError::LengthOutOfRange)?;
+        if body.len() < end {
+            body.resize(end, 0);
+        }
+        body[start..end].copy_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        let child = self.child_index(dir, name)?.ok_or(DriverError::NotFound)?;
+        let RwNode::File(body) = &mut self.nodes[child] else {
+            return Err(DriverError::Unsupported);
+        };
+        let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
+        body.resize(new, 0);
+        Ok(())
+    }
+
+    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        let child = self.child_index(dir, name)?.ok_or(DriverError::NotFound)?;
+        if let RwNode::Dir(children) = &self.nodes[child] {
+            if !children.is_empty() {
+                return Err(DriverError::Busy);
+            }
+        }
+        let dir_idx = Self::index(dir)?;
+        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
+            let key = children
+                .iter()
+                .find(|(_, &v)| v == child)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = key {
+                children.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// A default-layout VFS with `/Storage/usb0` mounted writable (no
+/// `READ_ONLY` flag), owner `admin`, mode `mount_mode`.
+fn backed_vfs_rw(mount_mode: u16) -> Vfs {
+    let mut vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
+        .expect("create mount point");
+    let handle = DriverHandle::from_raw(8).expect("non-zero handle");
+    let flags = MountFlags::from_bits(0).expect("empty flags");
+    vfs.mounts_mut()
+        .mount(p("/Storage/usb0"), flags, Some(handle))
+        .expect("mount backed");
+    vfs
+}
+
+#[test]
+fn delegated_create_then_write_and_read_back() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/notes.txt");
+
+    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    assert_eq!(vfs.write_via(&admin, &path, &mut fs, 0, b"hi there"), Ok(8));
+
+    let mut buf = [0u8; 16];
+    let n = vfs
+        .read_via(&admin, &path, &mut fs, 0, &mut buf)
+        .expect("read");
+    assert_eq!(&buf[..n], b"hi there");
+}
+
+#[test]
+fn delegated_mkdir_then_create_inside() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+
+    vfs.mkdir_via(&admin, &p("/Storage/usb0/sub"), &mut fs)
+        .expect("mkdir");
+    let inner = p("/Storage/usb0/sub/inner.bin");
+    vfs.create_via(&admin, &inner, &mut fs)
+        .expect("create inside");
+    vfs.write_via(&admin, &inner, &mut fs, 0, b"nested")
+        .expect("write inside");
+
+    let names = vfs
+        .list_via(&admin, &p("/Storage/usb0/sub"), &mut fs)
+        .expect("list");
+    assert_eq!(names, ["inner.bin"]);
+}
+
+#[test]
+fn delegated_truncate_changes_size() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/t.bin");
+    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    vfs.write_via(&admin, &path, &mut fs, 0, b"0123456789")
+        .expect("write");
+    vfs.truncate_via(&admin, &path, &mut fs, 4)
+        .expect("truncate");
+    assert_eq!(vfs.stat_via(&admin, &path, &mut fs).expect("stat").size, 4);
+}
+
+#[test]
+fn delegated_remove_unlinks() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/gone.txt");
+    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    vfs.remove_via(&admin, &path, &mut fs).expect("remove");
+    let mut buf = [0u8; 4];
+    assert_eq!(
+        vfs.read_via(&admin, &path, &mut fs, 0, &mut buf),
+        Err(VfsError::NotFound)
+    );
+}
+
+#[test]
+fn delegated_create_existing_is_already_exists() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/dup.txt");
+    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    assert_eq!(
+        vfs.create_via(&admin, &path, &mut fs),
+        Err(VfsError::AlreadyExists)
+    );
+}
+
+#[test]
+fn delegated_write_to_directory_is_is_a_directory() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+        .expect("mkdir");
+    assert_eq!(
+        vfs.write_via(&admin, &p("/Storage/usb0/d"), &mut fs, 0, b"x"),
+        Err(VfsError::IsADirectory)
+    );
+}
+
+#[test]
+fn delegated_remove_non_empty_directory_is_not_empty() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+        .expect("mkdir");
+    vfs.create_via(&admin, &p("/Storage/usb0/d/f"), &mut fs)
+        .expect("create child");
+    assert_eq!(
+        vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs),
+        Err(VfsError::NotEmpty)
+    );
+}
+
+#[test]
+fn delegated_write_on_read_only_mount_is_read_only() {
+    // `backed_vfs` mounts with `READ_ONLY`.
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    assert_eq!(
+        vfs.create_via(&admin, &p("/Storage/usb0/x"), &mut fs),
+        Err(VfsError::ReadOnly)
+    );
+}
+
+#[test]
+fn delegated_create_without_write_permission_is_denied() {
+    // Mount mode 0755 owned by admin: a different user has search but no
+    // write bit, so creating in the directory is denied.
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let other = cred(9, 9, &caps);
+    let mut fs = RwMockFs::new();
+    assert_eq!(
+        vfs.create_via(&other, &p("/Storage/usb0/x"), &mut fs),
+        Err(VfsError::PermissionDenied)
+    );
+}
+
+#[test]
+fn delegated_mutation_of_mount_root_is_invalid() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    assert_eq!(
+        vfs.create_via(&admin, &p("/Storage/usb0"), &mut fs),
+        Err(VfsError::InvalidPath)
+    );
+}

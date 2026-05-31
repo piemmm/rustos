@@ -22,7 +22,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, NodeId, NodeInfo, NodeKind};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeInfo, NodeKind};
 use rustos_abi::driver::DriverError;
 
 use super::path::MAX_COMPONENT_LEN;
@@ -62,21 +62,25 @@ const fn map_driver_error(error: DriverError) -> VfsError {
     }
 }
 
-/// A `FilesystemRead` driver bound to the [`Metadata`] template of its
-/// mount point, exposing VFS-shaped resolution over the delegated subtree.
+/// A filesystem driver bound to the [`Metadata`] template of its mount
+/// point, exposing VFS-shaped resolution over the delegated subtree.
+///
+/// The driver is borrowed behind the [`FilesystemRead`] surface (and, for
+/// the mutating methods, additionally [`FilesystemWrite`]); read-only call
+/// sites instantiate it as `DelegatedFs<'_, dyn FilesystemRead>`.
 ///
 /// `components` passed to the methods are the path *relative to the mount
 /// point* (the VFS strips the mount prefix); an empty slice names the mount
 /// point itself, i.e. the driver's root directory.
-pub struct DelegatedFs<'fs> {
-    fs: &'fs mut dyn FilesystemRead,
+pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized> {
+    fs: &'fs mut R,
     template: Metadata,
 }
 
-impl<'fs> DelegatedFs<'fs> {
+impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
     /// Bind `fs` to the `template` metadata its mount point carries.
     #[must_use]
-    pub fn new(fs: &'fs mut dyn FilesystemRead, template: Metadata) -> Self {
+    pub fn new(fs: &'fs mut R, template: Metadata) -> Self {
         Self { fs, template }
     }
 
@@ -186,6 +190,139 @@ impl<'fs> DelegatedFs<'fs> {
             index += 1;
         }
         Ok(names)
+    }
+}
+
+impl<F: FilesystemRead + FilesystemWrite + ?Sized> DelegatedFs<'_, F> {
+    /// Resolve the parent directory of the leaf addressed by `components`,
+    /// authorising search on every ancestor and search + write on the
+    /// parent itself (the uniform template, `AGENTS.md` §5.3 / §5.4).
+    ///
+    /// Returns the parent's [`NodeId`]; an empty `components` slice (which
+    /// names the mount point itself) is rejected — the driver root cannot
+    /// be the target of a mutation.
+    fn parent_for_write(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+    ) -> Result<NodeId, VfsError> {
+        let (_, parents) = components.split_last().ok_or(VfsError::InvalidPath)?;
+        let (parent, info) = self.resolve(cred, parents)?;
+        if info.kind != NodeKind::Directory {
+            return Err(VfsError::NotADirectory);
+        }
+        self.template.authorize(cred, Access::Execute)?;
+        self.template.authorize(cred, Access::Write)?;
+        Ok(parent)
+    }
+
+    /// Create an empty child of `kind` at `components`.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `components` is empty.
+    /// * [`VfsError::AlreadyExists`] if a child of that name already exists.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::NotFound`] (a missing ancestor), or [`VfsError::Io`].
+    pub fn create(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        kind: NodeKind,
+    ) -> Result<(), VfsError> {
+        let parent = self.parent_for_write(cred, components)?;
+        let name = components[components.len() - 1].as_bytes();
+        match self.fs.lookup(parent, name) {
+            Ok(_) => return Err(VfsError::AlreadyExists),
+            Err(DriverError::NotFound) => {}
+            Err(e) => return Err(map_driver_error(e)),
+        }
+        self.fs
+            .create(parent, name, kind)
+            .map_err(map_driver_error)?;
+        Ok(())
+    }
+
+    /// Write `data` into the file at `components` starting at `offset`,
+    /// returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `components` is empty.
+    /// * [`VfsError::IsADirectory`] if `components` names a directory.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotFound`],
+    ///   [`VfsError::NotADirectory`], or [`VfsError::Io`].
+    pub fn write(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, VfsError> {
+        let parent = self.parent_for_write(cred, components)?;
+        let name = components[components.len() - 1].as_bytes();
+        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
+        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        self.fs
+            .write_at(parent, name, offset, data)
+            .map_err(map_driver_error)
+    }
+
+    /// Set the length of the file at `components` to `size`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::write`].
+    pub fn truncate(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        size: u64,
+    ) -> Result<(), VfsError> {
+        let parent = self.parent_for_write(cred, components)?;
+        let name = components[components.len() - 1].as_bytes();
+        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
+        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        self.fs
+            .truncate(parent, name, size)
+            .map_err(map_driver_error)
+    }
+
+    /// Unlink the child at `components`.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `components` is empty.
+    /// * [`VfsError::NotFound`] if the child does not exist.
+    /// * [`VfsError::NotEmpty`] if it is a non-empty directory.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`], or
+    ///   [`VfsError::Io`].
+    pub fn remove(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+    ) -> Result<(), VfsError> {
+        let parent = self.parent_for_write(cred, components)?;
+        let name = components[components.len() - 1].as_bytes();
+        // Ensure it exists (distinguishing NotFound), and report NotEmpty
+        // for a non-empty directory rather than the driver's generic Busy.
+        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
+        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
+            let mut name_buf = [0u8; MAX_COMPONENT_LEN];
+            if self
+                .fs
+                .read_dir(node, 0, &mut name_buf)
+                .map_err(map_driver_error)?
+                .is_some()
+            {
+                return Err(VfsError::NotEmpty);
+            }
+        }
+        self.fs.remove(parent, name).map_err(map_driver_error)
     }
 }
 

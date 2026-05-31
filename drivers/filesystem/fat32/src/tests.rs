@@ -626,3 +626,215 @@ fn decode_utf16le_rejects_an_overflowing_output() {
     let mut out = [0u8; 2];
     assert_eq!(decode_utf16le(&units, &mut out), None);
 }
+
+// ---------------------------------------------------------------------
+// Write-path tests (`FilesystemWrite`).
+//
+// They mutate the in-memory image through the same `MockBlock` and then
+// read the result back through the `FilesystemRead` surface, so a
+// round-trip exercises both halves of the driver.
+// ---------------------------------------------------------------------
+
+#[test]
+fn create_then_write_and_read_back_a_short_named_file() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"NOTES.TXT", NodeKind::RegularFile)
+        .expect("create");
+
+    let payload = b"hello world";
+    let written = fs.write_at(root, b"NOTES.TXT", 0, payload).expect("write");
+    assert_eq!(written, payload.len());
+
+    // Re-resolve so the node carries the updated size, then read back.
+    let node = fs.lookup(root, b"notes.txt").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, payload.len() as u64);
+    let mut buf = [0u8; 32];
+    let read = fs.read_at(node, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..read], payload);
+}
+
+#[test]
+fn create_a_long_named_file_and_resolve_it() {
+    let mut fs = mount();
+    let root = fs.root();
+    let name = b"My Long Document.txt";
+    fs.create(root, name, NodeKind::RegularFile)
+        .expect("create");
+    let body = b"long content";
+    fs.write_at(root, name, 0, body).expect("write");
+
+    // Resolvable by the exact long name and case-insensitively.
+    let exact = fs.lookup(root, name).expect("exact");
+    let folded = fs.lookup(root, b"MY LONG DOCUMENT.TXT").expect("folded");
+    assert_eq!(exact, folded);
+
+    let mut buf = [0u8; 32];
+    let read = fs.read_at(exact, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..read], body);
+}
+
+#[test]
+fn write_extends_across_a_cluster_boundary() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"BIG.BIN", NodeKind::RegularFile)
+        .expect("create");
+
+    let mut payload = [0u8; 600];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = deep_byte(i);
+    }
+    assert_eq!(fs.write_at(root, b"BIG.BIN", 0, &payload), Ok(600));
+
+    let node = fs.lookup(root, b"BIG.BIN").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, 600);
+    let mut buf = [0u8; 600];
+    assert_eq!(fs.read_at(node, 0, &mut buf), Ok(600));
+    assert_eq!(buf, payload);
+}
+
+#[test]
+fn write_past_end_zero_fills_the_gap() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"SPARSE.BIN", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"SPARSE.BIN", 5, b"XYZ"), Ok(3));
+
+    let node = fs.lookup(root, b"SPARSE.BIN").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, 8);
+    let mut buf = [0u8; 8];
+    assert_eq!(fs.read_at(node, 0, &mut buf), Ok(8));
+    assert_eq!(&buf, b"\0\0\0\0\0XYZ");
+}
+
+#[test]
+fn truncate_shrinks_and_grows_a_file() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"T.BIN", NodeKind::RegularFile)
+        .expect("create");
+    let mut payload = [0u8; 600];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = deep_byte(i);
+    }
+    fs.write_at(root, b"T.BIN", 0, &payload).expect("write");
+
+    // Shrink to 100 bytes.
+    fs.truncate(root, b"T.BIN", 100).expect("shrink");
+    let node = fs.lookup(root, b"T.BIN").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, 100);
+    let mut head = [0u8; 100];
+    assert_eq!(fs.read_at(node, 0, &mut head), Ok(100));
+    assert_eq!(&head[..], &payload[..100]);
+
+    // Grow to 300 bytes; the new tail reads back as zero.
+    fs.truncate(root, b"T.BIN", 300).expect("grow");
+    let node = fs.lookup(root, b"T.BIN").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, 300);
+    let mut all = [0xAAu8; 300];
+    assert_eq!(fs.read_at(node, 0, &mut all), Ok(300));
+    assert_eq!(&all[..100], &payload[..100]);
+    assert!(all[100..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn remove_unlinks_a_file_and_frees_the_name() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"TMP.TXT", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"TMP.TXT", 0, b"bye").expect("write");
+    fs.remove(root, b"TMP.TXT").expect("remove");
+    assert_eq!(fs.lookup(root, b"TMP.TXT"), Err(DriverError::NotFound));
+
+    // The name (and its slots) can be reused immediately.
+    fs.create(root, b"TMP.TXT", NodeKind::RegularFile)
+        .expect("recreate");
+    assert!(fs.lookup(root, b"TMP.TXT").is_ok());
+}
+
+#[test]
+fn mkdir_then_create_a_file_inside() {
+    let mut fs = mount();
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"Docs", NodeKind::Directory)
+        .expect("mkdir");
+    assert_eq!(fs.node_info(dir).expect("info").kind, NodeKind::Directory);
+
+    // The directory is visible from the root.
+    let resolved = fs.lookup(root, b"docs").expect("lookup dir");
+    assert_eq!(resolved, dir);
+
+    fs.create(dir, b"inner.txt", NodeKind::RegularFile)
+        .expect("create inside");
+    fs.write_at(dir, b"inner.txt", 0, b"nested").expect("write");
+
+    let file = fs.lookup(dir, b"inner.txt").expect("lookup inside");
+    let mut buf = [0u8; 16];
+    let read = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..read], b"nested");
+}
+
+#[test]
+fn creating_an_existing_name_is_busy() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"DUP.TXT", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(
+        fs.create(root, b"DUP.TXT", NodeKind::RegularFile),
+        Err(DriverError::Busy)
+    );
+}
+
+#[test]
+fn writing_to_a_directory_is_unsupported() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.write_at(root, b"SUB", 0, b"x"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(fs.truncate(root, b"SUB", 0), Err(DriverError::Unsupported));
+}
+
+#[test]
+fn removing_a_non_empty_directory_is_busy() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(fs.remove(root, b"SUB"), Err(DriverError::Busy));
+}
+
+#[test]
+fn removing_an_empty_directory_succeeds() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"Empty", NodeKind::Directory)
+        .expect("mkdir");
+    fs.remove(root, b"Empty").expect("rmdir");
+    assert_eq!(fs.lookup(root, b"Empty"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn writing_a_missing_file_is_not_found() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.write_at(root, b"GHOST.TXT", 0, b"x"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.truncate(root, b"GHOST.TXT", 0),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.remove(root, b"GHOST.TXT"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn flush_is_a_synchronous_no_op() {
+    let mut fs = mount();
+    assert!(fs.flush().is_ok());
+}

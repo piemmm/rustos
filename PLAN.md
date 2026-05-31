@@ -3620,13 +3620,37 @@ device list.
   directory name). 12 host-side delegation tests + 1 errno-mapping test;
   the `docs/src/filesystem/overview.md` "Driver delegation" section
   documents it.
+- **FAT32 write support + write-path delegation landed.** A new
+  **versioned `FilesystemWrite`** trait (`create`/`write_at`/`truncate`/
+  `remove`/`flush`) was added to `lib/abi/src/driver/filesystem.rs` — the
+  symmetric counterpart to `FilesystemRead`, additive rather than a
+  widening of the frozen `Filesystem` or of `FilesystemRead`
+  (`AGENTS.md` §2.4 / §9). Its mutating methods address a target as a
+  `(dir, name)` pair because a FAT file's length and first cluster live
+  in the *parent directory entry*, not in a self-describing `NodeId`.
+  - `drivers/filesystem/fat32` now implements it: free-cluster scanning
+    with FAT mirroring across all copies, cluster-chain extend/free,
+    directory-slot finding/growth, VFAT long-name-set writing bound to a
+    generated directory-unique `~N` 8.3 short alias (so arbitrary,
+    case-preserving names round-trip), sparse zero-fill, and `truncate`
+    shrink/grow. No `unwrap`/`expect`/`panic!`, no `unsafe`; writes are
+    synchronous (no journal — FAT has none). 38 host tests (13 new
+    write/round-trip) + 2 new `lib/abi` `FilesystemWrite` mock tests.
+  - `kernel/core::fs` gains the symmetric `Vfs::{create_via, mkdir_via,
+    write_via, truncate_via, remove_via}` over `DelegatedFs` (made
+    generic over the borrowed driver), authorising §5.3 write on the
+    parent template and refusing a `READ_ONLY` mount; existence/emptiness
+    are pre-checked for precise `AlreadyExists`/`NotEmpty`/`IsADirectory`.
+    10 new delegated write tests against an in-memory read/write mock.
+  - Docs updated: the `FilesystemWrite` section in
+    `docs/src/abi/driver_traits.md`, the write tables/sections in
+    `docs/src/filesystem/{fat32,overview}.md`, and the FAT32 `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
-    inode) and **`ext4`** drivers, and FAT32 **write** support behind a
-    future `FilesystemWrite` trait (the symmetric versioned extension to
-    `FilesystemRead`), with the symmetric VFS write-delegation methods.
-  - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency
-    tests under QEMU, and the `rustfs`/`ext4` doc pages.
+    inode) and **`ext4`** read/write drivers.
+  - An end-to-end QEMU vertical mounting a real FAT32 image over
+    `virtio_blk`, the `pjdfstest`-equivalent POSIX suite + `rustfs`
+    crash-consistency tests under QEMU, and the `rustfs`/`ext4` doc pages.
 
 ---
 

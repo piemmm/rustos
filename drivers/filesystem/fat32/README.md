@@ -1,20 +1,20 @@
-# `rustos-drv-fs-fat32` — FAT32 filesystem driver (read-only)
+# `rustos-drv-fs-fat32` — FAT32 filesystem driver (read/write)
 
-Stage 5 deliverable. Reads a FAT32 volume behind any
+Stage 5 deliverable. Reads and writes a FAT32 volume behind any
 `rustos_abi::driver::block::Block` device and exposes it through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` trait.
+versioned `rustos_abi::driver::filesystem::FilesystemRead` and
+`FilesystemWrite` traits.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
-`DriverHandle` — it cannot perform I/O — so the read surface is a
+`DriverHandle` — it cannot perform I/O — so each I/O surface is a
 **new versioned trait** rather than a widening of the shipped one
-(`AGENTS.md` §2.4 / §9). A future `FilesystemWrite` trait will add the
-mutating surface.
+(`AGENTS.md` §2.4 / §9).
 
 ## Supported volumes
 
-| Format | Mode      | Names                                    |
-|--------|-----------|------------------------------------------|
-| FAT32  | read-only | long names (VFAT) + 8.3 short names      |
+| Format | Mode       | Names                                    |
+|--------|------------|------------------------------------------|
+| FAT32  | read/write | long names (VFAT) + 8.3 short names      |
 
 FAT type is identified by the FAT32 boot-sector shape — a zero 16-bit
 FAT size (offset 22) and a zero root-entry count (offset 17). A
@@ -39,10 +39,26 @@ invalid scalar value, checksum mismatch) rather than surfacing a partial
 name. When a long name is present the internal 8.3 alias is *not*
 separately resolvable.
 
+## Writing
+
+`FilesystemWrite` addresses a target as a `(dir, name)` pair, because a
+FAT file's length and starting cluster live in its parent directory
+entry, not in a self-describing `NodeId`. `create`/`mkdir` write a VFAT
+long-name set bound to a generated, directory-unique `~N` 8.3 short alias
+(so arbitrary, case-preserving names round-trip); `write_at` allocates
+and chains clusters, zero-fills sparse gaps and updates the entry;
+`truncate` frees the tail chain (shrink) or zero-extends (grow); and
+`remove` frees the chain and marks the entry plus its long-name run
+deleted. Free clusters are found by scanning the FAT, directories grow a
+zeroed cluster at a time, and every FAT mutation is mirrored across all
+FAT copies.
+
 ## Limitations
 
-- **Read-only.** Writing is out of scope until `FilesystemWrite` lands
-  (tracked in `PLAN.md`).
+- Writes go straight through to the block device; there is no
+  write-back cache or journal (FAT has no journal).
+- A generated short alias uses a `~N` numeric tail (collision-resolved
+  against the live directory) rather than the legacy hashed scheme.
 
 ## Security
 
@@ -55,8 +71,9 @@ normalisation policy likewise belong to the VFS, not the driver.
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
-- The `FilesystemRead` methods are reached only through the
-  `DriverHandle` the host minted at load time. The driver runs in user
+- The `FilesystemRead`/`FilesystemWrite` methods are reached only through
+  the `DriverHandle` the host minted at load time, and the VFS only
+  delegates a write to a non-`READ_ONLY` mount. The driver runs in user
   space; it does not request `CAP_DRV_KERNEL`.
 
 ## Test surface
@@ -77,8 +94,12 @@ allocation-free in-memory FAT32 image and exercises:
 - `Unsupported` on directory-vs-file mismatches and `BufferTooSmall`
   on an undersized name buffer.
 - The `register` capability gate.
+- Write round-trips: create + write + read-back (short and long names),
+  writes that extend across a cluster boundary, sparse zero-fill,
+  `truncate` shrink and grow, `remove` + name reuse, `mkdir` with a
+  nested file, and the `Busy`/`Unsupported`/`NotFound` guards.
 
-25/25 host-side tests pass. A QEMU `pjdfstest`-equivalent integration
+38/38 host-side tests pass. A QEMU `pjdfstest`-equivalent integration
 suite over `virtio_blk` is tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface
@@ -86,4 +107,4 @@ suite over `virtio_blk` is tracked in `.junie/next-session-prompt.md`.
 `AGENTS.md` §8 — the only public *function* is `register`. The `Fat32`
 type is exported so the driver host can construct an instance with
 `Fat32::open`; the host reaches into it only through the
-`FilesystemRead` trait.
+`FilesystemRead`/`FilesystemWrite` traits.

@@ -11,8 +11,8 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
   behind the [`Filesystem`] trait in `lib/abi`. The VFS never duplicates a
   driver's block I/O. The frozen `Filesystem` trait is mount/unmount only;
   path I/O delegates to a driver through the separate versioned
-  `FilesystemRead` trait (`AGENTS.md` §2.4 / §9). The first block-backed
-  driver is the read-only [FAT32 driver](./fat32.md).
+  `FilesystemRead` and `FilesystemWrite` traits (`AGENTS.md` §2.4 / §9).
+  The first block-backed driver is the read/write [FAT32 driver](./fat32.md).
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
@@ -55,14 +55,21 @@ stable user/kernel `Errno` at the syscall boundary.
 
 A subtree can be backed by a `drivers/filesystem/*` driver instead of the
 in-RAM arena. The mount records the driver's `DriverHandle`, and the VFS
-exposes three delegating operations that take a `&mut dyn FilesystemRead`
-the kernel host maps from that handle:
+exposes delegating operations that take the live driver the kernel host
+maps from that handle — the read ones a `&mut dyn FilesystemRead`, the
+mutating ones a driver implementing both `FilesystemRead` and
+`FilesystemWrite`:
 
-| Operation   | Effect                                                  |
-| ----------- | ------------------------------------------------------- |
-| `read_via`  | Read a file under a driver-backed mount.                |
-| `list_via`  | List a directory under a driver-backed mount.           |
-| `stat_via`  | Stat a node under a driver-backed mount.                |
+| Operation      | Effect                                               |
+| -------------- | ---------------------------------------------------- |
+| `read_via`     | Read a file under a driver-backed mount.             |
+| `list_via`     | List a directory under a driver-backed mount.        |
+| `stat_via`     | Stat a node under a driver-backed mount.             |
+| `create_via`   | Create a file under a driver-backed mount.           |
+| `mkdir_via`    | Create a directory under a driver-backed mount.      |
+| `write_via`    | Write a file under a driver-backed mount.            |
+| `truncate_via` | Set a file's length under a driver-backed mount.     |
+| `remove_via`   | Unlink a child under a driver-backed mount.          |
 
 Each walks the in-RAM tree to the mount point — authorising **search
 permission on every ancestor** — then hands the remaining path components
@@ -71,9 +78,11 @@ only (node kind, size, children, bytes); it makes **no** permission
 decision (`AGENTS.md` §5.4). Every delegated node inherits the mount
 point's [`Metadata`] as a uniform permission template — the natural model
 for a filesystem such as FAT that stores no per-file owner — and the §5.3
-check runs against it before each read and on every directory descended
-into. An unrecoverable driver fault, or a directory entry whose on-disk
-name is not valid UTF-8, surfaces as `VfsError::Io`.
+check runs against it before each read, before each mutation (which also
+requires **write** permission on the parent and refuses a `READ_ONLY`
+mount), and on every directory descended into. An unrecoverable driver
+fault, or a directory entry whose on-disk name is not valid UTF-8,
+surfaces as `VfsError::Io`.
 
 ## Path resolution
 

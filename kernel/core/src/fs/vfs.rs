@@ -13,7 +13,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, MountFlags};
+use rustos_abi::driver::filesystem::{
+    FilesystemRead, FilesystemWrite, MountFlags, NodeKind as DriverNodeKind,
+};
 use rustos_abi::CapabilityId;
 use rustos_kernel_sec::{GroupId, UserId};
 
@@ -162,7 +164,7 @@ impl Vfs {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, VfsError> {
-        let (template, remainder) = self.delegate_context(cred, path)?;
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).read(cred, &remainder, offset, buf)
     }
 
@@ -184,7 +186,7 @@ impl Vfs {
         path: &Path,
         fs: &mut dyn FilesystemRead,
     ) -> Result<Vec<String>, VfsError> {
-        let (template, remainder) = self.delegate_context(cred, path)?;
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).list(cred, &remainder)
     }
 
@@ -205,8 +207,113 @@ impl Vfs {
         path: &Path,
         fs: &mut dyn FilesystemRead,
     ) -> Result<DelegatedInfo, VfsError> {
-        let (template, remainder) = self.delegate_context(cred, path)?;
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).stat(cred, &remainder)
+    }
+
+    /// Create an empty regular file under a driver-backed mount,
+    /// delegating to `fs` (`AGENTS.md` §2.4 / §5.4).
+    ///
+    /// The covering mount must be driver-backed and writable; resolution
+    /// and the §5.3 checks match [`Vfs::read_via`], plus write permission
+    /// on the parent directory's template.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::AlreadyExists`], [`VfsError::PermissionDenied`],
+    ///   [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn create_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).create(cred, &remainder, DriverNodeKind::RegularFile)
+    }
+
+    /// Create a directory under a driver-backed mount, delegating to `fs`.
+    ///
+    /// See [`Vfs::create_via`] for the resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Vfs::create_via`].
+    pub fn mkdir_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).create(cred, &remainder, DriverNodeKind::Directory)
+    }
+
+    /// Write `data` into a file under a driver-backed mount starting at
+    /// `offset`, delegating to `fs` and returning the bytes written.
+    ///
+    /// See [`Vfs::create_via`] for the resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::IsADirectory`] if `path` names a directory.
+    /// * [`VfsError::NotFound`], [`VfsError::PermissionDenied`],
+    ///   [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn write_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).write(cred, &remainder, offset, data)
+    }
+
+    /// Set the length of a file under a driver-backed mount, delegating to
+    /// `fs`.
+    ///
+    /// See [`Vfs::write_via`] for the resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Vfs::write_via`].
+    pub fn truncate_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        size: u64,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).truncate(cred, &remainder, size)
+    }
+
+    /// Unlink a child under a driver-backed mount, delegating to `fs`.
+    ///
+    /// See [`Vfs::create_via`] for the resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
+    /// * [`VfsError::NotEmpty`] if `path` is a non-empty directory.
+    /// * [`VfsError::NotFound`], [`VfsError::PermissionDenied`],
+    ///   [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn remove_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).remove(cred, &remainder)
     }
 
     /// Resolve the driver-backed mount covering `path`, returning the
@@ -222,10 +329,14 @@ impl Vfs {
         &self,
         cred: &Credentials<'_>,
         path: &Path,
+        require_writable: bool,
     ) -> Result<(Metadata, Vec<String>), VfsError> {
         let mount = self.mounts.resolve(path);
         if mount.backing().is_none() {
             return Err(VfsError::NotFound);
+        }
+        if require_writable && mount.is_read_only() {
+            return Err(VfsError::ReadOnly);
         }
         let mount_depth = mount.path().depth();
         let mount_path = mount.path().clone();

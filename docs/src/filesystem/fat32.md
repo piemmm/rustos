@@ -1,17 +1,17 @@
 # FAT32 driver
 
-`drivers/filesystem/fat32` (`rustos-drv-fs-fat32`) is the read-only
+`drivers/filesystem/fat32` (`rustos-drv-fs-fat32`) is the read/write
 FAT32 driver. It is the first block-backed `drivers/filesystem/*`
 crate, chosen first because FAT32 backs the EFI system partition and SD
 cards (`AGENTS.md` §11).
 
-It reads a FAT32 volume sitting behind any
+It reads and writes a FAT32 volume sitting behind any
 [`Block`](../abi/driver_traits.md#block) device and exposes it through
-the versioned [`FilesystemRead`](../abi/driver_traits.md#filesystem)
-trait. The frozen `Filesystem` trait carries only `mount`/`unmount` and
-a `DriverHandle` and cannot perform I/O, so the read surface is a new
-versioned trait rather than a widening of the shipped one
-(`AGENTS.md` §2.4 / §9).
+the versioned [`FilesystemRead`](../abi/driver_traits.md#filesystem) and
+`FilesystemWrite` traits. The frozen `Filesystem` trait carries only
+`mount`/`unmount` and a `DriverHandle` and cannot perform I/O, so each
+I/O surface is a new versioned trait rather than a widening of the
+shipped one (`AGENTS.md` §2.4 / §9).
 
 ## What the driver does
 
@@ -23,6 +23,11 @@ versioned trait rather than a widening of the shipped one
 | `node_info`           | Report `{ kind, size }` from the node token.      |
 | `read_at`             | Walk the FAT cluster chain and copy file bytes.   |
 | `read_dir`            | Yield a directory's entries in on-disk order.     |
+| `create`              | Write a new LFN set + 8.3 entry; alloc a dir cluster for a directory. |
+| `write_at`            | Extend/chain clusters, zero-fill gaps, write bytes, update the entry. |
+| `truncate`            | Free the tail chain (shrink) or zero-extend (grow); update the entry. |
+| `remove`              | Free the cluster chain and mark the entry + its LFN run deleted. |
+| `flush`               | No-op: every mutation writes straight through to the device. |
 
 ## Long file names (VFAT)
 
@@ -56,6 +61,19 @@ The device logical-block size and the FAT bytes-per-sector are
 decoupled: every access is staged one logical block at a time, so the
 two sizes need not match.
 
+## Writing
+
+Writes address their target as a `(dir, name)` pair, because a FAT file's
+length and starting cluster live in its **parent directory entry**, not
+in a self-describing `NodeId` (`AGENTS.md` §2.4 — the symmetric counter
+to `FilesystemRead`). Each created entry is written as a VFAT long-name
+set bound to a generated, directory-unique `~N` 8.3 short alias, so an
+arbitrary, case-preserving name round-trips through a later read. Free
+clusters are found by scanning the FAT; directories grow by one zeroed
+cluster at a time when their entry slots are exhausted; and every FAT
+mutation is mirrored across all FAT copies. Sub-block writes are
+read-modified-written so neighbouring bytes are preserved.
+
 ## Permissions
 
 FAT32 stores no owner, mode, ACL, or capability gate. Those live in the
@@ -66,6 +84,8 @@ normalisation policy likewise belong to the VFS.
 
 ## Limitations
 
-- **Read-only.** Writing waits on a `FilesystemWrite` trait, tracked in
-  `PLAN.md` Stage 5; the per-driver crate `README.md` records the same
-  caveat next to the code.
+- The driver writes through to the block device synchronously; there is
+  no in-memory write-back cache or journal (FAT has no journal). A
+  generated short alias uses a `~N` numeric tail rather than the legacy
+  6-character-plus-hash scheme; collisions are still resolved against the
+  live directory, so on-disk uniqueness holds.

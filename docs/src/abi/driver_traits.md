@@ -150,8 +150,29 @@ caller-provided buffer alongside a `DirEntry { node, kind, name_len }`.
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the
 §5.3 model before calling here (`AGENTS.md` §5.4). The first
-implementation is the read-only [FAT32 driver](../filesystem/fat32.md);
-a future `FilesystemWrite` trait adds the mutating surface.
+implementation is the [FAT32 driver](../filesystem/fat32.md).
+
+The mutating surface is a second separate versioned trait,
+`FilesystemWrite`, again additive rather than a widening of the frozen
+`Filesystem` or of `FilesystemRead` (`AGENTS.md` §2.4 / §9):
+
+| Method                                | Capability gate                   |
+|---------------------------------------|-----------------------------------|
+| `create(dir, name, kind)`             | Driver handle (writable mount).   |
+| `write_at(dir, name, offset, data)`   | Driver handle (writable mount).   |
+| `truncate(dir, name, size)`           | Driver handle (writable mount).   |
+| `remove(dir, name)`                   | Driver handle (writable mount).   |
+| `flush()`                             | Driver handle.                    |
+
+Unlike the read surface, the mutating methods address their target as a
+`(dir, name)` pair rather than by a `NodeId`: a `NodeId` is
+self-describing but carries no back-pointer to the directory entry that
+stores a file's length and starting location, and filesystems such as
+FAT keep that metadata *in the parent directory*. As on the read side,
+the driver makes no permission decision; the VFS authorises the write
+against the §5.3 template (and refuses a write to a `READ_ONLY` mount)
+before delegating (`AGENTS.md` §5.4). The first implementation is the
+read/write [FAT32 driver](../filesystem/fat32.md).
 
 ## Block
 
