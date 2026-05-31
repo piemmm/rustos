@@ -131,6 +131,16 @@ fn build_argv(spec: &Spec, ovmf: &OvmfPaths, iso: &Path) -> Vec<OsString> {
         )
         .into(),
     );
+    // Attach QEMU's `ramfb` display device when requested. `ramfb` is a
+    // firmware-programmed linear framebuffer whose scan-out surface lives
+    // in guest RAM; the guest programs its geometry over the `fw_cfg`
+    // device the `pc`/`q35` machine already carries (here over the x86
+    // IOport DMA interface). This is what the vesa-display vertical
+    // drives.
+    if spec.display_ramfb {
+        argv.push("-device".into());
+        argv.push("ramfb".into());
+    }
     argv.push("-drive".into());
     argv.push(
         format!(
@@ -417,6 +427,36 @@ mod tests {
         assert!(argv
             .iter()
             .any(|a| a == "virtio-blk-pci,drive=blk1,disable-legacy=on"));
+    }
+
+    #[test]
+    fn argv_without_ramfb_attaches_no_display_device() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+        assert!(
+            !argv.iter().any(|a| a == "ramfb"),
+            "a display-free spec must not attach a ramfb device"
+        );
+    }
+
+    #[test]
+    fn argv_attaches_ramfb_when_requested() {
+        let mut spec = fixture_spec(1);
+        spec.display_ramfb = true;
+        let argv = render(&build_argv(
+            &spec,
+            &fixture_ovmf(),
+            Path::new("/tmp/out.iso"),
+        ));
+        let pos = argv
+            .iter()
+            .position(|a| a == "ramfb")
+            .expect("argv contains the ramfb device");
+        assert_eq!(argv[pos - 1], "-device");
     }
 
     #[test]

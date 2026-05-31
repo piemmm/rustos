@@ -1,0 +1,15 @@
+[package]
+name = "rustos-itest-fwcfg"
+description = "Transport-agnostic QEMU `fw_cfg` DMA client + `ramfb` programming helper shared by the display-class QEMU verticals (framebuffer on riscv64-MMIO, vesa on x86_64-IOport). The DMA protocol (FWCfgDmaAccess staging, file-directory scan, RAMFBCfg programming) lives here once; each vertical supplies only its transport's DMA-address-register write through the `DmaAddressRegister` seam (AGENTS.md §2.2 — no duplication, the transport is the only parallel-implementation difference)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

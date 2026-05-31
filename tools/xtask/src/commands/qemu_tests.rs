@@ -312,6 +312,30 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: true,
     },
+    // Stage 4 first-driver vertical (display class, x86_64 sibling of the
+    // framebuffer vertical): `rustos-test-vesa-qemu-x86-64` boots the
+    // production kernel pipeline, programs QEMU's `ramfb` over the
+    // `fw_cfg` IOport DMA interface so a static guest-RAM surface becomes
+    // a real scan-out framebuffer, publishes a bootloader-captured VBE
+    // `ModeInfoBlock` describing it as the boot hand-off, then loads the
+    // signed vesa display `.rxe` through `rustos_drvhost::Host` and drives
+    // it through load -> use -> unload -> reload. "Use" decodes the block
+    // with `VesaFramebuffer::open`, maps the surface through the
+    // capability-gated `KernelMmioMapper`, and `present`s a frame; a
+    // second independently-mapped window reads the pixels back to confirm
+    // they reached the scan-out memory. Any deviation flips
+    // `qemu_exit::exit_failure`. Single CPU and a 60-second budget match
+    // the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-vesa-qemu-x86-64",
+        binary: "rustos-test-vesa-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: true,
+    },
 ];
 
 /// Rust target triple for the riscv64 enrolments; selects the

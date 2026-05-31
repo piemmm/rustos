@@ -530,6 +530,10 @@ name = "rustos-installer"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-itest-fwcfg"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-itest-harness"
 version = "0.0.0"
 
@@ -727,6 +731,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
+ "rustos-itest-fwcfg",
  "rustos-itest-harness",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
@@ -843,6 +848,26 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-log",
  "rustos-sync",
+]
+
+[[package]]
+name = "rustos-test-vesa-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-x86_64",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-display-vesa",
+ "rustos-drvhost",
+ "rustos-itest-fwcfg",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-kernel-virtio",
+ "rustos-log",
 ]
 
 [[package]]

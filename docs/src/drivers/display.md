@@ -25,7 +25,7 @@ maps to `DriverError::BufferTooSmall`.
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 `ramfb` QEMU vertical |
-| vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests only |
+| vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
@@ -73,6 +73,9 @@ the pixels back to confirm they reached the scan-out memory QEMU
 consumes, before and after the reload. The `ramfb`/`fw_cfg` bring-up
 is test-harness code, mirroring how the virtio verticals own their
 PLIC/trap bring-up rather than placing it in the production kernel.
+The `fw_cfg` DMA protocol itself lives once in the shared
+`rustos-itest-fwcfg` crate; this vertical supplies only the riscv64
+MMIO transport (`AGENTS.md` §2.2).
 
 ### `rustos-drv-display-vesa`
 
@@ -102,8 +105,27 @@ semantics match the framebuffer driver: `register` clears
 `CAP_DRV_LOAD`, dropping the `VesaFramebuffer` releases the window
 (unload), and calling `open` again reloads.
 
-A QEMU integration vertical depends on the kernel publishing the
-boot-captured `ModeInfoBlock` as a capability and exposing a
-`MmioMapper` over the linear framebuffer — the same boot hand-off
-prerequisite the framebuffer and block drivers' QEMU verticals waited
-on.
+#### QEMU integration vertical
+
+`tests/integration/vesa_display_qemu_x86_64`
+(`rustos-test-vesa-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
+is the x86_64 sibling of the framebuffer vertical: it drives the driver
+against a **real** emulated framebuffer, closing the `load → use →
+unload → reload` loop on x86_64.
+
+The harness attaches a QEMU `ramfb` device (`-device ramfb`) and
+programs a static, page-aligned guest-RAM scan-out surface into it over
+the `fw_cfg` **IOport** DMA interface (registers `0x514`/`0x518`). It
+then synthesises the bootloader-captured VBE `ModeInfoBlock` describing
+that surface — the shape a real VBE mode query (`0x4F01`) would produce
+— as the boot hand-off, loads the signed vesa `.rxe` through
+`rustos_drvhost::Host` (the §8 load gate), and for the "use" step decodes
+the block with `VesaFramebuffer::open`, maps the surface through the
+capability-gated `rustos_kernel_virtio::KernelMmioMapper`, and calls
+`present`. A second window mapped over the same physical range reads the
+pixels back to confirm they reached the scan-out memory, before and
+after the reload.
+
+The `fw_cfg` DMA protocol lives once in the shared `rustos-itest-fwcfg`
+crate; this vertical supplies only the x86_64 IOport transport, the
+deliberate sibling of the riscv64 MMIO transport (`AGENTS.md` §2.2).

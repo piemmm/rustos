@@ -14,7 +14,7 @@ presents fully-rendered frames into it.
 
 | Platform | Surface source                          | Stage 4 status       |
 |----------|-----------------------------------------|----------------------|
-| x86_64   | VBE 2.0+ linear framebuffer (BIOS/VBE `ModeInfoBlock`) | mock-host tests only |
+| x86_64   | VBE 2.0+ linear framebuffer (BIOS/VBE `ModeInfoBlock`) | mock-host tests + `ramfb` QEMU vertical |
 
 The driver does **not** program the display controller or issue VBE BIOS
 calls; it consumes the `ModeInfoBlock` the bootloader already captured.
@@ -83,11 +83,29 @@ mock `MmioMapper`:
   map (`Unsupported`), and a parse failure surfacing before any mapping.
 - Unload → reload round-trip.
 
-23/23 host-side tests pass. A QEMU integration vertical depends on the
-kernel publishing the boot-captured VBE `ModeInfoBlock` as a capability
-and exposing a `MmioMapper` over the linear framebuffer; that boot
-hand-off is not yet in the tree, exactly as the framebuffer, ps2, and
-virtio-blk QEMU verticals waited on their kernel prerequisites.
+23/23 host-side tests pass.
+
+## QEMU integration vertical
+
+`tests/integration/vesa_display_qemu_x86_64`
+(`rustos-test-vesa-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
+drives the driver against a **real** emulated framebuffer on x86_64,
+closing the `load → use → unload → reload` loop — the x86_64 sibling of
+the riscv64 `framebuffer` vertical.
+
+The harness attaches a QEMU `ramfb` device (`-device ramfb`) and programs
+a static guest-RAM scan-out surface into it over the `fw_cfg` **IOport**
+DMA interface, then synthesises the bootloader-captured VBE
+`ModeInfoBlock` describing that surface (the shape VBE function `0x4F01`
+would produce) as the boot hand-off. It loads the signed vesa `.rxe`
+through `rustos_drvhost::Host`, decodes the block with
+`VesaFramebuffer::open`, maps the surface through the capability-gated
+`rustos_kernel_virtio::KernelMmioMapper`, and `present`s a frame; a
+second independently-mapped window reads the pixels back to confirm they
+reached the scan-out memory QEMU consumes, before and after the reload.
+The `fw_cfg` DMA protocol lives once in the shared `rustos-itest-fwcfg`
+crate; this vertical supplies only the x86_64 IOport transport, the
+deliberate sibling of the riscv64 MMIO transport (`AGENTS.md` §2.2).
 
 ## Public surface
 

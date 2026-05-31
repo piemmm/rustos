@@ -1075,6 +1075,42 @@ follow-up is its own thread and is now also complete.
 - Each driver crate ships a `README.md` (supported HW, caps, limits).
 
 **Status: in progress.**
+- `drivers/display/vesa` QEMU integration vertical shipped — the last
+  outstanding Stage 4 QEMU vertical, and the x86_64 sibling of the
+  riscv64 framebuffer-display vertical. It lives in
+  `tests/integration/vesa_display_qemu_x86_64`
+  (`rustos-test-vesa-qemu-x86-64`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60-second
+  budget) and drives the driver against a **real** emulated framebuffer
+  on x86_64. The harness attaches QEMU `ramfb` (`-device ramfb`, now
+  threaded through `rustos_qemu::Spec::with_ramfb` →
+  `tools/qemu/src/x86_64.rs` as well) and programs a static,
+  page-aligned guest-RAM scan-out surface into it over the `fw_cfg`
+  **IOport** DMA interface (registers `0x514`/`0x518`); it then
+  synthesises the bootloader-captured VBE `ModeInfoBlock` describing
+  that surface — the shape VBE function `0x4F01` would produce — as the
+  boot hand-off. The vertical boots the production kernel and, on
+  `AuditEvent::BootCompleted`, loads the signed vesa `.rxe` through
+  `rustos_drvhost::Host` (the §8 load gate, fixture manifest declaring
+  `CAP_DRV_LOAD`), decodes the block with `VesaFramebuffer::open`, maps
+  the surface through the capability-gated
+  `rustos_kernel_virtio::KernelMmioMapper`, and `present`s a frame; a
+  second window mapped over the same physical range reads the pixels
+  back to confirm they reached the scan-out memory QEMU consumes,
+  before and after the reload. The `fw_cfg` DMA protocol itself now
+  lives once in the shared `rustos-itest-fwcfg` crate (the
+  `FWCfgDmaAccess` staging, file-directory scan, and `RAMFBCfg`
+  programming, with host unit tests); the two display verticals supply
+  only their transport's DMA-address-register write through the
+  `DmaAddressRegister` seam — x86_64 IOport here, riscv64 MMIO there —
+  so the protocol is not duplicated (`AGENTS.md` §2.2). The riscv64
+  framebuffer vertical was refactored onto the shared crate in the same
+  change. No `unwrap`/`expect`/`panic!` in the test bin; the only
+  `unsafe` is the shared crate's documented `fw_cfg` DMA staging and
+  the shared bumpalloc `#[global_allocator]`. With this every emulable
+  Stage 4 first driver now has a `load → use → unload → reload` QEMU
+  vertical. Docs: `docs/src/drivers/display.md` +
+  `drivers/display/vesa/README.md`.
 - `drivers/input/ps2` QEMU integration vertical shipped — the first
   per-driver `load → use device → unload → reload` vertical for a
   display/input driver (the virtio storage/net verticals already cover
@@ -1133,9 +1169,10 @@ follow-up is its own thread and is now also complete.
   is confined to the documented `fw_cfg` MMIO/DMA accesses, the DTB
   span, and the shared bumpalloc `#[global_allocator]`. Docs:
   `docs/src/drivers/display.md` + `drivers/display/framebuffer/README.md`.
-  The one remaining Stage 4 QEMU vertical (`drivers/display/vesa`) still
-  awaits the kernel publishing the boot-captured VBE `ModeInfoBlock` as a
-  capability plus a `MmioMapper` over `PhysBasePtr`.
+  The remaining `drivers/display/vesa` QEMU vertical has since shipped
+  too (see the top status bullet); its x86_64 `fw_cfg` IOport transport
+  and this riscv64 MMIO transport now share the `rustos-itest-fwcfg`
+  crate's DMA protocol.
 - `drivers/display/vesa` (x86_64 BIOS) shipped — the VBE
   linear-framebuffer display driver, and the last outstanding Stage 4
   first driver. It implements `rustos_abi::driver::display::Display`
@@ -1174,12 +1211,9 @@ follow-up is its own thread and is now also complete.
   mapper; unmappable region; parse failure before mapping;
   unload→reload). Docs: a new `rustos-drv-display-vesa` section in
   `docs/src/drivers/display.md` (already wired into `docs/src/SUMMARY.md`
-  under the existing display page) + the crate `README.md`. A QEMU
-  integration vertical depends on the kernel publishing the
-  boot-captured `ModeInfoBlock` as a capability and exposing a
-  `MmioMapper` over the linear framebuffer — the same boot hand-off
-  prerequisite the framebuffer, ps2, and virtio-blk QEMU verticals
-  waited on. With this driver every per-class Stage 4 first driver
+  under the existing display page) + the crate `README.md`. The QEMU
+  integration vertical for this driver has since shipped (see the top
+  status bullet). With this driver every per-class Stage 4 first driver
   listed in the deliverables is now implemented.
 - `drivers/input/ps2` (x86_64) shipped — the first input-class driver.
   It implements `rustos_abi::driver::input::Input` for a keyboard on the

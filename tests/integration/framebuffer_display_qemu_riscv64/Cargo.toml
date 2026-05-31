@@ -36,4 +36,5 @@ rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-itest-fwcfg = { path = "../fwcfg", version = "=0.0.0" }
 rustos-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
