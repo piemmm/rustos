@@ -1,0 +1,37 @@
+[package]
+name = "rustos-test-memory-isolation-qemu-riscv64"
+description = "Stage 3c QEMU integration test: hardware-enforced memory isolation on the riscv64 virt board — an attacker Sv39 address space faults on a victim-only virtual address."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "two Sv39 address spaces disagree on one VA; switching to
+# the attacker space and reading that VA faults" integration test — the
+# riscv64 half of the Stage-3 "memory-isolation test passes" per-sub-stage
+# deliverable (`PLAN.md` Stage 3), the riscv64 analogue of
+# `tests/integration/memory_isolation` (x86_64). It links only the
+# `rustos-arch-riscv64` port (the isolation proof needs no `kernel/*`
+# subsystem): it builds a victim and an attacker `paging::AddressSpace`,
+# installs a `fault` handler that asserts the attacker took a load page
+# fault on the isolated VA while the victim's frame stayed intact, then
+# writes the `SiFive` Test PASS finisher. Keeping the QEMU-exit shortcut
+# in a dedicated bin (not a Cargo feature on the arch crate) prevents
+# feature unification from leaking it into any production build
+# (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-memory-isolation-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

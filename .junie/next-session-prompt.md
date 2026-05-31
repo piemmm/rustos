@@ -39,23 +39,33 @@ gate.)
 
 ## What needs doing next — finish Stage 3c (riscv64)
 
-1. **Memory-isolation QEMU vertical** exercising `paging::AddressSpace`:
-   build two Sv39 hierarchies that disagree on one VA, `switch` to the
-   attacker space, and confirm the MMU faults the cross-space access
-   (the riscv64 analogue of `tests/integration/memory_isolation`;
-   `AGENTS.md` §4). The arch primitives are in place — this is the
-   remaining Stage-3 "memory-isolation test passes" deliverable.
-2. **Wire the new primitives into the live scheduler/kernel** — drive
+The **memory-isolation QEMU vertical** is now landed and green:
+`tests/integration/memory_isolation_qemu_riscv64` builds a victim and
+an attacker Sv39 `paging::AddressSpace` that disagree on one VA, installs
+a handler through the new `kernel/arch/riscv64::fault` hook, `switch`es
+`satp` to the attacker, and confirms the MMU raises a load page fault on
+the isolated VA while the victim frame stays intact before writing the
+`SiFive` Test PASS finisher (the riscv64 analogue of
+`tests/integration/memory_isolation`; `AGENTS.md` §4). That satisfies
+the Stage-3 "memory-isolation test passes" deliverable for riscv64. The
+`fault` module adds a set-once `FaultHandlerFn(scause, stval, sepc) -> !`
+that the `trap` handler invokes for an unexpected synchronous exception
+before falling back to parking the hart.
+
+Remaining for 3c:
+
+1. **Wire the new primitives into the live scheduler/kernel** — drive
    real `Scheduler::on_timer_tick` from the riscv64 `preempt` callback
    in the boot pipeline, and exercise `context::switch` for an actual
    task switch.
-3. **Multi-hart SMP bring-up** — SBI `IPI` delivery (replacing the
+2. **Multi-hart SMP bring-up** — SBI `IPI` delivery (replacing the
    documented `RiscvArch::send_ipi` single-hart no-op), per-hart timer
    intervals, and `tp`-derived hart identity.
 
-Only after the above are 3c's per-sub-stage tests ("memory-isolation
-test passes", "timer interrupt drives scheduler") both satisfied with
-the primitives wired end-to-end.
+3c's per-sub-stage tests ("boots to init", "memory-isolation test
+passes", "timer interrupt drives scheduler") are now all satisfied; the
+remaining items above wire the primitives into the live kernel and add
+multi-hart SMP.
 
 ## Then — Stage 3b/3d
 
@@ -90,6 +100,13 @@ cargo run -p rustos-qemu --bin rustos-qemu-run -- \
     --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-timer-preempt-qemu-riscv64 \
     --arch riscv64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
 
-# riscv64 arch-crate host tests (paging/context/preempt/syscall):
+# riscv64 arch-crate host tests (paging/context/preempt/syscall/fault):
 cargo test -p rustos-arch-riscv64
+
+# Run the riscv64 memory-isolation vertical standalone (fast iteration):
+cargo build --locked -p rustos-test-memory-isolation-qemu-riscv64 \
+    --target riscv64gc-unknown-none-elf
+cargo run -p rustos-qemu --bin rustos-qemu-run -- \
+    --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-memory-isolation-qemu-riscv64 \
+    --arch riscv64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
 ```

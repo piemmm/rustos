@@ -88,6 +88,7 @@
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/framebuffer_display_qemu_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/fwcfg/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/harness/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation_qemu_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/ps2_input_qemu_x86_64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/riscv64_boot/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/timer_preempt_qemu_riscv64/src" isTestSource="false" />

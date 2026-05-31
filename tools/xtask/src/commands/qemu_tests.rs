@@ -269,6 +269,29 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
     },
+    // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
+    // half of the Stage-3 "memory-isolation test passes" per-sub-stage
+    // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`
+    // (x86_64). It boots the `virt` board, builds a victim and an attacker
+    // Sv39 `paging::AddressSpace` (each identity-maps the low 4 GiB) that
+    // disagree on a single 64 GiB virtual address, installs a `fault`
+    // handler, switches `satp` to the attacker space, and reads that
+    // address: the MMU raises a load page fault, the handler confirms the
+    // cause / faulting address / victim-intact invariants, and writes the
+    // `SiFive` Test PASS finisher. A regression that fails to isolate the
+    // address never faults and trips the failure finisher instead. Single
+    // CPU (the slice brings up one hart) and a 60-second budget match the
+    // other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-memory-isolation-qemu-riscv64",
+        binary: "rustos-test-memory-isolation-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
     // vertical — boot → build the virtio-MMIO bus from the device tree →

@@ -259,9 +259,24 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
             }
             return;
         }
-        // Any other synchronous exception is unexpected in this slice
-        // and returning would re-execute the faulting instruction
-        // forever.
+        // Any other synchronous exception (a page fault, an access
+        // fault, an illegal instruction) is unrecoverable in this slice:
+        // returning would re-execute the faulting instruction forever.
+        // Forward it to the installed fault handler if one is present
+        // (the memory-isolation vertical installs one to confirm an
+        // attacker faulted on an isolated address); otherwise fail closed
+        // by parking the hart (`AGENTS.md` §2.9).
+        if let Some(handler) = crate::fault::fault_handler() {
+            let stval: u64;
+            let sepc: u64;
+            // SAFETY: reading `stval` (the faulting address) and `sepc`
+            // (the faulting PC) has no side effects.
+            unsafe {
+                core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+                core::arch::asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack));
+            }
+            handler(scause, stval, sepc);
+        }
         crate::kernel_arch::halt_current_hart();
     }
 

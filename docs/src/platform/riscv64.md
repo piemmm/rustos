@@ -103,7 +103,9 @@ interrupts disabled (it neither calls `trap::init_traps` nor builds a
   goes to the syscall path, a supervisor external interrupt forwards to
   the one-shot PLIC dispatch callback (claim → `IrqTable::fire` →
   complete), a supervisor timer interrupt drives the scheduler tick, and
-  any other synchronous exception fails closed (parks the hart).
+  any other synchronous exception is forwarded to the installed
+  `fault::FaultHandlerFn` (passing `scause`/`stval`/`sepc`) if one is
+  present, otherwise fails closed (parks the hart).
 
 ## Stage 3 architecture primitives
 
@@ -119,8 +121,17 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   identity-maps the low gigabytes with 1 GiB leaves, adds 4 KiB mappings
   through `map_4k`, and activates via `satp` + `sfence.vma` in `switch`.
   This is the architectural mechanism the memory-isolation vertical
-  (a remaining follow-up) exercises: two hierarchies disagreeing on one
-  VA so the MMU faults a cross-address-space access (`AGENTS.md` §4).
+  exercises: two hierarchies disagreeing on one VA so the MMU faults a
+  cross-address-space access (`AGENTS.md` §4; see *Memory-isolation QEMU
+  vertical* below).
+- **Synchronous-exception hook (`fault.rs`).** A set-once fault handler
+  (`FaultHandlerFn(scause, stval, sepc) -> !`, the page-fault `scause`
+  constants, and `is_page_fault`) — the riscv64 analogue of the x86_64
+  `idt` page-fault callback. The `trap` handler invokes it for an
+  unexpected synchronous exception (reading `stval`/`sepc`) before
+  falling back to parking the hart, so a kernel slice or test can decide
+  what an otherwise-fatal fault means. The slot is set-once and a second
+  publish fails closed (`AGENTS.md` §2.1).
 - **Context switch (`context.rs` + `context.s`).** `TaskCtx { sp }` plus
   `rustos_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
   onto the outgoing kernel stack, swaps `sp` through `TaskCtx`, and
@@ -148,6 +159,32 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   4-byte `ecall`. Absent a callback it fails closed. The
   architecture-neutral validation/capability/audit dispatcher lives in
   `kernel/syscall` and is installed by the downstream binary.
+
+## Memory-isolation QEMU vertical
+
+`tests/integration/memory_isolation_qemu_riscv64` is the riscv64
+analogue of the x86_64 `tests/integration/memory_isolation` vertical and
+the Stage-3 "memory-isolation test passes" deliverable (`AGENTS.md` §4).
+It links only the arch port and supplies its own `kernel_main`:
+
+1. Builds a **victim** and an **attacker** `paging::AddressSpace`, each
+   identity-mapping the low 4 GiB (the board MMIO plus the RAM base at
+   `0x8000_0000`). The victim additionally maps a 4 KiB secret frame at a
+   virtual address (64 GiB) far above that window; the attacker does not.
+2. Switches `satp` to the victim and reads the secret VA, confirming the
+   mapping is genuine.
+3. Installs an `on_fault` handler through `fault::set_fault_handler`,
+   calls `trap::init_traps`, switches `satp` to the attacker, and reads
+   the same VA.
+4. The MMU raises a **load page fault** (`scause` 13); the trap vector
+   routes it to `on_fault`, which asserts the cause is a load page fault,
+   `stval` equals the secret VA, and the victim's frame is still intact
+   at its physical address — then writes the `SiFive` Test PASS finisher.
+
+A regression that fails to isolate the address never faults and trips a
+per-site failure finisher instead (`AGENTS.md` §5.4.5 — fail closed).
+The test is enrolled in `tools/xtask/src/commands/qemu_tests.rs` (single
+CPU, 60 s budget).
 
 ## Boot-state publication
 

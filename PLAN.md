@@ -814,15 +814,32 @@ Each sub-stage delivers one architecture. They share the same checklist:
           closed without a callback. 8 host tests; the existing
           riscv64 boot vertical still PASSES after the trap-frame
           change.
+    - [x] **Memory isolation** — `kernel/arch/riscv64::fault` + the
+          QEMU vertical `tests/integration/memory_isolation_qemu_riscv64`.
+          `fault` adds a set-once synchronous-exception handler hook
+          (`FaultHandlerFn(scause, stval, sepc) -> !`, page-fault
+          `scause` constants, `is_page_fault`) — the riscv64 analogue
+          of the x86_64 `idt` page-fault callback — which the `trap`
+          handler now invokes for an unexpected synchronous exception
+          (reading `stval`/`sepc`) before falling back to parking the
+          hart. 5 new host tests. The vertical (enrolled in
+          `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s
+          budget) boots the `virt` board, builds a victim and an
+          attacker `paging::AddressSpace` that disagree on one VA
+          (64 GiB, above the shared 4 GiB identity window), switches
+          `satp` to the attacker, and reads that VA: the MMU raises a
+          load page fault, the handler confirms the cause / faulting
+          address / victim-intact invariants, and writes `SiFive` Test
+          PASS — the "memory-isolation test passes" deliverable,
+          **verified green under QEMU on this host**.
     - The boot stub, console, and QEMU run script (`tools/qemu`)
-      pre-existed, so 3c's per-sub-stage checklist is satisfied
-      except the items below.
-- **Remaining for 3c completion (next session):** the
-  memory-isolation QEMU vertical exercising `paging::AddressSpace`
-  (two hierarchies disagreeing on one VA → MMU fault), multi-hart
-  SMP bring-up (SBI `IPI` + per-hart timer/identity), and wiring the
-  new address space + context switch into the live scheduler. These
-  are scoped in `.junie/next-session-prompt.md`.
+      pre-existed, so 3c's per-sub-stage checklist ("boots to init",
+      "memory-isolation test passes", "timer interrupt drives
+      scheduler") is now satisfied.
+- **Remaining for 3c completion (next session):** multi-hart SMP
+  bring-up (SBI `IPI` + per-hart timer/identity) and wiring the new
+  address space + context switch into the live scheduler. These are
+  scoped in `.junie/next-session-prompt.md`.
 
 ---
 

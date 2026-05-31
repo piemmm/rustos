@@ -17,6 +17,7 @@
 //! | [`kernel_arch`] | [`RiscvArch`] — the `SchedulerArch` impl + monotonic clock.   |
 //! | [`paging`]    | Sv39 page-table primitives (PTE/VPN/`satp`, identity map, `switch`). |
 //! | [`context`]   | Context-switch primitive (`TaskCtx` + `switch`).                |
+//! | [`fault`]     | Set-once synchronous-exception (page-fault) handler hook.       |
 //! | [`preempt`]   | Supervisor-timer scheduler-tick callback + SBI-timer arming.    |
 //! | [`syscall_entry`] | `ecall` argument marshalling + dispatch callback.           |
 //! | [`plic`]      | PLIC register driver (inherent mask/arm/claim).                 |
@@ -52,10 +53,13 @@
 //! # Not yet here
 //!
 //! Multi-hart SMP bring-up (and the SBI `IPI` delivery the
-//! `RiscvArch::send_ipi` no-op documents), wiring the new
+//! `RiscvArch::send_ipi` no-op documents) and wiring the new
 //! [`paging::AddressSpace`] / [`context`] switch into the live
-//! scheduler, and the memory-isolation QEMU vertical remain riscv64
-//! follow-ups. The [`plic`] controller and the [`trap`] S-mode vector
+//! scheduler remain riscv64 follow-ups. The
+//! `tests/integration/memory_isolation_qemu_riscv64` QEMU vertical
+//! proves the [`paging::AddressSpace`] / [`fault`] path enforces
+//! hardware memory isolation (an attacker space faults on a victim-only
+//! address). The [`plic`] controller and the [`trap`] S-mode vector
 //! land the external-IRQ foundation the virtio-mmio verticals build on;
 //! the boot-to-`BootCompleted` slice runs with paging off on a single
 //! hart and does not arm them — the verticals do.
@@ -80,6 +84,7 @@ core::arch::global_asm!(include_str!("boot.s"));
 core::arch::global_asm!(include_str!("context.s"));
 
 pub mod context;
+pub mod fault;
 pub mod fdt;
 pub mod kernel_arch;
 pub mod paging;
