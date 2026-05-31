@@ -15,6 +15,7 @@ mod deps_check;
 mod linkcheck;
 mod qemu_tests;
 mod sbom;
+mod supply_chain;
 mod wasm_tests;
 
 /// One sanctioned developer workflow.
@@ -30,6 +31,7 @@ pub enum Command {
     CfgCheck,
     Coverage,
     Sbom,
+    SupplyChain,
     Ci,
     Image,
 }
@@ -47,6 +49,7 @@ impl Command {
         Command::CfgCheck,
         Command::Coverage,
         Command::Sbom,
+        Command::SupplyChain,
         Command::Ci,
         Command::Image,
     ];
@@ -63,6 +66,7 @@ impl Command {
             "cfg-check" => Command::CfgCheck,
             "coverage" => Command::Coverage,
             "sbom" => Command::Sbom,
+            "supply-chain" => Command::SupplyChain,
             "ci" => Command::Ci,
             "image" => Command::Image,
             _ => return None,
@@ -81,6 +85,7 @@ impl Command {
             Command::CfgCheck => "cfg-check",
             Command::Coverage => "coverage",
             Command::Sbom => "sbom",
+            Command::SupplyChain => "supply-chain",
             Command::Ci => "ci",
             Command::Image => "image",
         }
@@ -98,6 +103,9 @@ impl Command {
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
             Command::Sbom => "Emit a CycloneDX SBOM from Cargo.lock (§19.3).",
+            Command::SupplyChain => {
+                "Verify source-hash pins against Cargo.lock and the advisory SLA (§19.3)."
+            }
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::Image => "Build platform images via tools/mkimage.",
         }
@@ -115,6 +123,7 @@ impl Command {
             Command::CfgCheck => run_cfg_check(ctx),
             Command::Coverage => run_coverage(ctx, args),
             Command::Sbom => run_sbom(ctx, args),
+            Command::SupplyChain => run_supply_chain(ctx, args),
             Command::Ci => run_ci(ctx),
             Command::Image => run_image(ctx, args),
         }
@@ -322,6 +331,26 @@ fn run_sbom(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     sbom::run(&ctx.workspace_root, output.as_deref())
 }
 
+fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // §19.3: verify the committed source-hash allow-list against
+    // `Cargo.lock` and enforce the advisory SLA. `--write-pins`
+    // regenerates the `[[source-pin]]` blocks from the lockfile
+    // (reviewed by diff, like the lockfile itself); the default verifies.
+    let mut write_pins = false;
+    for arg in args {
+        if arg == "--write-pins" {
+            write_pins = true;
+        } else {
+            return Err(format!(
+                "supply-chain: unexpected argument {arg:?}; usage: \
+                 cargo xtask supply-chain [--write-pins]"
+            ));
+        }
+    }
+    eprintln!("xtask: [supply-chain] {}", ctx.workspace_root.display());
+    supply_chain::run(&ctx.workspace_root, write_pins)
+}
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
@@ -338,6 +367,11 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     run_test(ctx, &[OsString::from("--qemu")])?;
     run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
+    // §19.3 supply-chain integrity: the source-hash allow-list and the
+    // advisory SLA. Runs right after `cargo deny` (which blocks an
+    // advisory immediately); this gate caps how long one may be accepted
+    // and fails closed when a pin drifts from `Cargo.lock`.
+    run_supply_chain(ctx, &[])?;
     run_abi_check(ctx, &[])?;
     Ok(())
 }

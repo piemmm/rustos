@@ -3988,9 +3988,11 @@ rxe loader item below lands.
   now emits a deterministic CycloneDX 1.5 SBOM from `Cargo.lock` (every
   workspace + external crate with version, source URL, and pinned
   source checksum); signing it with the per-installation key is deferred
-  behind the not-yet-existing signing API. Still missing: `build
-  --reproducible`, the advisory-SLA gate, a `deny.toml` source-hash
-  allow-list, and "no post-install network fetch" enforcement.
+  behind the not-yet-existing signing API. The source-hash allow-list
+  and the 7/30-day advisory-SLA gate also landed as `cargo xtask
+  supply-chain` (in `ci`; see burn-down item 4 below). Still missing:
+  `build --reproducible` and "no post-install network fetch"
+  enforcement.
 - **§19.4 audit-log integrity** — *in progress (core landing this
   session)*. `lib/log` was an in-memory facade with no hash-chaining,
   signed anchors, or per-service `CAP_LOG_WRITE` partitioning.
@@ -4035,9 +4037,23 @@ rxe loader item below lands.
    `docs/src/security/supply_chain.md`. *Signing* the SBOM with the
    per-installation key (§11) is deferred with item 2's signing: no
    private-key signing API exists yet (`rustos-crypto` is verify-only).
-4. **§19.3 source-hash allow-list + advisory SLA** — pin external-crate
-   registry hashes in `deny.toml`; add the 7-day (`lib/crypto` deps) /
-   30-day advisory-SLA gate to `cargo xtask ci`.
+4. **§19.3 source-hash allow-list + advisory SLA** — *done*. New
+   `cargo xtask supply-chain` (wired into `ci` after `cargo deny`)
+   verifies a committed `supply-chain.toml` policy file against
+   `Cargo.lock`: every external-registry crate must carry a matching
+   `[[source-pin]]` SHA-256 (a new/mismatched/stale/duplicate pin fails
+   closed, with paste-ready errors), and `--write-pins` regenerates the
+   pins from the lockfile (committed and reviewed by diff, like
+   `Cargo.lock` itself). The same command enforces the advisory SLA over
+   `[[advisory]]` ledger entries: each accepted RUSTSEC advisory carries
+   a `published` date and a `tier` (`crypto` = 7-day, `general` = 30-day
+   SLA from publication), failing closed the day after the window
+   lapses; the ledger is empty today. Self-contained (no `toml`/`serde`
+   dep), reusing `sbom`'s `Cargo.lock` parser; 18 unit tests cover the
+   policy parser, pin check, civil-date arithmetic, and SLA edges. Docs:
+   `docs/src/security/supply_chain.md`. (`deny.toml` is `cargo deny`'s
+   own format and has no per-crate hash field, so the allow-list lives
+   in the dedicated `supply-chain.toml` that the gate reads.)
 5. **§19.6 fuzzing harnesses + `cargo xtask fuzz`** — start with the
    `lib/abi` decoders (manifest, syscall) promised in Stage 1, then IPC
    and the `userland/net` parsers; wire `--quick` (≥ 60 s/PR) into `ci`.

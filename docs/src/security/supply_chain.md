@@ -51,6 +51,56 @@ prerequisite for the reproducible-build verification tracked as a later
 §19.3 burn-down item — two runs against the same lockfile produce byte-
 identical SBOMs.
 
+## Enforcement: source-hash pinning and the advisory SLA
+
+The SBOM records what the build consumed; `cargo xtask supply-chain`
+*enforces* two further §19.3 controls against a single committed policy
+file, `supply-chain.toml`, at the workspace root. It runs as part of
+`cargo xtask ci`, immediately after `cargo deny`.
+
+## Source-hash allow-list
+
+`Cargo.lock` already pins every external-registry crate's tarball
+SHA-256, and Cargo verifies downloads against it — but the lockfile is
+also exactly where a hostile dependency bump would land. §19.3 therefore
+requires a **separate, independently reviewed** allow-list of those
+hashes.
+
+Each `[[source-pin]]` block in `supply-chain.toml` pins one crate's
+`name`, exact `version`, and `sha256`. The check fails, closed, when:
+
+* a registry crate in `Cargo.lock` has **no pin** (a new dependency must
+  be vetted and added before it can build) — the error quotes the exact
+  block to paste in;
+* a pin's hash **does not match** the lockfile (the xz-utils class of
+  tamper);
+* a pin is **stale** (its crate is no longer in `Cargo.lock`) or
+  duplicated.
+
+The pins are generated from the lockfile with `cargo xtask supply-chain
+--write-pins` and committed. Like `Cargo.lock` itself the file is
+generated but its **diff must be reviewed**: a dependency or hash change
+shows up in a dedicated security artefact, so the two files must move
+together and neither can change silently.
+
+## Advisory SLA
+
+A RUSTSEC advisory against a workspace dependency blocks every merge but
+the resolving bump. `cargo deny` blocks the advisory immediately; the
+`[[advisory]]` ledger here governs the *grace window* in which one may be
+temporarily accepted while that bump is prepared. Each entry records the
+advisory `id`, the affected `package`, its `published` date
+(`YYYY-MM-DD`), a `tier`, and a `reason`.
+
+The `tier` selects the SLA from `AGENTS.md` §19.3:
+
+* `crypto` — a dependency of `lib/crypto`: **7 days** from publication;
+* `general` — any other crate: **30 days** from publication.
+
+The check fails, closed, the day after an accepted advisory exceeds its
+SLA (age is measured in whole days; exactly the SLA is still within it).
+The ledger is empty today — no advisory affects a workspace dependency.
+
 ## What is not here yet
 
 `AGENTS.md` §19.3 also requires the SBOM to be **signed by the
@@ -58,7 +108,6 @@ per-installation key** (§11). That step is deliberately deferred: no
 private-key signing API exists yet (`rustos-crypto` is verify-only, and
 the local capability authority is a later stage). This command emits the
 unsigned document the signer will later wrap. The remaining §19.3
-items — the source-hash allow-list and advisory-SLA gate, the
-`build --reproducible` verification, and the no-post-install-network-fetch
-enforcement — are tracked in the `PLAN.md` "§19 Threat Model and
-Hardening Burn-down".
+items — the `build --reproducible` verification and the
+no-post-install-network-fetch enforcement — are tracked in the `PLAN.md`
+"§19 Threat Model and Hardening Burn-down".

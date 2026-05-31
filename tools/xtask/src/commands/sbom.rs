@@ -49,10 +49,20 @@ impl LockedPackage {
     fn source_class(&self) -> &'static str {
         match self.source.as_deref() {
             None => "workspace",
-            Some(s) if s.starts_with("registry+") => "registry",
+            Some(_) if self.is_external_registry() => "registry",
             Some(s) if s.starts_with("git+") => "git",
             Some(_) => "other",
         }
+    }
+
+    /// `true` when this package is an external crate resolved from a Cargo
+    /// registry (its `source` carries the `registry+` scheme). These are
+    /// exactly the crates whose tarball hash the §19.3 source-hash
+    /// allow-list pins; workspace-local crates and git sources are not.
+    pub fn is_external_registry(&self) -> bool {
+        self.source
+            .as_deref()
+            .is_some_and(|s| s.starts_with("registry+"))
     }
 
     /// The distribution URL for an external package: the bare URL with
@@ -161,7 +171,7 @@ impl PartialPackage {
 
 /// Extract the string value of `key = "..."` from a single line, if the
 /// line assigns exactly that key. Returns `None` for any other line.
-fn parse_key(line: &str, key: &str) -> Option<String> {
+pub(crate) fn parse_key(line: &str, key: &str) -> Option<String> {
     let rest = line.strip_prefix(key)?.trim_start();
     let rest = rest.strip_prefix('=')?.trim_start();
     let inner = rest.strip_prefix('"')?;

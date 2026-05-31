@@ -1,0 +1,350 @@
+# RustOS supply-chain policy (AGENTS.md §19.3, PLAN.md §19 item 4).
+#
+# Verified by `cargo xtask supply-chain` (run as part of `cargo xtask ci`).
+#
+# [[source-pin]] blocks pin every external-registry crate's tarball
+# SHA-256. They are regenerated from Cargo.lock with
+# `cargo xtask supply-chain --write-pins` and committed: like Cargo.lock,
+# the file is generated but its diff MUST be reviewed, so a dependency or
+# hash change is visible in a dedicated security artefact. The check fails
+# if a crate is unpinned, mismatched, or a pin is stale.
+#
+# [[advisory]] blocks are hand-curated. Each records a RUSTSEC advisory
+# temporarily accepted while its resolving bump is prepared. `tier` is
+# `crypto` (a lib/crypto dependency, 7-day SLA) or `general` (30-day SLA);
+# the check fails, closed, once an advisory is older than its SLA.
+
+[[source-pin]]
+name = "aho-corasick"
+version = "1.1.4"
+sha256 = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+
+[[source-pin]]
+name = "autocfg"
+version = "1.5.1"
+sha256 = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[source-pin]]
+name = "bitflags"
+version = "2.11.1"
+sha256 = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[source-pin]]
+name = "block-buffer"
+version = "0.10.4"
+sha256 = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+
+[[source-pin]]
+name = "cc"
+version = "1.2.62"
+sha256 = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
+
+[[source-pin]]
+name = "cfg-if"
+version = "1.0.4"
+sha256 = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[source-pin]]
+name = "cpufeatures"
+version = "0.2.17"
+sha256 = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+
+[[source-pin]]
+name = "crypto-common"
+version = "0.1.7"
+sha256 = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+
+[[source-pin]]
+name = "curve25519-dalek"
+version = "4.1.3"
+sha256 = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+
+[[source-pin]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+sha256 = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+
+[[source-pin]]
+name = "digest"
+version = "0.10.7"
+sha256 = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+
+[[source-pin]]
+name = "ed25519"
+version = "2.2.3"
+sha256 = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+
+[[source-pin]]
+name = "ed25519-dalek"
+version = "2.1.1"
+sha256 = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
+
+[[source-pin]]
+name = "fiat-crypto"
+version = "0.2.9"
+sha256 = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[source-pin]]
+name = "find-msvc-tools"
+version = "0.1.9"
+sha256 = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[source-pin]]
+name = "generator"
+version = "0.8.8"
+sha256 = "52f04ae4152da20c76fe800fa48659201d5cf627c5149ca0b707b69d7eef6cf9"
+
+[[source-pin]]
+name = "generic-array"
+version = "0.14.7"
+sha256 = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+
+[[source-pin]]
+name = "getrandom"
+version = "0.2.17"
+sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+
+[[source-pin]]
+name = "lazy_static"
+version = "1.5.0"
+sha256 = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[source-pin]]
+name = "libc"
+version = "0.2.186"
+sha256 = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[source-pin]]
+name = "libm"
+version = "0.2.16"
+sha256 = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[source-pin]]
+name = "log"
+version = "0.4.30"
+sha256 = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+
+[[source-pin]]
+name = "loom"
+version = "0.7.2"
+sha256 = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+
+[[source-pin]]
+name = "matchers"
+version = "0.2.0"
+sha256 = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+
+[[source-pin]]
+name = "memchr"
+version = "2.8.1"
+sha256 = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+
+[[source-pin]]
+name = "nu-ansi-term"
+version = "0.50.3"
+sha256 = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+
+[[source-pin]]
+name = "num-traits"
+version = "0.2.19"
+sha256 = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+
+[[source-pin]]
+name = "once_cell"
+version = "1.21.4"
+sha256 = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[source-pin]]
+name = "pin-project-lite"
+version = "0.2.17"
+sha256 = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[source-pin]]
+name = "ppv-lite86"
+version = "0.2.21"
+sha256 = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+
+[[source-pin]]
+name = "proc-macro2"
+version = "1.0.106"
+sha256 = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+
+[[source-pin]]
+name = "proptest"
+version = "1.5.0"
+sha256 = "b4c2511913b88df1637da85cc8d96ec8e43a3f8bb8ccb71ee1ac240d6f3df58d"
+
+[[source-pin]]
+name = "quote"
+version = "1.0.45"
+sha256 = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+
+[[source-pin]]
+name = "rand"
+version = "0.8.6"
+sha256 = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+
+[[source-pin]]
+name = "rand_chacha"
+version = "0.3.1"
+sha256 = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+
+[[source-pin]]
+name = "rand_core"
+version = "0.6.4"
+sha256 = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+
+[[source-pin]]
+name = "rand_xorshift"
+version = "0.3.0"
+sha256 = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
+
+[[source-pin]]
+name = "regex-automata"
+version = "0.4.14"
+sha256 = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+
+[[source-pin]]
+name = "regex-syntax"
+version = "0.8.10"
+sha256 = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[source-pin]]
+name = "rustc_version"
+version = "0.4.1"
+sha256 = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+
+[[source-pin]]
+name = "rustversion"
+version = "1.0.22"
+sha256 = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[source-pin]]
+name = "scoped-tls"
+version = "1.0.1"
+sha256 = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[source-pin]]
+name = "semver"
+version = "1.0.28"
+sha256 = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[source-pin]]
+name = "sha2"
+version = "0.10.9"
+sha256 = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+
+[[source-pin]]
+name = "sharded-slab"
+version = "0.1.7"
+sha256 = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+
+[[source-pin]]
+name = "shlex"
+version = "1.3.0"
+sha256 = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[source-pin]]
+name = "signature"
+version = "2.2.0"
+sha256 = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+
+[[source-pin]]
+name = "smallvec"
+version = "1.15.1"
+sha256 = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[source-pin]]
+name = "subtle"
+version = "2.6.1"
+sha256 = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[source-pin]]
+name = "syn"
+version = "2.0.117"
+sha256 = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+
+[[source-pin]]
+name = "thread_local"
+version = "1.1.9"
+sha256 = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
+
+[[source-pin]]
+name = "tracing"
+version = "0.1.44"
+sha256 = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+
+[[source-pin]]
+name = "tracing-core"
+version = "0.1.36"
+sha256 = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+
+[[source-pin]]
+name = "tracing-log"
+version = "0.2.0"
+sha256 = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+
+[[source-pin]]
+name = "tracing-subscriber"
+version = "0.3.23"
+sha256 = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+
+[[source-pin]]
+name = "typenum"
+version = "1.20.0"
+sha256 = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+
+[[source-pin]]
+name = "unarray"
+version = "0.1.4"
+sha256 = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[source-pin]]
+name = "unicode-ident"
+version = "1.0.24"
+sha256 = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[source-pin]]
+name = "valuable"
+version = "0.1.1"
+sha256 = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[source-pin]]
+name = "version_check"
+version = "0.9.5"
+sha256 = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[source-pin]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+sha256 = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[source-pin]]
+name = "windows-link"
+version = "0.2.1"
+sha256 = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[source-pin]]
+name = "windows-result"
+version = "0.4.1"
+sha256 = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
+
+[[source-pin]]
+name = "windows-sys"
+version = "0.61.2"
+sha256 = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+
+[[source-pin]]
+name = "zerocopy"
+version = "0.8.49"
+sha256 = "bce33a6288fa3f072a8c2c7d0f2fdbb90e28298f0135c1f99b96c3db2efcc60b"
+
+[[source-pin]]
+name = "zerocopy-derive"
+version = "0.8.49"
+sha256 = "8fd425244944f4ab65ccff928e7323354c5a018c75838362fdce749dfad2ee1e"
+
+[[source-pin]]
+name = "zeroize"
+version = "1.8.1"
+sha256 = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"

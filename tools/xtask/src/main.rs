@@ -23,9 +23,12 @@
 //! - `sbom`         — emit a `CycloneDX` SBOM from `Cargo.lock` (§19.3):
 //!   every workspace and external crate with its version, source URL,
 //!   and pinned source checksum
+//! - `supply-chain` — verify the committed source-hash allow-list
+//!   against `Cargo.lock` and enforce the RUSTSEC advisory SLA (§19.3);
+//!   `--write-pins` regenerates the pins from the lockfile
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
 //!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
-//!   `cargo deny check`, `abi-check`
+//!   `cargo deny check`, `supply-chain`, `abi-check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
