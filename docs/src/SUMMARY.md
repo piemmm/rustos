@@ -59,6 +59,7 @@
 - [On-disk layout enforcement](./filesystem/layout.md)
 - [Permissions](./filesystem/permissions.md)
 - [FAT32 driver](./filesystem/fat32.md)
+- [rustfs driver](./filesystem/rustfs.md)
 
 # Userland
 

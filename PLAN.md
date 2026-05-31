@@ -3661,11 +3661,41 @@ device list.
   riscv64 MMIO sibling can reuse it) names the same files through the
   fixture, so both sides share one source of truth (§2.2). Docs:
   `docs/src/filesystem/{fat32,overview}.md` + the FAT32 `README.md`.
+- **Native `rustfs` driver landed.** `drivers/filesystem/rustfs`
+  (`rustos-drv-fs-rustfs`) is a block-backed, **journaled, copy-on-write**
+  filesystem that stores full POSIX metadata plus an inline ACL and an
+  optional capability gate **per inode** (§5.3), exposed through the
+  versioned `FilesystemRead` + `FilesystemWrite` traits (not a widening of
+  the frozen `Filesystem`, §2.4 / §9).
+  - On-disk: superblock, 256-byte inodes (16 direct + 1 single-indirect),
+    a data-block bitmap, a redo-log journal, and data blocks; geometry is
+    re-derived and validated at `open`.
+  - File **data is copy-on-write** (new block, re-point inode, free old);
+    **metadata is journaled** (bitmap/inode/dir/indirect images staged into
+    the on-disk journal, a checksummed commit record, then checkpoint to
+    home blocks). A mount replays a committed-but-un-checkpointed
+    transaction and discards an uncommitted one. Only the home block list
+    lives in RAM. No `unwrap`/`expect`/`panic!`, no `unsafe`.
+  - The per-inode security record is surfaced to the host via
+    `RustFs::security` / `RustFs::set_security` (the driver makes no
+    permission decision, §5.4).
+  - 17 host tests: format/open, create/lookup/list, read/write across
+    block boundaries + sparse fill, single-indirect large files across a
+    remount, `truncate` shrink/grow, `remove` + reuse, non-empty-dir
+    `Busy`, the per-inode ACL + capability-gate record persisting across a
+    remount, CoW overwrite persistence, the `register` cap-gate, and a
+    **crash-consistency sweep** that faults the device after every write
+    count during a journalled overwrite and asserts fully-old-or-fully-new
+    (both observed). Docs: `docs/src/filesystem/rustfs.md` (+ SUMMARY link)
+    and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
-    inode) and **`ext4`** read/write drivers.
-  - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency
-    tests under QEMU, and the `rustfs`/`ext4` doc pages.
+  - The **`ext4`** read/write driver.
+  - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
+    crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
+    vertical, and the `ext4` doc page.
+  - Surfacing `rustfs`'s per-inode owner/mode/ACL/capability-gate into the
+    VFS (today the VFS delegation uses the uniform mount-point template);
+    this needs a new versioned attribute trait + VFS wiring.
 
 ---
 

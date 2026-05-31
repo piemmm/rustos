@@ -1,12 +1,15 @@
 [package]
 name = "rustos-drv-fs-rustfs"
-description = "RustOS placeholder: native RustOS filesystem driver."
+description = "RustOS native filesystem driver (CoW, journaled, ACL + capability gates per inode)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 [lints]
 workspace = true
