@@ -3584,13 +3584,24 @@ device list.
     shipped trait (§2.4 / §9). `NodeId` is a self-describing packed token
     (first cluster + dir flag + size), so there is no in-memory inode
     table.
-  - Tests: 15 host-side unit tests against a hand-built, allocation-free
+  - **Long file names (VFAT) are reconstructed** (read-only): each entry
+    exposes a single UTF-8 name — its long name when a valid long-name
+    set (contiguous sequence, `0x40` last-logical fragment, matching
+    short-name checksum) precedes the 8.3 entry, otherwise the short
+    name. UTF-16LE units (incl. surrogate pairs) are decoded with a
+    first-party `decode_utf16le`; any malformed set (unpaired surrogate,
+    invalid scalar, checksum mismatch) falls back to the short name
+    rather than surfacing a partial name. No new dependency, no `unsafe`,
+    no `unwrap`/`panic`.
+  - Tests: 25 host-side unit tests against a hand-built, allocation-free
     in-memory FAT32 image + mock `Block` (open/validation incl.
     bad-signature & non-FAT32 rejection, ordered listing, case-
     insensitive lookup, subdirectory traversal, cross-cluster and
     boundary-straddling reads, offset/EOF, `Unsupported`/`BufferTooSmall`
-    paths, `register` cap-gate), plus 5 new `lib/abi` tests for the read
-    trait. Full `cargo xtask ci` green.
+    paths, `register` cap-gate; plus LFN listing/lookup, the short name
+    superseded by its long name, checksum-mismatch fall-back, and the
+    `decode_utf16le`/`short_name_checksum` units), plus 5 `lib/abi` tests
+    for the read trait. Full `cargo xtask ci` green.
   - Docs: `docs/src/filesystem/fat32.md` (+ SUMMARY link), the
     `FilesystemRead` section in `docs/src/abi/driver_traits.md`, the
     filesystem overview note, and `drivers/filesystem/fat32/README.md`.
@@ -3598,7 +3609,7 @@ device list.
   - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
     inode) and **`ext4`** drivers, and FAT32 **write** support behind a
     future `FilesystemWrite` trait (the symmetric versioned extension to
-    `FilesystemRead`); FAT32 long-file-name (VFAT) reconstruction.
+    `FilesystemRead`).
   - Wiring a block-backed mount into the VFS through `Vfs::mounts_mut`
     so path resolution delegates I/O to a `FilesystemRead` driver.
   - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency

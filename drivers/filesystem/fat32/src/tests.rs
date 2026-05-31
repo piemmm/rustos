@@ -27,6 +27,25 @@ const CLUSTER_HELLO: u32 = 3;
 const CLUSTER_SUB: u32 = 4;
 const CLUSTER_DEEP_FIRST: u32 = 5;
 const CLUSTER_DEEP_SECOND: u32 = 6;
+const CLUSTER_LONG: u32 = 7;
+
+/// Body of the long-named file `Greetings Café.txt`.
+const LONG_BODY: &[u8] = b"long name body\n";
+
+/// UTF-16 code units of `Greetings Café.txt` (the `é` is U+00E9), the
+/// long name carried by the `GREETI~1.TXT` short entry in `SUB/`.
+const LONG_NAME_UNITS: [u16; 18] = [
+    0x0047, 0x0072, 0x0065, 0x0065, 0x0074, 0x0069, 0x006E, 0x0067, 0x0073, 0x0020, 0x0043, 0x0061,
+    0x0066, 0x00E9, 0x002E, 0x0074, 0x0078, 0x0074,
+];
+
+/// The expected UTF-8 reconstruction of [`LONG_NAME_UNITS`].
+const LONG_NAME_UTF8: &[u8] = b"Greetings Caf\xC3\xA9.txt";
+
+/// The 8.3 short-name alias backing the long name.
+fn long_short_name() -> [u8; 11] {
+    short_name(b"GREETI~1", b"TXT")
+}
 
 fn set_le16(img: &mut [u8], offset: usize, value: u16) {
     img[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -65,6 +84,77 @@ fn write_entry(img: &mut [u8], offset: usize, name: &[u8; 11], attr: u8, cluster
 
 fn deep_byte(index: usize) -> u8 {
     u8::try_from(index % 256).expect("index % 256 fits in u8")
+}
+
+/// Write one 32-byte long-name directory entry.
+fn write_lfn_entry(
+    img: &mut [u8],
+    offset: usize,
+    order: u8,
+    checksum: u8,
+    slots: &[u16; LFN_UNITS_PER_ENTRY],
+) {
+    img[offset] = order;
+    img[offset + 11] = ATTR_LONG_NAME;
+    img[offset + 12] = 0;
+    img[offset + 13] = checksum;
+    for (k, &char_offset) in LFN_CHAR_OFFSETS.iter().enumerate() {
+        set_le16(img, offset + char_offset, slots[k]);
+    }
+}
+
+/// Write a complete long-name set (physical entries in descending
+/// sequence, the first flagged [`LFN_LAST_FLAG`]) followed by its 8.3
+/// short entry, returning the number of directory bytes consumed.
+///
+/// `checksum` is written into every fragment; passing a value other
+/// than the short-name checksum models a corrupt set so the fall-back
+/// to the 8.3 name can be tested.
+#[allow(clippy::too_many_arguments)]
+fn write_long_named_entry(
+    img: &mut [u8],
+    offset: usize,
+    units: &[u16],
+    short: &[u8; 11],
+    checksum: u8,
+    attr: u8,
+    cluster: u32,
+    size: u32,
+) -> usize {
+    let frag_count = units.len().div_ceil(LFN_UNITS_PER_ENTRY);
+    for phys in 0..frag_count {
+        let seq = frag_count - phys;
+        let mut order = u8::try_from(seq).expect("sequence fits in u8");
+        if phys == 0 {
+            order |= LFN_LAST_FLAG;
+        }
+        let base = (seq - 1) * LFN_UNITS_PER_ENTRY;
+        let mut slots = [0xFFFFu16; LFN_UNITS_PER_ENTRY];
+        for (k, slot) in slots.iter_mut().enumerate() {
+            let idx = base + k;
+            *slot = match idx.cmp(&units.len()) {
+                core::cmp::Ordering::Less => units[idx],
+                core::cmp::Ordering::Equal => 0x0000,
+                core::cmp::Ordering::Greater => 0xFFFF,
+            };
+        }
+        write_lfn_entry(img, offset + phys * DIR_ENTRY_LEN, order, checksum, &slots);
+    }
+    write_entry(
+        img,
+        offset + frag_count * DIR_ENTRY_LEN,
+        short,
+        attr,
+        cluster,
+        size,
+    );
+    (frag_count + 1) * DIR_ENTRY_LEN
+}
+
+/// Byte offset of the long-named file's first directory entry in `SUB/`
+/// (after `.`, `..`, and `DEEP.BIN`).
+fn long_entry_offset() -> usize {
+    cluster_offset(CLUSTER_SUB) + 3 * DIR_ENTRY_LEN
 }
 
 /// Construct the in-memory FAT32 image described in the module docs.
@@ -145,6 +235,23 @@ fn build_image() -> [u8; IMG_LEN] {
         CLUSTER_DEEP_FIRST,
         deep_size,
     );
+
+    // `Greetings Café.txt` (`GREETI~1.TXT`): a two-fragment long name.
+    let long_short = long_short_name();
+    let long_size = u32::try_from(LONG_BODY.len()).expect("body fits in u32");
+    write_long_named_entry(
+        &mut img,
+        sub + 3 * DIR_ENTRY_LEN,
+        &LONG_NAME_UNITS,
+        &long_short,
+        short_name_checksum(&long_short),
+        0x20,
+        CLUSTER_LONG,
+        long_size,
+    );
+    set_fat(&mut img, CLUSTER_LONG as usize, eoc);
+    let long_body = cluster_offset(CLUSTER_LONG);
+    img[long_body..long_body + LONG_BODY.len()].copy_from_slice(LONG_BODY);
 
     // DEEP.BIN contents span clusters 5 and 6.
     let first = cluster_offset(CLUSTER_DEEP_FIRST);
@@ -391,4 +498,131 @@ fn into_block_returns_the_backing_device() {
     let fs = mount();
     let block = fs.into_block();
     assert_eq!(block.geometry().expect("geo").block_count, 16);
+}
+
+#[test]
+fn long_file_name_is_reconstructed_in_listing() {
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+
+    let mut name = [0u8; 64];
+    // `.`/`..` are skipped, so index 0 is DEEP.BIN and index 1 is the
+    // long-named file.
+    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
+    assert_eq!(&name[..deep.name_len], b"DEEP.BIN");
+
+    let long = fs.read_dir(sub, 1, &mut name).expect("ok").expect("entry");
+    assert_eq!(&name[..long.name_len], LONG_NAME_UTF8);
+    assert_eq!(long.kind, NodeKind::RegularFile);
+
+    assert_eq!(fs.read_dir(sub, 2, &mut name), Ok(None));
+}
+
+#[test]
+fn lookup_resolves_a_long_file_name_case_insensitively() {
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+
+    let by_long = fs.lookup(sub, LONG_NAME_UTF8).expect("found by long name");
+    // The ASCII portion folds case; the non-ASCII `é` byte is compared
+    // verbatim.
+    let by_mixed = fs
+        .lookup(sub, b"greetings caf\xC3\xA9.TXT")
+        .expect("found case-insensitively");
+    assert_eq!(by_long, by_mixed);
+
+    let mut buf = [0u8; 32];
+    let read = fs.read_at(by_long, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..read], LONG_BODY);
+}
+
+#[test]
+fn long_name_supersedes_its_short_alias() {
+    // Each entry exposes a single name: when a valid long name is
+    // present it is the entry's name, and the internal 8.3 alias is not
+    // separately resolvable (the VFS namespace uses the long name).
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+
+    assert!(fs.lookup(sub, LONG_NAME_UTF8).is_ok());
+    assert_eq!(fs.lookup(sub, b"GREETI~1.TXT"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn corrupt_long_name_checksum_falls_back_to_short_name() {
+    let mut data = build_image();
+    // Overwrite the checksum byte (offset 13) of both long-name
+    // fragments with a value that cannot match the short name.
+    let first = long_entry_offset();
+    data[first + 13] ^= 0xFF;
+    data[first + DIR_ENTRY_LEN + 13] ^= 0xFF;
+
+    let mut fs = Fat32::open(MockBlock { data }).expect("valid volume");
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+
+    let mut name = [0u8; 64];
+    let entry = fs.read_dir(sub, 1, &mut name).expect("ok").expect("entry");
+    assert_eq!(&name[..entry.name_len], b"GREETI~1.TXT");
+
+    assert_eq!(fs.lookup(sub, LONG_NAME_UTF8), Err(DriverError::NotFound));
+}
+
+#[test]
+fn read_dir_rejects_a_buffer_too_small_for_a_long_name() {
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+
+    let mut small = [0u8; LONG_NAME_UTF8.len() - 1];
+    assert_eq!(
+        fs.read_dir(sub, 1, &mut small),
+        Err(DriverError::BufferTooSmall)
+    );
+}
+
+#[test]
+fn short_name_checksum_matches_the_specification() {
+    // The reference checksum of the 11-byte field "GREETI~1TXT".
+    let short = short_name(b"GREETI~1", b"TXT");
+    let mut expected = 0u8;
+    for &byte in &short {
+        expected = expected.rotate_right(1).wrapping_add(byte);
+    }
+    assert_eq!(short_name_checksum(&short), expected);
+}
+
+#[test]
+fn decode_utf16le_handles_a_surrogate_pair() {
+    // U+1F600 GRINNING FACE encodes as the surrogate pair D83D DE00.
+    let units = [0xD83Du16, 0xDE00];
+    let mut out = [0u8; 8];
+    let len = decode_utf16le(&units, &mut out).expect("decoded");
+    assert_eq!(&out[..len], b"\xF0\x9F\x98\x80");
+}
+
+#[test]
+fn decode_utf16le_stops_at_the_terminator() {
+    let units = [0x0041u16, 0x0042, 0x0000, 0xFFFF, 0x0043];
+    let mut out = [0u8; 8];
+    let len = decode_utf16le(&units, &mut out).expect("decoded");
+    assert_eq!(&out[..len], b"AB");
+}
+
+#[test]
+fn decode_utf16le_rejects_unpaired_surrogates() {
+    let mut out = [0u8; 8];
+    assert_eq!(decode_utf16le(&[0xD83Du16], &mut out), None);
+    assert_eq!(decode_utf16le(&[0xD83Du16, 0x0041], &mut out), None);
+    assert_eq!(decode_utf16le(&[0xDC00u16], &mut out), None);
+}
+
+#[test]
+fn decode_utf16le_rejects_an_overflowing_output() {
+    let units = [0x0041u16, 0x0042, 0x0043];
+    let mut out = [0u8; 2];
+    assert_eq!(decode_utf16le(&units, &mut out), None);
 }

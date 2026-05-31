@@ -21,12 +21,16 @@
 //!
 //! # Scope
 //!
-//! Read-only. Writing, and long-file-name (VFAT) reconstruction, are
-//! deliberately out of scope for this driver: every long-named file
-//! also carries an 8.3 short-name directory entry, which this driver
-//! reads, so the namespace is complete but case-folded to the short
-//! name. A future `FilesystemWrite` trait and an LFN-aware reader are
-//! tracked in `PLAN.md`.
+//! Read-only. Long file names (VFAT) are reconstructed: each entry
+//! exposes a single name — its long name when a valid, checksum-
+//! matching long-name set precedes the 8.3 short entry, and otherwise
+//! the short name (so a volume written without long names is still
+//! fully readable). When a long name is present the internal 8.3 alias
+//! is *not* separately resolvable; the long name is the entry's name.
+//! Names are returned as UTF-8 — UTF-16LE long names are decoded, and
+//! the driver falls back to the short name on any malformed set rather
+//! than surfacing a partial name. Writing is out of scope; a future
+//! `FilesystemWrite` trait is tracked in `PLAN.md`.
 //!
 //! # Capabilities
 //!
@@ -92,8 +96,40 @@ const FAT32_EOC: u32 = 0x0FFF_FFF8;
 /// The single "bad cluster" sentinel.
 const FAT32_BAD: u32 = 0x0FFF_FFF7;
 
-/// Longest 8.3 short name: 8 base + `.` + 3 extension.
-const MAX_SHORT_NAME: usize = 12;
+/// Maximum number of UTF-16 code units in a long file name, frozen by
+/// the VFAT specification.
+const MAX_LONG_NAME_UNITS: usize = 255;
+
+/// Number of UTF-16 code-unit slots a single long-name entry carries
+/// (5 + 6 + 2).
+const LFN_UNITS_PER_ENTRY: usize = 13;
+
+/// Maximum number of long-name entries in a single set. A 255-unit name
+/// needs 20 entries (the last is partially filled); a higher sequence
+/// number is malformed.
+const LFN_MAX_FRAGMENTS: usize = 20;
+
+/// Number of UTF-16 code-unit slots reserved while reassembling a set,
+/// covering the partially-filled final fragment.
+const LFN_BUFFER_UNITS: usize = LFN_MAX_FRAGMENTS * LFN_UNITS_PER_ENTRY;
+
+/// Maximum number of UTF-8 bytes a reconstructed long name can occupy:
+/// every code unit decodes to at most 3 UTF-8 bytes (a surrogate pair
+/// spends two units on a single 4-byte sequence, which is fewer bytes
+/// per unit, so this bound holds).
+const MAX_NAME_BYTES: usize = MAX_LONG_NAME_UNITS * 3;
+
+/// `order` byte bit marking the last logical (first physical) long-name
+/// entry of a set.
+const LFN_LAST_FLAG: u8 = 0x40;
+
+/// Mask isolating the 1-based sequence number from a long-name `order`
+/// byte.
+const LFN_SEQUENCE_MASK: u8 = 0x1F;
+
+/// Byte offsets within a long-name entry holding UTF-16 code units.
+const LFN_CHAR_OFFSETS: [usize; LFN_UNITS_PER_ENTRY] =
+    [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
 /// `NodeId` bit carrying the directory flag (cluster numbers are 28-bit,
 /// so bit 28 is free).
@@ -164,9 +200,11 @@ struct Layout {
     root_cluster: u32,
 }
 
-/// A single decoded short-name directory entry.
+/// A single decoded directory entry. `name` holds the file name as
+/// UTF-8 bytes — the reconstructed long name when one is present and
+/// valid, otherwise the 8.3 short name.
 struct ParsedEntry {
-    name: [u8; MAX_SHORT_NAME],
+    name: [u8; MAX_NAME_BYTES],
     name_len: usize,
     cluster: u32,
     size: u32,
@@ -214,7 +252,7 @@ fn trimmed_len(field: &[u8]) -> usize {
 
 /// Decode a 32-byte short-name directory entry.
 fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
-    let mut name = [0u8; MAX_SHORT_NAME];
+    let mut name = [0u8; MAX_NAME_BYTES];
     let mut len = 0;
 
     let base_len = trimmed_len(&raw[0..8]);
@@ -245,6 +283,151 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
         cluster,
         size: le32(raw, 28),
         is_dir: raw[11] & ATTR_DIRECTORY != 0,
+    }
+}
+
+/// VFAT short-name checksum binding a long-name set to its 8.3 entry.
+///
+/// Computed over the raw 11-byte on-disk short-name field (base +
+/// extension, space-padded), exactly as the bytes are stored — the
+/// `0x05` Kanji-lead substitution is *not* undone here, because the
+/// generating implementation checksums the stored bytes.
+fn short_name_checksum(short: &[u8; 11]) -> u8 {
+    let mut sum = 0u8;
+    for &byte in short {
+        sum = sum.rotate_right(1).wrapping_add(byte);
+    }
+    sum
+}
+
+/// Decode UTF-16LE code `units` into UTF-8 `out`, stopping at the first
+/// `0x0000` terminator.
+///
+/// Returns the number of bytes written, or `None` if the units contain
+/// an unpaired surrogate, an invalid scalar value, or would overflow
+/// `out` (callers fall back to the 8.3 short name on `None`).
+fn decode_utf16le(units: &[u16], out: &mut [u8]) -> Option<usize> {
+    const HIGH_SURROGATES: core::ops::RangeInclusive<u16> = 0xD800..=0xDBFF;
+    const LOW_SURROGATES: core::ops::RangeInclusive<u16> = 0xDC00..=0xDFFF;
+    const SURROGATE_BASE: u32 = 0x1_0000;
+
+    let mut written: usize = 0;
+    let mut index: usize = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if unit == 0 {
+            break;
+        }
+        let scalar = if HIGH_SURROGATES.contains(&unit) {
+            index += 1;
+            let low = *units.get(index)?;
+            if !LOW_SURROGATES.contains(&low) {
+                return None;
+            }
+            SURROGATE_BASE
+                + ((u32::from(unit - *HIGH_SURROGATES.start()) << 10)
+                    | u32::from(low - *LOW_SURROGATES.start()))
+        } else if LOW_SURROGATES.contains(&unit) {
+            return None;
+        } else {
+            u32::from(unit)
+        };
+        let decoded = char::from_u32(scalar)?;
+        let mut scratch = [0u8; 4];
+        let encoded = decoded.encode_utf8(&mut scratch);
+        let end = written.checked_add(encoded.len())?;
+        if end > out.len() {
+            return None;
+        }
+        out[written..end].copy_from_slice(encoded.as_bytes());
+        written = end;
+        index += 1;
+    }
+    Some(written)
+}
+
+/// Reassembles a VFAT long-name set from its physical directory
+/// entries, which precede the short entry in reverse sequence order
+/// (the entry flagged [`LFN_LAST_FLAG`] appears first).
+struct LongName {
+    units: [u16; LFN_BUFFER_UNITS],
+    total_units: usize,
+    next_sequence: u8,
+    checksum: u8,
+    started: bool,
+    valid: bool,
+}
+
+impl LongName {
+    fn new() -> Self {
+        Self {
+            units: [0u16; LFN_BUFFER_UNITS],
+            total_units: 0,
+            next_sequence: 0,
+            checksum: 0,
+            started: false,
+            valid: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.started = false;
+        self.valid = false;
+        self.total_units = 0;
+        self.next_sequence = 0;
+    }
+
+    /// Absorb one long-name directory entry.
+    fn push(&mut self, raw: &[u8; DIR_ENTRY_LEN]) {
+        let order = raw[0];
+        if order == DELETED_ENTRY {
+            self.reset();
+            return;
+        }
+        let sequence = order & LFN_SEQUENCE_MASK;
+        let is_last = order & LFN_LAST_FLAG != 0;
+        if sequence == 0 || usize::from(sequence) > LFN_MAX_FRAGMENTS {
+            self.reset();
+            return;
+        }
+
+        if is_last {
+            self.units = [0u16; LFN_BUFFER_UNITS];
+            self.total_units = usize::from(sequence) * LFN_UNITS_PER_ENTRY;
+            self.checksum = raw[13];
+            self.next_sequence = sequence;
+            self.started = true;
+            self.valid = true;
+        } else if !self.started
+            || !self.valid
+            || sequence != self.next_sequence
+            || raw[13] != self.checksum
+        {
+            self.valid = false;
+            return;
+        }
+
+        let base = (usize::from(sequence) - 1) * LFN_UNITS_PER_ENTRY;
+        for (slot, &offset) in LFN_CHAR_OFFSETS.iter().enumerate() {
+            self.units[base + slot] = le16(raw, offset);
+        }
+        self.next_sequence = sequence - 1;
+    }
+
+    /// Reconstruct the name into `out` if a complete, checksum-matching
+    /// set was accumulated for the short entry `short`.
+    fn finish(&self, short: &[u8; 11], out: &mut [u8]) -> Option<usize> {
+        if !self.started || !self.valid || self.next_sequence != 0 {
+            return None;
+        }
+        if self.checksum != short_name_checksum(short) {
+            return None;
+        }
+        let len = decode_utf16le(&self.units[..self.total_units], out)?;
+        if len == 0 {
+            return None;
+        }
+        Some(len)
     }
 }
 
@@ -370,13 +553,17 @@ impl<B: Block> Fat32<B> {
         Ok(classify_chain(u32::from_le_bytes(raw)))
     }
 
-    /// Return the next valid short-name entry at or after `cursor`,
-    /// advancing the cursor past it. `Ok(None)` marks end-of-directory.
+    /// Return the next valid entry at or after `cursor`, advancing the
+    /// cursor past it. `Ok(None)` marks end-of-directory.
     ///
-    /// Deleted entries, long-file-name fragments, volume labels, and
-    /// the `.`/`..` self/parent links are skipped (the VFS resolves
-    /// `.`/`..` itself, `AGENTS.md` §16).
+    /// The entry's name is the reconstructed VFAT long name when a
+    /// valid, checksum-matching long-name set precedes the short entry,
+    /// and otherwise the 8.3 short name. Deleted entries, orphaned
+    /// long-name fragments, volume labels, and the `.`/`..` self/parent
+    /// links are skipped (the VFS resolves `.`/`..` itself,
+    /// `AGENTS.md` §16).
     fn next_entry(&mut self, cursor: &mut DirCursor) -> Result<Option<ParsedEntry>, DriverError> {
+        let mut long = LongName::new();
         loop {
             if cursor.cluster < 2 {
                 return Ok(None);
@@ -402,14 +589,27 @@ impl<B: Block> Fat32<B> {
             if first == END_OF_DIR {
                 return Ok(None);
             }
-            if first == DELETED_ENTRY || first == b'.' {
+            if first == DELETED_ENTRY {
+                long.reset();
                 continue;
             }
             let attr = raw[11];
-            if attr == ATTR_LONG_NAME || attr & ATTR_VOLUME_ID != 0 {
+            if attr == ATTR_LONG_NAME {
+                long.push(&raw);
                 continue;
             }
-            return Ok(Some(parse_short_entry(&raw)));
+            if attr & ATTR_VOLUME_ID != 0 || first == b'.' {
+                long.reset();
+                continue;
+            }
+
+            let mut entry = parse_short_entry(&raw);
+            let mut short = [0u8; 11];
+            short.copy_from_slice(&raw[0..11]);
+            if let Some(long_len) = long.finish(&short, &mut entry.name) {
+                entry.name_len = long_len;
+            }
+            return Ok(Some(entry));
         }
     }
 
@@ -471,7 +671,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         if !node_is_dir(dir) {
             return Err(DriverError::Unsupported);
         }
-        if name.is_empty() || name.len() > MAX_SHORT_NAME {
+        if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(DriverError::NotFound);
         }
         let mut cursor = DirCursor {

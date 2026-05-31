@@ -24,6 +24,22 @@ versioned trait rather than a widening of the shipped one
 | `read_at`             | Walk the FAT cluster chain and copy file bytes.   |
 | `read_dir`            | Yield a directory's entries in on-disk order.     |
 
+## Long file names (VFAT)
+
+Each directory entry exposes a **single** name. When a valid long-name
+set precedes the 8.3 short entry — its sequence is contiguous, its
+`0x40` last-logical fragment is present, and its checksum matches the
+short name — the driver reconstructs that long name; otherwise it uses
+the 8.3 short name (so a volume written without long names stays fully
+readable). When a long name is present the internal 8.3 alias is *not*
+separately resolvable.
+
+Names are returned as **UTF-8**: the long name's UTF-16LE code units
+(including surrogate pairs) are decoded, and the driver falls back to
+the short name on any malformed set — an unpaired surrogate, an invalid
+scalar value, or a checksum mismatch — rather than surfacing a partial
+name.
+
 A `NodeId` is self-describing: it packs the entry's first cluster, a
 directory flag, and (for files) the size, so `node_info` needs no extra
 I/O and no in-memory inode table.
@@ -50,10 +66,6 @@ normalisation policy likewise belong to the VFS.
 
 ## Limitations
 
-- **Read-only.** Writing waits on a `FilesystemWrite` trait.
-- **No long-file-name (VFAT) reconstruction.** Every long-named file
-  also carries an 8.3 short-name entry, which the driver reads, so the
-  namespace is complete but case-folded to the short name.
-
-Both are tracked in `PLAN.md` Stage 5; the per-driver crate `README.md`
-records the same caveats next to the code.
+- **Read-only.** Writing waits on a `FilesystemWrite` trait, tracked in
+  `PLAN.md` Stage 5; the per-driver crate `README.md` records the same
+  caveat next to the code.

@@ -12,9 +12,9 @@ mutating surface.
 
 ## Supported volumes
 
-| Format | Mode      | Names                          |
-|--------|-----------|--------------------------------|
-| FAT32  | read-only | 8.3 short names, case-folded   |
+| Format | Mode      | Names                                    |
+|--------|-----------|------------------------------------------|
+| FAT32  | read-only | long names (VFAT) + 8.3 short names      |
 
 FAT type is identified by the FAT32 boot-sector shape — a zero 16-bit
 FAT size (offset 22) and a zero root-entry count (offset 17). A
@@ -27,13 +27,22 @@ decoupled: all I/O is staged one logical block at a time, so a 4096-byte
 FAT sector over a 512-byte block device (or the reverse) works without a
 special case.
 
+## Names
+
+Each directory entry exposes a single name as **UTF-8**: the
+reconstructed long name when a valid long-name set precedes the 8.3
+short entry (contiguous sequence, `0x40` last-logical fragment present,
+short-name checksum matches), and otherwise the 8.3 short name. UTF-16LE
+code units — including surrogate pairs — are decoded, and the driver
+falls back to the short name on any malformed set (unpaired surrogate,
+invalid scalar value, checksum mismatch) rather than surfacing a partial
+name. When a long name is present the internal 8.3 alias is *not*
+separately resolvable.
+
 ## Limitations
 
-- **Read-only.** Writing is out of scope until `FilesystemWrite` lands.
-- **No long-file-name (VFAT) reconstruction.** Every long-named file
-  also carries an 8.3 short-name directory entry, which the driver
-  reads, so the namespace is complete but case-folded to the short
-  name. An LFN-aware reader is tracked in `PLAN.md`.
+- **Read-only.** Writing is out of scope until `FilesystemWrite` lands
+  (tracked in `PLAN.md`).
 
 ## Security
 
@@ -61,11 +70,15 @@ allocation-free in-memory FAT32 image and exercises:
 - Case-insensitive `lookup`, including subdirectory traversal.
 - File reads across the FAT cluster chain, including a window that
   straddles a cluster boundary, plus offset/EOF behaviour.
+- Long-name (VFAT) reconstruction: multi-fragment listing and lookup,
+  the short name superseded by its long name, checksum-mismatch
+  fall-back, and the UTF-16LE→UTF-8 decoder (surrogate pairs, unpaired
+  surrogates, terminator, output overflow).
 - `Unsupported` on directory-vs-file mismatches and `BufferTooSmall`
   on an undersized name buffer.
 - The `register` capability gate.
 
-15/15 host-side tests pass. A QEMU `pjdfstest`-equivalent integration
+25/25 host-side tests pass. A QEMU `pjdfstest`-equivalent integration
 suite over `virtio_blk` is tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface
