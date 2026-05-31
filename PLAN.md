@@ -836,10 +836,37 @@ Each sub-stage delivers one architecture. They share the same checklist:
       pre-existed, so 3c's per-sub-stage checklist ("boots to init",
       "memory-isolation test passes", "timer interrupt drives
       scheduler") is now satisfied.
-- **Remaining for 3c completion (next session):** multi-hart SMP
-  bring-up (SBI `IPI` + per-hart timer/identity) and wiring the new
-  address space + context switch into the live scheduler. These are
-  scoped in `.junie/next-session-prompt.md`.
+    - [x] **Multi-hart SMP bring-up** — `kernel/arch/riscv64::smp` +
+          `smp.s` + the SBI v0.2 IPI/HSM calls in `sbi`. `smp` adds
+          `MAX_HARTS`, a `tp`-derived `current_hartid`, a set-once
+          secondary-entry callback, and `start_secondary` (SBI HSM
+          `hart_start` through the `smp.s` trampoline, which seeds each
+          hart's `tp` and a private `.bss` stack slice). `sbi` gains the
+          v0.2 `send_ipi` (sPI) and `hart_start` (HSM) calls returning a
+          typed `SbiRet`. `RiscvArch` now carries a `CpuId`↔hart-id map
+          (`new`/`with_harts`/`hartid_of`/`cpu_for_hartid`): `current_cpu`
+          reverse-maps the `tp` hart id and `send_ipi` raises a
+          supervisor software interrupt on the target hart (replacing the
+          former no-op). `preempt` stores per-hart timer intervals/CpuId,
+          adds `enable_ipi`, the set-once IPI callback, and
+          `on_software_interrupt` (clears `sip.SSIP`, runs the callback);
+          `trap` routes the supervisor-software-interrupt cause there.
+          21 new host tests (`sbi`, `smp`, `preempt`, `kernel_arch`),
+          clippy/rustdoc clean on host + `riscv64gc-unknown-none-elf`.
+          **QEMU vertical `tests/integration/ipi_smp_qemu_riscv64`**
+          (enrolled in `tools/xtask/src/commands/qemu_tests.rs`, 2 CPUs,
+          60 s) boots the `virt` board, derives the boot hart at runtime
+          (OpenSBI may boot on either hart), starts the other hart via
+          `smp::start_secondary`, and after that hart enables interrupts
+          delivers it a directed IPI through `RiscvArch::send_ipi`; PASS
+          once the secondary hart's `sip.SSIP` trap path runs the IPI
+          callback with the secondary's id — **verified green under QEMU
+          on this host**.
+- **Remaining for 3c completion (next session):** wiring the new
+  `preempt`/`smp` primitives and the `paging` address space + `context`
+  switch into the *live* `kernel/sched` scheduler (drive a real
+  `Scheduler::on_timer_tick` from the riscv64 boot pipeline and run an
+  actual task switch). Scoped in `.junie/next-session-prompt.md`.
 
 ---
 

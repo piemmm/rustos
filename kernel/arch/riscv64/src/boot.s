@@ -43,6 +43,13 @@ _start:
     j       1b
 2:
 
+    # Record the boot hartid in `tp` so `smp::current_hartid` recovers
+    # this hart's identity from a per-CPU register, exactly as the
+    # secondary stub (`smp.s`) does for every other hart. `a0` still
+    # holds the SBI-handed hartid here (the bss loop touched only
+    # `t0`/`t1`).
+    mv      tp, a0
+
     # Hand (hartid, dtb) to the Rust entry. `a0`/`a1` already hold the
     # SBI hand-off values, so they pass straight through. It does not
     # return.

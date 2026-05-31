@@ -67,4 +67,40 @@ fn diagnostic_slots_start_clear() {
     clear_for_tests();
     assert_eq!(timer_interval_ticks(), 0);
     assert_eq!(timer_cpu_id(), u32::MAX);
+    assert!(ipi_callback().is_none());
+}
+
+#[test]
+fn software_interrupt_enable_bit_and_cause_match_privileged_spec() {
+    assert_eq!(SIE_SSIE, 0x2);
+    assert_eq!(SIP_SSIP, 0x2);
+    assert_eq!(SCAUSE_SUPERVISOR_SOFTWARE, 1);
+}
+
+#[test]
+fn supervisor_software_interrupt_is_recognised() {
+    assert!(is_supervisor_software_interrupt(
+        crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_SUPERVISOR_SOFTWARE
+    ));
+    // Cause 1 without the interrupt bit is the "supervisor software"
+    // *exception* slot, not the IPI.
+    assert!(!is_supervisor_software_interrupt(
+        SCAUSE_SUPERVISOR_SOFTWARE
+    ));
+    // A timer interrupt is not a software interrupt.
+    assert!(!is_supervisor_software_interrupt(
+        crate::trap::SCAUSE_INTERRUPT_BIT | SCAUSE_SUPERVISOR_TIMER
+    ));
+}
+
+#[test]
+fn ipi_callback_round_trips() {
+    clear_for_tests();
+    assert!(ipi_callback().is_none());
+    set_ipi_callback(host_cb);
+    assert_eq!(
+        ipi_callback().map(|f| f as *const () as usize),
+        Some(host_cb as *const () as usize)
+    );
+    clear_for_tests();
 }

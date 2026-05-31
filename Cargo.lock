@@ -743,6 +743,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-ipi-smp-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-irq-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

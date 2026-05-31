@@ -287,6 +287,14 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         return;
     }
 
+    if crate::preempt::is_supervisor_software_interrupt(scause) {
+        // Supervisor software interrupt: a directed IPI raised by the
+        // SBI IPI extension. Acknowledge it (clear `sip.SSIP`) and run
+        // the installed IPI callback.
+        crate::preempt::on_software_interrupt();
+        return;
+    }
+
     if is_supervisor_external_interrupt(scause) {
         let raw = TRAP_DISPATCH_FN.load(Ordering::Acquire);
         if raw != 0 {
@@ -304,8 +312,8 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // before arming any line).
     }
 
-    // Other interrupt causes (software, timer) are not enabled in this
-    // slice; falling through resumes the interrupted context via `sret`.
+    // Any other interrupt cause is not enabled in this slice; falling
+    // through resumes the interrupted context via `sret`.
 }
 
 #[cfg(test)]

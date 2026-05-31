@@ -105,6 +105,7 @@ members = [
     "tests/integration/virtio_net_mmio_riscv64",
     "tests/integration/framebuffer_display_qemu_riscv64",
     "tests/integration/timer_preempt_qemu_riscv64",
+    "tests/integration/ipi_smp_qemu_riscv64",
     "tests/integration/fwcfg",
     "tests/integration/vesa_display_qemu_x86_64",
 ]

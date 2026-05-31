@@ -269,6 +269,29 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
     },
+    // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
+    // multi-hart SMP deliverable. It boots the `virt` board with two
+    // harts, derives the boot hart id at runtime (OpenSBI may boot on
+    // either), starts the other hart through `smp::start_secondary` (the
+    // SBI HSM `hart_start` call), waits for that hart to install its trap
+    // vector and enable supervisor software interrupts, then sends it a
+    // directed IPI through `RiscvArch::send_ipi` (the SBI IPI extension,
+    // replacing the former no-op). The test passes once the secondary
+    // hart's `sip.SSIP` trap path has run the IPI callback with the
+    // secondary hart's id — proving both hart bring-up and IPI delivery.
+    // A regression that fails to start the hart or deliver the IPI never
+    // reaches the PASS finisher, so the run times out. Two CPUs (the
+    // point of the test) and a 60-second budget.
+    QemuTest {
+        package: "rustos-test-ipi-smp-qemu-riscv64",
+        binary: "rustos-test-ipi-smp-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+    },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
     // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`
