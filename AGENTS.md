@@ -842,5 +842,181 @@ HAL (§17.2), and the headless guarantee (§17.3).
 
 ---
 
+## 19. Threat Model and Hardening
+
+RustOS's design (§4, §5, §8, §9, §16, §17, §18) already forecloses
+most of the structural attack classes that have driven CVEs in Linux
+and Windows: ambient root, setuid escalation, kernel-mode driver
+compromise, unsigned-code execution, `/proc`/`/sys`/`/etc` info
+disclosure and tampering, and unbounded DMA. This section is binding
+and addresses the attack classes those rules do **not** cover on
+their own: microarchitectural side channels, supply-chain compromise,
+exploit-mitigation defaults, audit-log tampering, and parser attacks
+on untrusted input. It is as non-negotiable as §2.
+
+### 19.1 Microarchitectural side channels
+
+- The Arch HAL surface (§17.2) is extended with a closed
+  **side-channel mitigation** trait set: kernel/user address-space
+  separation (KPTI-equivalent) where the silicon requires it,
+  speculation barriers on syscall entry/exit (e.g. IBRS/STIBP/SSBD on
+  x86_64, CSDB/SB on ARMv8, fence.i + sfence.vma sequencing on
+  riscv64), and per-arch flush-on-context-switch primitives for
+  microarchitectural buffers (MDS, L1TF, MMIO stale data).
+- Each `kernel/arch/<target>/` must implement these primitives
+  honestly for its target's known errata. A no-op implementation is
+  permitted **only** on targets where the silicon is provably not
+  vulnerable and the absence is justified in the crate's `README.md`.
+- The Arch HAL conformance suite (§17.2) gains a side-channel
+  vertical: syscall-entry barrier present, page-table-isolation
+  invariants hold, indirect-branch-predictor barrier on context
+  switch. A target that does not pass this suite cannot ship.
+- `lib/crypto` consumers that handle secrets must be tested for
+  constant-time behaviour under release optimisation
+  (`-C opt-level=3`); the test is part of the crate's required
+  unit-test set (§6, §7).
+
+### 19.2 Exploit-mitigation defaults (W^X, ASLR, CFI)
+
+- The `rxe` ABI (§9) freezes the following invariants on `abi-v1`:
+  - Every loadable segment is exactly one of `R`, `RX`, or `RW`.
+    `RWX` segments are refused at load time. JIT regions must
+    transition via an explicit, capability-gated
+    (`CAP_JIT_MAP_EXEC`) `mprotect`-equivalent that flips `RW` → `RX`
+    atomically.
+  - Every userland binary is position-independent (PIE). The kernel
+    image is KASLR-relocated per boot; the per-installation entropy
+    seed is part of the §11 installer output and is regenerated on
+    each boot from the platform RNG.
+  - Indirect calls across `extern "C"` boundaries (drivers, the
+    syscall ABI, IPC method dispatch) go through a type-tagged CFI
+    table whose tag is derived from the §9 syscall-interface hash.
+    A mismatched tag is a load-time refusal, not a runtime crash.
+- Stack canaries and shadow-stack (or SafeStack-equivalent) are
+  mandatory in the `unsafe` cores of `kernel/arch/<target>/` and any
+  `lib/*` crate with a non-trivial `unsafe` surface.
+
+### 19.3 Supply-chain integrity
+
+- **Reproducible builds.** Every image produced by `tools/mkimage`
+  (§12) must be bit-reproducible given the pinned toolchain and the
+  locked dependency tree. `cargo xtask build --reproducible` verifies
+  this on every release tag and is part of `cargo xtask ci` (§7).
+- **SBOM.** Every image embeds a CycloneDX SBOM listing every
+  workspace and external crate by version, source URL, and source
+  checksum. The SBOM is produced by `cargo xtask sbom` and is itself
+  signed by the per-installation key (§11).
+- **Source-hash pinning.** `Cargo.lock` is committed and source
+  hashes of every external crate are pinned via a `cargo deny`
+  source-allow-list. A crate whose registry tarball hash does not
+  match the pinned value fails the build. This is the cheapest
+  defence against the xz-utils class of attack.
+- **Advisory SLA.** Any RUSTSEC advisory affecting a workspace
+  dependency blocks all merges other than the bump that resolves it.
+  Advisories against `lib/crypto` dependencies have a 7-day SLA from
+  publication; all other crates have a 30-day SLA. `cargo xtask ci`
+  fails closed when the SLA is exceeded.
+- **No post-install network fetches.** Neither the kernel, drivers,
+  the installer, nor any userland system service may fetch executable
+  code (binaries, scripts, modules, container images) from the
+  network. Updates flow through the §11 update path and are signed
+  by the system update key.
+
+### 19.4 Audit-log integrity
+
+- The append-only log under `/System/Logs` (§16.2) is **hash-chained**:
+  every entry includes the cryptographic hash of the previous entry
+  and a monotonic per-CPU sequence number. Truncation requires the
+  separate `CAP_LOG_ROTATE` capability; no capability can edit an
+  existing entry.
+- The log root hash is periodically (at minimum once per minute and on
+  clean shutdown) signed by the per-installation log-attestation key
+  and persisted to a separate volume under `/System/Logs/Anchors/`.
+  A discontinuity in the chain is a security event in its own right.
+- `CAP_LOG_WRITE` is partitioned per service; a compromise of one
+  service cannot forge log entries attributed to another.
+
+### 19.5 Parser sandboxing
+
+- Every userland component that parses untrusted input — network
+  protocol decoders (`userland/net/*`), font rendering, image
+  decoders, archive extractors, media decoders, the help/document
+  viewer — runs in a **minimum-capability sandbox process**: a
+  dedicated address space holding only the capabilities required for
+  that specific parse (typically: one shared-memory IPC endpoint and
+  nothing else). No filesystem capability, no network capability, no
+  capability to spawn further processes.
+- The sandbox is the default, not an opt-in. A parser crate that
+  links into a non-sandboxed process is a defect.
+- Crashes inside a parser sandbox are contained: the caller receives
+  an error, the sandbox is replaced, and the event is logged
+  (§19.4). A parser crash must never bring down the calling service.
+
+### 19.6 Fuzzing
+
+- Every IPC endpoint (§4), every syscall (§9), every parser of
+  untrusted input (§19.5), and every public `lib/abi` decoder has a
+  `cargo-fuzz` (or equivalent in-tree harness) target.
+- `cargo xtask fuzz --quick` runs each harness for ≥ 60 s on every
+  PR and is part of `cargo xtask ci` (§7).
+- A nightly `cargo xtask fuzz --soak` runs each harness for ≥ 24 h.
+  Any crash, hang, or sanitiser report blocks the next release.
+- Crashing inputs are added to the crate's regression corpus
+  alongside a unit test (§7).
+
+### 19.7 Verified capability core
+
+- The capability-critical paths in `lib/caps`, `kernel/sec`,
+  `kernel/ipc::dispatch`, and `kernel/syscall::dispatch` carry
+  machine-checked specifications in addition to their unit and
+  property tests.
+- **Bronze (mandatory):** every public function in these crates has a
+  `proptest`-style stateful model and runs under `cargo xtask
+  proptest` for ≥ 60 s per change.
+- **Silver (target):** a TLA+ (or equivalent) model of the capability
+  + IPC state machine is kept in sync with the code under
+  `docs/src/security/model/`. `cargo xtask ci` runs the model
+  checker on every PR that touches the modelled subsystems.
+- **Gold (aspirational, tracked in `PLAN.md`):** Verus (or
+  equivalent) contracts on the public functions of `lib/caps` and the
+  capability-check path in `kernel/sec`, discharged by
+  `cargo xtask verify`.
+- AI assistance may be used to *draft* specifications, proofs,
+  models, and fuzz harnesses, but the verifier (Verus, TLA+, the
+  fuzzer, the property checker) is the **only** oracle. An
+  AI-drafted artefact is reviewed by a human under the §2.6
+  senior-developer bar before it becomes load-bearing; drafts
+  carry a `// SPEC-DRAFT:` marker and `cargo xtask spec-review`
+  fails CI if any such marker reaches `main`.
+
+### 19.8 Hardware-enforced capabilities (Tier-2)
+
+- A CHERI-capable architecture (CHERI-RISC-V or ARM Morello) is a
+  charter-recognised Tier-2 target. It lands as
+  `kernel/arch/cheri-riscv64/` (or equivalent) under the §17.2 Arch
+  HAL, with the HAL extended to expose per-pointer hardware
+  capabilities to safe wrappers in `lib/caps`.
+- Tier-2 status means: the target is exercised by `cargo xtask ci`
+  on a best-effort basis (no merge block on transient toolchain
+  breakage), but conformance and security claims attributable to
+  CHERI are gated on the target passing the Tier-1 conformance
+  suites.
+
+### 19.9 Out of scope (explicit)
+
+The following classes are **not** addressed by the charter and
+require operational, not architectural, defences. Calling them out
+prevents false claims:
+
+- Phishing, social engineering, weak user-chosen passwords.
+- Physical attacks: cold-boot, Evil Maid, JTAG/SWD, chip decap.
+- Compromise of a holder of `CAP_USER_ADMIN` or
+  `CAP_SYSTEM_UPDATE`. The capability model bounds blast radius; it
+  cannot prevent abuse by a legitimate holder.
+- Bugs in `rustc` / LLVM / the wasm host. §2.12's "roll your own"
+  does not extend to the compiler.
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.
