@@ -26,9 +26,10 @@
 //!
 //! Both decoders fail conservative: any value that is not an encoding
 //! the vendor has actually published is treated as
-//! [`CoreClass::Performance`], the safe homogeneous default the Arch HAL
-//! mandates for [`rustos_arch_api::SchedulerArch::core_class`]. They
-//! never guess a class from family/model heuristics or frequency tables.
+//! [`rustos_arch_api::CoreClass::Performance`], the safe homogeneous
+//! default the Arch HAL mandates for
+//! [`rustos_arch_api::SchedulerArch::core_class`]. They never guess a
+//! class from family/model heuristics or frequency tables.
 
 use rustos_arch_api::CoreClass;
 
@@ -123,7 +124,7 @@ pub const fn is_amd_vendor(ebx: u32, edx: u32, ecx: u32) -> bool {
 /// advertises both a heterogeneous topology (`EAX[30]`) and an available
 /// efficiency ranking (`EAX[29]`). When all three hold, the core is an
 /// [`CoreClass::Efficiency`] core iff its power/efficiency ranking
-/// (`EBX[23:16]`) is the lowest tier ([`EFFICIENCY_RANKING`]).
+/// (`EBX[23:16]`) is the lowest tier (`EFFICIENCY_RANKING`).
 ///
 /// Every other case — a non-Core level, a part that does not advertise a
 /// heterogeneous topology, a part without an available ranking, or any

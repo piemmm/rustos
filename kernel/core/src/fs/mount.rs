@@ -1,0 +1,226 @@
+//! The mount table and its per-mount permission policy (`AGENTS.md`
+//! §5.3, §16.2, §16.3).
+//!
+//! A mount associates a subtree (identified by its mount-point [`Path`])
+//! with a set of [`MountFlags`] (`ro`, `nosuid`, `nodev`, `noexec`) and,
+//! optionally, the [`DriverHandle`] of the filesystem driver backing it.
+//! The VFS consults the table on every write to decide whether the most
+//! specific mount covering a path forbids it (e.g. `/System` is mounted
+//! read-only; its `/System/Logs` and `/System/Settings` children are
+//! writable child mounts — `AGENTS.md` §16.2).
+//!
+//! "Most specific" is the longest mount-point [`Path`] that is a prefix of
+//! the queried path. The root mount (`/`) covers everything, so resolution
+//! always succeeds.
+
+use alloc::vec::Vec;
+
+use rustos_abi::driver::filesystem::MountFlags;
+use rustos_abi::driver::DriverHandle;
+
+use super::path::Path;
+use super::VfsError;
+
+/// One entry in the [`MountTable`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountPoint {
+    path: Path,
+    flags: MountFlags,
+    backing: Option<DriverHandle>,
+}
+
+impl MountPoint {
+    /// The mount-point path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The mount's permission flags.
+    #[must_use]
+    pub fn flags(&self) -> MountFlags {
+        self.flags
+    }
+
+    /// The backing filesystem driver handle, if any. The root mount and
+    /// the in-RAM default layout have no backing driver.
+    #[must_use]
+    pub fn backing(&self) -> Option<DriverHandle> {
+        self.backing
+    }
+
+    /// `true` if this mount is read-only.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.flags.contains(MountFlags::READ_ONLY)
+    }
+}
+
+/// The system mount table.
+///
+/// Always contains a root mount at `/`; [`MountTable::resolve`] therefore
+/// never fails. Mounts are stored in insertion order and scanned linearly:
+/// the table is small (one entry per mounted volume) so an index would be
+/// bloat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountTable {
+    mounts: Vec<MountPoint>,
+}
+
+impl MountTable {
+    /// Construct a table whose only entry is a writable root mount.
+    #[must_use]
+    pub fn new(root_flags: MountFlags) -> Self {
+        Self {
+            mounts: alloc::vec![MountPoint {
+                path: Path::root(),
+                flags: root_flags,
+                backing: None,
+            }],
+        }
+    }
+
+    /// Add a mount at `path` with `flags`, backed by `backing`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] if a mount already covers
+    /// exactly `path`.
+    pub fn mount(
+        &mut self,
+        path: Path,
+        flags: MountFlags,
+        backing: Option<DriverHandle>,
+    ) -> Result<(), VfsError> {
+        if self.mounts.iter().any(|m| m.path == path) {
+            return Err(VfsError::AlreadyExists);
+        }
+        self.mounts.push(MountPoint {
+            path,
+            flags,
+            backing,
+        });
+        Ok(())
+    }
+
+    /// Remove the mount at exactly `path`.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `path` is the root mount, which
+    ///   cannot be unmounted.
+    /// * [`VfsError::NotFound`] if no mount covers exactly `path`.
+    pub fn unmount(&mut self, path: &Path) -> Result<(), VfsError> {
+        if path.is_root() {
+            return Err(VfsError::InvalidPath);
+        }
+        let before = self.mounts.len();
+        self.mounts.retain(|m| &m.path != path);
+        if self.mounts.len() == before {
+            return Err(VfsError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// The most specific mount covering `path` (the longest mount-point
+    /// that is a prefix of `path`). Never fails: the root mount covers
+    /// every path.
+    #[must_use]
+    pub fn resolve(&self, path: &Path) -> &MountPoint {
+        self.mounts
+            .iter()
+            .filter(|m| m.path.is_prefix_of(path))
+            .max_by_key(|m| m.path.depth())
+            .unwrap_or(&self.mounts[0])
+    }
+
+    /// `true` if writes to `path` are forbidden by the covering mount's
+    /// read-only flag.
+    #[must_use]
+    pub fn is_read_only(&self, path: &Path) -> bool {
+        self.resolve(path).is_read_only()
+    }
+
+    /// Number of mounts (including the root mount).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.mounts.len()
+    }
+
+    /// Always `false`: the root mount is permanent.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.mounts.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(text: &str) -> Path {
+        Path::parse(text).expect("valid path")
+    }
+
+    #[test]
+    fn root_mount_covers_everything() {
+        let table = MountTable::new(MountFlags::default());
+        assert_eq!(table.resolve(&p("/anything/deep")).path(), &Path::root());
+        assert!(!table.is_read_only(&p("/anything")));
+    }
+
+    #[test]
+    fn longest_prefix_wins() {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(p("/System"), MountFlags::READ_ONLY, None)
+            .expect("mount /System");
+        table
+            .mount(p("/System/Logs"), MountFlags::NOSUID, None)
+            .expect("mount /System/Logs");
+
+        assert!(table.is_read_only(&p("/System/Drivers/x")));
+        // The writable child mount shadows the read-only parent.
+        assert!(!table.is_read_only(&p("/System/Logs/boot")));
+        assert_eq!(
+            table.resolve(&p("/System/Logs/boot")).path(),
+            &p("/System/Logs")
+        );
+    }
+
+    #[test]
+    fn duplicate_mount_is_rejected() {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(p("/Storage"), MountFlags::default(), None)
+            .expect("first");
+        assert_eq!(
+            table.mount(p("/Storage"), MountFlags::READ_ONLY, None),
+            Err(VfsError::AlreadyExists)
+        );
+    }
+
+    #[test]
+    fn unmount_root_is_refused() {
+        let mut table = MountTable::new(MountFlags::default());
+        assert_eq!(table.unmount(&Path::root()), Err(VfsError::InvalidPath));
+    }
+
+    #[test]
+    fn unmount_unknown_is_not_found() {
+        let mut table = MountTable::new(MountFlags::default());
+        assert_eq!(table.unmount(&p("/Storage/usb0")), Err(VfsError::NotFound));
+    }
+
+    #[test]
+    fn mount_then_unmount_round_trips() {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(p("/Storage/usb0"), MountFlags::NODEV, None)
+            .expect("mount");
+        assert_eq!(table.len(), 2);
+        table.unmount(&p("/Storage/usb0")).expect("unmount");
+        assert_eq!(table.len(), 1);
+        assert!(!table.is_empty());
+    }
+}

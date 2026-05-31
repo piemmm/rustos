@@ -72,6 +72,7 @@ extern crate std;
 pub mod audit;
 pub mod bootinfo;
 pub mod dispatch_slot;
+pub mod fs;
 pub mod init;
 pub mod panic;
 // The single scheduler selection point (`AGENTS.md` §17.1). Internal:
@@ -89,6 +90,10 @@ pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome,
+};
+pub use fs::{
+    Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,
+    VfsError,
 };
 pub use init::{kernel_main, InitError, Phase};
 pub use panic::{handle_panic, panic_dump, PanicContext};

@@ -63,6 +63,17 @@ impl MountFlags {
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
+
+    /// The set of flags present in either `self` or `other`.
+    ///
+    /// Both operands are already-validated [`MountFlags`], so the union
+    /// stays within [`Self::KNOWN_MASK`] and needs no re-validation. Used
+    /// to build composite mount policies such as the `nosuid,nodev,noexec`
+    /// default for `/System/Logs` (`AGENTS.md` §16.2).
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
 }
 
 /// Trait every filesystem driver implements.
@@ -137,6 +148,19 @@ mod tests {
     #[test]
     fn from_bits_rejects_unknown() {
         assert_eq!(MountFlags::from_bits(1 << 31), Err(DriverError::OutOfRange));
+    }
+
+    #[test]
+    fn union_combines_known_flags() {
+        let combined = MountFlags::NOSUID
+            .union(MountFlags::NODEV)
+            .union(MountFlags::NOEXEC);
+        assert!(combined.contains(MountFlags::NOSUID));
+        assert!(combined.contains(MountFlags::NODEV));
+        assert!(combined.contains(MountFlags::NOEXEC));
+        assert!(!combined.contains(MountFlags::READ_ONLY));
+        // The union of known flags is itself within the known mask.
+        assert_eq!(combined.bits() & !MountFlags::KNOWN_MASK.bits(), 0);
     }
 
     #[test]

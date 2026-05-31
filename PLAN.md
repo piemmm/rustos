@@ -3538,6 +3538,42 @@ device list.
 - `docs/src/filesystem/{overview,rustfs,ext4,fat32,permissions,layout}.md`
   (the new `layout.md` mirrors `AGENTS.md` §16).
 
+**Status: in progress — VFS policy layer landed.**
+- The architecture-neutral **VFS layer** is implemented in
+  `kernel/core/src/fs/` (`path`, `perm`, `mount`, `vfs`, `mod`):
+  - `path`: absolute-path parsing that rejects relative paths, empty/
+    over-long components, `.`/`..`, and NUL bytes; the `AGENTS.md` §16.1
+    reserved-name list and the four-entry root template as data.
+  - `perm`: the §5.3 permission model — POSIX mode bits **plus** ACL
+    **plus** an optional per-inode capability gate — decided by one
+    `Metadata::authorize` that fails closed and never branches on
+    `uid == 0` (§5.1).
+  - `mount`: a `MountTable` with longest-mount-prefix resolution and the
+    read-only query that backs `/System` (§16.2).
+  - `vfs`: the `Vfs` tree (`metadata`/`mkdir`/`create_file`/`read`/`write`/
+    `list`/`remove`/`set_required_cap`) enforcing the §16 layout, the
+    read-only `/System` (create/remove judged by the *parent's* mount),
+    and the §5.3 checks with per-directory search permission on traversal.
+    `Vfs::with_default_layout` lays out exactly `/System`, `/Users`,
+    `/Apps`, `/Storage` plus the writable `/System/Logs` and
+    `/System/Settings` child mounts.
+- Added `MountFlags::union` (const) to `lib/abi` to compose
+  `nosuid,nodev,noexec` mount policies without fallible re-validation.
+- Tests: 41 unit tests in `kernel/core::fs` (incl. the §16
+  layout-enforcement tests — `mkdir /etc` → `VfsError::ReservedPath`;
+  read-only `/System` with writable `Logs`/`Settings`; the §5.3
+  capability-gate test — a `CAP_AUDIT_READ`-marked file unreadable at mode
+  `0644` without the capability) + 1 new `MountFlags::union` test.
+- Docs: `docs/src/filesystem/{overview,layout,permissions}.md`
+  (linked in `SUMMARY.md`).
+- **Remaining for Stage 5** (out of scope this session, dependency-gated):
+  the block-backed `drivers/filesystem/{rustfs,ext4,fat32}` drivers and
+  their on-disk formats (need a Stage 4 block driver), the
+  `pjdfstest`-equivalent suite + `rustfs` crash-consistency tests under
+  QEMU, and the matching `rustfs`/`ext4`/`fat32` doc pages. The VFS wires a
+  block-backed mount in through `Vfs::mounts_mut` + the `Filesystem` trait
+  when those land.
+
 ---
 
 ## Stage 6 — Userland Foundations

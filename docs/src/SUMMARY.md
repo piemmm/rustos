@@ -53,6 +53,12 @@
 - [Display drivers](./drivers/display.md)
 - [Input drivers](./drivers/input.md)
 
+# Filesystem
+
+- [Overview](./filesystem/overview.md)
+- [On-disk layout enforcement](./filesystem/layout.md)
+- [Permissions](./filesystem/permissions.md)
+
 # Userland
 
 - [Networking service](./userland/net_icmp.md)
