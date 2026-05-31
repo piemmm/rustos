@@ -6,6 +6,7 @@ members = [
     "kernel/mem",
     "kernel/sched/api",
     "kernel/sched/mlfq",
+    "kernel/sched/eevdf",
     "kernel/ipc",
     "kernel/irq",
     "kernel/sec",

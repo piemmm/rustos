@@ -12,13 +12,17 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = ["scheduler-mlfq"]
+# EEVDF is the default scheduler policy (`AGENTS.md` §17.1): a fully
+# tickless Earliest-Eligible-Virtual-Deadline-First policy. The MLFQ
+# sibling stays available behind `scheduler-mlfq` (and is still tested).
+default = ["scheduler-eevdf"]
 
 # Scheduler selection (`AGENTS.md` §17.1). `kernel/core` is the single
 # selection point: exactly one `scheduler-*` feature must be active per
 # image, pulling in that one concrete `kernel/sched/<impl>` crate. The
 # `compile_error!` guards in `src/sched.rs` enforce the "exactly one"
 # rule. Adding a policy adds a sibling crate and a feature here.
+scheduler-eevdf = ["dep:rustos-kernel-sched-eevdf"]
 scheduler-mlfq = ["dep:rustos-kernel-sched-mlfq"]
 
 # `test-arch` exposes the host-only `TestArch` mock used by the
@@ -40,6 +44,7 @@ rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 # The scheduler contract (`SchedulerPolicy` + vocabulary) is always
 # present; the concrete policy is feature-selected above (§17.1).
 rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../sched/eevdf", version = "=0.0.0", optional = true }
 rustos-kernel-sched-mlfq = { path = "../sched/mlfq", version = "=0.0.0", optional = true }
 rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
@@ -50,5 +55,11 @@ rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 [dev-dependencies]
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the
 # host-only `test-arch` feature for free without ever leaking it into a
-# production build.
-rustos-kernel-core = { path = ".", version = "=0.0.0", features = ["test-arch"] }
+# production build. `default-features = false` keeps this self-link from
+# force-enabling the default `scheduler-eevdf` policy, so a build that
+# selects the MLFQ sibling with `--no-default-features --features
+# scheduler-mlfq,test-arch` is not silently turned into a forbidden
+# two-policy image by the test scaffolding (`AGENTS.md` §17.1). The
+# normal `cargo test` run still gets `scheduler-eevdf` from the package's
+# own default feature set.
+rustos-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
