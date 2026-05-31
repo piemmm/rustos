@@ -51,6 +51,30 @@ then applies the access check appropriate to the operation. All failures
 are reported as a [`VfsError`]; `VfsError::to_errno` maps them to the
 stable user/kernel `Errno` at the syscall boundary.
 
+## Driver delegation
+
+A subtree can be backed by a `drivers/filesystem/*` driver instead of the
+in-RAM arena. The mount records the driver's `DriverHandle`, and the VFS
+exposes three delegating operations that take a `&mut dyn FilesystemRead`
+the kernel host maps from that handle:
+
+| Operation   | Effect                                                  |
+| ----------- | ------------------------------------------------------- |
+| `read_via`  | Read a file under a driver-backed mount.                |
+| `list_via`  | List a directory under a driver-backed mount.           |
+| `stat_via`  | Stat a node under a driver-backed mount.                |
+
+Each walks the in-RAM tree to the mount point — authorising **search
+permission on every ancestor** — then hands the remaining path components
+to the driver through `DelegatedFs`. The driver returns *structural* I/O
+only (node kind, size, children, bytes); it makes **no** permission
+decision (`AGENTS.md` §5.4). Every delegated node inherits the mount
+point's [`Metadata`] as a uniform permission template — the natural model
+for a filesystem such as FAT that stores no per-file owner — and the §5.3
+check runs against it before each read and on every directory descended
+into. An unrecoverable driver fault, or a directory entry whose on-disk
+name is not valid UTF-8, surfaces as `VfsError::Io`.
+
 ## Path resolution
 
 A [`Path`] is absolute and normalised at parse time: relative paths, empty

@@ -14,6 +14,19 @@
 //! arena — the natural shape of the boot-time root before storage comes
 //! online.
 //!
+//! # Driver delegation (`AGENTS.md` §2.4 / §5.4)
+//!
+//! A subtree may instead be backed by a `drivers/filesystem/*` driver: the
+//! mount carries the driver's
+//! [`DriverHandle`](rustos_abi::driver::DriverHandle), and the
+//! [`Vfs::read_via`] / [`Vfs::list_via`] / [`Vfs::stat_via`] methods route
+//! resolution below the mount point to a
+//! [`rustos_abi::driver::filesystem::FilesystemRead`] driver supplied by the
+//! caller (the kernel maps the handle to the live driver). The driver
+//! returns *structural* I/O only; the VFS remains the single §5.3 policy
+//! point, authorising every traversal against the mount point's
+//! [`Metadata`] before and as it descends ([`DelegatedFs`]).
+//!
 //! # Layout enforcement (`AGENTS.md` §16)
 //!
 //! * The VFS refuses to create any reserved legacy POSIX top-level name
@@ -31,11 +44,13 @@
 //! [`perm::Metadata::authorize`]: capability gate, then ACL, then POSIX
 //! mode bits, failing closed and never branching on `uid == 0`.
 
+mod delegate;
 pub mod mount;
 pub mod path;
 pub mod perm;
 mod vfs;
 
+pub use delegate::{DelegatedFs, DelegatedInfo};
 pub use mount::{MountPoint, MountTable};
 pub use path::{
     is_reserved_top_level, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, RESERVED_TOP_LEVEL,
@@ -78,6 +93,12 @@ pub enum VfsError {
     PermissionDenied,
     /// The covering mount is read-only (`AGENTS.md` §16.2).
     ReadOnly,
+    /// A driver backing a delegated mount reported an unrecoverable
+    /// device fault, or returned a structurally invalid response (e.g. a
+    /// directory entry whose name is not valid UTF-8). The in-RAM tree
+    /// never produces this; it is reachable only through the
+    /// driver-delegation path ([`Vfs::read_via`] and friends).
+    Io,
 }
 
 impl VfsError {
@@ -86,8 +107,11 @@ impl VfsError {
     /// `abi-v1` has no dedicated code for `ENOTDIR`/`EISDIR`/`EEXIST`/
     /// `ENOTEMPTY`/`EINVAL`, so those collapse onto [`Errno::OutOfRange`];
     /// the read-only and reserved-name refusals are reported as
-    /// [`Errno::PermissionDenied`]. The precise [`VfsError`] is retained
-    /// in-kernel for logging.
+    /// [`Errno::PermissionDenied`]. `abi-v1` likewise has no dedicated
+    /// `EIO`, so [`Self::Io`] collapses onto [`Errno::NotImplemented`],
+    /// mirroring how [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
+    /// already maps. The precise [`VfsError`] is retained in-kernel for
+    /// logging.
     #[must_use]
     pub const fn to_errno(self) -> Errno {
         match self {
@@ -98,6 +122,7 @@ impl VfsError {
             | Self::IsADirectory
             | Self::AlreadyExists
             | Self::NotEmpty => Errno::OutOfRange,
+            Self::Io => Errno::NotImplemented,
         }
     }
 }
@@ -114,6 +139,7 @@ impl fmt::Display for VfsError {
             Self::NotEmpty => "directory not empty",
             Self::PermissionDenied => "permission denied",
             Self::ReadOnly => "read-only mount",
+            Self::Io => "filesystem driver i/o error",
         };
         f.write_str(message)
     }
@@ -134,6 +160,7 @@ mod tests {
         );
         assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
         assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::OutOfRange);
+        assert_eq!(VfsError::Io.to_errno(), Errno::NotImplemented);
     }
 
     #[test]
@@ -148,6 +175,7 @@ mod tests {
             VfsError::NotEmpty,
             VfsError::PermissionDenied,
             VfsError::ReadOnly,
+            VfsError::Io,
         ] {
             assert!(!alloc::format!("{e}").is_empty());
         }

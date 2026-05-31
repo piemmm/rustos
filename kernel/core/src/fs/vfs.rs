@@ -13,10 +13,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::MountFlags;
+use rustos_abi::driver::filesystem::{FilesystemRead, MountFlags};
 use rustos_abi::CapabilityId;
 use rustos_kernel_sec::{GroupId, UserId};
 
+use super::delegate::{DelegatedFs, DelegatedInfo};
 use super::mount::MountTable;
 use super::path::{is_reserved_top_level, Path, ROOT_TEMPLATE};
 use super::perm::{Access, Credentials, Metadata, Mode};
@@ -133,6 +134,108 @@ impl Vfs {
     /// driver into a subtree.
     pub fn mounts_mut(&mut self) -> &mut MountTable {
         &mut self.mounts
+    }
+
+    /// Read from a file under a driver-backed mount, delegating the I/O to
+    /// `fs` (`AGENTS.md` §2.4 / §5.4).
+    ///
+    /// The covering mount must be driver-backed (its
+    /// [`backing`](super::MountPoint::backing) is `Some`); the caller maps
+    /// that handle to the live `fs`. Resolution walks the in-RAM tree to the
+    /// mount point — authorising search permission on every ancestor — and
+    /// then delegates the remaining components to `fs`, applying the mount
+    /// point's [`Metadata`] as the permission template (see [`DelegatedFs`]).
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::IsADirectory`] if `path` names a directory.
+    /// * [`VfsError::PermissionDenied`] if a traversal or the read is
+    ///   denied.
+    /// * [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn read_via(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut dyn FilesystemRead,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path)?;
+        DelegatedFs::new(fs, template).read(cred, &remainder, offset, buf)
+    }
+
+    /// List a directory under a driver-backed mount, delegating to `fs`.
+    ///
+    /// See [`Vfs::read_via`] for the resolution and permission model. An
+    /// empty remainder (i.e. `path` is the mount point itself) lists the
+    /// driver's root directory.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
+    /// * [`VfsError::NotADirectory`] if `path` names a file.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn list_via(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut dyn FilesystemRead,
+    ) -> Result<Vec<String>, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path)?;
+        DelegatedFs::new(fs, template).list(cred, &remainder)
+    }
+
+    /// Report the structural metadata of a node under a driver-backed
+    /// mount, delegating to `fs`.
+    ///
+    /// See [`Vfs::read_via`] for the resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path` or
+    ///   the node does not exist.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::InvalidPath`], or [`VfsError::Io`].
+    pub fn stat_via(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut dyn FilesystemRead,
+    ) -> Result<DelegatedInfo, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path)?;
+        DelegatedFs::new(fs, template).stat(cred, &remainder)
+    }
+
+    /// Resolve the driver-backed mount covering `path`, returning the
+    /// permission template to apply to delegated nodes and the path
+    /// components below the mount point.
+    ///
+    /// Walking to the mount point through [`Vfs::resolve`] authorises
+    /// search permission on every ancestor directory; the mount point's own
+    /// metadata becomes the template, and search permission on the mount
+    /// point itself is enforced by the delegated walk (it is the template's
+    /// `Execute` bit).
+    fn delegate_context(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+    ) -> Result<(Metadata, Vec<String>), VfsError> {
+        let mount = self.mounts.resolve(path);
+        if mount.backing().is_none() {
+            return Err(VfsError::NotFound);
+        }
+        let mount_depth = mount.path().depth();
+        let mount_path = mount.path().clone();
+        let node = self.resolve(cred, &mount_path)?;
+        let NodeKind::Directory(_) = &node.kind else {
+            return Err(VfsError::NotADirectory);
+        };
+        let template = node.meta.clone();
+        let remainder = path.components()[mount_depth..].to_vec();
+        Ok((template, remainder))
     }
 
     /// Look up the [`Metadata`] of the inode at `path`.

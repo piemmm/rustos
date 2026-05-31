@@ -3605,13 +3605,26 @@ device list.
   - Docs: `docs/src/filesystem/fat32.md` (+ SUMMARY link), the
     `FilesystemRead` section in `docs/src/abi/driver_traits.md`, the
     filesystem overview note, and `drivers/filesystem/fat32/README.md`.
+- **VFS driver delegation landed** (read path): `kernel/core::fs` now
+  routes resolution under a driver-backed mount to a `FilesystemRead`
+  driver. A new `delegate` module exposes `DelegatedFs` (a per-call
+  adapter over a borrowed `&mut dyn FilesystemRead` — the live driver is
+  not stored in the `Clone + Eq` `Vfs`, only the mount's `DriverHandle`
+  is), and `Vfs::{read_via, list_via, stat_via}` walk the in-RAM tree to
+  the mount point (authorising search on every ancestor) then delegate the
+  remainder. The node-id ↔ VFS-inode bridge is *uniform-template*: every
+  delegated node inherits the mount point's `Metadata` for the §5.3 check
+  (FAT stores no per-file owner), and the driver makes no permission
+  decision (§5.4). A new `VfsError::Io` carries unrecoverable driver
+  faults and structurally invalid driver responses (e.g. a non-UTF-8
+  directory name). 12 host-side delegation tests + 1 errno-mapping test;
+  the `docs/src/filesystem/overview.md` "Driver delegation" section
+  documents it.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
     inode) and **`ext4`** drivers, and FAT32 **write** support behind a
     future `FilesystemWrite` trait (the symmetric versioned extension to
-    `FilesystemRead`).
-  - Wiring a block-backed mount into the VFS through `Vfs::mounts_mut`
-    so path resolution delegates I/O to a `FilesystemRead` driver.
+    `FilesystemRead`), with the symmetric VFS write-delegation methods.
   - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency
     tests under QEMU, and the `rustfs`/`ext4` doc pages.
 
