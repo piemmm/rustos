@@ -3645,12 +3645,27 @@ device list.
   - Docs updated: the `FilesystemWrite` section in
     `docs/src/abi/driver_traits.md`, the write tables/sections in
     `docs/src/filesystem/{fat32,overview}.md`, and the FAT32 `README.md`.
+- **End-to-end QEMU FAT32 vertical landed.** A new
+  `tests/integration/fat32_virtio_blk_pci_x86_64` boots the production
+  kernel, brings a real (emulated) virtio-blk-pci device online through
+  the shared virtio bring-up, then mounts a planted FAT32 image through
+  the real FAT32 driver, verifies the planted file, and creates + writes
+  + reads back a fresh file before signalling QEMU success. The on-disk
+  image is built by a new shared `tests/integration/fat32_image`
+  (`rustos-test-fat32-image`) fixture — a 1 MiB volume, two mirrored
+  FATs, one-sector clusters, accepted by `Fat32::open` — and host-tested
+  (5 tests) by round-tripping it through the real read/write driver. The
+  host harness (`cargo xtask test --qemu`) plants exactly that image; the
+  freestanding guest tail (`fat32_round_trip`, in the shared
+  `virtio_qemu_support` crate, generic over the virtio transport so the
+  riscv64 MMIO sibling can reuse it) names the same files through the
+  fixture, so both sides share one source of truth (§2.2). Docs:
+  `docs/src/filesystem/{fat32,overview}.md` + the FAT32 `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - The native **`rustfs`** (CoW, journaled, ACL + capability gates per
     inode) and **`ext4`** read/write drivers.
-  - An end-to-end QEMU vertical mounting a real FAT32 image over
-    `virtio_blk`, the `pjdfstest`-equivalent POSIX suite + `rustfs`
-    crash-consistency tests under QEMU, and the `rustfs`/`ext4` doc pages.
+  - The `pjdfstest`-equivalent POSIX suite + `rustfs` crash-consistency
+    tests under QEMU, and the `rustfs`/`ext4` doc pages.
 
 ---
 

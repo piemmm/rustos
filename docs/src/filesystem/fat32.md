@@ -74,6 +74,25 @@ cluster at a time when their entry slots are exhausted; and every FAT
 mutation is mirrored across all FAT copies. Sub-block writes are
 read-modified-written so neighbouring bytes are preserved.
 
+## End-to-end QEMU vertical
+
+`tests/integration/fat32_virtio_blk_pci_x86_64` exercises the driver
+against a **real (emulated) virtio-blk-pci device** under QEMU. It boots
+the production kernel pipeline, brings the block device online through
+the same shared bring-up the virtio-blk vertical uses, then mounts a
+planted FAT32 volume through `Fat32::open`, verifies the planted file
+reads back its known contents, and creates + writes + reads back a fresh
+file before signalling success.
+
+The on-disk image is built by the shared `rustos-test-fat32-image`
+fixture (a 1 MiB volume, two mirrored FATs, one-sector clusters). The
+host harness (`cargo xtask test --qemu`) plants exactly that image on the
+backing disk, and the freestanding guest tail names the same planted and
+to-be-written files through the fixture's constants, so the two sides
+share one source of truth (`AGENTS.md` §2.2). The device tail
+(`fat32_round_trip`) is generic over the virtio transport, so a riscv64
+MMIO sibling runs identical code.
+
 ## Permissions
 
 FAT32 stores no owner, mode, ACL, or capability gate. Those live in the

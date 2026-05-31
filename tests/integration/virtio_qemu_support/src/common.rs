@@ -26,10 +26,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::driver::net::Net;
 use rustos_abi::{CapabilityId, DriverManifest, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
+use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_network_virtio_net::VirtioNet;
 use rustos_drv_storage_virtio_blk::VirtioBlk;
 use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
@@ -302,6 +304,64 @@ pub fn virtio_blk_round_trip<Tr: Transport>(
         return Err("sector 1 round-trip mismatch");
     }
     env.log("virtio-qemu: sector 1 round-trip verified");
+    Ok(())
+}
+
+/// FAT32-over-virtio-blk device tail: open the device over `transport`,
+/// mount the planted FAT32 volume through the real
+/// [`Fat32`](rustos_drv_fs_fat32::Fat32) driver, verify the planted
+/// file reads back its known contents, then create and write a fresh
+/// file and read it back. Generic over the transport so the PCI and
+/// MMIO verticals run identical code (`AGENTS.md` §2.2).
+///
+/// The on-disk layout and the planted/written file names and contents
+/// come from the shared [`rustos_test_fat32_image`] fixture — the same
+/// source of truth the host harness plants the backing image from, so
+/// the two sides cannot drift (`AGENTS.md` §2.2).
+pub fn fat32_round_trip<Tr: Transport>(
+    env: &dyn QemuEnv,
+    transport: Tr,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    use rustos_test_fat32_image as image;
+
+    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
+    let mut fs = Fat32::open(blk).map_err(|_| "fat32 mount")?;
+    env.log("virtio-qemu: fat32 volume mounted");
+
+    let root = fs.root();
+    let planted = fs
+        .lookup(root, image::PLANTED_FILE_NAME)
+        .map_err(|_| "lookup planted file")?;
+    let mut buf = [0u8; 128];
+    let n = fs
+        .read_at(planted, 0, &mut buf)
+        .map_err(|_| "read planted file")?;
+    if &buf[..n] != image::PLANTED_FILE_CONTENT {
+        return Err("planted file contents mismatch");
+    }
+    env.log("virtio-qemu: fat32 planted file verified");
+
+    fs.create(root, image::NEW_FILE_NAME, NodeKind::RegularFile)
+        .map_err(|_| "create new file")?;
+    let written = fs
+        .write_at(root, image::NEW_FILE_NAME, 0, image::NEW_FILE_CONTENT)
+        .map_err(|_| "write new file")?;
+    if written != image::NEW_FILE_CONTENT.len() {
+        return Err("short write of new file");
+    }
+
+    let created = fs
+        .lookup(root, image::NEW_FILE_NAME)
+        .map_err(|_| "lookup new file")?;
+    let mut rb = [0u8; 128];
+    let m = fs
+        .read_at(created, 0, &mut rb)
+        .map_err(|_| "read-back new file")?;
+    if &rb[..m] != image::NEW_FILE_CONTENT {
+        return Err("new file round-trip mismatch");
+    }
+    env.log("virtio-qemu: fat32 write round-trip verified");
     Ok(())
 }
 

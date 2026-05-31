@@ -84,6 +84,12 @@ mount), and on every directory descended into. An unrecoverable driver
 fault, or a directory entry whose on-disk name is not valid UTF-8,
 surfaces as `VfsError::Io`.
 
+The whole driver-backed read **and** write path is exercised end-to-end
+under QEMU against a real (emulated) virtio-blk device: the
+`fat32_virtio_blk_pci_x86_64` vertical mounts a planted FAT32 image
+through the FAT32 driver and round-trips a read and a write (see
+[FAT32](./fat32.md)).
+
 ## Path resolution
 
 A [`Path`] is absolute and normalised at parse time: relative paths, empty

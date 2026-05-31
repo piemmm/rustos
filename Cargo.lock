@@ -753,6 +753,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-fat32-image"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-fs-fat32",
+]
+
+[[package]]
+name = "rustos-test-fat32-virtio-blk-pci-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-framebuffer-display-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -1043,6 +1063,7 @@ dependencies = [
  "rustos-drv-bus-mmio",
  "rustos-drv-bus-pci",
  "rustos-drv-bus-virtio",
+ "rustos-drv-fs-fat32",
  "rustos-drv-network-virtio-net",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
@@ -1054,6 +1075,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-net-icmp",
+ "rustos-test-fat32-image",
  "rustos-test-riscv64-boot",
  "rustos-util",
  "rustos-virtio",
@@ -1082,6 +1104,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-kernel-syscall",
  "rustos-qemu",
+ "rustos-test-fat32-image",
 ]
 
 [[package]]

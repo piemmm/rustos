@@ -41,3 +41,8 @@ rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
 rustos-qemu = { path = "../qemu", version = "=0.0.0" }
+# `test --qemu` plants the Stage 5 end-to-end FAT32 vertical's backing
+# image from the same `rustos-test-fat32-image` fixture the kernel-side
+# tail reads, so the planted layout and the guest's expectations share
+# one source of truth (`AGENTS.md` §2.2).
+rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }

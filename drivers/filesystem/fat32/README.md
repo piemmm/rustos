@@ -99,8 +99,19 @@ allocation-free in-memory FAT32 image and exercises:
   `truncate` shrink and grow, `remove` + name reuse, `mkdir` with a
   nested file, and the `Busy`/`Unsupported`/`NotFound` guards.
 
-38/38 host-side tests pass. A QEMU `pjdfstest`-equivalent integration
-suite over `virtio_blk` is tracked in `.junie/next-session-prompt.md`.
+38/38 host-side tests pass.
+
+An **end-to-end QEMU vertical** drives the driver against a real
+(emulated) virtio-blk-pci device:
+`tests/integration/fat32_virtio_blk_pci_x86_64` boots the production
+kernel, brings the block device online, mounts a planted FAT32 image
+through `Fat32::open`, verifies the planted file, and creates + writes +
+reads back a fresh file. The image is built by the shared
+`rustos-test-fat32-image` fixture and planted by `cargo xtask test
+--qemu`; the guest tail names the same files through that fixture, so
+both sides share one source of truth (`AGENTS.md` §2.2). A
+`pjdfstest`-equivalent POSIX suite is still tracked in
+`.junie/next-session-prompt.md`.
 
 ## Public surface
 

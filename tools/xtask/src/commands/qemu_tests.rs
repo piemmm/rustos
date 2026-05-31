@@ -42,6 +42,11 @@ struct QemuTest {
     /// firmware-programmed linear framebuffer in guest RAM). Used by the
     /// framebuffer-display vertical on the riscv64 `virt` board.
     ramfb: bool,
+    /// When `true`, attach a raw virtio-blk backing image holding the
+    /// shared [`rustos_test_fat32_image`] FAT32 volume (rather than the
+    /// `disk_sectors` sector-0 pattern). The kernel-side test mounts it
+    /// through the real FAT32 driver and round-trips a read and a write.
+    fat32_disk: bool,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -54,6 +59,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -69,6 +75,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -92,6 +99,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -116,6 +124,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -132,6 +141,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
@@ -163,6 +173,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -187,6 +198,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
@@ -213,6 +225,27 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: Some(2048),
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
+    },
+    // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
+    // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
+    // instead of a raw sector round-trip it mounts the planted FAT32
+    // volume through the real FAT32 driver, verifies the planted file,
+    // and creates+writes+reads-back a fresh file before `qemu_exit`.
+    // The backing image is the shared `rustos-test-fat32-image` FAT32
+    // volume (`fat32_disk`), not the sector-0 pattern, so its geometry
+    // is the image's own size. Single CPU and a 60-second budget match
+    // the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-fat32-virtio-blk-pci-x86-64",
+        binary: "rustos-test-fat32-virtio-blk-pci-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fat32_disk: true,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
     // full real virtio-net-pci round-trip on the same shared bring-up
@@ -236,6 +269,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: true,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
@@ -254,6 +288,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -276,6 +311,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
     // multi-hart SMP deliverable. It boots the `virt` board with two
@@ -299,6 +335,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
@@ -328,6 +365,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
@@ -351,6 +389,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
@@ -373,6 +412,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: Some(2048),
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
@@ -393,6 +433,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: true,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 4 first-driver vertical (display class):
     // `rustos-test-framebuffer-display-qemu-riscv64` boots the riscv64
@@ -416,6 +457,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: true,
+        fat32_disk: false,
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
     // framebuffer vertical): `rustos-test-vesa-qemu-x86-64` boots the
@@ -440,6 +482,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: true,
+        fat32_disk: false,
     },
     // Stage 3b: `rustos-test-kernel-arch-boot-aarch64` is the aarch64
     // half of the Stage-3 "boots to init" per-sub-stage deliverable. It
@@ -457,6 +500,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -475,6 +519,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
     // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
@@ -497,6 +542,7 @@ const TESTS: &[QemuTest] = &[
         disk_sectors: None,
         virtio_net: false,
         ramfb: false,
+        fat32_disk: false,
     },
 ];
 
@@ -556,6 +602,28 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
             .collect();
         rustos_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
             .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
+        spec = spec.with_virtio_blk(&image);
+    }
+
+    // Attach the shared FAT32 volume as the backing image. The bytes
+    // come from the single-source-of-truth `rustos-test-fat32-image`
+    // fixture the kernel-side tail also names, so the planted on-disk
+    // layout and the guest's expectations cannot drift (`AGENTS.md`
+    // §2.2). Only the non-zero sectors are planted; the planter
+    // zero-fills the rest, matching a freshly-formatted volume.
+    if t.fat32_disk {
+        let image = kernel.with_extension("fat32.img");
+        let bytes = rustos_test_fat32_image::build_image();
+        let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
+        let planted: Vec<(u64, &[u8])> = bytes
+            .chunks(sector_bytes)
+            .enumerate()
+            .filter(|(_, chunk)| chunk.iter().any(|&b| b != 0))
+            .map(|(lba, chunk)| (lba as u64, chunk))
+            .collect();
+        let total_sectors = rustos_test_fat32_image::TOTAL_SECTORS;
+        rustos_qemu::disk::plant_raw_disk(&image, total_sectors, &planted)
+            .map_err(|e| format!("test --qemu ({}): plant FAT32 disk: {e}", t.package))?;
         spec = spec.with_virtio_blk(&image);
     }
 
