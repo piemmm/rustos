@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-ps2-qemu-x86-64"
-description = "Stage 4 QEMU integration test: boot the rustos-kernel pipeline, load the signed PS/2 input driver through `rustos-drvhost::Host`, mint the x86_64 `PortIo8` backend, inject a deterministic i8042 scancode, drive the driver through load -> use -> unload -> reload, and signal QEMU success."
+description = "Stage 4 QEMU integration test: boot the rustos-kernel pipeline, load the signed PS/2 input driver through `rustos-drvhost::Host`, mint the x86_64 `PortIo8` backend, bind the keyboard line (ISA IRQ-1 -> GSI 1) in the production IrqTable, inject a deterministic i8042 scancode and wait on `IrqTable::try_wait_step` for the real interrupt before draining via the driver's poll, drive it through load -> use -> unload -> reload, and signal QEMU success."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,10 +20,14 @@ workspace = true
 #      (exercising the §8 load gate against the real
 #      `rustos_drv_input_ps2::register` entry point), then
 #   2. mints the x86_64 `PortIo8` backend (`rustos_arch_x86_64::pio`),
-#      injects a deterministic scancode into the i8042 output buffer via
-#      the controller's `0xD2` "write keyboard output buffer" command,
-#      and drives a real `Ps2Keyboard` through load -> use -> unload ->
-#      reload, decoding the injected press then release.
+#      binds the keyboard line (ISA IRQ-1 -> GSI 1) in the production
+#      `rustos_kernel_irq::IrqTable`, enables the i8042 keyboard-interrupt
+#      config bit, masks the legacy PIC, and unmasks GSI 1 at the
+#      IO-APIC, then injects a deterministic scancode via the controller's
+#      `0xD2` "write keyboard output buffer" command, waits on
+#      `IrqTable::try_wait_step` for the real interrupt, and drives a real
+#      `Ps2Keyboard` through load -> use -> unload -> reload, decoding the
+#      injected press then release.
 #
 # Anything other than the exact decoded events flips QEMU's
 # `isa-debug-exit` device to failure; success is signalled only when
@@ -48,4 +52,6 @@ rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 rustos-drv-input-ps2 = { path = "../../../drivers/input/ps2", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

@@ -16,9 +16,29 @@ must preserve. Read it together with the rustdoc on `kernel/sched`'s
 public items, and with [`AGENTS.md`](../../../AGENTS.md) §4 ("SMP from
 day one") and §2 ("Non-negotiable rules").
 
-## Algorithm
+## Scheduler policies
 
-The scheduler is a **Multi-Level Feedback Queue (MLFQ)** with periodic
+The dispatch *policy* is pluggable (`AGENTS.md` §17.1). Two concrete
+policies ship today, each in its own `kernel/sched/<impl>` crate, and
+both implement the same [`SchedulerPolicy`] contract so the rest of the
+kernel is agnostic to which one an image links:
+
+* **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — the
+  **default**. A fully *tickless* Earliest-Eligible-Virtual-Deadline-First
+  policy (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)).
+* **MLFQ** (`kernel/sched/mlfq`, feature `scheduler-mlfq`) — a
+  Multi-Level Feedback Queue with periodic priority boosting (see
+  [MLFQ policy](#mlfq-policy-scheduler-mlfq)).
+
+`kernel/core` is the single build-time selection point and enforces that
+**exactly one** `scheduler-*` feature is active per image. Everything
+below the two policy sections — the IPI hook, the timer entry point, the
+current-task slot, and the invariants — is shared by both policies
+because it lives in the contract, not the policy.
+
+## MLFQ policy (`scheduler-mlfq`)
+
+This policy is a **Multi-Level Feedback Queue (MLFQ)** with periodic
 priority boosting, dispatched via **per-CPU work-stealing queues**. The
 policy is the classical MLFQ as described in:
 
@@ -83,7 +103,57 @@ entry point — the queue is a single-end FIFO consumer, so MLFQ
 fairness within a band is preserved. Push is wait-free; consume
 is lock-free with a bounded retry loop on `Steal::Retry`.
 
-### IPI-based preemption hook
+## EEVDF policy (`scheduler-eevdf`, default)
+
+The default policy is **EEVDF — Earliest Eligible Virtual Deadline
+First** (Stoica & Abdel-Wahab, 1995; the same family Linux adopted for
+its fair scheduler in 6.6). It is dispatched via the same per-CPU
+work-stealing structure as MLFQ, but orders tasks by a continuous
+*virtual deadline* instead of discrete priority bands.
+
+### Virtual time, weight, eligibility, deadline
+
+Each CPU keeps its own fixed-point **virtual time** `V`. Each task has a
+**weight** derived from its [`Priority`] band (`High`:`Normal`:`Low` =
+`4`:`2`:`1`) and two virtual-time markers:
+
+* an **eligible time** `ve` — the task may run only once `V >= ve`;
+* a **deadline** `vd = ve + request / weight`, where `request` is one
+  dispatch's worth of service.
+
+Admission (spawn / unpark / migration) sets `ve = V` (zero initial lag)
+and `vd = ve + request/weight`. On each dispatch the CPU runs the
+**eligible** task with the **earliest** `vd` (ties broken by `TaskId`
+for determinism); the task's fulfilled request then rolls `ve` forward
+to its old `vd` and computes the next `vd`. `V` advances by
+`service / total_weight` of the tasks competing on that CPU, so a task
+accrues virtual time inversely to its weight and receives a CPU share
+proportional to it. No task is ever starved: every eligible task has a
+finite, monotonically increasing deadline.
+
+### Fully tickless
+
+Fairness, eligibility, and preemption are driven **entirely by virtual
+time advanced as work is dispatched** — never by a periodic timer tick.
+`Scheduler::on_timer_tick` is a pure observation counter for this
+policy; no scheduling decision reads it. This is what makes the policy
+tickless: a real arch port can run its timer in one-shot / `NO_HZ` mode,
+arming it only for the next virtual deadline rather than at a fixed
+frequency. The `tickless_weight_proportional_fairness` unit test proves
+fairness holds while `ticks_now()` never moves and `on_timer_tick` is
+never called.
+
+### Per-CPU queues + work-stealing
+
+Each CPU owns one virtual-time `RunQueue` with its own clock. An idle
+CPU steals the earliest-deadline task from a pseudo-randomly selected
+victim and **rebases** the migrated task's `ve`/`vd` onto the stealing
+CPU's clock (the EEVDF migration rule — a task carries no lag across
+CPUs). The earliest-eligible-deadline scan is `O(n)` in the per-CPU
+ready count; a future tree-backed index can replace it behind the
+`RunQueue` boundary without changing the policy.
+
+## IPI-based preemption hook
 
 The scheduler never sleeps or busy-waits on its own. It signals
 "there's work for you" to a CPU through
@@ -99,7 +169,7 @@ immediately, schedules a deferred reschedule, or — on
 on the IPI; correctness only requires that the target CPU eventually
 calls [`step`].
 
-### Timer-driven preemption entry point
+## Timer-driven preemption entry point
 
 The inverse direction — *arch driving the scheduler* on every timer
 tick — is `Scheduler::on_timer_tick(cpu)`. The arch port's timer ISR
@@ -109,8 +179,13 @@ calls this once per fire, *after* it has acknowledged the device-
 level interrupt source (EOI on the LAPIC, etc.). The scheduler
 itself never reaches for a timer register; the arch port owns that.
 
-`on_timer_tick` increments the per-CPU preemption counter and
-returns; it does **not** call `Scheduler::step`. The counter is
+Under the default tickless EEVDF policy a periodic tick is **not
+required** for correctness (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default));
+the entry point exists so a port that does run a periodic timer can
+record that it fired. Under MLFQ the same tick also bounds the priority
+boost interval. In both policies `on_timer_tick` increments the per-CPU
+preemption counter and returns; it does **not** call `Scheduler::step`.
+The counter is
 observable from `Scheduler::preemption_count(cpu)` and
 `Scheduler::total_preemption_count()`. These exist so integration
 tests can assert that preemption is actually firing — a silent
@@ -260,13 +335,20 @@ one policy crate per implementation:
   `SchedError`, `StepOutcome`, `SchedulerConfig`), the re-exported
   Arch HAL surface (`CpuId`, `SchedulerArch`), the host `TestArch`
   double, and the shared `conformance` suite.
+* `kernel/sched/eevdf` (`rustos-kernel-sched-eevdf`) — the EEVDF policy
+  described above, implementing `SchedulerPolicy`. This is the default.
 * `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`) — the MLFQ policy
-  described above, implementing `SchedulerPolicy`. Adding another
-  policy means adding a sibling crate, never editing this one.
-* `kernel/core` is the single build-time selection point: the
-  `scheduler-mlfq` feature (default) selects exactly one concrete
-  policy and re-exports it as `crate::sched::Scheduler`. No other
-  crate names a concrete policy — they depend on `kernel/sched/api`.
+  described above, implementing `SchedulerPolicy`. The two are siblings
+  (`AGENTS.md` §2.2 carve-out — parallel policies are deliberate, not
+  duplication); adding another policy means adding a sibling crate,
+  never editing an existing one.
+* `kernel/core` is the single build-time selection point: exactly one
+  `scheduler-*` feature is active per image (`scheduler-eevdf` by
+  default, `scheduler-mlfq` with `--no-default-features --features
+  scheduler-mlfq`). It re-exports the chosen policy as
+  `crate::sched::Scheduler`; `compile_error!` guards reject the
+  zero-policy and two-policy configurations. No other crate names a
+  concrete policy — they depend on `kernel/sched/api`.
 
 ## Test surface
 
@@ -275,11 +357,18 @@ The scheduler's behaviour is covered by:
 * The shared conformance suite `kernel/sched/api/src/conformance.rs`
   (`AGENTS.md` §17.1): generic over `SchedulerPolicy`, it asserts
   correct spawn/dispatch/block/wake and yield semantics, starvation-
-  freedom via the priority boost, fairness across bands, and a
-  deadlock-free, lossless, bounded-latency stress of 10 000 tasks
-  across 4 simulated cores. `kernel/sched/api/tests/conformance.rs`
-  runs it against the in-tree policy; every concrete policy must pass
-  it.
+  freedom, fairness across bands, and a deadlock-free, lossless,
+  bounded-latency stress of 10 000 tasks across 4 simulated cores.
+  Every concrete policy must pass it.
+* `kernel/sched/api/tests/conformance.rs` runs the suite against the
+  in-tree MLFQ policy; `kernel/sched/eevdf/tests/conformance.rs` runs
+  the identical suite against EEVDF — proving the two policies are
+  interchangeable behind the contract.
+* `kernel/sched/eevdf/src/scheduler.rs` `#[cfg(test)] mod tests` —
+  EEVDF-specific coverage: tickless weight-proportional fairness
+  (asserting no tick is ever used), even sharing of equal-weight tasks,
+  work-stealing, park/unpark, the current-task slot, and that
+  `on_timer_tick` is observation-only.
 * `kernel/sched/mlfq/tests/scheduler.rs` — MLFQ-specific integration
   tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
   preemption, cancellation safety, error surface).

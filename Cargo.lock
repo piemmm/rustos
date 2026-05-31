@@ -582,6 +582,7 @@ dependencies = [
  "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sched-api",
+ "rustos-kernel-sched-eevdf",
  "rustos-kernel-sched-mlfq",
  "rustos-kernel-sec",
  "rustos-kernel-syscall",
@@ -632,6 +633,16 @@ dependencies = [
  "rustos-arch-api",
  "rustos-kernel-sched-api",
  "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-kernel-sched-eevdf"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-eevdf",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -854,6 +865,8 @@ dependencies = [
  "rustos-drvhost",
  "rustos-itest-harness",
  "rustos-kernel",
+ "rustos-kernel-irq",
+ "rustos-kernel-sec",
  "rustos-log",
 ]
 

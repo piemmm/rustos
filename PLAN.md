@@ -3811,9 +3811,8 @@ a list collapses that list. No *new* violation may be added.
   in-tree policy). The MLFQ policy moved to the sibling crate
   `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`), which implements
   `SchedulerPolicy`. `kernel/core` is the single build-time selection
-  point: the default `scheduler-mlfq` feature selects the one concrete
-  policy and `src/sched.rs` `compile_error!`-guards that exactly one is
-  active per image. `kernel/sync` was relocated to `lib/sync` (renamed
+  point and `src/sched.rs` `compile_error!`-guards that exactly one
+  `scheduler-*` feature is active per image. `kernel/sync` was relocated to `lib/sync` (renamed
   `rustos-sync`) so a `SchedImpl` crate may name its primitives
   (`AGENTS.md` §6 / §17.4); §3/§4 updated to match. Grandfather edges
   removed: `kernel/sched → kernel/sync`, `riscv64 → kernel/sync`, and
@@ -3901,6 +3900,25 @@ a list collapses that list. No *new* violation may be added.
   closed if it returns. `deps-check` and `cfg-check` are clean. Docs
   updated: `docs/src/drivers/{bus,virtio}.md` and
   `docs/src/abi/driver_traits.md`.
+- Second scheduler policy: fully tickless EEVDF, now the default
+  (§17.1) — *done*. Added the sibling `SchedImpl` crate
+  `kernel/sched/eevdf` (`rustos-kernel-sched-eevdf`) implementing
+  `SchedulerPolicy`: an Earliest-Eligible-Virtual-Deadline-First policy
+  whose fairness, eligibility, and preemption are driven entirely by
+  per-dispatch virtual-time advance — never by a periodic tick
+  (`on_timer_tick` is observation-only). It reuses the same per-CPU
+  run-queue + work-stealing shape as the MLFQ sibling but is a *parallel*
+  implementation (`AGENTS.md` §2.2 carve-out), not a `cfg` fork, with its
+  own `RunQueue` (virtual-time-ordered, weight 4:2:1 by `Priority`). It
+  passes the shared conformance suite via
+  `kernel/sched/eevdf/tests/conformance.rs`. `kernel/core` now defaults
+  to `scheduler-eevdf`; `scheduler-mlfq` stays selectable
+  (`--no-default-features --features scheduler-mlfq`) and `src/sched.rs`
+  gained "no policy" and "more-than-one policy" `compile_error!` guards.
+  The MLFQ policy is retained and still exercised (its own tests + the
+  api-crate conformance test). `deps-check`/`cfg-check` clean (the new
+  crate classifies as `SchedImpl`); docs in
+  `docs/src/architecture/scheduler.md`.
 
 ---
 
