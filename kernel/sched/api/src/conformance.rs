@@ -25,7 +25,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::TestArch;
+use crate::arch::{CoreClass, TestArch};
 use crate::config::SchedulerConfig;
 use crate::outcome::StepOutcome;
 use crate::policy::SchedulerPolicy;
@@ -44,6 +44,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     no_starvation_under_priority_boost::<S>();
     fairness_no_band_is_starved::<S>();
     smp_stress_four_cores::<S>();
+    heterogeneous_topology_preserves_liveness::<S>();
 }
 
 /// Build a policy with `cpus` cores and the given per-band capacity.
@@ -291,5 +292,81 @@ fn smp_stress_four_cores<S: SchedulerPolicy<TestArch>>() {
     assert!(
         worst <= MAX_FIRST_RUN_LATENCY_STEPS,
         "worst-case first-run latency {worst} exceeds bound {MAX_FIRST_RUN_LATENCY_STEPS}"
+    );
+}
+
+/// On an asymmetric machine (performance + efficiency cores) a mixed
+/// population of interactive and background tasks must still be dispatched
+/// to completion with no loss and no deadlock.
+///
+/// Heterogeneous placement steers `Low` work onto efficiency cores and
+/// interactive work onto performance cores ([`crate::CoreClass`]); this
+/// asserts the universal property every policy must keep regardless of how
+/// it places work — the steering must never strand a task on a class with
+/// no runnable CPU, double-count it, or wedge the dispatch loop. Exact
+/// placement is policy-internal (and not publicly observable under
+/// work-stealing), so each policy's own unit tests cover *where* tasks
+/// land; this guards *liveness* across both.
+fn heterogeneous_topology_preserves_liveness<S: SchedulerPolicy<TestArch>>() {
+    const TASKS: u64 = 400;
+    const CPUS: u32 = 4;
+
+    let arch = Arc::new(TestArch::new(CPUS).expect("arch"));
+    // CPUs 0/1 performance, CPUs 2/3 efficiency.
+    arch.set_core_class(2, CoreClass::Efficiency);
+    arch.set_core_class(3, CoreClass::Efficiency);
+    let cfg = SchedulerConfig {
+        cpus: CPUS,
+        queue_capacity_per_band: 1024,
+        yields_before_demotion: 2,
+        boost_interval_ticks: 32,
+    };
+    let sched = S::new(cfg, arch.clone()).expect("sched");
+
+    let executions = Arc::new(AtomicU64::new(0));
+    for i in 0..TASKS {
+        let exec = executions.clone();
+        // Alternate background (Low) and interactive (High) work, spread
+        // across every CPU as the spawn hint.
+        let prio = if i % 2 == 0 {
+            Priority::Low
+        } else {
+            Priority::High
+        };
+        let yielded = AtomicU64::new(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let home = (i % u64::from(CPUS)) as u32;
+        sched
+            .spawn(home, prio, move |_ctx| {
+                exec.fetch_add(1, Ordering::Relaxed);
+                // Yield once (forcing a re-placement decision), then exit.
+                if yielded.fetch_add(1, Ordering::Relaxed) == 0 {
+                    TaskAction::Yield
+                } else {
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn");
+    }
+
+    let max_rounds: u64 = TASKS * 16;
+    let mut rounds = 0u64;
+    while sched.live_task_count() > 0 && rounds < max_rounds {
+        for cpu in 0..CPUS {
+            arch.set_current_cpu(cpu);
+            let _ = sched.step(cpu).expect("step");
+        }
+        arch.advance_ticks(1);
+        rounds += 1;
+    }
+    assert_eq!(
+        sched.live_task_count(),
+        0,
+        "every task completes on a heterogeneous machine (no task stranded)"
+    );
+    assert_eq!(
+        executions.load(Ordering::Relaxed),
+        TASKS * 2,
+        "each task ran exactly twice (yield + exit) — no loss, no duplication"
     );
 }

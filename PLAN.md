@@ -3919,6 +3919,34 @@ a list collapses that list. No *new* violation may be added.
   api-crate conformance test). `deps-check`/`cfg-check` clean (the new
   crate classifies as `SchedImpl`); docs in
   `docs/src/architecture/scheduler.md`.
+- Heterogeneous-CPU (performance + efficiency core) scheduling
+  (§17.1 / §17.2) — *done*. The Arch HAL gained a `CoreClass`
+  (`Performance` / `Efficiency`) and a **provided** method
+  `SchedulerArch::core_class(cpu) -> CoreClass` defaulting to
+  `Performance`, so all ten existing `SchedulerArch` implementors (and
+  the homogeneous-machine path) are unchanged and no interface creep is
+  introduced (`AGENTS.md` §2.4 — the class is static per-CPU identity,
+  the same category as `current_cpu`, not dynamic power management).
+  Both policies (`kernel/sched/{mlfq,eevdf}`) snapshot the per-CPU
+  classes at construction and steer placement by priority band —
+  `High`/`Normal` → performance core, `Low` (idle/background) →
+  efficiency core — in `spawn`, `unpark`, and the dispatch re-enqueue
+  path; on a homogeneous machine every such decision resolves to the
+  caller's home (strict no-op). Under MLFQ the existing boost/demote
+  machinery thereby promotes a busy background task **up** to a
+  performance core and demotes it back **down** to an efficiency core
+  for free; EEVDF carries competing weight across a class migration
+  (the work-stealing rebase). The x86_64 port detects real Intel hybrid
+  topology from CPUID **leaf 0x1A** (`kernel/arch/x86_64::hybrid`,
+  host-tested decoder) into a per-CPU class table on `X86_64Arch`
+  (boot CPU in `new`, APs via `record_core_class`). Host `TestArch`
+  gained `set_core_class`. Tests: new arch-api/`hybrid`/`X86_64Arch`
+  unit tests, per-policy placement + promote/demote unit tests, and a
+  shared conformance test `heterogeneous_topology_preserves_liveness`
+  (mixed High/Low population completes with no loss across both
+  policies). Docs: new "Heterogeneous CPUs" section in
+  `docs/src/architecture/scheduler.md`. clippy `-D warnings`,
+  host + `x86_64-unknown-none` builds clean.
 
 ---
 

@@ -65,8 +65,8 @@ mod runqueue;
 // the single canonical definitions in `kernel/sched/api` (`AGENTS.md`
 // §2.2 — no duplication).
 pub use rustos_kernel_sched_api::{
-    CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy,
-    StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
+    SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]

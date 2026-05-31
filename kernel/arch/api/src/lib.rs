@@ -40,6 +40,64 @@
 /// indices into its per-CPU arrays.
 pub type CpuId = u32;
 
+/// The performance class of a logical CPU on a heterogeneous machine.
+///
+/// Modern asymmetric CPUs (Intel "hybrid" / `big.LITTLE` / `DynamIQ`)
+/// pair high-throughput **performance** cores with low-power
+/// **efficiency** cores. The class is a *static identity* property of a
+/// [`CpuId`] — like [`SchedulerArch::current_cpu`] it never changes for
+/// the lifetime of the kernel image — discovered by the architecture
+/// port during early-boot platform enumeration (`AGENTS.md` §17.2,
+/// §18.2). It is deliberately distinct from *dynamic* power management
+/// (frequency scaling, deep sleep), which is not part of this surface.
+///
+/// The scheduler uses it to place latency-insensitive background work on
+/// efficiency cores and to migrate a task to a performance core when it
+/// needs throughput (`docs/src/architecture/scheduler.md`). A homogeneous
+/// machine reports every CPU as [`CoreClass::Performance`]; the rest of
+/// the kernel then treats placement as a no-op.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+pub enum CoreClass {
+    /// A high-throughput core (Intel "Core" / ARM "big"). The default
+    /// on a homogeneous machine.
+    #[default]
+    Performance = 0,
+    /// A low-power core (Intel "Atom" / ARM "LITTLE"), preferred for
+    /// idle/background work.
+    Efficiency = 1,
+}
+
+impl CoreClass {
+    /// Returns the raw discriminant as stored in an atomic.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`Self::as_u8`]; returns `None` for unknown encodings.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Performance),
+            1 => Some(Self::Efficiency),
+            _ => None,
+        }
+    }
+
+    /// `true` for [`CoreClass::Performance`].
+    #[must_use]
+    pub const fn is_performance(self) -> bool {
+        matches!(self, Self::Performance)
+    }
+
+    /// `true` for [`CoreClass::Efficiency`].
+    #[must_use]
+    pub const fn is_efficiency(self) -> bool {
+        matches!(self, Self::Efficiency)
+    }
+}
+
 /// Architecture surface the SMP scheduler needs to drive a system.
 ///
 /// Every architecture port implements this trait; the host test
@@ -64,10 +122,14 @@ pub type CpuId = u32;
 ///   port-defined. Sending an IPI to the calling CPU is allowed and is
 ///   a no-op equivalent to setting a self-reschedule flag.
 ///
-/// The trait is deliberately tiny. Anything more elaborate (per-core
+/// The trait is deliberately tiny. *Dynamic* power management (per-core
 /// timer programming, deep sleep, frequency scaling) belongs in the
-/// arch crate itself, not in this surface. Growing the trait would
-/// constitute interface creep (`AGENTS.md` §2.4).
+/// arch crate itself, not in this surface; growing the trait with that
+/// would constitute interface creep (`AGENTS.md` §2.4). [`Self::core_class`]
+/// is admitted because it is *static* per-CPU identity — the same
+/// category as [`Self::current_cpu`] — that the architecture-neutral
+/// scheduler genuinely needs to place work, and it is a provided method
+/// so existing ports inherit the homogeneous default unchanged.
 pub trait SchedulerArch: Send + Sync {
     /// Returns the calling CPU's identifier.
     fn current_cpu(&self) -> CpuId;
@@ -81,6 +143,19 @@ pub trait SchedulerArch: Send + Sync {
     /// records the request in an in-memory ledger so host tests can
     /// assert that preemption was requested.
     fn send_ipi(&self, target: CpuId);
+
+    /// Returns the static [`CoreClass`] of `cpu`.
+    ///
+    /// The default treats every CPU as a [`CoreClass::Performance`]
+    /// core — the correct answer for a homogeneous machine and for any
+    /// port that has not yet wired heterogeneous-core discovery. A port
+    /// on asymmetric hardware (Intel hybrid, ARM `big.LITTLE`) overrides
+    /// this with the class it discovered at boot. An out-of-range `cpu`
+    /// must return [`CoreClass::Performance`] (the safe default), never
+    /// panic.
+    fn core_class(&self, _cpu: CpuId) -> CoreClass {
+        CoreClass::Performance
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +190,26 @@ mod tests {
         assert_eq!(dynamic.current_cpu(), 3);
         assert_eq!(dynamic.ticks_now(), 0);
         dynamic.send_ipi(0);
+    }
+
+    #[test]
+    fn core_class_defaults_to_performance_for_homogeneous_ports() {
+        // A port that does not override `core_class` reports a
+        // homogeneous machine: every CPU is a performance core.
+        let arch = StubArch { cpu: 0 };
+        let dynamic: &dyn SchedulerArch = &arch;
+        assert_eq!(dynamic.core_class(0), CoreClass::Performance);
+        assert_eq!(dynamic.core_class(7), CoreClass::Performance);
+    }
+
+    #[test]
+    fn core_class_round_trips_through_u8() {
+        for c in [CoreClass::Performance, CoreClass::Efficiency] {
+            assert_eq!(CoreClass::from_u8(c.as_u8()), Some(c));
+        }
+        assert_eq!(CoreClass::from_u8(2), None);
+        assert_eq!(CoreClass::default(), CoreClass::Performance);
+        assert!(CoreClass::Performance.is_performance());
+        assert!(CoreClass::Efficiency.is_efficiency());
     }
 }

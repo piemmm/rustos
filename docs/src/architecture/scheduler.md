@@ -153,6 +153,65 @@ CPUs). The earliest-eligible-deadline scan is `O(n)` in the per-CPU
 ready count; a future tree-backed index can replace it behind the
 `RunQueue` boundary without changing the policy.
 
+## Heterogeneous CPUs (performance + efficiency cores)
+
+Modern asymmetric CPUs — Intel "hybrid" parts, ARM `big.LITTLE` /
+DynamIQ — pair high-throughput **performance** cores with low-power
+**efficiency** cores. Both policies place work sensibly across such a
+machine; on a homogeneous machine every path below is a strict no-op.
+
+### Detecting the topology
+
+A logical CPU's class is a *static identity* — like its `CpuId` it never
+changes for the kernel's lifetime — so it lives in the Arch HAL as
+`SchedulerArch::core_class(cpu) -> CoreClass` (`kernel/arch/api`). The
+method is **provided**: it defaults to `CoreClass::Performance`, so a
+homogeneous machine and any port that has not wired discovery behave
+exactly as before, and the surface stays free of dynamic
+power-management concerns (frequency scaling, deep sleep) which remain
+out of the HAL (`AGENTS.md` §2.4, §17.2). The architecture port
+discovers the class during early-boot enumeration; the x86_64 port reads
+it from CPUID **leaf 0x1A** (`kernel/arch/x86_64::hybrid`), records each
+core's class as it comes online, and serves it through the override. The
+host `TestArch` lets a unit test model an asymmetric machine via
+`TestArch::set_core_class`.
+
+### Placing work by class
+
+Each scheduler snapshots the per-CPU classes at construction and keeps a
+list of the performance and efficiency CPUs. A task's preferred class
+follows its priority band:
+
+* `High` / `Normal` (interactive, throughput-sensitive) → a
+  **performance** core;
+* `Low` (background / idle) → an **efficiency** core.
+
+`spawn`, `unpark`, and the dispatch re-enqueue path route a task to a CPU
+of its preferred class (round-robin within the class). If the task's
+current home is already of the right class it stays put — which is why
+the path is a no-op on a homogeneous machine, where the efficiency pool
+is empty and all work is `Performance`-class. EEVDF carries the task's
+competing weight with it across a class migration (the same
+no-lag-across-CPUs rebase that work-stealing uses).
+
+### Promotion and demotion
+
+Under **MLFQ** this single rule produces the promote-then-demote
+behaviour an idle-but-occasionally-busy task needs *for free*: a `Low`
+background task lives on an efficiency core; when the periodic priority
+boost lifts it to `High` to avoid starvation it migrates **up** to a
+performance core on its next turn, and when it is demoted back to `Low`
+once it settles it migrates **down** to an efficiency core again. Under
+**EEVDF** priority is static, so placement is by band; work-stealing may
+temporarily land a `Low` task on a performance core, and the task
+migrates back down to an efficiency core on its next yield.
+
+Liveness is guaranteed regardless of placement: the shared conformance
+suite's `heterogeneous_topology_preserves_liveness` test runs a mixed
+`High`/`Low` population to completion across performance and efficiency
+cores, asserting no task is stranded, lost, or duplicated. Each policy's
+own unit tests assert *where* tasks land.
+
 ## IPI-based preemption hook
 
 The scheduler never sleeps or busy-waits on its own. It signals

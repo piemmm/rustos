@@ -36,16 +36,11 @@
 //!   two pre-existing freestanding Stage-2 QEMU test bins — see the
 //!   note in `kernel/arch/x86_64/Cargo.toml`.
 
-use core::sync::atomic::AtomicU64;
-// `Ordering` is only referenced on the host path (bare-metal `ticks_now`
-// reads `RDTSC` and `send_ipi` writes LAPIC MMIO — neither uses an
-// `Ordering`). Scoping the import avoids a `dead_code`/`unused_imports`
-// warning on `target_os = "none"` without introducing a fake user.
-#[cfg(any(test, not(target_os = "none")))]
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
 
+use crate::hybrid;
 use crate::percpu::MAX_CPUS;
 
 /// Failure modes of [`X86_64Arch::new`].
@@ -119,6 +114,17 @@ pub struct X86_64Arch {
     /// Host-only stray-IPI counter for out-of-range targets.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
     host_stray_ipi: AtomicU64,
+
+    /// Static [`CoreClass`] of each CPU, indexed by dense [`CpuId`].
+    ///
+    /// Initialised to [`CoreClass::Performance`] (a homogeneous machine).
+    /// Each CPU records the class it read from CPUID as it comes online
+    /// via [`Self::record_core_class`]; the boot CPU's entry is recorded
+    /// in [`Self::new`]. The scheduler reads the table through the
+    /// [`SchedulerArch::core_class`] override so it can place background
+    /// work on efficiency cores (`AGENTS.md` §17.2 — static per-CPU
+    /// identity discovered by the arch port).
+    core_classes: [AtomicU8; MAX_CPUS],
 }
 
 impl X86_64Arch {
@@ -141,14 +147,35 @@ impl X86_64Arch {
         if recorded != boot_cpu_lapic_id {
             return Err(ArchInitError::BootCpuLapicMismatch);
         }
-        Ok(Self {
+        let this = Self {
             cpu_to_lapic,
             boot_cpu_id,
             boot_cpu_lapic_id,
             host_tick_counter: AtomicU64::new(0),
             host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
             host_stray_ipi: AtomicU64::new(0),
-        })
+            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; MAX_CPUS],
+        };
+        // `new` runs on the boot processor, so CPUID here reflects the
+        // boot core. Each application processor records its own class as
+        // it comes online (`Self::record_core_class`).
+        this.record_core_class(boot_cpu_id, hybrid::detect_current_core_class());
+        Ok(this)
+    }
+
+    /// Record the [`CoreClass`] `cpu` detected for itself.
+    ///
+    /// Each CPU calls this once as it comes online, passing the value
+    /// from [`crate::hybrid::detect_current_core_class`]. An out-of-range
+    /// `cpu` is ignored — the table is bounded to `MAX_CPUS`, so a stray
+    /// call cannot corrupt memory (`AGENTS.md` §5.4 fail-closed).
+    pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
+        if let Some(slot) = usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.core_classes.get(idx))
+        {
+            slot.store(class.as_u8(), Ordering::Relaxed);
+        }
     }
 
     /// Boot CPU's dense `CpuId`.
@@ -255,6 +282,18 @@ impl SchedulerArch for X86_64Arch {
             // monotonically non-decreasing.
             self.host_tick_counter.fetch_add(1, Ordering::Relaxed) + 1
         }
+    }
+
+    fn core_class(&self, cpu: CpuId) -> CoreClass {
+        // Out-of-range CPUs report the safe homogeneous default per the
+        // Arch HAL contract; a stored byte is always a valid encoding
+        // because `record_core_class` only writes `CoreClass::as_u8`.
+        usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.core_classes.get(idx))
+            .map_or(CoreClass::Performance, |slot| {
+                CoreClass::from_u8(slot.load(Ordering::Relaxed)).unwrap_or(CoreClass::Performance)
+            })
     }
 
     fn send_ipi(&self, target: CpuId) {
@@ -434,6 +473,24 @@ mod tests {
         arch.send_ipi(u32::MAX);
         assert_eq!(arch.host_stray_ipi_count(), 2);
         assert_eq!(arch.host_ipi_count(5), 0);
+    }
+
+    #[test]
+    fn core_class_defaults_to_performance_then_tracks_recorded_class() {
+        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        // Every CPU starts as a performance core (homogeneous default);
+        // on the host the boot-CPU detection also yields Performance.
+        assert_eq!(arch.core_class(0), CoreClass::Performance);
+        assert_eq!(arch.core_class(1), CoreClass::Performance);
+        // Recording an efficiency core is reflected by the override; the
+        // scheduler reads exactly this through `SchedulerArch`.
+        arch.record_core_class(1, CoreClass::Efficiency);
+        assert_eq!(arch.core_class(1), CoreClass::Efficiency);
+        assert_eq!(arch.core_class(0), CoreClass::Performance);
+        // Out-of-range CPUs report the safe default and do not panic.
+        assert_eq!(arch.core_class(u32::MAX), CoreClass::Performance);
+        arch.record_core_class(u32::MAX, CoreClass::Efficiency); // no-op
+        assert_eq!(arch.core_class(u32::MAX), CoreClass::Performance);
     }
 
     /// Compile-time proof that [`halt`] has the `-> !` signature

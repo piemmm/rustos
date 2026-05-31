@@ -925,7 +925,7 @@ dependencies = [
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-irq",
- "rustos-kernel-sched-mlfq",
+ "rustos-kernel-sched-eevdf",
  "rustos-kernel-sec",
  "rustos-kernel-syscall",
  "rustos-log",

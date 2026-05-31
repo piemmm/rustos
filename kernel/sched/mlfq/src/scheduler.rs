@@ -15,8 +15,8 @@ use crate::loom_compat::{AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy,
-    StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
+    SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 /// Per-CPU scheduler state.
@@ -135,6 +135,23 @@ pub struct Scheduler<A: SchedulerArch> {
     /// entry is reached on every architecture. There is no global
     /// mutable state: every CPU has its own atomic word.
     current: Box<[AtomicU64]>,
+    /// Static [`CoreClass`] of each CPU, indexed by [`CpuId`].
+    ///
+    /// Snapshotted once at construction from the arch HAL
+    /// ([`SchedulerArch::core_class`]); the class is a static identity
+    /// property (`AGENTS.md` §17.2) so a snapshot is authoritative for
+    /// the scheduler's lifetime.
+    core_classes: Box<[CoreClass]>,
+    /// Dense list of the performance-class CPUs.
+    perf_cpus: Box<[CpuId]>,
+    /// Dense list of the efficiency-class CPUs. Empty on a homogeneous
+    /// machine — placement then falls back to the task's home CPU, so
+    /// the heterogeneous path is a strict no-op there.
+    eff_cpus: Box<[CpuId]>,
+    /// Round-robin cursor used to spread same-class placements across the
+    /// CPUs of a class. A single relaxed counter is ample for this
+    /// control-plane decision.
+    class_rr: AtomicU64,
 }
 
 impl<A: SchedulerArch> Scheduler<A> {
@@ -161,6 +178,17 @@ impl<A: SchedulerArch> Scheduler<A> {
         for _ in 0..config.cpus {
             current.push(AtomicU64::new(0));
         }
+        let mut core_classes = Vec::with_capacity(config.cpus as usize);
+        let mut perf_cpus = Vec::new();
+        let mut eff_cpus = Vec::new();
+        for cpu in 0..config.cpus {
+            let class = arch.core_class(cpu);
+            core_classes.push(class);
+            match class {
+                CoreClass::Performance => perf_cpus.push(cpu),
+                CoreClass::Efficiency => eff_cpus.push(cpu),
+            }
+        }
         Ok(Self {
             arch,
             cpus: cpus.into_boxed_slice(),
@@ -172,7 +200,68 @@ impl<A: SchedulerArch> Scheduler<A> {
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
+            core_classes: core_classes.into_boxed_slice(),
+            perf_cpus: perf_cpus.into_boxed_slice(),
+            eff_cpus: eff_cpus.into_boxed_slice(),
+            class_rr: AtomicU64::new(0),
         })
+    }
+
+    /// The [`CoreClass`] a task at `prio` should run on.
+    ///
+    /// Interactive / throughput-sensitive work (`High`, `Normal`) prefers
+    /// a performance core; background work (`Low`) prefers an efficiency
+    /// core. Because the periodic priority boost promotes a starved `Low`
+    /// task to `High` and demotion returns it to `Low`, this single rule
+    /// is what makes a background task migrate *up* to a performance core
+    /// when it is given a turn and back *down* to an efficiency core once
+    /// it settles — the promote/demote behaviour heterogeneous CPUs need.
+    const fn preferred_class(prio: Priority) -> CoreClass {
+        match prio {
+            Priority::High | Priority::Normal => CoreClass::Performance,
+            Priority::Low => CoreClass::Efficiency,
+        }
+    }
+
+    /// Choose the CPU a task at `prio` should be enqueued on, given its
+    /// current `home`.
+    ///
+    /// Keeps `home` when it already matches the preferred class — that
+    /// avoids needless migration and makes the whole heterogeneous path
+    /// a strict no-op on a homogeneous machine (every CPU is a
+    /// performance core, so `Performance`-class work never moves and the
+    /// efficiency pool is empty). Otherwise it round-robins across the
+    /// CPUs of the preferred class, falling back to `home` when that pool
+    /// is empty (a headless / single-class configuration).
+    fn preferred_home(&self, prio: Priority, home: CpuId) -> CpuId {
+        let want = Self::preferred_class(prio);
+        if self.class_of(home) == want {
+            return home;
+        }
+        let pool = match want {
+            CoreClass::Performance => &self.perf_cpus,
+            CoreClass::Efficiency => &self.eff_cpus,
+        };
+        if pool.is_empty() {
+            return home;
+        }
+        // `pool.len()` is at most the CPU count (`u32`), so the modulus
+        // result fits a `usize` without truncation.
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = {
+            let len = pool.len() as u64;
+            (self.class_rr.fetch_add(1, Ordering::Relaxed) % len) as usize
+        };
+        pool[idx]
+    }
+
+    /// The static [`CoreClass`] of `cpu`, or [`CoreClass::Performance`]
+    /// (the safe default) for an out-of-range id.
+    fn class_of(&self, cpu: CpuId) -> CoreClass {
+        self.core_classes
+            .get(cpu as usize)
+            .copied()
+            .unwrap_or(CoreClass::Performance)
     }
 
     /// Returns the configured CPU count.
@@ -193,10 +282,16 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Spawn a new task at `priority` with a body closure.
     ///
-    /// The task is enqueued on `home_cpu`. If that CPU's queue is full
-    /// the task is parked in the global overflow list and any CPU that
-    /// next runs [`Self::step`] will pick it up; this preserves the
-    /// "spawn never panics" invariant (`AGENTS.md` §2.9).
+    /// `home_cpu` is the caller's hint. On a heterogeneous machine the
+    /// task is placed on a CPU of the [`CoreClass`] that matches its
+    /// priority (`preferred_home`) — a `Low` background task
+    /// lands on an efficiency core, interactive work on a performance
+    /// core — so the spawn already honours the asymmetric topology. On a
+    /// homogeneous machine `preferred_home` returns `home_cpu` unchanged.
+    /// If the chosen CPU's queue is full the task is parked in the global
+    /// overflow list and any CPU that next runs [`Self::step`] will pick
+    /// it up; this preserves the "spawn never panics" invariant
+    /// (`AGENTS.md` §2.9).
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
@@ -205,6 +300,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
         self.cpu_state(home_cpu)?;
+        let placed = self.preferred_home(priority, home_cpu);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 0 is reserved; the counter starts at 1 so this is a defence in
         // depth against a 64-bit wrap that no real kernel will see.
@@ -214,20 +310,20 @@ impl<A: SchedulerArch> Scheduler<A> {
             id
         };
         let boxed: Box<TaskBody> = Box::new(body);
-        let inner = Arc::new(TaskInner::new(id, home_cpu, priority, boxed));
+        let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
         self.tasks.write().insert(id, inner.clone());
-        // Try to enqueue on the home CPU; on overflow, push to the
+        // Try to enqueue on the placed CPU; on overflow, push to the
         // global overflow list. Both paths preserve cancellation safety
         // because state is updated only after enqueue confirms.
-        match self.cpu_state(home_cpu)?.push_priority(priority, id) {
+        match self.cpu_state(placed)?.push_priority(priority, id) {
             Ok(()) => {}
             Err(_) => self.overflow.lock().push(id),
         }
-        // Wake the home CPU. Spawning at higher priority than what is
+        // Wake the placed CPU. Spawning at higher priority than what is
         // running there should preempt — but at this layer we have no
         // visibility into "what is running there", so we always notify
         // and let the arch port decide. (`AGENTS.md` §2.4 — no creep.)
-        self.arch.send_ipi(home_cpu);
+        self.arch.send_ipi(placed);
         Ok(id)
     }
 
@@ -285,14 +381,19 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
         task.cas_state(TaskState::Parked, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
-        // Re-enqueue on the home CPU; overflow falls back as in `spawn`.
+        // A wake is the moment a previously-idle task "needs power":
+        // steer it onto a CPU of the class its priority calls for before
+        // re-enqueuing. On a homogeneous machine this is its old home.
+        // Overflow falls back as in `spawn`.
         let prio = task.load_priority();
         let home = task.home_cpu.load(Ordering::Acquire);
-        let cpu = self.cpu_state(home)?;
+        let target = self.preferred_home(prio, home);
+        task.home_cpu.store(target, Ordering::Release);
+        let cpu = self.cpu_state(target)?;
         if cpu.push_priority(prio, id).is_err() {
             self.overflow.lock().push(id);
         }
-        self.arch.send_ipi(home);
+        self.arch.send_ipi(target);
         Ok(())
     }
 
@@ -608,10 +709,17 @@ impl<A: SchedulerArch> Scheduler<A> {
                 };
                 task.priority.store(new_prio as u8, Ordering::Release);
                 task.store_state(TaskState::Ready);
-                let home = task.home_cpu.load(Ordering::Acquire);
+                // Re-place on a CPU of the class the (possibly demoted or
+                // boosted) priority now calls for. A task boosted to High
+                // migrates *up* to a performance core; one demoted to Low
+                // migrates back *down* to an efficiency core. On a
+                // homogeneous machine this resolves to the CPU it just ran
+                // on, so behaviour is unchanged.
+                let dest = self.preferred_home(new_prio, cpu);
+                task.home_cpu.store(dest, Ordering::Release);
                 let target = self
                     .cpus
-                    .get(home as usize)
+                    .get(dest as usize)
                     .unwrap_or(&self.cpus[cpu as usize]);
                 if target.push_priority(new_prio, id).is_err() {
                     self.overflow.lock().push(id);
@@ -1169,5 +1277,136 @@ mod tests {
     fn yield_current_rejects_unknown_task() {
         let (_arch, sched) = mk(1);
         assert_eq!(sched.yield_current(424_242), Err(SchedError::NoSuchTask));
+    }
+
+    // ---------------------------------------------------------------
+    // Heterogeneous CPUs (performance + efficiency cores).
+    // ---------------------------------------------------------------
+
+    /// 4-CPU machine, CPUs 0/1 performance and 2/3 efficiency, with a
+    /// short boost interval and eager demotion for deterministic tests.
+    fn mk_hetero() -> (Arc<TestArch>, Scheduler<TestArch>) {
+        let arch = Arc::new(TestArch::new(4).expect("arch"));
+        arch.set_core_class(2, CoreClass::Efficiency);
+        arch.set_core_class(3, CoreClass::Efficiency);
+        let cfg = SchedulerConfig {
+            cpus: 4,
+            queue_capacity_per_band: 64,
+            yields_before_demotion: 1,
+            boost_interval_ticks: 2,
+        };
+        let sched = Scheduler::new(cfg, arch.clone()).expect("sched");
+        (arch, sched)
+    }
+
+    fn home_of(sched: &Scheduler<TestArch>, id: TaskId) -> CpuId {
+        sched
+            .tasks
+            .read()
+            .get(&id)
+            .expect("task")
+            .home_cpu
+            .load(Ordering::Acquire)
+    }
+
+    #[test]
+    fn background_task_is_placed_on_an_efficiency_core() {
+        let (_arch, sched) = mk_hetero();
+        // Spawn a Low (background) task with a performance CPU as the
+        // caller hint; it must be steered onto an efficiency core.
+        let id = sched
+            .spawn(0, Priority::Low, |_| TaskAction::Park)
+            .expect("spawn");
+        assert_eq!(sched.class_of(home_of(&sched, id)), CoreClass::Efficiency);
+    }
+
+    #[test]
+    fn interactive_task_is_placed_on_a_performance_core() {
+        let (_arch, sched) = mk_hetero();
+        // Spawn an interactive (High) task with an efficiency CPU as the
+        // caller hint; it must be steered onto a performance core.
+        let id = sched
+            .spawn(3, Priority::High, |_| TaskAction::Park)
+            .expect("spawn");
+        assert_eq!(sched.class_of(home_of(&sched, id)), CoreClass::Performance);
+    }
+
+    #[test]
+    fn unpark_resteers_a_background_task_by_priority() {
+        let (_arch, sched) = mk_hetero();
+        let id = sched
+            .spawn(0, Priority::High, |_| TaskAction::Park)
+            .expect("spawn");
+        // Runs once: body parks it. It started on a performance core.
+        assert_eq!(sched.class_of(home_of(&sched, id)), CoreClass::Performance);
+        sched.step(home_of(&sched, id)).expect("step");
+        assert_eq!(sched.state_of(id), TaskState::Parked);
+        // Demote it to Low while parked, then wake it: the wake must
+        // re-place it onto an efficiency core.
+        sched
+            .tasks
+            .read()
+            .get(&id)
+            .expect("task")
+            .priority
+            .store(Priority::Low as u8, Ordering::Release);
+        sched.unpark(id).expect("unpark");
+        assert_eq!(sched.class_of(home_of(&sched, id)), CoreClass::Efficiency);
+    }
+
+    #[test]
+    fn boost_promotes_idle_task_to_performance_then_demotes_back() {
+        let (arch, sched) = mk_hetero();
+        // A background task that keeps yielding (it "wants" turns).
+        let runs = Arc::new(core::sync::atomic::AtomicU32::new(0));
+        let r2 = runs.clone();
+        let id = sched
+            .spawn(0, Priority::Low, move |_| {
+                if r2.fetch_add(1, Ordering::Relaxed) >= 8 {
+                    TaskAction::Exit
+                } else {
+                    TaskAction::Yield
+                }
+            })
+            .expect("spawn");
+        // Starts demoted on an efficiency core.
+        let start_home = home_of(&sched, id);
+        assert_eq!(sched.class_of(start_home), CoreClass::Efficiency);
+
+        // Fire the periodic boost: it promotes the task to High. Running
+        // it once on its efficiency core then yields → demote High→Normal
+        // → migrate *up* to a performance core (it needed power).
+        arch.advance_ticks(10);
+        arch.set_current_cpu(start_home);
+        sched.step(start_home).expect("boosted step");
+        let promoted_home = home_of(&sched, id);
+        assert_eq!(
+            sched.class_of(promoted_home),
+            CoreClass::Performance,
+            "a boosted background task migrates up to a performance core"
+        );
+
+        // Run it again on the performance core: Normal→Low demotion
+        // settles it back *down* onto an efficiency core once idle again.
+        arch.set_current_cpu(promoted_home);
+        sched.step(promoted_home).expect("demote step");
+        let settled_home = home_of(&sched, id);
+        assert_eq!(
+            sched.class_of(settled_home),
+            CoreClass::Efficiency,
+            "once demoted to Low the task returns to an efficiency core"
+        );
+    }
+
+    #[test]
+    fn homogeneous_machine_keeps_the_caller_home() {
+        // With the default (all-performance) topology, a Low task must
+        // stay on the CPU the caller named — the heterogeneous path is a
+        // strict no-op when there are no efficiency cores.
+        let (_arch, sched) = mk(4);
+        let id = sched
+            .spawn(2, Priority::Low, |_| TaskAction::Park)
+            .expect("spawn");
+        assert_eq!(home_of(&sched, id), 2);
     }
 }

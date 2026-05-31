@@ -76,8 +76,6 @@ pub mod apic_timer;
 pub mod bootmemory;
 pub mod context;
 pub mod gdt;
-pub mod interrupts;
-pub mod irq;
 /// Stage 3a (c7-arch): Arch HAL [`rustos_arch_api::SchedulerArch`]
 /// implementation for x86_64.
 ///
@@ -88,6 +86,10 @@ pub mod irq;
 /// page-table isolation rather than scheduling. The `rustos-kernel`
 /// bin enables the feature; see the `kernel/arch/x86_64/Cargo.toml`
 /// comment for the rationale (`AGENTS.md` §2.3 — pay for what you use).
+#[cfg(feature = "sched-arch")]
+pub mod hybrid;
+pub mod interrupts;
+pub mod irq;
 #[cfg(feature = "sched-arch")]
 pub mod kernel_arch;
 pub mod multiboot2;

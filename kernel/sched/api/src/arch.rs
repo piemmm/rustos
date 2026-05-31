@@ -17,10 +17,10 @@
 // here so the scheduler contract, every `kernel/sched/<impl>`, and
 // `kernel/core` all name the single canonical definition (`AGENTS.md`
 // §2.2 — no duplication).
-pub use rustos_arch_api::{CpuId, SchedulerArch};
+pub use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
 
 #[cfg(any(test, feature = "test-arch"))]
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// In-memory [`SchedulerArch`] implementation used by host-side tests and
 /// the `conformance` suite.
@@ -50,6 +50,13 @@ pub struct TestArch {
     /// the [`Self::stray_ipis`] counter instead of corrupting memory.
     ipis: alloc::vec::Vec<AtomicU64>,
     stray_ipis: AtomicU64,
+    /// Static [`CoreClass`] of each simulated CPU, indexed by [`CpuId`].
+    ///
+    /// Initialised to [`CoreClass::Performance`] (a homogeneous machine)
+    /// and mutated by [`Self::set_core_class`] so a host test can model
+    /// an asymmetric (performance + efficiency) topology and assert the
+    /// scheduler places work sensibly across it.
+    core_classes: alloc::vec::Vec<AtomicU8>,
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -68,12 +75,28 @@ impl TestArch {
         for _ in 0..cpus {
             ipis.push(AtomicU64::new(0));
         }
+        let mut core_classes = alloc::vec::Vec::with_capacity(cpus as usize);
+        for _ in 0..cpus {
+            core_classes.push(AtomicU8::new(CoreClass::Performance.as_u8()));
+        }
         Some(Self {
             current: AtomicU32::new(0),
             ticks: AtomicU64::new(0),
             ipis,
             stray_ipis: AtomicU64::new(0),
+            core_classes,
         })
+    }
+
+    /// Sets the simulated [`CoreClass`] of `cpu`.
+    ///
+    /// Lets a host test model an asymmetric machine. An out-of-range
+    /// `cpu` is a silent no-op (the same fail-soft policy the IPI ledger
+    /// uses) so a test cannot panic the scheduler through this path.
+    pub fn set_core_class(&self, cpu: CpuId, class: CoreClass) {
+        if let Some(slot) = self.core_classes.get(cpu as usize) {
+            slot.store(class.as_u8(), Ordering::Relaxed);
+        }
     }
 
     /// Returns the number of simulated CPUs.
@@ -133,6 +156,17 @@ impl SchedulerArch for TestArch {
                 self.stray_ipis.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    fn core_class(&self, cpu: CpuId) -> CoreClass {
+        // Out-of-range CPUs report the safe default per the trait
+        // contract; a stored byte is always a valid encoding because
+        // `set_core_class` only ever writes `CoreClass::as_u8`.
+        self.core_classes
+            .get(cpu as usize)
+            .map_or(CoreClass::Performance, |slot| {
+                CoreClass::from_u8(slot.load(Ordering::Relaxed)).unwrap_or(CoreClass::Performance)
+            })
     }
 }
 

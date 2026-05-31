@@ -32,7 +32,7 @@ pub mod task;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub use arch::TestArch;
-pub use arch::{CpuId, SchedulerArch};
+pub use arch::{CoreClass, CpuId, SchedulerArch};
 pub use config::SchedulerConfig;
 pub use error::{SchedError, SchedResult};
 pub use outcome::StepOutcome;
