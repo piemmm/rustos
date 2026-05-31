@@ -1,6 +1,6 @@
 [package]
 name = "rustos-arch-wasm32"
-description = "RustOS placeholder: wasm32 architecture port."
+description = "RustOS architecture port: wasm32 (Arch HAL implementation + browser-sandbox cooperative scheduling / WASM-memory isolation primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,29 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Like the bare-metal ports (`kernel/arch/{x86_64,aarch64,riscv64}`),
+# this crate is a pure Arch HAL implementation (`AGENTS.md` §17.2 /
+# §17.4): it names only the Arch HAL (`kernel/arch/api`) and `lib/*`,
+# never a concrete kernel subsystem. `WasmArch` implements
+# `rustos_arch_api::SchedulerArch`; the downstream boot consumer wraps it
+# in a `kernel/core::KernelArch` type.
+#
+# Where a bare-metal port gates its CSR/assembly operations to
+# `cfg(all(target_arch = "...", target_os = "none"))`, this port gates
+# its browser-host bindings (the imported JS functions, the panic
+# bridge, the console sink, and the exported entry trampoline) to
+# `cfg(target_arch = "wasm32")`. The remainder — the `WasmArch` struct,
+# the cooperative-scheduler bookkeeping, the WASM-memory isolation
+# model, and the syscall-argument marshalling — builds on the host so
+# its unit tests run under `cargo test` (`AGENTS.md` §7).
+[dependencies]
+rustos-arch-api = { path = "../api", version = "=0.0.0" }
+# `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
+# syscall entry path marshals user arguments into — the same `lib/*`
+# dependency the other arch ports take (`AGENTS.md` §17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

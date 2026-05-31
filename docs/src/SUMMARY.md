@@ -58,3 +58,4 @@
 - [x86_64](./platform/x86_64.md)
 - [riscv64](./platform/riscv64.md)
 - [aarch64](./platform/aarch64.md)
+- [wasm32](./platform/wasm32.md)

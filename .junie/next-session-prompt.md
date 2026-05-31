@@ -1,80 +1,73 @@
-# Next session — Stage 3d (wasm32), then resume Stage 5
+# Next session — Stage 3 complete; resume Stage 5
 
 ## Where we are
 
-Stage 3 (Architecture Ports) is now complete for **three of four**
-Tier-1 targets:
+Stage 3 (Architecture Ports) is now **complete for all four Tier-1
+targets**:
 
 - **3a x86_64** — complete.
-- **3b aarch64** — **complete (landed this session)**, see below.
+- **3b aarch64** — complete.
 - **3c riscv64** — complete.
-- **3d wasm32** — still a bare 6-line stub. This is the next
-  architecture deliverable.
+- **3d wasm32** — **complete (landed this session)**, see below.
 
-Verified green on this host: `cargo xtask ci` and `cargo xtask test
---qemu` (the full suite, including all three new aarch64 verticals).
+Verified green on this host: the full `cargo xtask` gate
+(`fmt`/`clippy`/`cfg-check`/`deps-check`/`docs-check`/`cargo deny`/
+`abi-check`), the host test suite, the QEMU matrix (`cargo xtask test
+--qemu`), and the new wasm32 browser vertical (`cargo xtask test
+--wasm`).
 
 (Note: `mdbook`/`mdbook-linkcheck`, `cargo-deny`, `cargo-llvm-cov` live
 in `~/.cargo/bin`, which is **not** on the default non-interactive
 `PATH` — `export PATH="$HOME/.cargo/bin:$PATH"` before invoking the
-gate.)
+gate. The wasm32 harness needs `node` + `puppeteer` + a Chrome binary;
+`/usr/bin/google-chrome` is used by default.)
 
-## Landed this session — Stage 3b (aarch64) complete
+## Landed this session — Stage 3d (wasm32) complete
 
-`kernel/arch/aarch64` went from a placeholder to a full Arch HAL
-implementation for the QEMU `virt` board, mirroring the riscv64 port.
-Pure bit/encoding/layout math is host-unit-tested (39 host tests),
-clippy/rustdoc clean on host + `aarch64-unknown-none`; the boot /
-console / exception / GIC / timer / MMU system-register and assembly
-operations are gated to `cfg(all(target_arch = "aarch64", target_os =
-"none"))`.
+`kernel/arch/wasm32` went from a 6-line placeholder to a full Arch HAL
+implementation for the browser sandbox (`wasm32-unknown-unknown`),
+mirroring the bare-metal ports but mapping every "hardware" concept to a
+JavaScript host:
 
-Modules: `boot.s` (EL2→EL1 drop, stack, `.bss` zero, DTB hand-off),
-`entry.rs`, `serial.rs` (PL011 UART `Sink`), `panic.rs`, `qemu_exit.rs`
-(ARM semihosting `SYS_EXIT`), `kernel_arch.rs` (`Aarch64Arch` +
-`CNTPCT`/`CNTFRQ` clock), `paging.rs` (stage-1 4 KiB / 3-level MMU,
-`T0SZ=25` 39-bit VA — the Sv39 mirror), `context.rs`/`context.s`
-(AAPCS64 task switch), `preempt.rs` (EL1 physical timer + GIC PPI 30),
-`vectors.s` + `exceptions.rs` (EL1 vector table + IRQ/sync dispatch),
-`gic.rs` (GICv2 driver), `syscall_entry.rs` (`svc` marshalling),
-`fault.rs` (`ESR_EL1` abort hook). Linker: `link/aarch64-virt.ld`.
+- per-CPU identity → the executing Web Worker context
+- monotonic clock → `performance.now()`
+- timer-interrupt-drives-scheduler → `requestAnimationFrame` cooperative
+  tick
+- inter-processor interrupt → a `MessageChannel` post between workers
+- MMU / page-table isolation → one WASM linear memory per worker
 
-Three Stage-3 per-sub-stage QEMU verticals, enrolled in
-`tools/xtask/src/commands/qemu_tests.rs` (single CPU, 60 s) and verified
-green under QEMU:
+Modules: `kernel_arch.rs` (`WasmArch` + `ms_to_ns` clock + `CpuId` ↔
+worker-index map), `preempt.rs` (rAF cooperative tick + `MessageChannel`
+IPI + `cooperative_budget_exhausted`), `isolation.rs` (`MemoryRegion` /
+`AddressSpace` / `WasmFault` — the "MMU" analogue), `syscall_entry.rs`
+(`pack_raw_args` + set-once dispatch callback), and the
+`cfg(target_arch = "wasm32")`-gated browser-host glue: `bindings.rs`
+(hand-rolled `extern "C"` `env` imports — no `wasm-bindgen`),
+`console.rs` (`console.log` `rustos_log::Sink`), `entry.rs` (the
+exported `rustos_arch_wasm32_main` / `on_frame` / `on_message`
+trampolines), `panic.rs` (`#[panic_handler]` bridge). Host loader:
+`kernel/arch/wasm32/web/rustos.js` (dependency-free). 28 host unit
+tests; clippy/rustdoc clean on host + `wasm32-unknown-unknown`.
 
-- `tests/integration/kernel_arch_boot_aarch64` — boots to init.
-- `tests/integration/timer_preempt_qemu_aarch64` — the GICv2 timer PPI
-  drives the `preempt` callback ≥ 20 times.
-- `tests/integration/memory_isolation_qemu_aarch64` — an attacker
-  `AddressSpace` faults on a victim-only page.
+Browser-headless vertical: `tests/integration/kernel_arch_boot_wasm32`
+(a `cdylib` whose `kernel_main` prints `BOOT_OK` / `ISOLATION_OK` /
+`TICK`) plus the puppeteer runner `web/harness.mjs`, launched by the new
+`cargo xtask test --wasm` (opt-in, mirroring `test --qemu`). The
+`rustos-itest-harness` build glue gained an `itest_wasm32` cfg. Docs:
+`docs/src/platform/wasm32.md`.
 
-Host runner: new `Arch::Aarch64` + `tools/qemu/src/aarch64.rs` (`virt`,
-`cortex-a72`, semihosting result protocol) + `Spec::for_aarch64_kernel`;
-the integration harness gained the `itest_aarch64` cfg; docs in
-`docs/src/platform/aarch64.md`.
+### wasm32 follow-ups (mirror how the bare-metal ports were staged)
+- Multi-worker SMP bring-up: spawn real Web Workers and route
+  `MessageChannel` IPIs between live module instances (the `send_ipi`
+  host post and `on_ipi_message` receive path already exist).
+- Wire the `requestAnimationFrame` cooperative tick into the *live*
+  `kernel/sched` `Scheduler` (the wasm32 analogue of
+  `tests/integration/sched_drive_qemu_riscv64`), and route a real
+  user→kernel host call through `syscall_entry::dispatch_syscall`.
 
-### aarch64 follow-ups (mirrors how riscv64 was staged)
-- Multi-hart SMP bring-up: `MPIDR_EL1` → dense `CpuId` map and
-  secondary-core start (PSCI `CPU_ON`). `send_ipi` already raises a
-  GICv2 SGI.
-- Wire the `paging::AddressSpace` / `context::switch` primitives into the
-  *live* `kernel/sched` `Scheduler` (the aarch64 analogue of
-  `tests/integration/sched_drive_qemu_riscv64`), and route the live EL0
-  `svc` register frame through to `syscall_entry::dispatch_svc`.
+## What needs doing next — resume Stage 5 follow-ups
 
-## What needs doing next — Stage 3d (wasm32)
-
-- **3d `kernel/arch/wasm32`** is a bare 6-line stub: cooperative
-  scheduling via `requestAnimationFrame`/`MessageChannel`, WASM-memory
-  isolation between worker contexts, and a browser headless harness.
-  This is structurally different from the bare-metal ports (no QEMU; a
-  browser/`wasm32-unknown-unknown` test environment), so plan the test
-  harness first.
-
-## Then — resume the earlier Stage 5 follow-ups
-
-(Previously queued, still valid once Stage 3 is complete.)
+(Previously queued, still valid now that Stage 3 is complete.)
 - Packed virtqueues (virtio 1.1 §2.7) for the virtio transport.
 - Interrupt-driven (rather than polled) delivery for the ps2 input
   vertical.
@@ -89,18 +82,15 @@ export PATH="$HOME/.cargo/bin:$PATH"   # mdbook / cargo-deny / cargo-llvm-cov li
 cargo xtask ci
 cargo xtask test --qemu
 
-# aarch64 arch-crate host tests (paging/context/preempt/syscall/fault/gic/kernel_arch):
-cargo test -p rustos-arch-aarch64
+# wasm32 browser-headless vertical (boot / isolation / cooperative tick):
+cargo xtask test --wasm
 
-# Run an aarch64 vertical standalone (fast iteration):
-cargo build --locked -p rustos-test-timer-preempt-qemu-aarch64 \
-    --target aarch64-unknown-none
-cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-    --kernel target/aarch64-unknown-none/debug/rustos-test-timer-preempt-qemu-aarch64 \
-    --arch aarch64 --cpus 1 --timeout-secs 60   # runner exit 0 == PASS
+# wasm32 arch-crate host tests:
+cargo test -p rustos-arch-wasm32
 
-# riscv64 verticals (unchanged, still green):
-cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-    --kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-timer-preempt-qemu-riscv64 \
-    --arch riscv64 --cpus 1 --timeout-secs 60
+# Run the wasm32 harness standalone (fast iteration):
+cargo build -p rustos-test-kernel-arch-boot-wasm32 --target wasm32-unknown-unknown
+node tests/integration/kernel_arch_boot_wasm32/web/harness.mjs \
+    --wasm target/wasm32-unknown-unknown/debug/rustos_test_kernel_arch_boot_wasm32.wasm \
+    --chrome /usr/bin/google-chrome --timeout-secs 30
 ```

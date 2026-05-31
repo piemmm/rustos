@@ -731,9 +731,10 @@ Each sub-stage delivers one architecture. They share the same checklist:
           section.
 - 3b — `kernel/arch/aarch64` (Raspberry Pi 3/4/5 + QEMU virt; GIC).
 - 3c — `kernel/arch/riscv64` (QEMU virt; PLIC, CLINT).
-- 3d — `kernel/arch/wasm32` (browser sandbox; cooperative scheduling backed
-  by `requestAnimationFrame` / `MessageChannel`; "MMU" enforced by WASM
-  memory isolation between worker contexts).
+- [x] 3d — `kernel/arch/wasm32` (browser sandbox; cooperative scheduling
+  backed by `requestAnimationFrame` / `MessageChannel`; "MMU" enforced by
+  WASM memory isolation between worker contexts). Complete — see the
+  "Stage 3d status" block below.
 
 **Tests (per sub-stage)**
 - Boots to `init` placeholder in QEMU / browser headless harness.
@@ -768,10 +769,10 @@ Each sub-stage delivers one architecture. They share the same checklist:
   as sub-items (f1)..(f7). The `_DISPATCH_SIGNATURE_PINNED`
   const-assert in `kernel/rustos-kernel::dispatch` still pins the
   callback ABI so the eventual swap cannot silently drift.
-- Stage 3d (wasm32) remains outstanding per its own checklist; it
-  follows the same per-arch template (a)..(d) the x86_64 sub-stage
-  completed. Stage 3b (aarch64) and 3c (riscv64) status is tracked
-  separately below.
+- Stage 3d (wasm32) is now complete (see the "Stage 3d status" block
+  below); Stage 3b (aarch64) and 3c (riscv64) status is tracked
+  separately below. **All four Tier-1 architecture ports are now
+  complete, so Stage 3 is complete.**
 
 **Stage 3b status: complete.**
 - `kernel/arch/aarch64` is now a full Arch HAL implementation for the
@@ -952,8 +953,69 @@ Each sub-stage delivers one architecture. They share the same checklist:
 - 3c's per-sub-stage checklist ("boots to init", "memory-isolation test
   passes", "timer interrupt drives scheduler"), multi-hart SMP, and the
   live-scheduler wiring are all satisfied, so **Stage 3c is complete**.
-  Stage 3b (aarch64) and 3d (wasm32) remain outstanding per their own
-  checklists.
+
+**Stage 3d status: complete.**
+- `kernel/arch/wasm32` is now a full Arch HAL implementation for the
+  browser sandbox (`wasm32-unknown-unknown`). It is the structural
+  counterpart of the bare-metal ports, but the "hardware" is a
+  JavaScript host: the per-CPU identity is the executing Web Worker
+  context, the monotonic clock is `performance.now()`, the
+  timer-interrupt-drives-scheduler path is a `requestAnimationFrame`
+  cooperative tick, an inter-processor interrupt is a `MessageChannel`
+  post, and the MMU/page-table isolation is one WASM linear memory per
+  worker. Every module carrying pure logic is host-unit-tested (28
+  host tests) and clippy/rustdoc clean on both the host and the
+  `wasm32-unknown-unknown` target; the browser-host bindings are gated
+  to `cfg(target_arch = "wasm32")`:
+    - [x] **Arch HAL** — `kernel_arch.rs`'s `WasmArch` implements
+          `rustos_arch_api::SchedulerArch`; the monotonic clock reads
+          `performance.now()` and converts via `ms_to_ns`. The
+          `CpuId` ↔ worker-index map mirrors the bare-metal ports'
+          `CpuId` ↔ hart-id map; `send_ipi` posts on the target
+          worker's `MessageChannel`.
+    - [x] **Cooperative preemption** — `preempt.rs`: a set-once tick
+          callback, `init_local_preempt` (requests the first animation
+          frame), `on_animation_frame` (callback → re-request frame),
+          and `on_ipi_message` (the `MessageChannel` IPI path), plus a
+          `cooperative_budget_exhausted` yield helper.
+    - [x] **Memory isolation** — `isolation.rs`: the WASM-linear-memory
+          isolation model (`MemoryRegion` / `AddressSpace` /
+          `WasmFault`), the wasm32 analogue of the bare-metal page
+          tables. An attacker `AddressSpace` faults on a victim-only
+          address; all bounds arithmetic is checked.
+    - [x] **Per-arch syscall entry** — `syscall_entry.rs`: `pack_raw_args`
+          marshals into the frozen `rustos_abi`
+          `[u64; SYSCALL_MAX_ARGS]` layout (shared with the bare-metal
+          ports, §2.2) and a set-once dispatch callback the host call
+          forwards to, failing closed without one.
+    - [x] **Browser-host glue** — `bindings.rs` (hand-rolled `extern "C"`
+          `env` imports — no `wasm-bindgen`, §2.12), `console.rs`
+          (`console.log`-backed `rustos_log::Sink`), `entry.rs` (the
+          exported `rustos_arch_wasm32_main` / `on_frame` / `on_message`
+          trampolines), and `panic.rs` (the `#[panic_handler]` bridge
+          that traps the instance), plus the dependency-free host loader
+          `kernel/arch/wasm32/web/rustos.js`.
+    - The Stage-3 per-sub-stage **browser-headless vertical** is
+      `tests/integration/kernel_arch_boot_wasm32` (the wasm32 analogue
+      of the bare-metal QEMU verticals): a `cdylib` whose `kernel_main`
+      boots the `WasmArch` handle (`BOOT_OK`), runs the isolation check
+      (`ISOLATION_OK`), and arms the cooperative scheduler (the tick
+      callback prints `TICK`). The puppeteer runner
+      (`web/harness.mjs`, launched by the new `cargo xtask test --wasm`)
+      serves the module + host loader over loopback, boots them in
+      headless Chrome, and reports PASS on `BOOT_OK` + `ISOLATION_OK` +
+      ≥ 20 `TICK`s — the three deliverables ("boots to init",
+      "memory-isolation test passes", "timer interrupt drives
+      scheduler"), **verified green in headless Chrome on this host**.
+      The browser harness is opt-in behind `test --wasm` (mirroring
+      `test --qemu`) because it needs Node.js + puppeteer + Chrome; the
+      `rustos-itest-harness` build glue gained an `itest_wasm32` cfg.
+      Docs: `docs/src/platform/wasm32.md`.
+    - Multi-worker SMP bring-up (spawning real Web Workers and routing
+      `MessageChannel` IPIs between live instances) and wiring the
+      cooperative tick into the *live* `kernel/sched` scheduler remain
+      wasm32 follow-ups, exactly as they were staged for the bare-metal
+      ports.
 
 ---
 

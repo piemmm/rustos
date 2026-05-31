@@ -394,6 +394,11 @@ dependencies = [
 [[package]]
 name = "rustos-arch-wasm32"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-arch-x86_64"
@@ -799,6 +804,15 @@ dependencies = [
  "rustos-itest-harness",
  "rustos-log",
  "rustos-test-riscv64-boot",
+]
+
+[[package]]
+name = "rustos-test-kernel-arch-boot-wasm32"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-wasm32",
+ "rustos-itest-harness",
 ]
 
 [[package]]

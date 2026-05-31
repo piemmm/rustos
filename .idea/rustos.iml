@@ -90,6 +90,7 @@
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/harness/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/ipi_smp_qemu_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot_aarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/integration/kernel_arch_boot_wasm32/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation_qemu_aarch64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/memory_isolation_qemu_riscv64/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/integration/ps2_input_qemu_x86_64/src" isTestSource="false" />

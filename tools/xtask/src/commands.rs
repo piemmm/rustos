@@ -14,6 +14,7 @@ mod cfg_check;
 mod deps_check;
 mod linkcheck;
 mod qemu_tests;
+mod wasm_tests;
 
 /// One sanctioned developer workflow.
 #[derive(Copy, Clone, Debug)]
@@ -158,9 +159,12 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // and every run has a strict, finite timeout.
     let mut forward = Vec::with_capacity(args.len());
     let mut run_qemu = false;
+    let mut run_wasm = false;
     for a in args {
         if a == "--qemu" {
             run_qemu = true;
+        } else if a == "--wasm" {
+            run_wasm = true;
         } else {
             forward.push(a.clone());
         }
@@ -173,6 +177,12 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
     if run_qemu {
         qemu_tests::run_all(ctx)?;
+    }
+    // `--wasm` boots the wasm32 vertical in a headless browser. It is
+    // opt-in (like `--qemu`) because it needs node + puppeteer + Chrome;
+    // see `commands/wasm_tests.rs`.
+    if run_wasm {
+        wasm_tests::run_all(ctx)?;
     }
     Ok(())
 }

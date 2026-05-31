@@ -17,6 +17,10 @@
 //! * `itest_x86_64` — freestanding on the 64-bit x86 port.
 //! * `itest_riscv64` — freestanding on the 64-bit RISC-V port.
 //! * `itest_aarch64` — freestanding on the 64-bit Arm port.
+//! * `itest_wasm32` — the browser-sandbox wasm32 port
+//!   (`wasm32-unknown-unknown`, `os = "unknown"`). Unlike the bare-metal
+//!   ports this is a `cdylib`, not a `no_main` kernel, so it gets its
+//!   own cfg *without* `freestanding`.
 //!
 //! Binaries gate on those names instead of a raw target predicate, so the
 //! instruction-set choice lives in this one audited place.
@@ -34,6 +38,7 @@ pub const KNOWN_CFGS: &[&str] = &[
     "itest_x86_64",
     "itest_riscv64",
     "itest_aarch64",
+    "itest_wasm32",
 ];
 
 /// Classify a target into the conditional-compilation names its
@@ -45,6 +50,13 @@ pub const KNOWN_CFGS: &[&str] = &[
 /// an inert stub.
 #[must_use]
 pub fn active_cfgs(os: &str, arch: &str) -> Vec<&'static str> {
+    // The wasm32 browser target (`wasm32-unknown-unknown`, `os =
+    // "unknown"`) is a `cdylib` the host loads, not a bare-metal
+    // `no_main` kernel, so it enables its own cfg without
+    // `freestanding`.
+    if os == "unknown" && arch == "wasm32" {
+        return vec!["itest_wasm32"];
+    }
     if os != "none" {
         return Vec::new();
     }
@@ -111,6 +123,11 @@ mod tests {
     #[test]
     fn unknown_bare_metal_arch_is_freestanding_only() {
         assert_eq!(active_cfgs("none", "wasm32"), ["freestanding"]);
+    }
+
+    #[test]
+    fn wasm32_browser_target_is_a_cdylib_not_freestanding() {
+        assert_eq!(active_cfgs("unknown", "wasm32"), ["itest_wasm32"]);
     }
 
     #[test]

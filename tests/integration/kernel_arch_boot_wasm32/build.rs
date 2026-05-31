@@ -1,0 +1,9 @@
+//! Build script: enable the `itest_wasm32` cfg when building for the
+//! browser target (`wasm32-unknown-unknown`), so the kernel body in
+//! `src/lib.rs` is gated on a central cfg name rather than a raw target
+//! predicate (`AGENTS.md` §2.2 / §17.2). Mirrors the bare-metal
+//! verticals' build scripts.
+
+fn main() {
+    rustos_itest_harness::emit_target_cfg();
+}
