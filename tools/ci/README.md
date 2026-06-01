@@ -16,6 +16,7 @@ belongs in a *named* `cargo xtask` subcommand (`tools/xtask`), not here.
 | `crontab.sample` | Ready-to-edit `crontab` for any cron-based host (Linux/Unix/macOS). |
 | `systemd/*.{service,timer}` | systemd user units for a Linux host (preferred over cron on systemd distros). |
 | `launchd/*.plist.sample` | `launchd` LaunchAgents for a macOS host (preferred over cron on laptops). |
+| `github-runner/README.md` | Standing up a self-hosted GitHub Actions runner (Linux) for the nightly soak workflow. |
 
 The `lib.sh`/`ci-run.sh`/`soak.sh` scripts themselves are portable `bash`
 (written to the host's bash 3.2, so they also run unchanged on the bash 4/5
@@ -63,6 +64,21 @@ only the trigger differs.
 All three run the full gate every 30 minutes and the soaks nightly at 02:00.
 The systemd timers and the cron `Persistent` behaviour both catch up a run
 missed while the host was asleep.
+
+### GitHub Actions
+
+The repo also ships GitHub Actions workflows so CI is driven by GitHub directly,
+not only by a standalone builder:
+
+- `.github/workflows/ci.yml` runs the full per-PR gate (`cargo xtask ci`) on a
+  **GitHub-hosted** `ubuntu-latest` runner — free and ephemeral.
+- `.github/workflows/soak.yml` runs the nightly 24 h soaks via `soak.sh` on a
+  **self-hosted Linux** runner, because a 24 h job exceeds the GitHub-hosted
+  per-job time cap.
+
+See `tools/ci/github-runner/README.md` to register and install the self-hosted
+Linux runner as a systemd service. A given host runs *either* a standalone
+builder (cron/systemd/launchd above) *or* a GitHub Actions runner — not both.
 
 ## The 24 h soaks, in parallel
 
