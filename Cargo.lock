@@ -662,10 +662,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-iconbar"
-version = "0.0.0"
-
-[[package]]
 name = "rustos-init"
 version = "0.0.0"
 dependencies = [
@@ -946,6 +942,10 @@ dependencies = [
  "rustos-abi",
  "rustos-log",
 ]
+
+[[package]]
+name = "rustos-taskbar"
+version = "0.0.0"
 
 [[package]]
 name = "rustos-test-drvhost-qemu"
@@ -1345,6 +1345,9 @@ dependencies = [
 [[package]]
 name = "rustos-wm"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-xtask"

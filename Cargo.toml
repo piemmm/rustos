@@ -91,7 +91,7 @@ members = [
     "userland/apps/setcap",
     "userland/apps/useradd",
     "userland/gui/wm",
-    "userland/gui/iconbar",
+    "userland/gui/taskbar",
     "userland/net/icmp",
 
     # Tooling

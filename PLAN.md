@@ -4505,6 +4505,41 @@ device list.
 **Docs**
 - `docs/src/desktop/{wm,taskbar,apps,theming}.md`.
 
+**Status: in progress.**
+- **Desktop paradigm reconciled.** `AGENTS.md` §3/§10 previously named a
+  RISC OS-style `userland/gui/iconbar`; the binding decision is the
+  traditional GNOME/Windows-style `userland/gui/taskbar` of this stage.
+  The placeholder crate was renamed `rustos-iconbar` → `rustos-taskbar`
+  (`userland/gui/taskbar`) and `AGENTS.md` §3/§10, the xtask GUI-crate
+  list, and the architecture overview were updated to match.
+- **Compositor core — DONE (first increment).** `userland/gui/wm`
+  (`rustos-wm`, `no_std`+`alloc`, dep only `rustos-abi`, §17.4) is the
+  user-space software compositor (`AGENTS.md` §10/§17.3). It composes a
+  z-ordered window stack over an opaque background into a `DisplayMode`
+  scan-out frame and presents it through a `Display` seam:
+  - **Premultiplied-alpha** `color` (`Pixel`/`Color`, shared rounded
+    `div255`, `scale_alpha`, Porter–Duff `over`) — correct per-surface
+    and per-region transparency.
+  - **`Surface`** premultiplied pixel buffers; **`geometry`**
+    `Point`/`Rect` (checked intersection/union/contains).
+  - **Anti-aliased rounded corners** (`corner::Corners`) via
+    deterministic supersampling (no `sqrt`), with a `Square` opt-out —
+    the single rounded-corner path the taskbar will reuse (§2.2).
+  - **Damage tracking** (`DamageRegion`): only changed pixels are
+    recomposited; `composite` clears damage and is idempotent.
+  - **`Compositor`** window ops (add/move/raise/remove, opacity, corners,
+    visibility, surface replace) each mark damage; fails closed on a
+    too-large/short-stride/unsupported-format mode (`None`, §2.9/§2.1).
+  - 46 headless unit tests; no `unsafe`, no `unwrap`/`expect`/`panic!` in
+    production paths. Docs `docs/src/desktop/wm.md` (+ SUMMARY) and the
+    crate `README.md`.
+- **Still to do this stage:** GPU-accelerated compositor path, input
+  routing (focus, click-to-activate, drag-and-drop), the
+  `userland/gui/taskbar` (start menu + session controls, task list,
+  clock + notification area, rounded edges via the WM path), the shared
+  dark/light theme definition + themed cursor set, and the default
+  filesystem-browser and terminal-emulator apps.
+
 ---
 
 ## Stage 8 — Installer and Image Builders

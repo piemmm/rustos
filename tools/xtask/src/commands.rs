@@ -198,7 +198,7 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 /// The `userland/gui/*` crates excluded from the headless image (§17.3).
-const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-iconbar"];
+const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-taskbar"];
 
 /// The number of times `cargo xtask ci` runs the whole test matrix on a
 /// GitHub Actions runner.

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-iconbar"
-description = "RustOS placeholder: RISC OS-style iconbar."
+name = "rustos-taskbar"
+description = "RustOS placeholder: traditional desktop taskbar."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

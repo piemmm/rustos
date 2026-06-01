@@ -73,6 +73,10 @@
 - [Application bundle loader](./userland/appmgr.md)
 - [Core CLI utilities](./userland/utilities.md)
 
+# Desktop
+
+- [Compositing window manager](./desktop/wm.md)
+
 # ABI
 
 - [Driver traits (`abi-v1`)](./abi/driver_traits.md)

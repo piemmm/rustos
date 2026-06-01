@@ -10,7 +10,7 @@ stages of [`PLAN.md`][plan] that introduce them.
 ┌────────────────────────────────────────────────────────────────────┐
 │ userland/                                                          │
 │   system/ │ session/ │ shell/ │ gui/ │ apps/                       │
-│     init, installer │ login │ shell │ wm, iconbar │ …              │
+│     init, installer │ login │ shell │ wm, taskbar │ …              │
 ├────────────────────────────────────────────────────────────────────┤
 │ drivers/                                                           │
 │   display/ │ filesystem/ │ bus/ │ input/ │ network/ │ storage/     │

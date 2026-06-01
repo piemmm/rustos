@@ -1,4 +1,4 @@
-//! RustOS placeholder crate: RISC OS-style iconbar.
+//! RustOS placeholder crate: traditional desktop taskbar.
 //!
 //! Stage 0 reserves this crate so the workspace builds end-to-end. The real
 //! implementation is delivered by **Stage 7** of `PLAN.md`; until then the

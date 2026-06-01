@@ -162,8 +162,8 @@ rustos/
 │   ├── shell/           # Command-line shells.
 │   │   └── shell/       # Default POSIX-ish shell with job control.
 │   ├── gui/             # Graphical desktop components.
-│   │   ├── wm/          # Compositing window manager (RISC OS-style).
-│   │   └── iconbar/     # RISC OS-style iconbar.
+│   │   ├── wm/          # Compositing window manager.
+│   │   └── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
 │   ├── net/             # Userland networking services.
 │   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
 │   └── apps/            # Default apps. Each app is its own crate.
@@ -383,10 +383,22 @@ an update to this section.
 
 ## 10. Desktop and Window Manager
 
-- RISC OS-style: iconbar at the bottom (or configured edge), filer-style file
-  manager, third-mouse-button menus, drag-and-drop save model.
+- Traditional desktop (GNOME/Windows-style): a taskbar pinned to a configured
+  screen edge, a filesystem browser, and drag-and-drop. The taskbar
+  (`userland/gui/taskbar`) carries a "start" menu button on the left (session
+  controls now, launcher entries later), a running-task list in the middle,
+  and a clock with an adjacent notification-icon area on the right.
 - Compositing window manager (`userland/gui/wm`). All compositing happens in
   user space; the kernel only ships framebuffer access through a capability.
+  The compositor supports per-window rounded corners (anti-aliased, with a
+  square-corner opt-out) and per-surface/per-region alpha transparency
+  (correct premultiplied-alpha blending). The taskbar's rounded edges are
+  drawn through that same compositor path — there is no second
+  rounded-corner implementation (§2.2).
+- Theming: a default dark theme plus a light theme, switchable at runtime,
+  driving colours, corner radii, fonts, and cursors for the WM, taskbar, and
+  default apps through one shared theme definition; adding a theme is data,
+  not new code.
 - Login: `userland/session/login` always starts in text mode and offers to launch the
   graphical session. If no graphics driver loads, the graphical option is
   hidden — never crashed, never errored.
