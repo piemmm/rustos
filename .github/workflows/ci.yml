@@ -1,8 +1,13 @@
 name: ci
 
-# Run on every push and PR. The workflow's sole job is to execute the same
-# `cargo xtask ci` pipeline contributors run locally, so a green CI run and a
-# green local run are equivalent by construction.
+# Run on every push and PR. The workflow runs the same `cargo xtask ci`
+# pipeline contributors run locally (so a green CI run and a green local run
+# are equivalent by construction), then drives the §19.6 fuzz harnesses and
+# §19.7 proptest models for a per-job budget. `cargo xtask ci` already runs
+# the per-PR `--quick` gate; this workflow additionally runs the full soak
+# registry in parallel for a minimum of 120 s each via `tools/ci/soak.sh`,
+# the same thin parallel-soak wrapper the nightly `soak` workflow uses
+# (AGENTS.md §15: pipeline logic lives in `cargo xtask`, never in tools/ci).
 
 on:
   push:
@@ -61,3 +66,28 @@ jobs:
 
       - name: cargo xtask ci
         run: cargo xtask ci
+
+      # §19.6/§19.7: run every fuzz harness and proptest model in parallel for
+      # a minimum of 120 s each. soak.sh enumerates both registries (the
+      # single source of truth) and fans them out one process per target, all
+      # sharing the 120 s per-job budget set with `--secs`. This is more than
+      # the per-PR `--quick` gate inside `cargo xtask ci` and well short of the
+      # nightly 24 h `soak` workflow. Fails closed: any harness crash, hang, or
+      # invariant/counterexample failure fails the job.
+      - name: Run soaks (fuzz + proptest, parallel, >= 120 s each)
+        env:
+          # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them
+          # below so a failing reproducer can be pulled off the run.
+          RUSTOS_CI_LOGDIR: ${{ runner.temp }}/rustos-soak-logs
+        run: tools/ci/soak.sh both --secs 120
+
+      - name: Upload soak logs
+        # Logs are the whole point on failure: §19.6/§19.7 want the crashing
+        # input turned into a regression test + corpus entry.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-soak-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/rustos-soak-logs/
+          if-no-files-found: warn
+          retention-days: 14
