@@ -2,12 +2,16 @@ name: ci
 
 # Run on every push and PR. The workflow runs the same `cargo xtask ci`
 # pipeline contributors run locally (so a green CI run and a green local run
-# are equivalent by construction), then drives the §19.6 fuzz harnesses and
+# check the same things; the only difference is the 100× test repeat below,
+# which is gated on the runner), then drives the §19.6 fuzz harnesses and
 # §19.7 proptest models for a per-job budget.
 #
-# `cargo xtask ci` runs the whole test matrix 100× (AGENTS.md §7: a flaky
-# test only surfaces across repeated runs, so a single green pass is not
-# enough to call a PR clean). The fuzz and proptest gates are *not* repeated
+# `cargo xtask ci` runs the whole test matrix 100× here (AGENTS.md §7: a
+# flaky test only surfaces across repeated runs, so a single green pass is
+# not enough to call a PR clean). The 100× repeat is gated on the runner-set
+# `GITHUB_ACTIONS=true` signal, so it costs the CI runners — not a developer
+# running `cargo xtask ci` locally, which runs the matrix once. The fuzz and
+# proptest gates are *not* repeated
 # 100×: they already run for a wall-clock budget, so `cargo xtask ci` runs
 # their per-PR `--quick` gate once and this workflow additionally runs the
 # full soak registry in parallel for a minimum of 120 s each via

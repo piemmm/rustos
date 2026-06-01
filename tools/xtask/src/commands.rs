@@ -200,7 +200,8 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 /// The `userland/gui/*` crates excluded from the headless image (§17.3).
 const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-iconbar"];
 
-/// The number of times `cargo xtask ci` runs the whole test matrix.
+/// The number of times `cargo xtask ci` runs the whole test matrix on a
+/// GitHub Actions runner.
 ///
 /// A flaky test only manifests across repeated runs, so `ci` exercises
 /// every host, QEMU, and (when opted in) wasm test this many times rather
@@ -208,7 +209,44 @@ const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-iconbar"];
 /// already run for a wall-clock budget (§19.6, §19.7), so re-running them a
 /// fixed number of times would be redundant. See `AGENTS.md` §7 (no flaky
 /// tests).
+///
+/// This 100× cost only buys flake coverage on the CI runners; a developer
+/// running `cargo xtask ci` locally before pushing wants a single, fast
+/// pass, not hours of repetition. The repeat is therefore gated on the
+/// runner-set GitHub Actions signal — see [`ci_test_iterations`].
 pub const CI_TEST_ITERATIONS: u32 = 100;
+
+/// The environment variable GitHub Actions sets to `"true"` on every runner.
+///
+/// It is documented as always present (and equal to `"true"`) inside a
+/// GitHub Actions job, and absent on a developer's machine, so it is the
+/// canonical, forge-set signal that we are running in CI rather than
+/// locally.
+const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
+
+/// Whether we are executing inside a GitHub Actions job.
+///
+/// Reads the runner-set [`GITHUB_ACTIONS_ENV`] signal. Kept as a thin
+/// wrapper so [`ci_test_iterations`] stays a pure function the tests can
+/// exercise without touching the process environment.
+fn in_github_actions() -> bool {
+    std::env::var_os(GITHUB_ACTIONS_ENV).is_some_and(|v| v == "true")
+}
+
+/// How many times `ci` should repeat the test matrix.
+///
+/// Only the GitHub Actions runners pay the [`CI_TEST_ITERATIONS`] 100×
+/// flake-hunting cost; a local `cargo xtask ci` (e.g. run from the IDE
+/// before pushing) repeats the matrix once so it finishes in a sensible
+/// time. The nightly 24 h soak (`cargo xtask test --soak`) remains the
+/// deeper flake net.
+fn ci_test_iterations(in_github_actions: bool) -> u32 {
+    if in_github_actions {
+        CI_TEST_ITERATIONS
+    } else {
+        1
+    }
+}
 
 /// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
 ///
@@ -638,17 +676,21 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // they run before the test matrix to fail a non-conforming PR fast.
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
-    // §7 (no flaky tests): run the whole test matrix `CI_TEST_ITERATIONS`
-    // times, not once. A flake (like the drvhost register-count race) only
-    // shows up across repeated runs, so a single green pass is not enough
-    // to call a PR clean. Fuzz and proptest are excluded below: they
-    // already run for a wall-clock budget (§19.6, §19.7).
+    // §7 (no flaky tests): on a GitHub Actions runner, run the whole test
+    // matrix `CI_TEST_ITERATIONS` times, not once. A flake (like the drvhost
+    // register-count race) only shows up across repeated runs, so a single
+    // green pass is not enough to call a PR clean. Locally the same 100×
+    // would cost hours, so a developer running `ci` from the IDE gets a
+    // single pass; the runners carry the flake-hunting budget. Fuzz and
+    // proptest are excluded below: they already run for a wall-clock budget
+    // (§19.6, §19.7).
+    let iterations = ci_test_iterations(in_github_actions());
     run_test(
         ctx,
         &[
             OsString::from("--qemu"),
             OsString::from("--count"),
-            OsString::from(CI_TEST_ITERATIONS.to_string()),
+            OsString::from(iterations.to_string()),
         ],
     )?;
     run_docs_check(ctx, &[])?;
@@ -753,7 +795,10 @@ fn relative(base: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_subcommand_available, parse_test_options, RunBudget, TEST_SOAK_SECS};
+    use super::{
+        cargo_subcommand_available, ci_test_iterations, parse_test_options, RunBudget,
+        CI_TEST_ITERATIONS, TEST_SOAK_SECS,
+    };
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
@@ -774,6 +819,15 @@ mod tests {
             &ctx,
             "definitely-not-a-real-cargo-subcommand"
         ));
+    }
+
+    /// On a GitHub Actions runner `ci` repeats the matrix 100× to hunt
+    /// flakes (§7); locally it runs once so a developer's pre-push `ci`
+    /// does not take hours.
+    #[test]
+    fn ci_repeats_the_matrix_only_on_github_actions() {
+        assert_eq!(ci_test_iterations(true), CI_TEST_ITERATIONS);
+        assert_eq!(ci_test_iterations(false), 1);
     }
 
     #[test]
