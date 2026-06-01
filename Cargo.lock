@@ -646,6 +646,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-groupadd"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-iconbar"
 version = "0.0.0"
 

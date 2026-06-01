@@ -4369,9 +4369,30 @@ device list.
   `unwrap`/`expect`/`panic!` in production paths. 24 unit tests; docs
   `docs/src/userland/utilities.md` (`useradd` section) and the crate
   `README.md`.
-- Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `mount`, `groupadd` — and the `.app` bundle / dynamic-loader policy)
-  are not yet started.
+- **`groupadd` CLI (`userland/apps/groupadd`) — DONE.** `rustos-groupadd`
+  creates a single group in the group database that persists under
+  `/System/Security/Groups` (`AGENTS.md` §5.1, §16) — the natural sibling
+  of `useradd`, narrowed to the two fields a group record carries. The
+  grammar is `groupadd [-g GID] [--] NAME`: a single name operand plus an
+  optional decimal gid (`-g`/`--gid`, attached or following), auto-
+  allocated by the database when omitted (no default-gid policy to invent,
+  §2.1). A group name (rather than a numeric id) is interface creep with
+  no name-to-id seam (§2.4), and the name must match `[a-z_][a-z0-9_-]*`
+  within a length bound. The tool is **not** the policy point (§5.4):
+  creating a group needs `CAP_USER_ADMIN` (§5.2), but the injected
+  `GroupDb` seam (`name_in_use` + `create(GroupSpec)`) enforces that and
+  gid collisions, surfacing a refusal as `GroupaddError::Create`. It
+  **fails closed**: an unknown option or anything other than exactly one
+  name operand is `GroupaddError::Usage`; an invalid name is
+  `GroupaddError::BadName`; a non-decimal id is `GroupaddError::BadId`; an
+  existing name is `GroupaddError::Exists`; a lookup/create failure
+  carries the underlying `Errno` as `GroupaddError::Lookup`/`Create`.
+  `no_std` (with `alloc`), depends only on `rustos-abi` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 21 unit
+  tests; docs `docs/src/userland/utilities.md` (`groupadd` section) and
+  the crate `README.md`.
+- Remaining Stage 6 deliverables (the last core CLI utility — `mount` —
+  and the `.app` bundle / dynamic-loader policy) are not yet started.
 
 ---
 

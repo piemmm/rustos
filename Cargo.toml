@@ -81,6 +81,7 @@ members = [
     "userland/apps/chown",
     "userland/apps/cp",
     "userland/apps/getcap",
+    "userland/apps/groupadd",
     "userland/apps/ls",
     "userland/apps/mv",
     "userland/apps/ps",
