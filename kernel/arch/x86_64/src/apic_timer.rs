@@ -376,30 +376,58 @@ pub struct PolledPit;
 #[cfg(any(target_os = "none", doc))]
 impl PortIo for PolledPit {
     fn inb(&mut self, port: u16) -> u8 {
-        // SAFETY: PIT ports 0x40-0x43 and 0x61 are architecturally
-        // present on every x86 platform RustOS targets; reading them
-        // has no side-effects other than the read itself.
-        unsafe {
-            let value: u8;
-            core::arch::asm!(
-                "in al, dx",
-                in("dx") port,
-                out("al") value,
-                options(nomem, nostack, preserves_flags),
-            );
-            value
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: PIT ports 0x40-0x43 and 0x61 are architecturally
+            // present on every x86 platform RustOS targets; reading
+            // them has no side-effects other than the read itself. The
+            // surrounding `cfg(target_arch = "x86_64")` guarantees
+            // `in`/`out` are only emitted for an x86_64 code generator.
+            unsafe {
+                let value: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    in("dx") port,
+                    out("al") value,
+                    options(nomem, nostack, preserves_flags),
+                );
+                value
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Non-x86_64 host build: the legacy PIT port I/O space
+            // exists only on x86, so `in`/`out` have no encoding here.
+            // `PolledPit` is the production calibration backend and is
+            // never reached on such hosts (`calibrate`'s unit tests
+            // drive a mock `PortIo`), so the shim returns a constant
+            // rather than emitting an invalid instruction. Returning a
+            // value (rather than panicking) honours `AGENTS.md` §2.9.
+            let _ = port;
+            0
         }
     }
     fn outb(&mut self, port: u16, value: u8) {
-        // SAFETY: as for `inb`; writes to channel 2 / port 0x61 only
-        // affect the speaker gate and the timer pulse we own.
-        unsafe {
-            core::arch::asm!(
-                "out dx, al",
-                in("dx") port,
-                in("al") value,
-                options(nomem, nostack, preserves_flags),
-            );
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: as for `inb`; writes to channel 2 / port 0x61
+            // only affect the speaker gate and the timer pulse we own.
+            // The surrounding `cfg(target_arch = "x86_64")` guarantees
+            // `in`/`out` are only emitted for an x86_64 code generator.
+            unsafe {
+                core::arch::asm!(
+                    "out dx, al",
+                    in("dx") port,
+                    in("al") value,
+                    options(nomem, nostack, preserves_flags),
+                );
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Non-x86_64 host build: see `inb`. No PIT port space exists
+            // off x86, and this backend is never reached on such hosts.
+            let _ = (port, value);
         }
     }
 }
