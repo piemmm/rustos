@@ -35,6 +35,11 @@ cargo install --locked cargo-deny mdbook
 
 ## Licence
 
-Licensed under the [GNU General Public License v3.0](./LICENSE) (GPL-3.0-only).
+Licensed under the [GNU General Public License v2.0 or later](./LICENSE)
+(GPL-2.0-or-later), with an additional syscall / ABI exception
+(`RustOS-syscall-note`) that keeps user-space programs which merely use the
+kernel's system calls or its published syscall / ABI interface definitions
+from being treated as derived works. See [`LICENSE`](./LICENSE) for the full
+text.
 
 RustOS is an independent, open-source hobby project. It is not affiliated with, endorsed by, or supported by the Rust Project or the Rust Foundation.

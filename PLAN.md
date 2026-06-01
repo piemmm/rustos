@@ -90,8 +90,9 @@ Do **not** begin a stage before all its listed dependencies are complete.
   (POSIX utilities only) and put `${CARGO_HOME:-~/.cargo}/bin` on `PATH`, so
   they run identically on Linux and macOS. Logs land outside the tree (§3);
   no pipeline step lives in the scripts (§15).
-- `LICENSE` (GPL-3.0-only), `README.md`, `AGENTS.md`, `PLAN.md` are
-  all present at the repository root.
+- `LICENSE` (GPL-2.0-or-later, with the `RustOS-syscall-note` syscall / ABI
+  exception), `README.md`, `AGENTS.md`, `PLAN.md` are all present at the
+  repository root.
 
 ---
 
@@ -1670,6 +1671,22 @@ follow-up is its own thread and is now also complete.
   `FramebufferConfig` plus a kernel `MmioMapper` over the surface),
   which is not yet in the tree — the same prerequisite pattern the
   virtio-blk QEMU verticals waited on (deferral (4) above).
+- Relicence follow-up (*complete*): the project moved from `GPL-3.0-only`
+  to **`GPL-2.0-or-later`** (GNU GPL version 2, or — at the recipient's
+  option — any later version) with an additional **syscall / ABI
+  exception**. The exception (named `RustOS-syscall-note`, modelled on the
+  same kind of grant other kernels publish) keeps user-space programs that
+  merely make system calls or include the project's published syscall / ABI
+  interface definitions from being treated as derived works. The verbatim
+  GNU GPL version 2 text and the exception preamble live in the root
+  `LICENSE`; every crate inherits `license = "GPL-2.0-or-later"` from
+  `[workspace.package]` (the exception only *loosens* the GPL, and no SPDX
+  exception identifier is registered for it, so the base copyleft is the
+  honest machine-readable expression). `deny.toml`'s `licenses.allow` now
+  lists `GPL-2.0-or-later`; `cargo deny check` is `advisories ok, bans ok,
+  licenses ok, sources ok`. `README.md` and the `drivers/bus/{pci,mmio}`
+  READMEs record the new licence + exception. The earlier `GPL-3.0` →
+  `GPL-3.0-only` defect note below is retained as accurate history.
 - Stage 4.D follow-up (Item 6 — acceptance gate, *complete*): finished the
   gate on a host that has `mdbook` (v0.5.3) + `mdbook-linkcheck` and
   `cargo-deny` (0.19.7) installed — the two tools the previous session

@@ -76,4 +76,5 @@ authority is requested (`AGENTS.md` §4).
 
 ## License
 
-GPL-3.0-only.
+GPL-2.0-or-later, with the `RustOS-syscall-note` syscall / ABI exception
+(see the repository-root `LICENSE`).
