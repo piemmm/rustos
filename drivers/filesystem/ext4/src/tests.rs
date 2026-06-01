@@ -882,3 +882,275 @@ fn create_exhausts_the_free_inodes() {
         Err(DriverError::DeviceFault)
     );
 }
+
+// --- Extended-attribute POSIX ACLs (`FilesystemSecurity`). ---
+
+/// Write a `POSIX_ACL_XATTR` value (version word + 8-byte
+/// `(e_tag, e_perm, e_id)` entries) into `img` at `pos`, returning its
+/// byte length.
+fn write_posix_acl(img: &mut [u8], pos: usize, entries: &[(u16, u16, u32)]) -> usize {
+    set_le32(img, pos, 2); // a_version
+    let mut off = pos + 4;
+    for &(tag, perm, id) in entries {
+        set_le16(img, off, tag);
+        set_le16(img, off + 2, perm);
+        set_le32(img, off + 4, id);
+        off += 8;
+    }
+    off - pos
+}
+
+/// Write one `ext4_xattr_entry` for `system.posix_acl_access` (the whole
+/// name is encoded by `e_name_index = 2`, so `e_name_len` is zero) at
+/// `pos`.
+fn write_acl_xattr_entry(img: &mut [u8], pos: usize, value_offs: u16, value_size: u32) {
+    img[pos] = 0; // e_name_len
+    img[pos + 1] = 2; // e_name_index = POSIX_ACL_ACCESS
+    set_le16(img, pos + 2, value_offs); // e_value_offs
+    set_le32(img, pos + 4, 0); // e_value_inum (in-block value)
+    set_le32(img, pos + 8, value_size); // e_value_size
+    set_le32(img, pos + 12, 0); // e_hash
+}
+
+/// The six entries a complete `getfacl`-style ACL carries; only the two
+/// named entries (`ACL_USER` 1000, `ACL_GROUP` 2000) surface as grants.
+const SAMPLE_ACL: [(u16, u16, u32); 6] = [
+    (1, 6, !0),   // ACL_USER_OBJ rw-
+    (2, 4, 1000), // ACL_USER 1000 r--
+    (4, 4, !0),   // ACL_GROUP_OBJ r--
+    (8, 5, 2000), // ACL_GROUP 2000 r-x
+    (16, 7, !0),  // ACL_MASK rwx
+    (32, 4, !0),  // ACL_OTHER r--
+];
+
+#[test]
+fn decode_posix_acl_keeps_only_named_user_and_group_grants() {
+    let mut value = [0u8; 4 + SAMPLE_ACL.len() * 8];
+    let len = write_posix_acl(&mut value, 0, &SAMPLE_ACL);
+    let mut sec = NodeSecurity::new(0o644, 0, 0);
+    decode_posix_acl(&value[..len], &mut sec);
+    assert_eq!(
+        sec.acl(),
+        &[
+            SecurityAcl {
+                subject: SecuritySubject::User(1000),
+                perms: 4,
+            },
+            SecurityAcl {
+                subject: SecuritySubject::Group(2000),
+                perms: 5,
+            },
+        ]
+    );
+}
+
+#[test]
+fn decode_posix_acl_rejects_a_bad_version() {
+    let mut value = [0u8; 12];
+    set_le32(&mut value, 0, 99); // not POSIX_ACL_VERSION
+    set_le16(&mut value, 4, 2); // ACL_USER
+    set_le16(&mut value, 6, 7);
+    set_le32(&mut value, 8, 1000);
+    let mut sec = NodeSecurity::new(0o644, 0, 0);
+    decode_posix_acl(&value, &mut sec);
+    assert!(sec.acl().is_empty());
+}
+
+#[test]
+fn decode_posix_acl_stops_at_the_inline_budget() {
+    // Ten named-user entries; the record only holds MAX_ACL_ENTRIES (8).
+    let mut value = vec![0u8; 4 + 10 * 8];
+    set_le32(&mut value, 0, 2);
+    for i in 0..10u32 {
+        let off = 4 + i as usize * 8;
+        set_le16(&mut value, off, 2); // ACL_USER
+        set_le16(&mut value, off + 2, 4);
+        set_le32(&mut value, off + 4, i);
+    }
+    let mut sec = NodeSecurity::new(0, 0, 0);
+    decode_posix_acl(&value, &mut sec);
+    assert_eq!(sec.acl().len(), 8);
+}
+
+#[test]
+fn find_posix_acl_locates_a_value_with_a_block_value_base() {
+    let mut region = [0u8; 256];
+    let value = [1u8, 2, 3, 4, 5];
+    let value_offs = 128usize;
+    region[value_offs..value_offs + value.len()].copy_from_slice(&value);
+    write_acl_xattr_entry(&mut region, 32, u16c(value_offs), u32c(value.len()));
+    let found = find_posix_acl(&region, 32, 0).expect("attribute present");
+    assert_eq!(found, &value);
+}
+
+#[test]
+fn find_posix_acl_locates_a_value_with_an_inode_value_base() {
+    let mut region = [0u8; 256];
+    let entries_start = 64usize; // header magic + 4 in the inode body
+    let value_offs = 80usize; // measured from entries_start
+    let value = [9u8, 8, 7];
+    let at = entries_start + value_offs;
+    region[at..at + value.len()].copy_from_slice(&value);
+    write_acl_xattr_entry(
+        &mut region,
+        entries_start,
+        u16c(value_offs),
+        u32c(value.len()),
+    );
+    let found = find_posix_acl(&region, entries_start, entries_start).expect("present");
+    assert_eq!(found, &value);
+}
+
+#[test]
+fn find_posix_acl_skips_unrelated_attributes() {
+    let mut region = [0u8; 64];
+    // A `user.attr` entry (name_index 1), then the zero-word terminator.
+    region[0] = 4; // e_name_len
+    region[1] = 1; // e_name_index = "user."
+    set_le16(&mut region, 2, 40);
+    set_le32(&mut region, 8, 4); // e_value_size
+    region[16..20].copy_from_slice(b"attr");
+    assert!(find_posix_acl(&region, 0, 0).is_none());
+}
+
+#[test]
+fn security_decodes_a_posix_acl_from_the_external_block() {
+    let mut img = build_image();
+    let acl_block: u32 = 16;
+    set_le32(&mut img, inode_offset(11) + 0x68, acl_block); // i_file_acl_lo
+
+    let base = block_offset(acl_block);
+    set_le32(&mut img, base, 0xEA02_0000); // h_magic
+    set_le32(&mut img, base + 4, 1); // h_refcount
+    set_le32(&mut img, base + 8, 1); // h_blocks
+    let value_offs = 128usize; // measured from the block start
+    let value_size = write_posix_acl(&mut img, base + value_offs, &SAMPLE_ACL);
+    write_acl_xattr_entry(
+        &mut img,
+        base + XATTR_BLOCK_HEADER_LEN,
+        u16c(value_offs),
+        u32c(value_size),
+    );
+
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let sec = fs.security(file).expect("security");
+    assert_eq!(sec.mode, 0o644);
+    assert_eq!(
+        sec.acl(),
+        &[
+            SecurityAcl {
+                subject: SecuritySubject::User(1000),
+                perms: 4,
+            },
+            SecurityAcl {
+                subject: SecuritySubject::Group(2000),
+                perms: 5,
+            },
+        ]
+    );
+}
+
+#[test]
+fn security_ignores_a_garbage_external_block() {
+    let mut img = build_image();
+    let acl_block: u32 = 16;
+    set_le32(&mut img, inode_offset(11) + 0x68, acl_block);
+    // The block carries no xattr magic: the ACL is simply absent.
+    let base = block_offset(acl_block);
+    set_le32(&mut img, base, 0xDEAD_BEEF);
+
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let sec = fs.security(file).expect("security");
+    assert!(sec.acl().is_empty());
+}
+
+#[test]
+fn security_decodes_an_inline_posix_acl_from_the_inode_body() {
+    // A second, 256-byte-inode volume: the enlarged inode record has room
+    // for an inline xattr region after `i_extra_isize`.
+    const BS: usize = 1024;
+    const ISIZE: usize = 256;
+    const IPG: u32 = 16;
+    const ITAB: usize = 5; // inode table spans blocks 5..=8 (16 * 256 B)
+    const ROOT_DATA: u32 = 9;
+    let mut img = vec![0u8; IMG_LEN];
+
+    let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
+    set_le32(&mut img, sb, IPG); // s_inodes_count
+    set_le32(&mut img, sb + 0x04, u32c(FS_BLOCK_COUNT)); // s_blocks_count_lo
+    set_le32(&mut img, sb + 0x14, 1); // s_first_data_block
+    set_le32(&mut img, sb + 0x18, 0); // s_log_block_size -> 1024
+    set_le32(&mut img, sb + 0x20, u32c(FS_BLOCK_COUNT)); // s_blocks_per_group
+    set_le32(&mut img, sb + 0x28, IPG); // s_inodes_per_group
+    set_le16(&mut img, sb + 0x38, EXT_MAGIC);
+    set_le32(&mut img, sb + 0x4C, 1); // s_rev_level (dynamic)
+    set_le16(&mut img, sb + 0x58, u16c(ISIZE)); // s_inode_size
+    set_le32(&mut img, sb + 0x60, INCOMPAT_FILETYPE);
+
+    let gd = 2 * BS;
+    set_le32(&mut img, gd, u32c(BLOCK_BITMAP_BLOCK));
+    set_le32(&mut img, gd + 0x04, u32c(INODE_BITMAP_BLOCK));
+    set_le32(&mut img, gd + 0x08, u32c(ITAB));
+
+    let ino_off = |ino: u32| ITAB * BS + (ino as usize - 1) * ISIZE;
+
+    // Root inode 2: extent-mapped directory, one block.
+    {
+        let b = ino_off(ROOT_INODE);
+        set_le16(&mut img, b, S_IFDIR | 0o755);
+        set_le32(&mut img, b + 0x04, u32c(BS));
+        set_le32(&mut img, b + 0x20, INODE_FLAG_EXTENTS);
+        let ib = b + I_BLOCK_OFFSET;
+        set_le16(&mut img, ib, EXTENT_MAGIC);
+        set_le16(&mut img, ib + 2, 1);
+        set_le16(&mut img, ib + 4, 4);
+        set_le16(&mut img, ib + 16, 1); // ee_len
+        set_le32(&mut img, ib + 20, ROOT_DATA); // ee_start_lo
+    }
+    {
+        let off = block_offset(ROOT_DATA);
+        let block = &mut img[off..off + BS];
+        let mut pos = put_dirent(block, 0, ROOT_INODE, b".", FT_DIR, false);
+        pos = put_dirent(block, pos, ROOT_INODE, b"..", FT_DIR, false);
+        let _ = put_dirent(block, pos, 11, b"f", FT_REG, true);
+    }
+
+    // File inode 11: empty regular file carrying an inline POSIX ACL.
+    {
+        let b = ino_off(11);
+        set_le16(&mut img, b, S_IFREG | 0o600);
+        set_le32(&mut img, b + 0x20, INODE_FLAG_EXTENTS);
+        let ib = b + I_BLOCK_OFFSET;
+        set_le16(&mut img, ib, EXTENT_MAGIC);
+        set_le16(&mut img, ib + 4, 4); // eh_max
+
+        let extra = 32usize;
+        set_le16(&mut img, b + 0x80, u16c(extra)); // i_extra_isize
+        let header = b + 0x80 + extra;
+        set_le32(&mut img, header, 0xEA02_0000); // inline xattr magic
+        let entries_start = header + 4;
+        let value_offs = 20usize; // measured from entries_start
+        let value_size = write_posix_acl(&mut img, entries_start + value_offs, &SAMPLE_ACL);
+        write_acl_xattr_entry(&mut img, entries_start, u16c(value_offs), u32c(value_size));
+    }
+
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid inline-ACL volume");
+    let file = fs.lookup(fs.root(), b"f").expect("found");
+    let sec = fs.security(file).expect("security");
+    assert_eq!(sec.mode, 0o600);
+    assert_eq!(
+        sec.acl(),
+        &[
+            SecurityAcl {
+                subject: SecuritySubject::User(1000),
+                perms: 4,
+            },
+            SecurityAcl {
+                subject: SecuritySubject::Group(2000),
+                perms: 5,
+            },
+        ]
+    );
+}

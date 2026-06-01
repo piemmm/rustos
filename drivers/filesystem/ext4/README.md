@@ -101,11 +101,19 @@ The driver implements `FilesystemSecurity`: `security(node)` reports a
 `NodeSecurity` carrying the inode's POSIX mode (the low 12 bits, with
 the type bits stripped), owner uid, and owner gid. The uid and gid each
 recombine their low half (`i_uid`/`i_gid`) with the osd2 high half
-(`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability gate, and
-its POSIX ACLs live in extended-attribute blocks this read surface does
-not yet decode, so the record carries no `required_cap` and no inline
-ACL entries; the VFS applies the mode/owner record on its own. Surfacing
-the xattr ACL is a later deliverable.
+(`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability gate, so
+the record carries no `required_cap`.
+
+Named-user / named-group POSIX ACL grants are decoded from the inode's
+`system.posix_acl_access` extended attribute into the record's inline
+ACL entries. Both storage forms are read: the **inline** region in an
+enlarged inode's tail (after `i_extra_isize`, value offsets relative to
+the first entry) and the **external block** named by `i_file_acl` (value
+offsets relative to the block start). `ACL_USER`/`ACL_GROUP` entries
+become one grant-only `SecurityAcl` each; the owner/owning-group/other/
+mask entries are already expressed by the mode bits and are skipped. An
+absent or malformed attribute simply contributes no grants (the mode
+bits still apply — §5.4, fail closed).
 
 ## Required capabilities
 
@@ -134,6 +142,10 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
 - `FilesystemSecurity::security` for a regular file (mode, and a uid/gid
   that span both the low and osd2 high halves) and a directory, plus the
   `NotFound` guard.
+- **POSIX ACLs**: standalone `decode`/`find` units (both value-base
+  conventions, bad version, the inline-budget cap, unrelated
+  attributes), and end-to-end `security` reads of an external xattr
+  block, a garbage block, and an inline ACL in a 256-byte-inode volume.
 - **Writing**: create + multi-block `write_at` round-tripping across a
   remount; duplicate / invalid-name / non-directory `create` rejection;
   sparse extension past EOF; `truncate` shrink-then-grow; directory
@@ -143,7 +155,7 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
   `metadata_csum` volume.
 - The `register` capability gate and `into_block` round-trip.
 
-32/32 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
+41/41 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
 end-to-end QEMU vertical are tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface

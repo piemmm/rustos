@@ -70,10 +70,30 @@ template. `security(node)` reports a `NodeSecurity` carrying the inode's
 POSIX mode (the low 12 bits, with the type bits stripped) and its owner
 uid/gid; each id recombines its low half (`i_uid`/`i_gid`) with the osd2
 high half (`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability
-gate, and its POSIX ACLs live in extended-attribute blocks this read
-surface does not yet decode, so the record carries no `required_cap` and
-no inline ACL entries. Surfacing the xattr ACL is a later deliverable
-alongside write support.
+gate, so the record carries no `required_cap`.
+
+### POSIX ACLs
+
+Named-user and named-group POSIX ACL grants are decoded from the inode's
+`system.posix_acl_access` extended attribute into the record's inline
+ACL entries. ext4 keeps that attribute in two places, both of which the
+driver reads:
+
+- an **inline** region in the tail of an enlarged (`inode_size > 128`)
+  inode record, immediately after `i_extra_isize`, whose entry value
+  offsets are measured from the first entry; and
+- an **external block** named by `i_file_acl`, whose entry value offsets
+  are measured from the start of the block.
+
+Both share the `ext4_xattr_entry` encoding (magic `0xEA020000`,
+`e_name_index = 2` for the access ACL). The `ACL_USER` / `ACL_GROUP`
+entries map to one grant-only `SecurityAcl` each (`SecuritySubject::User`
+/ `Group` with the POSIX `rwx` triad); the owner/owning-group/other/mask
+entries are already expressed by the mode bits, so they are skipped. A
+volume may carry the attribute inline, in the external block, in both, or
+in neither; an absent or malformed region simply contributes no grants
+(the mode bits still apply — `AGENTS.md` §5.4, fail closed). The record's
+inline ACL budget bounds the number of named grants surfaced.
 
 ## Writing
 
@@ -116,7 +136,7 @@ size 1024, one block group, 128-byte inodes, `filetype` on, with block
 and inode bitmaps and free space) holding an extent-mapped root, an
 extent-mapped file, a subdirectory with a nested file, and a classic
 block-mapped file that combines direct pointers, sparse holes, and a
-single-indirect block. The 32 host-side tests cover superblock
+single-indirect block. The 41 host-side tests cover superblock
 validation, `node_info`, ordered listing with `.`/`..` suppression and
 end-of-directory, `lookup` and subdirectory traversal, extent and
 classic reads (including across holes and the direct/indirect boundary),
@@ -128,5 +148,9 @@ non-directory rejection, sparse extension, `truncate` shrink-then-grow,
 directory creation with `.`/`..` and removal (empty vs. `Busy`), inode
 reuse after `remove`, the `write_at`/`truncate` directory and
 not-found guards, free-inode exhaustion, and the fail-closed refusal of
-mutation on a `metadata_csum` volume. A `pjdfstest`-equivalent POSIX
+mutation on a `metadata_csum` volume, and the POSIX-ACL decode —
+standalone `decode`/`find` units (both value-base conventions, bad
+version, the inline budget cap, unrelated attributes) plus end-to-end
+`security` reads of an external xattr block, a garbage block, and an
+inline ACL in a 256-byte-inode volume. A `pjdfstest`-equivalent POSIX
 suite and an end-to-end QEMU vertical remain future work.

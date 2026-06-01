@@ -3769,10 +3769,28 @@ device list.
   the directory/not-found/invalid-name guards, free-inode exhaustion, and
   the fail-closed refusal on a `metadata_csum` volume). Docs:
   `docs/src/filesystem/{ext4,overview}.md` and the crate `README.md`.
+- **`ext4` POSIX-ACL decode — DONE.** `security(node)` now folds the
+  inode's `system.posix_acl_access` extended attribute into the
+  `NodeSecurity` record. Both ext4 storage forms are read: the inline
+  region in an enlarged (`inode_size > 128`) inode's tail (after
+  `i_extra_isize`, value offsets relative to the first entry) and the
+  external block named by `i_file_acl` (value offsets relative to the
+  block start), sharing the `ext4_xattr_entry` encoding (magic
+  `0xEA020000`, `e_name_index = 2`). Named `ACL_USER`/`ACL_GROUP`
+  entries become one grant-only `SecurityAcl` each
+  (`SecuritySubject::User`/`Group`, POSIX `rwx`); the
+  owner/owning-group/other/mask entries are already expressed by the
+  mode bits and are skipped, and an absent or malformed attribute
+  contributes no grants (§5.4 — fail closed, never widen). No
+  `unwrap`/`expect`/`panic!`, no `unsafe`. Tests grew from 32 to **41**
+  (standalone `decode`/`find` units for both value-base conventions,
+  bad version, the inline-budget cap, unrelated attributes; end-to-end
+  `security` reads of an external xattr block, a garbage block, and an
+  inline ACL in a 256-byte-inode volume). Docs:
+  `docs/src/filesystem/ext4.md` and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - Decoding the ext4 xattr POSIX ACL into the `FilesystemSecurity`
-    record; growing an ext4 directory / file beyond the inline-extent
-    root (interior extent-tree edits) for the checksummed feature set.
+  - Growing an ext4 directory / file beyond the inline-extent root
+    (interior extent-tree edits) for the checksummed feature set.
   - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
     crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
     vertical.

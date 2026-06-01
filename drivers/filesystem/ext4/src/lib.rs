@@ -61,7 +61,7 @@
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
-    NodeSecurity,
+    NodeSecurity, SecurityAcl, SecuritySubject,
 };
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -144,6 +144,47 @@ const I_BLOCK_OFFSET: usize = 40;
 /// tree never approaches this; the bound prevents a malformed image from
 /// looping).
 const MAX_EXTENT_DEPTH: u16 = 5;
+
+/// Largest on-disk inode record the driver stages on the stack while
+/// reading the inline extended-attribute region. ext4 inode sizes are a
+/// power of two no larger than the block size, which itself never
+/// exceeds [`MAX_BLOCK_SIZE`].
+const MAX_INODE_SIZE: usize = MAX_BLOCK_SIZE as usize;
+
+/// Extended-attribute header magic (`h_magic` for the external block and
+/// the inode-body header alike), little-endian `0xEA02_0000`.
+const XATTR_MAGIC: u32 = 0xEA02_0000;
+
+/// Byte length of an external xattr block's header, ahead of its first
+/// entry (`struct ext4_xattr_header`).
+const XATTR_BLOCK_HEADER_LEN: usize = 32;
+
+/// Byte length of the inode-body xattr header (`struct
+/// ext4_xattr_ibody_header`): just the 4-byte magic.
+const XATTR_IBODY_HEADER_LEN: usize = 4;
+
+/// Fixed length of one xattr entry header, ahead of its (4-byte aligned)
+/// name (`struct ext4_xattr_entry`).
+const XATTR_ENTRY_HEADER_LEN: usize = 16;
+
+/// `e_name_index` for the `system.posix_acl_access` attribute: the whole
+/// name is encoded by the index, so its `e_name_len` is zero.
+const XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
+
+/// `i_extra_isize` lives here, immediately after the 128-byte classic
+/// inode; the inline xattr region begins `i_extra_isize` bytes further on.
+const I_EXTRA_ISIZE_OFFSET: usize = 128;
+
+/// `a_version` of a `POSIX_ACL_XATTR` value, little-endian `2`.
+const POSIX_ACL_VERSION: u32 = 2;
+/// `e_tag` for a named-user ACL entry; `e_id` is the uid granted.
+const ACL_TAG_USER: u16 = 0x02;
+/// `e_tag` for a named-group ACL entry; `e_id` is the gid granted.
+const ACL_TAG_GROUP: u16 = 0x08;
+/// Low three bits of an ACL `e_perm`: the POSIX `rwx` triad.
+const ACL_PERM_MASK: u16 = 0x07;
+/// Byte length of one `posix_acl_xattr_entry` (`e_tag`, `e_perm`, `e_id`).
+const POSIX_ACL_ENTRY_LEN: usize = 8;
 
 /// Read a little-endian `u16` at `off`, or `0` if out of bounds.
 fn le16(buf: &[u8], off: usize) -> u16 {
@@ -234,6 +275,9 @@ struct Inode {
     size: u64,
     /// `i_flags`.
     flags: u32,
+    /// External extended-attribute block (`i_file_acl` low half combined
+    /// with the osd2 high half); `0` when the inode has none.
+    file_acl: u64,
     /// Raw `i_block` array (extent root or block-pointer map).
     block: [u8; I_BLOCK_LEN],
 }
@@ -253,13 +297,14 @@ impl Inode {
         self.flags & INODE_FLAG_EXTENTS != 0
     }
 
-    /// The inode's §5.3 security record.
+    /// The inode's base §5.3 security record (owner, group, mode bits),
+    /// before any extended-attribute ACL is folded in.
     ///
     /// ext4 stores the POSIX mode bits (`i_mode` low 12 bits, the type
-    /// bits stripped), owner, and group per inode. It has no inline
-    /// capability gate, and POSIX ACLs live in extended-attribute blocks
-    /// this read surface does not yet decode, so the record carries no
-    /// ACL entries and no capability requirement.
+    /// bits stripped), owner, and group per inode, and has no inline
+    /// capability gate. Named-user / named-group POSIX ACL grants live in
+    /// extended attributes and are decoded into this record separately by
+    /// [`Ext4::decode_inode_acl`], which needs the backing device.
     fn security(&self) -> NodeSecurity {
         NodeSecurity::new(u32::from(self.mode) & 0x0FFF, self.uid, self.gid)
     }
@@ -580,6 +625,7 @@ impl<B: Block> Ext4<B> {
         let size_lo = u64::from(le32(&raw, 0x04));
         let size_hi = u64::from(le32(&raw, 0x6C));
         let flags = le32(&raw, 0x20);
+        let file_acl = u64::from(le32(&raw, 0x68)) | (u64::from(le16(&raw, 0x74)) << 32);
         let mut block = [0u8; I_BLOCK_LEN];
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
         Ok(Inode {
@@ -588,6 +634,7 @@ impl<B: Block> Ext4<B> {
             gid,
             size: (size_hi << 32) | size_lo,
             flags,
+            file_acl,
             block,
         })
     }
@@ -1292,6 +1339,70 @@ fn align4(n: usize) -> usize {
     (n + 3) & !3
 }
 
+/// Locate the `system.posix_acl_access` value within an extended-attribute
+/// region.
+///
+/// `region` is the whole staged buffer (the inode body, or the external
+/// xattr block). `entries_start` is the byte offset of the first
+/// `ext4_xattr_entry`; `value_base` is the offset that entries' `e_value_offs`
+/// are measured from (the first-entry offset for an inode-body region, `0`
+/// for a block). Returns the value slice, or `None` when the attribute is
+/// absent or the region is malformed. The walk always advances by at least
+/// one entry header, so a corrupt region terminates rather than loops.
+fn find_posix_acl(region: &[u8], entries_start: usize, value_base: usize) -> Option<&[u8]> {
+    let mut pos = entries_start;
+    loop {
+        if pos + XATTR_ENTRY_HEADER_LEN > region.len() {
+            return None;
+        }
+        // The end of the entry list is a zeroed first word.
+        if le32(region, pos) == 0 {
+            return None;
+        }
+        let name_len = usize::from(region[pos]);
+        let name_index = region[pos + 1];
+        let value_offs = usize::from(le16(region, pos + 2));
+        let value_inum = le32(region, pos + 4);
+        let value_size = usize_of(u64::from(le32(region, pos + 8))).ok()?;
+        if name_index == XATTR_INDEX_POSIX_ACL_ACCESS && name_len == 0 && value_inum == 0 {
+            let start = value_base.checked_add(value_offs)?;
+            let end = start.checked_add(value_size)?;
+            return region.get(start..end);
+        }
+        pos = pos.checked_add(align4(XATTR_ENTRY_HEADER_LEN + name_len))?;
+    }
+}
+
+/// Fold a `POSIX_ACL_XATTR` value into `sec`, pushing one grant-only
+/// [`SecurityAcl`] per named-user (`ACL_USER`) and named-group
+/// (`ACL_GROUP`) entry. The owner/owning-group/other/mask entries are
+/// already expressed by the mode bits, so they are skipped. A value with
+/// the wrong version, or one that overflows the inline ACL budget, is
+/// folded as far as it cleanly can be — the mode bits always still apply
+/// (`AGENTS.md` §5.4 — fail closed, never widen).
+fn decode_posix_acl(value: &[u8], sec: &mut NodeSecurity) {
+    if value.len() < 4 || le32(value, 0) != POSIX_ACL_VERSION {
+        return;
+    }
+    let mut off = 4;
+    while off + POSIX_ACL_ENTRY_LEN <= value.len() {
+        let tag = le16(value, off);
+        let perms = (le16(value, off + 2) & ACL_PERM_MASK) as u8;
+        let id = le32(value, off + 4);
+        let subject = match tag {
+            ACL_TAG_USER => Some(SecuritySubject::User(id)),
+            ACL_TAG_GROUP => Some(SecuritySubject::Group(id)),
+            _ => None,
+        };
+        if let Some(subject) = subject {
+            if sec.push_acl(SecurityAcl { subject, perms }).is_err() {
+                break;
+            }
+        }
+        off += POSIX_ACL_ENTRY_LEN;
+    }
+}
+
 impl<B: Block> Ext4<B> {
     /// Sectors (512-byte `i_blocks` units) per filesystem block.
     fn sectors_per_block(&self) -> u32 {
@@ -1569,6 +1680,58 @@ impl<B: Block> FilesystemRead for Ext4<B> {
     }
 }
 
+impl<B: Block> Ext4<B> {
+    /// Fold inode `ino`'s POSIX-ACL extended attributes into `sec`.
+    ///
+    /// ext4 keeps `system.posix_acl_access` in two places: an inline
+    /// region in the tail of an enlarged (`inode_size > 128`) inode record,
+    /// after `i_extra_isize`, and/or an external block named by
+    /// `i_file_acl`. Both share the same entry encoding, differing only in
+    /// where `e_value_offs` is measured from. A volume may use either, both,
+    /// or neither; an absent or malformed region simply contributes no
+    /// grants (the mode bits still apply).
+    fn decode_inode_acl(
+        &mut self,
+        ino: u32,
+        inode: &Inode,
+        sec: &mut NodeSecurity,
+    ) -> Result<(), DriverError> {
+        let inode_size = self.layout.inode_size as usize;
+        if inode_size > I_EXTRA_ISIZE_OFFSET {
+            let offset = self.locate_inode(ino)?;
+            let staged = inode_size.min(MAX_INODE_SIZE);
+            let mut raw = [0u8; MAX_INODE_SIZE];
+            device_read(
+                &mut self.block,
+                self.block_size,
+                self.block_count,
+                offset,
+                &mut raw[..staged],
+            )?;
+            let extra = usize::from(le16(&raw, I_EXTRA_ISIZE_OFFSET));
+            let header = I_EXTRA_ISIZE_OFFSET + extra;
+            if header + XATTR_IBODY_HEADER_LEN <= staged && le32(&raw, header) == XATTR_MAGIC {
+                let entries_start = header + XATTR_IBODY_HEADER_LEN;
+                if let Some(value) = find_posix_acl(&raw[..staged], entries_start, entries_start) {
+                    decode_posix_acl(value, sec);
+                }
+            }
+        }
+
+        if inode.file_acl != 0 && inode.file_acl < self.layout.blocks_count {
+            let bs = self.layout.block_size as usize;
+            let mut block = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_fs_block(inode.file_acl, &mut block[..bs])?;
+            if le32(&block, 0) == XATTR_MAGIC {
+                if let Some(value) = find_posix_acl(&block[..bs], XATTR_BLOCK_HEADER_LEN, 0) {
+                    decode_posix_acl(value, sec);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<B: Block> FilesystemSecurity for Ext4<B> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         let ino = node_inode(node)?;
@@ -1576,7 +1739,9 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         if inode.kind().is_none() {
             return Err(DriverError::NotFound);
         }
-        Ok(inode.security())
+        let mut sec = inode.security();
+        self.decode_inode_acl(ino, &inode, &mut sec)?;
+        Ok(sec)
     }
 }
 
