@@ -161,7 +161,7 @@ impl SchedulerArch for Aarch64Arch {
 
 /// Read the architectural physical counter `CNTPCT_EL0` (the monotonic
 /// tick source on the `virt` board).
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn read_cntpct() -> u64 {
     let ticks: u64;
     // SAFETY: `CNTPCT_EL0` is the unprivileged physical counter; reading
@@ -175,8 +175,15 @@ pub(crate) fn read_cntpct() -> u64 {
 
 /// Host substitute for `CNTPCT_EL0`: a strictly increasing counter so
 /// the unit tests observe a monotonic clock. Never linked into a kernel
-/// image (the aarch64 build uses the `mrs` reader above).
-#[cfg(not(target_arch = "aarch64"))]
+/// image (the bare-metal aarch64 build uses the `mrs` reader above).
+///
+/// Gated on "not bare-metal aarch64" rather than "not aarch64" so a
+/// hosted aarch64 development machine (e.g. an Apple-silicon or ARM
+/// Linux host running `cargo test`) also uses this deterministic
+/// substitute instead of the real `CNTPCT_EL0`, whose coarse tick can
+/// read identically across two adjacent calls. Mirrors the gating in
+/// the x86_64 and riscv64 backends.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub(crate) fn read_cntpct() -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

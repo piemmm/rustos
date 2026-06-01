@@ -148,6 +148,18 @@ pub fn find_ovmf() -> io::Result<OvmfPaths> {
             "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
             "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
         ),
+        // macOS Homebrew, Apple-silicon prefix (`qemu` formula ships
+        // edk2 firmware; x86_64 boots against the shared i386 VARS
+        // template).
+        (
+            "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+            "/opt/homebrew/share/qemu/edk2-i386-vars.fd",
+        ),
+        // macOS Homebrew, Intel prefix.
+        (
+            "/usr/local/share/qemu/edk2-x86_64-code.fd",
+            "/usr/local/share/qemu/edk2-i386-vars.fd",
+        ),
     ];
 
     for (code, vars) in CANDIDATES {
@@ -167,7 +179,8 @@ pub fn find_ovmf() -> io::Result<OvmfPaths> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "OVMF firmware not found in any standard path. Install the \
-         `ovmf` package on Debian/Ubuntu or `edk2-ovmf` on Fedora/Arch.",
+         `ovmf` package on Debian/Ubuntu, `edk2-ovmf` on Fedora/Arch, \
+         or `qemu` (which bundles the edk2 firmware) via Homebrew on macOS.",
     ))
 }
 

@@ -18,9 +18,8 @@
 
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ed25519_dalek::{Signer, SigningKey};
 use rustos_abi::{
@@ -133,26 +132,31 @@ impl ImageSource for MemSource {
     }
 }
 
-/// Count of times the fixed `register` entry point has been called.
-static REGISTER_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Reset the global register-call counter. Tests that observe the
-/// counter must call this at the top of the test to avoid cross-test
-/// state.
-pub fn reset_register_calls() {
-    REGISTER_CALLS.store(0, Ordering::SeqCst);
+thread_local! {
+    /// Count of times the fixed `register` entry point has been called
+    /// on the current thread. Thread-local rather than a process-global
+    /// static so tests running in parallel (each on its own harness
+    /// thread, with `register` invoked synchronously on that thread)
+    /// never observe or reset each other's count.
+    static REGISTER_CALLS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Read the current register-call counter.
+/// Reset this thread's register-call counter. Tests that observe the
+/// counter call this at the top of the test to start from a known base.
+pub fn reset_register_calls() {
+    REGISTER_CALLS.with(|c| c.set(0));
+}
+
+/// Read this thread's register-call counter.
 pub fn register_calls() -> u64 {
-    REGISTER_CALLS.load(Ordering::SeqCst)
+    REGISTER_CALLS.with(Cell::get)
 }
 
 /// Driver `register` entry point: bumps the counter and yields a fixed
 /// non-zero handle. Returning `Ok` exercises the host's success path;
 /// the test crate provides [`failing_register`] for the negative path.
 pub fn mock_register(_host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
-    REGISTER_CALLS.fetch_add(1, Ordering::SeqCst);
+    REGISTER_CALLS.with(|c| c.set(c.get() + 1));
     DriverHandle::from_raw(0x00C0_FFEE)
 }
 
