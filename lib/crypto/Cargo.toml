@@ -16,6 +16,13 @@ workspace = true
 # here are the vetted RustCrypto SHA-2 and dalek-cryptography Ed25519
 # implementations. Versions are pinned; bumping a pin requires an audit pass.
 sha2 = { version = "=0.10.9", default-features = false }
+# RustCrypto's audited ChaCha20-Poly1305 AEAD. It backs the encrypted-swap
+# layer (`AGENTS.md` §4): the kernel pages secrets out only through an
+# authenticated cipher. `default-features = false` keeps this `no_std` and
+# pulls in neither `alloc`, `getrandom`, nor `rand_core` — the wrapper uses
+# only the in-place detached `AeadInPlace` trait, so nonces and keys are
+# supplied by the caller and never sourced inside this crate.
+chacha20poly1305 = { version = "=0.10.1", default-features = false }
 # The `zeroize` feature wires `ed25519-dalek`'s own internal key material
 # into `zeroize::Zeroize` on drop. `lib/crypto` itself never names the
 # `zeroize` crate (we expose verification only, no private-key handling),

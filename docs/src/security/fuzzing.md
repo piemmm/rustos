@@ -19,7 +19,7 @@ deterministic `cargo test` integration test driven by a small, seeded,
 allocation-free PRNG. A fixed seed makes any failure reproducible — a
 flaky fuzz target is a bug (`AGENTS.md` §7).
 
-Four harnesses exist today:
+Five harnesses exist today:
 
 * `lib/abi/tests/fuzz_decode.rs` — the `lib/abi` wire decoders
   (`IpcMessageHeader::from_bytes`, `ManifestHeader::from_bytes`). It
@@ -42,6 +42,13 @@ Four harnesses exist today:
   byte-for-byte in FIFO order, and that the mailbox never exceeds its
   capacity. A separate test proves a closed port refuses every sender,
   however privileged.
+* `kernel/mem/tests/fuzz_swap.rs` — the encrypted-swap restore path
+  (`EncryptedSwap::load`), which reads records off a swap *device* whose
+  bytes an attacker with disk access may have rewritten (`AGENTS.md` §4).
+  It drives random pages, slots, and byte-level tampering and asserts
+  that an untampered round-trip is faithful, that any tampering or
+  relocation makes `load` fail closed, and that the output buffer is
+  zeroed on every failure.
 
 This completes the §19.6 burn-down's coverage of the IPC endpoints and
 the `userland/net` protocol parsers. Future untrusted-input parsers

@@ -62,6 +62,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
     },
+    Target {
+        package: "rustos-kernel-mem",
+        test: "fuzz_swap",
+        description: "encrypted-swap restore path (untrusted swap-device bytes)",
+    },
 ];
 
 /// How long to run each harness.

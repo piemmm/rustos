@@ -15,6 +15,11 @@
 # the check fails, closed, once an advisory is older than its SLA.
 
 [[source-pin]]
+name = "aead"
+version = "0.5.2"
+sha256 = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
+
+[[source-pin]]
 name = "aho-corasick"
 version = "1.1.4"
 sha256 = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
@@ -43,6 +48,21 @@ sha256 = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 name = "cfg-if"
 version = "1.0.4"
 sha256 = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[source-pin]]
+name = "chacha20"
+version = "0.9.1"
+sha256 = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+
+[[source-pin]]
+name = "chacha20poly1305"
+version = "0.10.1"
+sha256 = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+
+[[source-pin]]
+name = "cipher"
+version = "0.4.4"
+sha256 = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 
 [[source-pin]]
 name = "cpufeatures"
@@ -105,6 +125,11 @@ version = "0.2.17"
 sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 
 [[source-pin]]
+name = "inout"
+version = "0.1.4"
+sha256 = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
+
+[[source-pin]]
 name = "lazy_static"
 version = "1.5.0"
 sha256 = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
@@ -155,9 +180,19 @@ version = "1.21.4"
 sha256 = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[source-pin]]
+name = "opaque-debug"
+version = "0.3.1"
+sha256 = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[source-pin]]
 name = "pin-project-lite"
 version = "0.2.17"
 sha256 = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[source-pin]]
+name = "poly1305"
+version = "0.8.0"
+sha256 = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 
 [[source-pin]]
 name = "ppv-lite86"
@@ -303,6 +338,11 @@ sha256 = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 name = "unicode-ident"
 version = "1.0.24"
 sha256 = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[source-pin]]
+name = "universal-hash"
+version = "0.5.1"
+sha256 = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 
 [[source-pin]]
 name = "valuable"

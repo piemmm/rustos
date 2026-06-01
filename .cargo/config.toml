@@ -29,6 +29,20 @@ rustflags = [
     # targets, so pin it explicitly here. `AGENTS.md` §15.10 — every
     # `--cfg` carries a justifying comment.
     "--cfg", "curve25519_dalek_backend=\"serial\"",
+    # `chacha20` and `poly1305` (pulled in transitively through
+    # `rustos-crypto` → `chacha20poly1305`, which backs the encrypted-swap
+    # layer, `AGENTS.md` §4) unconditionally compile their AVX2/SSE2
+    # intrinsics backends on `x86_64`, selecting one at runtime via
+    # `cpufeatures`. `x86_64-unknown-none` is a soft-float, SSE-disabled
+    # kernel target, and lowering those SIMD intrinsics there crashes the
+    # codegen backend (rustc SIGILL) — the same freestanding-SIMD problem
+    # as `curve25519-dalek` above. These crates expose a `force_soft`
+    # escape hatch for exactly this case, so pin the portable backend on
+    # this target. (Only `x86_64` ships an always-on intrinsics backend;
+    # the other bare-metal targets already use soft by default.)
+    # `AGENTS.md` §15.10 — every `--cfg` carries a justifying comment.
+    "--cfg", "chacha20_force_soft",
+    "--cfg", "poly1305_force_soft",
 ]
 
 [target.aarch64-unknown-none]

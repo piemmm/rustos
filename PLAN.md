@@ -4224,7 +4224,29 @@ device list.
   library. Functions per `AGENTS.md` §11 and lays out the filesystem per
   `AGENTS.md` §16: exactly `/System`, `/Users`, `/Apps`, `/Storage`; no
   legacy POSIX top-level directories; mount flags as specified in §11.3
-  and §16.3; expert mode refuses any reserved name.
+  and §16.3; expert mode refuses any reserved name. The secure default
+  lays out encrypted root **and** encrypted swap (`AGENTS.md` §4, §11);
+  plaintext swap is never offered, including in expert mode.
+- Kernel swap subsystem: when the process/VM model gains a pager, swap is
+  brought up only through the encrypted-swap layer keyed by an ephemeral
+  per-boot key from the platform RNG (`AGENTS.md` §4, §19.2). The kernel
+  refuses to activate an unencrypted swap device and fails closed; the key
+  is discarded on shutdown and never persisted.
+  - **Encrypted-swap layer — DONE (landed ahead of Stage 8).**
+    `kernel/mem::swap` is the cryptographic envelope the pager must route
+    through: `EncryptedSwap` is the *sole* way to use a `SwapBackend`
+    (plaintext swap is unrepresentable, `AGENTS.md` §2.11 — fail closed by
+    construction), sealing each page with `lib/crypto`'s new
+    ChaCha20-Poly1305 AEAD wrapper (`aead::seal`/`open`). The `SwapKey` is
+    ephemeral, drawn from an injected `EntropySource` (the §19.2 RNG seam),
+    zeroed on drop, and never persisted. Record layout
+    `nonce(12) ‖ tag(16) ‖ ciphertext(4096)`; per-write `salt ‖ counter`
+    nonce (exhaustion fails closed); slot index bound as AAD; `load` zeroes
+    the caller's buffer on every failure. 16 unit tests + a §19.6 fuzz
+    harness (`tests/fuzz_swap.rs`); `lib/crypto` gains 7 AEAD tests incl.
+    the RFC 8439 vector. **Still pending:** the pager that calls
+    `store`/`load`, the real platform-RNG `EntropySource`, the swap-device
+    backend driver, and the `CAP`-gated activation syscall — all Stage 8.
 - `tools/mkimage` producing:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI).
   - `images/rustos-aarch64-rpi.img`.

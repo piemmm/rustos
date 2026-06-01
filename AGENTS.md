@@ -212,6 +212,19 @@ an update to this section.
   - No `unsafe` global allocator that performs raw pointer arithmetic without
     bounds-checked wrappers.
   - Deterministic OOM behaviour: allocation failure is a `Result`, never a panic.
+- **Encrypted swap is the default, and there is no plaintext-swap mode.**
+  Any backing store the kernel pages anonymous, stack, or capability-bearing
+  memory out to is encrypted with `lib/crypto`. The zero-on-free guarantee
+  above is void if those bytes can be read back from an unencrypted swap
+  device, so swap inherits the same secret-handling bar as RAM.
+  - The swap key is an ephemeral random key drawn from the platform RNG at
+    boot (the §19.2 KASLR/entropy source) and is **never persisted** — it is
+    discarded on shutdown, so paged-out secrets cannot be recovered across a
+    power cycle and there is nothing at rest to attack.
+  - Enabling swap without encryption is not a supported configuration: the
+    kernel refuses to activate a swap device that is not wrapped by the
+    encrypted-swap layer, and fails closed (§5.4) rather than falling back to
+    plaintext. The installer never lays out plaintext swap (§11).
 - **No ambient authority.** Every syscall takes the calling task's capability
   set explicitly; there is no "root can do anything" backdoor in kernel code.
 
@@ -384,6 +397,11 @@ an update to this section.
   2. Prompt for the first user (username, password, full name, primary group).
   3. Offer the secure default layout defined in §16:
      - Encrypted root (LUKS-equivalent using `lib/crypto`).
+     - Encrypted swap (§4). Swap is keyed by an ephemeral per-boot
+       random key that is never written to disk, so the default needs
+       no passphrase and leaves nothing recoverable at rest. The
+       installer never lays out plaintext swap, and expert mode may not
+       create it.
      - `/System` mounted read-only (the only writable paths inside it
        are `/System/Logs` and `/System/Settings`, and they are mounted
        `nosuid,nodev,noexec`).

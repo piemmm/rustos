@@ -56,6 +56,7 @@ pub mod phys;
 pub mod ptr;
 pub mod sensitive;
 pub mod slab;
+pub mod swap;
 pub mod vmm;
 
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
@@ -67,6 +68,9 @@ pub use mmio::{MmioError, MmioMap, MmioRegion};
 pub use phys::{DirectPhysMap, PhysMap};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
+pub use swap::{
+    EncryptedSwap, EntropySource, SwapBackend, SwapError, SwapKey, SwapPage, SWAP_RECORD_LEN,
+};
 pub use vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
 
 #[cfg(any(test, feature = "host-tests"))]

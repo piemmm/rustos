@@ -272,15 +272,72 @@ for draining the descriptor stream into a `BootMemoryMap` via
 `alloc` so it can be linked into the freestanding Stage-2 QEMU test
 binaries that do not yet provide a `#[global_allocator]`.
 
+## 7b. Encrypted swap (`swap`)
+
+When a pager writes a page of anonymous, stack, or capability-bearing
+memory out to a backing store, that page leaves RAM — and the
+zero-on-free guarantees of [§4](#4-sensitive-region-api) and
+[§5](#5-dma-buffers) would be void if the bytes could be read back off
+an unencrypted swap device. The `swap` module closes that gap: every
+page is sealed with `lib/crypto`'s ChaCha20-Poly1305 AEAD before it
+reaches the device (`AGENTS.md` §4).
+
+**Fail-closed by construction.** `AGENTS.md` §4 requires that the kernel
+"refuses to activate a swap device that is not wrapped by the
+encrypted-swap layer". RustOS enforces this in the type system rather
+than with a runtime flag: a [`SwapBackend`] (the raw, slot-addressed
+device) exposes only opaque [`SWAP_RECORD_LEN`]-byte records and makes
+no cryptographic decision, and the **only** way to read or write a page
+through it is [`EncryptedSwap`], whose sole constructor
+[`EncryptedSwap::activate`] takes a [`SwapKey`]. There is no plaintext
+code path to fall back to, so plaintext swap is unrepresentable
+(`AGENTS.md` §2.11).
+
+**Ephemeral per-boot key.** The [`SwapKey`] is drawn from the platform
+RNG (the §19.2 entropy source, injected as the [`EntropySource`] seam
+until that subsystem lands), zeroed on drop, and never persisted: there
+is no serialisation path and no accessor that copies the key out of the
+crate. A power cycle destroys the key, so paged-out secrets cannot be
+recovered at rest.
+
+**Record layout & nonce discipline.** Each on-device record is
+`nonce(12) ‖ tag(16) ‖ ciphertext(4096)`. ChaCha20-Poly1305 fails
+catastrophically on `(key, nonce)` reuse, so each `EncryptedSwap`
+draws a random 32-bit salt at activation and appends a 64-bit
+monotonic counter; counter exhaustion fails closed
+([`SwapError::NonceExhausted`]) rather than wrapping. The slot index is
+bound as associated data, so a record relocated to a different slot
+fails authentication. On any failure — bad slot, backend fault, or a
+forged/tampered record — `load` zeroes the caller's buffer before
+returning the error, so a caller can never observe stale or forged
+plaintext (`AGENTS.md` §5.4).
+
+The pager that calls `store` / `load`, and the capability gate on
+*activating* a swap device, are Stage 8 work; this module is the
+cryptographic layer they are required to route through.
+
+[`SwapBackend`]: ../../rustos_kernel_mem/swap/trait.SwapBackend.html
+[`EncryptedSwap`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html
+[`EncryptedSwap::activate`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html#method.activate
+[`SwapKey`]: ../../rustos_kernel_mem/swap/struct.SwapKey.html
+[`EntropySource`]: ../../rustos_kernel_mem/swap/trait.EntropySource.html
+[`SwapError::NonceExhausted`]: ../../rustos_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted
+[`SWAP_RECORD_LEN`]: ../../rustos_kernel_mem/swap/constant.SWAP_RECORD_LEN.html
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:
   buddy split/merge, bitmap correctness, slab guard-page detection,
-  zero-on-free, OOM paths.
+  zero-on-free, OOM paths, and the encrypted-swap round-trip /
+  tamper-rejection / fail-closed cases.
 - **Property tests** — `kernel/mem/tests/proptest_frame.rs` runs
   randomised alloc/free sequences and asserts the no-double-allocation
   and no-leak invariants, plus the reserved-frame untouchability
   invariant.
+- **Fuzzing** — `kernel/mem/tests/fuzz_swap.rs` drives the encrypted-swap
+  restore path with arbitrary device contents (`AGENTS.md` §19.6),
+  asserting that tampering is always rejected and the output buffer is
+  zeroed on failure.
 - **Loom tests** — `kernel/mem/tests/loom.rs` model-checks concurrent
   allocation, gated on `RUSTFLAGS="--cfg loom"` exactly like
   `lib/sync`.

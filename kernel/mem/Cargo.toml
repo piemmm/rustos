@@ -36,6 +36,13 @@ rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
+# Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
+# kernel writes to a swap device are sealed with `lib/crypto`'s
+# ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.
+# §17.4 permits a kernel subsystem to depend on `lib/*`; §1/§2.12 require
+# the cipher come from `lib/crypto`, never hand-rolled here.
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+
 # Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
 # per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The
 # `derive` feature is intentionally omitted: we use the `Zeroize` trait
