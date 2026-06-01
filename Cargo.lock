@@ -511,6 +511,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-chown"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-collections"
 version = "0.0.0"
 

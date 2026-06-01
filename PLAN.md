@@ -4243,8 +4243,35 @@ device list.
   34 unit tests (parser + mode algebra + change engine); docs
   `docs/src/userland/utilities.md` (`chmod` section) and the crate
   `README.md`.
+- **`chown` CLI (`userland/apps/chown`) — DONE.** `rustos-chown` applies an
+  ownership change to each of its file operands (`AGENTS.md` §3): the owner
+  operand is `OWNER`, `OWNER:GROUP`, or `:GROUP`, where `OWNER` and `GROUP`
+  are **decimal** user/group ids — `OWNER` changes only the owning user,
+  `:GROUP` only the owning group, and `OWNER:GROUP` both. Names are not
+  accepted (RustOS has no name-to-id seam in this tool, so a name would be
+  interface creep, §2.4); an empty spec, a bare `:`, and a trailing-colon
+  `OWNER:` are rejected rather than guessed (§2.1). With `-R` a directory
+  is changed and then its contents recursively (the directory before its
+  contents, reusing the kind carried in each directory entry so it
+  re-inspects nothing). `run` asks the injected `FileSystem` seam for each
+  operand's kind, applies the owner via `set_owner`, and walks each
+  directory `-R` must descend — writing only the help banner through the
+  injected `Output` seam (`chown` is silent on success), the same seam
+  discipline as `chmod`/`cp`/`mv`/`rm`. It **fails closed**: an
+  unrecognised option or a missing operand is a `ChownError::Usage`; an
+  owner operand that is not a valid spec is a `ChownError::BadOwner`; an
+  operand that cannot be inspected surfaces the underlying `Errno` as
+  `ChownError::Stat` and stops before any later operand; an unapplyable
+  owner is `ChownError::Apply`; a directory whose entries cannot be read
+  during a recursive descent is `ChownError::Read` (`AGENTS.md` §2.9).
+  POSIX `chown` spells recursive `-R` (a bare `-r` is not an option).
+  `no_std` (with `alloc`), depends only on `rustos-abi` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 25 unit
+  tests (parser + owner-spec + change engine); docs
+  `docs/src/userland/utilities.md` (`chown` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ps`, `mount`, `chown`, `useradd`, `groupadd`,
+  `ps`, `mount`, `useradd`, `groupadd`,
   `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
   not yet started.
 
