@@ -4452,26 +4452,58 @@ device list.
 
 ---
 
-## Stage 7 — Graphics, Window Manager, Iconbar
+## Stage 7 — Graphics, Window Manager, Taskbar
 
 **Dependencies:** Stage 6 + a display driver from Stage 4.
 
 **Deliverables**
 - `userland/gui/wm`: compositing window manager. Per-window surfaces, damage
   tracking, GPU acceleration where a driver exposes it, software fallback
-  otherwise.
-- `userland/gui/iconbar`: RISC OS-style iconbar with pinned app slots, mounted
-  filesystem icons, and a status area.
-- Default theme + cursor set.
-- A handful of default apps under `userland/apps/`: filer, text editor,
-  terminal emulator, settings panel (users, groups, permissions, caps).
+  otherwise. The compositor must support:
+  - **Rounded window corners**: per-window corner radius applied during
+    composition (anti-aliased), with a square-corner setting retained for
+    windows that opt out.
+  - **Alpha transparency**: per-surface and per-region alpha so a window can
+    be wholly or partially translucent; the compositor blends translucent
+    surfaces against what is behind them with correct premultiplied-alpha
+    compositing.
+- `userland/gui/taskbar`: a traditional desktop taskbar (in the style of
+  GNOME/Windows), pinned to a configured screen edge. Layout:
+  - **Left**: a "start" menu button opening a menu. The menu is **not** an
+    application launcher; at this stage it is largely unpopulated and holds
+    only session controls (log out, lock, shut down, restart). It is built
+    so launcher entries can be added later without changing its public IPC.
+  - **Middle**: a task list showing currently running tasks (one entry per
+    top-level window/application), with focus/activate and minimise/restore
+    on click.
+  - **Right**: a clock anchored to the right-hand end, with a **notification
+    icon area** immediately to its left for status/notification icons.
+  - **Rounded edges**: the taskbar itself supports rounded corners, drawn
+    through the same compositor rounded-corner path as windows (no duplicate
+    implementation, `AGENTS.md` §2.2).
+- Theming: a **default dark theme** plus a **light theme**, switchable at
+  runtime. Themes drive colours, corner radii, fonts, and cursors for the
+  WM, taskbar, and default apps through one shared theme definition; adding a
+  theme is data, not new code.
+- Default cursor set (themed).
+- Default apps under `userland/apps/`:
+  - **Filesystem browser**: navigates the §16 filesystem layout, honouring
+    capability-gated permissions; no `/proc`/`/sys` fabrication (§16.1).
+  - **Terminal emulator**: runs the default shell with job control.
 
 **Tests**
-- Headless compositor tests using a virtual framebuffer.
-- Input routing tests (focus, drag-and-drop save model).
+- Headless compositor tests using a virtual framebuffer, including
+  rounded-corner masking and per-region alpha blending (premultiplied-alpha
+  correctness, fully-opaque and fully-transparent edge cases).
+- Taskbar layout tests: start-menu button + session-control entries on the
+  left, running-task list in the middle, notification area and clock on the
+  right; rounded-edge rendering.
+- Theme-switch tests: dark ↔ light applies consistently across WM, taskbar,
+  and default apps.
+- Input routing tests (focus, click-to-activate, drag-and-drop).
 
 **Docs**
-- `docs/src/desktop/{wm,iconbar,apps,theming}.md`.
+- `docs/src/desktop/{wm,taskbar,apps,theming}.md`.
 
 ---
 
