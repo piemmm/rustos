@@ -76,6 +76,7 @@ members = [
     "userland/shell/shell",
     "userland/shell/sysinfo",
     "userland/apps/cat",
+    "userland/apps/ls",
     "userland/gui/wm",
     "userland/gui/iconbar",
     "userland/net/icmp",

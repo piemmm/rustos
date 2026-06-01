@@ -4115,8 +4115,31 @@ device list.
   `unwrap`/`expect`/`panic!` in production paths. 20 unit tests; docs
   `docs/src/userland/utilities.md` (`cat` section) and the crate
   `README.md`.
+- **`ls` CLI (`userland/apps/ls`) — DONE.** `rustos-ls` lists directory
+  contents (`AGENTS.md` §3): it inspects each path operand in order — a
+  non-directory operand is listed by name, a directory operand has its
+  entries listed sorted by name — defaulting to the current directory
+  (`.`) when none is given. `-a` includes dot-prefixed entries; `-l`
+  renders the long format (the ten-character mode string — a type
+  character plus the nine `rwx` bits — the right-aligned size, then the
+  name); short options cluster (`-la`). `run` asks the injected `Listing`
+  seam for each operand's `Metadata` and each directory's entries, sorts
+  and formats them, and writes the listing through the injected `Output`
+  seam in one call — the seam discipline of `cat`, so every parsing,
+  filtering, sorting, and formatting decision is testable without a
+  kernel. With several operands, non-directory operands are listed first,
+  then each directory under a `path:` header, blocks separated by a blank
+  line. It **fails closed**: an unrecognised option is a `LsError::Usage`
+  that inspects nothing, an operand that cannot be stat'd surfaces the
+  underlying `Errno` as `LsError::Stat` and stops before any later
+  operand, an unreadable directory is `LsError::Read`, and a failed write
+  is `LsError::Output` (`AGENTS.md` §2.9). `no_std` (with `alloc`),
+  depends only on `rustos-abi` (§17.4); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. 23 unit tests; docs
+  `docs/src/userland/utilities.md` (`ls` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ls`, `cp`, `mv`, `rm`, `ps`, `mount`, `chmod`, `chown`, `useradd`,
+  `cp`, `mv`, `rm`, `ps`, `mount`, `chmod`, `chown`, `useradd`,
   `groupadd`, `setcap`, `getcap` — and the `.app` bundle /
   dynamic-loader policy) are not yet started.
 

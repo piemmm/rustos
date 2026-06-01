@@ -1,8 +1,8 @@
 # Core CLI utilities (`userland/apps` and `userland/shell`)
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
-This page documents the ones that have landed (`sysinfo` and `cat`) and
-is extended as the others (`ls`, `cp`, `ps`, `mount`, …) arrive.
+This page documents the ones that have landed (`sysinfo`, `cat`, and
+`ls`) and is extended as the others (`cp`, `ps`, `mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -170,3 +170,86 @@ streaming, continuous line numbering across files and across a chunk
 boundary, a missing trailing newline, an empty numbered file, chunked
 streaming of a multi-chunk file, and the missing-file and dead-console
 fail-closed paths.
+
+## `ls` — list directory contents (`userland/apps/ls`)
+
+`rustos-ls` lists directory contents (`AGENTS.md` §3). It inspects each
+of its path operands in order: a non-directory operand is listed by name,
+and a directory operand has its entries listed, sorted by name. With no
+operand it lists the current directory (`.`). With `-a` it includes
+entries whose name begins with `.`; with `-l` it prints the long format —
+the type and permission bits, the size, then the name — the POSIX model.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
+only dependency is the audited `rustos-abi` crate, so it never links a
+kernel or driver crate (`AGENTS.md` §17.4).
+
+### Grammar
+
+```
+ls [-a] [-l] [--] [path...]
+```
+
+| Token          | Meaning                                            |
+|----------------|----------------------------------------------------|
+| `-a`, `--all`  | include entries whose name begins with `.`         |
+| `-l`, `--long` | long format: type/permission bits, size, then name |
+| `-h`, `--help` | print the usage banner (wins immediately)          |
+| `--`           | end option parsing; every later argument is a path |
+| *path*         | a file or directory to list                        |
+
+With no `path` operand `ls` lists the current directory. Short options
+may be combined into one argument (e.g. `-la` is `-l -a`); an
+unrecognised letter anywhere in such a cluster is a `LsError::Usage`
+error. The bare `-` is a path named `-`, not an option.
+
+### A render machine, not a data source
+
+`run` asks the injected filesystem seam for the metadata of each operand
+and the entries of each directory, then writes the sorted, formatted
+listing to the terminal in a single write. The two operations that reach
+the outside world are injected seams, the same discipline as `cat`'s
+`FileSource`/`Output`:
+
+- `Listing` — stat a path (to learn whether it is a directory) and read a
+  directory's entries by index until the index runs past the end.
+- `Output` — write the rendered listing to the terminal.
+
+On a running system these are syscall- and console-backed; in tests they
+are in-memory fixtures, so every parsing, filtering, sorting, and
+formatting decision is testable without a kernel.
+
+### Layout
+
+When several operands are given, non-directory operands are listed first
+(sorted by name), then each directory operand has its entries listed,
+preceded by a `path:` header and separated from the previous block by a
+blank line — the POSIX model. A single directory operand is listed
+without a header. The short format prints one name per line; the long
+format prints the ten-character mode string (a type character — `d`,
+`-`, `l`, or `?` — followed by the nine `rwx` permission bits), the
+size right-aligned across the listing, then the name.
+
+### Fail closed
+
+- An unrecognised option is a `LsError::Usage` that inspects nothing.
+- An operand that cannot be stat'd surfaces the underlying `Errno` as
+  `LsError::Stat` and stops before any later operand (a missing operand
+  among several aborts rather than skipping silently).
+- A directory that cannot be read is `LsError::Read`.
+- A failed terminal write is `LsError::Output`.
+
+There is no partial-guess path and no panic (`AGENTS.md` §2.9).
+
+### Tests
+
+`cargo test -p rustos-ls` drives the parser and the listing engine
+against an in-memory tree and a recording output: the command grammar
+(every option, clustered short flags, `-`/`--`, and the usage-error
+path), sorted directory listing, the hidden-file filter with and without
+`-a`, a non-directory operand, the long format's mode string and
+right-aligned size (across all four entry kinds), single- and
+multi-operand layout (files first, then directory headers), an empty
+directory, and the missing-operand, unreadable-directory, and
+dead-console fail-closed paths.

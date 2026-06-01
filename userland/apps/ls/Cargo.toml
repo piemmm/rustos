@@ -1,0 +1,19 @@
+[package]
+name = "rustos-ls"
+description = "RustOS `ls` CLI: list directory contents (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The stable `Errno` is the only thing `ls` needs from the workspace: the
+# tool inspects paths and lists directories through injected seams that speak
+# the frozen `Errno`, so it invents no parallel error set (§2.2) and never
+# links a kernel or driver crate (§17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
