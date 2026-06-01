@@ -12,7 +12,7 @@ rules, it points to them.
    interfaces is forbidden; extend versioned ones instead.
 3. Run `cargo xtask ci` locally before pushing. The same command runs in
    CI and must be green. Locally it runs the test matrix once; on the
-   GitHub Actions runners it repeats the matrix 100× to hunt flaky tests
+   GitHub Actions runners it repeats the matrix 20× to hunt flaky tests
    ([§7][test]), so a local `ci` finishes quickly without that hours-long
    repeat.
 4. Update documentation in the same commit as the code it describes —
@@ -26,7 +26,7 @@ rules, it points to them.
 | `clippy`      | `cargo clippy --workspace --all-targets -- -D warnings`     |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
-| `test`        | `cargo test --workspace --all-targets` + QEMU matrix; repeated 100× on GitHub Actions to catch flaky tests, once locally ([§7][test]) |
+| `test`        | `cargo test --workspace --all-targets` + QEMU matrix; repeated 20× on GitHub Actions to catch flaky tests, once locally ([§7][test]) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
