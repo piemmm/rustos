@@ -3749,9 +3749,30 @@ device list.
   tests (file mode/owner with both id halves, directory record,
   `NotFound`). Docs: `docs/src/filesystem/{ext4,overview}.md`,
   `docs/src/abi/driver_traits.md`, and the crate `README.md`.
+- **`ext4` write support — DONE.** The `ext4` driver now implements the
+  versioned `FilesystemWrite` trait (`create`/`write_at`/`truncate`/
+  `remove`/`flush`): block + inode bitmap allocation with
+  group-descriptor and superblock free-count maintenance, classic
+  block-map allocation (direct + single indirect) for new objects,
+  directory-entry insertion (record-slack split, block append) and
+  removal (merge into the predecessor), and `truncate` shrink/grow over
+  both the classic map and an inline depth-0 extent root (zeroing the
+  retained partial block). Because correct on-disk checksums and wide
+  descriptors are a prerequisite for safe mutation, the write path
+  refuses (`Unsupported`) any volume carrying `metadata_csum`,
+  `gdt_csum`/`uninit_bg`, or `64bit` (such volumes stay fully readable),
+  and refuses to free a mapping it cannot fully account for rather than
+  orphan blocks (§2.1 / §5.4 — fail closed). No `unwrap`/`expect`/
+  `panic!`, no `unsafe`. Tests grew from 17 to **32** (create + multi-block
+  write round-trips across a remount, sparse extension, `truncate`
+  shrink-then-grow, directory create/remove incl. `Busy`, inode reuse,
+  the directory/not-found/invalid-name guards, free-inode exhaustion, and
+  the fail-closed refusal on a `metadata_csum` volume). Docs:
+  `docs/src/filesystem/{ext4,overview}.md` and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - `ext4` **write** support (`FilesystemWrite`); decoding the ext4 xattr
-    POSIX ACL into the `FilesystemSecurity` record.
+  - Decoding the ext4 xattr POSIX ACL into the `FilesystemSecurity`
+    record; growing an ext4 directory / file beyond the inline-extent
+    root (interior extent-tree edits) for the checksummed feature set.
   - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
     crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
     vertical.

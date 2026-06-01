@@ -15,20 +15,35 @@
 //!     └── deep.bin         (inode 14, extent-mapped regular file)
 //! ```
 
+extern crate alloc;
+
 use super::*;
+use alloc::vec;
+use alloc::vec::Vec;
 use rustos_abi::driver::block::BlockGeometry;
 use rustos_abi::DriverKind;
 
 const FS_BLOCK: usize = 1024;
-const FS_BLOCK_COUNT: usize = 15;
+const FS_BLOCK_COUNT: usize = 40;
 const IMG_LEN: usize = FS_BLOCK * FS_BLOCK_COUNT;
 
 const DEV_SECTOR: usize = 512;
 const DEV_SECTOR_COUNT: u64 = (IMG_LEN / DEV_SECTOR) as u64;
 
+const BLOCK_BITMAP_BLOCK: usize = 3;
+const INODE_BITMAP_BLOCK: usize = 4;
 const INODE_TABLE_BLOCK: usize = 5;
 const INODES_PER_GROUP: u32 = 16;
 const INODE_SIZE: usize = 128;
+
+/// The first data block that starts the run of free space the write
+/// tests allocate from (blocks `0..=14` are metadata or planted data).
+const FIRST_FREE_BLOCK: usize = 15;
+/// Number of free data blocks the fixture leaves (`15..40`).
+const FREE_BLOCKS: usize = FS_BLOCK_COUNT - FIRST_FREE_BLOCK;
+/// Inodes `1..=14` are in use (reserved + the four planted files /
+/// directories); inodes `15` and `16` are free.
+const FREE_INODES: usize = 2;
 
 const ROOT_DATA_BLOCK: u32 = 7;
 const HELLO_DATA_BLOCK: u32 = 8;
@@ -179,25 +194,53 @@ fn put_dirent(
     pos + rec_len
 }
 
-/// Build the in-memory ext4 image described in the module docs.
-fn build_image() -> [u8; IMG_LEN] {
-    let mut img = [0u8; IMG_LEN];
-
+/// Write the superblock, the single group descriptor, and the block /
+/// inode bitmaps that the write path's allocator consumes.
+fn write_volume_metadata(img: &mut [u8]) {
     // --- Superblock at byte 1024 (block 1). ---
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
-    set_le32(&mut img, sb, INODES_PER_GROUP * 2); // s_inodes_count
-    set_le32(&mut img, sb + 0x04, u32c(FS_BLOCK_COUNT)); // s_blocks_count_lo
-    set_le32(&mut img, sb + 0x18, 0); // s_log_block_size -> 1024
-    set_le32(&mut img, sb + 0x20, u32c(FS_BLOCK_COUNT)); // s_blocks_per_group
-    set_le32(&mut img, sb + 0x28, INODES_PER_GROUP); // s_inodes_per_group
-    set_le16(&mut img, sb + 0x38, EXT_MAGIC); // s_magic
-    set_le32(&mut img, sb + 0x4C, 1); // s_rev_level (dynamic)
-    set_le16(&mut img, sb + 0x58, u16c(INODE_SIZE)); // s_inode_size
-    set_le32(&mut img, sb + 0x60, INCOMPAT_FILETYPE); // s_feature_incompat
+    set_le32(img, sb, INODES_PER_GROUP); // s_inodes_count
+    set_le32(img, sb + 0x04, u32c(FS_BLOCK_COUNT)); // s_blocks_count_lo
+    set_le32(img, sb + 0x0C, u32c(FREE_BLOCKS)); // s_free_blocks_count_lo
+    set_le32(img, sb + 0x10, u32c(FREE_INODES)); // s_free_inodes_count
+    set_le32(img, sb + 0x14, 1); // s_first_data_block (1024-byte blocks)
+    set_le32(img, sb + 0x18, 0); // s_log_block_size -> 1024
+    set_le32(img, sb + 0x20, u32c(FS_BLOCK_COUNT)); // s_blocks_per_group
+    set_le32(img, sb + 0x28, INODES_PER_GROUP); // s_inodes_per_group
+    set_le16(img, sb + 0x38, EXT_MAGIC); // s_magic
+    set_le32(img, sb + 0x4C, 1); // s_rev_level (dynamic)
+    set_le16(img, sb + 0x58, u16c(INODE_SIZE)); // s_inode_size
+    set_le32(img, sb + 0x60, INCOMPAT_FILETYPE); // s_feature_incompat
 
     // --- Group descriptor 0 at block 2. ---
     let gd = 2 * FS_BLOCK;
-    set_le32(&mut img, gd + 0x08, u32c(INODE_TABLE_BLOCK)); // bg_inode_table_lo
+    set_le32(img, gd, u32c(BLOCK_BITMAP_BLOCK)); // bg_block_bitmap_lo
+    set_le32(img, gd + 0x04, u32c(INODE_BITMAP_BLOCK)); // bg_inode_bitmap_lo
+    set_le32(img, gd + 0x08, u32c(INODE_TABLE_BLOCK)); // bg_inode_table_lo
+    set_le16(img, gd + 0x0C, u16c(FREE_BLOCKS)); // bg_free_blocks_count_lo
+    set_le16(img, gd + 0x0E, u16c(FREE_INODES)); // bg_free_inodes_count_lo
+    set_le16(img, gd + 0x10, 2); // bg_used_dirs_count_lo (root + sub)
+
+    // --- Block bitmap (block 3): blocks 1..=14 used, 15..=39 free.
+    //     Bit `b` represents block `s_first_data_block + b`, i.e. b + 1. ---
+    let bbm = block_offset(u32c(BLOCK_BITMAP_BLOCK));
+    for block in 1..FIRST_FREE_BLOCK {
+        let bit = block - 1;
+        img[bbm + bit / 8] |= 1 << (bit % 8);
+    }
+
+    // --- Inode bitmap (block 4): inodes 1..=14 used, 15..=16 free. ---
+    let ibm = block_offset(u32c(INODE_BITMAP_BLOCK));
+    for ino in 1..=14 {
+        let bit = ino - 1;
+        img[ibm + bit / 8] |= 1 << (bit % 8);
+    }
+}
+
+/// Build the in-memory ext4 image described in the module docs.
+fn build_image() -> Vec<u8> {
+    let mut img = vec![0u8; IMG_LEN];
+    write_volume_metadata(&mut img);
 
     // --- Root directory (inode 2), one extent-mapped block. ---
     write_extent_inode(
@@ -299,7 +342,7 @@ fn build_image() -> [u8; IMG_LEN] {
 /// 512-byte logical-block size distinct from the 1024-byte filesystem
 /// block so the device-staging path is exercised.
 struct MockBlock {
-    data: [u8; IMG_LEN],
+    data: Vec<u8>,
 }
 
 impl MockBlock {
@@ -569,4 +612,273 @@ fn security_reports_a_directorys_record() {
 fn security_of_an_absent_node_is_not_found() {
     let mut fs = mount();
     assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
+}
+
+// --- Write surface (`FilesystemWrite`). ---
+
+/// Re-open the volume backing `fs`, exercising the persistence of any
+/// writes through a fresh mount.
+fn remount(fs: Ext4<MockBlock>) -> Ext4<MockBlock> {
+    Ext4::open(fs.into_block()).expect("re-open the mutated image")
+}
+
+#[test]
+fn create_and_write_a_regular_file_round_trips() {
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"new.txt", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.node_info(file).expect("info").size, 0);
+    assert_eq!(fs.lookup(root, b"new.txt"), Ok(file));
+
+    // A payload spanning two filesystem blocks.
+    let mut payload = [0u8; FS_BLOCK + 500];
+    let mut next = 0u8;
+    for b in &mut payload {
+        *b = next;
+        next = next.wrapping_add(1);
+    }
+    let n = fs.write_at(root, b"new.txt", 0, &payload).expect("write");
+    assert_eq!(n, payload.len());
+    assert_eq!(fs.node_info(file).expect("info").size, payload.len() as u64);
+
+    let mut fs = remount(fs);
+    let file = fs
+        .lookup(fs.root(), b"new.txt")
+        .expect("found after remount");
+    let mut buf = [0u8; FS_BLOCK + 500];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(n, payload.len());
+    assert_eq!(buf, payload);
+}
+
+#[test]
+fn create_then_appears_in_directory_listing() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"zeta.dat", NodeKind::RegularFile)
+        .expect("create");
+    let mut name = [0u8; 32];
+    let mut found = false;
+    for index in 0.. {
+        let Some(entry) = fs.read_dir(root, index, &mut name).expect("read_dir") else {
+            break;
+        };
+        if &name[..entry.name_len] == b"zeta.dat" {
+            assert_eq!(entry.kind, NodeKind::RegularFile);
+            found = true;
+        }
+    }
+    assert!(found, "the created file is listed");
+}
+
+#[test]
+fn create_rejects_a_duplicate_name() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.create(root, b"hello.txt", NodeKind::RegularFile),
+        Err(DriverError::Busy)
+    );
+}
+
+#[test]
+fn create_in_a_regular_file_is_unsupported() {
+    let mut fs = mount();
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    assert_eq!(
+        fs.create(file, b"x", NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn create_rejects_an_invalid_name() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.create(root, b"", NodeKind::RegularFile),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        fs.create(root, b"a/b", NodeKind::RegularFile),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        fs.create(root, b"..", NodeKind::RegularFile),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn write_past_eof_leaves_a_sparse_hole() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"sparse.bin", NodeKind::RegularFile)
+        .expect("create");
+    let tail = b"TAIL";
+    let n = fs.write_at(root, b"sparse.bin", 2000, tail).expect("write");
+    assert_eq!(n, tail.len());
+
+    let file = fs.lookup(root, b"sparse.bin").expect("found");
+    assert_eq!(
+        fs.node_info(file).expect("info").size,
+        2000 + tail.len() as u64
+    );
+    let mut buf = [0u8; 2000 + 4];
+    let read = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(read, buf.len());
+    assert!(
+        buf[..2000].iter().all(|&b| b == 0),
+        "the gap reads as zeros"
+    );
+    assert_eq!(&buf[2000..], tail);
+}
+
+#[test]
+fn truncate_shrink_then_grow() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.create(root, b"trunc.bin", NodeKind::RegularFile)
+        .expect("create");
+    let payload = [0xABu8; 3 * FS_BLOCK];
+    fs.write_at(root, b"trunc.bin", 0, &payload).expect("write");
+
+    // Shrink to mid-first-block: the freed tail blocks return to the pool.
+    fs.truncate(root, b"trunc.bin", 100).expect("shrink");
+    let file = fs.lookup(root, b"trunc.bin").expect("found");
+    assert_eq!(fs.node_info(file).expect("info").size, 100);
+    let mut buf = [0u8; 200];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(n, 100);
+    assert!(buf[..100].iter().all(|&b| b == 0xAB));
+
+    // Grow back: the extension reads as zeros (sparse).
+    fs.truncate(root, b"trunc.bin", FS_BLOCK as u64)
+        .expect("grow");
+    let mut big = [0xFFu8; FS_BLOCK];
+    let n = fs.read_at(file, 0, &mut big).expect("read");
+    assert_eq!(n, FS_BLOCK);
+    assert!(big[..100].iter().all(|&b| b == 0xAB));
+    assert!(big[100..].iter().all(|&b| b == 0), "grown region is zero");
+}
+
+#[test]
+fn create_a_directory_with_dot_and_dotdot() {
+    let mut fs = mount();
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"newdir", NodeKind::Directory)
+        .expect("mkdir");
+    assert_eq!(fs.node_info(dir).expect("info").kind, NodeKind::Directory);
+
+    // A fresh directory lists no children (`.`/`..` are skipped).
+    let mut name = [0u8; 32];
+    assert_eq!(fs.read_dir(dir, 0, &mut name), Ok(None));
+
+    // It accepts a child, which then resolves and lists.
+    let child = fs
+        .create(dir, b"inner.txt", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.lookup(dir, b"inner.txt"), Ok(child));
+
+    let mut fs = remount(fs);
+    let dir = fs.lookup(fs.root(), b"newdir").expect("dir after remount");
+    assert!(fs.lookup(dir, b"inner.txt").is_ok());
+}
+
+#[test]
+fn remove_a_file_frees_its_inode_for_reuse() {
+    let mut fs = mount();
+    let root = fs.root();
+    fs.remove(root, b"hello.txt").expect("remove");
+    assert_eq!(fs.lookup(root, b"hello.txt"), Err(DriverError::NotFound));
+
+    // The freed inode and blocks are reusable: creating + writing succeeds
+    // and round-trips across a remount.
+    fs.create(root, b"again.txt", NodeKind::RegularFile)
+        .expect("create reuses freed metadata");
+    let body = b"reused";
+    fs.write_at(root, b"again.txt", 0, body).expect("write");
+
+    let mut fs = remount(fs);
+    let file = fs.lookup(fs.root(), b"again.txt").expect("found");
+    let mut buf = [0u8; 16];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], body);
+}
+
+#[test]
+fn remove_a_non_empty_directory_is_busy() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(fs.remove(root, b"sub"), Err(DriverError::Busy));
+}
+
+#[test]
+fn remove_an_emptied_directory() {
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("sub");
+    fs.remove(sub, b"deep.bin").expect("empty the dir");
+    fs.remove(root, b"sub").expect("remove the now-empty dir");
+    assert_eq!(fs.lookup(root, b"sub"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn write_to_a_directory_is_unsupported() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.write_at(root, b"sub", 0, b"x"),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn write_to_a_missing_child_is_not_found() {
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(
+        fs.write_at(root, b"absent", 0, b"x"),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn mutation_is_refused_on_a_checksummed_volume() {
+    let mut data = build_image();
+    let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
+    set_le32(&mut data, sb + 0x64, RO_COMPAT_METADATA_CSUM); // s_feature_ro_compat
+    let mut fs = Ext4::open(MockBlock { data }).expect("opens read-only");
+    // Reads still work; only mutation is refused (fail closed, §5.4).
+    assert!(fs.lookup(fs.root(), b"hello.txt").is_ok());
+    assert_eq!(
+        fs.create(fs.root(), b"x", NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.write_at(fs.root(), b"hello.txt", 0, b"x"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.remove(fs.root(), b"hello.txt"),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn create_exhausts_the_free_inodes() {
+    let mut fs = mount();
+    let root = fs.root();
+    // The fixture leaves exactly two free inodes (15, 16).
+    fs.create(root, b"one", NodeKind::RegularFile)
+        .expect("first");
+    fs.create(root, b"two", NodeKind::RegularFile)
+        .expect("second");
+    assert_eq!(
+        fs.create(root, b"three", NodeKind::RegularFile),
+        Err(DriverError::DeviceFault)
+    );
 }

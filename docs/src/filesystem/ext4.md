@@ -1,19 +1,17 @@
 # ext4 driver
 
-`drivers/filesystem/ext4` (`rustos-drv-fs-ext4`) is a **read-only**
+`drivers/filesystem/ext4` (`rustos-drv-fs-ext4`) is a **read/write**
 driver for ext2/ext3/ext4 volumes behind any
 [`Block`](../abi/driver_traits.md) device. It implements the versioned
-`FilesystemRead` trait; the frozen `Filesystem` trait remains
-mount/unmount only, so the read surface is a separate trait rather than
-a widening of the shipped one (`AGENTS.md` §2.4 / §9), exactly as for the
-[FAT32](./fat32.md) and [rustfs](./rustfs.md) drivers.
-
-## Why read-only first
+`FilesystemRead`, `FilesystemWrite`, and `FilesystemSecurity` traits; the
+frozen `Filesystem` trait remains mount/unmount only, so each surface is
+a separate trait rather than a widening of the shipped one
+(`AGENTS.md` §2.4 / §9), exactly as for the [FAT32](./fat32.md) and
+[rustfs](./rustfs.md) drivers.
 
 ext4 is the dominant Linux on-disk format, so reading existing volumes
-(installation media, foreign disks) is the first need. Write support is
-a later deliverable and, as with FAT32, will arrive as the separate
-`FilesystemWrite` trait rather than by changing the read surface.
+(installation media, foreign disks) was the first need; mutation arrived
+later behind the separate `FilesystemWrite` trait.
 
 ## On-disk support
 
@@ -77,6 +75,34 @@ surface does not yet decode, so the record carries no `required_cap` and
 no inline ACL entries. Surfacing the xattr ACL is a later deliverable
 alongside write support.
 
+## Writing
+
+The `FilesystemWrite` surface (`create`, `write_at`, `truncate`,
+`remove`, `flush`) mutates a mounted volume. Like the read surface it
+makes **no** permission decision — the VFS authorises every write before
+delegating (`AGENTS.md` §5.4). New files and directories are created with
+the classic block map (12 direct pointers + the single indirect block);
+file data is allocated from the block bitmap, inodes from the inode
+bitmap, and the group-descriptor and superblock free counts are kept in
+step. Directory entries are inserted by splitting an existing record's
+slack (growing the directory by a block when none fits) and removed by
+merging the freed slot into its predecessor. `truncate` frees the tail
+blocks of both the classic map and the inline depth-0 extent root and
+zeroes the retained partial block so a later extension reads as zeros.
+
+### Mutation scope (fail closed)
+
+Maintaining a volume's metadata checksums and wide 64-bit descriptors
+correctly is a prerequisite for safe mutation, so the write path refuses
+(`DriverError::Unsupported`) any volume carrying the `metadata_csum`,
+`gdt_csum`/`uninit_bg`, or `64bit` features — a default `mkfs.ext4`
+image is therefore writable only when created without those features
+(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`), while every such volume
+stays fully **readable**. `remove`/`truncate` of a file whose mapping is
+not the classic map or an inline depth-0 extent root is likewise refused
+rather than orphaning blocks. This is a deliberate, documented boundary
+(`AGENTS.md` §2.1 / §5.4), not a silent best-effort.
+
 ## Capabilities
 
 Loading requires `CAP_DRV_LOAD`; the `FilesystemRead` methods are reached
@@ -85,16 +111,22 @@ runs in user space and does not request `CAP_DRV_KERNEL`.
 
 ## Tests
 
-`cargo test -p rustos-drv-fs-ext4` builds an allocation-free in-memory
-ext4 image (block size 1024, one block group, 128-byte inodes,
-`filetype` on) holding an extent-mapped root, an extent-mapped file, a
-subdirectory with a nested file, and a classic block-mapped file that
-combines direct pointers, sparse holes, and a single-indirect block. The
-17 host-side tests cover superblock validation, `node_info`, ordered
-listing with `.`/`..` suppression and end-of-directory, `lookup` and
-subdirectory traversal, extent and classic reads (including across holes
-and the direct/indirect boundary), the `Unsupported`/`BufferTooSmall`/
-`NotFound` guards, the `register` capability gate, and the
-`FilesystemSecurity::security` record for a file (mode plus a uid/gid
-spanning both halves) and a directory. A `pjdfstest`-equivalent POSIX
+`cargo test -p rustos-drv-fs-ext4` builds an in-memory ext4 image (block
+size 1024, one block group, 128-byte inodes, `filetype` on, with block
+and inode bitmaps and free space) holding an extent-mapped root, an
+extent-mapped file, a subdirectory with a nested file, and a classic
+block-mapped file that combines direct pointers, sparse holes, and a
+single-indirect block. The 32 host-side tests cover superblock
+validation, `node_info`, ordered listing with `.`/`..` suppression and
+end-of-directory, `lookup` and subdirectory traversal, extent and
+classic reads (including across holes and the direct/indirect boundary),
+the `Unsupported`/`BufferTooSmall`/`NotFound` guards, the `register`
+capability gate, the `FilesystemSecurity::security` record for a file
+and a directory, and the write surface: create + multi-block write
+round-trips (persisting across a remount), duplicate / invalid-name /
+non-directory rejection, sparse extension, `truncate` shrink-then-grow,
+directory creation with `.`/`..` and removal (empty vs. `Busy`), inode
+reuse after `remove`, the `write_at`/`truncate` directory and
+not-found guards, free-inode exhaustion, and the fail-closed refusal of
+mutation on a `metadata_csum` volume. A `pjdfstest`-equivalent POSIX
 suite and an end-to-end QEMU vertical remain future work.

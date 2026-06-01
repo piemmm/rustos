@@ -1,9 +1,10 @@
-//! RustOS ext4 filesystem driver (read-only).
+//! RustOS ext4 filesystem driver (read/write).
 //!
-//! Reads an ext2/ext3/ext4 volume sitting behind any
+//! Attaches an ext2/ext3/ext4 volume sitting behind any
 //! [`rustos_abi::driver::block::Block`] device and exposes it through
-//! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`]
-//! surface (`AGENTS.md` §2.4 / §9 — new behaviour ships as a new trait,
+//! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`],
+//! [`FilesystemWrite`], and [`FilesystemSecurity`] surfaces
+//! (`AGENTS.md` §2.4 / §9 — new behaviour ships as a new trait,
 //! never by widening the frozen mount/unmount
 //! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
 //!
@@ -17,20 +18,34 @@
 //! Per `AGENTS.md` §8 the only public *function* is [`register`].
 //! [`Ext4`] is a public *type* the driver host instantiates with
 //! [`Ext4::open`]; the host reaches into it only through the
-//! [`FilesystemRead`] trait.
+//! [`FilesystemRead`], [`FilesystemWrite`], and [`FilesystemSecurity`]
+//! traits.
 //!
 //! # Scope
 //!
-//! Read-only. Supports the modern ext4 on-disk shape — block sizes
-//! 1024..=4096, 128- or 256-byte inodes, 32- or 64-byte group
-//! descriptors (the `64bit` feature), extent-mapped inodes (the default
-//! since ext4) including multi-level extent trees, and the classic
-//! ext2/ext3 indirect block map (direct + single/double/triple
-//! indirect) — and linear (non-hash-indexed leaf) directory blocks. The
-//! root block of a hash-indexed (`htree`) directory is read through its
-//! linear `.`/`..` view; deeply indexed interior directory nodes are not
-//! traversed. A [`NodeId`] is the on-disk inode number, so there is no
-//! in-memory inode table. No `unwrap`/`expect`/`panic!` and no `unsafe`.
+//! Reads the modern ext4 on-disk shape — block sizes 1024..=4096, 128-
+//! or 256-byte inodes, 32- or 64-byte group descriptors (the `64bit`
+//! feature), extent-mapped inodes (the default since ext4) including
+//! multi-level extent trees, and the classic ext2/ext3 indirect block
+//! map (direct + single/double/triple indirect) — and linear
+//! (non-hash-indexed leaf) directory blocks. The root block of a
+//! hash-indexed (`htree`) directory is read through its linear `.`/`..`
+//! view; deeply indexed interior directory nodes are not traversed. A
+//! [`NodeId`] is the on-disk inode number, so there is no in-memory
+//! inode table.
+//!
+//! Writing (`create`/`write_at`/`truncate`/`remove`) allocates from the
+//! block and inode bitmaps, maintains the group-descriptor and
+//! superblock free counts, and creates new objects with the classic
+//! block map. Because correct on-disk checksums and wide descriptors are
+//! a prerequisite for safe mutation, the write path refuses
+//! ([`DriverError::Unsupported`]) any volume carrying the
+//! `metadata_csum`, `gdt_csum`, or `64bit` features (such volumes stay
+//! fully readable); it likewise refuses to free a mapping that is
+//! neither the classic map nor an inline depth-0 extent root, rather
+//! than orphan blocks (`AGENTS.md` §2.1 / §5.4 — fail closed).
+//!
+//! No `unwrap`/`expect`/`panic!` and no `unsafe`.
 //!
 //! # Capabilities
 //!
@@ -45,7 +60,8 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    NodeSecurity,
 };
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -89,6 +105,14 @@ const INCOMPAT_FILETYPE: u32 = 0x0002;
 /// `s_feature_incompat`: 64-bit block numbers; group descriptors are
 /// `s_desc_size` bytes wide rather than the legacy 32.
 const INCOMPAT_64BIT: u32 = 0x0080;
+
+/// `s_feature_ro_compat`: lazy block-group initialisation, with a
+/// per-group descriptor checksum (`bg_checksum`). Mutating such a
+/// volume safely requires recomputing that checksum.
+const RO_COMPAT_GDT_CSUM: u32 = 0x0010;
+/// `s_feature_ro_compat`: every metadata block carries a crc32c
+/// checksum. Mutating such a volume safely requires recomputing them.
+const RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
 
 /// `i_flags`: the inode is mapped by an extent tree, not block pointers.
 const INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
@@ -137,6 +161,35 @@ fn le32(buf: &[u8], off: usize) -> u32 {
     }
 }
 
+/// Write a little-endian `u16` at `off`; a no-op if out of bounds.
+fn put_le16(buf: &mut [u8], off: usize, value: u16) {
+    if let Some(b) = buf.get_mut(off..off + 2) {
+        b.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Write a little-endian `u32` at `off`; a no-op if out of bounds.
+fn put_le32(buf: &mut [u8], off: usize, value: u32) {
+    if let Some(b) = buf.get_mut(off..off + 4) {
+        b.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Narrow a `u64` to `u32`, mapping overflow to [`DriverError::DeviceFault`].
+fn u32_of(value: u64) -> Result<u32, DriverError> {
+    u32::try_from(value).map_err(|_| DriverError::DeviceFault)
+}
+
+/// Narrow a `usize` to `u16`, mapping overflow to [`DriverError::DeviceFault`].
+fn u16_of(value: usize) -> Result<u16, DriverError> {
+    u16::try_from(value).map_err(|_| DriverError::DeviceFault)
+}
+
+/// Narrow a `u64` to `usize`, mapping overflow to [`DriverError::DeviceFault`].
+fn usize_of(value: u64) -> Result<usize, DriverError> {
+    usize::try_from(value).map_err(|_| DriverError::DeviceFault)
+}
+
 /// Validated geometry of an ext4 volume, in bytes/blocks.
 struct Layout {
     /// Filesystem block size in bytes (`1024 << s_log_block_size`).
@@ -155,6 +208,17 @@ struct Layout {
     gdt_offset: u64,
     /// Number of block groups in the volume.
     group_count: u64,
+    /// Blocks per block group.
+    blocks_per_group: u32,
+    /// First data block (1 when `block_size == 1024`, else 0); also the
+    /// block number that bit 0 of group 0's block bitmap represents.
+    first_data_block: u64,
+    /// Whether the volume's feature set is one this driver can safely
+    /// **mutate**. Writes refuse (`Unsupported`) when it is not — e.g.
+    /// the `metadata_csum`, `gdt_csum`/`uninit_bg`, or `64bit` features
+    /// require checksum or wide-descriptor maintenance the write path
+    /// does not perform (`AGENTS.md` §5.4 — fail closed).
+    write_safe: bool,
 }
 
 /// A decoded inode: only the structural fields the read and security
@@ -232,6 +296,38 @@ fn device_read<B: Block>(
         block.read_blocks(lba, &mut scratch[..bs_usize])?;
         let take = core::cmp::min(bs_usize - within, buf.len() - done);
         buf[done..done + take].copy_from_slice(&scratch[within..within + take]);
+        done += take;
+    }
+    Ok(())
+}
+
+/// Write `buf.len()` bytes starting at device byte `offset`, staging
+/// through one logical block at a time (a read-modify-write when the
+/// span does not cover whole device blocks).
+fn device_write<B: Block>(
+    block: &mut B,
+    block_size: u32,
+    block_count: u64,
+    offset: u64,
+    buf: &[u8],
+) -> Result<(), DriverError> {
+    let bs = u64::from(block_size);
+    let bs_usize = block_size as usize;
+    let mut scratch = [0u8; MAX_BLOCK_SIZE as usize];
+    let mut done: usize = 0;
+    while done < buf.len() {
+        let cursor = offset + done as u64;
+        let lba = cursor / bs;
+        let within = usize::try_from(cursor % bs).map_err(|_| DriverError::DeviceFault)?;
+        if lba >= block_count {
+            return Err(DriverError::DeviceFault);
+        }
+        let take = core::cmp::min(bs_usize - within, buf.len() - done);
+        if within != 0 || take != bs_usize {
+            block.read_blocks(lba, &mut scratch[..bs_usize])?;
+        }
+        scratch[within..within + take].copy_from_slice(&buf[done..done + take]);
+        block.write_blocks(lba, &scratch[..bs_usize])?;
         done += take;
     }
     Ok(())
@@ -340,6 +436,11 @@ impl<B: Block> Ext4<B> {
         let gdt_block: u64 = if block_size == 1024 { 2 } else { 1 };
         let gdt_offset = gdt_block * u64::from(block_size);
 
+        let feature_ro_compat = le32(&sb, 0x64);
+        let write_safe =
+            !is_64bit && feature_ro_compat & (RO_COMPAT_METADATA_CSUM | RO_COMPAT_GDT_CSUM) == 0;
+        let first_data_block = u64::from(le32(&sb, 0x14));
+
         Ok(Self {
             block,
             block_size: dev_block_size,
@@ -353,6 +454,9 @@ impl<B: Block> Ext4<B> {
                 filetype,
                 gdt_offset,
                 group_count,
+                blocks_per_group,
+                first_data_block,
+                write_safe,
             },
         })
     }
@@ -415,8 +519,9 @@ impl<B: Block> Ext4<B> {
         )
     }
 
-    /// Read and decode inode number `ino`.
-    fn read_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
+    /// Compute the device byte offset of inode number `ino`'s on-disk
+    /// record.
+    fn locate_inode(&mut self, ino: u32) -> Result<u64, DriverError> {
         if ino == 0 {
             return Err(DriverError::NotFound);
         }
@@ -451,10 +556,15 @@ impl<B: Block> Ext4<B> {
             return Err(DriverError::DeviceFault);
         }
 
-        let inode_offset = inode_table_block
+        inode_table_block
             .checked_mul(u64::from(self.layout.block_size))
             .and_then(|base| base.checked_add(index * u64::from(self.layout.inode_size)))
-            .ok_or(DriverError::DeviceFault)?;
+            .ok_or(DriverError::DeviceFault)
+    }
+
+    /// Read and decode inode number `ino`.
+    fn read_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
+        let inode_offset = self.locate_inode(ino)?;
         let mut raw = [0u8; 128];
         device_read(
             &mut self.block,
@@ -771,6 +881,626 @@ fn file_type_kind(ft: u8) -> Option<NodeKind> {
     }
 }
 
+impl<B: Block> Ext4<B> {
+    /// Refuse mutation of a volume whose feature set this driver cannot
+    /// maintain (`AGENTS.md` §5.4 — fail closed).
+    fn ensure_writable(&self) -> Result<(), DriverError> {
+        if self.layout.write_safe {
+            Ok(())
+        } else {
+            Err(DriverError::Unsupported)
+        }
+    }
+
+    /// Write `buf[..block_size]` to filesystem block `block_num`.
+    fn write_fs_block(&mut self, block_num: u64, buf: &[u8]) -> Result<(), DriverError> {
+        if block_num == 0 || block_num >= self.layout.blocks_count {
+            return Err(DriverError::DeviceFault);
+        }
+        let bs = self.layout.block_size as usize;
+        let offset = block_num
+            .checked_mul(u64::from(self.layout.block_size))
+            .ok_or(DriverError::DeviceFault)?;
+        device_write(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            offset,
+            &buf[..bs],
+        )
+    }
+
+    /// Read a `u32` superblock field at byte offset `field`.
+    fn sb_u32(&mut self, field: u64) -> Result<u32, DriverError> {
+        let mut raw = [0u8; 4];
+        device_read(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            SUPERBLOCK_OFFSET + field,
+            &mut raw,
+        )?;
+        Ok(u32::from_le_bytes(raw))
+    }
+
+    /// Write a `u32` superblock field at byte offset `field`.
+    fn set_sb_u32(&mut self, field: u64, value: u32) -> Result<(), DriverError> {
+        device_write(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            SUPERBLOCK_OFFSET + field,
+            &value.to_le_bytes(),
+        )
+    }
+
+    /// Device byte offset of group `group`'s descriptor.
+    fn group_desc_offset(&self, group: u64) -> Result<u64, DriverError> {
+        self.layout
+            .gdt_offset
+            .checked_add(group * u64::from(self.layout.desc_size))
+            .ok_or(DriverError::DeviceFault)
+    }
+
+    /// Read group `group`'s descriptor into a fixed buffer.
+    fn read_group_desc(&mut self, group: u64) -> Result<[u8; 64], DriverError> {
+        let off = self.group_desc_offset(group)?;
+        let mut desc = [0u8; 64];
+        let len = self.layout.desc_size as usize;
+        device_read(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            off,
+            &mut desc[..len],
+        )?;
+        Ok(desc)
+    }
+
+    /// Write group `group`'s descriptor back from a fixed buffer.
+    fn write_group_desc(&mut self, group: u64, desc: &[u8; 64]) -> Result<(), DriverError> {
+        let off = self.group_desc_offset(group)?;
+        let len = self.layout.desc_size as usize;
+        device_write(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            off,
+            &desc[..len],
+        )
+    }
+
+    /// Read inode `ino`'s full on-disk record into `raw[..inode_size]`.
+    fn read_inode_raw(&mut self, ino: u32, raw: &mut [u8]) -> Result<(), DriverError> {
+        let off = self.locate_inode(ino)?;
+        let len = self.layout.inode_size as usize;
+        device_read(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            off,
+            &mut raw[..len],
+        )
+    }
+
+    /// Write inode `ino`'s full on-disk record from `raw[..inode_size]`.
+    fn write_inode_raw(&mut self, ino: u32, raw: &[u8]) -> Result<(), DriverError> {
+        let off = self.locate_inode(ino)?;
+        let len = self.layout.inode_size as usize;
+        device_write(
+            &mut self.block,
+            self.block_size,
+            self.block_count,
+            off,
+            &raw[..len],
+        )
+    }
+}
+
+impl<B: Block> Ext4<B> {
+    /// Allocate one free data block, returning its zero-filled absolute
+    /// block number. Updates the block bitmap, the group-descriptor free
+    /// count, and the superblock free count.
+    fn alloc_block(&mut self) -> Result<u64, DriverError> {
+        let bpg = u64::from(self.layout.blocks_per_group);
+        let bs = self.layout.block_size as usize;
+        for group in 0..self.layout.group_count {
+            let mut desc = self.read_group_desc(group)?;
+            let free = le16(&desc, 0x0C);
+            if free == 0 {
+                continue;
+            }
+            let bitmap_block = u64::from(le32(&desc, 0x00));
+            let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_fs_block(bitmap_block, &mut bm)?;
+            for bit in 0..bpg {
+                let abs = self.layout.first_data_block + group * bpg + bit;
+                if abs >= self.layout.blocks_count {
+                    break;
+                }
+                let byte = (bit / 8) as usize;
+                if byte >= bs {
+                    break;
+                }
+                let mask = 1u8 << (bit % 8);
+                if bm[byte] & mask == 0 {
+                    bm[byte] |= mask;
+                    self.write_fs_block(bitmap_block, &bm)?;
+                    put_le16(&mut desc, 0x0C, free - 1);
+                    self.write_group_desc(group, &desc)?;
+                    let sb_free = self.sb_u32(0x0C)?;
+                    self.set_sb_u32(0x0C, sb_free.saturating_sub(1))?;
+                    let zero = [0u8; MAX_BLOCK_SIZE as usize];
+                    self.write_fs_block(abs, &zero)?;
+                    return Ok(abs);
+                }
+            }
+        }
+        Err(DriverError::DeviceFault)
+    }
+
+    /// Release data block `abs`, clearing its bitmap bit and restoring
+    /// the group-descriptor and superblock free counts.
+    fn free_block(&mut self, abs: u64) -> Result<(), DriverError> {
+        if abs < self.layout.first_data_block {
+            return Err(DriverError::DeviceFault);
+        }
+        let rel = abs - self.layout.first_data_block;
+        let bpg = u64::from(self.layout.blocks_per_group);
+        let group = rel / bpg;
+        let bit = rel % bpg;
+        if group >= self.layout.group_count {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut desc = self.read_group_desc(group)?;
+        let bitmap_block = u64::from(le32(&desc, 0x00));
+        let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_fs_block(bitmap_block, &mut bm)?;
+        let byte = (bit / 8) as usize;
+        let mask = 1u8 << (bit % 8);
+        if bm[byte] & mask != 0 {
+            bm[byte] &= !mask;
+            self.write_fs_block(bitmap_block, &bm)?;
+            let free = le16(&desc, 0x0C);
+            put_le16(&mut desc, 0x0C, free + 1);
+            self.write_group_desc(group, &desc)?;
+            let sb_free = self.sb_u32(0x0C)?;
+            self.set_sb_u32(0x0C, sb_free + 1)?;
+        }
+        Ok(())
+    }
+
+    /// Allocate one free inode, returning its number. `is_dir` bumps the
+    /// group's directory count. Updates the inode bitmap and free counts.
+    fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, DriverError> {
+        let ipg = u64::from(self.layout.inodes_per_group);
+        let total = u64::from(self.sb_u32(0x00)?);
+        let bs = self.layout.block_size as usize;
+        for group in 0..self.layout.group_count {
+            let mut desc = self.read_group_desc(group)?;
+            let free = le16(&desc, 0x0E);
+            if free == 0 {
+                continue;
+            }
+            let bitmap_block = u64::from(le32(&desc, 0x04));
+            let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_fs_block(bitmap_block, &mut bm)?;
+            for bit in 0..ipg {
+                let ino = group * ipg + bit + 1;
+                if ino > total {
+                    break;
+                }
+                let byte = (bit / 8) as usize;
+                if byte >= bs {
+                    break;
+                }
+                let mask = 1u8 << (bit % 8);
+                if bm[byte] & mask == 0 {
+                    bm[byte] |= mask;
+                    self.write_fs_block(bitmap_block, &bm)?;
+                    put_le16(&mut desc, 0x0E, free - 1);
+                    if is_dir {
+                        let dirs = le16(&desc, 0x10);
+                        put_le16(&mut desc, 0x10, dirs + 1);
+                    }
+                    self.write_group_desc(group, &desc)?;
+                    let sb_free = self.sb_u32(0x10)?;
+                    self.set_sb_u32(0x10, sb_free.saturating_sub(1))?;
+                    return u32::try_from(ino).map_err(|_| DriverError::DeviceFault);
+                }
+            }
+        }
+        Err(DriverError::DeviceFault)
+    }
+
+    /// Release inode `ino`, clearing its bitmap bit and restoring the
+    /// free counts. `is_dir` decrements the group's directory count.
+    fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), DriverError> {
+        let ipg = u64::from(self.layout.inodes_per_group);
+        let group = u64::from(ino - 1) / ipg;
+        let bit = u64::from(ino - 1) % ipg;
+        if group >= self.layout.group_count {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut desc = self.read_group_desc(group)?;
+        let bitmap_block = u64::from(le32(&desc, 0x04));
+        let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_fs_block(bitmap_block, &mut bm)?;
+        let byte = (bit / 8) as usize;
+        let mask = 1u8 << (bit % 8);
+        if bm[byte] & mask != 0 {
+            bm[byte] &= !mask;
+            self.write_fs_block(bitmap_block, &bm)?;
+            let free = le16(&desc, 0x0E);
+            put_le16(&mut desc, 0x0E, free + 1);
+            if is_dir {
+                let dirs = le16(&desc, 0x10);
+                put_le16(&mut desc, 0x10, dirs.saturating_sub(1));
+            }
+            self.write_group_desc(group, &desc)?;
+            let sb_free = self.sb_u32(0x10)?;
+            self.set_sb_u32(0x10, sb_free + 1)?;
+        }
+        Ok(())
+    }
+}
+
+impl<B: Block> Ext4<B> {
+    /// Map logical block `logical` of the inode whose raw record is in
+    /// `raw` to a physical block, allocating backing storage (and any
+    /// indirect/extent metadata) when it is a hole. `allocated` is bumped
+    /// by every filesystem block this call newly allocated so the caller
+    /// can maintain `i_blocks`.
+    fn map_or_alloc(
+        &mut self,
+        raw: &mut [u8],
+        logical: u64,
+        allocated: &mut u64,
+    ) -> Result<u64, DriverError> {
+        if le32(raw, 0x20) & INODE_FLAG_EXTENTS != 0 {
+            self.map_or_alloc_extent(raw, logical, allocated)
+        } else {
+            self.map_or_alloc_classic(raw, logical, allocated)
+        }
+    }
+
+    /// Classic block-map allocation: 12 direct pointers plus the single
+    /// indirect block. Double/triple indirect growth is not written
+    /// (`DeviceFault`); files this driver creates never reach it.
+    fn map_or_alloc_classic(
+        &mut self,
+        raw: &mut [u8],
+        logical: u64,
+        allocated: &mut u64,
+    ) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        if logical < 12 {
+            let off = ib + usize_of(logical)? * 4;
+            let ptr = le32(raw, off);
+            if ptr != 0 {
+                return Ok(u64::from(ptr));
+            }
+            let blk = self.alloc_block()?;
+            *allocated += 1;
+            put_le32(
+                raw,
+                off,
+                u32::try_from(blk).map_err(|_| DriverError::DeviceFault)?,
+            );
+            return Ok(blk);
+        }
+        let ppb = self.pointers_per_block();
+        let rem = logical - 12;
+        if rem >= ppb {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut ind = le32(raw, ib + 48);
+        if ind == 0 {
+            let blk = self.alloc_block()?;
+            *allocated += 1;
+            ind = u32::try_from(blk).map_err(|_| DriverError::DeviceFault)?;
+            put_le32(raw, ib + 48, ind);
+        }
+        let mut ind_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_fs_block(u64::from(ind), &mut ind_buf)?;
+        let off = usize_of(rem)? * 4;
+        let ptr = le32(&ind_buf, off);
+        if ptr != 0 {
+            return Ok(u64::from(ptr));
+        }
+        let blk = self.alloc_block()?;
+        *allocated += 1;
+        put_le32(
+            &mut ind_buf,
+            off,
+            u32::try_from(blk).map_err(|_| DriverError::DeviceFault)?,
+        );
+        self.write_fs_block(u64::from(ind), &ind_buf)?;
+        Ok(blk)
+    }
+
+    /// Inline-extent allocation: serves the depth-0 extent root held in
+    /// `i_block`, extending the last extent when the new block is
+    /// logically and physically contiguous, otherwise adding a fresh
+    /// extent while the four inline slots last. An interior extent tree
+    /// (non-zero depth) or a full root is not grown (`DeviceFault`).
+    fn map_or_alloc_extent(
+        &mut self,
+        raw: &mut [u8],
+        logical: u64,
+        allocated: &mut u64,
+    ) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        if le16(raw, ib) != EXTENT_MAGIC || le16(raw, ib + 6) != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        let entries = usize::from(le16(raw, ib + 2));
+        let max_entries = (I_BLOCK_LEN - 12) / 12;
+        if entries > max_entries {
+            return Err(DriverError::DeviceFault);
+        }
+        for i in 0..entries {
+            let off = ib + 12 + i * 12;
+            let ee_block = u64::from(le32(raw, off));
+            let raw_len = le16(raw, off + 4);
+            let len = if raw_len > 32_768 {
+                u64::from(raw_len - 32_768)
+            } else {
+                u64::from(raw_len)
+            };
+            if logical >= ee_block && logical < ee_block + len {
+                let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
+                return Ok(phys + (logical - ee_block));
+            }
+        }
+        let blk = self.alloc_block()?;
+        *allocated += 1;
+        if entries > 0 {
+            let off = ib + 12 + (entries - 1) * 12;
+            let ee_block = u64::from(le32(raw, off));
+            let raw_len = le16(raw, off + 4);
+            let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
+            if raw_len < 32_768
+                && logical == ee_block + u64::from(raw_len)
+                && blk == phys + u64::from(raw_len)
+            {
+                put_le16(raw, off + 4, raw_len + 1);
+                return Ok(blk);
+            }
+        }
+        if entries < max_entries {
+            let off = ib + 12 + entries * 12;
+            put_le32(
+                raw,
+                off,
+                u32::try_from(logical).map_err(|_| DriverError::DeviceFault)?,
+            );
+            put_le16(raw, off + 4, 1);
+            put_le16(raw, off + 6, u16::try_from(blk >> 32).unwrap_or(0));
+            put_le32(raw, off + 8, u32_of(blk)?);
+            put_le16(raw, ib + 2, u16_of(entries + 1)?);
+            return Ok(blk);
+        }
+        self.free_block(blk)?;
+        Err(DriverError::DeviceFault)
+    }
+}
+
+/// Round `n` up to the next multiple of four (the directory-entry
+/// `rec_len` alignment).
+fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+impl<B: Block> Ext4<B> {
+    /// Sectors (512-byte `i_blocks` units) per filesystem block.
+    fn sectors_per_block(&self) -> u32 {
+        self.layout.block_size / 512
+    }
+
+    /// Write a directory entry header + name at `pos` of `block`,
+    /// honouring the `filetype` feature for the name-length / file-type
+    /// byte layout.
+    fn write_dirent(
+        &self,
+        block: &mut [u8],
+        pos: usize,
+        ino: u32,
+        rec_len: u16,
+        name: &[u8],
+        file_type: u8,
+    ) -> Result<(), DriverError> {
+        put_le32(block, pos, ino);
+        put_le16(block, pos + 4, rec_len);
+        if self.layout.filetype {
+            block[pos + 6] = u8::try_from(name.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+            block[pos + 7] = file_type;
+        } else {
+            put_le16(block, pos + 6, u16_of(name.len())?);
+        }
+        block[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name.len()].copy_from_slice(name);
+        Ok(())
+    }
+
+    /// Read a directory entry's `(inode, rec_len, name_len)` triple at
+    /// `pos`, validating `rec_len` against the block size `bs`.
+    fn read_dirent_header(
+        &self,
+        block: &[u8],
+        pos: usize,
+        bs: usize,
+    ) -> Result<(u32, usize, usize), DriverError> {
+        let ino = le32(block, pos);
+        let rec_len = usize::from(le16(block, pos + 4));
+        if rec_len < DIRENT_HEADER || rec_len % 4 != 0 || pos + rec_len > bs {
+            return Err(DriverError::DeviceFault);
+        }
+        let name_len = if self.layout.filetype {
+            usize::from(block[pos + 6])
+        } else {
+            usize::from(le16(block, pos + 6))
+        };
+        Ok((ino, rec_len, name_len))
+    }
+
+    /// Try to place a `needed`-byte entry into directory block `block`,
+    /// either reusing an unused slot or splitting one with slack.
+    /// Returns whether the entry was placed.
+    fn place_in_block(
+        &self,
+        block: &mut [u8],
+        needed: usize,
+        ino: u32,
+        name: &[u8],
+        file_type: u8,
+    ) -> Result<bool, DriverError> {
+        let bs = block.len();
+        let mut pos = 0usize;
+        while pos + DIRENT_HEADER <= bs {
+            let (slot_ino, rec_len, name_len) = self.read_dirent_header(block, pos, bs)?;
+            let used = if slot_ino == 0 {
+                0
+            } else {
+                align4(DIRENT_HEADER + name_len)
+            };
+            if rec_len >= used + needed {
+                if slot_ino == 0 {
+                    self.write_dirent(block, pos, ino, u16_of(rec_len)?, name, file_type)?;
+                } else {
+                    self.write_dirent(block, pos, slot_ino, u16_of(used)?, &[], 0)?;
+                    let np = pos + used;
+                    self.write_dirent(block, np, ino, u16_of(rec_len - used)?, name, file_type)?;
+                }
+                return Ok(true);
+            }
+            pos += rec_len;
+        }
+        Ok(false)
+    }
+
+    /// Insert child `(child_ino, name, file_type)` into directory inode
+    /// `dir_ino`, growing the directory by one block when no existing
+    /// block has room.
+    fn insert_dirent(
+        &mut self,
+        dir_ino: u32,
+        name: &[u8],
+        child_ino: u32,
+        file_type: u8,
+    ) -> Result<(), DriverError> {
+        let needed = align4(DIRENT_HEADER + name.len());
+        let bs = self.layout.block_size as usize;
+        let dir = self.read_inode(dir_ino)?;
+        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for logical in 0..total_blocks {
+            let Some(phys) = self.map_block(&dir, logical)? else {
+                continue;
+            };
+            self.read_fs_block(phys, &mut block_buf)?;
+            if self.place_in_block(&mut block_buf[..bs], needed, child_ino, name, file_type)? {
+                self.write_fs_block(phys, &block_buf)?;
+                return Ok(());
+            }
+        }
+        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_inode_raw(dir_ino, &mut raw)?;
+        let mut allocated = 0u64;
+        let phys = self.map_or_alloc(&mut raw, total_blocks, &mut allocated)?;
+        let mut new_block = [0u8; MAX_BLOCK_SIZE as usize];
+        self.write_dirent(&mut new_block, 0, child_ino, u16_of(bs)?, name, file_type)?;
+        self.write_fs_block(phys, &new_block)?;
+        let new_size = (total_blocks + 1) * u64::from(self.layout.block_size);
+        put_le32(&mut raw, 0x04, u32_of(new_size)?);
+        let blocks = le32(&raw, 0x1C);
+        put_le32(
+            &mut raw,
+            0x1C,
+            blocks + u32_of(allocated)? * self.sectors_per_block(),
+        );
+        self.write_inode_raw(dir_ino, &raw)?;
+        Ok(())
+    }
+
+    /// Remove the entry named `name` from directory inode `dir_ino`,
+    /// returning the child inode number. The freed slot is merged into
+    /// the preceding entry (or zeroed when it is first in its block).
+    fn remove_dirent(&mut self, dir_ino: u32, name: &[u8]) -> Result<u32, DriverError> {
+        let bs = self.layout.block_size as usize;
+        let dir = self.read_inode(dir_ino)?;
+        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for logical in 0..total_blocks {
+            let Some(phys) = self.map_block(&dir, logical)? else {
+                continue;
+            };
+            self.read_fs_block(phys, &mut block_buf)?;
+            let mut pos = 0usize;
+            let mut prev: Option<usize> = None;
+            while pos + DIRENT_HEADER <= bs {
+                let (slot_ino, rec_len, name_len) = self.read_dirent_header(&block_buf, pos, bs)?;
+                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
+                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
+                    if slot_name == name {
+                        match prev {
+                            Some(pp) => {
+                                let (_, prev_rec, _) =
+                                    self.read_dirent_header(&block_buf, pp, bs)?;
+                                put_le16(&mut block_buf, pp + 4, u16_of(prev_rec + rec_len)?);
+                            }
+                            None => put_le32(&mut block_buf, pos, 0),
+                        }
+                        self.write_fs_block(phys, &block_buf)?;
+                        return Ok(slot_ino);
+                    }
+                }
+                prev = Some(pos);
+                pos += rec_len;
+            }
+        }
+        Err(DriverError::NotFound)
+    }
+
+    /// Whether directory inode `dir_ino` holds only `.` / `..`.
+    fn dir_is_empty(&mut self, dir_ino: u32) -> Result<bool, DriverError> {
+        let bs = self.layout.block_size as usize;
+        let dir = self.read_inode(dir_ino)?;
+        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for logical in 0..total_blocks {
+            let Some(phys) = self.map_block(&dir, logical)? else {
+                continue;
+            };
+            self.read_fs_block(phys, &mut block_buf)?;
+            let mut pos = 0usize;
+            while pos + DIRENT_HEADER <= bs {
+                let (slot_ino, rec_len, name_len) = self.read_dirent_header(&block_buf, pos, bs)?;
+                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
+                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
+                    if slot_name != b"." && slot_name != b".." {
+                        return Ok(false);
+                    }
+                }
+                pos += rec_len;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Resolve a child of directory `dir_ino` by name to its inode.
+    fn lookup_child(&mut self, dir_ino: u32, name: &[u8]) -> Result<u32, DriverError> {
+        let dir = self.read_inode(dir_ino)?;
+        if dir.kind() != Some(NodeKind::Directory) {
+            return Err(DriverError::Unsupported);
+        }
+        let mut scratch = [0u8; 0];
+        match self.find_entry(&dir, DirQuery::ByName(name), &mut scratch)? {
+            Some(found) => Ok(found.ino),
+            None => Err(DriverError::NotFound),
+        }
+    }
+}
+
 impl<B: Block> FilesystemRead for Ext4<B> {
     fn root(&self) -> NodeId {
         NodeId::from_raw(u64::from(ROOT_INODE))
@@ -847,6 +1577,331 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
             return Err(DriverError::NotFound);
         }
         Ok(inode.security())
+    }
+}
+
+/// Longest directory-entry component this driver writes (the ext
+/// `EXT4_NAME_LEN`).
+const MAX_NAME_LEN: usize = 255;
+
+/// `i_mode` for a regular file this driver creates (`0o644`).
+const NEW_FILE_MODE: u16 = S_IFREG | 0o644;
+/// `i_mode` for a directory this driver creates (`0o755`).
+const NEW_DIR_MODE: u16 = S_IFDIR | 0o755;
+
+/// Validate a path component the write surface will store.
+fn validate_name(name: &[u8]) -> Result<(), DriverError> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        return Err(DriverError::LengthOutOfRange);
+    }
+    if name == b"." || name == b".." || name.iter().any(|&b| b == b'/' || b == 0) {
+        return Err(DriverError::LengthOutOfRange);
+    }
+    Ok(())
+}
+
+impl<B: Block> Ext4<B> {
+    /// Free every block of the inode in `raw` whose logical index is at
+    /// least `keep`, compacting the mapping in place. Returns the number
+    /// of filesystem blocks freed (for `i_blocks` maintenance). Supports
+    /// the classic map and the inline depth-0 extent root; anything else
+    /// is refused (`Unsupported`).
+    fn truncate_blocks(&mut self, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
+        if le32(raw, 0x20) & INODE_FLAG_EXTENTS != 0 {
+            self.truncate_extent_blocks(raw, keep)
+        } else {
+            self.truncate_classic_blocks(raw, keep)
+        }
+    }
+
+    /// [`Self::truncate_blocks`] for the inline depth-0 extent root.
+    fn truncate_extent_blocks(&mut self, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        if le16(raw, ib) != EXTENT_MAGIC || le16(raw, ib + 6) != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        let entries = usize::from(le16(raw, ib + 2));
+        let max_entries = (I_BLOCK_LEN - 12) / 12;
+        if entries > max_entries {
+            return Err(DriverError::Unsupported);
+        }
+        let mut freed = 0u64;
+        let mut kept = 0usize;
+        for i in 0..entries {
+            let off = ib + 12 + i * 12;
+            let ee_block = u64::from(le32(raw, off));
+            let raw_len = le16(raw, off + 4);
+            let len = if raw_len > 32_768 {
+                u64::from(raw_len - 32_768)
+            } else {
+                u64::from(raw_len)
+            };
+            let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
+            if ee_block >= keep {
+                for b in 0..len {
+                    self.free_block(phys + b)?;
+                    freed += 1;
+                }
+            } else {
+                let keep_len = if ee_block + len <= keep {
+                    raw_len
+                } else {
+                    for b in (keep - ee_block)..len {
+                        self.free_block(phys + b)?;
+                        freed += 1;
+                    }
+                    u16_of(usize_of(keep - ee_block)?)?
+                };
+                let dst = ib + 12 + kept * 12;
+                put_le32(raw, dst, u32_of(ee_block)?);
+                put_le16(raw, dst + 4, keep_len);
+                put_le16(raw, dst + 6, u16::try_from(phys >> 32).unwrap_or(0));
+                put_le32(raw, dst + 8, u32_of(phys)?);
+                kept += 1;
+            }
+        }
+        for i in kept..entries {
+            let off = ib + 12 + i * 12;
+            for b in &mut raw[off..off + 12] {
+                *b = 0;
+            }
+        }
+        put_le16(raw, ib + 2, u16_of(kept)?);
+        Ok(freed)
+    }
+
+    /// [`Self::truncate_blocks`] for the classic direct + single-indirect
+    /// block map.
+    fn truncate_classic_blocks(&mut self, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        let mut freed = 0u64;
+        for logical in keep.min(12)..12 {
+            let off = ib + usize_of(logical)? * 4;
+            let ptr = le32(raw, off);
+            if ptr != 0 {
+                self.free_block(u64::from(ptr))?;
+                freed += 1;
+                put_le32(raw, off, 0);
+            }
+        }
+        let ind = le32(raw, ib + 48);
+        if ind != 0 {
+            let mut ind_buf = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_fs_block(u64::from(ind), &mut ind_buf)?;
+            let ppb = usize_of(self.pointers_per_block())?;
+            let mut remaining = false;
+            let mut modified = false;
+            for idx in 0..ppb {
+                let logical = 12 + idx as u64;
+                let ptr = le32(&ind_buf, idx * 4);
+                if ptr != 0 {
+                    if logical >= keep {
+                        self.free_block(u64::from(ptr))?;
+                        freed += 1;
+                        put_le32(&mut ind_buf, idx * 4, 0);
+                        modified = true;
+                    } else {
+                        remaining = true;
+                    }
+                }
+            }
+            if modified {
+                self.write_fs_block(u64::from(ind), &ind_buf)?;
+            }
+            if !remaining {
+                self.free_block(u64::from(ind))?;
+                freed += 1;
+                put_le32(raw, ib + 48, 0);
+            }
+        }
+        if le32(raw, ib + 52) != 0 || le32(raw, ib + 56) != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        Ok(freed)
+    }
+
+    /// Read a regular-file inode's raw record for mutation, rejecting a
+    /// directory (`Unsupported`).
+    fn open_regular_for_write(
+        &mut self,
+        ino: u32,
+    ) -> Result<[u8; MAX_BLOCK_SIZE as usize], DriverError> {
+        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_inode_raw(ino, &mut raw)?;
+        if le16(&raw, 0) & S_IFMT != S_IFREG {
+            return Err(DriverError::Unsupported);
+        }
+        Ok(raw)
+    }
+}
+
+impl<B: Block> FilesystemWrite for Ext4<B> {
+    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        self.ensure_writable()?;
+        validate_name(name)?;
+        let dir_ino = node_inode(dir)?;
+        let dir_inode = self.read_inode(dir_ino)?;
+        if dir_inode.kind() != Some(NodeKind::Directory) {
+            return Err(DriverError::Unsupported);
+        }
+        let mut scratch = [0u8; 0];
+        if self
+            .find_entry(&dir_inode, DirQuery::ByName(name), &mut scratch)?
+            .is_some()
+        {
+            return Err(DriverError::Busy);
+        }
+
+        let is_dir = kind == NodeKind::Directory;
+        let new_ino = self.alloc_inode(is_dir)?;
+        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        let bs = self.layout.block_size as usize;
+        if is_dir {
+            put_le16(&mut raw, 0, NEW_DIR_MODE);
+            put_le16(&mut raw, 0x1A, 2);
+            let blk = match self.alloc_block() {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = self.free_inode(new_ino, true);
+                    return Err(e);
+                }
+            };
+            let mut dir_block = [0u8; MAX_BLOCK_SIZE as usize];
+            self.write_dirent(&mut dir_block, 0, new_ino, 12, b".", FT_DIR)?;
+            self.write_dirent(&mut dir_block, 12, dir_ino, u16_of(bs - 12)?, b"..", FT_DIR)?;
+            self.write_fs_block(blk, &dir_block)?;
+            put_le32(&mut raw, I_BLOCK_OFFSET, u32_of(blk)?);
+            put_le32(&mut raw, 0x04, u32_of(bs as u64)?);
+            put_le32(&mut raw, 0x1C, self.sectors_per_block());
+        } else {
+            put_le16(&mut raw, 0, NEW_FILE_MODE);
+            put_le16(&mut raw, 0x1A, 1);
+        }
+        self.write_inode_raw(new_ino, &raw)?;
+
+        let file_type = if is_dir { FT_DIR } else { FT_REG };
+        self.insert_dirent(dir_ino, name, new_ino, file_type)?;
+        if is_dir {
+            let mut draw = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_inode_raw(dir_ino, &mut draw)?;
+            let links = le16(&draw, 0x1A);
+            put_le16(&mut draw, 0x1A, links + 1);
+            self.write_inode_raw(dir_ino, &draw)?;
+        }
+        Ok(NodeId::from_raw(u64::from(new_ino)))
+    }
+
+    fn write_at(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, DriverError> {
+        self.ensure_writable()?;
+        let dir_ino = node_inode(dir)?;
+        let child = self.lookup_child(dir_ino, name)?;
+        let mut raw = self.open_regular_for_write(child)?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let bs = u64::from(self.layout.block_size);
+        let size = (u64::from(le32(&raw, 0x6C)) << 32) | u64::from(le32(&raw, 0x04));
+        let mut allocated = 0u64;
+        let mut written = 0usize;
+        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        while written < data.len() {
+            let cursor = offset + written as u64;
+            let logical = cursor / bs;
+            let within = usize::try_from(cursor % bs).map_err(|_| DriverError::DeviceFault)?;
+            let take = core::cmp::min(
+                self.layout.block_size as usize - within,
+                data.len() - written,
+            );
+            let phys = self.map_or_alloc(&mut raw, logical, &mut allocated)?;
+            self.read_fs_block(phys, &mut block_buf)?;
+            block_buf[within..within + take].copy_from_slice(&data[written..written + take]);
+            self.write_fs_block(phys, &block_buf)?;
+            written += take;
+        }
+        let new_size = core::cmp::max(size, offset + data.len() as u64);
+        put_le32(&mut raw, 0x04, u32_of(new_size)?);
+        put_le32(&mut raw, 0x6C, u32_of(new_size >> 32)?);
+        let blocks = le32(&raw, 0x1C);
+        put_le32(
+            &mut raw,
+            0x1C,
+            blocks + u32_of(allocated)? * self.sectors_per_block(),
+        );
+        self.write_inode_raw(child, &raw)?;
+        Ok(written)
+    }
+
+    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        self.ensure_writable()?;
+        let dir_ino = node_inode(dir)?;
+        let child = self.lookup_child(dir_ino, name)?;
+        let mut raw = self.open_regular_for_write(child)?;
+        let cur = (u64::from(le32(&raw, 0x6C)) << 32) | u64::from(le32(&raw, 0x04));
+        let bs = u64::from(self.layout.block_size);
+        if size < cur {
+            let keep = size.div_ceil(bs);
+            let freed = self.truncate_blocks(&mut raw, keep)?;
+            let blocks = le32(&raw, 0x1C);
+            let dec = u32_of(freed)? * self.sectors_per_block();
+            put_le32(&mut raw, 0x1C, blocks.saturating_sub(dec));
+        }
+        put_le32(&mut raw, 0x04, u32_of(size)?);
+        put_le32(&mut raw, 0x6C, u32_of(size >> 32)?);
+        self.write_inode_raw(child, &raw)?;
+
+        // Zero the tail of a retained partial block so a later extension
+        // reads back zeros rather than the discarded bytes (POSIX).
+        let within = usize::try_from(size % bs).map_err(|_| DriverError::DeviceFault)?;
+        if size < cur && within != 0 {
+            let inode = self.read_inode(child)?;
+            if let Some(phys) = self.map_block(&inode, size / bs)? {
+                let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+                self.read_fs_block(phys, &mut block_buf)?;
+                for b in &mut block_buf[within..self.layout.block_size as usize] {
+                    *b = 0;
+                }
+                self.write_fs_block(phys, &block_buf)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        self.ensure_writable()?;
+        let dir_ino = node_inode(dir)?;
+        let dir_inode = self.read_inode(dir_ino)?;
+        if dir_inode.kind() != Some(NodeKind::Directory) {
+            return Err(DriverError::Unsupported);
+        }
+        let child = self.lookup_child(dir_ino, name)?;
+        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_inode_raw(child, &mut raw)?;
+        let mode = le16(&raw, 0);
+        let is_dir = mode & S_IFMT == S_IFDIR;
+        if is_dir && !self.dir_is_empty(child)? {
+            return Err(DriverError::Busy);
+        }
+        self.truncate_blocks(&mut raw, 0)?;
+        self.remove_dirent(dir_ino, name)?;
+        self.free_inode(child, is_dir)?;
+        if is_dir {
+            let mut draw = [0u8; MAX_BLOCK_SIZE as usize];
+            self.read_inode_raw(dir_ino, &mut draw)?;
+            let links = le16(&draw, 0x1A);
+            put_le16(&mut draw, 0x1A, links.saturating_sub(1));
+            self.write_inode_raw(dir_ino, &draw)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

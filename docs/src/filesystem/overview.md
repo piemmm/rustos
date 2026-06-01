@@ -15,8 +15,9 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
   The first block-backed driver is the read/write [FAT32 driver](./fat32.md);
   the native [rustfs driver](./rustfs.md) adds a journaled, copy-on-write
   filesystem that stores per-inode ACLs and capability gates; the
-  read-only [ext4 driver](./ext4.md) reads ext2/ext3/ext4 volumes and
-  surfaces each inode's stored owner/mode through `FilesystemSecurity`.
+  read/write [ext4 driver](./ext4.md) reads ext2/ext3/ext4 volumes,
+  mutates the unchecksummed feature set, and surfaces each inode's stored
+  owner/mode through `FilesystemSecurity`.
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
@@ -101,7 +102,8 @@ Where that `Metadata` comes from is the one place the two policies differ:
   mode, ACL, and capability gate — so a file marked owner-only or gated on
   a capability is enforced as stored regardless of the mount template — or
   the [ext4 driver](./ext4.md), which reports each inode's stored owner and
-  mode (its ACLs live in xattr blocks not yet decoded).
+  mode (its ACLs live in xattr blocks not yet decoded) and likewise
+  serves the mutating `*_via` operations on writable volumes.
 
 Both routes feed the *same* `Metadata::authorize` decision, so the policy
 is single-sourced; only the metadata's origin changes.

@@ -1,13 +1,13 @@
-# `rustos-drv-fs-ext4` — ext4 filesystem driver (read-only)
+# `rustos-drv-fs-ext4` — ext4 filesystem driver (read/write)
 
-Stage 5 deliverable. Reads an ext2/ext3/ext4 volume behind any
+Stage 5 deliverable. Attaches an ext2/ext3/ext4 volume behind any
 `rustos_abi::driver::block::Block` device and exposes it through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` trait, and
-surfaces each inode's §5.3 owner/mode through the versioned
-`FilesystemSecurity` trait.
+versioned `rustos_abi::driver::filesystem::FilesystemRead` and
+`FilesystemWrite` traits, and surfaces each inode's §5.3 owner/mode
+through the versioned `FilesystemSecurity` trait.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
-`DriverHandle` — it cannot perform I/O — so the read surface is a **new
+`DriverHandle` — it cannot perform I/O — so each surface is a **new
 versioned trait** rather than a widening of the shipped one
 (`AGENTS.md` §2.4 / §9), exactly as for the FAT32 and rustfs drivers.
 
@@ -54,9 +54,35 @@ otherwise from the child inode's mode. The root block of a hash-indexed
 directory is read through its linear `.`/`..` view; deeply indexed
 interior directory nodes are not traversed.
 
+## Writing
+
+The `FilesystemWrite` surface (`create`, `write_at`, `truncate`,
+`remove`, `flush`) mutates a mounted volume; like the read surface it
+makes **no** permission decision (`AGENTS.md` §5.4 — the VFS authorises
+first). New files/directories use the classic block map; data blocks
+are taken from the block bitmap and inodes from the inode bitmap, with
+the group-descriptor and superblock free counts kept in step. Directory
+entries are inserted by splitting an existing record's slack (growing
+the directory by a block when none fits) and removed by merging the
+freed slot into its predecessor. `truncate` frees the tail of both the
+classic map and an inline depth-0 extent root and zeroes the retained
+partial block.
+
+### Mutation scope (fail closed)
+
+Correct on-disk checksums and wide descriptors are a prerequisite for
+safe mutation, so the write path refuses (`DriverError::Unsupported`)
+any volume carrying the `metadata_csum`, `gdt_csum`/`uninit_bg`, or
+`64bit` features — such a volume stays fully **readable**, and a default
+`mkfs.ext4` image is writable only when made without those features
+(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`). `remove`/`truncate` of a
+file whose mapping is neither the classic map nor an inline depth-0
+extent root is likewise refused rather than orphaning blocks
+(`AGENTS.md` §2.1 / §5.4).
+
 ## Limitations
 
-- Read-only. Write support (`FilesystemWrite`) is a later deliverable.
+- Mutation is gated to the unchecksummed, non-`64bit` feature set above.
 - Hash-tree (`htree`) interior nodes are not traversed; only the linear
   leaf layout is read (sufficient for small and moderate directories).
 - Inline-data and special files (symlinks, devices, FIFOs) are reported
@@ -79,7 +105,7 @@ recombine their low half (`i_uid`/`i_gid`) with the osd2 high half
 its POSIX ACLs live in extended-attribute blocks this read surface does
 not yet decode, so the record carries no `required_cap` and no inline
 ACL entries; the VFS applies the mode/owner record on its own. Surfacing
-the xattr ACL is a later deliverable alongside write support.
+the xattr ACL is a later deliverable.
 
 ## Required capabilities
 
@@ -108,14 +134,21 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
 - `FilesystemSecurity::security` for a regular file (mode, and a uid/gid
   that span both the low and osd2 high halves) and a directory, plus the
   `NotFound` guard.
+- **Writing**: create + multi-block `write_at` round-tripping across a
+  remount; duplicate / invalid-name / non-directory `create` rejection;
+  sparse extension past EOF; `truncate` shrink-then-grow; directory
+  creation (`.`/`..`) and removal (empty vs. `Busy`); inode reuse after
+  `remove`; `write_at`/`truncate` directory and not-found guards;
+  free-inode exhaustion; and the fail-closed refusal of mutation on a
+  `metadata_csum` volume.
 - The `register` capability gate and `into_block` round-trip.
 
-17/17 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
+32/32 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
 end-to-end QEMU vertical are tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface
 
 `AGENTS.md` §8 — the only public *function* is `register`. The `Ext4`
 type is exported so the driver host can construct an instance with
-`Ext4::open`; the host reaches into it only through the `FilesystemRead`
-trait.
+`Ext4::open`; the host reaches into it only through the `FilesystemRead`,
+`FilesystemWrite`, and `FilesystemSecurity` traits.
