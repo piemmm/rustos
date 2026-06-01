@@ -1,9 +1,9 @@
 # Core CLI utilities (`userland/apps` and `userland/shell`)
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
-This page documents the ones that have landed (`sysinfo`, `cat`, `ls`,
-`rm`, `cp`, `mv`, and `chmod`) and is extended as the others (`ps`,
-`mount`, …) arrive.
+This page documents the ones that have landed (`sysinfo`, `ps`, `cat`,
+`ls`, `rm`, `cp`, `mv`, `chmod`, `chown`, `getcap`, and `setcap`) and is
+extended as the others (`mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -18,9 +18,10 @@ that API: it does **not** read a virtual filesystem, and there is no
 privileged path that bypasses the capability check.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on the audited `rustos-abi` crate and the shared
+`rustos-procinfo` client helpers, so it never links a kernel or driver
+crate (`AGENTS.md` §17.4).
 
 ### Commands
 
@@ -59,6 +60,14 @@ tests they are in-memory fixtures, so every rendering and paging
 decision is testable without a kernel — the same seam discipline as
 `init` (`Spawner`/`Reaper`) and `login` (`Prompt`).
 
+The `Transport`/`Output` seams, the request framing and capability-aware
+call, and the process-list paging and row rendering are shared with `ps`
+through the `lib/procinfo` crate. Sibling userland crates may not depend
+on one another (`AGENTS.md` §17.4), so the common piece lives in `lib/*`
+rather than being copied (`AGENTS.md` §2.2); `sysinfo` adds only the
+scalar queries (`memory`/`hardware`/`identity`/`uptime`) and its own
+command grammar on top.
+
 ### Paging
 
 A process list can be longer than a single reply, so `sysinfo` pages it:
@@ -95,6 +104,81 @@ the command grammar (every subcommand, alias, and the usage-error
 paths), every query's rendering, process-list paging across a page
 boundary, self-vs-global query routing, and the denied, malformed,
 truncated, and dead-console fail-closed paths.
+
+## `ps` — list processes (`userland/apps/ps`)
+
+`rustos-ps` is the POSIX-named process lister. Like `sysinfo`, it is a
+*client* of the System Information API (`AGENTS.md` §16.6): there is no
+`/proc`, so `ps` issues the `sysinfo-v1` process-list queries served by
+`/System/Services/sysinfod` and has no privileged path that bypasses the
+capability check. By default it lists the caller's own processes (the
+ungated `SELF_PROCESS_LIST`); `-e`/`-A`/`--all` request every process
+(`GLOBAL_PROCESS_LIST`, which the service gates on `CAP_SYSINFO_GLOBAL`).
+
+The crate is `no_std` (with `alloc`, used only by the test fixtures), has
+no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
+(`AGENTS.md` §2.9). It depends only on the audited `rustos-abi` crate and
+the shared `rustos-procinfo` client helpers, so it never links a kernel
+or driver crate (`AGENTS.md` §17.4).
+
+### Grammar
+
+```
+ps [-e | -A | --all]
+
+  (default)   list your own processes
+  -e, -A      list every process (needs CAP_SYSINFO_GLOBAL)
+  -h, --help  show the usage banner
+```
+
+`ps` takes no file operands. `--` ends option parsing. An unknown option,
+an unknown letter inside a cluster, or any positional operand is a
+fail-closed `PsError::Usage`.
+
+### Shared with `sysinfo`
+
+`ps` and `sysinfo` read the same process list, so the request seams
+(`Transport`/`Output`), the request framing and capability-aware `call`,
+the `offset`/`limit` page walk, and the fixed-column row rendering
+(`PID PPID UID GID S CPU NAME`, with a single-letter state code) live
+once in the `lib/procinfo` crate rather than being copied (`AGENTS.md`
+§2.2). Because sibling userland crates may not depend on one another
+(`AGENTS.md` §17.4), that shared piece is a `lib/*` crate. `ps` supplies
+only its own argument grammar, usage banner, and `PsError`.
+
+### A renderer, not a policy point
+
+`run` pages through the process list via `lib/procinfo` and writes one
+rendered row per process to the injected `Output`. The capability gate
+lives in `sysinfod`, not here: a denied global listing comes back as
+`Errno::PermissionDenied`, which `ps` renders honestly as
+`PsError::PermissionDenied` (`AGENTS.md` §5.4 — the service is the policy
+point). The two operations that reach the outside world — issuing the
+request and writing the terminal — are the injected `Transport` and
+`Output` seams; on a running system they are IPC- and console-backed, and
+in tests they are in-memory fixtures.
+
+### Fail closed
+
+- An unknown option or a positional operand is a `PsError::Usage` that
+  issues no query and prints the usage banner.
+- A denied global listing is `PsError::PermissionDenied`; any other
+  transport failure or a reply that does not decode against `sysinfo-v1`
+  (a process page whose length is not a whole number of records) is a
+  hard `PsError::Service`, never a partially-rendered guess.
+- A failed terminal write is `PsError::Output`. There is no panic
+  (`AGENTS.md` §2.9).
+
+### Tests
+
+`cargo test -p rustos-ps` drives the parser and the request/render engine
+against an in-memory `sysinfod` stand-in and a recording output: the
+command grammar (default self-listing, the `-e`/`-A`/`--all` selectors,
+`-h`/`--help`, unknown-option and positional-operand rejection), the
+self-vs-global query routing, header + rows rendering, the empty listing,
+the denied-global capability mapping, and the header/row write-failure
+paths. The shared page walk and rendering carry their own unit tests in
+`lib/procinfo` (`cargo test -p rustos-procinfo`).
 
 ## `cat` — concatenate files to the terminal (`userland/apps/cat`)
 

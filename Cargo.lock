@@ -860,6 +860,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-procinfo"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
+name = "rustos-ps"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-procinfo",
+]
+
+[[package]]
 name = "rustos-qemu"
 version = "0.0.0"
 
@@ -897,6 +912,7 @@ name = "rustos-sysinfo"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-procinfo",
 ]
 
 [[package]]

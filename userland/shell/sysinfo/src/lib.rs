@@ -37,15 +37,19 @@
 //!
 //! * [`error`] — [`SysinfoError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] enum and its argument [`parse`]r.
-//! * [`transport`] — the [`Transport`] and [`Output`] seams.
 //! * [`client`] — the [`run`] entry point and the response renderers.
+//!
+//! The [`Transport`] and [`Output`] seams, the request framing, and the
+//! process-list paging and rendering are shared with the `ps` tool through
+//! `lib/procinfo` rather than duplicated here (`AGENTS.md` §2.2).
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
+//! audited `lib/abi` ABI crate and the shared `lib/procinfo` client
+//! helpers, so this userland tool never links a kernel or driver crate
+//! (`AGENTS.md` §17.4). No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths (`AGENTS.md` §2.9).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -56,9 +60,8 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod transport;
 
 pub use client::{run, USAGE};
 pub use command::{parse, Command};
 pub use error::SysinfoError;
-pub use transport::{Output, Transport};
+pub use rustos_procinfo::{Output, Transport};

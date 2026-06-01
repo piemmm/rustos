@@ -1,7 +1,8 @@
-//! The two seams through which `sysinfo` touches the outside world.
+//! The two seams through which a System Information API client touches the
+//! outside world.
 //!
 //! Keeping the request transport and the terminal behind object-safe traits
-//! is what lets the request/render logic in [`crate::client`] run against
+//! is what lets the request/render logic that consumes this crate run against
 //! in-memory fixtures with no kernel, mirroring the seam design of the other
 //! userland crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`).
 
@@ -12,11 +13,13 @@ use rustos_abi::Errno;
 /// reply.
 ///
 /// `request` is a [`SysinfoRequestHeader`](rustos_abi::sysinfo::SysinfoRequestHeader)
-/// followed by the query's typed payload, already encoded little-endian.
-/// The returned bytes are the service's reply exactly as `sysinfod`
-/// produced them: packed `ProcessRecord`s, a scalar struct's wire image, or
-/// the hardware-tree bytes (`AGENTS.md` §16.6). The transport owns the reply
-/// allocation so the client never has to guess a response buffer size.
+/// followed by the query's typed payload, already encoded little-endian
+/// (build it with [`encode_request`](crate::encode_request)). The returned
+/// bytes are the service's reply exactly as `sysinfod` produced them: packed
+/// [`ProcessRecord`](rustos_abi::sysinfo::ProcessRecord)s, a scalar struct's
+/// wire image, or the hardware-tree bytes (`AGENTS.md` §16.6). The transport
+/// owns the reply allocation so the caller never has to guess a response
+/// buffer size.
 ///
 /// # Errors
 ///
@@ -30,8 +33,8 @@ pub trait Transport {
 
 /// Writes one rendered line to the terminal.
 ///
-/// The client renders each row of a response as a separate line; the seam
-/// owns the trailing newline so a fixture can capture lines cleanly.
+/// A client renders each row of a response as a separate line; the seam owns
+/// the trailing newline so a fixture can capture lines cleanly.
 ///
 /// # Errors
 ///

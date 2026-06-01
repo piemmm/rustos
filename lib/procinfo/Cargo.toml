@@ -1,0 +1,20 @@
+[package]
+name = "rustos-procinfo"
+description = "RustOS shared System Information API client helpers: the request/response seams and the process-list paging + render shared by the `sysinfo` and `ps` tools (§6, §16.6 — `PLAN.md` Stage 6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `sysinfo-v1` wire surface plus the stable `Errno`: this crate
+# builds the typed request and decodes the typed process-list response
+# through these ABI types and invents no parallel format or error set
+# (§2.2, §16.6). As a `lib/*` crate it depends only on other `lib/*` crates
+# (§17.4).
+rustos-abi = { path = "../abi", version = "=0.0.0" }

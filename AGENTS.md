@@ -143,6 +143,8 @@ rustos/
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── log/             # Structured logging.
+│   ├── procinfo/        # Shared System Information API client helpers
+│   │                    #   (request seams, process-list paging + render).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── util/            # Strictly justified utilities.
 │   └── virtio/          # Bus-agnostic virtio split-virtqueue protocol

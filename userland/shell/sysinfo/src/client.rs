@@ -6,15 +6,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use rustos_abi::sysinfo::{
-    KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
-};
-use rustos_abi::Errno;
+use rustos_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId, SystemIdentity, Uptime};
+
+use rustos_procinfo::{call, for_each_process, render_process, Output, Transport, PROCESS_HEADER};
 
 use crate::command::Command;
 use crate::error::SysinfoError;
-use crate::transport::{Output, Transport};
 
 /// The usage banner printed by [`Command::Help`] and on a usage error.
 pub const USAGE: &str = "\
@@ -27,12 +24,6 @@ queries:
   identity            machine identity and OS version
   uptime              time since boot and boot wall-clock time
   help                show this message";
-
-/// Number of [`ProcessRecord`]s requested per process-list page.
-///
-/// A page bounds the reply size so the transport never has to carry every
-/// process at once; the client walks pages until a short page ends the list.
-const PROCESS_PAGE: u16 = 64;
 
 /// Run one [`Command`], issuing its query through `transport` and writing the
 /// rendered result to `out`.
@@ -59,39 +50,14 @@ pub fn run(
     }
 }
 
-/// Encode a request header (with no payload) or header+payload for `query`.
-fn request_bytes(query: SysinfoQueryId, payload: &[u8]) -> Vec<u8> {
-    let header = SysinfoRequestHeader {
-        magic: SYSINFO_REQUEST_MAGIC,
-        version: SYSINFO_VERSION_CURRENT,
-        flags: 0,
-        query,
-        reserved: 0,
-        // Every payload this CLI builds is at most `ProcessListRequest::WIRE_LEN`
-        // (8 bytes), so the conversion is always exact; the saturating
-        // fallback is unreachable and never silently corrupts a real request.
-        payload_len: u32::try_from(payload.len()).unwrap_or(u32::MAX),
-        request_id: 0,
-    };
-    let mut bytes = Vec::with_capacity(SysinfoRequestHeader::WIRE_LEN + payload.len());
-    bytes.extend_from_slice(&header.to_le_bytes());
-    bytes.extend_from_slice(payload);
-    bytes
-}
-
-/// Issue `query` with `payload` and map the transport `Errno` onto the
-/// CLI's error vocabulary (so a capability denial renders precisely).
+/// Issue `query` with `payload` through the shared client helper and map a
+/// capability denial or transport failure onto the CLI's error vocabulary.
 fn service_call(
     transport: &dyn Transport,
     query: SysinfoQueryId,
     payload: &[u8],
 ) -> Result<Vec<u8>, SysinfoError> {
-    transport
-        .query(&request_bytes(query, payload))
-        .map_err(|errno| match errno {
-            Errno::PermissionDenied => SysinfoError::PermissionDenied,
-            other => SysinfoError::Service(other),
-        })
+    call(transport, query, payload).map_err(SysinfoError::from)
 }
 
 /// Write `line` to `out`, mapping a console failure onto
@@ -101,67 +67,20 @@ fn emit(out: &dyn Output, line: &str) -> Result<(), SysinfoError> {
 }
 
 /// Page through the process list and render one row per process.
+///
+/// The page walk and row rendering are the shared helpers from
+/// `lib/procinfo`; the CLI only supplies the column header and the per-row
+/// sink (`AGENTS.md` §2.2).
 fn run_processes(
     all: bool,
     transport: &dyn Transport,
     out: &dyn Output,
 ) -> Result<(), SysinfoError> {
-    let query = if all {
-        SysinfoQueryId::GLOBAL_PROCESS_LIST
-    } else {
-        SysinfoQueryId::SELF_PROCESS_LIST
-    };
-    emit(out, "  PID  PPID   UID   GID S CPU NAME")?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = ProcessListRequest {
-            offset,
-            limit: PROCESS_PAGE,
-            flags: 0,
-        };
-        let reply = service_call(transport, query, &request.to_le_bytes())?;
-        if reply.len() % ProcessRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BadMagic));
-        }
-        let count = reply.len() / ProcessRecord::WIRE_LEN;
-        for chunk in reply.chunks_exact(ProcessRecord::WIRE_LEN) {
-            let record = ProcessRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            emit(out, &render_process(&record))?;
-        }
-        if count < usize::from(PROCESS_PAGE) {
-            return Ok(());
-        }
-        let advanced =
-            u32::try_from(count).map_err(|_| SysinfoError::Service(Errno::LengthOutOfRange))?;
-        offset = offset
-            .checked_add(advanced)
-            .ok_or(SysinfoError::Service(Errno::LengthOutOfRange))?;
-    }
-}
-
-/// Render one [`ProcessRecord`] as a fixed-column row.
-fn render_process(record: &ProcessRecord) -> String {
-    format!(
-        "{:>5} {:>5} {:>5} {:>5} {} {:>3} {}",
-        record.pid,
-        record.parent_pid,
-        record.uid,
-        record.gid,
-        state_char(record.state),
-        record.cpu,
-        name_lossy(record.name_bytes()),
-    )
-}
-
-/// A single-letter process-state code, in the spirit of `ps`.
-fn state_char(state: ProcessState) -> char {
-    match state {
-        ProcessState::Runnable => 'r',
-        ProcessState::Running => 'R',
-        ProcessState::Blocked => 'D',
-        ProcessState::Zombie => 'Z',
-        ProcessState::Stopped => 'T',
-    }
+    emit(out, PROCESS_HEADER)?;
+    for_each_process(transport, all, |record| {
+        out.write_line(&render_process(record))
+    })
+    .map_err(SysinfoError::from)
 }
 
 /// Fetch and render the kernel memory statistics.
@@ -252,7 +171,6 @@ mod tests {
     use super::{run, USAGE};
     use crate::command::Command;
     use crate::error::SysinfoError;
-    use crate::transport::{Output, Transport};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -262,6 +180,7 @@ mod tests {
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::Errno;
+    use rustos_procinfo::{Output, Transport};
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
     /// the real service does and answers from fixed fixtures.

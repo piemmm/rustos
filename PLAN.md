@@ -4321,8 +4321,31 @@ device list.
   throughout (`AGENTS.md` §5.2) are part of the frozen `abi-v1` contract;
   4 new tests pin them, cover the name↔id round-trip, assert every
   assigned id is named, and confirm `from_name` is exact and fails closed.
+- **`ps` CLI (`userland/apps/ps`) + shared `lib/procinfo` — DONE.**
+  `rustos-ps` lists processes through the `sysinfo-v1` System Information
+  API served by `sysinfod` (`AGENTS.md` §16.6) — there is no `/proc`. By
+  default it lists the caller's own processes (the ungated
+  `SELF_PROCESS_LIST`); `-e`/`-A`/`--all` request every process
+  (`GLOBAL_PROCESS_LIST`, gated by the service on `CAP_SYSINFO_GLOBAL`).
+  `ps` and the `sysinfo` CLI share the process-list shape, so — because
+  sibling userland crates may not depend on one another (§17.4) — the
+  request seams (`Transport`/`Output`), the request framing + capability-
+  aware `call`, and the `offset`/`limit` page walk plus fixed-column row
+  render were lifted into the new **`lib/procinfo`** crate rather than
+  copied (§2.2); the `sysinfo` CLI was refactored onto it (deleting its
+  duplicated `transport`/encode/`service_call`/paging/render). `ps` owns
+  only its own grammar, usage banner, and `PsError`. It **fails closed**:
+  an unknown option or any positional operand is a `PsError::Usage`; a
+  denied global listing is `PsError::PermissionDenied` (the service is the
+  policy point, §5.4); any other transport failure or undecodable reply is
+  `PsError::Service`; a failed write is `PsError::Output`. Both crates are
+  `no_std` (with `alloc`) and depend only on `lib/*` (`rustos-abi` +
+  `rustos-procinfo`, §17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths. `lib/procinfo` has 14 unit tests and `rustos-ps` 13;
+  docs `docs/src/userland/utilities.md` (`ps` section) and both crate
+  `README.md`s.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ps`, `mount`, `useradd`, `groupadd` — and the `.app` bundle /
+  `mount`, `useradd`, `groupadd` — and the `.app` bundle /
   dynamic-loader policy) are not yet started.
 
 ---
