@@ -1,8 +1,8 @@
 # Core CLI utilities (`userland/apps` and `userland/shell`)
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
-The first to land is `sysinfo`; this page documents it and is extended
-as the others (`ls`, `cp`, `ps`, `mount`, …) arrive.
+This page documents the ones that have landed (`sysinfo` and `cat`) and
+is extended as the others (`ls`, `cp`, `ps`, `mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -94,3 +94,79 @@ the command grammar (every subcommand, alias, and the usage-error
 paths), every query's rendering, process-list paging across a page
 boundary, self-vs-global query routing, and the denied, malformed,
 truncated, and dead-console fail-closed paths.
+
+## `cat` — concatenate files to the terminal (`userland/apps/cat`)
+
+`rustos-cat` is the first crate under `userland/apps/` (`AGENTS.md` §3).
+It reads each of its sources in order and writes the bytes to the
+terminal. A source is either a path or standard input — the `-` operand,
+and the default when no operand is given. With `-n` it numbers the output
+lines, continuously across every source, the POSIX model.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
+only dependency is the audited `rustos-abi` crate, so it never links a
+kernel or driver crate (`AGENTS.md` §17.4).
+
+### Grammar
+
+```
+cat [-n] [--] [file...]
+```
+
+| Token            | Meaning                                            |
+|------------------|----------------------------------------------------|
+| `-n`, `--number` | number output lines, continuously across sources   |
+| `-h`, `--help`   | print the usage banner (wins immediately)          |
+| `--`             | end option parsing; every later argument is a path |
+| `-`              | standard input                                     |
+| *path*           | a file to read                                     |
+
+With no `path` (or `-`) operand the single source is standard input. Any
+other leading-dash argument before `--` is a `CatError::Usage` error,
+never a silently ignored token.
+
+### A stream/render machine, not a data source
+
+`run` pulls bytes from each source in fixed-size chunks and writes them —
+optionally line-numbered — to the terminal. The three operations that
+reach the outside world are injected seams, the same discipline as
+`sysinfo`'s `Transport`/`Output`:
+
+- `FileSource` — read a byte range of a named file, streaming it with an
+  advancing offset until a read returns zero (end-of-file).
+- `Input` — read the next bytes of standard input until end-of-input.
+- `Output` — write rendered bytes to the terminal.
+
+On a running system these are syscall- and console-backed; in tests they
+are in-memory fixtures, so every parsing, streaming, and numbering
+decision is testable without a kernel.
+
+### Numbering
+
+`-n` numbers each line once, when its first byte appears. The line state
+is carried across read chunks and across sources, so a line that
+straddles a chunk boundary — or a file boundary — is numbered exactly
+once, and numbering is continuous across every source.
+
+### Fail closed
+
+- An unrecognised option is a `CatError::Usage` that reads nothing.
+- A source that cannot be read surfaces the underlying `Errno` as
+  `CatError::Read` and stops before any later source (a missing file
+  among several aborts rather than skipping silently).
+- A failed terminal write is `CatError::Output`.
+- A seam that reports more bytes than the read buffer holds is refused
+  (`CatError::Read`) rather than indexed out of bounds — no panic
+  (`AGENTS.md` §2.9).
+
+### Tests
+
+`cargo test -p rustos-cat` drives the parser and the streaming engine
+against an in-memory filesystem, a buffered standard input, and a
+recording output: the command grammar (every option, `-`/`--`, and the
+usage-error path), single- and multi-file concatenation, standard-input
+streaming, continuous line numbering across files and across a chunk
+boundary, a missing trailing newline, an empty numbered file, chunked
+streaming of a multi-chunk file, and the missing-file and dead-console
+fail-closed paths.

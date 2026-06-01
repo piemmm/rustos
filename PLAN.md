@@ -4093,9 +4093,31 @@ device list.
   + 12 request/render against an in-memory `sysinfod` stand-in); docs
   `docs/src/userland/utilities.md` (+ SUMMARY link) and the crate
   `README.md`.
+- **`cat` CLI (`userland/apps/cat`) — DONE.** `rustos-cat` is the first
+  crate under `userland/apps/` (`AGENTS.md` §3): it concatenates its
+  sources — files and standard input (the `-` operand, and the default
+  when none is given) — to the terminal, numbering output lines
+  continuously across every source with `-n`, the POSIX model. `run`
+  pulls bytes from each source in fixed-size chunks and writes them
+  (optionally line-numbered) through three injected seams — `FileSource`
+  (read a byte range of a named file), `Input` (standard input), and
+  `Output` (terminal) — so every parsing, streaming, and numbering
+  decision is testable without a kernel (the seam discipline of `init`,
+  `login`, and `sysinfo`). The line-numbering state is carried across
+  read chunks and across sources, so a line straddling a chunk or file
+  boundary is numbered exactly once. It **fails closed**: an unrecognised
+  option is a `CatError::Usage` that reads nothing, a source that cannot
+  be read surfaces the underlying `Errno` as `CatError::Read` and stops
+  before any later source, a failed write is `CatError::Output`, and a
+  seam reporting more bytes than the buffer holds is refused rather than
+  indexed out of bounds (`AGENTS.md` §2.9). `no_std` (with `alloc`),
+  depends only on `rustos-abi` (§17.4); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. 20 unit tests; docs
+  `docs/src/userland/utilities.md` (`cat` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`, `chmod`, `chown`,
-  `useradd`, `groupadd`, `setcap`, `getcap` — and the `.app` bundle /
+  `ls`, `cp`, `mv`, `rm`, `ps`, `mount`, `chmod`, `chown`, `useradd`,
+  `groupadd`, `setcap`, `getcap` — and the `.app` bundle /
   dynamic-loader policy) are not yet started.
 
 ---
