@@ -1,0 +1,19 @@
+[package]
+name = "rustos-chmod"
+description = "RustOS `chmod` CLI: change file mode bits (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The stable `Errno` is the only thing `chmod` needs from the workspace: the
+# tool changes a path's mode through an injected filesystem seam that speaks
+# the frozen `Errno`, so it invents no parallel error set (§2.2) and never
+# links a kernel or driver crate (§17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

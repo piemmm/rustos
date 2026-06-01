@@ -76,6 +76,7 @@ members = [
     "userland/shell/shell",
     "userland/shell/sysinfo",
     "userland/apps/cat",
+    "userland/apps/chmod",
     "userland/apps/cp",
     "userland/apps/ls",
     "userland/apps/mv",

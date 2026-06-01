@@ -4217,8 +4217,34 @@ device list.
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 30 unit
   tests (10 parser + 20 move engine); docs
   `docs/src/userland/utilities.md` (`mv` section) and the crate `README.md`.
+- **`chmod` CLI (`userland/apps/chmod`) — DONE.** `rustos-chmod` applies a
+  mode to each of its file operands (`AGENTS.md` §3): an absolute octal
+  value (`644`, `0755`, …) that replaces the low twelve permission bits
+  outright, or a comma-separated list of symbolic clauses
+  (`[ugoa]*[-+=][rwxXst]*`, e.g. `g+w`, `a=rx`, `u+s`) that transform the
+  file's current bits — the full POSIX mode algebra (who `ugoa`, ops
+  `+-=`, perms `rwxXst`, conditional `X`, setuid/setgid/sticky,
+  multiple operator sections per clause, omitted-who treated as `a`). With
+  `-R` a directory is changed and then its contents recursively (the
+  directory before its contents). `run` asks the injected `FileSystem`
+  seam for each operand's kind and current mode, computes the new mode,
+  applies it via `set_mode`, and walks each directory `-R` must descend —
+  writing only the help banner through the injected `Output` seam (`chmod`
+  is silent on success), the same seam discipline as `cp`/`mv`/`rm`. It
+  **fails closed**: an unrecognised option or a missing operand is a
+  `ChmodError::Usage`; a mode operand that is neither octal nor symbolic is
+  a `ChmodError::BadMode`; an operand that cannot be inspected surfaces the
+  underlying `Errno` as `ChmodError::Stat` and stops before any later
+  operand; an unapplyable mode is `ChmodError::Apply`; a directory whose
+  entries cannot be read during a recursive descent is `ChmodError::Read`
+  (`AGENTS.md` §2.9). POSIX `chmod` spells recursive `-R` (a bare `-r` is
+  not an option). `no_std` (with `alloc`), depends only on `rustos-abi`
+  (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+  34 unit tests (parser + mode algebra + change engine); docs
+  `docs/src/userland/utilities.md` (`chmod` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
+  `ps`, `mount`, `chown`, `useradd`, `groupadd`,
   `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
   not yet started.
 
