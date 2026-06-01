@@ -4138,10 +4138,32 @@ device list.
   `unwrap`/`expect`/`panic!` in production paths. 23 unit tests; docs
   `docs/src/userland/utilities.md` (`ls` section) and the crate
   `README.md`.
+- **`rm` CLI (`userland/apps/rm`) — DONE.** `rustos-rm` removes its
+  operands in order (`AGENTS.md` §3): a non-directory operand (a regular
+  file, a symbolic link removed and never followed, a device node) is
+  unlinked, and a directory operand is removed only with `-r`, which
+  removes its contents depth-first and then the directory itself; naming
+  a directory without `-r` is a `RmError::IsDirectory`. With `-f` an
+  operand that does not exist is skipped, the POSIX model. `run` asks the
+  injected `Removal` seam for each operand's kind, reads each directory it
+  must descend by index, and unlinks every reachable object — contents
+  before their directory — writing only the help banner through the
+  injected `Output` seam (`rm` is silent on success), the same seam
+  discipline as `ls`/`cat`. It **fails closed**: an unrecognised option or
+  a missing operand without `-f` is a `RmError::Usage` that removes
+  nothing; an operand that cannot be inspected surfaces the underlying
+  `Errno` as `RmError::Stat` and stops before any later operand (`-f`
+  suppresses only `NotFound`, never `PermissionDenied`); an unreadable
+  directory is `RmError::Read`; a failed unlink is `RmError::Remove`
+  (`AGENTS.md` §2.9). `no_std` (with `alloc`), depends only on
+  `rustos-abi` (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths. 26 unit tests (10 parser + 16 removal engine); docs
+  `docs/src/userland/utilities.md` (`rm` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `cp`, `mv`, `rm`, `ps`, `mount`, `chmod`, `chown`, `useradd`,
-  `groupadd`, `setcap`, `getcap` — and the `.app` bundle /
-  dynamic-loader policy) are not yet started.
+  `cp`, `mv`, `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
+  `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
+  not yet started.
 
 ---
 
