@@ -4270,10 +4270,60 @@ device list.
   tests (parser + owner-spec + change engine); docs
   `docs/src/userland/utilities.md` (`chown` section) and the crate
   `README.md`.
+- **`getcap` CLI (`userland/apps/getcap`) — DONE.** `rustos-getcap`
+  reports the optional per-inode capability gate (`AGENTS.md` §5.3): a
+  capability the caller must hold to reach a node at all, on top of the
+  mode/ACL checks. For each file operand it prints `path CAP_NAME` when
+  the file carries a gate and nothing when it does not (so a clean tree is
+  silent), and with `-R` reports a directory and then its contents
+  recursively. A gate renders by its canonical `CAP_*` name via the new
+  frozen `rustos_abi::CapabilityId::name`; a node that stored an in-range
+  identifier the running ABI has not named renders as `CAP_<id>` rather
+  than being silently dropped (`AGENTS.md` §2.1). `run` asks the injected
+  `FileSystem` seam for each operand's kind and gate and walks each
+  directory `-R` must descend — the same seam discipline as `chmod`/`chown`;
+  the driver only *reports* the gate and makes no permission decision
+  (`AGENTS.md` §5.4). It **fails closed**: an unrecognised option or a
+  missing operand is a `GetcapError::Usage`; an uninspectable operand
+  surfaces the `Errno` as `GetcapError::Stat` and stops the run; an
+  unreadable gate is `GetcapError::Query`; an unreadable directory during
+  `-R` is `GetcapError::Read`; a failed write is `GetcapError::Output`.
+  `no_std` (with `alloc`), depends only on `rustos-abi` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 15 unit
+  tests; docs `docs/src/userland/utilities.md` (`getcap` section) and the
+  crate `README.md`.
+- **`setcap` CLI (`userland/apps/setcap`) — DONE.** `rustos-setcap` is the
+  policy-writing companion of `getcap`: it sets or clears the per-inode
+  capability gate (`AGENTS.md` §5.3). The capability operand is a
+  canonical `CAP_*` name (install that gate, resolved through the shared
+  frozen `rustos_abi::CapabilityId::from_name`, §2.2) or the literal `-`
+  (clear the gate); with `-R` a directory is changed and then its contents
+  recursively. The name match is exact and case-sensitive — an unknown,
+  mis-cased, or bare-numeric value is a fail-closed
+  `SetcapError::BadCapability` (`AGENTS.md` §2.1). `run` asks the injected
+  `FileSystem` seam for each operand's kind, applies the gate with
+  `set_cap`, and walks each directory `-R` must descend (directory before
+  contents) — the same seam discipline as `chmod`/`chown`; `setcap` stores
+  the gate but makes no permission decision (`AGENTS.md` §5.4), and setting
+  a gate is itself privileged (the seam refuses an unauthorised attempt,
+  surfaced as `SetcapError::Apply`). It **fails closed**: an unrecognised
+  option or a missing operand is a `SetcapError::Usage`; an uninspectable
+  operand surfaces the `Errno` as `SetcapError::Stat` and stops the run; an
+  unapplyable gate is `SetcapError::Apply`; an unreadable directory during
+  `-R` is `SetcapError::Read`. `no_std` (with `alloc`), depends only on
+  `rustos-abi` (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths. 22 unit tests; docs `docs/src/userland/utilities.md`
+  (`setcap` section) and the crate `README.md`.
+- **Canonical capability names in `lib/abi` — DONE (this session, with
+  `getcap`/`setcap`).** `rustos_abi::CapabilityId` gained `name()` /
+  `from_name()` backed by a single `NAMED` source-of-truth table (so the
+  two can never disagree, §2.2). The `CAP_*` spellings the charter uses
+  throughout (`AGENTS.md` §5.2) are part of the frozen `abi-v1` contract;
+  4 new tests pin them, cover the name↔id round-trip, assert every
+  assigned id is named, and confirm `from_name` is exact and fails closed.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `ps`, `mount`, `useradd`, `groupadd`,
-  `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
-  not yet started.
+  `ps`, `mount`, `useradd`, `groupadd` — and the `.app` bundle /
+  dynamic-loader policy) are not yet started.
 
 ---
 

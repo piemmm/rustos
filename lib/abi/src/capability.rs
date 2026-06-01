@@ -109,6 +109,61 @@ impl CapabilityId {
     /// capability check.
     pub const SYSINFO_HW: Self = Self(15);
 
+    /// Every capability assigned a canonical name in `abi-v1`, paired with
+    /// that name.
+    ///
+    /// This table is the **single source of truth** for both
+    /// [`name`](Self::name) and [`from_name`](Self::from_name), so the two
+    /// can never disagree on the name↔id mapping (`AGENTS.md` §2.2). The
+    /// `CAP_*` names are the ones the charter uses throughout (`AGENTS.md`
+    /// §5.2) and are part of the frozen `abi-v1` contract: an existing
+    /// name may not be re-spelled or re-pointed, and a newly assigned
+    /// identifier takes a new row.
+    const NAMED: &'static [(Self, &'static str)] = &[
+        (Self::FS_MOUNT, "CAP_FS_MOUNT"),
+        (Self::NET_RAW, "CAP_NET_RAW"),
+        (Self::DRV_LOAD, "CAP_DRV_LOAD"),
+        (Self::DRV_KERNEL, "CAP_DRV_KERNEL"),
+        (Self::USER_ADMIN, "CAP_USER_ADMIN"),
+        (Self::TIME_SET, "CAP_TIME_SET"),
+        (Self::IPC_BIND_PRIVILEGED, "CAP_IPC_BIND_PRIVILEGED"),
+        (Self::AUDIT_READ, "CAP_AUDIT_READ"),
+        (Self::AUDIT_WRITE, "CAP_AUDIT_WRITE"),
+        (Self::MEM_DMA, "CAP_MEM_DMA"),
+        (Self::IRQ_BIND, "CAP_IRQ_BIND"),
+        (Self::MMIO_MAP, "CAP_MMIO_MAP"),
+        (Self::SYSINFO_GLOBAL, "CAP_SYSINFO_GLOBAL"),
+        (Self::SYSINFO_KERNEL, "CAP_SYSINFO_KERNEL"),
+        (Self::SYSINFO_HW, "CAP_SYSINFO_HW"),
+    ];
+
+    /// The canonical `CAP_*` name of this capability, or [`None`] for an
+    /// in-range identifier that `abi-v1` has not yet assigned a name.
+    ///
+    /// The returned string is the exact spelling [`from_name`](Self::from_name)
+    /// accepts, so a name round-trips back to the same identifier.
+    #[must_use]
+    pub fn name(self) -> Option<&'static str> {
+        Self::NAMED
+            .iter()
+            .find(|(cap, _)| *cap == self)
+            .map(|(_, name)| *name)
+    }
+
+    /// The capability with canonical `CAP_*` name `name`, or [`None`] if no
+    /// `abi-v1` capability bears that name.
+    ///
+    /// The match is exact and case-sensitive; there is no abbreviation or
+    /// alias, so a name either denotes exactly one frozen capability or
+    /// nothing at all (fail closed, `AGENTS.md` §2.1).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::NAMED
+            .iter()
+            .find(|(_, candidate)| *candidate == name)
+            .map(|(cap, _)| *cap)
+    }
+
     /// Construct a [`CapabilityId`] from its raw value, validating the range.
     ///
     /// Returns [`Errno::OutOfRange`] if `raw` exceeds [`CAPABILITY_ID_MAX`].
@@ -190,6 +245,47 @@ mod tests {
         assert_eq!(CapabilityId::SYSINFO_GLOBAL.as_u16(), 13);
         assert_eq!(CapabilityId::SYSINFO_KERNEL.as_u16(), 14);
         assert_eq!(CapabilityId::SYSINFO_HW.as_u16(), 15);
+    }
+
+    #[test]
+    fn names_are_frozen_and_round_trip() {
+        // The canonical `CAP_*` spellings are part of abi-v1; do not
+        // re-spell or re-point them.
+        assert_eq!(CapabilityId::FS_MOUNT.name(), Some("CAP_FS_MOUNT"));
+        assert_eq!(CapabilityId::AUDIT_READ.name(), Some("CAP_AUDIT_READ"));
+        assert_eq!(CapabilityId::SYSINFO_HW.name(), Some("CAP_SYSINFO_HW"));
+
+        // Every named id round-trips name -> id -> name.
+        for &(cap, name) in CapabilityId::NAMED {
+            assert_eq!(cap.name(), Some(name));
+            assert_eq!(CapabilityId::from_name(name), Some(cap));
+        }
+    }
+
+    #[test]
+    fn every_assigned_id_has_a_name() {
+        // Capabilities 1..=15 are assigned in abi-v1; each must carry a
+        // canonical name so `getcap`/`setcap` can render and accept it.
+        for raw in 1..=15 {
+            let cap = CapabilityId::from_raw(raw).expect("in range");
+            assert!(cap.name().is_some(), "capability {raw} has no name");
+        }
+    }
+
+    #[test]
+    fn from_name_is_exact_and_fails_closed() {
+        // Unknown, mis-cased, or differently-spelled names denote nothing.
+        assert_eq!(CapabilityId::from_name(""), None);
+        assert_eq!(CapabilityId::from_name("FS_MOUNT"), None);
+        assert_eq!(CapabilityId::from_name("cap_fs_mount"), None);
+        assert_eq!(CapabilityId::from_name("CAP_FS_MOUNT "), None);
+        assert_eq!(CapabilityId::from_name("CAP_NOPE"), None);
+    }
+
+    #[test]
+    fn an_unassigned_in_range_id_has_no_name() {
+        let unassigned = CapabilityId::from_raw(200).expect("in range");
+        assert_eq!(unassigned.name(), None);
     }
 
     #[test]

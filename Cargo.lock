@@ -639,6 +639,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-getcap"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-iconbar"
 version = "0.0.0"
 
@@ -858,6 +865,13 @@ version = "0.0.0"
 
 [[package]]
 name = "rustos-rm"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
+name = "rustos-setcap"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
