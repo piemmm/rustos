@@ -88,10 +88,16 @@ zero-fill; single-indirect large files across a remount; `truncate` shrink
 and grow; `remove` and name reuse; the non-empty-directory `Busy` guard;
 the per-inode security record (mode, owner, ACL, capability gate) round-
 tripping across a remount; copy-on-write overwrite persistence; the
-`register` capability gate; and a **crash-consistency sweep** that faults
-the device after every possible write count during a journalled overwrite
-and asserts the result is always either fully the old or fully the new
-contents — never torn — with both outcomes observed.
+`register` capability gate; a **crash-consistency sweep** that faults the
+device after every possible write count during a journalled overwrite and
+asserts the result is always either fully the old or fully the new
+contents — never torn — with both outcomes observed; and a **journal
+soak** that drives a deterministic, seeded stream of
+`create`/`write`/`truncate`/`remove` operations and crash-tests *every*
+operation at *every* device-write count, asserting the recovered whole-
+tree snapshot equals the volume either exactly before or exactly after the
+operation (never an intermediate) and remains mountable, with rollbacks
+and replays both observed across the run.
 
-The native journal crash-consistency soak and the `pjdfstest`-equivalent
-POSIX suite remain tracked in `.junie/next-session-prompt.md`.
+The `pjdfstest`-equivalent POSIX suite remains tracked in
+`.junie/next-session-prompt.md`.

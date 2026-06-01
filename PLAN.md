@@ -3679,15 +3679,21 @@ device list.
   - The per-inode security record is surfaced to the host via
     `RustFs::security` / `RustFs::set_security` (the driver makes no
     permission decision, §5.4).
-  - 17 host tests: format/open, create/lookup/list, read/write across
+  - 18 host tests: format/open, create/lookup/list, read/write across
     block boundaries + sparse fill, single-indirect large files across a
     remount, `truncate` shrink/grow, `remove` + reuse, non-empty-dir
     `Busy`, the per-inode ACL + capability-gate record persisting across a
-    remount, CoW overwrite persistence, the `register` cap-gate, and a
+    remount, CoW overwrite persistence, the `register` cap-gate, a
     **crash-consistency sweep** that faults the device after every write
     count during a journalled overwrite and asserts fully-old-or-fully-new
-    (both observed). Docs: `docs/src/filesystem/rustfs.md` (+ SUMMARY link)
-    and the crate `README.md`.
+    (both observed), and a **journal soak** that drives a deterministic,
+    seeded `create`/`write`/`truncate`/`remove` stream and crash-tests
+    *every* operation at *every* device-write count — the recovered
+    whole-tree snapshot must equal the volume either exactly before or
+    exactly after the operation (never an intermediate) and stay mountable,
+    with rollbacks and replays both observed. Docs:
+    `docs/src/filesystem/rustfs.md` (+ SUMMARY link) and the crate
+    `README.md`.
 - **`rustfs` per-inode security surfaced into the VFS — DONE.** A third
   separate versioned ABI trait, `FilesystemSecurity`
   (`security(node) -> NodeSecurity`), was added to
@@ -3791,9 +3797,12 @@ device list.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - Growing an ext4 directory / file beyond the inline-extent root
     (interior extent-tree edits) for the checksummed feature set.
-  - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
-    crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
-    vertical.
+  - The `rustfs` journal crash-consistency *soak* — **DONE**: a
+    deterministic, seeded multi-operation soak crash-tests every scripted
+    `create`/`write`/`truncate`/`remove` at every device-write count and
+    asserts whole-tree old-or-new recovery (never torn), staying mountable.
+  - The `pjdfstest`-equivalent POSIX suite and an end-to-end QEMU
+    `rustfs`-over-virtio_blk vertical.
 
 ---
 

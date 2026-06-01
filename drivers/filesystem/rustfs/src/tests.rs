@@ -433,3 +433,195 @@ fn journal_is_crash_consistent_at_every_write_point() {
     assert!(saw_old, "no crash point rolled the overwrite back");
     assert!(saw_new, "no crash point replayed the overwrite");
 }
+
+/// A deterministic, seeded multi-operation **journal soak**: a long
+/// randomised script of `create`/`write`/`truncate`/`remove` operations
+/// is driven against the volume, and *every* operation is independently
+/// crash-tested at *every* device-write count. After each simulated
+/// crash the recovered volume must equal the whole-tree snapshot either
+/// before the operation (transaction rolled back) or after it
+/// (transaction replayed) — never a torn intermediate — and must remain
+/// mountable and listable. The soak proves the per-operation atomicity
+/// of §16 / §5.3 metadata across the full mutation surface, not just a
+/// single overwrite.
+const SOAK_BUDGET: usize = 32;
+const SOAK_NAMES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
+
+/// One scripted mutation, addressed by a `(root, name)` pair.
+#[derive(Debug, Clone)]
+enum SoakOp {
+    CreateFile(&'static [u8]),
+    CreateDir(&'static [u8]),
+    Write(&'static [u8], u64, Vec<u8>),
+    Truncate(&'static [u8], u64),
+    Remove(&'static [u8]),
+}
+
+/// Small linear-congruential PRNG (no external dependency, §2.12) seeded
+/// for a fully reproducible script.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 32) as u32
+    }
+
+    fn below(&mut self, n: u32) -> u32 {
+        self.next_u32() % n
+    }
+}
+
+/// Build a store-backed device from a captured image.
+fn device_from(store: &[u8], writes_left: Option<usize>) -> MockBlock {
+    MockBlock {
+        store: store.to_vec(),
+        writes_left,
+    }
+}
+
+/// Read a regular file's full contents (bounded by its reported size).
+fn read_file(fs: &mut RustFs<MockBlock>, id: NodeId) -> Vec<u8> {
+    let size = usize::try_from(fs.node_info(id).map_or(0, |i| i.size)).unwrap_or(0);
+    let mut out: Vec<u8> = Vec::new();
+    let mut off = 0u64;
+    let mut buf = [0u8; BS];
+    while out.len() < size {
+        match fs.read_at(id, off, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let take = n.min(size - out.len());
+                out.extend_from_slice(&buf[..take]);
+                off = off.saturating_add(n as u64);
+            }
+        }
+    }
+    out
+}
+
+/// Recursively snapshot a directory into sorted `(path, kind, content)`
+/// triples. `kind` is `0` for files, `1` for directories.
+fn collect(
+    fs: &mut RustFs<MockBlock>,
+    dir: NodeId,
+    prefix: &[u8],
+    out: &mut Vec<(Vec<u8>, u8, Vec<u8>)>,
+) {
+    let mut entries: Vec<(Vec<u8>, NodeKind)> = Vec::new();
+    let mut idx = 0u64;
+    let mut name = [0u8; NAME_MAX];
+    while let Ok(Some(e)) = fs.read_dir(dir, idx, &mut name) {
+        entries.push((name[..e.name_len].to_vec(), e.kind));
+        idx += 1;
+    }
+    for (nm, kind) in entries {
+        let mut path = prefix.to_vec();
+        path.push(b'/');
+        path.extend_from_slice(&nm);
+        if kind == NodeKind::Directory {
+            out.push((path.clone(), 1, Vec::new()));
+            if let Ok(id) = fs.lookup(dir, &nm) {
+                collect(fs, id, &path, out);
+            }
+        } else {
+            let content = fs
+                .lookup(dir, &nm)
+                .map(|id| read_file(fs, id))
+                .unwrap_or_default();
+            out.push((path, 0, content));
+        }
+    }
+}
+
+/// Open a clone of `store` (replaying the journal) and snapshot the whole
+/// tree. A failed mount is a recovery defect and fails the test here.
+fn snapshot(store: &[u8]) -> Vec<(Vec<u8>, u8, Vec<u8>)> {
+    let mut fs = RustFs::open(device_from(store, None)).expect("snapshot mount");
+    let root = fs.root();
+    let mut out = Vec::new();
+    collect(&mut fs, root, b"", &mut out);
+    out.sort();
+    out
+}
+
+/// Apply one scripted operation; errors (duplicate, missing, wrong kind)
+/// are legitimate no-ops for consistency and are ignored.
+fn apply_op(fs: &mut RustFs<MockBlock>, root: NodeId, op: &SoakOp) {
+    let _ = match op {
+        SoakOp::CreateFile(n) => fs.create(root, n, NodeKind::RegularFile).map(|_| ()),
+        SoakOp::CreateDir(n) => fs.create(root, n, NodeKind::Directory).map(|_| ()),
+        SoakOp::Write(n, off, data) => fs.write_at(root, n, *off, data).map(|_| ()),
+        SoakOp::Truncate(n, len) => fs.truncate(root, n, *len),
+        SoakOp::Remove(n) => fs.remove(root, n),
+    };
+}
+
+/// Produce the committed image that results from applying `op` to `store`.
+fn commit(store: &[u8], op: &SoakOp) -> Vec<u8> {
+    let mut fs = RustFs::open(device_from(store, None)).expect("commit mount");
+    let root = fs.root();
+    apply_op(&mut fs, root, op);
+    fs.into_block().store
+}
+
+#[test]
+fn journal_soak_is_crash_consistent_across_a_random_op_stream() {
+    let mut rng = Lcg(0x0BAD_F00D_DEAD_BEEF);
+    let mut script: Vec<SoakOp> = Vec::new();
+    for _ in 0..24 {
+        let name = SOAK_NAMES[(rng.next_u32() as usize) % SOAK_NAMES.len()];
+        script.push(match rng.below(5) {
+            0 => SoakOp::CreateFile(name),
+            1 => SoakOp::CreateDir(name),
+            2 => {
+                let off = u64::from(rng.below(2048));
+                let len = (rng.below(600) + 1) as usize;
+                let mut data = Vec::with_capacity(len);
+                for _ in 0..len {
+                    data.push((rng.next_u32() & 0xFF) as u8);
+                }
+                SoakOp::Write(name, off, data)
+            }
+            3 => SoakOp::Truncate(name, u64::from(rng.below(2048))),
+            _ => SoakOp::Remove(name),
+        });
+    }
+
+    let mut good = fresh().into_block().store;
+    let mut saw_change = false;
+    let mut saw_old = false;
+    let mut saw_new = false;
+
+    for op in &script {
+        let old_snap = snapshot(&good);
+        let new_store = commit(&good, op);
+        let new_snap = snapshot(&new_store);
+        if old_snap != new_snap {
+            saw_change = true;
+        }
+
+        for k in 0..SOAK_BUDGET {
+            let mut fs = RustFs::open(device_from(&good, Some(k))).expect("crash mount");
+            let root = fs.root();
+            apply_op(&mut fs, root, op);
+            let crashed = fs.into_block().store;
+            let recovered = snapshot(&crashed);
+            if recovered == old_snap {
+                saw_old = true;
+            } else if recovered == new_snap {
+                saw_new = true;
+            } else {
+                panic!("torn volume after crash at write {k} for op {op:?}");
+            }
+        }
+
+        good = new_store;
+    }
+
+    assert!(saw_change, "the script never mutated the volume");
+    assert!(saw_old, "no crash point ever rolled an operation back");
+    assert!(saw_new, "no crash point ever replayed an operation");
+}

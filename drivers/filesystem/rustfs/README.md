@@ -59,19 +59,24 @@ than a uniform mount-point template.
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-rustfs` runs 17 host-side tests over an
+`cargo test -p rustos-drv-fs-rustfs` runs 18 host-side tests over an
 in-memory device: format/open (and unformatted-device rejection),
 create/lookup/listing (buffer-size guard, `.`/`..` skip), read/write across
 block boundaries and sparse zero-fill, single-indirect large files across a
 remount, `truncate` shrink/grow, `remove` + name reuse, the non-empty
 directory `Busy` guard, the per-inode security record round-tripping across
 a remount, copy-on-write overwrite persistence, the `register` capability
-gate, and a crash-consistency sweep that faults the device after every
-possible write count during a journalled overwrite and asserts the result
-is always fully-old or fully-new — never torn.
+gate, a crash-consistency sweep that faults the device after every possible
+write count during a journalled overwrite and asserts the result is always
+fully-old or fully-new — never torn, and a **journal soak** that drives a
+deterministic, seeded stream of `create`/`write`/`truncate`/`remove`
+operations and crash-tests *every* operation at *every* device-write count,
+asserting the recovered whole-tree snapshot equals the volume either
+exactly before or exactly after the operation (never an intermediate) and
+stays mountable, with both rollbacks and replays observed across the run.
 
-The native journal crash-consistency soak and the `pjdfstest`-equivalent
-POSIX suite are tracked in `.junie/next-session-prompt.md`.
+The `pjdfstest`-equivalent POSIX suite is tracked in
+`.junie/next-session-prompt.md`.
 
 ## Public surface
 
