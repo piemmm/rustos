@@ -50,11 +50,13 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeTimes,
 };
 pub use rustos_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
+use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 #[cfg(test)]
@@ -83,7 +85,11 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// Magic in the superblock's first eight bytes: `"RUSTFS\0\1"`.
 const SUPERBLOCK_MAGIC: u64 = 0x5255_5354_4653_0001;
 /// On-disk format version understood by this build.
-const FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 added the four §21 [`Time64`] timestamps to each inode
+/// (`created`/`modified`/`accessed`/`changed`), which reshaped the inode
+/// record; a version-1 volume is refused rather than misread.
+const FORMAT_VERSION: u32 = 2;
 
 /// Largest block size the driver stages through its on-stack scratch
 /// buffers. No Tier-1 block device exceeds 4096 bytes per block.
@@ -99,7 +105,10 @@ const DIRENT_SIZE: usize = 64;
 const NAME_MAX: usize = DIRENT_SIZE - 8;
 
 /// Number of direct block pointers stored inline in an inode.
-const DIRECT_PTRS: usize = 16;
+///
+/// Reduced from 16 to 12 in format version 2 to make room for the four
+/// §21 [`Time64`] timestamps inside the fixed 256-byte inode record.
+const DIRECT_PTRS: usize = 12;
 /// Maximum number of inline ACL entries stored in an inode.
 ///
 /// The on-disk inode reserves room for exactly this many entries; it must
@@ -146,6 +155,17 @@ fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
     buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
 }
 
+/// Write a [`Time64`] at `off` (12 bytes: 8-byte seconds + 4-byte nanos).
+fn wr_time(buf: &mut [u8], off: usize, value: Time64) {
+    buf[off..off + Time64::WIRE_LEN].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Read a [`Time64`] at `off`. A non-canonical on-disk encoding (a
+/// sub-second field at or above one second) is treated as corruption.
+fn rd_time(buf: &[u8], off: usize) -> Result<Time64, DriverError> {
+    Time64::from_bytes(&buf[off..off + Time64::WIRE_LEN]).map_err(|_| DriverError::DeviceFault)
+}
+
 /// Narrow a `u64` to a `usize` without an `as` cast. Every caller passes
 /// a value already bounded by a validated block size or block index, so
 /// the saturating fall-back is never reached on a 64-bit target and is a
@@ -161,7 +181,7 @@ fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-// Inode field byte offsets within a 256-byte record.
+// Inode field byte offsets within a 256-byte record (format version 2).
 const I_USED: usize = 0;
 const I_KIND: usize = 4;
 const I_MODE: usize = 8;
@@ -171,10 +191,15 @@ const I_NLINK: usize = 20;
 const I_REQCAP: usize = 24;
 const I_ACLCOUNT: usize = 28;
 const I_SIZE: usize = 32;
-const I_ACL_BASE: usize = 48;
+// The four §21 timestamps, each a 12-byte Time64, occupy bytes 40..88.
+const I_CREATED: usize = 40;
+const I_MODIFIED: usize = 52;
+const I_ACCESSED: usize = 64;
+const I_CHANGED: usize = 76;
+const I_ACL_BASE: usize = 88;
 const I_ACL_STRIDE: usize = 8;
-const I_DIRECT_BASE: usize = 112;
-const I_INDIRECT: usize = 240;
+const I_DIRECT_BASE: usize = 152;
+const I_INDIRECT: usize = 248;
 
 /// In-memory image of one on-disk inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -183,17 +208,24 @@ struct Inode {
     sec: Security,
     nlink: u32,
     size: u64,
+    times: NodeTimes,
     direct: [u64; DIRECT_PTRS],
     indirect: u64,
 }
 
 impl Inode {
-    fn empty(kind: u32, sec: Security) -> Self {
+    fn empty(kind: u32, sec: Security, now: Time64) -> Self {
         Self {
             kind,
             sec,
             nlink: 1,
             size: 0,
+            times: NodeTimes {
+                created: now,
+                modified: now,
+                accessed: now,
+                changed: now,
+            },
             direct: [0; DIRECT_PTRS],
             indirect: 0,
         }
@@ -236,6 +268,12 @@ impl Inode {
             };
             sec.push_acl(AclEntry { subject, perms })?;
         }
+        let times = NodeTimes {
+            created: rd_time(buf, I_CREATED)?,
+            modified: rd_time(buf, I_MODIFIED)?,
+            accessed: rd_time(buf, I_ACCESSED)?,
+            changed: rd_time(buf, I_CHANGED)?,
+        };
         let mut direct = [0u64; DIRECT_PTRS];
         for (i, slot) in direct.iter_mut().enumerate() {
             *slot = rd_u64(buf, I_DIRECT_BASE + i * 8);
@@ -245,6 +283,7 @@ impl Inode {
             sec,
             nlink: rd_u32(buf, I_NLINK),
             size: rd_u64(buf, I_SIZE),
+            times,
             direct,
             indirect: rd_u64(buf, I_INDIRECT),
         }))
@@ -268,6 +307,10 @@ impl Inode {
         let acl = self.sec.acl();
         wr_u32(buf, I_ACLCOUNT, as_u32(acl.len()));
         wr_u64(buf, I_SIZE, self.size);
+        wr_time(buf, I_CREATED, self.times.created);
+        wr_time(buf, I_MODIFIED, self.times.modified);
+        wr_time(buf, I_ACCESSED, self.times.accessed);
+        wr_time(buf, I_CHANGED, self.times.changed);
         for (i, entry) in acl.iter().enumerate() {
             let base = I_ACL_BASE + i * I_ACL_STRIDE;
             let (kind_byte, id) = match entry.subject {
@@ -493,6 +536,16 @@ pub struct RustFs<B: Block> {
     block: B,
     layout: Layout,
     pending: Pending,
+    clock: fn() -> Time64,
+}
+
+/// Default clock for a freshly mounted volume: every §21 stamp is the
+/// Unix epoch until the host installs a real clock with
+/// [`RustFs::with_clock`]. A driver running headless on a board with no
+/// wall clock yet keeps deterministic, in-range timestamps this way
+/// rather than panicking or inventing a time (`AGENTS.md` §2.9, §21).
+fn epoch_clock() -> Time64 {
+    Time64::UNIX_EPOCH
 }
 
 /// FNV-1a 64-bit offset basis, the journal-checksum seed.
@@ -598,7 +651,7 @@ impl<B: Block> RustFs<B> {
         let root_data = layout.data_start;
         block.write_blocks(root_data, &scratch[..bs])?;
         // Root inode.
-        let mut root = Inode::empty(KIND_DIR, Security::new(0o755, 0, 0));
+        let mut root = Inode::empty(KIND_DIR, Security::new(0o755, 0, 0), Time64::UNIX_EPOCH);
         root.nlink = 2;
         root.size = bs as u64;
         root.direct[0] = root_data;
@@ -616,6 +669,7 @@ impl<B: Block> RustFs<B> {
             block,
             layout,
             pending: Pending::new(),
+            clock: epoch_clock,
         })
     }
 
@@ -649,7 +703,25 @@ impl<B: Block> RustFs<B> {
             block,
             layout,
             pending: Pending::new(),
+            clock: epoch_clock,
         })
+    }
+
+    /// Install the clock used to stamp the §21 [`Time64`] timestamps on
+    /// subsequent mutations (create, write, truncate, security change,
+    /// directory update). Without it, every stamp is the Unix epoch.
+    ///
+    /// The clock is a pure `fn() -> Time64`; the host points it at the
+    /// kernel's monotonic-to-wall clock source. Replacing it never
+    /// rewrites timestamps already on disk.
+    ///
+    /// # Capabilities
+    ///
+    /// Reached only through the driver's [`DriverHandle`].
+    #[must_use]
+    pub fn with_clock(mut self, clock: fn() -> Time64) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Consume the filesystem, returning the backing block device.
@@ -1239,6 +1311,7 @@ impl<B: Block> RustFs<B> {
         let ino = self.ino_of(node)?;
         let mut inode = self.read_inode(ino)?;
         inode.sec = sec;
+        inode.times.changed = (self.clock)();
         self.write_inode(ino, &inode)?;
         self.commit()
     }
@@ -1250,6 +1323,7 @@ impl<B: Block> RustFs<B> {
         kind: NodeKind,
     ) -> Result<NodeId, DriverError> {
         Self::check_name(name)?;
+        let now = (self.clock)();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -1263,7 +1337,7 @@ impl<B: Block> RustFs<B> {
             NodeKind::Directory => (KIND_DIR, 0o755),
             NodeKind::RegularFile => (KIND_FILE, 0o644),
         };
-        let mut child = Inode::empty(kind_val, Security::new(mode, 0, 0));
+        let mut child = Inode::empty(kind_val, Security::new(mode, 0, 0), now);
         if kind_val == KIND_DIR {
             child.nlink = 2;
         }
@@ -1280,6 +1354,8 @@ impl<B: Block> RustFs<B> {
             dir_inode.nlink += 1;
         }
         self.add_entry(&mut dir_inode, child_ino, name)?;
+        dir_inode.times.modified = now;
+        dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
         self.commit()?;
         Ok(NodeId::from_raw(u64::from(child_ino)))
@@ -1305,6 +1381,10 @@ impl<B: Block> RustFs<B> {
             return Err(DriverError::Unsupported);
         }
         let written = self.write_file(&mut child, offset, data)?;
+        let now = (self.clock)();
+        child.times.modified = now;
+        child.times.accessed = now;
+        child.times.changed = now;
         self.write_inode(child_ino, &child)?;
         self.commit()?;
         Ok(written)
@@ -1324,6 +1404,9 @@ impl<B: Block> RustFs<B> {
             return Err(DriverError::Unsupported);
         }
         self.truncate_file(&mut child, size)?;
+        let now = (self.clock)();
+        child.times.modified = now;
+        child.times.changed = now;
         self.write_inode(child_ino, &child)?;
         self.commit()
     }
@@ -1347,6 +1430,9 @@ impl<B: Block> RustFs<B> {
             dir_inode.nlink = dir_inode.nlink.saturating_sub(1);
         }
         self.remove_entry(&dir_inode, name)?;
+        let now = (self.clock)();
+        dir_inode.times.modified = now;
+        dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
         self.commit()
     }
@@ -1500,5 +1586,12 @@ impl<B: Block> FilesystemSecurity for RustFs<B> {
     fn security(&mut self, node: NodeId) -> Result<Security, DriverError> {
         let ino = self.ino_of(node)?;
         Ok(self.read_inode(ino)?.sec)
+    }
+}
+
+impl<B: Block> FilesystemTimestamps for RustFs<B> {
+    fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
+        let ino = self.ino_of(node)?;
+        Ok(self.read_inode(ino)?.times)
     }
 }

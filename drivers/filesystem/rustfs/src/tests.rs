@@ -625,3 +625,135 @@ fn journal_soak_is_crash_consistent_across_a_random_op_stream() {
     assert!(saw_old, "no crash point ever rolled an operation back");
     assert!(saw_new, "no crash point ever replayed an operation");
 }
+
+// The clock seam is a stateless `fn() -> Time64`, so each instant a test
+// needs is its own constant-returning clock, re-installed with
+// `RustFs::with_clock` between steps. This keeps the tests deterministic
+// and free of shared mutable state (`AGENTS.md` §2.1 — no global mutable
+// static; §7 — no flaky tests).
+fn clock_1000() -> Time64 {
+    Time64::from_secs(1_000)
+}
+fn clock_2000() -> Time64 {
+    Time64::from_secs(2_000)
+}
+fn clock_3000() -> Time64 {
+    Time64::from_secs(3_000)
+}
+fn clock_4000() -> Time64 {
+    Time64::from_secs(4_000)
+}
+/// ~1906: a pre-1970 instant whose seconds value is negative.
+fn clock_pre_1970() -> Time64 {
+    Time64::from_secs(-2_000_000_000)
+}
+/// ~2096: a post-2038 instant beyond the signed 32-bit seconds wall.
+fn clock_post_2038() -> Time64 {
+    Time64::from_secs(4_000_000_000)
+}
+fn clock_100() -> Time64 {
+    Time64::from_secs(100)
+}
+fn clock_200() -> Time64 {
+    Time64::from_secs(200)
+}
+
+#[test]
+fn timestamps_default_to_the_epoch_without_a_clock() {
+    let mut fs = fresh();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"e", NodeKind::RegularFile)
+        .expect("create");
+    let t = fs.times(file).expect("times");
+    assert_eq!(t.created, Time64::UNIX_EPOCH);
+    assert_eq!(t.modified, Time64::UNIX_EPOCH);
+    assert_eq!(t.accessed, Time64::UNIX_EPOCH);
+    assert_eq!(t.changed, Time64::UNIX_EPOCH);
+}
+
+#[test]
+fn timestamps_are_stamped_persisted_and_span_the_64bit_range() {
+    let mut fs = RustFs::format(MockBlock::new(), INODES)
+        .expect("format")
+        .with_clock(clock_1000);
+    let root = fs.root();
+
+    // Create stamps all four timestamps to the creation instant.
+    let file = fs
+        .create(root, b"t", NodeKind::RegularFile)
+        .expect("create");
+    let t = fs.times(file).expect("times");
+    assert_eq!(t.created, Time64::from_secs(1_000));
+    assert_eq!(t.modified, Time64::from_secs(1_000));
+    assert_eq!(t.accessed, Time64::from_secs(1_000));
+    assert_eq!(t.changed, Time64::from_secs(1_000));
+
+    // A write advances mtime/atime/ctime but never the creation time.
+    fs = fs.with_clock(clock_2000);
+    fs.write_at(root, b"t", 0, b"hello").expect("write");
+    let t = fs.times(file).expect("times");
+    assert_eq!(t.created, Time64::from_secs(1_000));
+    assert_eq!(t.modified, Time64::from_secs(2_000));
+    assert_eq!(t.accessed, Time64::from_secs(2_000));
+    assert_eq!(t.changed, Time64::from_secs(2_000));
+
+    // A metadata change touches only ctime.
+    fs = fs.with_clock(clock_3000);
+    fs.set_security(file, Security::new(0o600, 1, 2))
+        .expect("set security");
+    let t = fs.times(file).expect("times");
+    assert_eq!(t.modified, Time64::from_secs(2_000));
+    assert_eq!(t.changed, Time64::from_secs(3_000));
+
+    // A truncate is a content change: mtime and ctime advance.
+    fs = fs.with_clock(clock_4000);
+    fs.truncate(root, b"t", 2).expect("truncate");
+    let t = fs.times(file).expect("times");
+    assert_eq!(t.modified, Time64::from_secs(4_000));
+    assert_eq!(t.changed, Time64::from_secs(4_000));
+
+    // A pre-1970 creation time and a post-2038 modification time (beyond
+    // the i32-seconds wall) round-trip without truncation (§21).
+    fs = fs.with_clock(clock_pre_1970);
+    let old = fs
+        .create(root, b"old", NodeKind::RegularFile)
+        .expect("create old");
+    fs = fs.with_clock(clock_post_2038);
+    fs.write_at(root, b"old", 0, b"x").expect("write old");
+
+    // Every timestamp is on-disk inode state and survives a remount.
+    let dev = fs.into_block();
+    let mut fs = RustFs::open(dev).expect("reopen");
+    let t = fs.times(file).expect("reload times");
+    assert_eq!(t.created, Time64::from_secs(1_000));
+    assert_eq!(t.modified, Time64::from_secs(4_000));
+    let told = fs.times(old).expect("reload old times");
+    assert_eq!(told.created, clock_pre_1970());
+    assert_eq!(told.modified, clock_post_2038());
+    assert!(told.created.secs() < 0, "pre-1970 time lost its sign");
+    assert!(
+        told.modified.secs() > i64::from(i32::MAX),
+        "post-2038 time was truncated to 32 bits"
+    );
+}
+
+#[test]
+fn directory_timestamps_track_create_and_remove() {
+    let mut fs = RustFs::format(MockBlock::new(), INODES)
+        .expect("format")
+        .with_clock(clock_100);
+    let root = fs.root();
+
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    let rt = fs.times(root).expect("root times");
+    assert_eq!(rt.modified, Time64::from_secs(100));
+    assert_eq!(rt.changed, Time64::from_secs(100));
+
+    fs = fs.with_clock(clock_200);
+    fs.remove(root, b"a").expect("remove");
+    let rt = fs.times(root).expect("root times");
+    assert_eq!(rt.modified, Time64::from_secs(200));
+    assert_eq!(rt.changed, Time64::from_secs(200));
+}

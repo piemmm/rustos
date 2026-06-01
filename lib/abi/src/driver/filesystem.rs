@@ -11,6 +11,7 @@
 //! does not duplicate it.
 
 use super::DriverError;
+use crate::time::Time64;
 use crate::CapabilityId;
 
 /// Mount-flag bitmap, frozen at `abi-v1`.
@@ -518,6 +519,59 @@ pub trait FilesystemSecurity {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError>;
 }
 
+/// The four §21 timestamps stored for a filesystem node.
+///
+/// Every field is a 64-bit-native [`Time64`] (`AGENTS.md` §21): absolute
+/// time is never a seconds-only scalar, so the full pre-1970 and
+/// post-2038 range round-trips without truncation. The four instants
+/// follow the POSIX model:
+///
+/// * `created` — set once when the node is created and never changed.
+/// * `modified` — last change to the node's *contents* (mtime).
+/// * `accessed` — last access to the node's contents (atime).
+/// * `changed` — last change to the node's *metadata* (ctime).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct NodeTimes {
+    /// Creation instant; set once and never changed.
+    pub created: Time64,
+    /// Last contents-modification instant (mtime).
+    pub modified: Time64,
+    /// Last access instant (atime).
+    pub accessed: Time64,
+    /// Last metadata-change instant (ctime).
+    pub changed: Time64,
+}
+
+/// Per-node §21 timestamp access to a mounted filesystem.
+///
+/// This is a **versioned `abi-v1` extension** — a *separate* trait from
+/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`],
+/// never a widening of any of them nor of the frozen [`Filesystem`]; new
+/// behaviour ships as a new trait (`AGENTS.md` §2.4 / §9). A driver whose
+/// on-disk format stores the four §21 timestamps as true [`Time64`]
+/// implements it so the VFS can surface them; a driver whose backing
+/// format keeps no timestamps (or only narrower legacy ones it cannot
+/// widen) simply does not implement it.
+///
+/// The driver only *reports* the stored record; it makes no permission
+/// decision (`AGENTS.md` §5.4 — the VFS is the policy point).
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
+pub trait FilesystemTimestamps {
+    /// Report the four §21 timestamps stored for `node`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,6 +963,33 @@ mod tests {
             }
             Ok(self.sec)
         }
+    }
+
+    /// A node whose stored §21 timestamps the VFS reads through the trait.
+    struct MockTimesFs {
+        times: NodeTimes,
+    }
+
+    impl FilesystemTimestamps for MockTimesFs {
+        fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            Ok(self.times)
+        }
+    }
+
+    #[test]
+    fn mock_times_fs_reports_stored_record() {
+        let times = NodeTimes {
+            created: Time64::from_secs(-2_000_000_000),
+            modified: Time64::from_secs(2_200_000_000),
+            accessed: Time64::new(1, 500).expect("canonical"),
+            changed: Time64::UNIX_EPOCH,
+        };
+        let mut fs = MockTimesFs { times };
+        assert_eq!(fs.times(NodeId::from_raw(1)), Ok(times));
+        assert_eq!(fs.times(NodeId::NONE), Err(DriverError::NotFound));
     }
 
     #[test]

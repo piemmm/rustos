@@ -201,6 +201,23 @@ inode's stored mode and owner (its POSIX ACLs live in xattr blocks the
 read surface does not yet decode, so it surfaces no `required_cap` and no
 ACL entries).
 
+A driver whose on-disk format stores the four §21 timestamps as true
+`Time64` additionally implements a fourth separate versioned trait,
+`FilesystemTimestamps`, alongside (never a widening of) the others
+(`AGENTS.md` §2.4 / §9 / §21):
+
+| Method         | Capability gate    |
+|----------------|--------------------|
+| `times(node)`  | Driver handle.     |
+
+`times` returns a `NodeTimes { created, modified, accessed, changed }`
+record, each field a 64-bit-native `Time64` (signed seconds plus
+nanoseconds), so absolute time is never a seconds-only scalar and the
+full pre-1970 / post-2038 range round-trips without truncation. A driver
+whose backing format keeps no timestamps (or only narrower legacy ones it
+cannot widen) simply does not implement it. The first implementation is
+the native [`rustfs` driver](../filesystem/rustfs.md).
+
 ## Block
 
 `trait Block`. Methods:

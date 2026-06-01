@@ -30,16 +30,48 @@ the superblock:
 
 | Region        | Contents                                                    |
 | ------------- | ----------------------------------------------------------- |
-| Superblock    | Block 0: magic, version, geometry, region offsets, root.    |
+| Superblock    | Block 0: magic, version (2), geometry, region offsets, root.|
 | Inode table   | Fixed 256-byte inode records; index 1 is the root.          |
 | Data bitmap   | One bit per data block.                                     |
 | Journal       | One header block plus a fixed-size redo-log data area.      |
 | Data          | File and directory data blocks, and indirect-pointer blocks.|
 
-Each inode holds 16 direct block pointers plus one single-indirect block,
-so a file spans up to `16 + block_size/8` blocks. Directories are ordinary
+Each inode holds 12 direct block pointers plus one single-indirect block,
+so a file spans up to `12 + block_size/8` blocks. Directories are ordinary
 block-addressed payloads of 64-byte slots (`inode`, `name_len`, name);
 `.` and `..` are stored on disk and hidden from `read_dir`.
+
+The inode record also stores the four §21 timestamps; format version 2
+reduced the direct-pointer count from 16 to 12 to make room for them
+without growing the fixed 256-byte record. A version-1 volume is refused
+rather than misread.
+
+## Timestamps (§21)
+
+Every inode stores four 64-bit-native `Time64` timestamps —
+`created`, `modified`, `accessed`, and `changed` — so absolute time is
+never a seconds-only scalar and the full pre-1970 / post-2038 range
+round-trips without truncation (`AGENTS.md` §21). They are surfaced
+through the versioned `FilesystemTimestamps` trait
+(`times(node) -> NodeTimes`), a separate `abi-v1` extension alongside
+`FilesystemSecurity` — never a widening of `FilesystemRead` /
+`FilesystemWrite` (`AGENTS.md` §2.4 / §9).
+
+The driver stamps them from a clock seam installed with
+`RustFs::with_clock(clock: fn() -> Time64)`; without it every stamp is
+the Unix epoch, so a board with no wall clock yet keeps deterministic,
+in-range timestamps rather than panicking or inventing a time
+(`AGENTS.md` §2.9). The stamping follows the POSIX model:
+
+- **create** sets all four to the creation instant and bumps the parent
+  directory's `modified`/`changed`;
+- **write** advances `modified`/`accessed`/`changed`;
+- **truncate** advances `modified`/`changed`;
+- **set_security** advances only `changed` (a metadata change);
+- **remove** bumps the parent directory's `modified`/`changed`.
+
+`created` is set once and never changed. Installing a different clock
+never rewrites timestamps already on disk.
 
 ## Copy-on-write and journaling
 
@@ -109,8 +141,12 @@ device; create/lookup/listing (including the buffer-size guard and the
 zero-fill; single-indirect large files across a remount; `truncate` shrink
 and grow; `remove` and name reuse; the non-empty-directory `Busy` guard;
 the per-inode security record (mode, owner, ACL, capability gate) round-
-tripping across a remount; copy-on-write overwrite persistence; the
-`register` capability gate; a **crash-consistency sweep** that faults the
+tripping across a remount; the four §21 `Time64` timestamps defaulting to
+the epoch without a clock, being stamped per the POSIX model, tracking
+directory create/remove, persisting across a remount, and round-tripping
+pre-1970 and post-2038 instants without truncation; copy-on-write
+overwrite persistence; the `register` capability gate; a
+**crash-consistency sweep** that faults the
 device after every possible write count during a journalled overwrite and
 asserts the result is always either fully the old or fully the new
 contents — never torn — with both outcomes observed; and a **journal

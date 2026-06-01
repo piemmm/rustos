@@ -4971,7 +4971,7 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
 
 ## §20 / §21 ABI Compliance (`stdinfo` + 64-bit-native time)
 
-**Status:** ABI foundation delivered; one filesystem follow-up tracked.
+**Status:** ABI foundation delivered; RustFS timestamp follow-up complete.
 
 `AGENTS.md` §20 (Standard Information Stream) and §21 (64-bit Time and
 Filesystem Timestamps) were added after Stages 0–5 had already frozen
@@ -5007,16 +5007,28 @@ their ABI surfaces, so a compliance pass was run before continuing Stage
 4. **Docs** — *done*. `docs/src/abi/time.md` and `docs/src/abi/stdinfo.md`
    (both in `SUMMARY.md`); `docs/src/abi/sysinfo.md` updated for the new
    `Uptime` shape.
-5. **RustFS `Time64` timestamps** — *follow-up, tracked here*. The RustFS
-   inode (`drivers/filesystem/rustfs`) currently stores no `created` /
-   `modified` / `accessed` / `changed` fields at all. §21 requires RustFS
-   to store all four as true `Time64`. Adding them is an on-disk inode
-   layout change (new fields, `FORMAT_VERSION` bump, journal coverage) and
-   belongs to the RustFS metadata work, not this ABI pass — it must not be
-   bolted on as a half-layout (§2.1). **[DO IMMEDIATELY ON the next RustFS
-   metadata change.]** Until then RustFS stores no absolute time, so it
-   does not *violate* §21 (it stores nothing the wrong way); it is simply
-   not yet complete against the RustFS clause.
+5. **RustFS `Time64` timestamps** — *done*. Each RustFS inode now stores
+   the four §21 timestamps (`created` / `modified` / `accessed` /
+   `changed`) as true `Time64`, surfaced through a new versioned
+   `FilesystemTimestamps` trait (`times(node) -> NodeTimes`) in
+   `lib/abi/src/driver/filesystem.rs` — a separate `abi-v1` extension
+   alongside `FilesystemSecurity`, never a widening of `FilesystemRead` /
+   `FilesystemWrite` (§2.4 / §9). The on-disk inode record was reshaped
+   (the four 12-byte `Time64` fields occupy bytes 40..88; the inline
+   direct-pointer count dropped from 16 to 12 to keep the fixed 256-byte
+   record) and `FORMAT_VERSION` bumped to 2, so a version-1 volume is
+   refused rather than misread; the timestamps ride the existing journal
+   because they live in the inode block. The driver stamps them from a
+   clock seam (`RustFs::with_clock(fn() -> Time64)`, defaulting to the
+   Unix epoch so a clockless board stays deterministic and never panics,
+   §2.9): create stamps all four and bumps the parent directory's
+   mtime/ctime, write advances mtime/atime/ctime, truncate advances
+   mtime/ctime, `set_security` advances ctime, and remove bumps the
+   parent's mtime/ctime; `created` is set once. Tests cover default-epoch
+   behaviour, the POSIX stamping rules, directory create/remove tracking,
+   remount persistence, and pre-1970 / post-2038 round-trips without
+   truncation. Docs: `docs/src/filesystem/rustfs.md` and
+   `docs/src/abi/driver_traits.md`.
 
 ---
 
