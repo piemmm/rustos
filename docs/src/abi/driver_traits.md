@@ -150,7 +150,9 @@ caller-provided buffer alongside a `DirEntry { node, kind, name_len }`.
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the
 §5.3 model before calling here (`AGENTS.md` §5.4). The first
-implementation is the [FAT32 driver](../filesystem/fat32.md).
+implementation is the [FAT32 driver](../filesystem/fat32.md); the
+read-only [ext4 driver](../filesystem/ext4.md) implements this trait
+without `FilesystemWrite`.
 
 The mutating surface is a second separate versioned trait,
 `FilesystemWrite`, again additive rather than a widening of the frozen

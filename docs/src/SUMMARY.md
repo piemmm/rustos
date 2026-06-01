@@ -60,6 +60,7 @@
 - [Permissions](./filesystem/permissions.md)
 - [FAT32 driver](./filesystem/fat32.md)
 - [rustfs driver](./filesystem/rustfs.md)
+- [ext4 driver](./filesystem/ext4.md)
 
 # Userland
 

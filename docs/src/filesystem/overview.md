@@ -14,7 +14,8 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
   `FilesystemRead` and `FilesystemWrite` traits (`AGENTS.md` §2.4 / §9).
   The first block-backed driver is the read/write [FAT32 driver](./fat32.md);
   the native [rustfs driver](./rustfs.md) adds a journaled, copy-on-write
-  filesystem that stores per-inode ACLs and capability gates.
+  filesystem that stores per-inode ACLs and capability gates; the
+  read-only [ext4 driver](./ext4.md) reads ext2/ext3/ext4 volumes.
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in

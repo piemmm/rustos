@@ -3717,11 +3717,31 @@ device list.
     denial). Docs: `docs/src/abi/driver_traits.md`,
     `docs/src/filesystem/{overview,rustfs,permissions}.md`, and the rustfs
     `README.md`.
+- **`ext4` read-only driver — DONE.** `drivers/filesystem/ext4`
+  (`rustos-drv-fs-ext4`) reads ext2/ext3/ext4 volumes over the Stage 4
+  `Block` trait and implements `FilesystemRead` (read-only; the frozen
+  `Filesystem` stays mount/unmount, §2.4 / §9). `Ext4::open` validates the
+  superblock (magic `0xEF53` at the fixed byte offset 1024) and re-derives
+  the geometry (block size 1024..=4096, 128/256-byte inodes, 32/64-byte
+  group descriptors incl. the `64bit` feature). A `NodeId` is the on-disk
+  inode number (no in-memory inode table); logical→physical mapping covers
+  both **extent-mapped** inodes (extent tree incl. interior index nodes)
+  and the classic **block map** (12 direct + single/double/triple
+  indirect), with sparse holes reading as zeros. Linear directory blocks
+  are walked honouring `rec_len`, skipping `.`/`..` and unused slots;
+  hash-indexed (`htree`) directories are read through their linear leaf
+  view. No `unwrap`/`expect`/`panic!`, no `unsafe`. 14 host tests against a
+  hand-built in-memory image (extent root/file, subdir + nested file,
+  classic file across holes + the direct/indirect boundary, bad-magic
+  rejection, `Unsupported`/`BufferTooSmall`/`NotFound` guards, the
+  `register` cap-gate). Docs: `docs/src/filesystem/ext4.md` (+ SUMMARY
+  link), the overview and `FilesystemRead` notes, and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - The **`ext4`** read/write driver.
+  - `ext4` **write** support (`FilesystemWrite`) and surfacing ext4's
+    per-inode §5.3 record via `FilesystemSecurity`.
   - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
     crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
-    vertical, and the `ext4` doc page.
+    vertical.
 
 ---
 
