@@ -63,6 +63,14 @@ pub enum Errno {
     /// stays bound, the handle stays valid, and the caller may
     /// re-issue `irq_wait` immediately.
     TimedOut = 13,
+    /// An absolute time or duration cannot be represented by the target.
+    ///
+    /// Emitted by [`crate::time::Time64`] / [`crate::time::Duration64`] when a
+    /// value is narrowed to a representation that cannot hold it — for
+    /// example converting a `Time64` to a narrower on-disk timestamp encoding
+    /// (`AGENTS.md` §21). The conversion is always checked; this errno is the
+    /// fail-closed result, never a silent truncation, wrap, or saturation.
+    TimestampOutOfRange = 14,
 }
 
 impl Errno {
@@ -89,6 +97,7 @@ impl fmt::Display for Errno {
             Self::MessageTooLarge => "message too large",
             Self::NotImplemented => "operation not implemented",
             Self::TimedOut => "operation timed out",
+            Self::TimestampOutOfRange => "timestamp out of range",
         };
         f.write_str(message)
     }
@@ -114,6 +123,7 @@ mod tests {
         assert_eq!(Errno::MessageTooLarge.as_i32(), 11);
         assert_eq!(Errno::NotImplemented.as_i32(), 12);
         assert_eq!(Errno::TimedOut.as_i32(), 13);
+        assert_eq!(Errno::TimestampOutOfRange.as_i32(), 14);
     }
 
     #[test]

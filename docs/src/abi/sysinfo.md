@@ -65,8 +65,10 @@ fails closed: bad magic or a non-zero reserved field is
   name buffer bounded by [`PROCESS_NAME_MAX`].
 - [`KernelMemoryStats`] — total/free/kernel-heap/user-resident bytes and
   the architecture page size.
-- [`Uptime`] — monotonic uptime in nanoseconds and the boot wall-clock
-  time.
+- [`Uptime`] — the monotonic span since boot as a [`Duration64`] and the
+  wall-clock boot instant as a [`Time64`]; absolute time is carried with
+  the 64-bit-native time types, never a seconds-only scalar
+  (`AGENTS.md` §21).
 - [`SystemIdentity`] — the per-installation machine id
   ([`MACHINE_ID_LEN`] bytes), the OS version triple, and an inline
   hostname bounded by [`HOSTNAME_MAX`].
@@ -87,6 +89,8 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`PROCESS_NAME_MAX`]: ../../rustos_abi/sysinfo/constant.PROCESS_NAME_MAX.html
 [`KernelMemoryStats`]: ../../rustos_abi/sysinfo/struct.KernelMemoryStats.html
 [`Uptime`]: ../../rustos_abi/sysinfo/struct.Uptime.html
+[`Time64`]: ../../rustos_abi/time/struct.Time64.html
+[`Duration64`]: ../../rustos_abi/time/struct.Duration64.html
 [`SystemIdentity`]: ../../rustos_abi/sysinfo/struct.SystemIdentity.html
 [`MACHINE_ID_LEN`]: ../../rustos_abi/sysinfo/constant.MACHINE_ID_LEN.html
 [`HOSTNAME_MAX`]: ../../rustos_abi/sysinfo/constant.HOSTNAME_MAX.html

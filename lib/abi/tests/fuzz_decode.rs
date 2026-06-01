@@ -29,6 +29,7 @@ use rustos_abi::sysinfo::{
     KernelMemoryStats, ProcessListRequest, ProcessRecord, SysinfoRequestHeader, SystemIdentity,
     Uptime,
 };
+use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::{IpcMessageHeader, ManifestHeader};
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
@@ -104,6 +105,16 @@ fn exercise(bytes: &[u8]) {
         let redecoded = SystemIdentity::from_bytes(&id.to_le_bytes())
             .expect("round-trip of an accepted identity must succeed");
         assert_eq!(id, redecoded);
+    }
+    if let Ok(time) = Time64::from_bytes(bytes) {
+        let redecoded = Time64::from_bytes(&time.to_le_bytes())
+            .expect("round-trip of an accepted instant must succeed");
+        assert_eq!(time, redecoded);
+    }
+    if let Ok(duration) = Duration64::from_bytes(bytes) {
+        let redecoded = Duration64::from_bytes(&duration.to_le_bytes())
+            .expect("round-trip of an accepted duration must succeed");
+        assert_eq!(duration, redecoded);
     }
 }
 

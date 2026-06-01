@@ -76,6 +76,8 @@
 
 - [Driver traits (`abi-v1`)](./abi/driver_traits.md)
 - [System Information API (`sysinfo-v1`)](./abi/sysinfo.md)
+- [64-bit-native time (`abi-v1`)](./abi/time.md)
+- [Standard Information Stream (`stdinfo`, fd 3)](./abi/stdinfo.md)
 
 # Platforms
 

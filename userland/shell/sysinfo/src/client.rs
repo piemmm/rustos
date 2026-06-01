@@ -213,8 +213,22 @@ fn run_identity(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
 fn run_uptime(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     let reply = service_call(transport, SysinfoQueryId::UPTIME, &[])?;
     let uptime = Uptime::from_bytes(&reply).map_err(SysinfoError::Service)?;
-    emit(out, &format!("uptime ns:   {}", uptime.uptime_ns))?;
-    emit(out, &format!("boot unix s: {}", uptime.boot_unix_secs))
+    emit(
+        out,
+        &format!(
+            "since boot:  {}.{:09}s",
+            uptime.since_boot.secs(),
+            uptime.since_boot.subsec_nanos()
+        ),
+    )?;
+    emit(
+        out,
+        &format!(
+            "boot time:   {}.{:09}s since the Unix epoch",
+            uptime.boot_time.secs(),
+            uptime.boot_time.subsec_nanos()
+        ),
+    )
 }
 
 /// Render `bytes` as lowercase hex with no separators.
@@ -246,6 +260,7 @@ mod tests {
         KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId,
         SysinfoRequestHeader, SystemIdentity, Uptime,
     };
+    use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
@@ -276,8 +291,8 @@ mod tests {
                 },
                 identity: SystemIdentity::new([0xAB; 16], 1, 2, 3, b"rustbox").unwrap(),
                 uptime: Uptime {
-                    uptime_ns: 9,
-                    boot_unix_secs: 1000,
+                    since_boot: Duration64::from_nanos(9),
+                    boot_time: Time64::from_secs(1000),
                 },
                 hardware: Vec::new(),
                 deny: None,

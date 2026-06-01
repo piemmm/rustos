@@ -4969,6 +4969,57 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
 
 ---
 
+## §20 / §21 ABI Compliance (`stdinfo` + 64-bit-native time)
+
+**Status:** ABI foundation delivered; one filesystem follow-up tracked.
+
+`AGENTS.md` §20 (Standard Information Stream) and §21 (64-bit Time and
+Filesystem Timestamps) were added after Stages 0–5 had already frozen
+their ABI surfaces, so a compliance pass was run before continuing Stage
+6.
+
+1. **§21 canonical time types** — *done*. `lib/abi/src/time.rs`
+   (`rustos_abi::time`) defines `Time64` (signed 64-bit seconds since the
+   Unix epoch + a canonical nanosecond field — a `timespec64` analogue,
+   not seconds-only `time64_t`) and `Duration64` (signed seconds + nanos).
+   Both encode 12 bytes little-endian via the shared `lib/abi/src/le.rs`
+   helpers (a new `read_i64`/`put_i64` pair was added there so no `as`
+   cast is needed). Narrowing to a legacy on-disk field is checked
+   (`secs_i32`/`secs_u32`) and fails with the new
+   `Errno::TimestampOutOfRange = 14`; silent truncation/wrap/saturation is
+   refused. Tests cover the epoch, pre-1970, post-2038, post-2106, and
+   non-canonical nanosecond rejection.
+2. **§21 ABI migration** — *done*. The only seconds-only absolute-time
+   field in the frozen surface, `sysinfo::Uptime`, was migrated from
+   `{ uptime_ns: u64, boot_unix_secs: u64 }` to
+   `{ since_boot: Duration64, boot_time: Time64 }` (24-byte wire). All
+   call sites updated: `sysinfod` source/service + tests, the `sysinfo`
+   CLI render + fixtures, and the `lib/abi` fuzz harness (which now also
+   exercises the `Time64`/`Duration64` decoders, §19.6).
+3. **§20 `stdinfo` ABI** — *done*. `lib/abi/src/stdinfo.rs`
+   (`rustos_abi::stdinfo`) reserves `STDINFO_FD = 3` and defines the
+   closed `StdInfoRecord` (version, producer, closed `StdInfoKind`, stable
+   `code`, `Severity`, terse `Human`, structured `ai`). It is `no_std` and
+   allocation-free: `write_jsonl` serialises one JSONL line into a
+   caller-provided buffer (JSON-escaping strings, embedding the `ai`
+   object verbatim) and fails closed with `Errno::BufferTooSmall`. No
+   synonym kinds; no free-form record types.
+4. **Docs** — *done*. `docs/src/abi/time.md` and `docs/src/abi/stdinfo.md`
+   (both in `SUMMARY.md`); `docs/src/abi/sysinfo.md` updated for the new
+   `Uptime` shape.
+5. **RustFS `Time64` timestamps** — *follow-up, tracked here*. The RustFS
+   inode (`drivers/filesystem/rustfs`) currently stores no `created` /
+   `modified` / `accessed` / `changed` fields at all. §21 requires RustFS
+   to store all four as true `Time64`. Adding them is an on-disk inode
+   layout change (new fields, `FORMAT_VERSION` bump, journal coverage) and
+   belongs to the RustFS metadata work, not this ABI pass — it must not be
+   bolted on as a half-layout (§2.1). **[DO IMMEDIATELY ON the next RustFS
+   metadata change.]** Until then RustFS stores no absolute time, so it
+   does not *violate* §21 (it stores nothing the wrong way); it is simply
+   not yet complete against the RustFS clause.
+
+---
+
 ## Assignment Notes for Task Dispatchers
 
 When handing a stage to an implementing agent, the task brief **must**:

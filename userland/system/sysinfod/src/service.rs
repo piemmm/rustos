@@ -219,6 +219,7 @@ mod tests {
         SysinfoRequestHeader, SystemIdentity, Uptime, MACHINE_ID_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT,
     };
+    use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
     use rustos_log::{Event, Level, Sink};
 
@@ -330,8 +331,8 @@ mod tests {
         }
         fn uptime(&self, _caller: &Caller<'_>) -> Result<Uptime, Errno> {
             Ok(Uptime {
-                uptime_ns: 1_000,
-                boot_unix_secs: 1_700_000_000,
+                since_boot: Duration64::from_nanos(1_000),
+                boot_time: Time64::from_secs(1_700_000_000),
             })
         }
     }
@@ -469,7 +470,9 @@ mod tests {
         let req = request_bytes(SysinfoQueryId::UPTIME, &[]);
         let mut resp = [0u8; 64];
         let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
-        assert_eq!(Uptime::from_bytes(&resp[..n]).unwrap().uptime_ns, 1_000);
+        let up = Uptime::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(up.since_boot, Duration64::from_nanos(1_000));
+        assert_eq!(up.boot_time, Time64::from_secs(1_700_000_000));
 
         let req = request_bytes(SysinfoQueryId::SYSTEM_IDENTITY, &[]);
         let mut resp = [0u8; 128];

@@ -19,6 +19,7 @@
 //! no privileged path that bypasses the capability check.
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::time::{Duration64, Time64};
 use crate::{CapabilityId, Errno};
 
 /// Version tag for the frozen `sysinfo-v1` request/response surface.
@@ -603,36 +604,44 @@ impl KernelMemoryStats {
 }
 
 /// Response payload for [`SysinfoQueryId::UPTIME`].
+///
+/// Time is carried with the 64-bit-native ABI types (`AGENTS.md` §21): the
+/// monotonic span since boot as a [`Duration64`] and the wall-clock boot
+/// instant as a [`Time64`]. Absolute time is never a seconds-only scalar.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct Uptime {
-    /// Nanoseconds since boot from the monotonic clock.
-    pub uptime_ns: u64,
-    /// Wall-clock boot time as seconds since the Unix epoch.
-    pub boot_unix_secs: u64,
+    /// Monotonic span since boot.
+    pub since_boot: Duration64,
+    /// Wall-clock boot instant.
+    pub boot_time: Time64,
 }
 
 impl Uptime {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 16;
+    pub const WIRE_LEN: usize = Duration64::WIRE_LEN + Time64::WIRE_LEN;
 
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        put_u64(&mut out, 0, self.uptime_ns);
-        put_u64(&mut out, 8, self.boot_unix_secs);
+        out[0..Duration64::WIRE_LEN].copy_from_slice(&self.since_boot.to_le_bytes());
+        out[Duration64::WIRE_LEN..].copy_from_slice(&self.boot_time.to_le_bytes());
         out
     }
 
-    /// Decode from `bytes`. Returns [`Errno::BufferTooSmall`] if short.
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or
+    /// [`Errno::TimestampOutOfRange`] if an encoded sub-second field is not
+    /// canonical.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         Ok(Self {
-            uptime_ns: read_u64(bytes, 0),
-            boot_unix_secs: read_u64(bytes, 8),
+            since_boot: Duration64::from_bytes(&bytes[0..Duration64::WIRE_LEN])?,
+            boot_time: Time64::from_bytes(&bytes[Duration64::WIRE_LEN..])?,
         })
     }
 }
@@ -754,6 +763,7 @@ mod tests {
         SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
         SYSINFO_VERSION_V1,
     };
+    use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
 
     #[test]
@@ -1014,9 +1024,10 @@ mod tests {
     #[test]
     fn uptime_round_trips() {
         let up = Uptime {
-            uptime_ns: 123_456_789,
-            boot_unix_secs: 1_700_000_000,
+            since_boot: Duration64::from_nanos(123_456_789),
+            boot_time: Time64::from_secs(1_700_000_000),
         };
+        assert_eq!(Uptime::WIRE_LEN, 24);
         assert_eq!(Uptime::from_bytes(&up.to_le_bytes()), Ok(up));
         assert_eq!(Uptime::from_bytes(&[0u8; 4]), Err(Errno::BufferTooSmall));
     }

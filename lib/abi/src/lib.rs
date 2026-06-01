@@ -23,9 +23,11 @@ pub mod ipc;
 pub(crate) mod le;
 pub mod manifest;
 pub mod rxe;
+pub mod stdinfo;
 pub mod syscall;
 pub mod syscalls;
 pub mod sysinfo;
+pub mod time;
 
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
@@ -44,6 +46,10 @@ pub use rxe::{
     kaslr_bias, LoadHeader, LoadImage, RxeError, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC,
     LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
 };
+pub use stdinfo::{
+    Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
+    STDINFO_VERSION_V1,
+};
 pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
@@ -57,6 +63,7 @@ pub use sysinfo::{
     SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
     SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
+pub use time::{Duration64, Time64, NANOS_PER_SEC};
 
 /// ABI version tag for the frozen `abi-v1` interface.
 ///
