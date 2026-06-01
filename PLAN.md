@@ -4344,9 +4344,34 @@ device list.
   production paths. `lib/procinfo` has 14 unit tests and `rustos-ps` 13;
   docs `docs/src/userland/utilities.md` (`ps` section) and both crate
   `README.md`s.
+- **`useradd` CLI (`userland/apps/useradd`) — DONE.** `rustos-useradd`
+  creates a single account in the user database that persists under
+  `/System/Security/Users` (`AGENTS.md` §5.1, §16). It parses a login
+  name plus its numeric identity — an optional uid (`-u`, auto-allocated
+  by the database when omitted), a **required** primary group (`-g`), an
+  optional comma-separated supplementary set (`-G`), and the textual
+  comment (`-c`) and home directory (`-d`) — and hands the record to the
+  injected `UserDb` seam. Group/user references are **decimal** ids
+  (a name would be interface creep with no name-to-id seam, §2.4, the
+  same choice `chown` makes), and the login name must match
+  `[a-z_][a-z0-9_-]*` within a length bound. The tool is **not** the
+  policy point (§5.4): creating an account needs `CAP_USER_ADMIN` (§5.2),
+  but the database enforces that — along with uid collisions, group
+  existence, and the supplementary bound — and a refusal surfaces as
+  `UseraddError::Create`. It never guesses a default group, uid, or home
+  directory (§2.1). It **fails closed**: an unknown option, a missing
+  `-g`, or anything other than exactly one name operand is a
+  `UseraddError::Usage`; an invalid login name is `UseraddError::BadName`;
+  a non-decimal id is `UseraddError::BadId`; an existing name is
+  `UseraddError::Exists`; a lookup/create failure carries the underlying
+  `Errno` as `UseraddError::Lookup`/`Create`. `no_std` (with `alloc`),
+  depends only on `rustos-abi` (§17.4); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. 24 unit tests; docs
+  `docs/src/userland/utilities.md` (`useradd` section) and the crate
+  `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `mount`, `useradd`, `groupadd` — and the `.app` bundle /
-  dynamic-loader policy) are not yet started.
+  `mount`, `groupadd` — and the `.app` bundle / dynamic-loader policy)
+  are not yet started.
 
 ---
 

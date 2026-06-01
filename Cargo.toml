@@ -86,6 +86,7 @@ members = [
     "userland/apps/ps",
     "userland/apps/rm",
     "userland/apps/setcap",
+    "userland/apps/useradd",
     "userland/gui/wm",
     "userland/gui/iconbar",
     "userland/net/icmp",

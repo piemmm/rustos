@@ -1301,6 +1301,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-useradd"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-util"
 version = "0.0.0"
 
