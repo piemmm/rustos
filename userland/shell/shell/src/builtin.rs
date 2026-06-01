@@ -82,8 +82,7 @@ fn cd(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             OK
         }
         Err(err) => {
-            ctx.console
-                .write_stderr(&format!("cd: {target}: {err}\n"));
+            ctx.console.write_stderr(&format!("cd: {target}: {err}\n"));
             USAGE_ERROR
         }
     }
@@ -257,9 +256,8 @@ fn bg(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 }
 
 fn help(ctx: &mut BuiltinContext<'_>) -> i32 {
-    ctx.console.write_stdout(
-        "builtins: cd pwd exit export unset echo jobs fg bg help\n",
-    );
+    ctx.console
+        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg help\n");
     OK
 }
 
@@ -395,11 +393,11 @@ mod tests {
         let mut fx = Fixture::new();
         let id = fx.jobs.add(Pid::new(20), "build", JobState::Stopped);
         assert_eq!(fx.run(&["bg", "%1"]), Some(0));
-        assert_eq!(fx.host.last_signal(), Some((Pid::new(20), Signal::Continue)));
         assert_eq!(
-            fx.jobs.by_id(id).map(|j| j.state),
-            Some(JobState::Running)
+            fx.host.last_signal(),
+            Some((Pid::new(20), Signal::Continue))
         );
+        assert_eq!(fx.jobs.by_id(id).map(|j| j.state), Some(JobState::Running));
         assert_eq!(fx.console.stdout(), "[1] build &\n");
     }
 

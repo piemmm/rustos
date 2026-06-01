@@ -291,6 +291,29 @@ an update to this section.
   4. `cargo fmt --check`.
   5. `cargo deny check` (license + advisory audit).
   6. `cargo doc --no-deps` (doc build must succeed; broken links fail the build).
+- **Definition of done — the whole project, not just the touched crate.**
+  A change is not "done" until the **entire** workspace test suite has been
+  run and is green. This is non-negotiable. Before reporting any task
+  complete you MUST run, over the whole project (never scoped to a single
+  crate with `-p`):
+  1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
+  2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
+     cfg-check, the test matrix, docs-check, `cargo deny`, supply-chain,
+     the per-PR `--quick` fuzz and proptest gates, model-check, spec-review,
+     crypto constant-time, and abi-check).
+  3. A fuzzing run of **at least 5 seconds** per harness:
+     `cargo xtask fuzz --secs 5` (this is on top of the `--quick` gate that
+     `cargo xtask ci` already runs).
+  4. Anything else exercised by `.github/workflows/ci.yml` that the two
+     commands above do not already cover (e.g. the parallel soak via
+     `tools/ci/soak.sh`). A locally green run and a green CI run must be
+     equivalent by construction; if CI runs it, you run it.
+  Quote the actual command output when reporting completion. A per-crate
+  (`-p <crate>`) run is never a substitute for the whole-project run.
+- **Every issue found is fixed, not deferred.** If any of the runs above
+  fails — in code you touched or anywhere else — you MUST fix it (or revert
+  the change that caused it) before the task is done. "Pre-existing
+  failure" and "unrelated crate" are not exemptions (see §2.5).
 - **A failing test blocks the change.** Whether or not the failure existed
   before is irrelevant.
 - **Tests are never deferred.** Writing the tests for a change is part of
@@ -446,8 +469,13 @@ You are not exempt from any rule above. In addition:
 4. **Do not duplicate code to avoid a refactor.** Refactor.
 5. **Do not add "convenience" wrappers** unless they are used in at least two
    independent places and documented.
-6. **Run the full test suite** (`cargo xtask test`) before reporting a task
-   complete. Quote the actual output.
+6. **Run the full test suite over the *entire* project** before reporting a
+   task complete — never a per-crate (`-p`) subset. At minimum this means
+   `cargo fmt --all`, the complete `cargo xtask ci` pipeline, and a fuzzing
+   run of at least 5 seconds (`cargo xtask fuzz --secs 5`), plus anything
+   else `.github/workflows/ci.yml` runs (see §7's "Definition of done").
+   Quote the actual output. Any failure found — yours or pre-existing — is
+   fixed before the task is done.
 7. **State your assumptions** at the top of any non-trivial change. If an
    assumption cannot be verified from the repository, stop and ask.
 8. **Never** edit generated files, `target/`, or `.idea/` content as part of
