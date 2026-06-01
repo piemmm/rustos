@@ -829,8 +829,7 @@ mod tests {
 
     #[test]
     fn spec_for_rejects_unassigned_id() {
-        let past =
-            SysinfoQueryId::from_raw(u16::try_from(SYSINFO_QUERIES.len()).unwrap()).unwrap();
+        let past = SysinfoQueryId::from_raw(u16::try_from(SYSINFO_QUERIES.len()).unwrap()).unwrap();
         assert!(spec_for(past).is_none());
     }
 
@@ -847,7 +846,10 @@ mod tests {
         assert_eq!(rec[2], 0); // capability absent
         assert_eq!(&rec[3..5], &[0, 0]);
         assert_eq!(rec[5], 0); // audit off
-        assert_eq!(&rec[6..6 + b"self_process_list".len()], b"self_process_list");
+        assert_eq!(
+            &rec[6..6 + b"self_process_list".len()],
+            b"self_process_list"
+        );
     }
 
     #[test]
@@ -932,16 +934,10 @@ mod tests {
             limit: 64,
             flags: 0,
         };
-        assert_eq!(
-            ProcessListRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
+        assert_eq!(ProcessListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
         let mut bytes = req.to_le_bytes();
         bytes[6] = 1; // reserved flag set
-        assert_eq!(
-            ProcessListRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
+        assert_eq!(ProcessListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
         assert_eq!(
             ProcessListRequest::from_bytes(&[0u8; 4]),
             Err(Errno::BufferTooSmall)
@@ -964,16 +960,7 @@ mod tests {
 
     #[test]
     fn process_record_round_trips() {
-        let rec = ProcessRecord::new(
-            1,
-            0,
-            0,
-            0,
-            ProcessState::Running,
-            2,
-            b"init",
-        )
-        .unwrap();
+        let rec = ProcessRecord::new(1, 0, 0, 0, ProcessState::Running, 2, b"init").unwrap();
         assert_eq!(rec.name_bytes(), b"init");
         let decoded = ProcessRecord::from_bytes(&rec.to_le_bytes()).unwrap();
         assert_eq!(decoded, rec);
@@ -992,10 +979,7 @@ mod tests {
             .unwrap()
             .to_le_bytes();
         bytes[24] = 0xFF; // invalid state discriminant
-        assert_eq!(
-            ProcessRecord::from_bytes(&bytes),
-            Err(Errno::OutOfRange)
-        );
+        assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
 
         let mut bytes = ProcessRecord::new(1, 0, 0, 0, ProcessState::Runnable, 0, b"a")
             .unwrap()
@@ -1024,10 +1008,7 @@ mod tests {
         );
         let mut bytes = stats.to_le_bytes();
         bytes[36] = 1; // reserved non-zero
-        assert_eq!(
-            KernelMemoryStats::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
+        assert_eq!(KernelMemoryStats::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     #[test]
