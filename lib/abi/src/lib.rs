@@ -37,7 +37,9 @@ pub use driver::{
 };
 pub use error::Errno;
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
-pub use manifest::{ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES};
+pub use manifest::{
+    decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
+};
 pub use rxe::{
     kaslr_bias, LoadHeader, LoadImage, RxeError, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC,
     LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,

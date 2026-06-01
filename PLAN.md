@@ -3979,7 +3979,30 @@ device list.
   `rustos-log` (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
   production paths. 12 unit tests; docs `docs/src/userland/sysinfod.md`
   (+ SUMMARY link) and the crate `README.md`.
-- Remaining Stage 6 deliverables (`init`, `shell`, `login`, the core CLI
+- **PID 1 service manager (`userland/system/init`) — DONE.** `rustos-init`
+  is the orchestrator that brings the registered system services up in
+  dependency order, grants each one the intersection of its signed
+  manifest's capability request with init's own authority (`AGENTS.md`
+  §5.2), and reaps children. `Init::start_all` orders the services with a
+  deterministic Kahn topological sort (`AGENTS.md` §18.3) and **fails
+  closed** on a structurally invalid graph — an unregistered dependency
+  (`DependencyMissing`) or a cycle (`DependencyCycle`) starts nothing.
+  Over a sound graph it starts every service it can, refusing one whose
+  manifest over-requests authority (`CapabilityEscalation`, never a silent
+  narrowing) and skipping the transitive dependents of any service that
+  fails, returning the full `StartReport`. The capability decode is the
+  shared `rustos_abi::decode_capability_ids` (added this session and reused
+  by `drvhost`, so the manifest-body format has one implementation,
+  `AGENTS.md` §2.2). The trusted load/verify/exec step and exited-child
+  notifications are injected as the `Spawner`/`Reaper` seams, keeping the
+  security-relevant code free of kernel plumbing and exhaustively testable.
+  `Init::reap` distinguishes a registered service's exit from an inherited
+  orphan. `no_std` (with `alloc`), deps only `rustos-abi`/`rustos-caps`/
+  `rustos-log` (`AGENTS.md` §17.4); no `unsafe`, no `unwrap`/`expect`/
+  `panic!` in production paths. Audit `EventId` range `9000..10000`. 17
+  unit tests; docs `docs/src/userland/init.md` (+ SUMMARY link) and the
+  crate `README.md`.
+- Remaining Stage 6 deliverables (`shell`, `login`, the core CLI
   utilities, and the `.app` bundle / dynamic-loader policy) are not yet
   started.
 

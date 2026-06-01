@@ -1,6 +1,6 @@
 [package]
 name = "rustos-init"
-description = "RustOS placeholder: PID 1 service manager."
+description = "RustOS PID 1: the service manager that brings up the system in dependency order, grants each service the intersection of its manifest request and the system authority, and reaps exited children (Stage 6 — `AGENTS.md` §5.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,15 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The frozen `abi-v1` surface: the `ManifestHeader` + `decode_capability_ids`
+# pair init uses to turn a service's signed manifest into a requested
+# capability set, the `CapabilityId` registry, and the `Errno` table.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# `CapabilitySet` and its intersection/subset algebra — the one place the
+# delegation invariant lives, so init never re-implements it (§2.2, §5.2).
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# §19.4 structured audit log: every start, denial, skip, exit, and reaped
+# orphan is recorded through a `rustos_log::Sink`.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

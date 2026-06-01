@@ -6,7 +6,7 @@
 //! binary; both halves are covered by [`ManifestHeader::signature`].
 
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
-use crate::Errno;
+use crate::{CapabilityId, Errno};
 
 /// Magic number identifying an `abi-v1` manifest (`"RXM1"` little-endian).
 pub const MANIFEST_MAGIC: u32 = u32::from_le_bytes(*b"RXM1");
@@ -130,6 +130,44 @@ impl ManifestHeader {
     }
 }
 
+/// Decode the capability body that follows a [`ManifestHeader`].
+///
+/// The body is `count` little-endian `u16` [`CapabilityId`] values, where
+/// `count` is the manifest's `capability_count` field. Each identifier is
+/// range-checked against [`CAPABILITY_ID_MAX`](crate::CAPABILITY_ID_MAX).
+///
+/// Decoded identifiers are written into `out`; the number written (always
+/// `count` on success) is returned so a fixed-size scratch buffer can be
+/// reused across manifests. This is the single decoder for the body format
+/// documented on this module, shared by every consumer that turns a signed
+/// manifest into a requested capability set (`AGENTS.md` §2.2).
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] if `out` cannot hold `count` identifiers, or
+///   if `body` is shorter than `count * 2` bytes.
+/// * [`Errno::LengthOutOfRange`] if `count * 2` overflows `usize`.
+/// * [`Errno::OutOfRange`] if any identifier exceeds
+///   [`CAPABILITY_ID_MAX`](crate::CAPABILITY_ID_MAX).
+pub fn decode_capability_ids(
+    body: &[u8],
+    count: usize,
+    out: &mut [CapabilityId],
+) -> Result<usize, Errno> {
+    if out.len() < count {
+        return Err(Errno::BufferTooSmall);
+    }
+    let needed = count.checked_mul(2).ok_or(Errno::LengthOutOfRange)?;
+    if body.len() < needed {
+        return Err(Errno::BufferTooSmall);
+    }
+    for (i, slot) in out.iter_mut().enumerate().take(count) {
+        let raw = u16::from_le_bytes([body[i * 2], body[i * 2 + 1]]);
+        *slot = CapabilityId::from_raw(raw)?;
+    }
+    Ok(count)
+}
+
 #[inline]
 fn u16_le(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
@@ -147,9 +185,9 @@ fn u32_le(bytes: &[u8], offset: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES};
+    use super::{decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES};
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
-    use crate::{Errno, ABI_VERSION_CURRENT};
+    use crate::{CapabilityId, Errno, ABI_VERSION_CURRENT, CAPABILITY_ID_MAX};
 
     fn sample() -> ManifestHeader {
         ManifestHeader {
@@ -229,5 +267,51 @@ mod tests {
         let range = ManifestHeader::signed_range();
         assert_eq!(range.end, ManifestHeader::WIRE_LEN - 64);
         assert_eq!(range.start, 0);
+    }
+
+    #[test]
+    fn decode_capability_ids_round_trips() {
+        let body = [3u8, 0, 8, 0, 13, 0];
+        let mut out = [CapabilityId::FS_MOUNT; 4];
+        assert_eq!(decode_capability_ids(&body, 3, &mut out), Ok(3));
+        assert_eq!(
+            [out[0], out[1], out[2]],
+            [
+                CapabilityId::DRV_LOAD,
+                CapabilityId::AUDIT_READ,
+                CapabilityId::SYSINFO_GLOBAL,
+            ],
+        );
+    }
+
+    #[test]
+    fn decode_capability_ids_rejects_small_out() {
+        let body = [1u8, 0, 2, 0];
+        let mut out = [CapabilityId::FS_MOUNT; 1];
+        assert_eq!(
+            decode_capability_ids(&body, 2, &mut out),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn decode_capability_ids_rejects_short_body() {
+        let body = [1u8, 0, 2];
+        let mut out = [CapabilityId::FS_MOUNT; 4];
+        assert_eq!(
+            decode_capability_ids(&body, 2, &mut out),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn decode_capability_ids_rejects_out_of_range() {
+        let raw = (CAPABILITY_ID_MAX + 1).to_le_bytes();
+        let body = [raw[0], raw[1]];
+        let mut out = [CapabilityId::FS_MOUNT; 4];
+        assert_eq!(
+            decode_capability_ids(&body, 1, &mut out),
+            Err(Errno::OutOfRange)
+        );
     }
 }

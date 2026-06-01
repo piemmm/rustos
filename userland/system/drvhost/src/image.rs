@@ -20,9 +20,7 @@
 //! bytes, so the caller controls the lifetime (and the wipe) of the
 //! sensitive buffer that backs it.
 
-use rustos_abi::{
-    CapabilityId, DriverError, DriverManifest, CAPABILITY_ID_MAX, DRIVER_SIGNATURE_LEN,
-};
+use rustos_abi::{CapabilityId, DriverError, DriverManifest, Errno, DRIVER_SIGNATURE_LEN};
 
 use crate::HostError;
 
@@ -100,26 +98,16 @@ impl<'a> ParsedImage<'a> {
     /// # Errors
     ///
     /// * [`HostError::CapabilityOutOfRange`] if any identifier exceeds
-    ///   [`CAPABILITY_ID_MAX`].
+    ///   [`CAPABILITY_ID_MAX`](rustos_abi::CAPABILITY_ID_MAX).
     /// * [`HostError::ImageTruncated`] if `out` cannot hold
     ///   `capability_count` identifiers (the caller sized the buffer
     ///   too small).
     pub fn decode_capabilities(&self, out: &mut [CapabilityId]) -> Result<usize, HostError> {
         let count = usize::from(self.manifest.capability_count);
-        if out.len() < count {
-            return Err(HostError::ImageTruncated);
-        }
-        let body = self.capability_body;
-        for i in 0..count {
-            let lo = body[i * 2];
-            let hi = body[i * 2 + 1];
-            let raw = u16::from_le_bytes([lo, hi]);
-            if raw > CAPABILITY_ID_MAX {
-                return Err(HostError::CapabilityOutOfRange);
-            }
-            out[i] = CapabilityId::from_raw(raw).map_err(|_| HostError::CapabilityOutOfRange)?;
-        }
-        Ok(count)
+        rustos_abi::decode_capability_ids(self.capability_body, count, out).map_err(|e| match e {
+            Errno::OutOfRange => HostError::CapabilityOutOfRange,
+            _ => HostError::ImageTruncated,
+        })
     }
 }
 
@@ -132,7 +120,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::{DriverKind, DRIVER_MANIFEST_MAGIC};
+    use rustos_abi::{DriverKind, CAPABILITY_ID_MAX, DRIVER_MANIFEST_MAGIC};
 
     extern crate alloc;
 

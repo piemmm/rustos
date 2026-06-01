@@ -65,6 +65,7 @@
 
 # Userland
 
+- [PID 1 service manager](./userland/init.md)
 - [System Information service](./userland/sysinfod.md)
 - [Networking service](./userland/net_icmp.md)
 

@@ -545,6 +545,11 @@ version = "0.0.0"
 [[package]]
 name = "rustos-init"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-installer"
