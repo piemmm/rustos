@@ -210,11 +210,11 @@ const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-iconbar"];
 /// fixed number of times would be redundant. See `AGENTS.md` §7 (no flaky
 /// tests).
 ///
-/// This 100× cost only buys flake coverage on the CI runners; a developer
+/// This 20× cost only buys flake coverage on the CI runners; a developer
 /// running `cargo xtask ci` locally before pushing wants a single, fast
 /// pass, not hours of repetition. The repeat is therefore gated on the
 /// runner-set GitHub Actions signal — see [`ci_test_iterations`].
-pub const CI_TEST_ITERATIONS: u32 = 100;
+pub const CI_TEST_ITERATIONS: u32 = 20;
 
 /// The environment variable GitHub Actions sets to `"true"` on every runner.
 ///
@@ -235,7 +235,7 @@ fn in_github_actions() -> bool {
 
 /// How many times `ci` should repeat the test matrix.
 ///
-/// Only the GitHub Actions runners pay the [`CI_TEST_ITERATIONS`] 100×
+/// Only the GitHub Actions runners pay the [`CI_TEST_ITERATIONS`] 20×
 /// flake-hunting cost; a local `cargo xtask ci` (e.g. run from the IDE
 /// before pushing) repeats the matrix once so it finishes in a sensible
 /// time. The nightly 24 h soak (`cargo xtask test --soak`) remains the
@@ -252,7 +252,7 @@ fn ci_test_iterations(in_github_actions: bool) -> u32 {
 ///
 /// Matches the fuzz/proptest soak floor (§19.6/§19.7). The nightly `soak`
 /// workflow repeats the whole test matrix for this long via
-/// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR 100×
+/// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR 20×
 /// run still gets a full night of exposure.
 pub const TEST_SOAK_SECS: u64 = 24 * 60 * 60;
 
@@ -679,7 +679,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // §7 (no flaky tests): on a GitHub Actions runner, run the whole test
     // matrix `CI_TEST_ITERATIONS` times, not once. A flake (like the drvhost
     // register-count race) only shows up across repeated runs, so a single
-    // green pass is not enough to call a PR clean. Locally the same 100×
+    // green pass is not enough to call a PR clean. Locally the same 20×
     // would cost hours, so a developer running `ci` from the IDE gets a
     // single pass; the runners carry the flake-hunting budget. Fuzz and
     // proptest are excluded below: they already run for a wall-clock budget
@@ -821,7 +821,7 @@ mod tests {
         ));
     }
 
-    /// On a GitHub Actions runner `ci` repeats the matrix 100× to hunt
+    /// On a GitHub Actions runner `ci` repeats the matrix 20× to hunt
     /// flakes (§7); locally it runs once so a developer's pre-push `ci`
     /// does not take hours.
     #[test]

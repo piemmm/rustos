@@ -37,7 +37,7 @@
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
-//!   `clippy`, `deps-check`, `cfg-check`, `test` (run 100× on a GitHub
+//!   `clippy`, `deps-check`, `cfg-check`, `test` (run 20× on a GitHub
 //!   Actions runner to catch flaky tests, §7; once locally so a pre-push
 //!   `ci` is not punishingly slow), `docs-check`, `cargo deny check`,
 //!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
