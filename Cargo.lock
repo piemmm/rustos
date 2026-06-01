@@ -437,6 +437,13 @@ name = "rustos-collections"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-cp"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-crypto"
 version = "0.0.0"
 dependencies = [

@@ -4160,8 +4160,33 @@ device list.
   production paths. 26 unit tests (10 parser + 16 removal engine); docs
   `docs/src/userland/utilities.md` (`rm` section) and the crate
   `README.md`.
+- **`cp` CLI (`userland/apps/cp`) — DONE.** `rustos-cp` copies its source
+  operands to a destination (`AGENTS.md` §3): with a single source and a
+  non-directory destination the source is copied to that exact path, while
+  an existing-directory destination (always, with more than one source)
+  receives each source under its own base name. A directory source is
+  copied only with `-r`, which reproduces the whole subtree; naming a
+  directory without `-r` is a `CpError::IsDirectory`, the POSIX model.
+  `run` asks the injected `FileSystem` seam for each source's kind, streams
+  a regular file from source to destination in fixed-size chunks (matching
+  `cat`'s granularity), and creates each destination directory before its
+  contents — writing only the help banner through the injected `Output`
+  seam (`cp` is silent on success), the same seam discipline as `rm`. `-f`
+  removes a destination that cannot be created and retries the create once.
+  It **fails closed**: an unrecognised option, fewer than two operands, or
+  more than one source aimed at a non-directory destination is a
+  `CpError::Usage` that copies nothing; a directory source whose
+  destination already exists as a non-directory is a
+  `CpError::NotADirectory`; an operand that cannot be inspected surfaces the
+  underlying `Errno` as `CpError::Stat` and stops before any later operand;
+  an unreadable source is `CpError::Read`, an uncreatable destination is
+  `CpError::Create`, and a failed write is `CpError::Write` (`AGENTS.md`
+  §2.9). `no_std` (with `alloc`), depends only on `rustos-abi` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 28 unit
+  tests (9 parser + 19 copy engine); docs
+  `docs/src/userland/utilities.md` (`cp` section) and the crate `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `cp`, `mv`, `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
+  `mv`, `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
   `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
   not yet started.
 
