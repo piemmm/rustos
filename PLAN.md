@@ -3688,14 +3688,40 @@ device list.
     count during a journalled overwrite and asserts fully-old-or-fully-new
     (both observed). Docs: `docs/src/filesystem/rustfs.md` (+ SUMMARY link)
     and the crate `README.md`.
+- **`rustfs` per-inode security surfaced into the VFS — DONE.** A third
+  separate versioned ABI trait, `FilesystemSecurity`
+  (`security(node) -> NodeSecurity`), was added to
+  `lib/abi/src/driver/filesystem.rs` alongside the allocation-free
+  `NodeSecurity`/`SecurityAcl`/`SecuritySubject` §5.3 record (mode, uid,
+  gid, `required_cap`, up to `MAX_ACL_ENTRIES = 8` grant-only ACL entries)
+  — additive, never a widening of the frozen `Filesystem` or of
+  `FilesystemRead`/`FilesystemWrite` (§2.4 / §9).
+  - `rustfs` now **uses these ABI types as its own storage** (its former
+    crate-local `Security`/`AclEntry`/`AclSubject` are `pub use` aliases of
+    them, eliminating the §2.2 duplication) and implements
+    `FilesystemSecurity`; a const-assert pins its on-disk `ACL_MAX` to
+    `MAX_ACL_ENTRIES`.
+  - `kernel/core::fs` translates the record with
+    `Metadata::from_node_security` (each grant-only ACL bit → one *allow*
+    `AclEntry`, reusing the single `Access::bit` rwx mapping), and
+    `DelegatedFs` gained a `MetaPolicy` type parameter (`Uniform` =
+    mount-point template, `PerInode` = the driver's stored record). The VFS
+    exposes `read_via_secured` / `list_via_secured` / `stat_via_secured` /
+    `create_via_secured` / `mkdir_via_secured` / `write_via_secured` /
+    `truncate_via_secured` / `remove_via_secured`; both routes feed the
+    *same* `Metadata::authorize` decision, so policy stays single-sourced.
+  - Tests: 2 new `lib/abi` security tests, 1 `perm::from_node_security`
+    test, and 5 secured-delegation tests (per-inode owner/mode +
+    capability-gate denial vs the uniform template, owner-with-capability
+    allow, secured `stat`/`list`, and a secured-write parent-permission
+    denial). Docs: `docs/src/abi/driver_traits.md`,
+    `docs/src/filesystem/{overview,rustfs,permissions}.md`, and the rustfs
+    `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - The **`ext4`** read/write driver.
   - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
     crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
     vertical, and the `ext4` doc page.
-  - Surfacing `rustfs`'s per-inode owner/mode/ACL/capability-gate into the
-    VFS (today the VFS delegation uses the uniform mount-point template);
-    this needs a new versioned attribute trait + VFS wiring.
 
 ---
 

@@ -50,7 +50,7 @@ pub mod path;
 pub mod perm;
 mod vfs;
 
-pub use delegate::{DelegatedFs, DelegatedInfo};
+pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
 pub use mount::{MountPoint, MountTable};
 pub use path::{
     is_reserved_top_level, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, RESERVED_TOP_LEVEL,

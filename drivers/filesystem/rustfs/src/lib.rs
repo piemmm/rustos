@@ -50,7 +50,10 @@
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+};
+pub use rustos_abi::driver::filesystem::{
+    NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -98,7 +101,12 @@ const NAME_MAX: usize = DIRENT_SIZE - 8;
 /// Number of direct block pointers stored inline in an inode.
 const DIRECT_PTRS: usize = 16;
 /// Maximum number of inline ACL entries stored in an inode.
+///
+/// The on-disk inode reserves room for exactly this many entries; it must
+/// equal the ABI record's [`MAX_ACL_ENTRIES`](rustos_abi::driver::filesystem::MAX_ACL_ENTRIES)
+/// so a full on-disk ACL round-trips through [`Security`] without loss.
 const ACL_MAX: usize = 8;
+const _: () = assert!(ACL_MAX == rustos_abi::driver::filesystem::MAX_ACL_ENTRIES);
 
 /// Inode-table index of the root directory. Index 0 is reserved as the
 /// "no inode" sentinel so that a zeroed directory slot reads as free.
@@ -151,102 +159,6 @@ fn as_usize(value: u64) -> usize {
 /// length), so the fall-back ceiling is never reached.
 fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
-}
-
-/// The subject a single [`AclEntry`] grants rights to.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AclSubject {
-    /// Grant applies to the user with this uid.
-    User(u32),
-    /// Grant applies to the group with this gid.
-    Group(u32),
-}
-
-impl AclSubject {
-    fn kind_byte(self) -> u8 {
-        match self {
-            Self::User(_) => 1,
-            Self::Group(_) => 2,
-        }
-    }
-
-    fn id(self) -> u32 {
-        match self {
-            Self::User(id) | Self::Group(id) => id,
-        }
-    }
-}
-
-/// One inline access-control-list entry (`AGENTS.md` §5.3).
-///
-/// `perms` is a POSIX-style `rwx` triad in its low three bits
-/// (`0b100` read, `0b010` write, `0b001` execute/search).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct AclEntry {
-    /// The user or group the entry grants rights to.
-    pub subject: AclSubject,
-    /// The `rwx` permission bits granted to `subject`.
-    pub perms: u8,
-}
-
-/// The complete security record `rustfs` stores for one inode.
-///
-/// This is the driver's *storage* of the §5.3 model. The driver never
-/// makes a permission decision from it (§5.4); it is surfaced to the
-/// host so the VFS — the policy point — can apply the model.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Security {
-    /// POSIX mode bits (type bits are not stored here; see the inode kind).
-    pub mode: u32,
-    /// Owning user id.
-    pub uid: u32,
-    /// Owning group id.
-    pub gid: u32,
-    /// Optional capability required to access the inode at all
-    /// (`None` = no capability gate).
-    pub required_cap: Option<CapabilityId>,
-    acl: [AclEntry; ACL_MAX],
-    acl_len: usize,
-}
-
-impl Security {
-    /// A record owned by `(uid, gid)` with mode `mode`, no ACL entries
-    /// and no capability gate.
-    #[must_use]
-    pub const fn new(mode: u32, uid: u32, gid: u32) -> Self {
-        Self {
-            mode,
-            uid,
-            gid,
-            required_cap: None,
-            acl: [AclEntry {
-                subject: AclSubject::User(0),
-                perms: 0,
-            }; ACL_MAX],
-            acl_len: 0,
-        }
-    }
-
-    /// The inode's ACL entries.
-    #[must_use]
-    pub fn acl(&self) -> &[AclEntry] {
-        &self.acl[..self.acl_len]
-    }
-
-    /// Append an ACL entry.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::LengthOutOfRange`] if the inode already holds the
-    /// maximum number of inline entries (eight).
-    pub fn push_acl(&mut self, entry: AclEntry) -> Result<(), DriverError> {
-        if self.acl_len >= ACL_MAX {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        self.acl[self.acl_len] = entry;
-        self.acl_len += 1;
-        Ok(())
-    }
 }
 
 // Inode field byte offsets within a 256-byte record.
@@ -358,9 +270,13 @@ impl Inode {
         wr_u64(buf, I_SIZE, self.size);
         for (i, entry) in acl.iter().enumerate() {
             let base = I_ACL_BASE + i * I_ACL_STRIDE;
-            buf[base] = entry.subject.kind_byte();
+            let (kind_byte, id) = match entry.subject {
+                AclSubject::User(id) => (1u8, id),
+                AclSubject::Group(id) => (2u8, id),
+            };
+            buf[base] = kind_byte;
             buf[base + 1] = entry.perms;
-            wr_u32(buf, base + 4, entry.subject.id());
+            wr_u32(buf, base + 4, id);
         }
         for (i, ptr) in self.direct.iter().enumerate() {
             wr_u64(buf, I_DIRECT_BASE + i * 8, *ptr);
@@ -1305,18 +1221,6 @@ impl<B: Block> RustFs<B> {
         Ok(())
     }
 
-    /// The security record stored for `node` (`AGENTS.md` §5.3 — the
-    /// driver stores it; the VFS decides on it, §5.4).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if `node` does not name a live inode.
-    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    pub fn security(&mut self, node: NodeId) -> Result<Security, DriverError> {
-        let ino = self.ino_of(node)?;
-        Ok(self.read_inode(ino)?.sec)
-    }
-
     /// Replace the security record stored for `node`.
     ///
     /// # Errors
@@ -1589,5 +1493,12 @@ impl<B: Block> FilesystemWrite for RustFs<B> {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         self.commit()
+    }
+}
+
+impl<B: Block> FilesystemSecurity for RustFs<B> {
+    fn security(&mut self, node: NodeId) -> Result<Security, DriverError> {
+        let ino = self.ino_of(node)?;
+        Ok(self.read_inode(ino)?.sec)
     }
 }

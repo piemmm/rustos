@@ -20,6 +20,7 @@
 
 use alloc::vec::Vec;
 
+use rustos_abi::driver::filesystem::{NodeSecurity, SecuritySubject};
 use rustos_abi::CapabilityId;
 use rustos_abi::CapabilityQuery;
 use rustos_kernel_sec::{GroupId, UserId};
@@ -174,6 +175,38 @@ impl Metadata {
             required_cap: None,
             acl: Vec::new(),
         }
+    }
+
+    /// Translate a filesystem driver's stored §5.3 security record
+    /// ([`NodeSecurity`]) into the VFS policy [`Metadata`].
+    ///
+    /// This is the bridge that lets a driver such as `rustfs`, which stores
+    /// full per-inode ownership, mode bits, an ACL, and an optional
+    /// capability gate, drive the §5.3 decision instead of a uniform
+    /// mount-point template. Each grant-only driver ACL entry expands into
+    /// one *allow* [`AclEntry`] per `rwx` bit it grants; the driver surface
+    /// carries no explicit deny (`AGENTS.md` §5.3).
+    #[must_use]
+    pub fn from_node_security(sec: &NodeSecurity) -> Self {
+        let mode = Mode::from_bits(u16::try_from(sec.mode & 0o7777).unwrap_or(0));
+        let mut meta = Self::new(UserId(sec.uid), GroupId(sec.gid), mode);
+        meta.required_cap = sec.required_cap;
+        for entry in sec.acl() {
+            let who = match entry.subject {
+                SecuritySubject::User(id) => AclWho::User(UserId(id)),
+                SecuritySubject::Group(id) => AclWho::Group(GroupId(id)),
+            };
+            for access in [Access::Read, Access::Write, Access::Execute] {
+                if u16::from(entry.perms) & access.bit() != 0 {
+                    meta.acl.push(AclEntry {
+                        who,
+                        access,
+                        allow: true,
+                    });
+                }
+            }
+        }
+        meta
     }
 
     /// Decide whether `cred` may perform `access` on this inode.
@@ -358,6 +391,49 @@ mod tests {
         let root = creds(0, 0, &[], &caps);
         assert_eq!(
             meta.authorize(&root, Access::Read),
+            Err(VfsError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn from_node_security_carries_owner_mode_cap_and_acl() {
+        use rustos_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
+
+        let mut sec = NodeSecurity::new(0o600, 7, 3);
+        sec.required_cap = Some(CapabilityId::AUDIT_READ);
+        // A group ACL grant of read+write (0b110) for gid 42.
+        sec.push_acl(SecurityAcl {
+            subject: SecuritySubject::Group(42),
+            perms: 0b110,
+        })
+        .expect("acl");
+
+        let meta = Metadata::from_node_security(&sec);
+        assert_eq!(meta.owner, UserId(7));
+        assert_eq!(meta.group, GroupId(3));
+        assert_eq!(meta.mode, Mode::from_bits(0o600));
+        assert_eq!(meta.required_cap, Some(CapabilityId::AUDIT_READ));
+        // The single rw grant expands into one allow entry per bit.
+        assert_eq!(meta.acl.len(), 2);
+
+        // A gid-42 member, without the capability, is still gated out.
+        let without = CapabilitySet::empty();
+        let denied = creds(8, 1, &[GroupId(42)], &without);
+        assert_eq!(
+            meta.authorize(&denied, Access::Read),
+            Err(VfsError::PermissionDenied)
+        );
+
+        // With the capability the ACL grant lets the group member read and
+        // write, where the owner-only mode `0o600` would otherwise deny.
+        let mut with = CapabilitySet::empty();
+        with.insert(CapabilityId::AUDIT_READ);
+        let member = creds(8, 1, &[GroupId(42)], &with);
+        assert!(meta.authorize(&member, Access::Read).is_ok());
+        assert!(meta.authorize(&member, Access::Write).is_ok());
+        // No grant for execute: falls through to the denying mode bits.
+        assert_eq!(
+            meta.authorize(&member, Access::Execute),
             Err(VfsError::PermissionDenied)
         );
     }

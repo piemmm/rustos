@@ -5,8 +5,8 @@ block-backed, journaled, copy-on-write filesystem that stores full POSIX
 metadata plus an inline access-control list and an optional capability
 gate **per inode** (`AGENTS.md` §5.3). It sits behind any
 `rustos_abi::driver::block::Block` device and is exposed through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` and
-`FilesystemWrite` traits.
+versioned `rustos_abi::driver::filesystem::FilesystemRead`,
+`FilesystemWrite`, and `FilesystemSecurity` traits.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
 `DriverHandle` — it cannot perform I/O — so each I/O surface is a **new
@@ -40,10 +40,14 @@ numbers are held in RAM (no large in-memory staging buffer). No
 
 ## Security
 
-`rustfs` **stores** each inode's owner, mode, ACL, and capability gate, and
-surfaces the record through `RustFs::security` / `RustFs::set_security`. It
-makes **no** permission decision itself: the VFS is the policy point
-(`AGENTS.md` §5.4).
+`rustfs` **stores** each inode's owner, mode, ACL, and capability gate. It
+reports the record through the versioned `FilesystemSecurity` trait
+(`security(node) -> NodeSecurity`) and accepts an updated one through
+`RustFs::set_security`, but makes **no** permission decision itself: the
+VFS is the policy point (`AGENTS.md` §5.4). Because the driver implements
+`FilesystemSecurity`, the VFS delegates through its `*_via_secured`
+operations and judges each node against its own stored §5.3 record rather
+than a uniform mount-point template.
 
 ## Required capabilities
 
@@ -74,4 +78,5 @@ POSIX suite are tracked in `.junie/next-session-prompt.md`.
 `AGENTS.md` §8 — the only public *function* is `register`. The `RustFs`
 type is exported so the driver host can construct an instance with
 `RustFs::format` / `RustFs::open`; the host reaches into it through the
-`FilesystemRead`/`FilesystemWrite` traits and the `security` accessors.
+`FilesystemRead`/`FilesystemWrite`/`FilesystemSecurity` traits and the
+`set_security` accessor.

@@ -36,6 +36,19 @@ A request for `Read`, `Write`, or `Execute` access is decided as follows:
 Only the inode's **owner** may change its capability gate
 (`Vfs::set_required_cap`).
 
+## Where the metadata comes from
+
+For the in-RAM tree the `Metadata` above is held directly on the inode.
+For a [driver-backed mount](./overview.md) it has two sources: the uniform
+mount-point template (a driver such as FAT that stores no per-file owner),
+or — for a driver that stores a full per-inode §5.3 record and implements
+`FilesystemSecurity`, such as [rustfs](./rustfs.md) — the node's own stored
+record, translated by `Metadata::from_node_security`. Each grant-only
+driver ACL entry (a `subject` plus an `rwx` triad) expands into one
+**allow** ACL entry per bit it grants; the driver surface carries no
+explicit deny. Either way the resulting `Metadata` feeds the *same*
+`authorize` decision above.
+
 ## Traversal
 
 Resolving a path requires **search (execute) permission on every directory

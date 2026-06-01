@@ -174,6 +174,27 @@ against the §5.3 template (and refuses a write to a `READ_ONLY` mount)
 before delegating (`AGENTS.md` §5.4). The first implementation is the
 read/write [FAT32 driver](../filesystem/fat32.md).
 
+A driver that stores full POSIX metadata *per inode* — owner, group,
+mode bits, an ACL, and an optional capability gate (§5.3) — additionally
+implements a third separate versioned trait, `FilesystemSecurity`, so
+the VFS can use that **stored** record as the policy input instead of a
+uniform mount-point template:
+
+| Method            | Capability gate    |
+|-------------------|--------------------|
+| `security(node)`  | Driver handle.     |
+
+`security` returns a `NodeSecurity { mode, uid, gid, required_cap, acl }`
+record, where `acl` is up to `MAX_ACL_ENTRIES` (eight) grant-only
+`SecurityAcl { subject, perms }` entries (`subject` is a
+`SecuritySubject::User | Group`, `perms` an `rwx` triad). Like the other
+surfaces the driver only *reports* the record and makes no decision; the
+VFS translates it into its policy metadata and applies the §5.3 model
+(`AGENTS.md` §5.4). A driver such as FAT that keeps no per-file owner
+simply does not implement this trait, and the VFS keeps applying the
+mount-point template. The first implementation is the native
+[`rustfs` driver](../filesystem/rustfs.md).
+
 ## Block
 
 `trait Block`. Methods:

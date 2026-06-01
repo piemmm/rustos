@@ -14,7 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, MountFlags, NodeKind as DriverNodeKind,
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeKind as DriverNodeKind,
 };
 use rustos_abi::CapabilityId;
 use rustos_kernel_sec::{GroupId, UserId};
@@ -314,6 +314,146 @@ impl Vfs {
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
         DelegatedFs::new(fs, template).remove(cred, &remainder)
+    }
+
+    // -----------------------------------------------------------------
+    // Per-inode (`FilesystemSecurity`) variants.
+    //
+    // These mirror the `*_via` methods above but judge every delegated
+    // node against the driver's *own* stored §5.3 record rather than the
+    // uniform mount-point template (`AGENTS.md` §5.3 / §5.4). The kernel
+    // host calls these for a driver such as `rustfs` that stores full
+    // per-inode ownership, mode, ACL, and capability gate; the
+    // template-based `*_via` methods remain for drivers (e.g. FAT) that
+    // store no per-file owner. The driver still makes no permission
+    // decision — the VFS applies the model to the record it reports.
+    // -----------------------------------------------------------------
+
+    /// Per-inode counterpart of [`Vfs::read_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::read_via`].
+    pub fn read_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).read(cred, &remainder, offset, buf)
+    }
+
+    /// Per-inode counterpart of [`Vfs::list_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::list_via`].
+    pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<Vec<String>, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).list(cred, &remainder)
+    }
+
+    /// Per-inode counterpart of [`Vfs::stat_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::stat_via`].
+    pub fn stat_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<DelegatedInfo, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).stat(cred, &remainder)
+    }
+
+    /// Per-inode counterpart of [`Vfs::create_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::create_via`].
+    pub fn create_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).create(cred, &remainder, DriverNodeKind::RegularFile)
+    }
+
+    /// Per-inode counterpart of [`Vfs::mkdir_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::create_via`].
+    pub fn mkdir_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).create(cred, &remainder, DriverNodeKind::Directory)
+    }
+
+    /// Per-inode counterpart of [`Vfs::write_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::write_via`].
+    pub fn write_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).write(cred, &remainder, offset, data)
+    }
+
+    /// Per-inode counterpart of [`Vfs::truncate_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::write_via`].
+    pub fn truncate_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        size: u64,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).truncate(cred, &remainder, size)
+    }
+
+    /// Per-inode counterpart of [`Vfs::remove_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::remove_via`].
+    pub fn remove_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).remove(cred, &remainder)
     }
 
     /// Resolve the driver-backed mount covering `path`, returning the

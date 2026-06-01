@@ -408,7 +408,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::FilesystemWrite;
+use rustos_abi::driver::filesystem::{FilesystemSecurity, FilesystemWrite, NodeSecurity};
+use rustos_abi::CapabilityId;
 
 enum RwNode {
     Dir(BTreeMap<String, usize>),
@@ -417,12 +418,16 @@ enum RwNode {
 
 struct RwMockFs {
     nodes: Vec<RwNode>,
+    sec: Vec<NodeSecurity>,
 }
 
 impl RwMockFs {
     fn new() -> Self {
         Self {
             nodes: alloc::vec![RwNode::Dir(BTreeMap::new())],
+            // Root is admin-owned and world-traversable by default, so the
+            // secured write tests can vary just the node they care about.
+            sec: alloc::vec![NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID)],
         }
     }
 
@@ -537,6 +542,8 @@ impl FilesystemWrite for RwMockFs {
         };
         let new_index = self.nodes.len();
         self.nodes.push(node);
+        self.sec
+            .push(NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID));
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
@@ -598,6 +605,13 @@ impl FilesystemWrite for RwMockFs {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+}
+
+impl FilesystemSecurity for RwMockFs {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        let idx = Self::index(node)?;
+        self.sec.get(idx).copied().ok_or(DriverError::NotFound)
     }
 }
 
@@ -767,5 +781,191 @@ fn delegated_mutation_of_mount_root_is_invalid() {
     assert_eq!(
         vfs.create_via(&admin, &p("/Storage/usb0"), &mut fs),
         Err(VfsError::InvalidPath)
+    );
+}
+
+// ---------------------------------------------------------------------
+// Per-inode (`FilesystemSecurity`) delegation tests.
+//
+// `SecMockFs` is a read-only driver that, unlike `MockFs`, stores a full
+// §5.3 record per node. The mount point itself is admin-owned `0o755`, so
+// the *uniform* `*_via` methods would grant admin every access; the
+// secured `*_via_secured` methods instead honour each node's own stored
+// record (`AGENTS.md` §5.3 / §5.4).
+// ---------------------------------------------------------------------
+
+const SECRET_FILE: u64 = 2;
+const SECRET_BODY: &[u8] = b"top secret";
+/// The owner uid baked into `SecMockFs`'s `secret.txt` record.
+const SECRET_OWNER: u32 = 7;
+
+struct SecMockFs;
+
+impl FilesystemRead for SecMockFs {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(ROOT)
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        match node.raw() {
+            ROOT => Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                size: 0,
+            }),
+            SECRET_FILE => Ok(NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: SECRET_BODY.len() as u64,
+            }),
+            _ => Err(DriverError::NotFound),
+        }
+    }
+
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        match dir.raw() {
+            ROOT if name == b"secret.txt" => Ok(NodeId::from_raw(SECRET_FILE)),
+            ROOT => Err(DriverError::NotFound),
+            _ => Err(DriverError::Unsupported),
+        }
+    }
+
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        if file.raw() != SECRET_FILE {
+            return Err(DriverError::Unsupported);
+        }
+        let Ok(start) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        if start >= SECRET_BODY.len() {
+            return Ok(0);
+        }
+        let n = core::cmp::min(buf.len(), SECRET_BODY.len() - start);
+        buf[..n].copy_from_slice(&SECRET_BODY[start..start + n]);
+        Ok(n)
+    }
+
+    fn read_dir(
+        &mut self,
+        dir: NodeId,
+        index: u64,
+        name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        if dir.raw() != ROOT || index != 0 {
+            return Ok(None);
+        }
+        let name = b"secret.txt";
+        if name_out.len() < name.len() {
+            return Err(DriverError::BufferTooSmall);
+        }
+        name_out[..name.len()].copy_from_slice(name);
+        Ok(Some(DirEntry {
+            node: NodeId::from_raw(SECRET_FILE),
+            kind: NodeKind::RegularFile,
+            name_len: name.len(),
+        }))
+    }
+}
+
+impl FilesystemSecurity for SecMockFs {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        match node.raw() {
+            ROOT => Ok(NodeSecurity::new(0o755, 0, 0)),
+            SECRET_FILE => {
+                let mut sec = NodeSecurity::new(0o600, SECRET_OWNER, 0);
+                sec.required_cap = Some(CapabilityId::AUDIT_READ);
+                Ok(sec)
+            }
+            _ => Err(DriverError::NotFound),
+        }
+    }
+}
+
+#[test]
+fn secured_read_honours_per_inode_owner_and_capability_gate() {
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = SecMockFs;
+    let path = p("/Storage/usb0/secret.txt");
+    let mut buf = [0u8; 32];
+
+    // Uniform delegation judges against the admin-owned 0o755 template, so
+    // admin can read the file.
+    let n = vfs
+        .read_via(&admin, &path, &mut fs, 0, &mut buf)
+        .expect("uniform read allowed");
+    assert_eq!(&buf[..n], SECRET_BODY);
+
+    // The secured path uses the file's own record (owner 7, mode 0o600,
+    // gated on CAP_AUDIT_READ): admin holds neither the ownership nor the
+    // capability, so it is denied.
+    assert_eq!(
+        vfs.read_via_secured(&admin, &path, &mut fs, 0, &mut buf),
+        Err(VfsError::PermissionDenied)
+    );
+}
+
+#[test]
+fn secured_read_allows_owner_holding_the_capability() {
+    let vfs = backed_vfs(0o755);
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::AUDIT_READ);
+    let owner = cred(SECRET_OWNER, 0, &caps);
+    let mut fs = SecMockFs;
+    let mut buf = [0u8; 32];
+    let n = vfs
+        .read_via_secured(&owner, &p("/Storage/usb0/secret.txt"), &mut fs, 0, &mut buf)
+        .expect("secured read allowed");
+    assert_eq!(&buf[..n], SECRET_BODY);
+}
+
+#[test]
+fn secured_stat_reports_per_inode_metadata() {
+    let vfs = backed_vfs(0o755);
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::AUDIT_READ);
+    let owner = cred(SECRET_OWNER, 0, &caps);
+    let mut fs = SecMockFs;
+    let info = vfs
+        .stat_via_secured(&owner, &p("/Storage/usb0/secret.txt"), &mut fs)
+        .expect("secured stat");
+    assert_eq!(info.kind, NodeKind::RegularFile);
+    assert_eq!(info.size, SECRET_BODY.len() as u64);
+    assert_eq!(info.meta.owner, UserId(SECRET_OWNER));
+    assert_eq!(info.meta.mode, Mode::from_bits(0o600));
+    assert_eq!(info.meta.required_cap, Some(CapabilityId::AUDIT_READ));
+}
+
+#[test]
+fn secured_list_of_mount_root_lists_driver_root() {
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = SecMockFs;
+    // The driver root is 0o755, world-readable, so listing it is allowed.
+    let names = vfs
+        .list_via_secured(&admin, &p("/Storage/usb0"), &mut fs)
+        .expect("secured list");
+    assert_eq!(names, ["secret.txt"]);
+}
+
+#[test]
+fn secured_write_honours_per_inode_parent_permission() {
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    // Re-own the driver root to uid 7 with owner-only access; admin now has
+    // no write bit on the parent under the per-inode policy.
+    fs.sec[0] = NodeSecurity::new(0o700, SECRET_OWNER, 0);
+
+    // Uniform delegation still uses the admin-owned mount template → allowed.
+    let path = p("/Storage/usb0/a.txt");
+    vfs.create_via(&admin, &path, &mut fs)
+        .expect("uniform create");
+
+    // Secured delegation consults the (uid-7-owned) parent → admin denied.
+    assert_eq!(
+        vfs.create_via_secured(&admin, &p("/Storage/usb0/b.txt"), &mut fs),
+        Err(VfsError::PermissionDenied)
     );
 }

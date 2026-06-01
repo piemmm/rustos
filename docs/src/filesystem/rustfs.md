@@ -11,8 +11,15 @@ by widening the frozen mount/unmount `Filesystem` trait (`AGENTS.md` §2.4 /
 
 The driver **stores** each inode's owner, mode, ACL, and capability gate
 but makes **no** permission decision itself: the VFS is the policy point
-(`AGENTS.md` §5.4). The stored record is surfaced to the host through
-`RustFs::security` / `RustFs::set_security`.
+(`AGENTS.md` §5.4). The stored record is read back through the versioned
+`FilesystemSecurity` trait (`security(node) -> NodeSecurity`) and written
+through `RustFs::set_security`. Because `rustfs` implements
+`FilesystemSecurity`, the kernel host delegates to it through the VFS's
+`*_via_secured` operations, which judge each node against its **own**
+stored §5.3 record (`Metadata::from_node_security`) rather than a uniform
+mount-point template — so an owner-only or capability-gated file is
+enforced as stored. See [Driver delegation](./overview.md) and the
+[driver-trait reference](../abi/driver_traits.md).
 
 ## On-disk layout
 

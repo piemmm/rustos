@@ -77,14 +77,30 @@ Each walks the in-RAM tree to the mount point — authorising **search
 permission on every ancestor** — then hands the remaining path components
 to the driver through `DelegatedFs`. The driver returns *structural* I/O
 only (node kind, size, children, bytes); it makes **no** permission
-decision (`AGENTS.md` §5.4). Every delegated node inherits the mount
-point's [`Metadata`] as a uniform permission template — the natural model
-for a filesystem such as FAT that stores no per-file owner — and the §5.3
-check runs against it before each read, before each mutation (which also
-requires **write** permission on the parent and refuses a `READ_ONLY`
-mount), and on every directory descended into. An unrecoverable driver
-fault, or a directory entry whose on-disk name is not valid UTF-8,
-surfaces as `VfsError::Io`.
+decision (`AGENTS.md` §5.4). The §5.3 check runs against a node's
+[`Metadata`] before each read, before each mutation (which also requires
+**write** permission on the parent and refuses a `READ_ONLY` mount), and on
+every directory descended into. An unrecoverable driver fault, or a
+directory entry whose on-disk name is not valid UTF-8, surfaces as
+`VfsError::Io`.
+
+Where that `Metadata` comes from is the one place the two policies differ:
+
+- The `*_via` methods apply the **mount point's** `Metadata` as a uniform
+  template to every node — the natural model for a filesystem such as FAT
+  that stores no per-file owner.
+- The `*_via_secured` counterparts (`read_via_secured`,
+  `list_via_secured`, `stat_via_secured`, `create_via_secured`,
+  `mkdir_via_secured`, `write_via_secured`, `truncate_via_secured`,
+  `remove_via_secured`) instead read **each node's own stored §5.3
+  record** through the driver's `FilesystemSecurity` surface and translate
+  it (`Metadata::from_node_security`). The kernel host calls these for a
+  driver such as [rustfs](./rustfs.md) that stores full per-inode owner,
+  mode, ACL, and capability gate, so a file marked owner-only or gated on a
+  capability is enforced as stored regardless of the mount template.
+
+Both routes feed the *same* `Metadata::authorize` decision, so the policy
+is single-sourced; only the metadata's origin changes.
 
 The whole driver-backed read **and** write path is exercised end-to-end
 under QEMU against a real (emulated) virtio-blk device: the

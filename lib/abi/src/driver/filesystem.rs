@@ -11,6 +11,7 @@
 //! does not duplicate it.
 
 use super::DriverError;
+use crate::CapabilityId;
 
 /// Mount-flag bitmap, frozen at `abi-v1`.
 ///
@@ -392,6 +393,131 @@ pub trait FilesystemWrite {
     fn flush(&mut self) -> Result<(), DriverError>;
 }
 
+/// Maximum number of inline ACL entries a [`NodeSecurity`] record carries.
+///
+/// Eight inline entries keep the record fixed-size and allocation-free,
+/// matching the per-inode inline-ACL budget a `drivers/filesystem/*`
+/// driver stores for the §5.3 model (`AGENTS.md` §5.3).
+pub const MAX_ACL_ENTRIES: usize = 8;
+
+/// The principal a [`SecurityAcl`] entry grants rights to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SecuritySubject {
+    /// The user with this uid.
+    User(u32),
+    /// The group with this gid (matched against a caller's primary and
+    /// supplementary groups by the VFS).
+    Group(u32),
+}
+
+/// One inline access-control-list entry of a node's §5.3 security record.
+///
+/// `perms` is a POSIX-style `rwx` triad in its low three bits (`0b100`
+/// read, `0b010` write, `0b001` execute/search) **granted** to `subject`.
+/// The surface is grant-only — the POSIX ACL model — so a driver never
+/// surfaces an explicit deny; the VFS composes these grants with the mode
+/// bits when it applies the model (`AGENTS.md` §5.3).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SecurityAcl {
+    /// The user or group the entry grants rights to.
+    pub subject: SecuritySubject,
+    /// The `rwx` permission bits granted to `subject`.
+    pub perms: u8,
+}
+
+/// The complete §5.3 security record a filesystem driver stores for one
+/// node, surfaced to the VFS through [`FilesystemSecurity::security`].
+///
+/// This is an in-process policy record the VFS consumes, not a serialized
+/// wire type: each `drivers/filesystem/*` driver owns its own on-disk
+/// encoding and translates to and from this shape. The driver stores the
+/// record but makes **no** permission decision from it (`AGENTS.md` §5.4 —
+/// the VFS is the policy point).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NodeSecurity {
+    /// POSIX mode bits (type bits are not stored here; see [`NodeKind`]).
+    pub mode: u32,
+    /// Owning user id.
+    pub uid: u32,
+    /// Owning group id.
+    pub gid: u32,
+    /// An optional capability the caller must hold to access the node at
+    /// all, on top of the mode/ACL checks (`None` = no capability gate).
+    pub required_cap: Option<CapabilityId>,
+    acl: [SecurityAcl; MAX_ACL_ENTRIES],
+    acl_len: usize,
+}
+
+impl NodeSecurity {
+    /// A record owned by `(uid, gid)` with mode `mode`, no ACL entries,
+    /// and no capability gate.
+    #[must_use]
+    pub const fn new(mode: u32, uid: u32, gid: u32) -> Self {
+        Self {
+            mode,
+            uid,
+            gid,
+            required_cap: None,
+            acl: [SecurityAcl {
+                subject: SecuritySubject::User(0),
+                perms: 0,
+            }; MAX_ACL_ENTRIES],
+            acl_len: 0,
+        }
+    }
+
+    /// The node's ACL entries.
+    #[must_use]
+    pub fn acl(&self) -> &[SecurityAcl] {
+        &self.acl[..self.acl_len]
+    }
+
+    /// Append an ACL entry.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] if the record already holds
+    /// [`MAX_ACL_ENTRIES`] entries.
+    pub fn push_acl(&mut self, entry: SecurityAcl) -> Result<(), DriverError> {
+        if self.acl_len >= MAX_ACL_ENTRIES {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.acl[self.acl_len] = entry;
+        self.acl_len += 1;
+        Ok(())
+    }
+}
+
+/// Per-node §5.3 security access to a mounted filesystem.
+///
+/// This is a **versioned `abi-v1` extension** — a *separate* trait from
+/// [`FilesystemRead`] / [`FilesystemWrite`], never a widening of either
+/// nor of the frozen [`Filesystem`]; new behaviour ships as a new trait
+/// (`AGENTS.md` §2.4 / §9). A driver that stores full POSIX metadata per
+/// inode — owner, mode, ACL, and an optional capability gate (§5.3) —
+/// implements it so the VFS can use that **stored** record as the policy
+/// input instead of a uniform mount-point template. A driver such as FAT
+/// that keeps no per-file owner does not implement it, and the VFS keeps
+/// applying the mount-point template.
+///
+/// The driver only *reports* the record; it makes no permission decision
+/// (`AGENTS.md` §5.4 — the VFS is the policy point).
+///
+/// # Capabilities
+///
+/// Calls are reached only through the kernel-issued
+/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
+pub trait FilesystemSecurity {
+    /// Report the §5.3 security record stored for `node`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +873,55 @@ mod tests {
             Err(DriverError::Unsupported)
         );
         assert_eq!(fs.remove(W_FILE, W_NAME), Err(DriverError::Unsupported));
+    }
+
+    #[test]
+    fn node_security_acl_is_bounded() {
+        let mut sec = NodeSecurity::new(0o640, 7, 9);
+        assert!(sec.acl().is_empty());
+        assert_eq!(sec.required_cap, None);
+        for _ in 0..MAX_ACL_ENTRIES {
+            sec.push_acl(SecurityAcl {
+                subject: SecuritySubject::User(1),
+                perms: 0b100,
+            })
+            .expect("within bound");
+        }
+        assert_eq!(sec.acl().len(), MAX_ACL_ENTRIES);
+        assert_eq!(
+            sec.push_acl(SecurityAcl {
+                subject: SecuritySubject::Group(2),
+                perms: 0b010,
+            }),
+            Err(DriverError::LengthOutOfRange)
+        );
+    }
+
+    /// A node whose stored §5.3 record the VFS reads through the trait.
+    struct MockSecurityFs {
+        sec: NodeSecurity,
+    }
+
+    impl FilesystemSecurity for MockSecurityFs {
+        fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+            if node == NodeId::NONE {
+                return Err(DriverError::NotFound);
+            }
+            Ok(self.sec)
+        }
+    }
+
+    #[test]
+    fn mock_security_fs_reports_stored_record() {
+        let mut sec = NodeSecurity::new(0o600, 7, 9);
+        sec.required_cap = Some(CapabilityId::AUDIT_READ);
+        sec.push_acl(SecurityAcl {
+            subject: SecuritySubject::Group(11),
+            perms: 0b110,
+        })
+        .expect("acl");
+        let mut fs = MockSecurityFs { sec };
+        assert_eq!(fs.security(NodeId::from_raw(1)), Ok(sec));
+        assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
     }
 }

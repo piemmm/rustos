@@ -7,11 +7,14 @@
 //! supplies **structural** I/O only — it mints opaque [`NodeId`]s and
 //! reports each node's kind, size, children, and bytes; it makes no
 //! permission decision (`AGENTS.md` §5.4). Ownership, mode bits, ACLs, and
-//! the §5.3 capability gate stay in the VFS: every delegated node inherits
-//! the mount point's [`Metadata`] as a uniform template (the natural model
-//! for a filesystem like FAT that stores no per-file owner), and
-//! [`DelegatedFs`] authorises against it before reading and on every
-//! directory it descends into.
+//! the §5.3 capability gate stay in the VFS, which authorises every node
+//! before reading it and every directory it descends into. The metadata it
+//! authorises against is chosen by the [`MetaPolicy`] the call site picks:
+//! [`Uniform`] applies the mount point's [`Metadata`] to every node (the
+//! natural model for a filesystem like FAT that stores no per-file owner),
+//! while [`PerInode`] reads each node's own stored §5.3 record through
+//! [`FilesystemSecurity`] (for a driver like `rustfs` that stores full
+//! per-inode ownership, mode, ACL, and capability gate).
 //!
 //! The adapter is constructed per call with a `&mut dyn FilesystemRead`
 //! rather than stored in the [`Vfs`](super::Vfs): the VFS tree is
@@ -19,10 +22,14 @@
 //! [`DriverHandle`](rustos_abi::driver::DriverHandle) by the kernel host —
 //! is neither.
 
+use core::marker::PhantomData;
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeInfo, NodeKind};
+use rustos_abi::driver::filesystem::{
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo, NodeKind,
+};
 use rustos_abi::driver::DriverError;
 
 use super::path::MAX_COMPONENT_LEN;
@@ -30,11 +37,12 @@ use super::perm::{Access, Credentials, Metadata};
 use super::VfsError;
 
 /// Structural metadata of a delegated node, paired with the VFS
-/// [`Metadata`] template the mount applies to it.
+/// [`Metadata`] that governs it.
 ///
 /// `kind` and `size` come from the driver's on-disk layout; `meta` is the
-/// mount point's metadata, the policy the §5.3 checks use for every node in
-/// the delegated subtree.
+/// metadata the active [`MetaPolicy`] derived for the node — the mount
+/// point's template under [`Uniform`], or the node's own stored §5.3
+/// record under [`PerInode`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegatedInfo {
     /// Whether the node is a directory or a regular file.
@@ -62,57 +70,127 @@ const fn map_driver_error(error: DriverError) -> VfsError {
     }
 }
 
-/// A filesystem driver bound to the [`Metadata`] template of its mount
-/// point, exposing VFS-shaped resolution over the delegated subtree.
+/// A filesystem driver bound to its mount point, exposing VFS-shaped
+/// resolution over the delegated subtree under a [`MetaPolicy`] `P`.
 ///
 /// The driver is borrowed behind the [`FilesystemRead`] surface (and, for
-/// the mutating methods, additionally [`FilesystemWrite`]); read-only call
-/// sites instantiate it as `DelegatedFs<'_, dyn FilesystemRead>`.
+/// the mutating methods, additionally [`FilesystemWrite`]); the
+/// [`PerInode`] policy additionally requires [`FilesystemSecurity`].
+/// Construct it with [`DelegatedFs::new`] for the [`Uniform`] policy or
+/// [`DelegatedFs::new_secured`] for [`PerInode`].
 ///
 /// `components` passed to the methods are the path *relative to the mount
 /// point* (the VFS strips the mount prefix); an empty slice names the mount
 /// point itself, i.e. the driver's root directory.
-pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized> {
+pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
     fs: &'fs mut R,
     template: Metadata,
+    _policy: PhantomData<P>,
 }
 
-impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
-    /// Bind `fs` to the `template` metadata its mount point carries.
+/// How [`DelegatedFs`] derives the [`Metadata`] it authorises a node
+/// against.
+///
+/// The two implementations are the two §5.3 sources a delegated subtree
+/// can have: the uniform mount-point template ([`Uniform`], for a driver
+/// like FAT that stores no per-file owner) and the driver's own stored
+/// per-inode record ([`PerInode`], for a driver like `rustfs`). Both feed
+/// the *same* [`Metadata::authorize`] decision (`AGENTS.md` §5.3 / §5.4 —
+/// the VFS is the single policy point).
+///
+/// The two implementors [`Uniform`] and [`PerInode`] are the only ones the
+/// crate provides; callers select between them with [`DelegatedFs::new`]
+/// and [`DelegatedFs::new_secured`] rather than naming this trait.
+pub trait MetaPolicy<R: FilesystemRead + ?Sized> {
+    /// The permission metadata governing `node`.
+    fn metadata(fs: &mut R, node: NodeId, template: &Metadata) -> Result<Metadata, VfsError>;
+}
+
+/// Apply the mount point's [`Metadata`] uniformly to every delegated node.
+pub enum Uniform {}
+
+/// Apply each node's own stored §5.3 record, read through
+/// [`FilesystemSecurity`].
+pub enum PerInode {}
+
+impl<R: FilesystemRead + ?Sized> MetaPolicy<R> for Uniform {
+    fn metadata(_fs: &mut R, _node: NodeId, template: &Metadata) -> Result<Metadata, VfsError> {
+        Ok(template.clone())
+    }
+}
+
+impl<R: FilesystemRead + FilesystemSecurity + ?Sized> MetaPolicy<R> for PerInode {
+    fn metadata(fs: &mut R, node: NodeId, _template: &Metadata) -> Result<Metadata, VfsError> {
+        let sec = fs.security(node).map_err(map_driver_error)?;
+        Ok(Metadata::from_node_security(&sec))
+    }
+}
+
+impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R, Uniform> {
+    /// Bind `fs` to the `template` metadata its mount point carries; every
+    /// node in the delegated subtree is judged against that one template.
     #[must_use]
     pub fn new(fs: &'fs mut R, template: Metadata) -> Self {
-        Self { fs, template }
+        Self {
+            fs,
+            template,
+            _policy: PhantomData,
+        }
     }
+}
 
+impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, PerInode> {
+    /// Bind `fs` so each node is judged against its *own* stored §5.3
+    /// record (read through [`FilesystemSecurity`]) rather than the mount
+    /// template.
+    ///
+    /// `template` is retained only as the metadata of the mount point in
+    /// the in-RAM tree; the delegated walk consults the driver's per-inode
+    /// record for every node, including the driver root.
+    #[must_use]
+    pub fn new_secured(fs: &'fs mut R, template: Metadata) -> Self {
+        Self {
+            fs,
+            template,
+            _policy: PhantomData,
+        }
+    }
+}
+
+impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     /// Resolve `components` from the driver root, enforcing search
     /// (execute) permission on every directory descended into — the same
-    /// rule the in-RAM [`Vfs`](super::Vfs) applies, decided against the
-    /// uniform template.
+    /// rule the in-RAM [`Vfs`](super::Vfs) applies. Each directory is
+    /// judged against the metadata the active [`MetaPolicy`] derives for
+    /// it, and the resolved target's metadata is returned for the caller's
+    /// own access check.
     fn resolve(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<(NodeId, NodeInfo), VfsError> {
+    ) -> Result<(NodeId, NodeInfo, Metadata), VfsError> {
         let mut node = self.fs.root();
         let mut info = self.fs.node_info(node).map_err(map_driver_error)?;
+        let mut meta = P::metadata(self.fs, node, &self.template)?;
         for component in components {
             if info.kind != NodeKind::Directory {
                 return Err(VfsError::NotADirectory);
             }
-            self.template.authorize(cred, Access::Execute)?;
+            meta.authorize(cred, Access::Execute)?;
             node = self
                 .fs
                 .lookup(node, component.as_bytes())
                 .map_err(map_driver_error)?;
             info = self.fs.node_info(node).map_err(map_driver_error)?;
+            meta = P::metadata(self.fs, node, &self.template)?;
         }
-        Ok((node, info))
+        Ok((node, info, meta))
     }
 
     /// Report the structural metadata of the node at `components`, paired
-    /// with the mount's permission template. Like POSIX `stat`, this needs
-    /// search permission on every intermediate directory but none on the
-    /// target itself.
+    /// with the permission metadata that governs it. Like POSIX `stat`,
+    /// this needs search permission on every intermediate directory but
+    /// none on the target itself.
     ///
     /// # Errors
     ///
@@ -123,11 +201,11 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
         cred: &Credentials<'_>,
         components: &[String],
     ) -> Result<DelegatedInfo, VfsError> {
-        let (_, info) = self.resolve(cred, components)?;
+        let (_, info, meta) = self.resolve(cred, components)?;
         Ok(DelegatedInfo {
             kind: info.kind,
             size: info.size,
-            meta: self.template.clone(),
+            meta,
         })
     }
 
@@ -138,7 +216,7 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
     /// # Errors
     ///
     /// * [`VfsError::IsADirectory`] if `components` names a directory.
-    /// * [`VfsError::PermissionDenied`] if the template denies read.
+    /// * [`VfsError::PermissionDenied`] if the node's metadata denies read.
     /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`], or
     ///   [`VfsError::Io`].
     pub fn read(
@@ -148,11 +226,11 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, VfsError> {
-        let (node, info) = self.resolve(cred, components)?;
+        let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind == NodeKind::Directory {
             return Err(VfsError::IsADirectory);
         }
-        self.template.authorize(cred, Access::Read)?;
+        meta.authorize(cred, Access::Read)?;
         self.fs.read_at(node, offset, buf).map_err(map_driver_error)
     }
 
@@ -162,7 +240,7 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
     /// # Errors
     ///
     /// * [`VfsError::NotADirectory`] if `components` names a file.
-    /// * [`VfsError::PermissionDenied`] if the template denies read.
+    /// * [`VfsError::PermissionDenied`] if the node's metadata denies read.
     /// * [`VfsError::NotFound`] or [`VfsError::Io`] (the latter also for a
     ///   directory entry whose on-disk name is not valid UTF-8).
     pub fn list(
@@ -170,11 +248,11 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
         cred: &Credentials<'_>,
         components: &[String],
     ) -> Result<Vec<String>, VfsError> {
-        let (node, info) = self.resolve(cred, components)?;
+        let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
-        self.template.authorize(cred, Access::Read)?;
+        meta.authorize(cred, Access::Read)?;
 
         let mut names = Vec::new();
         let mut name_buf = [0u8; MAX_COMPONENT_LEN];
@@ -193,10 +271,11 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R> {
     }
 }
 
-impl<F: FilesystemRead + FilesystemWrite + ?Sized> DelegatedFs<'_, F> {
+impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs<'_, F, P> {
     /// Resolve the parent directory of the leaf addressed by `components`,
     /// authorising search on every ancestor and search + write on the
-    /// parent itself (the uniform template, `AGENTS.md` §5.3 / §5.4).
+    /// parent itself, judged against the parent's own metadata under the
+    /// active [`MetaPolicy`] (`AGENTS.md` §5.3 / §5.4).
     ///
     /// Returns the parent's [`NodeId`]; an empty `components` slice (which
     /// names the mount point itself) is rejected — the driver root cannot
@@ -207,12 +286,12 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized> DelegatedFs<'_, F> {
         components: &[String],
     ) -> Result<NodeId, VfsError> {
         let (_, parents) = components.split_last().ok_or(VfsError::InvalidPath)?;
-        let (parent, info) = self.resolve(cred, parents)?;
+        let (parent, info, meta) = self.resolve(cred, parents)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
-        self.template.authorize(cred, Access::Execute)?;
-        self.template.authorize(cred, Access::Write)?;
+        meta.authorize(cred, Access::Execute)?;
+        meta.authorize(cred, Access::Write)?;
         Ok(parent)
     }
 
