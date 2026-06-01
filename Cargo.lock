@@ -825,6 +825,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-mv"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-net-icmp"
 version = "0.0.0"
 dependencies = [

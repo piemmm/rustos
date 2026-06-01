@@ -78,6 +78,7 @@ members = [
     "userland/apps/cat",
     "userland/apps/cp",
     "userland/apps/ls",
+    "userland/apps/mv",
     "userland/apps/rm",
     "userland/gui/wm",
     "userland/gui/iconbar",

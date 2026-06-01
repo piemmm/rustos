@@ -4188,8 +4188,37 @@ device list.
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 28 unit
   tests (9 parser + 19 copy engine); docs
   `docs/src/userland/utilities.md` (`cp` section) and the crate `README.md`.
+- **`mv` CLI (`userland/apps/mv`) — DONE.** `rustos-mv` relocates its
+  source operands to a destination (`AGENTS.md` §3): with a single source
+  and a non-directory destination the source is moved to that exact path,
+  while an existing-directory destination (always, with more than one
+  source) receives each source under its own base name. Unlike `cp`, a
+  directory is moved without a flag. `run` asks the injected `FileSystem`
+  seam for each source's kind and then to `rename` it onto its
+  destination; a rename within one filesystem is atomic and is the whole
+  move, while a rename that would cross a filesystem boundary is reported
+  as an explicit `RenameOutcome::CrossDevice` (never an overloaded
+  `Errno`, §2.11) and falls back to the POSIX relocation: copy the source
+  (streaming a regular file in fixed-size chunks matching `cat`/`cp`,
+  reproducing a directory subtree) then remove it depth-first. `-n` never
+  overwrites an existing destination; `-f` removes a destination that
+  blocks the rename and retries once; `mv` is otherwise silent on success,
+  writing only the help banner through the injected `Output` seam (the
+  same seam discipline as `cp`/`rm`). It **fails closed**: an unrecognised
+  option, fewer than two operands, or more than one source aimed at a
+  non-directory destination is an `MvError::Usage` that moves nothing; an
+  operand that cannot be inspected surfaces the underlying `Errno` as
+  `MvError::Stat` and stops before any later operand; a non-boundary
+  rename failure is `MvError::Rename`; during a cross-device relocation an
+  unreadable source is `MvError::Read`, an uncreatable destination is
+  `MvError::Create`, a failed write is `MvError::Write`, and a source that
+  cannot be removed after the copy is `MvError::Remove` (`AGENTS.md`
+  §2.9). `no_std` (with `alloc`), depends only on `rustos-abi` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 30 unit
+  tests (10 parser + 20 move engine); docs
+  `docs/src/userland/utilities.md` (`mv` section) and the crate `README.md`.
 - Remaining Stage 6 deliverables (the rest of the core CLI utilities —
-  `mv`, `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
+  `ps`, `mount`, `chmod`, `chown`, `useradd`, `groupadd`,
   `setcap`, `getcap` — and the `.app` bundle / dynamic-loader policy) are
   not yet started.
 
