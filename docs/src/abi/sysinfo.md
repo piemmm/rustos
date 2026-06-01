@@ -36,12 +36,17 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `HARDWARE_TREE`         | `CAP_SYSINFO_HW`       | yes     |
 | `SYSTEM_IDENTITY`       | none                   | no      |
 | `UPTIME`                | none                   | no      |
+| `MOUNT_LIST`            | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
 own processes") require no capability; the global view does
 (`AGENTS.md` §16.6). The hardware-tree query gates the read-only view of
-the detected hardware tree (`AGENTS.md` §18.4).
+the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` is ungated:
+the mount table is system-wide and secret-free, so — like `UPTIME` and
+`SYSTEM_IDENTITY` — any task may read it; the privileged *act* of
+mounting is gated separately by `CAP_FS_MOUNT` (`AGENTS.md` §5.2) and is
+not part of this read-only API.
 
 ## Wire framing
 
@@ -72,6 +77,15 @@ fails closed: bad magic or a non-zero reserved field is
 - [`SystemIdentity`] — the per-installation machine id
   ([`MACHINE_ID_LEN`] bytes), the OS version triple, and an inline
   hostname bounded by [`HOSTNAME_MAX`].
+- [`MountListRequest`] — `offset`/`limit` pagination for the mount-list
+  query, structurally parallel to [`ProcessListRequest`] but a distinct
+  frozen payload (each query owns its argument type, `AGENTS.md` §9).
+- [`MountRecord`] — one mount-table entry: the backing `source` (bounded
+  by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
+  the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), and the [`MountFlags`]
+  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`). The flag field
+  reuses the filesystem-driver ABI's `MountFlags` rather than re-declaring
+  the flag algebra (`AGENTS.md` §2.2).
 
 Every payload is `#[repr(C)]`, allocation-free, and exposes a
 `to_le_bytes`/`from_bytes` pair; every `from_bytes` is exercised by the
@@ -94,6 +108,12 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`SystemIdentity`]: ../../rustos_abi/sysinfo/struct.SystemIdentity.html
 [`MACHINE_ID_LEN`]: ../../rustos_abi/sysinfo/constant.MACHINE_ID_LEN.html
 [`HOSTNAME_MAX`]: ../../rustos_abi/sysinfo/constant.HOSTNAME_MAX.html
+[`MountListRequest`]: ../../rustos_abi/sysinfo/struct.MountListRequest.html
+[`MountRecord`]: ../../rustos_abi/sysinfo/struct.MountRecord.html
+[`MOUNT_SOURCE_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
+[`MOUNT_TARGET_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
+[`MOUNT_FSTYPE_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
+[`MountFlags`]: ../../rustos_abi/driver/filesystem/struct.MountFlags.html
 [`CapabilityId`]: ../../rustos_abi/capability/struct.CapabilityId.html
 [`Errno::BadMagic`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno::AbiVersionUnsupported`]: ../../rustos_abi/error/enum.Errno.html

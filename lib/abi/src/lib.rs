@@ -56,12 +56,12 @@ pub use syscalls::{
     SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,
 };
 pub use sysinfo::{
-    encoded_query_table, spec_for as sysinfo_spec_for, KernelMemoryStats, ProcessListRequest,
-    ProcessRecord, ProcessState, SysinfoQueryId, SysinfoQuerySpec, SysinfoRequestHeader,
-    SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-    MACHINE_ID_LEN, PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    encoded_query_table, spec_for as sysinfo_spec_for, KernelMemoryStats, MountListRequest,
+    MountRecord, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoQuerySpec,
+    SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
+    HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
 pub use time::{Duration64, Time64, NANOS_PER_SEC};
 

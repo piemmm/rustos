@@ -4391,8 +4391,39 @@ device list.
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 21 unit
   tests; docs `docs/src/userland/utilities.md` (`groupadd` section) and
   the crate `README.md`.
-- Remaining Stage 6 deliverables (the last core CLI utility — `mount` —
-  and the `.app` bundle / dynamic-loader policy) are not yet started.
+- **`mount` CLI (`userland/apps/mount`) + `sysinfo-v1` `MOUNT_LIST` — DONE.**
+  `rustos-mount` both reports and changes the mount table. **Listing** is a
+  read of live system state, so — like `ps` — it goes through the System
+  Information API (§16.6): a new ungated `MOUNT_LIST` query (id 6, the
+  seventh frozen `sysinfo-v1` query) carries a `MountListRequest`
+  (`offset`/`limit` paging) and returns packed `MountRecord`s (inline
+  `source`/`target`/`fstype` buffers plus the filesystem-driver ABI's
+  `MountFlags`, reused rather than re-declared, §2.2). `sysinfod` grew a
+  `mount_records` source method and a dispatch arm, and the process- and
+  mount-list paging now share one `page_records` helper (§2.2). The mount
+  table is system-wide and secret-free, so the query is ungated; the
+  privileged *act* of mounting is gated separately by `CAP_FS_MOUNT` (§5.2).
+  **Attaching** (`SOURCE TARGET`) hands a `MountSpec` to the injected
+  `Mounter` seam; the kernel is the policy point (§5.4) and a refusal
+  surfaces as `MountError::Mount`. The listing reuses the shared
+  `lib/procinfo` helpers — extended this session with a generic `walk_pages`
+  paged-list walk, a shared `ListError` (renamed from `ProcessListError`),
+  and a `for_each_mount`/`render_mount` mount module — rather than copying
+  them (§2.2, §17.4); `ps` and `sysinfo` were migrated onto `ListError`.
+  Grammar `mount [-r] [-t TYPE] [-o ro,rw,nosuid,nodev,noexec] [--]
+  [SOURCE TARGET]`. It **fails closed**: an unknown option, a missing
+  value, or a wrong operand count is `MountError::Usage`; a bad `-o`/`-t`
+  value is `MountError::BadOption`; a listing failure is
+  `MountError::Service`; a write failure is `MountError::Output`. `no_std`
+  (with `alloc`), deps only `rustos-abi` + `rustos-procinfo` (§17.4); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. 23 `mount`
+  unit tests (+ new `lib/abi`, `lib/procinfo`, and `sysinfod` tests, and
+  both new decoders enrolled in the `lib/abi` fuzz harness, §19.6); docs
+  `docs/src/userland/utilities.md` (`mount` section), `docs/src/abi/sysinfo.md`,
+  `docs/src/userland/sysinfod.md`, and the crate `README.md`.
+- The remaining Stage 6 deliverable (the `.app` bundle / dynamic-loader
+  policy, §16.4/§16.5) is not yet started; every core CLI utility is now
+  done.
 
 ---
 

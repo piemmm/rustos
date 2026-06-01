@@ -2,7 +2,7 @@
 
 use core::fmt;
 use rustos_abi::Errno;
-use rustos_procinfo::{CallError, ProcessListError};
+use rustos_procinfo::{CallError, ListError};
 
 /// Why a `ps` invocation did not complete.
 ///
@@ -36,11 +36,11 @@ impl From<CallError> for PsError {
     }
 }
 
-impl From<ProcessListError> for PsError {
-    fn from(err: ProcessListError) -> Self {
+impl From<ListError> for PsError {
+    fn from(err: ListError) -> Self {
         match err {
-            ProcessListError::Call(call) => call.into(),
-            ProcessListError::Sink(errno) => Self::Output(errno),
+            ListError::Call(call) => call.into(),
+            ListError::Sink(errno) => Self::Output(errno),
         }
     }
 }

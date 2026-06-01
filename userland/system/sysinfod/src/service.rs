@@ -2,7 +2,8 @@
 //! capability-checked, audited, and answered (`AGENTS.md` §16.6).
 
 use rustos_abi::sysinfo::{
-    spec_for, ProcessListRequest, ProcessRecord, SysinfoQueryId, SysinfoRequestHeader,
+    spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, SysinfoQueryId,
+    SysinfoRequestHeader,
 };
 use rustos_abi::Errno;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -143,6 +144,8 @@ fn dispatch(
         write_bytes(&source.system_identity(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::UPTIME {
         write_bytes(&source.uptime(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::MOUNT_LIST {
+        mount_list(source, caller, payload, response)
     } else {
         Err(Errno::NotImplemented)
     }
@@ -159,21 +162,62 @@ fn process_list(
 ) -> Result<usize, Errno> {
     let request = ProcessListRequest::from_bytes(payload)?;
     let records = source.process_records(caller, scope)?;
-    let offset = request.offset as usize;
-    if offset >= records.len() {
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        ProcessRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`MountListRequest`], apply paging, and pack the selected
+/// [`MountRecord`]s into `response`.
+fn mount_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller<'_>,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = MountListRequest::from_bytes(payload)?;
+    let records = source.mount_records(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        MountRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Pack a paged window of fixed-`wire_len` records into `response`.
+///
+/// Shared by every list query so the paging arithmetic — offset bounds, the
+/// `limit` window, the buffer-capacity check, and the fail-closed
+/// `BufferTooSmall` — lives in exactly one place (`AGENTS.md` §2.2). `encode`
+/// writes record `index` into the supplied `wire_len`-byte slot.
+fn page_records(
+    response: &mut [u8],
+    offset: usize,
+    limit: usize,
+    count: usize,
+    wire_len: usize,
+    mut encode: impl FnMut(usize, &mut [u8]),
+) -> Result<usize, Errno> {
+    if offset >= count {
         return Ok(0);
     }
-    let take = core::cmp::min(records.len() - offset, request.limit as usize);
-    let needed = take
-        .checked_mul(ProcessRecord::WIRE_LEN)
-        .ok_or(Errno::LengthOutOfRange)?;
+    let take = core::cmp::min(count - offset, limit);
+    let needed = take.checked_mul(wire_len).ok_or(Errno::LengthOutOfRange)?;
     if response.len() < needed {
         return Err(Errno::BufferTooSmall);
     }
     let mut written = 0;
-    for record in &records[offset..offset + take] {
-        response[written..written + ProcessRecord::WIRE_LEN].copy_from_slice(&record.to_le_bytes());
-        written += ProcessRecord::WIRE_LEN;
+    for index in offset..offset + take {
+        encode(index, &mut response[written..written + wire_len]);
+        written += wire_len;
     }
     Ok(written)
 }
@@ -214,10 +258,11 @@ mod tests {
     use crate::events;
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
+    use rustos_abi::driver::filesystem::MountFlags;
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, MACHINE_ID_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, MACHINE_ID_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
     use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
@@ -285,6 +330,7 @@ mod tests {
         own: [ProcessRecord; 2],
         global: [ProcessRecord; 3],
         hwtree: [u8; 5],
+        mounts: [MountRecord; 2],
     }
     impl FixtureSource {
         fn new() -> Self {
@@ -299,6 +345,16 @@ mod tests {
                     mk(11, 1000, b"editor"),
                 ],
                 hwtree: [1, 2, 3, 4, 5],
+                mounts: [
+                    MountRecord::new(b"rootfs", b"/", b"rustfs", MountFlags::READ_ONLY).unwrap(),
+                    MountRecord::new(
+                        b"data",
+                        b"/Storage/data",
+                        b"rustfs",
+                        MountFlags::NOSUID.union(MountFlags::NODEV),
+                    )
+                    .unwrap(),
+                ],
             }
         }
     }
@@ -334,6 +390,9 @@ mod tests {
                 since_boot: Duration64::from_nanos(1_000),
                 boot_time: Time64::from_secs(1_700_000_000),
             })
+        }
+        fn mount_records(&self, _caller: &Caller<'_>) -> Result<&[MountRecord], Errno> {
+            Ok(&self.mounts)
         }
     }
 
@@ -481,6 +540,39 @@ mod tests {
         assert_eq!(id.hostname_bytes(), b"rustos-box");
         // Neither query is audited.
         assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn mount_list_needs_no_capability_and_pages() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let mlr = MountListRequest {
+            offset: 0,
+            limit: 10,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr.to_le_bytes());
+        let mut resp = [0u8; 1024];
+        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * MountRecord::WIRE_LEN);
+        let first = MountRecord::from_bytes(&resp[..MountRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.target_bytes(), b"/");
+        assert!(first.flags().contains(MountFlags::READ_ONLY));
+        // The mount table is not audited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // Paging past the end returns an empty page.
+        let mlr_end = MountListRequest {
+            offset: 9,
+            limit: 4,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
     }
 
     #[test]

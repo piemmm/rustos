@@ -11,7 +11,8 @@ use alloc::string::String;
 use rustos_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
 use rustos_abi::Errno;
 
-use crate::request::{call, CallError};
+use crate::list::{field_lossy, walk_pages, ListError};
+use crate::request::CallError;
 use crate::transport::Transport;
 
 /// Number of [`ProcessRecord`]s requested per process-list page.
@@ -24,23 +25,6 @@ pub const PROCESS_PAGE: u16 = 64;
 /// The column header for a process listing, matching the columns
 /// [`render_process`] produces.
 pub const PROCESS_HEADER: &str = "  PID  PPID   UID   GID S CPU NAME";
-
-/// Why a process-list walk did not complete.
-///
-/// [`Call`](ProcessListError::Call) carries a transport/capability failure
-/// (including a structurally invalid reply, reported as
-/// [`Errno::BadMagic`]); [`Sink`](ProcessListError::Sink) carries the
-/// [`Errno`] a caller's per-record sink raised (typically a terminal write).
-/// Distinguishing them lets a consuming tool map each onto the right line of
-/// its own error enum (`AGENTS.md` §2.2).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessListError {
-    /// The query failed, was denied, or returned a structurally invalid
-    /// reply.
-    Call(CallError),
-    /// The per-record sink raised an error (e.g. a failed terminal write).
-    Sink(Errno),
-}
 
 /// Page through the process list and hand each decoded [`ProcessRecord`] to
 /// `sink`.
@@ -58,49 +42,40 @@ pub enum ProcessListError {
 ///
 /// # Errors
 ///
-/// * [`ProcessListError::Call`] — the transport failed, the service denied
-///   the query, or the reply was structurally invalid.
-/// * [`ProcessListError::Sink`] — `sink` returned an error for some record;
-///   the walk stops at that record.
+/// * [`ListError::Call`] — the transport failed, the service denied the
+///   query, or the reply was structurally invalid.
+/// * [`ListError::Sink`] — `sink` returned an error for some record; the
+///   walk stops at that record.
 pub fn for_each_process(
     transport: &dyn Transport,
     all: bool,
     mut sink: impl FnMut(&ProcessRecord) -> Result<(), Errno>,
-) -> Result<(), ProcessListError> {
+) -> Result<(), ListError> {
     let query = if all {
         SysinfoQueryId::GLOBAL_PROCESS_LIST
     } else {
         SysinfoQueryId::SELF_PROCESS_LIST
     };
-    let mut offset: u32 = 0;
-    loop {
-        let request = ProcessListRequest {
-            offset,
-            limit: PROCESS_PAGE,
-            flags: 0,
-        };
-        let reply =
-            call(transport, query, &request.to_le_bytes()).map_err(ProcessListError::Call)?;
-        if reply.len() % ProcessRecord::WIRE_LEN != 0 {
-            return Err(ProcessListError::Call(CallError::Service(Errno::BadMagic)));
-        }
-        let count = reply.len() / ProcessRecord::WIRE_LEN;
-        for chunk in reply.chunks_exact(ProcessRecord::WIRE_LEN) {
+    walk_pages(
+        transport,
+        query,
+        ProcessRecord::WIRE_LEN,
+        PROCESS_PAGE,
+        |offset, limit| {
+            ProcessListRequest {
+                offset,
+                limit,
+                flags: 0,
+            }
+            .to_le_bytes()
+            .to_vec()
+        },
+        |chunk| {
             let record = ProcessRecord::from_bytes(chunk)
-                .map_err(|errno| ProcessListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ProcessListError::Sink)?;
-        }
-        if count < usize::from(PROCESS_PAGE) {
-            return Ok(());
-        }
-        let advanced = u32::try_from(count)
-            .map_err(|_| ProcessListError::Call(CallError::Service(Errno::LengthOutOfRange)))?;
-        offset = offset
-            .checked_add(advanced)
-            .ok_or(ProcessListError::Call(CallError::Service(
-                Errno::LengthOutOfRange,
-            )))?;
-    }
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
 }
 
 /// Render one [`ProcessRecord`] as a fixed-column row matching
@@ -115,7 +90,7 @@ pub fn render_process(record: &ProcessRecord) -> String {
         record.gid,
         state_char(record.state),
         record.cpu,
-        name_lossy(record.name_bytes()),
+        field_lossy(record.name_bytes()),
     )
 }
 
@@ -131,18 +106,10 @@ pub fn state_char(state: ProcessState) -> char {
     }
 }
 
-/// Decode an inline name buffer for display, substituting `U+FFFD` for any
-/// invalid byte rather than failing (a display routine never panics, §2.9).
-fn name_lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        for_each_process, render_process, state_char, ProcessListError, PROCESS_HEADER,
-        PROCESS_PAGE,
-    };
+    use super::{for_each_process, render_process, state_char, PROCESS_HEADER, PROCESS_PAGE};
+    use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
     use alloc::vec::Vec;
@@ -202,7 +169,7 @@ mod tests {
         ProcessRecord::new(pid, 1, 1000, 1000, state, 0, name).expect("record")
     }
 
-    fn collect(all: bool, fixture: &Fixture) -> Result<Vec<ProcessRecord>, ProcessListError> {
+    fn collect(all: bool, fixture: &Fixture) -> Result<Vec<ProcessRecord>, ListError> {
         let seen = RefCell::new(Vec::new());
         for_each_process(fixture, all, |r| {
             seen.borrow_mut().push(*r);
@@ -262,7 +229,7 @@ mod tests {
         fixture.deny = true;
         assert_eq!(
             collect(true, &fixture),
-            Err(ProcessListError::Call(CallError::PermissionDenied))
+            Err(ListError::Call(CallError::PermissionDenied))
         );
     }
 
@@ -272,7 +239,7 @@ mod tests {
         fixture.malformed = true;
         assert_eq!(
             collect(false, &fixture),
-            Err(ProcessListError::Call(CallError::Service(Errno::BadMagic)))
+            Err(ListError::Call(CallError::Service(Errno::BadMagic)))
         );
     }
 
@@ -292,7 +259,7 @@ mod tests {
                 Ok(())
             }
         });
-        assert_eq!(result, Err(ProcessListError::Sink(Errno::NotFound)));
+        assert_eq!(result, Err(ListError::Sink(Errno::NotFound)));
         // The walk stopped at the first record.
         assert_eq!(*count.borrow(), 1);
     }

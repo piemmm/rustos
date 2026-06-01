@@ -1,0 +1,24 @@
+[package]
+name = "rustos-mount"
+description = "RustOS `mount` CLI: list mounted filesystems via the System Information API and attach new ones (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `Errno`, the `MountFlags` mount-policy bitmap the tool parses
+# and presents, and the `sysinfo-v1` mount-list surface; `mount` invents no
+# parallel error or flag set (§2.2) and never links a kernel or driver crate
+# (§17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared System Information API client helpers: the `Transport`/`Output`
+# seams, request framing, and the mount-table paging + render shared with the
+# other `sysinfo` clients. `mount` consumes these rather than duplicating them
+# (§2.2, §16.6).
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }

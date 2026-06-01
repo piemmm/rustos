@@ -853,6 +853,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-mount"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-procinfo",
+]
+
+[[package]]
 name = "rustos-mv"
 version = "0.0.0"
 dependencies = [

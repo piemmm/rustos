@@ -2,7 +2,7 @@
 
 use core::fmt;
 use rustos_abi::Errno;
-use rustos_procinfo::{CallError, ProcessListError};
+use rustos_procinfo::{CallError, ListError};
 
 /// Why a `sysinfo` invocation did not complete.
 ///
@@ -36,11 +36,11 @@ impl From<CallError> for SysinfoError {
     }
 }
 
-impl From<ProcessListError> for SysinfoError {
-    fn from(err: ProcessListError) -> Self {
+impl From<ListError> for SysinfoError {
+    fn from(err: ListError) -> Self {
         match err {
-            ProcessListError::Call(call) => call.into(),
-            ProcessListError::Sink(errno) => Self::Output(errno),
+            ListError::Call(call) => call.into(),
+            ListError::Sink(errno) => Self::Output(errno),
         }
     }
 }

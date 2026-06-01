@@ -42,16 +42,18 @@ a privileged query without first passing its capability gate.
 | `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | encoded hardware tree (opaque) |
 | `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
 | `UPTIME`              | none                 | no      | `Uptime`                       |
+| `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
 
 ## Response encoding
 
 There is no response envelope: the typed payload *is* the response.
 
-- Process-list queries pack zero or more `ProcessRecord`s back-to-back.
-  The caller pages with the request's `offset`/`limit` and detects the
-  end of the list when it receives fewer than `limit` records. The
-  paging bounds live in the dispatcher (in one place), not in the data
-  source.
+- The list queries pack zero or more fixed-size records back-to-back —
+  `ProcessRecord`s for the process lists, `MountRecord`s for the mount
+  list. The caller pages with the request's `offset`/`limit` and detects
+  the end of the list when it receives fewer than `limit` records. The
+  paging bounds live in one shared helper in the dispatcher, not in the
+  data source.
 - The scalar queries return the little-endian wire image of their
   response struct.
 - The hardware-tree query passes the source's encoded bytes through
@@ -62,7 +64,7 @@ There is no response envelope: the typed payload *is* the response.
 ## The data seam
 
 The live data — the process table, memory accounting, the hardware
-tree, machine identity, uptime — is read through the `SysinfoSource`
+tree, machine identity, uptime, mount table — is read through the `SysinfoSource`
 trait, injected by `init` when it starts the service. On a running
 kernel this is a thin shim over the kernel's bookkeeping; in tests it is
 an in-memory fixture. Splitting policy from data keeps the
@@ -97,6 +99,7 @@ drowning the log; the cross-principal, kernel, and hardware queries are.
 `SysinfoSource` fixture and a recording log sink, covering every query,
 paging (`offset`/`limit` and the empty page past the end), the capability
 gates and their denial records, the audited-served record, the
-hardware-tree pass-through, and the malformed-header / truncated-payload
+hardware-tree pass-through, the ungated mount-table listing, and the
+malformed-header / truncated-payload
 / unassigned-query / undersized-buffer fail-closed paths, plus the
 `EventId` range and uniqueness invariants.

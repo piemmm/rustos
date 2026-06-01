@@ -180,6 +180,91 @@ the denied-global capability mapping, and the header/row write-failure
 paths. The shared page walk and rendering carry their own unit tests in
 `lib/procinfo` (`cargo test -p rustos-procinfo`).
 
+## `mount` — list and attach filesystems (`userland/apps/mount`)
+
+`rustos-mount` both reports and changes the mount table, and the two
+halves take deliberately different paths. **Listing** the mounted
+filesystems is a *read* of live system state, so — like `ps` — it goes
+through the System Information API (`AGENTS.md` §16.6): there is no
+`/proc` and no mount-table file, so `mount` issues the ungated
+`sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod`.
+**Attaching** a filesystem is privileged (it needs `CAP_FS_MOUNT`,
+`AGENTS.md` §5.2), and the kernel — not this tool — makes that decision
+(`AGENTS.md` §5.4).
+
+The crate is `no_std` (with `alloc`, used only by the test fixtures), has
+no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
+(`AGENTS.md` §2.9). It depends only on the audited `rustos-abi` crate and
+the shared `rustos-procinfo` client helpers, so it never links a kernel
+or driver crate (`AGENTS.md` §17.4).
+
+### Grammar
+
+```
+mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
+
+  (no operands)        list the mounted filesystems
+  SOURCE TARGET        mount SOURCE at TARGET (needs CAP_FS_MOUNT)
+  -r, --read-only      mount read-only (same as -o ro)
+  -t, --types TYPE     filesystem type (probed when omitted)
+  -o, --options LIST   comma-separated: ro,rw,nosuid,nodev,noexec
+  -h, --help           show the usage banner
+```
+
+With no operands `mount` lists the table; with exactly `SOURCE TARGET` it
+attaches. Value options accept their value attached (`-text4`,
+`--types=ext4`) or as the following argument; `-r` may cluster with other
+toggles. `--` ends option parsing. The recognised `-o` names map onto the
+frozen `MountFlags` bitmap (`ro`/`rw` plus the `nosuid`/`nodev`/`noexec`
+restrictions, `AGENTS.md` §5.3).
+
+### Listing — a client of the mount-list query
+
+A listing pages the `MOUNT_LIST` reply through the same `lib/procinfo`
+machinery `ps` uses — the `Transport`/`Output` seams, the request framing,
+and the generic `offset`/`limit` page walk — so none of it is copied
+(`AGENTS.md` §2.2). The shared renderer prints one familiar
+`source on target type fstype (options)` line per mount; the option list
+opens with `ro`/`rw` and then names each restriction in force. The query
+is ungated: the mount table is system-wide and secret-free, so any task
+may read it (`AGENTS.md` §16.6).
+
+### Attaching — a presenter, not a policy point
+
+For a `SOURCE TARGET` request `mount` parses and validates the arguments
+and hands a `MountSpec` to the injected `Mounter` seam; it makes no
+permission decision of its own. The kernel is the policy point
+(`AGENTS.md` §5.4): a caller lacking `CAP_FS_MOUNT`, an unknown source, a
+bad superblock, or an already-mounted target is refused there and
+surfaced as `MountError::Mount(errno)`. `mount` writes nothing on a
+successful attach. A `None` filesystem type asks the kernel to identify
+the volume by probing; `mount` never guesses one (`AGENTS.md` §2.1).
+
+### Fail closed
+
+- An unknown option, a missing option value, or a number of operands
+  other than zero or two is a `MountError::Usage`; mount options given
+  with no operands are also a usage error (there is nothing to mount).
+- An unknown or empty `-o`/`-t` value is a `MountError::BadOption`.
+- A listing transport failure or a reply that does not decode against
+  `sysinfo-v1` is a hard `MountError::Service`, never a partially-rendered
+  guess; a refused or failed attach is `MountError::Mount`; a failed
+  terminal write is `MountError::Output`. There is no panic (`AGENTS.md`
+  §2.9).
+
+### Tests
+
+`cargo test -p rustos-mount` drives the parser and the engine against an
+in-memory `sysinfod` fixture, a recording output, and an in-memory
+mounter: the command grammar (list vs mount vs help, every option form,
+attached/space values, the read-only shorthand, `--`, and the
+usage/bad-option rejections), the mount-table listing and its query
+routing, the empty table, the service- and output-failure paths, the
+attach request reaching the mounter with the right fields, and the denied
+attach mapping to `MountError::Mount`. The shared page walk and the
+`source on target type fstype (options)` rendering carry their own unit
+tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
+
 ## `cat` — concatenate files to the terminal (`userland/apps/cat`)
 
 `rustos-cat` is the first crate under `userland/apps/` (`AGENTS.md` §3).

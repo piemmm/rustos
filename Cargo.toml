@@ -83,6 +83,7 @@ members = [
     "userland/apps/getcap",
     "userland/apps/groupadd",
     "userland/apps/ls",
+    "userland/apps/mount",
     "userland/apps/mv",
     "userland/apps/ps",
     "userland/apps/rm",

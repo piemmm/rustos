@@ -18,6 +18,7 @@
 //! `/System/Services/sysinfod` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
+use crate::driver::filesystem::MountFlags;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::time::{Duration64, Time64};
 use crate::{CapabilityId, Errno};
@@ -58,6 +59,13 @@ impl SysinfoQueryId {
     pub const SYSTEM_IDENTITY: Self = Self(4);
     /// Read system uptime and boot wall-clock time. Requires none.
     pub const UPTIME: Self = Self(5);
+    /// List the currently-mounted filesystems. Requires no capability:
+    /// the mount table is system-wide rather than scoped to a principal,
+    /// and exposes no per-process secret, so — like [`Self::UPTIME`] and
+    /// [`Self::SYSTEM_IDENTITY`] — any task may read it (`AGENTS.md`
+    /// §16.6). The privileged *act* of mounting is gated separately by
+    /// `CAP_FS_MOUNT`; this query only reports.
+    pub const MOUNT_LIST: Self = Self(6);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -168,10 +176,19 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         required_capability: None,
         audit: false,
     },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::MOUNT_LIST,
+        name: "mount_list",
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding in [`ENCODED_QUERY_TABLE`].
-pub const ENCODED_QUERY_TABLE_LEN: usize = SYSINFO_QUERY_RECORD_LEN * 6;
+///
+/// Derived from the registry length so adding a query updates it
+/// automatically; the encoder asserts every name fits the fixed stride.
+pub const ENCODED_QUERY_TABLE_LEN: usize = SYSINFO_QUERY_RECORD_LEN * SYSINFO_QUERIES.len();
 
 /// Canonical byte representation of [`SYSINFO_QUERIES`].
 ///
@@ -753,16 +770,239 @@ impl SystemIdentity {
     }
 }
 
+/// Maximum bytes of the source identifier carried in a [`MountRecord`].
+///
+/// The source is the backing volume or device name (e.g. a `/Storage`
+/// volume label); it shares the path-length ceiling with the target.
+pub const MOUNT_SOURCE_MAX: usize = 64;
+
+/// Maximum bytes of the mount-point path carried in a [`MountRecord`].
+pub const MOUNT_TARGET_MAX: usize = 64;
+
+/// Maximum bytes of the filesystem-type name carried in a [`MountRecord`].
+///
+/// Driver type names (`rustfs`, `ext4`, `fat32`, …) are short; the bound
+/// keeps a hostile reply from claiming an unbounded type string.
+pub const MOUNT_FSTYPE_MAX: usize = 16;
+
+/// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
+///
+/// Structurally parallel to [`ProcessListRequest`] but a distinct frozen
+/// payload: each `sysinfo-v1` query owns its argument type, exactly as each
+/// syscall owns its argument shape (`AGENTS.md` §9). The response is a
+/// sequence of [`MountRecord`]s; the client pages through it with
+/// `offset`/`limit` so a fixed-size transport buffer never has to hold every
+/// mount at once.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct MountListRequest {
+    /// Index of the first mount to return.
+    pub offset: u32,
+    /// Maximum number of [`MountRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl MountListRequest {
+    /// Encoded size of a [`MountListRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`MountListRequest`].
+    ///
+    /// Returns:
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
+    ///   (reserved-must-be-zero violations are wire corruption).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One entry in the system mount table, returned by
+/// [`SysinfoQueryId::MOUNT_LIST`].
+///
+/// Each record names a mounted filesystem by its backing `source`, the
+/// `target` path it is mounted at, the driver `fstype`, and the
+/// [`MountFlags`] policy in force (`ro`/`nosuid`/`nodev`/`noexec`, §5.3).
+/// The string fields are inline fixed-capacity buffers, so the whole record
+/// is a flat, allocation-free `repr(C)` block of [`MountRecord::WIRE_LEN`]
+/// bytes encoded little-endian. The policy bits reuse the same
+/// [`MountFlags`] type the filesystem driver ABI defines rather than
+/// re-declaring the flag algebra (`AGENTS.md` §2.2).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MountRecord {
+    flags: MountFlags,
+    source_len: u8,
+    target_len: u8,
+    fstype_len: u8,
+    source: [u8; MOUNT_SOURCE_MAX],
+    target: [u8; MOUNT_TARGET_MAX],
+    fstype: [u8; MOUNT_FSTYPE_MAX],
+}
+
+impl MountRecord {
+    /// Encoded size of a [`MountRecord`] on the wire.
+    ///
+    /// `4` bytes of flags, three length bytes plus one reserved pad, then the
+    /// three fixed-capacity string buffers.
+    pub const WIRE_LEN: usize = 8 + MOUNT_SOURCE_MAX + MOUNT_TARGET_MAX + MOUNT_FSTYPE_MAX;
+
+    const TARGET_OFFSET: usize = 8 + MOUNT_SOURCE_MAX;
+    const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
+
+    /// Build a record from its parts.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `source` exceeds [`MOUNT_SOURCE_MAX`],
+    /// `target` exceeds [`MOUNT_TARGET_MAX`], or `fstype` exceeds
+    /// [`MOUNT_FSTYPE_MAX`].
+    pub fn new(
+        source: &[u8],
+        target: &[u8],
+        fstype: &[u8],
+        flags: MountFlags,
+    ) -> Result<Self, Errno> {
+        if source.len() > MOUNT_SOURCE_MAX
+            || target.len() > MOUNT_TARGET_MAX
+            || fstype.len() > MOUNT_FSTYPE_MAX
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let source_len = u8::try_from(source.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let target_len = u8::try_from(target.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let fstype_len = u8::try_from(fstype.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let mut record = Self {
+            flags,
+            source_len,
+            target_len,
+            fstype_len,
+            source: [0u8; MOUNT_SOURCE_MAX],
+            target: [0u8; MOUNT_TARGET_MAX],
+            fstype: [0u8; MOUNT_FSTYPE_MAX],
+        };
+        record.source[..source.len()].copy_from_slice(source);
+        record.target[..target.len()].copy_from_slice(target);
+        record.fstype[..fstype.len()].copy_from_slice(fstype);
+        Ok(record)
+    }
+
+    /// The mount policy flags in force on this filesystem.
+    #[must_use]
+    pub fn flags(&self) -> MountFlags {
+        self.flags
+    }
+
+    /// The backing source bytes (volume/device identifier).
+    #[must_use]
+    pub fn source_bytes(&self) -> &[u8] {
+        &self.source[..self.source_len as usize]
+    }
+
+    /// The mount-point path bytes.
+    #[must_use]
+    pub fn target_bytes(&self) -> &[u8] {
+        &self.target[..self.target_len as usize]
+    }
+
+    /// The filesystem-type name bytes.
+    #[must_use]
+    pub fn fstype_bytes(&self) -> &[u8] {
+        &self.fstype[..self.fstype_len as usize]
+    }
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.flags.bits());
+        out[4] = self.source_len;
+        out[5] = self.target_len;
+        out[6] = self.fstype_len;
+        out[8..8 + MOUNT_SOURCE_MAX].copy_from_slice(&self.source);
+        out[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]
+            .copy_from_slice(&self.target);
+        out[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]
+            .copy_from_slice(&self.fstype);
+        out
+    }
+
+    /// Decode `bytes` into a [`MountRecord`].
+    ///
+    /// Returns:
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::OutOfRange`] if the flags word sets a bit outside the
+    ///   known [`MountFlags`] mask, or the reserved pad byte is non-zero.
+    /// * [`Errno::LengthOutOfRange`] if any length byte exceeds its buffer.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[7] != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let flags = MountFlags::from_bits(read_u32(bytes, 0)).map_err(|_| Errno::OutOfRange)?;
+        let source_len = bytes[4];
+        let target_len = bytes[5];
+        let fstype_len = bytes[6];
+        if source_len as usize > MOUNT_SOURCE_MAX
+            || target_len as usize > MOUNT_TARGET_MAX
+            || fstype_len as usize > MOUNT_FSTYPE_MAX
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut source = [0u8; MOUNT_SOURCE_MAX];
+        let mut target = [0u8; MOUNT_TARGET_MAX];
+        let mut fstype = [0u8; MOUNT_FSTYPE_MAX];
+        source.copy_from_slice(&bytes[8..8 + MOUNT_SOURCE_MAX]);
+        target.copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]);
+        fstype.copy_from_slice(&bytes[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]);
+        Ok(Self {
+            flags,
+            source_len,
+            target_len,
+            fstype_len,
+            source,
+            target,
+            fstype,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, KernelMemoryStats, ProcessListRequest, ProcessRecord,
-        ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN,
-        PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX,
-        SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
-        SYSINFO_VERSION_V1,
+        encoded_query_table, spec_for, KernelMemoryStats, MountListRequest, MountRecord,
+        ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
+        MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX,
+        SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
+    use crate::driver::filesystem::MountFlags;
     use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
 
@@ -775,6 +1015,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::HARDWARE_TREE.as_u16(), 3);
         assert_eq!(SysinfoQueryId::SYSTEM_IDENTITY.as_u16(), 4);
         assert_eq!(SysinfoQueryId::UPTIME.as_u16(), 5);
+        assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -831,10 +1072,19 @@ mod tests {
                 .required_capability,
             Some(CapabilityId::SYSINFO_HW)
         );
+        // The mount table is system-wide but secret-free, so it is ungated
+        // like uptime and identity (§16.6).
+        assert_eq!(
+            spec_for(SysinfoQueryId::MOUNT_LIST)
+                .unwrap()
+                .required_capability,
+            None
+        );
         // Privileged queries are audited; self-scoped observers are not.
         assert!(spec_for(SysinfoQueryId::GLOBAL_PROCESS_LIST).unwrap().audit);
         assert!(!spec_for(SysinfoQueryId::SELF_PROCESS_LIST).unwrap().audit);
         assert!(!spec_for(SysinfoQueryId::UPTIME).unwrap().audit);
+        assert!(!spec_for(SysinfoQueryId::MOUNT_LIST).unwrap().audit);
     }
 
     #[test]
@@ -1043,6 +1293,82 @@ mod tests {
         let decoded = SystemIdentity::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, id);
         assert_eq!(decoded.hostname_bytes(), b"rustos-box");
+    }
+
+    #[test]
+    fn mount_list_request_round_trips_and_rejects_reserved() {
+        let req = MountListRequest {
+            offset: 3,
+            limit: 32,
+            flags: 0,
+        };
+        assert_eq!(MountListRequest::WIRE_LEN, 8);
+        assert_eq!(MountListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1; // reserved flag set
+        assert_eq!(MountListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            MountListRequest::from_bytes(&[0u8; 4]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn mount_record_round_trips() {
+        let flags = MountFlags::READ_ONLY
+            .union(MountFlags::NOSUID)
+            .union(MountFlags::NODEV)
+            .union(MountFlags::NOEXEC);
+        let rec = MountRecord::new(b"/Storage/data", b"/Storage/data", b"rustfs", flags).unwrap();
+        assert_eq!(rec.source_bytes(), b"/Storage/data");
+        assert_eq!(rec.target_bytes(), b"/Storage/data");
+        assert_eq!(rec.fstype_bytes(), b"rustfs");
+        assert_eq!(rec.flags(), flags);
+        let decoded = MountRecord::from_bytes(&rec.to_le_bytes()).unwrap();
+        assert_eq!(decoded, rec);
+    }
+
+    #[test]
+    fn mount_record_rejects_overlong_fields() {
+        let long_source = [b's'; MOUNT_SOURCE_MAX + 1];
+        assert_eq!(
+            MountRecord::new(&long_source, b"/", b"rustfs", MountFlags::default()),
+            Err(Errno::LengthOutOfRange)
+        );
+        let long_target = [b't'; MOUNT_TARGET_MAX + 1];
+        assert_eq!(
+            MountRecord::new(b"src", &long_target, b"rustfs", MountFlags::default()),
+            Err(Errno::LengthOutOfRange)
+        );
+        let long_type = [b'x'; MOUNT_FSTYPE_MAX + 1];
+        assert_eq!(
+            MountRecord::new(b"src", b"/", &long_type, MountFlags::default()),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn mount_record_rejects_corrupt_wire() {
+        let rec = MountRecord::new(b"src", b"/", b"rustfs", MountFlags::default()).unwrap();
+        assert_eq!(
+            MountRecord::from_bytes(&[0u8; 8]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Unknown flag bit outside KNOWN_MASK.
+        let mut bytes = rec.to_le_bytes();
+        bytes[0] = 0xFF;
+        assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        // Reserved pad byte non-zero.
+        let mut bytes = rec.to_le_bytes();
+        bytes[7] = 1;
+        assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+        // A length byte beyond its buffer.
+        let mut bytes = rec.to_le_bytes();
+        bytes[4] = u8::try_from(MOUNT_SOURCE_MAX + 1).unwrap();
+        assert_eq!(
+            MountRecord::from_bytes(&bytes),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 
     #[test]

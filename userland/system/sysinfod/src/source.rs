@@ -10,7 +10,7 @@
 //! two keeps the security-relevant code free of any particular kernel
 //! plumbing.
 
-use rustos_abi::sysinfo::{KernelMemoryStats, ProcessRecord, SystemIdentity, Uptime};
+use rustos_abi::sysinfo::{KernelMemoryStats, MountRecord, ProcessRecord, SystemIdentity, Uptime};
 use rustos_abi::{CapabilityQuery, Errno};
 
 /// The authenticated principal on whose behalf a request is served.
@@ -81,4 +81,13 @@ pub trait SysinfoSource {
 
     /// Return system uptime and boot wall-clock time.
     fn uptime(&self, caller: &Caller<'_>) -> Result<Uptime, Errno>;
+
+    /// Return the current mount table.
+    ///
+    /// The mount table is system-wide and secret-free, so the query is
+    /// ungated (`AGENTS.md` §16.6): unlike [`process_records`](Self::process_records)
+    /// there is no per-principal scope to narrow. As with the process list
+    /// the slice is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn mount_records(&self, caller: &Caller<'_>) -> Result<&[MountRecord], Errno>;
 }

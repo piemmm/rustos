@@ -26,8 +26,8 @@
 //! so it runs once regardless of the budget.
 
 use rustos_abi::sysinfo::{
-    KernelMemoryStats, ProcessListRequest, ProcessRecord, SysinfoRequestHeader, SystemIdentity,
-    Uptime,
+    KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+    SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::{IpcMessageHeader, ManifestHeader};
@@ -85,6 +85,16 @@ fn exercise(bytes: &[u8]) {
         let redecoded = ProcessListRequest::from_bytes(&req.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(req, redecoded);
+    }
+    if let Ok(req) = MountListRequest::from_bytes(bytes) {
+        let redecoded = MountListRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = MountRecord::from_bytes(bytes) {
+        let redecoded = MountRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
     }
     if let Ok(rec) = ProcessRecord::from_bytes(bytes) {
         let redecoded = ProcessRecord::from_bytes(&rec.to_le_bytes())
