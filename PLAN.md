@@ -4019,9 +4019,30 @@ device list.
   `panic!` in production paths. Audit `EventId` range `9000..10000`. 17
   unit tests; docs `docs/src/userland/init.md` (+ SUMMARY link) and the
   crate `README.md`.
-- Remaining Stage 6 deliverables (`shell`, `login`, the core CLI
-  utilities, and the `.app` bundle / dynamic-loader policy) are not yet
-  started.
+- **Default shell (`userland/shell/shell`) — DONE.** `rustos-shell` is a
+  POSIX-ish command interpreter: `lexer::tokenize` turns a line into a
+  quoting- and escape-aware token stream, `parser::parse` builds a
+  `CommandList` of pipelines joined by the `;`/`&&`/`||`/`&` connectors,
+  `env::Environment::expand_word` performs `$NAME`/`${NAME}`/`$?`
+  expansion, and `Shell::run_line` runs each entry — honouring the
+  connector run-conditions and the background flag — dispatching the
+  in-process builtins (`cd`, `pwd`, `exit`, `export`, `unset`, `echo`,
+  `jobs`, `fg`, `bg`, `help`) or launching externals, with a `JobTable`
+  tracking background/stopped jobs and reporting finished ones before the
+  next prompt. The two outside-world operations are the injected
+  `ProcessHost`/`Console` seams (mirroring `init`'s `Spawner`/`Reaper`),
+  so every parsing, expansion, and control-flow decision is testable
+  without a kernel; host failures flow back as the stable `rustos_abi`
+  `Errno`, so the shell invents no parallel error set (`AGENTS.md` §2.2).
+  A line that will not lex/parse/expand is a `ParseError` that runs
+  nothing and sets `$?` to 2; a command that will not launch is an
+  ordinary non-zero status (127), never a panic and never a line abort
+  (`AGENTS.md` §2.9). `no_std` (with `alloc`), depends only on
+  `rustos-abi` (`AGENTS.md` §17.4); no `unsafe`, no `unwrap`/`expect`/
+  `panic!` in production paths. 60 unit tests; docs
+  `docs/src/userland/shell.md` (+ SUMMARY link) and the crate `README.md`.
+- Remaining Stage 6 deliverables (`login`, the core CLI utilities, and
+  the `.app` bundle / dynamic-loader policy) are not yet started.
 
 ---
 

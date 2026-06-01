@@ -1,6 +1,6 @@
 [package]
 name = "rustos-shell"
-description = "RustOS placeholder: default RustOS shell."
+description = "RustOS default shell: a POSIX-ish command interpreter with quoting, variable expansion, pipelines, redirections, sequencing, and job control (Stage 6 — `PLAN.md`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The frozen `abi-v1` surface. The shell's process-host seam reports failures
+# as the stable `Errno`, so the same error vocabulary the kernel returns
+# flows back to the user verbatim — the shell invents no parallel error set
+# (§2.2).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

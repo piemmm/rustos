@@ -739,6 +739,9 @@ version = "0.0.0"
 [[package]]
 name = "rustos-shell"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-sync"
