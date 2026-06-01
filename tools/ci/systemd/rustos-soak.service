@@ -1,8 +1,8 @@
 # systemd service — RustOS nightly 24 h soaks (parallel).
 #
-# Runs tools/ci/soak.sh, which fans every §19.6 fuzz harness and §19.7
-# proptest model out into a parallel process sharing one 24 h wall clock.
-# Pair it with rustos-soak.timer.
+# Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
+# proptest model, and the §7 repeated-test matrix out into parallel processes
+# sharing one 24 h wall clock. Pair it with rustos-soak.timer.
 #
 # Install (user unit; see rustos-ci.service for the full sequence):
 #
@@ -15,7 +15,7 @@
 # disabled. Edit the absolute ExecStart path to match your checkout.
 
 [Unit]
-Description=RustOS nightly soaks (cargo xtask fuzz/proptest --soak, parallel)
+Description=RustOS nightly soaks (fuzz/proptest/test --soak, parallel)
 After=network-online.target
 Wants=network-online.target
 
@@ -23,4 +23,4 @@ Wants=network-online.target
 Type=oneshot
 TimeoutStartSec=infinity
 Environment=RUSTOS_CI_SYNC=1
-ExecStart=%h/RustroverProjects/rustos/tools/ci/soak.sh
+ExecStart=%h/RustroverProjects/rustos/tools/ci/soak.sh all

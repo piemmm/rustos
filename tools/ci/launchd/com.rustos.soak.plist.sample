@@ -2,8 +2,9 @@
 <!--
   launchd LaunchAgent — RustOS nightly 24 h soaks (parallel).
 
-  Runs tools/ci/soak.sh, which fans every §19.6 fuzz harness and §19.7
-  proptest model out into a parallel process. Install with:
+  Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
+  proptest model, and the §7 repeated-test matrix out into parallel
+  processes. Install with:
 
     cp tools/ci/launchd/com.rustos.soak.plist.sample \
        ~/Library/LaunchAgents/com.rustos.soak.plist
@@ -22,6 +23,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/ianhawkins/RustroverProjects/rustos/tools/ci/soak.sh</string>
+        <string>all</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

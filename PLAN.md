@@ -73,11 +73,13 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - CI definition `.github/workflows/ci.yml` runs `cargo xtask ci` on every
   push and pull request on a GitHub-hosted `ubuntu-latest` runner, with
   cargo + xtask-helper-tool caches.
-- `.github/workflows/soak.yml` runs the nightly 24 h soaks (`tools/ci/soak.sh`)
-  on a **self-hosted Linux** runner (`[self-hosted, linux]`) — a 24 h job
-  exceeds the GitHub-hosted per-job time cap — and uploads the per-job soak
-  logs as a build artifact. `tools/ci/github-runner/README.md` documents
-  registering and installing that runner as a systemd service.
+- `.github/workflows/soak.yml` runs the nightly 24 h soaks
+  (`tools/ci/soak.sh all`: §19.6 fuzz, §19.7 proptest, and the §7
+  repeated-test matrix) on a **self-hosted Linux** runner
+  (`[self-hosted, linux]`) — a 24 h job exceeds the GitHub-hosted per-job
+  time cap — and uploads the per-job soak logs as a build artifact.
+  `tools/ci/github-runner/README.md` documents registering and installing
+  that runner as a systemd service.
 - `tools/ci/` holds the build-host orchestration scripts (`lib.sh`,
   `ci-run.sh`, `soak.sh`) plus scheduler samples for every supported host —
   `crontab.sample` (cron), `systemd/*.{service,timer}` (Linux),
@@ -85,8 +87,9 @@ Do **not** begin a stage before all its listed dependencies are complete.
   Actions runner) — and a `README.md`. They are thin
   wrappers over `cargo xtask`: `ci-run.sh` logs one subcommand run (default
   `ci`), and `soak.sh` fans the §19.6 fuzz harnesses and §19.7 proptest
-  models out into parallel `--soak --target` jobs so the nightly is not
-  `(harnesses+models) x 24 h` serialised. The scripts are portable `bash`
+  models out into parallel `--soak --target` jobs — plus, with `all`, the
+  §7 repeated-test soak (`cargo xtask test --qemu --soak`) — so the nightly
+  is not `(harnesses+models) x 24 h` serialised. The scripts are portable `bash`
   (POSIX utilities only) and put `${CARGO_HOME:-~/.cargo}/bin` on `PATH`, so
   they run identically on Linux and macOS. Logs land outside the tree (§3);
   no pipeline step lives in the scripts (§15).

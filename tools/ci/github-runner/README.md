@@ -12,12 +12,13 @@ There are two CI workloads, and they want different runners:
 | Workload | Workflow | Runner | Why |
 |----------|----------|--------|-----|
 | Per-PR / per-push gate (`cargo xtask ci`) | `.github/workflows/ci.yml` | GitHub-hosted `ubuntu-latest` | Free, ephemeral, finishes well inside the hosted time cap. |
-| Nightly 24 h soaks (§19.6 fuzz, §19.7 proptest) | `.github/workflows/soak.yml` | **self-hosted `[self-hosted, linux]`** | A 24 h job exceeds the GitHub-hosted per-job time cap; it must run on a machine we own. |
+| Nightly 24 h soaks (§19.6 fuzz, §19.7 proptest, §7 repeated tests) | `.github/workflows/soak.yml` | **self-hosted `[self-hosted, linux]`** | A 24 h job exceeds the GitHub-hosted per-job time cap; it must run on a machine we own. |
 
-`soak.yml` runs `tools/ci/soak.sh`, which fans every fuzz harness and proptest
-model out into parallel `--soak` processes sharing one 24 h wall clock. That is
-the same script a standalone cron/systemd/launchd builder runs, so this runner
-and a standalone builder produce equivalent results.
+`soak.yml` runs `tools/ci/soak.sh all`, which fans every fuzz harness, proptest
+model, and the §7 repeated-test matrix out into parallel `--soak` processes
+sharing one 24 h wall clock. That is the same script a standalone
+cron/systemd/launchd builder runs, so this runner and a standalone builder
+produce equivalent results.
 
 ## Labels
 

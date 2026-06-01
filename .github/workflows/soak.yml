@@ -1,6 +1,10 @@
 name: soak
 
-# Nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest).
+# Nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest, and the §7
+# repeated-test soak). The default `all` runs every fuzz harness, every
+# proptest model, and the whole test matrix in parallel, each for 24 h: a
+# flake too rare to surface in the per-PR 100× test run still gets a full
+# night of exposure.
 #
 # These cannot run on GitHub-hosted runners: a hosted job is hard-capped well
 # below 24 h. They therefore run on a *self-hosted Linux runner* (see
@@ -19,8 +23,8 @@ on:
       kind:
         description: "Which soaks to run"
         type: choice
-        default: both
-        options: [both, fuzz, proptest]
+        default: all
+        options: [all, both, fuzz, proptest, test]
       secs:
         description: "Per-job budget override in seconds (blank = 24 h default; use a small value for a smoke run)"
         type: string
@@ -63,7 +67,7 @@ jobs:
           # below so a failing reproducer can be pulled off the run.
           RUSTOS_CI_LOGDIR: ${{ runner.temp }}/rustos-soak-logs
         run: |
-          KIND="${{ github.event.inputs.kind || 'both' }}"
+          KIND="${{ github.event.inputs.kind || 'all' }}"
           SECS="${{ github.event.inputs.secs }}"
           if [ -n "$SECS" ]; then
             tools/ci/soak.sh "$KIND" --secs "$SECS"

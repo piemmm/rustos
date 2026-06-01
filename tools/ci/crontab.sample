@@ -23,9 +23,9 @@ SHELL=/bin/bash
 # Full per-PR gate (AGENTS.md §7) every 30 minutes.
 */30 * * * *  RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh ci
 
-# Nightly 24 h soaks — every §19.6 fuzz harness and §19.7 proptest model in
-# parallel. One invocation; soak.sh fans the registries out.
-0 2 * * *     RUSTOS_CI_SYNC=1 $REPO/tools/ci/soak.sh
+# Nightly 24 h soaks — every §19.6 fuzz harness, §19.7 proptest model, and the
+# §7 repeated-test matrix in parallel. One invocation; soak.sh fans them out.
+0 2 * * *     RUSTOS_CI_SYNC=1 $REPO/tools/ci/soak.sh all
 
 # Nightly headless Tier-1 builds (AGENTS.md §17.5) — the headless image must
 # keep building for every Tier-1 target.

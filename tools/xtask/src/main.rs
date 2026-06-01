@@ -9,7 +9,11 @@
 //! ## Commands
 //!
 //! - `build`        — `cargo build --workspace --all-targets`
-//! - `test`         — `cargo test --workspace --all-targets`
+//! - `test`         — `cargo test --workspace --all-targets`; `--count N`
+//!   (alias `--iterations N`) repeats the whole matrix N times to surface
+//!   flaky tests (§7), defaulting to one run; `--soak` (tuned by `--secs N`)
+//!   instead repeats it for a wall-clock budget (24 h by default), which the
+//!   nightly `soak` workflow uses to run the tests repeatedly for 24 h
 //! - `clippy`       — `cargo clippy --workspace --all-targets -- -D warnings`
 //! - `fmt`          — `cargo fmt --all -- --check` (pass `--fix` to apply)
 //! - `docs-check`   — rustdoc (deny warnings) + mdBook build + link check
@@ -33,9 +37,10 @@
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
-//!   `clippy`, `deps-check`, `cfg-check`, `test`, `docs-check`,
-//!   `cargo deny check`, `supply-chain`, `fuzz --quick`, `proptest --quick`,
-//!   `model-check`, `spec-review`, `abi-check`
+//!   `clippy`, `deps-check`, `cfg-check`, `test` (run 100× to catch flaky
+//!   tests, §7), `docs-check`, `cargo deny check`, `supply-chain`,
+//!   `fuzz --quick`, `proptest --quick`, `model-check`, `spec-review`,
+//!   `abi-check`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and

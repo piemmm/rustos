@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# soak.sh — run the nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest)
-# with every harness and model running IN PARALLEL, one log per job.
+# soak.sh — run the nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest,
+# and the §7 repeated-test soak) with every harness, model, and the test
+# matrix running IN PARALLEL, one log per job.
 #
 # `cargo xtask fuzz --soak` and `cargo xtask proptest --soak` run their
 # registries sequentially, so the full nightly would otherwise take
@@ -9,17 +10,26 @@
 # target, all sharing the single 24 h wall-clock budget. The registries stay
 # the single source of truth — this script never hard-codes the target list.
 #
-# Usage:
-#   tools/ci/soak.sh [fuzz|proptest] [--sequential] [--secs N] [--dry-run]
+# `cargo xtask test --soak` is the §7 counterpart: it repeats the whole test
+# matrix for the same 24 h budget so a flake too rare to surface in the
+# per-PR 100x run still gets a full night of exposure. It is a single job
+# (the matrix is one unit), launched alongside the fuzz/proptest fan-out.
 #
-#   (no kind)      run both the fuzz and proptest soaks
+# Usage:
+#   tools/ci/soak.sh [fuzz|proptest|test|both|all] [--sequential] \
+#                    [--secs N] [--dry-run]
+#
+#   (no kind)      same as `both`: the §19.6 fuzz and §19.7 proptest soaks
 #   fuzz           run only the §19.6 fuzz harnesses
 #   proptest       run only the §19.7 proptest models
+#   test           run only the §7 repeated-test soak
+#   both           run the fuzz and proptest soaks
+#   all            run fuzz, proptest, and the repeated-test soak
 #   --sequential   run jobs one at a time (default is parallel)
 #   --secs N       override the per-job budget (for smoke runs; CI uses 24 h)
 #   --dry-run      print the planned jobs and exit without running anything
 #
-# Exit status is non-zero if any job fails — §19.6/§19.7 fail closed.
+# Exit status is non-zero if any job fails — §7/§19.6/§19.7 fail closed.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,8 +43,8 @@ secs=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        fuzz | proptest) kind="$1" ;;
-        both) kind="both" ;;
+        fuzz | proptest | test) kind="$1" ;;
+        both | all) kind="$1" ;;
         --sequential) sequential=1 ;;
         --dry-run) dry_run=1 ;;
         --secs)
@@ -44,7 +54,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             echo "soak: unexpected argument '$1'" >&2
-            echo "usage: soak.sh [fuzz|proptest] [--sequential] [--secs N] [--dry-run]" >&2
+            echo "usage: soak.sh [fuzz|proptest|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
             exit 2
             ;;
     esac
@@ -75,10 +85,11 @@ enumerate() {
     cargo xtask "$1" --list | awk 'NF { print $1 }'
 }
 
-# launch <label> <xtask-subcommand> <target>: start (or, when --sequential,
-# run) one soak job, logging to "$soak_dir/<label>.log".
-launch() {
-    local label="$1" subcmd="$2" target="$3"
+# launch_raw <label> <xtask-args...>: start (or, when --sequential, run) one
+# `cargo xtask <args...>` job, logging to "$soak_dir/<label>.log".
+launch_raw() {
+    local label="$1"
+    shift
     local logf="$soak_dir/$label.log"
     echo "soak: $label -> $logf"
     job_labels+=("$label")
@@ -88,25 +99,37 @@ launch() {
     fi
     if [ "$sequential" -eq 1 ]; then
         local rc=0
-        cargo xtask "$subcmd" --soak --target "$target" \
-            ${budget_args[@]+"${budget_args[@]}"} >"$logf" 2>&1 || rc=$?
+        cargo xtask "$@" >"$logf" 2>&1 || rc=$?
         job_pids+=("done:$rc")
     else
-        cargo xtask "$subcmd" --soak --target "$target" \
-            ${budget_args[@]+"${budget_args[@]}"} >"$logf" 2>&1 &
+        cargo xtask "$@" >"$logf" 2>&1 &
         job_pids+=("$!")
     fi
 }
 
-if [ "$kind" = "both" ] || [ "$kind" = "fuzz" ]; then
+# launch <label> <xtask-subcommand> <target>: a fuzz/proptest soak job for one
+# registry target, sharing the per-job budget.
+launch() {
+    local label="$1" subcmd="$2" target="$3"
+    launch_raw "$label" "$subcmd" --soak --target "$target" \
+        ${budget_args[@]+"${budget_args[@]}"}
+}
+
+if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "fuzz" ]; then
     while IFS= read -r t; do
         [ -n "$t" ] && launch "fuzz-$t" fuzz "$t"
     done < <(enumerate fuzz)
 fi
-if [ "$kind" = "both" ] || [ "$kind" = "proptest" ]; then
+if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
     while IFS= read -r m; do
         [ -n "$m" ] && launch "proptest-$m" proptest "$m"
     done < <(enumerate proptest)
+fi
+# The §7 repeated-test soak: one job that repeats the whole test matrix
+# (host + the bare-metal QEMU verticals) for the per-job budget. `cargo xtask
+# test` owns the repeat loop, so the budget covers the matrix as a unit.
+if [ "$kind" = "all" ] || [ "$kind" = "test" ]; then
+    launch_raw "test" test --qemu --soak ${budget_args[@]+"${budget_args[@]}"}
 fi
 
 if [ "$dry_run" -eq 1 ]; then

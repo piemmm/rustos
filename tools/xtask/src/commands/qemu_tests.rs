@@ -588,12 +588,26 @@ const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// `Spec::for_aarch64_kernel` constructor in [`run_one`].
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
-/// Build and execute every enrolled QEMU test. Returns the first failure.
-pub fn run_all(ctx: &Context) -> Result<(), String> {
+/// Build every enrolled QEMU test once.
+///
+/// Call this before the (possibly repeated) [`run_once`] passes so a soak
+/// re-runs the binaries rather than rebuilding them each pass (`AGENTS.md`
+/// §7's no-flaky-tests rule: the value of repetition is in the *runs*).
+pub fn build_all(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
-
     for t in TESTS {
         build_one(ctx, t)?;
+    }
+    Ok(())
+}
+
+/// Execute every enrolled QEMU test once. Returns the first failure.
+///
+/// The caller ([`super::run_test`]) owns the repeat loop so a duration
+/// budget covers the whole matrix as a unit; this runs exactly one pass and
+/// never retries on failure (`AGENTS.md` §7).
+pub fn run_once(ctx: &Context) -> Result<(), String> {
+    for t in TESTS {
         run_one(ctx, t)?;
     }
     Ok(())

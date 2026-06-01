@@ -23,7 +23,7 @@ rules, it points to them.
 | `clippy`      | `cargo clippy --workspace --all-targets -- -D warnings`     |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
-| `test`        | `cargo test --workspace --all-targets`                      |
+| `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run 100× to catch flaky tests ([§7][test]) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
@@ -38,3 +38,4 @@ release flows; they are documented by `cargo xtask --help`.
 [modularity]: ./architecture/modularity.md
 [sc]: ./security/supply_chain.md
 [fz]: ./security/fuzzing.md
+[test]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md

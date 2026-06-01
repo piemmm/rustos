@@ -27,9 +27,13 @@ const WASM_ARTIFACT: &str = "rustos_test_kernel_arch_boot_wasm32.wasm";
 /// Harness runner, workspace-relative.
 const HARNESS: &str = "tests/integration/kernel_arch_boot_wasm32/web/harness.mjs";
 
-/// Build and run the wasm32 browser-headless vertical.
-pub fn run_all(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [test --wasm] building + running the wasm32 boot vertical");
+/// Check the browser toolchain is present and build the wasm32 module once.
+///
+/// Call this before the (possibly repeated) [`run_once`] passes. A host
+/// lacking `node` fails loudly here rather than skipping (`AGENTS.md` §7 —
+/// never silently skip a test).
+pub fn prepare(ctx: &Context) -> Result<(), String> {
+    eprintln!("xtask: [test --wasm] building the wasm32 boot vertical");
 
     if !node_available() {
         return Err(
@@ -38,7 +42,14 @@ pub fn run_all(ctx: &Context) -> Result<(), String> {
         );
     }
 
-    build(ctx)?;
+    build(ctx)
+}
+
+/// Run the wasm32 boot harness once.
+///
+/// The caller ([`super::run_test`]) owns the repeat loop so a duration
+/// budget covers the whole matrix as a unit; this runs exactly one pass.
+pub fn run_once(ctx: &Context) -> Result<(), String> {
     run_harness(ctx)
 }
 
