@@ -70,6 +70,7 @@
 - [Networking service](./userland/net_icmp.md)
 - [Default shell](./userland/shell.md)
 - [Text login](./userland/login.md)
+- [Core CLI utilities](./userland/utilities.md)
 
 # ABI
 

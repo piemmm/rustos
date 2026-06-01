@@ -74,6 +74,7 @@ members = [
     "userland/system/installer",
     "userland/session/login",
     "userland/shell/shell",
+    "userland/shell/sysinfo",
     "userland/gui/wm",
     "userland/gui/iconbar",
     "userland/net/icmp",

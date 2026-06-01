@@ -4069,8 +4069,34 @@ device list.
   production paths. Audit `EventId` range `10000..11000`. 17 unit tests;
   docs `docs/src/userland/login.md` (+ SUMMARY link) and the crate
   `README.md`.
-- Remaining Stage 6 deliverables (the core CLI utilities and the `.app`
-  bundle / dynamic-loader policy) are not yet started.
+- **`sysinfo` CLI (`userland/shell/sysinfo`) — DONE.** `rustos-sysinfo`
+  is the single command-line tool that exposes the System Information API
+  to the terminal (`AGENTS.md` §16.6): it is a *client* of the
+  `sysinfo-v1` ABI served by `sysinfod`, not a `/proc`/`/sys` reader, and
+  there is no privileged path bypassing the capability check. `run` turns
+  one parsed `Command` (`processes [--all]`, `memory`, `hardware`,
+  `identity`, `uptime`, `help`, with short aliases) into a typed
+  `SysinfoRequestHeader` + payload, issues it through the injected
+  `Transport` seam, decodes the typed reply with the ABI's fail-closed
+  `from_bytes` decoders, and renders one line per row to the injected
+  `Output` seam — paging the process list with `offset`/`limit` until a
+  short page ends it. It **fails closed**: a capability denial comes back
+  as `Errno::PermissionDenied` and renders as `SysinfoError::PermissionDenied`
+  (no parallel policy, §2.2); an unknown subcommand/flag/stray argument is
+  a `SysinfoError::Usage` that issues no query; a reply that does not
+  decode against `sysinfo-v1` is a hard `SysinfoError::Service` error,
+  never a partial guess. The hardware-tree wire format is owned by
+  `lib/abi` §18 and not built yet, so `hardware` honestly reports the
+  byte length rather than faking a decode (§2.1). `no_std` (with `alloc`),
+  depends only on `rustos-abi` (§17.4); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. 19 unit tests (7 parser
+  + 12 request/render against an in-memory `sysinfod` stand-in); docs
+  `docs/src/userland/utilities.md` (+ SUMMARY link) and the crate
+  `README.md`.
+- Remaining Stage 6 deliverables (the rest of the core CLI utilities —
+  `ls`, `cp`, `mv`, `rm`, `cat`, `ps`, `mount`, `chmod`, `chown`,
+  `useradd`, `groupadd`, `setcap`, `getcap` — and the `.app` bundle /
+  dynamic-loader policy) are not yet started.
 
 ---
 
