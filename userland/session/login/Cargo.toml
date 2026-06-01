@@ -1,6 +1,6 @@
 [package]
 name = "rustos-login"
-description = "RustOS placeholder: text and graphical login."
+description = "RustOS text login: authenticates against kernel/sec and launches a text or graphical session (Stage 6 — `PLAN.md`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,13 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The frozen `abi-v1` surface: login reports terminal and authentication
+# failures as the stable `Errno`, so it invents no parallel error set (§2.2).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# Capability primitives: an authenticated user carries the capability ceiling
+# kernel/sec granted it, handed to the session at launch (§5.2).
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# Structured audit logging for every security-relevant login decision (§19.4).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

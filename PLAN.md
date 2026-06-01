@@ -4041,8 +4041,36 @@ device list.
   `rustos-abi` (`AGENTS.md` §17.4); no `unsafe`, no `unwrap`/`expect`/
   `panic!` in production paths. 60 unit tests; docs
   `docs/src/userland/shell.md` (+ SUMMARY link) and the crate `README.md`.
-- Remaining Stage 6 deliverables (`login`, the core CLI utilities, and
-  the `.app` bundle / dynamic-loader policy) are not yet started.
+- **Text login (`userland/session/login`) — DONE.** `rustos-login`
+  authenticates a user against `kernel/sec` and launches a session on
+  their behalf (`AGENTS.md` §10). `Login::run` repeats a bounded,
+  **fail-closed** loop: prompt for a username (echoed) and password
+  (un-echoed via the `Prompt::read_secret` seam, §5), verify the
+  `Credentials` through the injected `Authenticator` (which checks the
+  password against the stored hash with `lib/crypto`'s constant-time
+  primitives — login never sees the hash), and on success choose a
+  session (text by default; graphical offered only when a display driver
+  and the window manager are present, §10) and hand the authenticated
+  identity to the `SessionLauncher`. A rejected attempt is audited and
+  consumes one try; an exhausted budget launches nothing
+  (`LoginError::TooManyAttempts`), a dead console aborts
+  (`LoginError::Console`), and a refused session launch returns
+  (`LoginError::SessionLaunch`). The `Authenticator` returns the same
+  error whether the account is unknown or the password is wrong, and
+  login never discloses the cause, so the prompt cannot probe for valid
+  usernames (§5). A successful authentication yields an
+  `AuthenticatedUser` `(uid, primary gid, supplementary gids, capability
+  grants)` whose capability ceiling login hands to the launcher verbatim
+  and never widens (§4, §5.2). The three outside-world operations are the
+  injected `Prompt`/`Authenticator`/`SessionLauncher` seams (mirroring
+  `init`'s `Spawner`/`Reaper`), so the policy is testable without a
+  kernel. `no_std` (with `alloc`), deps only `rustos-abi`/`rustos-caps`/
+  `rustos-log` (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths. Audit `EventId` range `10000..11000`. 17 unit tests;
+  docs `docs/src/userland/login.md` (+ SUMMARY link) and the crate
+  `README.md`.
+- Remaining Stage 6 deliverables (the core CLI utilities and the `.app`
+  bundle / dynamic-loader policy) are not yet started.
 
 ---
 

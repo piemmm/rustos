@@ -724,6 +724,11 @@ dependencies = [
 [[package]]
 name = "rustos-login"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-log",
+]
 
 [[package]]
 name = "rustos-net-icmp"

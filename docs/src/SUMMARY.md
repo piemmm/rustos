@@ -69,6 +69,7 @@
 - [System Information service](./userland/sysinfod.md)
 - [Networking service](./userland/net_icmp.md)
 - [Default shell](./userland/shell.md)
+- [Text login](./userland/login.md)
 
 # ABI
 
