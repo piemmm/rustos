@@ -1,0 +1,17 @@
+[package]
+name = "rustos-geometry"
+description = "RustOS shared integer screen geometry (points and rectangles) for the window manager, taskbar, and graphical apps (§6, §17.4 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies on purpose: this crate is the bottom of the §17.4
+# layering. The compositing colour algebra lives in `userland/gui/wm`; this
+# crate owns only the coordinate types the GUI crates share, so it is
+# depended on, never depends.

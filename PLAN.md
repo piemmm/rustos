@@ -4556,12 +4556,48 @@ device list.
   - 13 unit tests (+ a doctest); docs `docs/src/desktop/theming.md`
     (+ SUMMARY) and the crate `README.md` (tier `experimental`).
     `userland/gui/wm` is its first consumer.
+- **Shared geometry library — DONE (increment).** `lib/geometry`
+  (`rustos-geometry`, `no_std`, **zero dependencies**, `Layer::Lib`) now
+  owns the `Point`/`Rect` coordinate types. They were defined in
+  `userland/gui/wm`, but the taskbar and the default apps need the same
+  vocabulary and may not depend on the window manager (§17.4); per §6/§2.2
+  the shared types belong in `lib/*`. `rustos-wm` now re-exports them
+  (behaviour-neutral; its `geometry` module is a one-line re-export), so
+  there is exactly one definition. Added to `AGENTS.md` §3's `lib/` list
+  and the workspace manifest. 7 geometry unit tests; `rustos-wm` keeps its
+  43 compositor tests.
+- **Taskbar layout + model — DONE (increment).** `userland/gui/taskbar`
+  (`rustos-taskbar`, `no_std`+`alloc`, deps only `lib/geometry` +
+  `lib/theme`, `Layer::UserGui`, §17.4) is the GNOME/Windows-style bar
+  pinned to a configured screen edge (§10):
+  - **Layout** (`TaskbarConfig` + `BarLayout::compute`): start button at
+    the leading end, running-task list in the middle, notification-icon
+    area packed before a trailing clock; horizontal or vertical depending
+    on the `Edge`. All arithmetic saturates — a degenerate screen fails
+    closed *inside* the bar (§2.9), and a slot that doesn't fit is
+    `Rect::EMPTY` and never hit.
+  - **Hit-testing** (`BarLayout::hit_test → Hit`) for input routing.
+  - **Start menu** (`StartMenu`): session controls only (log out, lock,
+    shut down, restart); shaped so launcher entries arrive later as a new
+    `MenuAction` variant without changing the list/activate interface
+    (§2.4). Fail-closed `activate` (§5.4/§2.9).
+  - **Task list** (`TaskList`): one entry per top-level window with the
+    click-to-activate / minimise-restore rule reported via
+    `ActivateOutcome`; **notification area** (`NotificationArea`).
+  - **Rounded edges via the WM path (§2.2):** the taskbar draws no corners
+    itself; `BarLayout::corner_radius` carries the theme's
+    `taskbar_corner_radius` and the WM rounds the bar with the same
+    `Corners::from_radius` path it uses for windows. `Taskbar::apply_theme`
+    switches it at runtime.
+  - 20 headless unit tests; no `unsafe`, no `unwrap`/`expect`/`panic!` in
+    production paths. Docs `docs/src/desktop/taskbar.md` (+ SUMMARY) and the
+    crate `README.md`.
 - **Still to do this stage:** GPU-accelerated compositor path, input
-  routing (focus, click-to-activate, drag-and-drop), the
-  `userland/gui/taskbar` (start menu + session controls, task list,
-  clock + notification area, rounded edges via the WM path), wiring the
-  theme through the taskbar + default apps and the themed cursor *assets*,
-  and the default filesystem-browser and terminal-emulator apps.
+  routing (focus, click-to-activate, drag-and-drop) and wiring the taskbar
+  hit-test/model to live window-manager events, taskbar pixel rendering
+  into a WM surface, wiring the theme colours/fonts through the taskbar +
+  default apps and the themed cursor *assets*, and the default
+  filesystem-browser and terminal-emulator apps.
 
 ---
 

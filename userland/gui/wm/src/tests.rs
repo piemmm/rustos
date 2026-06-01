@@ -152,44 +152,9 @@ fn unpremultiply_transparent_is_transparent() {
     assert_eq!(Pixel::TRANSPARENT.unpremultiply(), Color::TRANSPARENT);
 }
 
-// ---- geometry --------------------------------------------------------
-
-#[test]
-fn rect_intersection_overlap() {
-    let a = Rect::new(0, 0, 4, 4);
-    let b = Rect::new(2, 2, 4, 4);
-    assert_eq!(a.intersection(&b), Rect::new(2, 2, 2, 2));
-}
-
-#[test]
-fn rect_intersection_disjoint_is_empty() {
-    let a = Rect::new(0, 0, 2, 2);
-    let b = Rect::new(5, 5, 2, 2);
-    assert!(a.intersection(&b).is_empty());
-}
-
-#[test]
-fn rect_union_with_empty_is_other() {
-    let r = Rect::new(1, 2, 3, 4);
-    assert_eq!(Rect::EMPTY.union(&r), r);
-    assert_eq!(r.union(&Rect::EMPTY), r);
-}
-
-#[test]
-fn rect_union_covers_both() {
-    let a = Rect::new(0, 0, 2, 2);
-    let b = Rect::new(4, 4, 2, 2);
-    assert_eq!(a.union(&b), Rect::new(0, 0, 6, 6));
-}
-
-#[test]
-fn rect_contains_is_half_open() {
-    let r = Rect::new(0, 0, 2, 2);
-    assert!(r.contains(Point::new(0, 0)));
-    assert!(r.contains(Point::new(1, 1)));
-    assert!(!r.contains(Point::new(2, 0)));
-    assert!(!r.contains(Point::new(0, 2)));
-}
+// The `Point`/`Rect` primitives are unit-tested in their own crate
+// (`lib/geometry`); the compositor tests below exercise how the window
+// manager *uses* them (damage, z-order, hit-testing).
 
 // ---- rounded corners -------------------------------------------------
 

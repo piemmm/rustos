@@ -142,6 +142,8 @@ rustos/
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
+│   ├── geometry/        # Shared integer screen geometry (Point/Rect) for
+│   │                    #   the WM, taskbar, and graphical apps (§17.4).
 │   ├── log/             # Structured logging.
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).

@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared integer screen geometry (§6, §17.4): `Point`/`Rect` are defined
+# once in `lib/geometry` and re-exported here, so the taskbar and apps — which
+# may not depend on the window manager — reuse the same vocabulary (§2.2).
+rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The shared desktop theme definition (§10): the compositor sources its
 # root background colour, and windows their corner radii, from the active
 # theme. `lib/theme` is the single source the taskbar and apps read too, so

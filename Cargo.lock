@@ -648,6 +648,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-geometry"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-getcap"
 version = "0.0.0"
 dependencies = [
@@ -946,6 +950,10 @@ dependencies = [
 [[package]]
 name = "rustos-taskbar"
 version = "0.0.0"
+dependencies = [
+ "rustos-geometry",
+ "rustos-theme",
+]
 
 [[package]]
 name = "rustos-test-drvhost-qemu"
@@ -1351,6 +1359,7 @@ name = "rustos-wm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-geometry",
  "rustos-theme",
 ]
 

@@ -1,12 +1,22 @@
 [package]
 name = "rustos-taskbar"
-description = "RustOS placeholder: traditional desktop taskbar."
+description = "RustOS traditional desktop taskbar: edge-pinned layout, start menu with session controls, running-task list, and notification area + clock (§10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[dependencies]
+# Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
+# window manager uses, lifted to `lib/*` so the taskbar reuses it without
+# depending on the window manager (§17.4, §2.2).
+rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The single shared theme definition (§10): the taskbar takes its corner
+# radius (and, in later increments, colours/fonts) from the active theme so
+# it stays consistent with the window manager and apps.
+rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 
 [lints]
 workspace = true

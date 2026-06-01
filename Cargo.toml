@@ -35,6 +35,7 @@ members = [
     "lib/caps",
     "lib/collections",
     "lib/crypto",
+    "lib/geometry",
     "lib/log",
     "lib/procinfo",
     "lib/sync",
