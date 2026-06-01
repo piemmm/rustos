@@ -73,13 +73,16 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - CI definition `.github/workflows/ci.yml` runs `cargo xtask ci` on every
   push and pull request, with cargo + xtask-helper-tool caches.
 - `tools/ci/` holds the build-host orchestration scripts (`lib.sh`,
-  `ci-run.sh`, `soak.sh`) plus `crontab.sample` and `launchd/*.plist.sample`
-  samples and a `README.md`. They are thin wrappers over `cargo xtask`:
-  `ci-run.sh` logs one subcommand run (default `ci`), and `soak.sh` fans the
-  §19.6 fuzz harnesses and §19.7 proptest models out into parallel
-  `--soak --target` jobs so the nightly is not `(harnesses+models) x 24 h`
-  serialised. Logs land outside the tree (§3); no pipeline step lives in the
-  scripts (§15).
+  `ci-run.sh`, `soak.sh`) plus scheduler samples for every supported host —
+  `crontab.sample` (cron), `systemd/*.{service,timer}` (Linux), and
+  `launchd/*.plist.sample` (macOS) — and a `README.md`. They are thin
+  wrappers over `cargo xtask`: `ci-run.sh` logs one subcommand run (default
+  `ci`), and `soak.sh` fans the §19.6 fuzz harnesses and §19.7 proptest
+  models out into parallel `--soak --target` jobs so the nightly is not
+  `(harnesses+models) x 24 h` serialised. The scripts are portable `bash`
+  (POSIX utilities only) and put `${CARGO_HOME:-~/.cargo}/bin` on `PATH`, so
+  they run identically on Linux and macOS. Logs land outside the tree (§3);
+  no pipeline step lives in the scripts (§15).
 - `LICENSE` (GPL-3.0-only), `README.md`, `AGENTS.md`, `PLAN.md` are
   all present at the repository root.
 

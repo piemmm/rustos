@@ -1,0 +1,28 @@
+# systemd service — RustOS full per-PR gate (`cargo xtask ci`).
+#
+# The idiomatic Linux equivalent of the macOS launchd agent. Pair it with
+# rustos-ci.timer (the .timer is what schedules it; this unit just runs once).
+#
+# Install as a *user* unit (no root needed; mirrors a launchd LaunchAgent):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/ci/systemd/rustos-ci.service ~/.config/systemd/user/
+#   cp tools/ci/systemd/rustos-ci.timer   ~/.config/systemd/user/
+#   # edit the absolute ExecStart path below to match your checkout, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rustos-ci.timer
+#   # so timers fire while you are logged out:
+#   loginctl enable-linger "$USER"
+#
+# The script self-locates the repo and puts the pinned toolchain on PATH
+# (tools/ci/lib.sh), so the only thing to edit is the ExecStart path.
+
+[Unit]
+Description=RustOS CI gate (cargo xtask ci)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=RUSTOS_CI_SYNC=1
+ExecStart=%h/RustroverProjects/rustos/tools/ci/ci-run.sh ci

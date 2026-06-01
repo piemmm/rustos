@@ -24,23 +24,28 @@ RUSTOS_CI_BRANCH="${RUSTOS_CI_BRANCH:-master}"
 
 # ci_prepare: make the environment safe for an unattended `cargo xtask` run.
 #
-# - Puts the pinned toolchain on PATH. cron/launchd start with a bare PATH
-#   (/usr/bin:/bin:...), but rustup/cargo/rustc live in ~/.cargo/bin on this
-#   host; without this every job fails with "command not found".
+# - Puts the pinned toolchain on PATH. cron, launchd, and systemd all start
+#   jobs with a bare PATH (/usr/bin:/bin:...), but rustup/cargo/rustc live in
+#   the cargo bin directory; without this every job fails with "command not
+#   found". The location is CARGO_HOME/bin when CARGO_HOME is set (common on
+#   Linux CI images), falling back to ~/.cargo/bin (the rustup default on both
+#   Linux and macOS). If cargo is already on PATH (a system-wide install) we
+#   leave PATH untouched.
 # - Forces plain-text cargo output so logs paste back cleanly.
 # - Optionally fast-forwards the checkout to the branch tip (RUSTOS_CI_SYNC=1).
 #   Off by default so the scripts never destroy uncommitted local work by
 #   surprise; a dedicated builder sets RUSTOS_CI_SYNC=1.
 ci_prepare() {
+    local cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
     case ":$PATH:" in
-        *":$HOME/.cargo/bin:"*) ;;
-        *) PATH="$HOME/.cargo/bin:$PATH" ;;
+        *":$cargo_bin:"*) ;;
+        *) PATH="$cargo_bin:$PATH" ;;
     esac
     export PATH
     export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
 
     if ! command -v cargo >/dev/null 2>&1; then
-        echo "ci: cargo not found on PATH (expected the pinned toolchain in ~/.cargo/bin)" >&2
+        echo "ci: cargo not found on PATH (looked in '$cargo_bin'; set CARGO_HOME or install the pinned toolchain)" >&2
         return 127
     fi
 

@@ -13,8 +13,15 @@ belongs in a *named* `cargo xtask` subcommand (`tools/xtask`), not here.
 | `lib.sh` | Sourced by the others. Puts the pinned toolchain on `PATH`, resolves the repo root, sets the log directory, and (opt-in) syncs the checkout. |
 | `ci-run.sh` | Run one `cargo xtask` subcommand, logging to a timestamped file. Default subcommand is `ci` (the full per-PR gate, §7). |
 | `soak.sh` | Run the nightly 24 h soaks (§19.6 fuzz, §19.7 proptest) with every harness/model **in parallel**, one log per job. |
-| `crontab.sample` | Ready-to-edit `crontab` for a Linux/Unix builder. |
+| `crontab.sample` | Ready-to-edit `crontab` for any cron-based host (Linux/Unix/macOS). |
+| `systemd/*.{service,timer}` | systemd user units for a Linux host (preferred over cron on systemd distros). |
 | `launchd/*.plist.sample` | `launchd` LaunchAgents for a macOS host (preferred over cron on laptops). |
+
+The `lib.sh`/`ci-run.sh`/`soak.sh` scripts themselves are portable `bash`
+(written to the host's bash 3.2, so they also run unchanged on the bash 4/5
+shipped by Linux distros) and use only POSIX utilities (`date -u`, `awk`,
+`tr`, `git`, `cargo`). They run identically on Linux and macOS; only the
+*scheduler* differs, which is why there is a sample per platform.
 
 ## Quick start
 
@@ -35,12 +42,27 @@ tools/ci/soak.sh --dry-run
 
 ## Scheduling
 
-- **Linux/Unix:** `crontab tools/ci/crontab.sample` (edit `REPO` first).
-- **macOS:** copy the plists into `~/Library/LaunchAgents/` and
-  `launchctl load` them. `launchd` survives sleep/wake more predictably than
-  cron on a laptop. The script bodies are identical; only the trigger differs.
+Pick the scheduler your host already runs; the script bodies are identical, so
+only the trigger differs.
 
-Both run the full gate every 30 minutes and the soaks nightly at 02:00.
+- **Linux (systemd) — preferred:** install the user units and enable the
+  timers (no root needed):
+  ```sh
+  mkdir -p ~/.config/systemd/user
+  cp tools/ci/systemd/rustos-*.{service,timer} ~/.config/systemd/user/
+  # edit the absolute ExecStart path in each .service to match your checkout
+  systemctl --user daemon-reload
+  systemctl --user enable --now rustos-ci.timer rustos-soak.timer
+  loginctl enable-linger "$USER"   # let timers fire while logged out
+  ```
+- **Linux/Unix (cron):** `crontab tools/ci/crontab.sample` (edit `REPO` first).
+- **macOS (launchd):** copy the plists into `~/Library/LaunchAgents/` and
+  `launchctl load` them. `launchd` survives sleep/wake more predictably than
+  cron on a laptop.
+
+All three run the full gate every 30 minutes and the soaks nightly at 02:00.
+The systemd timers and the cron `Persistent` behaviour both catch up a run
+missed while the host was asleep.
 
 ## The 24 h soaks, in parallel
 
@@ -72,9 +94,12 @@ tools/ci/soak.sh --secs 30       # short budget for a smoke run
 
 ## Notes
 
-- **Toolchain on `PATH`.** cron/launchd start with a bare `PATH`; the pinned
-  toolchain lives in `~/.cargo/bin`. `lib.sh` prepends it, so jobs do not fail
-  with "command not found". The toolchain version itself is pinned by
+- **Toolchain on `PATH`.** cron, launchd, and systemd all start jobs with a
+  bare `PATH`; the pinned toolchain lives in `${CARGO_HOME:-~/.cargo}/bin`
+  (the rustup default on both Linux and macOS). `lib.sh` prepends that
+  directory — honouring `CARGO_HOME` for Linux CI images that relocate it —
+  unless `cargo` is already on `PATH` (a system-wide install), so jobs do not
+  fail with "command not found". The toolchain version itself is pinned by
   `rust-toolchain.toml`, not by these scripts.
 - **Handing logs back.** One file per run; `cargo xtask` runs steps in order
   and fails closed, so the failing step is at the **tail** of its log. For a
