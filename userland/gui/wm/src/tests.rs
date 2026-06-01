@@ -5,7 +5,7 @@ extern crate alloc;
 use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
 use rustos_abi::DriverError;
 
-use crate::color::{Color, Pixel};
+use crate::color::Color;
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect};
@@ -70,91 +70,11 @@ impl Display for MockDisplay {
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
 
-// ---- colour / blending ----------------------------------------------
-
-#[test]
-fn premultiply_opaque_is_identity() {
-    assert_eq!(
-        RED.premultiply(),
-        Pixel {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255
-        }
-    );
-}
-
-#[test]
-fn premultiply_transparent_clears_colour() {
-    assert_eq!(
-        Color::rgba(255, 255, 255, 0).premultiply(),
-        Pixel::TRANSPARENT
-    );
-}
-
-#[test]
-fn over_opaque_source_replaces_destination() {
-    let src = RED.premultiply();
-    let dst = BLUE.premultiply();
-    assert_eq!(src.over(dst), src);
-}
-
-#[test]
-fn over_transparent_source_keeps_destination() {
-    let dst = BLUE.premultiply();
-    assert_eq!(Pixel::TRANSPARENT.over(dst), dst);
-}
-
-#[test]
-fn over_half_alpha_blends_premultiplied() {
-    let src = Color::rgba(255, 0, 0, 128).premultiply();
-    let dst = BLUE.premultiply();
-    assert_eq!(
-        src.over(dst),
-        Pixel {
-            r: 128,
-            g: 0,
-            b: 127,
-            a: 255
-        }
-    );
-}
-
-#[test]
-fn scale_alpha_extremes() {
-    let p = RED.premultiply();
-    assert_eq!(p.scale_alpha(255), p);
-    assert_eq!(p.scale_alpha(0), Pixel::TRANSPARENT);
-}
-
-#[test]
-fn scale_alpha_half() {
-    assert_eq!(
-        RED.premultiply().scale_alpha(128),
-        Pixel {
-            r: 128,
-            g: 0,
-            b: 0,
-            a: 128
-        }
-    );
-}
-
-#[test]
-fn unpremultiply_round_trips_opaque() {
-    let c = Color::rgb(17, 200, 240);
-    assert_eq!(c.premultiply().unpremultiply(), c);
-}
-
-#[test]
-fn unpremultiply_transparent_is_transparent() {
-    assert_eq!(Pixel::TRANSPARENT.unpremultiply(), Color::TRANSPARENT);
-}
-
-// The `Point`/`Rect` primitives are unit-tested in their own crate
-// (`lib/geometry`); the compositor tests below exercise how the window
-// manager *uses* them (damage, z-order, hit-testing).
+// The colour algebra (`Color`/`Pixel`, premultiply, `over`, `scale_alpha`)
+// and the `Surface` pixel buffer are unit-tested in their own crate
+// (`lib/raster`); likewise the `Point`/`Rect` primitives in `lib/geometry`.
+// The compositor tests below exercise how the window manager *uses* them
+// (rounded corners, damage, z-order, blending, hit-testing).
 
 // ---- rounded corners -------------------------------------------------
 
@@ -202,33 +122,6 @@ fn radius_is_clamped_to_half_side() {
     // becomes a capsule whose centre row is fully covered.
     let huge = Corners::Rounded { radius: 1000 };
     assert_eq!(huge.coverage(10, 5, 20, 10), 255);
-}
-
-// ---- surface ---------------------------------------------------------
-
-#[test]
-fn new_surface_is_transparent() {
-    let s = Surface::new(3, 2).expect("allocates");
-    assert_eq!(s.width(), 3);
-    assert_eq!(s.height(), 2);
-    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
-}
-
-#[test]
-fn surface_get_set_bounds() {
-    let mut s = Surface::new(2, 2).expect("allocates");
-    s.set(1, 1, RED.premultiply());
-    assert_eq!(s.get(1, 1), Some(RED.premultiply()));
-    assert_eq!(s.get(2, 0), None);
-    s.set(9, 9, RED.premultiply()); // out of bounds: ignored
-}
-
-#[test]
-fn fill_rect_is_clipped() {
-    let mut s = Surface::new(4, 4).expect("allocates");
-    s.fill_rect(2, 2, 10, 10, RED.premultiply().unpremultiply());
-    assert_eq!(s.get(3, 3), Some(RED.premultiply()));
-    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
 }
 
 // ---- damage ----------------------------------------------------------

@@ -4610,13 +4610,45 @@ device list.
   focus, grabbed window removed mid-drag → `MoveEnded`); no `unsafe`,
   no `unwrap`/`expect`/`panic!`. 8 new headless tests (51 total). Docs
   `docs/src/desktop/wm.md` and the crate `README.md` updated.
+- **Shared rasteriser library — DONE (increment).** `lib/raster`
+  (`rustos-raster`, `no_std`+`alloc`, dep only `lib/theme`, `Layer::Lib`)
+  now owns the premultiplied-alpha `Color`/`Pixel` algebra (`div255`,
+  `premultiply`/`unpremultiply`, `scale_alpha`, Porter–Duff `over`) and the
+  `Surface` pixel buffer (`fill`/`fill_rect`/`get`/`set`). They were private
+  to `userland/gui/wm`, but the taskbar must paint pixels too and may not
+  depend on the window manager (§17.4); per §6/§2.2 the shared rasteriser
+  belongs in `lib/*` — the same reasoning as `lib/geometry` and `lib/theme`.
+  The `From<rustos_theme::Rgba> for Color` edge moves here too (its single
+  owner), which is why the crate depends on `lib/theme`. `rustos-wm` now
+  re-exports the types (behaviour-neutral; its `color`/`surface` modules are
+  one-line re-exports), so there is exactly one definition. 14 unit tests
+  moved into the new crate; `rustos-wm` keeps 39 compositor/input tests.
+  Added to `AGENTS.md` §3's `lib/` list and the workspace manifest; the
+  stale `wm::Color` references in `lib/theme` were repointed at `lib/raster`.
+  Docs: crate `README.md` (tier `experimental`).
+- **Taskbar pixel rendering — DONE (increment).** `userland/gui/taskbar`
+  gains a `render` module (`render(&Taskbar, &Theme) -> Option<Surface>`)
+  that paints the bar's regions into a `lib/raster` `Surface` sized to the
+  bar, using the active theme's `Palette`: the background is `surface_raised`,
+  the start button `accent`, each task slot `accent` when it is the focused
+  non-minimised task / `surface_raised` (recedes) when minimised / `surface`
+  otherwise, and each notification icon `on_surface_muted`. The surface is
+  rectangular — the WM rounds it via `BarLayout::corner_radius` through its
+  single rounded-corner path (§2.2) — and the colour algebra is reused from
+  `lib/raster`, never duplicated. Screen→bar-local mapping saturates and
+  `fill_rect` clips, so a degenerate layout paints nothing rather than
+  panicking (§2.9). 7 new headless tests (27 total); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. Docs
+  `docs/src/desktop/taskbar.md`; the taskbar now depends on `lib/geometry` +
+  `lib/raster` + `lib/theme` only (§17.4). Glyph rendering (clock/task-title
+  text) and notification-icon artwork remain for a later increment.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted
-  into `lib/*` per §17.4), taskbar pixel rendering into a WM surface,
-  wiring the theme colours/fonts through the taskbar + default apps and
-  the themed cursor *assets*, and the default filesystem-browser and
-  terminal-emulator apps.
+  into `lib/*` per §17.4), glyph/text and icon-artwork rendering on top of
+  the themed region fills now produced, wiring the theme *fonts* through the
+  taskbar + default apps and the themed cursor *assets*, and the default
+  filesystem-browser and terminal-emulator apps.
 
 ---
 

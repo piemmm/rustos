@@ -38,13 +38,14 @@ bundles, under a stable `ThemeId`:
 ## No duplicated colour algebra
 
 A theme `Rgba` is a straight-alpha colour token with no compositing
-arithmetic. The premultiplied-alpha blending lives in the window manager. The
-two meet at exactly one edge — the compositor's `From<Rgba> for Color`
-conversion — so the colour algebra is never copied into the theme crate
-(`AGENTS.md` §2.2). Likewise a window or the taskbar derives its corner style
-from a theme radius through the compositor's single rounded-corner path with
-`Corners::from_radius` (radius `0` is the square opt-out), never a second
-rounding implementation.
+arithmetic. The premultiplied-alpha blending lives in the shared rasteriser
+`lib/raster` (re-exported by the window manager and used by the taskbar). The
+two meet at exactly one edge — `lib/raster`'s `From<Rgba> for Color`
+conversion — so the colour algebra is never copied into the theme crate, nor
+re-implemented per consumer (`AGENTS.md` §2.2). Likewise a window or the
+taskbar derives its corner style from a theme radius through the compositor's
+single rounded-corner path with `Corners::from_radius` (radius `0` is the
+square opt-out), never a second rounding implementation.
 
 ## Switching at runtime
 

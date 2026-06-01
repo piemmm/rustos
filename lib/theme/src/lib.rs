@@ -11,10 +11,10 @@
 //! ([`Palette`]), geometric [`Metrics`] (the corner radii the compositor's
 //! single rounded-corner path consumes, `AGENTS.md` §2.2), [`Fonts`], and a
 //! [`CursorSet`]. None of the rendering or compositing arithmetic lives
-//! here — that is the window manager's job — so nothing is duplicated
-//! (`AGENTS.md` §2.2). A consumer converts a theme [`Rgba`] into its own
-//! render colour at the edge (for the compositor, `From<Rgba> for
-//! wm::Color`).
+//! here — that is the shared rasteriser's job (`lib/raster`) — so nothing
+//! is duplicated (`AGENTS.md` §2.2). A consumer converts a theme [`Rgba`]
+//! into the shared render colour at the edge (`From<Rgba> for
+//! rustos_raster::Color`).
 //!
 //! # Where it sits
 //!

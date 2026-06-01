@@ -19,10 +19,11 @@ This crate is pure theme *data*. A `Theme` is a table of:
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
   under `/System/Graphics`.
 
-The crate owns no rendering or compositing arithmetic — that lives in
-`userland/gui/wm`. A consumer converts a theme `Rgba` into its own render
-colour at the edge (the compositor provides `From<Rgba> for wm::Color`), so
-the colour algebra is never duplicated (`AGENTS.md` §2.2).
+The crate owns no rendering or compositing arithmetic — that lives in the
+shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the
+shared render colour at the edge (`lib/raster` provides `From<Rgba> for
+rustos_raster::Color`), so the colour algebra is never duplicated
+(`AGENTS.md` §2.2).
 
 `ThemeRegistry` owns the available themes and the active selection. It always
 holds the two built-ins (so there is always an active theme), switches with

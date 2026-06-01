@@ -903,6 +903,13 @@ name = "rustos-qemu"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-raster"
+version = "0.0.0"
+dependencies = [
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-rm"
 version = "0.0.0"
 dependencies = [
@@ -952,6 +959,7 @@ name = "rustos-taskbar"
 version = "0.0.0"
 dependencies = [
  "rustos-geometry",
+ "rustos-raster",
  "rustos-theme",
 ]
 
@@ -1360,6 +1368,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-geometry",
+ "rustos-raster",
  "rustos-theme",
 ]
 

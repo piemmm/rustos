@@ -2,19 +2,23 @@
 
 The taskbar (`userland/gui/taskbar`, crate `rustos-taskbar`) is the
 GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
-`PLAN.md` Stage 7). This page describes the **layout-and-model** increment:
-the geometry of every region, pointer hit-testing for input routing, and the
-start-menu / task-list / notification-area state machines. Pixel rendering
-and the live window-manager IPC build on this model in later increments.
+`PLAN.md` Stage 7). This page describes the **layout, model, and rendering**:
+the geometry of every region, pointer hit-testing for input routing, the
+start-menu / task-list / notification-area state machines, and painting those
+regions into a themed pixel surface. Glyph rendering (clock and task-title
+text), notification-icon artwork, and the live window-manager IPC build on
+this model in later increments.
 
 ## Where it sits
 
 As a `userland/gui/*` crate the taskbar depends only on `lib/*`: the shared
-[`rustos-geometry`](../lib/overview.md) coordinate types and the shared
-[`rustos-theme`](theming.md) definition. It never depends on the window
-manager or on any sibling userland crate, and nothing depends on it in turn
-(`AGENTS.md` §17.4, §17.3) — the desktop is an optional, one-way-dependent
-frontend, so a headless image simply omits it.
+[`rustos-geometry`](../lib/overview.md) coordinate types, the shared
+`rustos-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
+window manager also paints with), and the shared [`rustos-theme`](theming.md)
+definition. It never depends on the window manager or on any sibling userland
+crate, and nothing depends on it in turn (`AGENTS.md` §17.4, §17.3) — the
+desktop is an optional, one-way-dependent frontend, so a headless image
+simply omits it.
 
 ## Layout
 
@@ -50,6 +54,30 @@ The taskbar supports rounded corners, but it does **not** draw them itself.
 its single anti-aliased rounded-corner path, exactly as it rounds windows.
 There is no second rounded-corner implementation (`AGENTS.md` §2.2).
 
+## Rendering
+
+`render` paints the taskbar into a `rustos-raster` `Surface` sized to the bar,
+filling each region with a colour role from the active theme's `Palette`:
+
+- the bar background is the **raised surface** colour;
+- the start button is the **accent**;
+- each task slot is the **accent** when it is the focused, non-minimised task,
+  the **raised surface** colour (so it recedes into the bar) when minimised,
+  and the plain **surface** colour otherwise — which the palette guarantees
+  reads as distinct from the raised background;
+- each notification icon slot is the **muted** foreground colour.
+
+The surface is rectangular: the taskbar paints no corners. The window manager
+presents it and applies `BarLayout::corner_radius` through its single
+anti-aliased rounded-corner path, exactly as it rounds windows (`AGENTS.md`
+§2.2). The colour algebra is not duplicated here either — `rustos-raster`
+owns the one premultiplied-alpha implementation and the
+`From<Rgba> for Color` edge. Region rectangles are screen-space; each is
+translated into the bar's local surface space, the translation saturates, and
+`fill_rect` clips, so a degenerate layout paints nothing rather than
+panicking (`AGENTS.md` §2.9). Switching themes simply re-renders with the new
+palette.
+
 ## Start menu
 
 The start menu is **not** an application launcher at this stage. It is
@@ -79,8 +107,9 @@ ids, so a clash signals a bug rather than a benign retry.
 
 The taskbar reads its corner radius from the active theme and adopts a new one
 with `Taskbar::apply_theme`; the rest of its state is untouched, so a runtime
-dark/light switch needs no model relayout (`AGENTS.md` §10). Colours and fonts
-are wired through the same theme in the rendering increment.
+dark/light switch needs no model relayout (`AGENTS.md` §10). The region
+**colours** are wired through the same theme by `render` (see *Rendering*);
+the **fonts** join them when glyph rendering lands in a later increment.
 
 ## Tests
 
@@ -89,4 +118,7 @@ session-control population and fail-closed activation, the task-list
 focus/minimise rule, notification add/remove deduplication, the region layout
 and hit-testing for a bottom bar, vertical-bar layout, all four edges,
 overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the
-theme-driven corner radius.
+theme-driven corner radius. The rendering tests assert the painted surface
+matches the bar dimensions and that the background, start button, focused /
+unfocused / minimised task slots, and notification icons take the expected
+theme colour, including that a dark↔light switch repaints the background.

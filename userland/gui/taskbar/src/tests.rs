@@ -1,12 +1,14 @@
-//! Headless unit tests for the taskbar layout and model.
+//! Headless unit tests for the taskbar layout, model, and rendering.
 
 use rustos_geometry::{Point, Rect};
+use rustos_raster::{Color, Pixel, Surface};
 use rustos_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
 use crate::layout::{BarLayout, Hit};
 use crate::menu::{MenuAction, MenuEntryId, SessionControl, StartMenu};
 use crate::notifications::{IconId, NotificationArea};
+use crate::render::render;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
 
@@ -346,4 +348,134 @@ fn apply_theme_switches_corner_radius() {
     assert_eq!(bar.corner_radius(), 12);
     bar.apply_theme(&squared);
     assert_eq!(bar.corner_radius(), 0);
+}
+
+// ---- rendering ------------------------------------------------------
+
+/// The premultiplied pixel a theme palette role paints as.
+fn role(color: rustos_theme::Rgba) -> Pixel {
+    Color::from(color).premultiply()
+}
+
+/// The painted pixel at screen point `(x, y)`, translated into the bar's
+/// local surface space.
+fn pixel_at(surface: &Surface, bar: Rect, x: i32, y: i32) -> Pixel {
+    let lx = u32::try_from(x - bar.left()).expect("point is right of the bar origin");
+    let ly = u32::try_from(y - bar.top()).expect("point is below the bar origin");
+    surface.get(lx, ly).expect("point lies inside the bar")
+}
+
+#[test]
+fn rendered_surface_matches_bar_dimensions() {
+    let theme = Theme::dark();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert_eq!(surface.width(), layout.bar.width);
+    assert_eq!(surface.height(), layout.bar.height);
+}
+
+#[test]
+fn background_is_the_raised_surface_colour() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    // No tasks: a point in the middle of the empty task region is bare bar.
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert_eq!(
+        pixel_at(&surface, bar.layout().bar, 500, 780),
+        role(palette.surface_raised)
+    );
+}
+
+#[test]
+fn start_button_is_painted_with_the_accent() {
+    let theme = Theme::dark();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert_eq!(
+        pixel_at(&surface, bar.layout().bar, 24, 780),
+        role(theme.palette().accent)
+    );
+}
+
+#[test]
+fn focused_task_is_accent_and_others_are_surface() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().add(TaskId(2), "Browser");
+    bar.tasks_mut().activate(TaskId(1));
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    // tasks[0] = (48,760,160,40); tasks[1] = (208,760,160,40).
+    assert_eq!(
+        pixel_at(&surface, layout.bar, 120, 780),
+        role(palette.accent)
+    );
+    assert_eq!(
+        pixel_at(&surface, layout.bar, 280, 780),
+        role(palette.surface)
+    );
+}
+
+#[test]
+fn minimised_task_recedes_into_the_background() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().activate(TaskId(1)); // focus
+    bar.tasks_mut().activate(TaskId(1)); // click again -> minimise
+    assert!(bar.tasks().is_minimised(TaskId(1)));
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert_eq!(
+        pixel_at(&surface, layout.bar, 120, 780),
+        role(palette.surface_raised)
+    );
+}
+
+#[test]
+fn notification_icon_is_painted_with_the_muted_role() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.notifications_mut().add(IconId(1), "icon.network");
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    // With one icon: clock starts at 920, so the lone icon slot is
+    // notifications[0] = (896,760,24,40).
+    assert_eq!(
+        pixel_at(&surface, layout.bar, 900, 780),
+        role(palette.on_surface_muted)
+    );
+}
+
+#[test]
+fn theme_switch_repaints_the_background() {
+    let dark = Theme::dark();
+    let light = Theme::light();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
+    let layout = bar.layout();
+
+    let dark_surface = render(&bar, &dark).expect("bar renders");
+    let light_surface = render(&bar, &light).expect("bar renders");
+    assert_eq!(
+        pixel_at(&dark_surface, layout.bar, 500, 780),
+        role(dark.palette().surface_raised)
+    );
+    assert_eq!(
+        pixel_at(&light_surface, layout.bar, 500, 780),
+        role(light.palette().surface_raised)
+    );
+    assert_ne!(
+        dark.palette().surface_raised,
+        light.palette().surface_raised,
+        "dark and light differ, so the repaint is observable"
+    );
 }

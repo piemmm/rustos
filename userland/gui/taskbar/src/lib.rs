@@ -16,25 +16,31 @@
 //!
 //! # What this increment delivers
 //!
-//! The Stage 7 taskbar **layout and model**: the geometry of every region
-//! ([`BarLayout`]), pointer [`hit_test`](BarLayout::hit_test)ing for input
-//! routing, and the start-menu / task-list / notification-area state
-//! machines. It sources its corner radius from the active theme
-//! ([`rustos_theme`]) and exposes it through [`BarLayout::corner_radius`];
-//! the taskbar never rounds its own corners — the window manager applies
-//! that radius through its single anti-aliased rounded-corner path
-//! (`AGENTS.md` §2.2), exactly as it rounds windows.
+//! The Stage 7 taskbar **layout, model, and rendering**: the geometry of
+//! every region ([`BarLayout`]), pointer [`hit_test`](BarLayout::hit_test)ing
+//! for input routing, the start-menu / task-list / notification-area state
+//! machines, and [`render`]ing those regions into a themed pixel
+//! [`Surface`](rustos_raster::Surface). It sources its corner radius and
+//! colours from the active theme ([`rustos_theme`]) and exposes the radius
+//! through [`BarLayout::corner_radius`]; the taskbar never rounds its own
+//! corners — the window manager applies that radius through its single
+//! anti-aliased rounded-corner path (`AGENTS.md` §2.2), exactly as it rounds
+//! windows.
 //!
-//! Pixel rendering, the framebuffer surface, and the live IPC wiring to the
-//! window manager build on this model in later Stage 7 increments.
+//! Glyph rendering (clock and task-title text), notification-icon artwork,
+//! and the live IPC wiring to the window manager build on this model in
+//! later Stage 7 increments.
+//!
+//! [`render`]: render::render
 //!
 //! # Where it sits
 //!
 //! As a `userland/gui/*` crate it depends only on `lib/*` — the shared
-//! [`rustos_geometry`] coordinate types and the shared [`rustos_theme`]
-//! definition — never on the window manager or any sibling userland crate
-//! (`AGENTS.md` §17.4). Nothing depends on it in turn (§17.3): the desktop
-//! is an optional, one-way-dependent frontend.
+//! [`rustos_geometry`] coordinate types, the shared [`rustos_raster`]
+//! surface, and the shared [`rustos_theme`] definition — never on the window
+//! manager or any sibling userland crate (`AGENTS.md` §17.4). Nothing depends
+//! on it in turn (§17.3): the desktop is an optional, one-way-dependent
+//! frontend.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -46,6 +52,7 @@ pub mod edge;
 pub mod layout;
 pub mod menu;
 pub mod notifications;
+pub mod render;
 pub mod taskbar;
 pub mod tasks;
 
@@ -56,5 +63,6 @@ pub use edge::{Edge, Orientation};
 pub use layout::{BarLayout, Hit};
 pub use menu::{MenuAction, MenuEntry, MenuEntryId, SessionControl, StartMenu};
 pub use notifications::{IconId, NotificationArea, NotificationIcon};
+pub use render::render;
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};

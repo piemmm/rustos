@@ -39,6 +39,12 @@ rounded-corner coverage correct:
 - `Pixel::over` composites a premultiplied source over a premultiplied
   destination as `src + dst * (1 - src.a)`.
 
+`Color`, `Pixel`, and `Surface` (and the `From<Rgba> for Color` theme edge)
+are defined once in the shared rasteriser `lib/raster` and re-exported by the
+window manager. The taskbar paints into the same `Surface` type and reuses the
+same colour algebra without depending on the window manager (`AGENTS.md`
+§17.4) and without a second implementation (`AGENTS.md` §2.2).
+
 ## Rounded corners
 
 `Corners::Rounded { radius }` rounds a window's corners; `Corners::Square`

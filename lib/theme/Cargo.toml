@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 # No dependencies on purpose: this crate is pure theme *data*. The
-# compositing colour algebra lives in `userland/gui/wm`; this crate owns the
+# compositing colour algebra lives in `lib/raster`; this crate owns the
 # authored design tokens it (and the taskbar and default apps) read, so it
 # stays at the bottom of the §17.4 layering and is depended on, never
 # depends.

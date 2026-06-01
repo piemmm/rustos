@@ -13,6 +13,11 @@ publish.workspace = true
 # window manager uses, lifted to `lib/*` so the taskbar reuses it without
 # depending on the window manager (§17.4, §2.2).
 rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
+# primitives the window manager paints with, lifted to `lib/*` so the taskbar
+# renders its regions into a `Surface` without depending on the window manager
+# and without duplicating the colour algebra (§17.4, §2.2).
+rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # The single shared theme definition (§10): the taskbar takes its corner
 # radius (and, in later increments, colours/fonts) from the active theme so
 # it stays consistent with the window manager and apps.

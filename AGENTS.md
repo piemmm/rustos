@@ -147,6 +147,8 @@ rustos/
 │   ├── log/             # Structured logging.
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
+│   ├── raster/          # Shared software rasterisation: premultiplied-alpha
+│   │                    #   Color/Pixel + Surface for the WM and taskbar (§17.4).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).

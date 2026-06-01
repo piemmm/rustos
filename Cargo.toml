@@ -38,6 +38,7 @@ members = [
     "lib/geometry",
     "lib/log",
     "lib/procinfo",
+    "lib/raster",
     "lib/sync",
     "lib/theme",
     "lib/util",

@@ -2,17 +2,17 @@
 //!
 //! A [`Rgba`] is *design data*: a straight-alpha, 8-bit-per-channel colour
 //! authored by a theme. It carries no compositing arithmetic — that lives
-//! in the window manager's premultiplied-alpha pixel type
-//! (`userland/gui/wm`). Keeping the two apart is deliberate: a theme is a
-//! table of colours, and the compositor is what blends them, so neither
+//! in the shared rasteriser's premultiplied-alpha pixel type
+//! (`lib/raster`). Keeping the two apart is deliberate: a theme is a
+//! table of colours, and the rasteriser is what blends them, so neither
 //! reimplements the other (`AGENTS.md` §2.2).
 
 /// A straight-alpha colour with 8 bits per channel.
 ///
 /// Channels are **not** premultiplied; `a` is an independent opacity where
 /// `0` is fully transparent and `255` fully opaque. A consumer that needs
-/// to composite the colour converts it into its own premultiplied pixel
-/// type (for the compositor, `From<Rgba> for wm::Color`).
+/// to composite the colour converts it into the shared rasteriser's
+/// premultiplied pixel type (`From<Rgba> for rustos_raster::Color`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Rgba {
     /// Red channel, `0..=255`.
