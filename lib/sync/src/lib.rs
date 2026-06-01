@@ -76,6 +76,7 @@ extern crate std;
 mod tests {
     use super::*;
     use std::string::String;
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
     use std::vec::Vec;
@@ -479,18 +480,27 @@ mod tests {
 
     #[test]
     fn rwlock_pending_writer_blocks_concurrent_readers() {
-        // Once a writer is pending, no `try_read` may succeed until it
-        // is released. We use threads to set up the race.
+        // While a writer holds the lock, no `try_read` may succeed until it
+        // is released. The handshake is deterministic: the writer signals
+        // once it holds the lock and waits for permission to release, so the
+        // assertions never depend on thread timing (`AGENTS.md` §7 — no
+        // flaky tests).
         let l = Arc::new(RwLock::new(0u32));
         let l2 = l.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
         let w = thread::spawn(move || {
             let _g = l2.write();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            // Announce that the write lock is held, then hold it until told.
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
             // _g drops here, releasing the writer.
         });
-        // Give the writer time to take the lock.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Wait until the writer definitely holds the lock before asserting.
+        acquired_rx.recv().unwrap();
         assert!(l.try_read().is_none());
+        // Let the writer release, then a reader must be able to acquire.
+        release_tx.send(()).unwrap();
         w.join().unwrap();
         assert!(l.try_read().is_some());
     }

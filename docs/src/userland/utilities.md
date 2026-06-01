@@ -2,7 +2,8 @@
 
 Stage 6 ships a set of small command-line utilities, each its own crate.
 This page documents the ones that have landed (`sysinfo`, `cat`, `ls`,
-`rm`, and `cp`) and is extended as the others (`ps`, `mount`, …) arrive.
+`rm`, `cp`, and `mv`) and is extended as the others (`ps`, `mount`, …)
+arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -443,3 +444,103 @@ refusal, the missing-source fail-closed path, a failure stopping before a
 later source, the unreadable-source / uncreatable-destination /
 failed-write paths, the `-f` remove-and-retry recovery, and the
 trailing-slash base-name join.
+
+## `mv` — move (rename) files and directories (`userland/apps/mv`)
+
+`rustos-mv` relocates each of its source operands to a destination
+(`AGENTS.md` §3). With a single source and a destination that is not a
+directory, the source is moved to that exact path. When the destination
+is an existing directory — and always when there is more than one
+source — each source is moved *into* it under its base name. Unlike
+`cp`, a directory needs no flag: a directory is moved like any other
+operand. This is the POSIX model.
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
+only dependency is the audited `rustos-abi` crate, so it never links a
+kernel or driver crate (`AGENTS.md` §17.4).
+
+### Grammar
+
+```
+mv [-f] [-n] [--] source... dest
+
+  -f, --force        remove a blocking destination and retry the rename
+  -n, --no-clobber   never overwrite an existing destination
+  -h, --help         show the usage banner
+```
+
+At least one source and a destination are required. Short options may be
+combined (e.g. `-fn`). `--` ends option parsing: every later argument is
+a path. With more than one source the destination must be a directory.
+`-h`/`--help` wins immediately.
+
+### A move machine, not a data source
+
+`run` asks the injected filesystem seam what each source is, then asks it
+to `rename` the source onto its destination. A rename within one
+filesystem is atomic and is the whole operation. The operations that
+reach the outside world are injected seams, mirroring the other userland
+crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s
+`FileSystem`):
+
+- `FileSystem` — learn a path's kind, rename a path, read a file's bytes
+  and a directory's entries, create directories/files/bytes, and remove
+  files and directories (for the cross-device relocation and for `-f`).
+- `Output` — write the usage banner to the terminal (`mv` is silent on
+  success).
+
+On a running system these are syscall- and console-backed; in tests they
+are in-memory fixtures, so every routing and fallback decision is
+testable without a kernel.
+
+### Cross-device relocation
+
+A rename cannot be atomic when its source and destination live on
+different filesystems. Rather than overload an `Errno`, the `rename` seam
+reports that case as an explicit `RenameOutcome::CrossDevice` outcome
+(`AGENTS.md` §2.11). The engine then performs the POSIX relocation: it
+copies the source to the destination — streaming a regular file in
+fixed-size chunks (matching `cat`'s and `cp`'s granularity) and
+reproducing a directory subtree depth-first — and only then removes the
+source, depth-first, so a directory is unlinked after its contents. A
+failure during the copy leaves the source in place.
+
+### No-clobber and force
+
+`-n` never overwrites: a source whose destination already exists is
+skipped silently. `-f` covers a destination that blocks the rename (for
+example, an existing read-only file): the destination is removed and the
+rename is retried exactly once. Without either flag an existing
+destination is overwritten, the default POSIX behaviour.
+
+### Fail closed
+
+- An unknown option, fewer than two operands, or more than one source
+  aimed at a non-directory destination is an `MvError::Usage` that moves
+  nothing.
+- An operand that cannot be inspected surfaces the underlying `Errno` as
+  `MvError::Stat`, and the run stops before any later operand.
+- A rename that fails for a reason other than crossing a filesystem
+  boundary is `MvError::Rename`.
+- During a cross-device relocation an unreadable source is
+  `MvError::Read`, an uncreatable destination is `MvError::Create`, a
+  failed write is `MvError::Write`, and a source that cannot be removed
+  after a successful copy is `MvError::Remove`.
+
+There is no partial-guess path and no panic (`AGENTS.md` §2.9).
+
+### Tests
+
+`cargo test -p rustos-mv` drives the parser and the move engine against
+an in-memory tree and a recording output: the command grammar (every
+option, clustered short flags, `-`/`--`, the too-few-operands and
+unknown-option paths), a file renamed to a new path, a directory renamed,
+a file moved into a directory under its base name, several files into a
+directory, the several-sources-to-a-non-directory `Usage` refusal, the
+missing-source fail-closed path, a failure stopping before a later
+source, `-n` skipping an existing destination, the default overwrite, the
+failed-rename path, the blocking-destination refusal and its `-f`
+remove-and-retry recovery, the cross-device file / large-file /
+directory relocations, the cross-device read/write/remove fail-closed
+paths, and the trailing-slash base-name join.
