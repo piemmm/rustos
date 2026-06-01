@@ -65,6 +65,7 @@
 
 # Userland
 
+- [System Information service](./userland/sysinfod.md)
 - [Networking service](./userland/net_icmp.md)
 
 # ABI

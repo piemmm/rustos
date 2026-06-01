@@ -3959,9 +3959,29 @@ device list.
   unit tests; every new `from_bytes` is enrolled in the `lib/abi` fuzz
   harness (§19.6). Docs: `docs/src/abi/sysinfo.md` (+ SUMMARY link). No
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+- **System Information service (`userland/system/sysinfod`) — DONE.**
+  The user-space dispatcher that serves the `sysinfo-v1` API
+  (`rustos-sysinfod`, §16.6) is implemented. `serve` decodes a
+  `SysinfoRequestHeader` + typed payload, looks the query up in the
+  frozen `SYSINFO_QUERIES` registry, enforces the query's declared
+  capability against the caller's `CapabilityQuery` view **before** any
+  data access (fail closed, §5.4), emits a `lib/log` audit record for
+  every audited invocation and every denial (reserved `EventId` range
+  `8000..9000`, §19.4), and pages/encodes the answer. The live data is
+  read through an injected `SysinfoSource` seam (`Caller` + `ProcessScope`)
+  so the security-relevant code is independent of kernel plumbing and is
+  testable with an in-memory fixture; the dispatcher chooses the scope
+  from the query id so a self-scoped request can never widen into a
+  global one. Process-list responses are paged `ProcessRecord`s, scalar
+  responses are the struct's wire image, and `HARDWARE_TREE` is passed
+  through verbatim (the hardware-tree wire format is owned by `lib/abi`
+  §18, not invented here). `no_std`, depends only on `rustos-abi` +
+  `rustos-log` (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths. 12 unit tests; docs `docs/src/userland/sysinfod.md`
+  (+ SUMMARY link) and the crate `README.md`.
 - Remaining Stage 6 deliverables (`init`, `shell`, `login`, the core CLI
-  utilities, `sysinfod`, and the `.app` bundle / dynamic-loader policy)
-  are not yet started.
+  utilities, and the `.app` bundle / dynamic-loader policy) are not yet
+  started.
 
 ---
 

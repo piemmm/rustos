@@ -1,0 +1,21 @@
+[package]
+name = "rustos-sysinfod"
+description = "RustOS System Information service: the capability-checked dispatcher that serves the `sysinfo` API (Stage 6 — `AGENTS.md` §16.6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `sysinfo-v1` wire surface, the `Errno` table, the
+# `CapabilityId` registry, and the object-safe `CapabilityQuery` seam the
+# dispatcher gates on.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# §19.4 structured audit log: every cross-principal invocation and every
+# capability denial is recorded through a `rustos_log::Sink`.
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

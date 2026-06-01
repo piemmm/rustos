@@ -69,6 +69,7 @@ members = [
     # mirroring the `drivers/<class>/<name>` layout documented in
     # AGENTS.md §3.
     "userland/system/drvhost",
+    "userland/system/sysinfod",
     "userland/system/init",
     "userland/system/installer",
     "userland/session/login",
