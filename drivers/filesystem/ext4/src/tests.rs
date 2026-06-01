@@ -38,6 +38,11 @@ const DEEP_DATA_BLOCK: u32 = 10;
 const HELLO_BODY: &[u8] = b"Hello from ext4 via extents!\n";
 const DEEP_BODY: &[u8] = b"deep file body in a subdirectory\n";
 
+/// Owner of `hello.txt`. Both ids span the low (`i_uid`/`i_gid`) and
+/// high (osd2 `l_i_*_high`) halves so the combined decode is exercised.
+const HELLO_UID: u32 = 0x0001_2345;
+const HELLO_GID: u32 = 0x0002_6789;
+
 /// The classic-mapped file spans 13 logical blocks. Only logical blocks
 /// 0, 1 (direct pointers) and 12 (reached through the single-indirect
 /// block) carry data; every other logical block is a sparse hole
@@ -71,6 +76,16 @@ fn set_le32(img: &mut [u8], off: usize, value: u32) {
 
 fn inode_offset(ino: u32) -> usize {
     INODE_TABLE_BLOCK * FS_BLOCK + (ino as usize - 1) * INODE_SIZE
+}
+
+/// Set an inode's owner, splitting each id into its low half
+/// (`i_uid`/`i_gid`) and osd2 high half (`l_i_uid_high`/`l_i_gid_high`).
+fn set_owner(img: &mut [u8], ino: u32, uid: u32, gid: u32) {
+    let base = inode_offset(ino);
+    set_le16(img, base + 0x02, (uid & 0xFFFF) as u16);
+    set_le16(img, base + 0x78, (uid >> 16) as u16);
+    set_le16(img, base + 0x18, (gid & 0xFFFF) as u16);
+    set_le16(img, base + 0x7A, (gid >> 16) as u16);
 }
 
 fn block_offset(block: u32) -> usize {
@@ -210,6 +225,7 @@ fn build_image() -> [u8; IMG_LEN] {
         u32c(HELLO_BODY.len()),
         &[(0, 1, HELLO_DATA_BLOCK)],
     );
+    set_owner(&mut img, 11, HELLO_UID, HELLO_GID);
     {
         let off = block_offset(HELLO_DATA_BLOCK);
         img[off..off + HELLO_BODY.len()].copy_from_slice(HELLO_BODY);
@@ -522,4 +538,35 @@ fn into_block_returns_the_underlying_device() {
         dev.geometry().expect("geometry").block_count,
         DEV_SECTOR_COUNT
     );
+}
+
+#[test]
+fn security_reports_a_files_mode_and_owner() {
+    let mut fs = mount();
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let sec = fs.security(file).expect("security");
+    // The mode is the low 12 bits; the directory/file type bits are stripped.
+    assert_eq!(sec.mode, 0o644);
+    // uid/gid recombine the low half with the osd2 high half.
+    assert_eq!(sec.uid, HELLO_UID);
+    assert_eq!(sec.gid, HELLO_GID);
+    // ext4 stores no inline capability gate and no inline ACL here.
+    assert_eq!(sec.required_cap, None);
+    assert!(sec.acl().is_empty());
+}
+
+#[test]
+fn security_reports_a_directorys_record() {
+    let mut fs = mount();
+    let sec = fs.security(fs.root()).expect("security");
+    assert_eq!(sec.mode, 0o755);
+    // The root inode in the fixture leaves the owner at the default 0/0.
+    assert_eq!(sec.uid, 0);
+    assert_eq!(sec.gid, 0);
+}
+
+#[test]
+fn security_of_an_absent_node_is_not_found() {
+    let mut fs = mount();
+    assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
 }

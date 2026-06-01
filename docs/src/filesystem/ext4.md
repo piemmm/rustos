@@ -63,10 +63,19 @@ are not traversed.
 
 ext4 stores a per-inode owner, mode, and ACL, but the driver makes **no**
 permission decision: the VFS metadata layer that mounts it is the policy
-point (`AGENTS.md` §5.4). Surfacing the stored per-inode §5.3 record to
-the VFS through `FilesystemSecurity` (as [rustfs](./rustfs.md) does) is a
-later step; until then a mounted ext4 subtree is governed by the uniform
-mount-point template.
+point (`AGENTS.md` §5.4).
+
+The driver implements the versioned `FilesystemSecurity` trait (as
+[rustfs](./rustfs.md) does), so the VFS can drive authorization from the
+stored per-inode §5.3 record instead of the uniform mount-point
+template. `security(node)` reports a `NodeSecurity` carrying the inode's
+POSIX mode (the low 12 bits, with the type bits stripped) and its owner
+uid/gid; each id recombines its low half (`i_uid`/`i_gid`) with the osd2
+high half (`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability
+gate, and its POSIX ACLs live in extended-attribute blocks this read
+surface does not yet decode, so the record carries no `required_cap` and
+no inline ACL entries. Surfacing the xattr ACL is a later deliverable
+alongside write support.
 
 ## Capabilities
 
@@ -81,10 +90,11 @@ ext4 image (block size 1024, one block group, 128-byte inodes,
 `filetype` on) holding an extent-mapped root, an extent-mapped file, a
 subdirectory with a nested file, and a classic block-mapped file that
 combines direct pointers, sparse holes, and a single-indirect block. The
-14 host-side tests cover superblock validation, `node_info`, ordered
+17 host-side tests cover superblock validation, `node_info`, ordered
 listing with `.`/`..` suppression and end-of-directory, `lookup` and
 subdirectory traversal, extent and classic reads (including across holes
 and the direct/indirect boundary), the `Unsupported`/`BufferTooSmall`/
-`NotFound` guards, and the `register` capability gate. A
-`pjdfstest`-equivalent POSIX suite and an end-to-end QEMU vertical remain
-future work.
+`NotFound` guards, the `register` capability gate, and the
+`FilesystemSecurity::security` record for a file (mode plus a uid/gid
+spanning both halves) and a directory. A `pjdfstest`-equivalent POSIX
+suite and an end-to-end QEMU vertical remain future work.

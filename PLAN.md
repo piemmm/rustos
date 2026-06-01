@@ -3730,15 +3730,28 @@ device list.
   indirect), with sparse holes reading as zeros. Linear directory blocks
   are walked honouring `rec_len`, skipping `.`/`..` and unused slots;
   hash-indexed (`htree`) directories are read through their linear leaf
-  view. No `unwrap`/`expect`/`panic!`, no `unsafe`. 14 host tests against a
+  view. No `unwrap`/`expect`/`panic!`, no `unsafe`. 17 host tests against a
   hand-built in-memory image (extent root/file, subdir + nested file,
   classic file across holes + the direct/indirect boundary, bad-magic
   rejection, `Unsupported`/`BufferTooSmall`/`NotFound` guards, the
-  `register` cap-gate). Docs: `docs/src/filesystem/ext4.md` (+ SUMMARY
-  link), the overview and `FilesystemRead` notes, and the crate `README.md`.
+  `register` cap-gate, and the `FilesystemSecurity` record). Docs:
+  `docs/src/filesystem/ext4.md` (+ SUMMARY link), the overview and
+  `FilesystemRead` notes, and the crate `README.md`.
+- **`ext4` per-inode security surfaced into the VFS — DONE.** The `ext4`
+  driver now decodes each inode's owner (`i_uid`/`i_gid` recombined with
+  the osd2 high halves `l_i_uid_high`/`l_i_gid_high`) and implements the
+  versioned `FilesystemSecurity` trait: `security(node)` reports a
+  `NodeSecurity` carrying the POSIX mode (low 12 bits, type bits stripped)
+  and owner uid/gid. ext4 has no inline capability gate and its POSIX ACLs
+  live in extended-attribute blocks the read surface does not yet decode,
+  so the record surfaces no `required_cap` and no inline ACL entries
+  (xattr ACL decoding is deferred alongside write support). 3 new host
+  tests (file mode/owner with both id halves, directory record,
+  `NotFound`). Docs: `docs/src/filesystem/{ext4,overview}.md`,
+  `docs/src/abi/driver_traits.md`, and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - `ext4` **write** support (`FilesystemWrite`) and surfacing ext4's
-    per-inode §5.3 record via `FilesystemSecurity`.
+  - `ext4` **write** support (`FilesystemWrite`); decoding the ext4 xattr
+    POSIX ACL into the `FilesystemSecurity` record.
   - The `pjdfstest`-equivalent POSIX suite, the `rustfs` journal
     crash-consistency *soak* and an end-to-end QEMU `rustfs`-over-virtio_blk
     vertical.

@@ -2,7 +2,9 @@
 
 Stage 5 deliverable. Reads an ext2/ext3/ext4 volume behind any
 `rustos_abi::driver::block::Block` device and exposes it through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` trait.
+versioned `rustos_abi::driver::filesystem::FilesystemRead` trait, and
+surfaces each inode's §5.3 owner/mode through the versioned
+`FilesystemSecurity` trait.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
 `DriverHandle` — it cannot perform I/O — so the read surface is a **new
@@ -69,6 +71,16 @@ that mounts the driver is the policy point (§5.4 — this is raw
 structural I/O). Case-folding and Unicode normalisation policy likewise
 belong to the VFS, not the driver.
 
+The driver implements `FilesystemSecurity`: `security(node)` reports a
+`NodeSecurity` carrying the inode's POSIX mode (the low 12 bits, with
+the type bits stripped), owner uid, and owner gid. The uid and gid each
+recombine their low half (`i_uid`/`i_gid`) with the osd2 high half
+(`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability gate, and
+its POSIX ACLs live in extended-attribute blocks this read surface does
+not yet decode, so the record carries no `required_cap` and no inline
+ACL entries; the VFS applies the mode/owner record on its own. Surfacing
+the xattr ACL is a later deliverable alongside write support.
+
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
@@ -93,9 +105,12 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
   direct/single-indirect boundary.
 - `Unsupported` on directory-vs-file mismatches and the `NodeId::NONE`
   guard.
+- `FilesystemSecurity::security` for a regular file (mode, and a uid/gid
+  that span both the low and osd2 high halves) and a directory, plus the
+  `NotFound` guard.
 - The `register` capability gate and `into_block` round-trip.
 
-14/14 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
+17/17 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
 end-to-end QEMU vertical are tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface

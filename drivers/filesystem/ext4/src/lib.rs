@@ -44,7 +44,9 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{DirEntry, FilesystemRead, NodeId, NodeInfo, NodeKind};
+use rustos_abi::driver::filesystem::{
+    DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
+};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -155,10 +157,15 @@ struct Layout {
     group_count: u64,
 }
 
-/// A decoded inode: only the structural fields the read surface needs.
+/// A decoded inode: only the structural fields the read and security
+/// surfaces need.
 struct Inode {
     /// `i_mode`, including the type bits.
     mode: u16,
+    /// Owning user id (`i_uid` low half combined with the osd2 high half).
+    uid: u32,
+    /// Owning group id (`i_gid` low half combined with the osd2 high half).
+    gid: u32,
     /// File length in bytes (low + high halves combined).
     size: u64,
     /// `i_flags`.
@@ -180,6 +187,17 @@ impl Inode {
     /// Whether the inode is extent-mapped rather than block-mapped.
     fn uses_extents(&self) -> bool {
         self.flags & INODE_FLAG_EXTENTS != 0
+    }
+
+    /// The inode's §5.3 security record.
+    ///
+    /// ext4 stores the POSIX mode bits (`i_mode` low 12 bits, the type
+    /// bits stripped), owner, and group per inode. It has no inline
+    /// capability gate, and POSIX ACLs live in extended-attribute blocks
+    /// this read surface does not yet decode, so the record carries no
+    /// ACL entries and no capability requirement.
+    fn security(&self) -> NodeSecurity {
+        NodeSecurity::new(u32::from(self.mode) & 0x0FFF, self.uid, self.gid)
     }
 }
 
@@ -447,6 +465,8 @@ impl<B: Block> Ext4<B> {
         )?;
 
         let mode = le16(&raw, 0);
+        let uid = u32::from(le16(&raw, 0x02)) | (u32::from(le16(&raw, 0x78)) << 16);
+        let gid = u32::from(le16(&raw, 0x18)) | (u32::from(le16(&raw, 0x7A)) << 16);
         let size_lo = u64::from(le32(&raw, 0x04));
         let size_hi = u64::from(le32(&raw, 0x6C));
         let flags = le32(&raw, 0x20);
@@ -454,6 +474,8 @@ impl<B: Block> Ext4<B> {
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
         Ok(Inode {
             mode,
+            uid,
+            gid,
             size: (size_hi << 32) | size_lo,
             flags,
             block,
@@ -814,6 +836,17 @@ impl<B: Block> FilesystemRead for Ext4<B> {
             kind,
             name_len: found.name_len,
         }))
+    }
+}
+
+impl<B: Block> FilesystemSecurity for Ext4<B> {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        let ino = node_inode(node)?;
+        let inode = self.read_inode(ino)?;
+        if inode.kind().is_none() {
+            return Err(DriverError::NotFound);
+        }
+        Ok(inode.security())
     }
 }
 

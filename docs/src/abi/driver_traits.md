@@ -195,7 +195,11 @@ VFS translates it into its policy metadata and applies the §5.3 model
 (`AGENTS.md` §5.4). A driver such as FAT that keeps no per-file owner
 simply does not implement this trait, and the VFS keeps applying the
 mount-point template. The first implementation is the native
-[`rustfs` driver](../filesystem/rustfs.md).
+[`rustfs` driver](../filesystem/rustfs.md); the
+[`ext4` driver](../filesystem/ext4.md) also implements it, reporting each
+inode's stored mode and owner (its POSIX ACLs live in xattr blocks the
+read surface does not yet decode, so it surfaces no `required_cap` and no
+ACL entries).
 
 ## Block
 
