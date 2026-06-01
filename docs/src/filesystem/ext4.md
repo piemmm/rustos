@@ -107,8 +107,22 @@ bitmap, and the group-descriptor and superblock free counts are kept in
 step. Directory entries are inserted by splitting an existing record's
 slack (growing the directory by a block when none fits) and removed by
 merging the freed slot into its predecessor. `truncate` frees the tail
-blocks of both the classic map and the inline depth-0 extent root and
-zeroes the retained partial block so a later extension reads as zeros.
+blocks of the classic map and the extent map (the inline depth-0 root or
+a depth-1 tree) and zeroes the retained partial block so a later
+extension reads as zeros.
+
+A pre-existing extent-mapped file (those a foreign `mkfs` created) grows
+in place: `write_at` extends the last extent when the new block is
+contiguous and otherwise appends a fresh extent. When the four inline
+`i_block` extent slots are exhausted, the inline root is converted into
+a **depth-1 tree** — its extents move into a freshly allocated leaf
+block and the root becomes an index node — after which further leaves
+are attached through new (ascending-ordered) root index entries.
+`truncate`/`remove` free a depth-1 tree's emptied leaf blocks and drop
+their index entries, collapsing the root back to an empty depth-0 node
+when no leaf survives. A tree that would need a second index level
+(depth ≥ 2) is refused (see below); the driver never builds one, and the
+read path still maps any depth on disk.
 
 ### Mutation scope (fail closed)
 
@@ -120,8 +134,10 @@ image is therefore writable only when created without those features
 (e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`), while every such volume
 stays fully **readable**. `remove`/`truncate` of a file whose mapping is
 not the classic map or an inline depth-0 extent root is likewise refused
-rather than orphaning blocks. This is a deliberate, documented boundary
-(`AGENTS.md` §2.1 / §5.4), not a silent best-effort.
+rather than orphaning blocks. Likewise, growing an extent tree beyond a
+single index level (depth ≥ 2) is refused rather than half-built. This
+is a deliberate, documented boundary (`AGENTS.md` §2.1 / §5.4), not a
+silent best-effort.
 
 ## Capabilities
 
@@ -136,7 +152,7 @@ size 1024, one block group, 128-byte inodes, `filetype` on, with block
 and inode bitmaps and free space) holding an extent-mapped root, an
 extent-mapped file, a subdirectory with a nested file, and a classic
 block-mapped file that combines direct pointers, sparse holes, and a
-single-indirect block. The 41 host-side tests cover superblock
+single-indirect block. The 44 host-side tests cover superblock
 validation, `node_info`, ordered listing with `.`/`..` suppression and
 end-of-directory, `lookup` and subdirectory traversal, extent and
 classic reads (including across holes and the direct/indirect boundary),
@@ -147,8 +163,12 @@ round-trips (persisting across a remount), duplicate / invalid-name /
 non-directory rejection, sparse extension, `truncate` shrink-then-grow,
 directory creation with `.`/`..` and removal (empty vs. `Busy`), inode
 reuse after `remove`, the `write_at`/`truncate` directory and
-not-found guards, free-inode exhaustion, and the fail-closed refusal of
-mutation on a `metadata_csum` volume, and the POSIX-ACL decode —
+not-found guards, free-inode exhaustion, the fail-closed refusal of
+mutation on a `metadata_csum` volume, the depth-0 → depth-1 extent-tree
+growth (sparse writes that overflow the inline root, with read-back and
+remount persistence, a sparse hole between extents, and depth-1
+`truncate`-to-zero and `remove` freeing and reusing the tree's blocks),
+and the POSIX-ACL decode —
 standalone `decode`/`find` units (both value-base conventions, bad
 version, the inline budget cap, unrelated attributes) plus end-to-end
 `security` reads of an external xattr block, a garbage block, and an

@@ -3794,9 +3794,32 @@ device list.
   `security` reads of an external xattr block, a garbage block, and an
   inline ACL in a 256-byte-inode volume). Docs:
   `docs/src/filesystem/ext4.md` and the crate `README.md`.
+- **`ext4` interior extent-tree growth — DONE.** A pre-existing
+  extent-mapped file now grows beyond the four inline `i_block` extent
+  slots: when they are exhausted, `write_at` converts the inline depth-0
+  root into a **depth-1 tree** (the four extents move into a freshly
+  allocated leaf block and the root becomes a single index entry), then
+  attaches further leaves through new ascending-ordered root index
+  entries; the last extent is extended in place when contiguous.
+  `truncate`/`remove` free a depth-1 tree's emptied leaf blocks, drop
+  their index entries, and collapse the root back to an empty depth-0
+  node when none survive. The depth-0 leaf find/append/extend and the
+  per-leaf trim are shared free functions reused by the root and by leaf
+  blocks (§2.2 — no duplicated extent algebra). A tree that would need a
+  second index level (depth ≥ 2) is refused (`DeviceFault`) rather than
+  half-built — the driver never builds one and the read path still maps
+  any on-disk depth (§2.1 / §5.4 — fail closed). Still gated: mutation of
+  the checksummed (`metadata_csum`/`gdt_csum`) and `64bit` feature sets,
+  which stay fully readable. No `unwrap`/`expect`/`panic!`, no `unsafe`.
+  Tests grew from 41 to **44** (depth-0 → depth-1 conversion with
+  read-back + remount persistence and a sparse hole between extents,
+  depth-1 `truncate`-to-zero with block reuse, and `remove` of a depth-1
+  file with reuse). Docs: `docs/src/filesystem/ext4.md` and the crate
+  `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
-  - Growing an ext4 directory / file beyond the inline-extent root
-    (interior extent-tree edits) for the checksummed feature set.
+  - Mutation of the checksummed (`metadata_csum`/`gdt_csum`) and `64bit`
+    ext4 feature sets (a first-party crc32c + wide-descriptor
+    maintenance); such volumes stay fully readable today.
   - The `rustfs` journal crash-consistency *soak* — **DONE**: a
     deterministic, seeded multi-operation soak crash-tests every scripted
     `create`/`write`/`truncate`/`remove` at every device-write count and

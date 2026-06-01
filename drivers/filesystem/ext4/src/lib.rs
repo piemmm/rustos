@@ -120,6 +120,10 @@ const INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
 /// Extent-tree node header magic (`eh_magic`), little-endian `0xF30A`.
 const EXTENT_MAGIC: u16 = 0xF30A;
 
+/// Number of extent (or index) entries the inline `i_block` root holds
+/// after its 12-byte header: `(60 - 12) / 12 = 4`.
+const INLINE_EXTENT_MAX: usize = (I_BLOCK_LEN - 12) / 12;
+
 /// `i_mode` type mask and the two node kinds the read surface models.
 const S_IFMT: u16 = 0xF000;
 /// `i_mode` value for a directory.
@@ -1266,11 +1270,13 @@ impl<B: Block> Ext4<B> {
         Ok(blk)
     }
 
-    /// Inline-extent allocation: serves the depth-0 extent root held in
-    /// `i_block`, extending the last extent when the new block is
-    /// logically and physically contiguous, otherwise adding a fresh
-    /// extent while the four inline slots last. An interior extent tree
-    /// (non-zero depth) or a full root is not grown (`DeviceFault`).
+    /// Extent allocation. Serves the depth-0 inline root held in
+    /// `i_block` directly — extending the last extent when contiguous,
+    /// else appending while the four inline slots last — and grows the
+    /// root into a depth-1 tree (a single index level over leaf blocks)
+    /// once those slots are exhausted. A tree that would need a second
+    /// index level is refused (`DeviceFault`); this driver never builds
+    /// one, and the read path still maps any depth on disk.
     fn map_or_alloc_extent(
         &mut self,
         raw: &mut [u8],
@@ -1278,58 +1284,136 @@ impl<B: Block> Ext4<B> {
         allocated: &mut u64,
     ) -> Result<u64, DriverError> {
         let ib = I_BLOCK_OFFSET;
-        if le16(raw, ib) != EXTENT_MAGIC || le16(raw, ib + 6) != 0 {
+        if le16(raw, ib) != EXTENT_MAGIC {
             return Err(DriverError::DeviceFault);
         }
+        match le16(raw, ib + 6) {
+            0 => {
+                if usize::from(le16(raw, ib + 2)) > INLINE_EXTENT_MAX {
+                    return Err(DriverError::DeviceFault);
+                }
+                if let Some(phys) = leaf_find(raw, ib, logical) {
+                    return Ok(phys);
+                }
+                let blk = self.alloc_block()?;
+                *allocated += 1;
+                if leaf_place(raw, ib, INLINE_EXTENT_MAX, logical, blk, true)? {
+                    return Ok(blk);
+                }
+                self.grow_root_to_depth1(raw, logical, blk, allocated)
+            }
+            1 => self.alloc_in_depth1(raw, logical, allocated),
+            _ => Err(DriverError::DeviceFault),
+        }
+    }
+
+    /// Convert a full inline depth-0 extent root into a depth-1 tree:
+    /// move its extents into a freshly allocated leaf block, place the
+    /// new `logical`→`data_blk` mapping there, and rewrite the inode root
+    /// as a single index entry pointing at that leaf.
+    fn grow_root_to_depth1(
+        &mut self,
+        raw: &mut [u8],
+        logical: u64,
+        data_blk: u64,
+        allocated: &mut u64,
+    ) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        let leaf_cap = (self.layout.block_size as usize - 12) / 12;
         let entries = usize::from(le16(raw, ib + 2));
-        let max_entries = (I_BLOCK_LEN - 12) / 12;
-        if entries > max_entries {
+        let leaf = self.alloc_block()?;
+        *allocated += 1;
+        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        put_le16(&mut leaf_buf, 0, EXTENT_MAGIC);
+        put_le16(&mut leaf_buf, 2, u16_of(entries)?);
+        put_le16(&mut leaf_buf, 4, u16_of(leaf_cap)?);
+        put_le16(&mut leaf_buf, 6, 0);
+        for i in 0..entries {
+            let src = ib + 12 + i * 12;
+            let dst = 12 + i * 12;
+            leaf_buf[dst..dst + 12].copy_from_slice(&raw[src..src + 12]);
+        }
+        if !leaf_place(&mut leaf_buf, 0, leaf_cap, logical, data_blk, true)? {
             return Err(DriverError::DeviceFault);
         }
+        let first_block = le32(&leaf_buf, 12);
+        self.write_fs_block(leaf, &leaf_buf)?;
+        for b in &mut raw[ib + 12..ib + I_BLOCK_LEN] {
+            *b = 0;
+        }
+        put_le16(raw, ib + 2, 1);
+        put_le16(raw, ib + 4, u16_of(INLINE_EXTENT_MAX)?);
+        put_le16(raw, ib + 6, 1);
+        let off = ib + 12;
+        put_le32(raw, off, first_block);
+        put_le32(raw, off + 4, u32_of(leaf)?);
+        put_le16(raw, off + 8, u16::try_from(leaf >> 32).unwrap_or(0));
+        put_le16(raw, off + 10, 0);
+        Ok(data_blk)
+    }
+
+    /// Allocate `logical` within a depth-1 extent tree rooted in the
+    /// inode: descend to the covering leaf, extend/append within it, or
+    /// attach a fresh single-extent leaf via a new (ascending-ordered)
+    /// root index entry. A tree that would need a second index level is
+    /// refused (`DeviceFault`).
+    fn alloc_in_depth1(
+        &mut self,
+        raw: &mut [u8],
+        logical: u64,
+        allocated: &mut u64,
+    ) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        let leaf_cap = (self.layout.block_size as usize - 12) / 12;
+        let entries = usize::from(le16(raw, ib + 2));
+        if entries == 0 || entries > INLINE_EXTENT_MAX {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut chosen = 0usize;
+        let mut best: Option<u64> = None;
         for i in 0..entries {
-            let off = ib + 12 + i * 12;
-            let ee_block = u64::from(le32(raw, off));
-            let raw_len = le16(raw, off + 4);
-            let len = if raw_len > 32_768 {
-                u64::from(raw_len - 32_768)
-            } else {
-                u64::from(raw_len)
+            let eib = u64::from(le32(raw, ib + 12 + i * 12));
+            let better = match best {
+                None => true,
+                Some(b) => eib >= b,
             };
-            if logical >= ee_block && logical < ee_block + len {
-                let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
-                return Ok(phys + (logical - ee_block));
+            if eib <= logical && better {
+                best = Some(eib);
+                chosen = i;
             }
         }
+        let coff = ib + 12 + chosen * 12;
+        let leaf_ptr = (u64::from(le16(raw, coff + 8)) << 32) | u64::from(le32(raw, coff + 4));
+        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        self.read_fs_block(leaf_ptr, &mut leaf_buf)?;
+        if le16(&leaf_buf, 0) != EXTENT_MAGIC || le16(&leaf_buf, 6) != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        if let Some(phys) = leaf_find(&leaf_buf, 0, logical) {
+            return Ok(phys);
+        }
+        let is_rightmost = chosen == entries - 1;
         let blk = self.alloc_block()?;
         *allocated += 1;
-        if entries > 0 {
-            let off = ib + 12 + (entries - 1) * 12;
-            let ee_block = u64::from(le32(raw, off));
-            let raw_len = le16(raw, off + 4);
-            let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
-            if raw_len < 32_768
-                && logical == ee_block + u64::from(raw_len)
-                && blk == phys + u64::from(raw_len)
-            {
-                put_le16(raw, off + 4, raw_len + 1);
-                return Ok(blk);
-            }
-        }
-        if entries < max_entries {
-            let off = ib + 12 + entries * 12;
-            put_le32(
-                raw,
-                off,
-                u32::try_from(logical).map_err(|_| DriverError::DeviceFault)?,
-            );
-            put_le16(raw, off + 4, 1);
-            put_le16(raw, off + 6, u16::try_from(blk >> 32).unwrap_or(0));
-            put_le32(raw, off + 8, u32_of(blk)?);
-            put_le16(raw, ib + 2, u16_of(entries + 1)?);
+        if leaf_place(&mut leaf_buf, 0, leaf_cap, logical, blk, is_rightmost)? {
+            self.write_fs_block(leaf_ptr, &leaf_buf)?;
             return Ok(blk);
         }
-        self.free_block(blk)?;
-        Err(DriverError::DeviceFault)
+        if entries >= INLINE_EXTENT_MAX {
+            self.free_block(blk)?;
+            return Err(DriverError::DeviceFault);
+        }
+        let new_leaf = self.alloc_block()?;
+        *allocated += 1;
+        let mut nb = [0u8; MAX_BLOCK_SIZE as usize];
+        put_le16(&mut nb, 0, EXTENT_MAGIC);
+        put_le16(&mut nb, 4, u16_of(leaf_cap)?);
+        if !leaf_place(&mut nb, 0, leaf_cap, logical, blk, false)? {
+            return Err(DriverError::DeviceFault);
+        }
+        self.write_fs_block(new_leaf, &nb)?;
+        insert_root_index(raw, entries, logical, new_leaf)?;
+        Ok(blk)
     }
 }
 
@@ -1337,6 +1421,101 @@ impl<B: Block> Ext4<B> {
 /// `rec_len` alignment).
 fn align4(n: usize) -> usize {
     (n + 3) & !3
+}
+
+/// Find logical block `logical` within the leaf extent node whose 12-byte
+/// header begins at `hdr` in `buf`, returning the physical block backing
+/// it, or `None` when the leaf does not map it (a sparse hole or beyond
+/// its extents).
+fn leaf_find(buf: &[u8], hdr: usize, logical: u64) -> Option<u64> {
+    let entries = usize::from(le16(buf, hdr + 2));
+    for i in 0..entries {
+        let off = hdr + 12 + i * 12;
+        let ee_block = u64::from(le32(buf, off));
+        let raw_len = le16(buf, off + 4);
+        let len = if raw_len > 32_768 {
+            u64::from(raw_len - 32_768)
+        } else {
+            u64::from(raw_len)
+        };
+        if len == 0 {
+            continue;
+        }
+        if logical >= ee_block && logical < ee_block + len {
+            let phys = (u64::from(le16(buf, off + 6)) << 32) | u64::from(le32(buf, off + 8));
+            return Some(phys + (logical - ee_block));
+        }
+    }
+    None
+}
+
+/// Insert an index entry for `leaf` covering logical block `ei_block`
+/// into the inode extent root, keeping the `entries` existing entries in
+/// ascending `ei_block` order.
+fn insert_root_index(
+    raw: &mut [u8],
+    entries: usize,
+    ei_block: u64,
+    leaf: u64,
+) -> Result<(), DriverError> {
+    let ib = I_BLOCK_OFFSET;
+    let mut pos = entries;
+    for i in 0..entries {
+        if u64::from(le32(raw, ib + 12 + i * 12)) > ei_block {
+            pos = i;
+            break;
+        }
+    }
+    raw.copy_within(
+        ib + 12 + pos * 12..ib + 12 + entries * 12,
+        ib + 12 + (pos + 1) * 12,
+    );
+    let off = ib + 12 + pos * 12;
+    put_le32(raw, off, u32_of(ei_block)?);
+    put_le32(raw, off + 4, u32_of(leaf)?);
+    put_le16(raw, off + 8, u16::try_from(leaf >> 32).unwrap_or(0));
+    put_le16(raw, off + 10, 0);
+    put_le16(raw, ib + 2, u16_of(entries + 1)?);
+    Ok(())
+}
+
+/// Map logical block `logical` to physical block `blk` in the leaf extent
+/// node at `hdr`, extending the final extent when `allow_extend` and the
+/// new block is logically and physically contiguous, otherwise appending
+/// a fresh extent while a slot (`max_entries`) remains. Returns `true`
+/// when the mapping was placed, `false` when the leaf is full.
+fn leaf_place(
+    buf: &mut [u8],
+    hdr: usize,
+    max_entries: usize,
+    logical: u64,
+    blk: u64,
+    allow_extend: bool,
+) -> Result<bool, DriverError> {
+    let entries = usize::from(le16(buf, hdr + 2));
+    if allow_extend && entries > 0 {
+        let off = hdr + 12 + (entries - 1) * 12;
+        let ee_block = u64::from(le32(buf, off));
+        let raw_len = le16(buf, off + 4);
+        let phys = (u64::from(le16(buf, off + 6)) << 32) | u64::from(le32(buf, off + 8));
+        if raw_len < 32_768
+            && logical == ee_block + u64::from(raw_len)
+            && blk == phys + u64::from(raw_len)
+        {
+            put_le16(buf, off + 4, raw_len + 1);
+            return Ok(true);
+        }
+    }
+    if entries < max_entries {
+        let off = hdr + 12 + entries * 12;
+        put_le32(buf, off, u32_of(logical)?);
+        put_le16(buf, off + 4, 1);
+        put_le16(buf, off + 6, u16::try_from(blk >> 32).unwrap_or(0));
+        put_le32(buf, off + 8, u32_of(blk)?);
+        put_le16(buf, hdr + 2, u16_of(entries + 1)?);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Locate the `system.posix_acl_access` value within an extended-attribute
@@ -1779,29 +1958,55 @@ impl<B: Block> Ext4<B> {
         }
     }
 
-    /// [`Self::truncate_blocks`] for the inline depth-0 extent root.
+    /// [`Self::truncate_blocks`] for the extent map. Handles the inline
+    /// depth-0 root and a depth-1 tree (freeing emptied leaf blocks and
+    /// dropping their root index entries); a deeper tree is refused
+    /// (`Unsupported`).
     fn truncate_extent_blocks(&mut self, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
         let ib = I_BLOCK_OFFSET;
-        if le16(raw, ib) != EXTENT_MAGIC || le16(raw, ib + 6) != 0 {
+        if le16(raw, ib) != EXTENT_MAGIC {
             return Err(DriverError::Unsupported);
         }
-        let entries = usize::from(le16(raw, ib + 2));
-        let max_entries = (I_BLOCK_LEN - 12) / 12;
+        match le16(raw, ib + 6) {
+            0 => {
+                if usize::from(le16(raw, ib + 2)) > INLINE_EXTENT_MAX {
+                    return Err(DriverError::Unsupported);
+                }
+                let (freed, _kept) = self.trim_leaf(raw, ib, INLINE_EXTENT_MAX, keep)?;
+                Ok(freed)
+            }
+            1 => self.truncate_depth1_blocks(raw, keep),
+            _ => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// Free every extent at or beyond logical block `keep` within the
+    /// leaf extent node whose 12-byte header begins at `hdr` in `buf`,
+    /// compacting (and, where `keep` falls inside one, trimming) the
+    /// survivors in place. Returns `(blocks_freed, surviving_extents)`.
+    fn trim_leaf(
+        &mut self,
+        buf: &mut [u8],
+        hdr: usize,
+        max_entries: usize,
+        keep: u64,
+    ) -> Result<(u64, usize), DriverError> {
+        let entries = usize::from(le16(buf, hdr + 2));
         if entries > max_entries {
             return Err(DriverError::Unsupported);
         }
         let mut freed = 0u64;
         let mut kept = 0usize;
         for i in 0..entries {
-            let off = ib + 12 + i * 12;
-            let ee_block = u64::from(le32(raw, off));
-            let raw_len = le16(raw, off + 4);
+            let off = hdr + 12 + i * 12;
+            let ee_block = u64::from(le32(buf, off));
+            let raw_len = le16(buf, off + 4);
             let len = if raw_len > 32_768 {
                 u64::from(raw_len - 32_768)
             } else {
                 u64::from(raw_len)
             };
-            let phys = (u64::from(le16(raw, off + 6)) << 32) | u64::from(le32(raw, off + 8));
+            let phys = (u64::from(le16(buf, off + 6)) << 32) | u64::from(le32(buf, off + 8));
             if ee_block >= keep {
                 for b in 0..len {
                     self.free_block(phys + b)?;
@@ -1817,11 +2022,58 @@ impl<B: Block> Ext4<B> {
                     }
                     u16_of(usize_of(keep - ee_block)?)?
                 };
+                let dst = hdr + 12 + kept * 12;
+                put_le32(buf, dst, u32_of(ee_block)?);
+                put_le16(buf, dst + 4, keep_len);
+                put_le16(buf, dst + 6, u16::try_from(phys >> 32).unwrap_or(0));
+                put_le32(buf, dst + 8, u32_of(phys)?);
+                kept += 1;
+            }
+        }
+        for i in kept..entries {
+            let off = hdr + 12 + i * 12;
+            for b in &mut buf[off..off + 12] {
+                *b = 0;
+            }
+        }
+        put_le16(buf, hdr + 2, u16_of(kept)?);
+        Ok((freed, kept))
+    }
+
+    /// [`Self::truncate_extent_blocks`] for a depth-1 tree: trim each
+    /// leaf to `keep`, free a leaf left empty, drop its root index entry,
+    /// and collapse the root back to an empty depth-0 node when no leaf
+    /// survives.
+    fn truncate_depth1_blocks(&mut self, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
+        let ib = I_BLOCK_OFFSET;
+        let leaf_cap = (self.layout.block_size as usize - 12) / 12;
+        let entries = usize::from(le16(raw, ib + 2));
+        if entries == 0 || entries > INLINE_EXTENT_MAX {
+            return Err(DriverError::Unsupported);
+        }
+        let mut freed = 0u64;
+        let mut kept = 0usize;
+        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        for i in 0..entries {
+            let off = ib + 12 + i * 12;
+            let ei_block = u64::from(le32(raw, off));
+            let leaf_ptr = (u64::from(le16(raw, off + 8)) << 32) | u64::from(le32(raw, off + 4));
+            self.read_fs_block(leaf_ptr, &mut leaf_buf)?;
+            if le16(&leaf_buf, 0) != EXTENT_MAGIC || le16(&leaf_buf, 6) != 0 {
+                return Err(DriverError::Unsupported);
+            }
+            let (leaf_freed, surviving) = self.trim_leaf(&mut leaf_buf, 0, leaf_cap, keep)?;
+            freed += leaf_freed;
+            if surviving == 0 {
+                self.free_block(leaf_ptr)?;
+                freed += 1;
+            } else {
+                self.write_fs_block(leaf_ptr, &leaf_buf)?;
                 let dst = ib + 12 + kept * 12;
-                put_le32(raw, dst, u32_of(ee_block)?);
-                put_le16(raw, dst + 4, keep_len);
-                put_le16(raw, dst + 6, u16::try_from(phys >> 32).unwrap_or(0));
-                put_le32(raw, dst + 8, u32_of(phys)?);
+                put_le32(raw, dst, u32_of(ei_block)?);
+                put_le32(raw, dst + 4, u32_of(leaf_ptr)?);
+                put_le16(raw, dst + 8, u16::try_from(leaf_ptr >> 32).unwrap_or(0));
+                put_le16(raw, dst + 10, 0);
                 kept += 1;
             }
         }
@@ -1831,7 +2083,13 @@ impl<B: Block> Ext4<B> {
                 *b = 0;
             }
         }
-        put_le16(raw, ib + 2, u16_of(kept)?);
+        if kept == 0 {
+            put_le16(raw, ib + 2, 0);
+            put_le16(raw, ib + 4, u16_of(INLINE_EXTENT_MAX)?);
+            put_le16(raw, ib + 6, 0);
+        } else {
+            put_le16(raw, ib + 2, u16_of(kept)?);
+        }
         Ok(freed)
     }
 

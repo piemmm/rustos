@@ -764,6 +764,114 @@ fn truncate_shrink_then_grow() {
     assert!(big[100..].iter().all(|&b| b == 0), "grown region is zero");
 }
 
+/// Logical blocks written far enough apart to stay distinct extents, so
+/// the inline four-slot extent root overflows and converts to a depth-1
+/// tree (`hello.txt`'s planted extent already occupies the first slot,
+/// so the fifth write here is the one that forces the conversion).
+const GROWTH_LOGICALS: [u64; 5] = [100, 200, 300, 400, 500];
+
+/// A deterministic, non-zero fill byte for the block at `logical`.
+fn growth_marker(logical: u64) -> u8 {
+    u8::try_from(logical / 100).expect("marker index fits") * 17 + 3
+}
+
+/// Sparsely write one distinct block at each [`GROWTH_LOGICALS`] offset of
+/// `hello.txt`, forcing its depth-0 inline root to grow into a depth-1
+/// extent tree.
+fn grow_hello_into_depth1(fs: &mut Ext4<MockBlock>) {
+    let root = fs.root();
+    for &logical in &GROWTH_LOGICALS {
+        let block = [growth_marker(logical); FS_BLOCK];
+        let n = fs
+            .write_at(root, b"hello.txt", logical * FS_BLOCK as u64, &block)
+            .expect("sparse write grows the extent tree");
+        assert_eq!(n, FS_BLOCK);
+    }
+}
+
+#[test]
+fn an_extent_file_grows_into_a_depth1_tree() {
+    let mut fs = mount();
+    grow_hello_into_depth1(&mut fs);
+
+    // Re-open to prove the converted tree persists on disk.
+    let mut fs = remount(fs);
+    let root = fs.root();
+    let file = fs.lookup(root, b"hello.txt").expect("found");
+
+    // The original first-block contents survive the conversion.
+    let mut head = [0u8; 64];
+    let n = fs.read_at(file, 0, &mut head).expect("read head");
+    assert_eq!(n, head.len());
+    assert_eq!(&head[..HELLO_BODY.len()], HELLO_BODY);
+
+    // Every sparsely-written block reads back its marker...
+    for &logical in &GROWTH_LOGICALS {
+        let mut buf = [0u8; FS_BLOCK];
+        let n = fs
+            .read_at(file, logical * FS_BLOCK as u64, &mut buf)
+            .expect("read a grown block");
+        assert_eq!(n, FS_BLOCK);
+        assert!(
+            buf.iter().all(|&b| b == growth_marker(logical)),
+            "logical block {logical} reads back its marker"
+        );
+    }
+
+    // ...and a gap between them is a sparse hole of zeros.
+    let mut hole = [0xFFu8; FS_BLOCK];
+    let n = fs
+        .read_at(file, 150 * FS_BLOCK as u64, &mut hole)
+        .expect("read hole");
+    assert_eq!(n, FS_BLOCK);
+    assert!(hole.iter().all(|&b| b == 0), "the gap reads as zeros");
+}
+
+#[test]
+fn truncating_a_depth1_extent_file_to_zero_frees_its_tree() {
+    let mut fs = mount();
+    grow_hello_into_depth1(&mut fs);
+    let root = fs.root();
+    fs.truncate(root, b"hello.txt", 0)
+        .expect("truncate to zero");
+    let file = fs.lookup(root, b"hello.txt").expect("found");
+    assert_eq!(fs.node_info(file).expect("info").size, 0);
+
+    // The freed leaf + data blocks return to the pool: re-growing into a
+    // fresh depth-1 tree succeeds and round-trips across a remount.
+    grow_hello_into_depth1(&mut fs);
+    let mut fs = remount(fs);
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    for &logical in &GROWTH_LOGICALS {
+        let mut buf = [0u8; FS_BLOCK];
+        let n = fs
+            .read_at(file, logical * FS_BLOCK as u64, &mut buf)
+            .expect("read a regrown block");
+        assert_eq!(n, FS_BLOCK);
+        assert!(buf.iter().all(|&b| b == growth_marker(logical)));
+    }
+}
+
+#[test]
+fn removing_a_depth1_extent_file_frees_it() {
+    let mut fs = mount();
+    grow_hello_into_depth1(&mut fs);
+    let root = fs.root();
+    fs.remove(root, b"hello.txt")
+        .expect("remove a depth-1 file");
+    assert_eq!(fs.lookup(root, b"hello.txt"), Err(DriverError::NotFound));
+
+    // The inode and all of its data + leaf blocks are reusable afterwards.
+    fs.create(root, b"fresh.txt", NodeKind::RegularFile)
+        .expect("create reuses the freed metadata");
+    fs.write_at(root, b"fresh.txt", 0, b"ok").expect("write");
+    let mut fs = remount(fs);
+    let file = fs.lookup(fs.root(), b"fresh.txt").expect("found");
+    let mut buf = [0u8; 8];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"ok");
+}
+
 #[test]
 fn create_a_directory_with_dot_and_dotdot() {
     let mut fs = mount();
