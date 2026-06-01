@@ -64,9 +64,18 @@ are taken from the block bitmap and inodes from the inode bitmap, with
 the group-descriptor and superblock free counts kept in step. Directory
 entries are inserted by splitting an existing record's slack (growing
 the directory by a block when none fits) and removed by merging the
-freed slot into its predecessor. `truncate` frees the tail of both the
-classic map and an inline depth-0 extent root and zeroes the retained
-partial block.
+freed slot into its predecessor. `truncate` frees the tail of the
+classic map and the extent map (the inline depth-0 root or a depth-1
+tree) and zeroes the retained partial block.
+
+A pre-existing extent-mapped file grows in place: `write_at` extends the
+last extent when contiguous, otherwise appends a fresh extent, and once
+the four inline `i_block` slots are exhausted it converts the root into
+a **depth-1 tree** (extents move into a new leaf block; the root becomes
+an index node) and attaches further leaves via new ascending-ordered
+root index entries. `truncate`/`remove` free a depth-1 tree's emptied
+leaves, drop their index entries, and collapse the root back to an empty
+depth-0 node when none survive.
 
 ### Mutation scope (fail closed)
 
@@ -75,14 +84,18 @@ safe mutation, so the write path refuses (`DriverError::Unsupported`)
 any volume carrying the `metadata_csum`, `gdt_csum`/`uninit_bg`, or
 `64bit` features — such a volume stays fully **readable**, and a default
 `mkfs.ext4` image is writable only when made without those features
-(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`). `remove`/`truncate` of a
-file whose mapping is neither the classic map nor an inline depth-0
-extent root is likewise refused rather than orphaning blocks
-(`AGENTS.md` §2.1 / §5.4).
+(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`). Growing an extent tree
+beyond a single index level (depth ≥ 2), and `remove`/`truncate` of a
+file whose mapping is neither the classic map nor a depth-0/depth-1
+extent tree, are likewise refused rather than half-built or orphaning
+blocks (`AGENTS.md` §2.1 / §5.4).
 
 ## Limitations
 
 - Mutation is gated to the unchecksummed, non-`64bit` feature set above.
+- Extent-tree growth is gated to a single index level (depth ≤ 1); a
+  deeper tree is refused, never half-built (the read path still maps
+  any depth).
 - Hash-tree (`htree`) interior nodes are not traversed; only the linear
   leaf layout is read (sufficient for small and moderate directories).
 - Inline-data and special files (symlinks, devices, FIFOs) are reported
@@ -151,11 +164,14 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
   sparse extension past EOF; `truncate` shrink-then-grow; directory
   creation (`.`/`..`) and removal (empty vs. `Busy`); inode reuse after
   `remove`; `write_at`/`truncate` directory and not-found guards;
-  free-inode exhaustion; and the fail-closed refusal of mutation on a
-  `metadata_csum` volume.
+  free-inode exhaustion; the fail-closed refusal of mutation on a
+  `metadata_csum` volume; and the depth-0 → depth-1 extent-tree growth
+  (sparse writes overflowing the inline root, read-back + remount
+  persistence, a sparse hole between extents, and depth-1
+  `truncate`-to-zero and `remove` freeing and reusing the tree).
 - The `register` capability gate and `into_block` round-trip.
 
-41/41 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
+44/44 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
 end-to-end QEMU vertical are tracked in `.junie/next-session-prompt.md`.
 
 ## Public surface

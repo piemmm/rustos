@@ -87,13 +87,15 @@ const PREEMPT_CALIBRATION_WINDOW_US: u32 = 10_000;
 
 /// Per-CPU kernel-stack size in bytes.
 ///
-/// 16 KiB matches the BSP bootstrap stack in `kernel/arch/x86_64::boot.s`
-/// and the per-AP stacks in `scheduler_stress_qemu`. The stack hosts
-/// the kernel side of a `syscall` transition (frame layout in
-/// `syscall_entry::syscall_entry_stub`); 16 KiB is comfortably above
-/// the worst-case kernel-side stack footprint for the (c7-bin)
-/// pipeline.
-const KERNEL_STACK_BYTES: usize = 16 * 1024;
+/// 64 KiB matches the BSP bootstrap stack in `kernel/arch/x86_64::boot.s`.
+/// The stack hosts the kernel side of a `syscall` transition (frame
+/// layout in `syscall_entry::syscall_entry_stub`) and, in the QEMU
+/// integration verticals, a full device-bring-up scenario driven
+/// synchronously on the boot thread — including a filesystem `open`
+/// that stages whole blocks through on-stack scratch buffers. The
+/// earlier 16 KiB was marginal for that nested path; 64 KiB gives ample
+/// headroom.
+const KERNEL_STACK_BYTES: usize = 64 * 1024;
 
 /// 16-byte-aligned kernel-stack slot. Matches the System V AMD64
 /// ABI's 16-byte stack-alignment requirement at function entry.

@@ -109,10 +109,13 @@ Both routes feed the *same* `Metadata::authorize` decision, so the policy
 is single-sourced; only the metadata's origin changes.
 
 The whole driver-backed read **and** write path is exercised end-to-end
-under QEMU against a real (emulated) virtio-blk device: the
-`fat32_virtio_blk_pci_x86_64` vertical mounts a planted FAT32 image
-through the FAT32 driver and round-trips a read and a write (see
-[FAT32](./fat32.md)).
+under QEMU against a real (emulated) virtio-blk device by two verticals:
+the `fat32_virtio_blk_pci_x86_64` vertical mounts a planted FAT32 image
+through the FAT32 driver (see [FAT32](./fat32.md)), and the
+`rustfs_virtio_blk_pci_x86_64` vertical mounts a planted rustfs volume —
+one the rustfs driver itself authored — through the rustfs driver (see
+[rustfs](./rustfs.md)). Both round-trip a read and a write through the
+shared, transport-generic device tail.
 
 ## Path resolution
 

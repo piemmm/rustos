@@ -71,6 +71,28 @@ copy-on-write zeroing the partial last block) or grows, and `remove`
 refuses a non-empty directory with `Busy`. A `NodeId` is the inode index;
 node identity is stable across a remount.
 
+## End-to-end QEMU vertical
+
+`tests/integration/rustfs_virtio_blk_pci_x86_64` exercises the driver
+against a **real (emulated) virtio-blk-pci device** under QEMU. It boots
+the production kernel pipeline, brings the block device online through
+the same shared bring-up the virtio-blk and FAT32 verticals use, then
+mounts a planted rustfs volume through `RustFs::open`, verifies the
+planted file reads back its known contents, and creates + writes + reads
+back a fresh file before signalling success.
+
+The on-disk image is built by the shared `rustos-test-rustfs-image`
+fixture (a 1 MiB, 512-byte-block, 64-inode volume). Unlike the
+hand-encoded FAT32 fixture, the rustfs image is authored by the **real
+rustfs driver itself** — the fixture formats an in-memory volume through
+`RustFs::format` and plants the file through the driver's own write path
+— so the fixture and the driver can never disagree about the on-disk
+format (`AGENTS.md` §2.2). The host harness (`cargo xtask test --qemu`)
+plants exactly that image on the backing disk, and the freestanding guest
+tail names the same planted and to-be-written files through the fixture's
+constants. The device tail (`rustfs_round_trip`) is generic over the
+virtio transport, so a riscv64 MMIO sibling runs identical code.
+
 ## Capabilities
 
 Loading requires `CAP_DRV_LOAD` at `register` time. The driver runs in

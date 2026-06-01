@@ -45,7 +45,9 @@ rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
 
 # --- riscv64 (`virt`-board MMIO) -------------------------------------
@@ -73,5 +75,7 @@ rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
