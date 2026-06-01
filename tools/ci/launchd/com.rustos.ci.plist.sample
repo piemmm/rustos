@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent — RustOS full per-PR gate (`cargo xtask ci`).
+
+  macOS prefers launchd over cron and survives sleep/wake more predictably on
+  a laptop. Install with:
+
+    cp tools/ci/launchd/com.rustos.ci.plist.sample \
+       ~/Library/LaunchAgents/com.rustos.ci.plist
+    # edit the absolute paths below to match your checkout / user, then:
+    launchctl load ~/Library/LaunchAgents/com.rustos.ci.plist
+
+  StartInterval runs the gate every 30 minutes. The script self-locates the
+  repo and toolchain; logs land outside the repo (see tools/ci/README.md).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rustos.ci</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ianhawkins/RustroverProjects/rustos/tools/ci/ci-run.sh</string>
+        <string>ci</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUSTOS_CI_SYNC</key>
+        <string>1</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/ianhawkins/ci-logs/rustos/launchd-ci.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ianhawkins/ci-logs/rustos/launchd-ci.err.log</string>
+</dict>
+</plist>

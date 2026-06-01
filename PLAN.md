@@ -31,6 +31,10 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `docs/` mdBook scaffold.
 - CI definition (`.github/workflows/ci.yml` or equivalent) running
   `cargo xtask ci` on every push.
+- `tools/ci/`: CI/build-host orchestration — thin wrappers around
+  `cargo xtask` for an unattended builder (scheduling, logging, and the
+  parallel nightly 24 h soaks). No pipeline logic; that stays in
+  `tools/xtask` (§15).
 - `LICENSE`, `README.md` (short), `AGENTS.md` (exists), `PLAN.md` (this file).
 
 **Tests**
@@ -68,6 +72,14 @@ Do **not** begin a stage before all its listed dependencies are complete.
   Stage 1 per-crate `lib/*` pages.
 - CI definition `.github/workflows/ci.yml` runs `cargo xtask ci` on every
   push and pull request, with cargo + xtask-helper-tool caches.
+- `tools/ci/` holds the build-host orchestration scripts (`lib.sh`,
+  `ci-run.sh`, `soak.sh`) plus `crontab.sample` and `launchd/*.plist.sample`
+  samples and a `README.md`. They are thin wrappers over `cargo xtask`:
+  `ci-run.sh` logs one subcommand run (default `ci`), and `soak.sh` fans the
+  §19.6 fuzz harnesses and §19.7 proptest models out into parallel
+  `--soak --target` jobs so the nightly is not `(harnesses+models) x 24 h`
+  serialised. Logs land outside the tree (§3); no pipeline step lives in the
+  scripts (§15).
 - `LICENSE` (GPL-3.0-only), `README.md`, `AGENTS.md`, `PLAN.md` are
   all present at the repository root.
 

@@ -1,0 +1,30 @@
+# RustOS CI/build-host crontab — sample.
+#
+# Install with `crontab tools/ci/crontab.sample` after adjusting the repo path
+# below. Every job is self-locating (it derives the repo root and puts the
+# pinned toolchain on PATH via tools/ci/lib.sh), so the only thing to edit is
+# REPO if your checkout is elsewhere.
+#
+# A dedicated builder should track the branch tip: RUSTOS_CI_SYNC=1 makes each
+# job `git fetch && git reset --hard origin/<branch>` before running. Drop it
+# on a developer laptop where you do not want the working tree reset.
+#
+# Logs land outside the repo (default ~/ci-logs/rustos); override with
+# RUSTOS_CI_LOGDIR. See tools/ci/README.md.
+
+REPO=/Users/ianhawkins/RustroverProjects/rustos
+SHELL=/bin/bash
+
+# Full per-PR gate (AGENTS.md §7) every 30 minutes.
+*/30 * * * *  RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh ci
+
+# Nightly 24 h soaks — every §19.6 fuzz harness and §19.7 proptest model in
+# parallel. One invocation; soak.sh fans the registries out.
+0 2 * * *     RUSTOS_CI_SYNC=1 $REPO/tools/ci/soak.sh
+
+# Nightly headless Tier-1 builds (AGENTS.md §17.5) — the headless image must
+# keep building for every Tier-1 target.
+0  4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
+20 4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target aarch64-unknown-none
+40 4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target riscv64gc-unknown-none-elf
+0  5 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target wasm32-unknown-unknown

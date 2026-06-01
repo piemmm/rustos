@@ -181,7 +181,10 @@ rustos/
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
 │   ├── mkimage/         # Image builders per platform.
-│   └── qemu/            # QEMU run scripts.
+│   ├── qemu/            # QEMU run scripts.
+│   └── ci/              # CI/build-host orchestration: thin wrappers around
+│                        #   cargo xtask (scheduling, logging, parallel soaks).
+│                        #   No pipeline logic lives here (that is tools/xtask).
 │
 └── images/              # Output: .iso, .img, .wasm bundles. .gitignored.
 ```
