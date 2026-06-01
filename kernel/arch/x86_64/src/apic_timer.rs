@@ -104,24 +104,40 @@ pub struct Rdtsc;
 
 impl TscReader for Rdtsc {
     fn read(&mut self) -> u64 {
-        // SAFETY: `rdtsc` is unprivileged, has no memory side effects,
-        // and is documented in Intel SDM Vol. 2B. It is unconditionally
-        // available on every x86_64 CPU (it predates the architecture),
-        // and `Rdtsc` is `#[cfg]`-gated to `target_arch = "x86_64"` at
-        // the impl level. The instruction reads the monotonically-
-        // non-decreasing time-stamp counter into EDX:EAX; we recombine
-        // it into a single `u64`.
-        let lo: u32;
-        let hi: u32;
-        unsafe {
-            core::arch::asm!(
-                "rdtsc",
-                out("eax") lo,
-                out("edx") hi,
-                options(nomem, nostack, preserves_flags),
-            );
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: `rdtsc` is unprivileged, has no memory side
+            // effects, and is documented in Intel SDM Vol. 2B. It is
+            // unconditionally available on every x86_64 CPU (it predates
+            // the architecture); the surrounding `cfg(target_arch =
+            // "x86_64")` guarantees the instruction is only emitted for
+            // an x86_64 code generator. The instruction reads the
+            // monotonically-non-decreasing time-stamp counter into
+            // EDX:EAX; we recombine it into a single `u64`.
+            let lo: u32;
+            let hi: u32;
+            unsafe {
+                core::arch::asm!(
+                    "rdtsc",
+                    out("eax") lo,
+                    out("edx") hi,
+                    options(nomem, nostack, preserves_flags),
+                );
+            }
+            (u64::from(hi) << 32) | u64::from(lo)
         }
-        (u64::from(hi) << 32) | u64::from(lo)
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Non-x86_64 host build (e.g. a developer's aarch64 or
+            // riscv64 workstation running `cargo test`). `rdtsc` has no
+            // encoding off x86_64, so emitting it would fail to
+            // assemble. The production reader is never exercised on such
+            // hosts — `calibrate`'s unit tests drive the calibration
+            // window through `MockTsc` — so a constant keeps the crate
+            // building without inventing a fake timebase. Returning a
+            // value (rather than panicking) honours `AGENTS.md` §2.9.
+            0
+        }
     }
 }
 
