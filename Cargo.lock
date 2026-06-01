@@ -890,6 +890,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-posix-fs-suite"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drv-fs-rustfs",
+ "rustos-kernel-core",
+ "rustos-kernel-sec",
+]
+
+[[package]]
 name = "rustos-test-ps2-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

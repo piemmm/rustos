@@ -1,0 +1,83 @@
+//! `readdir`/`stat` conformance: directory listing, `ENOTDIR` on listing
+//! a file, and the size/kind a `stat` reports.
+
+use rustos_test_posix_fs_suite::*;
+
+#[test]
+fn readdir_lists_created_children() {
+    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let caps = CapabilitySet::empty();
+    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+
+    vfs.create_via_secured(&owner, &vol_path("alpha"), &mut fs)
+        .expect("create alpha");
+    vfs.create_via_secured(&owner, &vol_path("beta"), &mut fs)
+        .expect("create beta");
+    vfs.mkdir_via_secured(&owner, &vol_path("gamma"), &mut fs)
+        .expect("mkdir gamma");
+
+    let mut names = vfs
+        .list_via_secured(&owner, &path(MOUNT), &mut fs)
+        .expect("list mount root");
+    names.sort();
+    assert_eq!(names, ["alpha", "beta", "gamma"]);
+}
+
+#[test]
+fn readdir_of_a_file_is_not_a_directory() {
+    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let caps = CapabilitySet::empty();
+    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+
+    vfs.create_via_secured(&owner, &vol_path("file"), &mut fs)
+        .expect("create");
+    assert_eq!(
+        vfs.list_via_secured(&owner, &vol_path("file"), &mut fs),
+        Err(VfsError::NotADirectory)
+    );
+}
+
+#[test]
+fn readdir_of_empty_directory_is_empty() {
+    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let caps = CapabilitySet::empty();
+    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+
+    vfs.mkdir_via_secured(&owner, &vol_path("empty"), &mut fs)
+        .expect("mkdir");
+    let names = vfs
+        .list_via_secured(&owner, &vol_path("empty"), &mut fs)
+        .expect("list");
+    assert!(names.is_empty());
+}
+
+#[test]
+fn stat_reports_size_after_writes() {
+    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let caps = CapabilitySet::empty();
+    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+
+    vfs.create_via_secured(&owner, &vol_path("sized"), &mut fs)
+        .expect("create");
+    vfs.write_via_secured(&owner, &vol_path("sized"), &mut fs, 0, b"twelve bytes")
+        .expect("write");
+
+    let info = vfs
+        .stat_via_secured(&owner, &vol_path("sized"), &mut fs)
+        .expect("stat");
+    assert_eq!(info.kind, NodeKind::RegularFile);
+    assert_eq!(info.size, 12);
+}
+
+#[test]
+fn stat_of_a_missing_path_is_not_found() {
+    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let caps = CapabilitySet::empty();
+    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+
+    assert_eq!(
+        vfs.stat_via_secured(&owner, &vol_path("ghost"), &mut fs)
+            .map(|info| info.size),
+        Err(VfsError::NotFound)
+    );
+}

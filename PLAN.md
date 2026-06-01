@@ -3876,7 +3876,24 @@ device list.
     itself (`RustFs::format` + plant), so the fixture and the driver share
     one source of truth for the on-disk format (§2.2); the transport-
     generic `rustfs_round_trip` tail makes a riscv64 MMIO sibling cheap.
-  - The `pjdfstest`-equivalent POSIX suite.
+  - The `pjdfstest`-equivalent POSIX suite — **DONE**:
+    `tests/integration/posix_fs_suite` (`rustos-test-posix-fs-suite`)
+    drives the real `rustfs` driver through the real `kernel/core::fs`
+    VFS policy layer and asserts the POSIX-visible return values and
+    error codes of every operation the system exposes — `mkdir`,
+    `open`/`read`/`write`, `unlink`, `rmdir`, `truncate`,
+    `readdir`/`stat`, the §5.3 permission model (mode bits, ACL grants,
+    and the capability gate the charter names: a `CAP_AUDIT_READ`-marked
+    file is unreadable at mode `0644` without the capability), the §16
+    layout rules (the four top-level directories, reserved-name refusal,
+    read-only `/System` with writable `Logs`/`Settings`, read-only
+    mounts), the namespace constraints (absolute-only; `.`/`..`/NUL/
+    over-long components refused), and the stable `Errno` mapping. The
+    harness re-implements no FS semantics (§2.2); it is the *semantics*
+    companion to the QEMU virtio-blk verticals, run on the host against
+    the identical driver and VFS code. Docs:
+    `docs/src/filesystem/posix_suite.md` and the crate `README.md`.
+    **Stage 5 is now complete.**
 
 ---
 

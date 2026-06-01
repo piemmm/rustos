@@ -106,6 +106,7 @@ members = [
     "tests/integration/virtio_qemu_support",
     "tests/integration/fat32_image",
     "tests/integration/rustfs_image",
+    "tests/integration/posix_fs_suite",
     "tests/integration/virtio_blk_pci_x86_64",
     "tests/integration/fat32_virtio_blk_pci_x86_64",
     "tests/integration/rustfs_virtio_blk_pci_x86_64",
