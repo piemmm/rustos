@@ -3830,18 +3830,40 @@ device list.
   blocks (§2.2 — no duplicated extent algebra). A tree that would need a
   second index level (depth ≥ 2) is refused (`DeviceFault`) rather than
   half-built — the driver never builds one and the read path still maps
-  any on-disk depth (§2.1 / §5.4 — fail closed). Still gated: mutation of
-  the checksummed (`metadata_csum`/`gdt_csum`) and `64bit` feature sets,
-  which stay fully readable. No `unwrap`/`expect`/`panic!`, no `unsafe`.
-  Tests grew from 41 to **44** (depth-0 → depth-1 conversion with
-  read-back + remount persistence and a sparse hole between extents,
-  depth-1 `truncate`-to-zero with block reuse, and `remove` of a depth-1
-  file with reuse). Docs: `docs/src/filesystem/ext4.md` and the crate
-  `README.md`.
+  any on-disk depth (§2.1 / §5.4 — fail closed). No
+  `unwrap`/`expect`/`panic!`, no `unsafe`. Tests grew from 41 to **44**
+  (depth-0 → depth-1 conversion with read-back + remount persistence and
+  a sparse hole between extents, depth-1 `truncate`-to-zero with block
+  reuse, and `remove` of a depth-1 file with reuse). Docs:
+  `docs/src/filesystem/ext4.md` and the crate `README.md`.
+- **`ext4` checksummed + wide-descriptor mutation — DONE.** The write
+  path now maintains every on-disk checksum a volume carries, so a
+  default `mkfs.ext4` image (`metadata_csum,extent,64bit`) is mutated in
+  place. First-party `crc32c` (reversed poly `0x82F6_3B78`, seeded
+  `crc32c(~0, uuid)`) covers the superblock `s_checksum`, group-
+  descriptor `bg_checksum`, block/inode-bitmap checksums, per-inode
+  `i_checksum_lo`/`hi`, directory-leaf `ext4_dir_entry_tail`, and
+  extent-block `ext4_extent_tail`; first-party `crc16` (poly `0xA001`)
+  covers the legacy `gdt_csum`/`uninit_bg` descriptor checksum; the
+  64-byte descriptor's high-half checksum and `bg_itable_unused` are
+  maintained too (a storage checksum is not a cryptographic primitive,
+  so §2.12 does not apply). `remove` now marks the freed inode deleted
+  (`i_links_count = 0`, `i_dtime`, zeroed size/blocks) and a latent
+  `place_in_block` split bug (which zeroed the shrunk entry's name) was
+  fixed. Mutation still fails closed (§5.4) on a feature outside the
+  supported allow-list (`bigalloc`, `meta_bg`, `inline_data`,
+  `checksum_seed`, …) and on an uninitialised block group. No
+  `unwrap`/`expect`/`panic!`, no `unsafe`. **44 in-tree unit tests**
+  plus a new **5-test integration suite** (`tests/checksummed.rs`)
+  that mutates **real `mke2fs 1.47.0`** `metadata_csum` and `gdt_csum`
+  fixtures (committed under `tests/fixtures/`) and re-verifies every
+  checksum with an *independent* crc, pristine and post-mutation; the
+  mutated images also pass `e2fsck -f` cleanly. Docs:
+  `docs/src/filesystem/ext4.md` and the crate `README.md`.
 - **Remaining for Stage 5** (dependency-gated — next sessions):
   - Mutation of the checksummed (`metadata_csum`/`gdt_csum`) and `64bit`
-    ext4 feature sets (a first-party crc32c + wide-descriptor
-    maintenance); such volumes stay fully readable today.
+    ext4 feature sets — **DONE** (first-party crc32c + crc16 + wide
+    descriptors; validated against real `mke2fs` images and `e2fsck`).
   - The `rustfs` journal crash-consistency *soak* — **DONE**: a
     deterministic, seeded multi-operation soak crash-tests every scripted
     `create`/`write`/`truncate`/`remove` at every device-write count and

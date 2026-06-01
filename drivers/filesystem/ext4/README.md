@@ -77,22 +77,46 @@ root index entries. `truncate`/`remove` free a depth-1 tree's emptied
 leaves, drop their index entries, and collapse the root back to an empty
 depth-0 node when none survive.
 
-### Mutation scope (fail closed)
+### Checksums and wide descriptors
 
-Correct on-disk checksums and wide descriptors are a prerequisite for
-safe mutation, so the write path refuses (`DriverError::Unsupported`)
-any volume carrying the `metadata_csum`, `gdt_csum`/`uninit_bg`, or
-`64bit` features — such a volume stays fully **readable**, and a default
-`mkfs.ext4` image is writable only when made without those features
-(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`). Growing an extent tree
-beyond a single index level (depth ≥ 2), and `remove`/`truncate` of a
-file whose mapping is neither the classic map nor a depth-0/depth-1
-extent tree, are likewise refused rather than half-built or orphaning
-blocks (`AGENTS.md` §2.1 / §5.4).
+The write path maintains every on-disk checksum a volume carries, so a
+default `mkfs.ext4` image (`metadata_csum`, `extent`, `64bit`) is
+mutated in place. All checksum primitives are **first-party** (a storage
+checksum is not a cryptographic primitive, so §2.12's "never roll your
+own" does not apply):
+
+- **`metadata_csum`** (crc32c, reversed polynomial `0x82F6_3B78`,
+  seeded with `crc32c(~0, s_uuid)`): the superblock `s_checksum`; each
+  group descriptor `bg_checksum` (low 16 bits); the block- and
+  inode-bitmap checksums (`bg_*_bitmap_csum_lo/hi`); each inode
+  (`i_checksum_lo`/`i_checksum_hi`, seeded per inode by number and
+  generation); each directory leaf's `ext4_dir_entry_tail`; and each
+  allocated extent block's `ext4_extent_tail`.
+- **`gdt_csum`/`uninit_bg`** (crc16, reversed polynomial `0xA001`): the
+  legacy group-descriptor `bg_checksum`.
+- **`64bit`**: the 64-byte group descriptor's high-half checksum and
+  `bg_itable_unused` fields.
+
+`bg_itable_unused` is lowered as inodes are allocated, and `remove`
+marks the freed inode deleted (`i_links_count = 0`, `i_dtime`, zeroed
+size/blocks) so a consistency check sees a freed — not orphaned — inode.
+
+Mutation still **fails closed** (`DriverError::Unsupported`) on a
+volume whose feature set the write path cannot maintain — anything
+outside the supported `incompat`/`ro_compat` allow-list, e.g.
+`bigalloc`, `meta_bg`, `inline_data`, or an explicit `checksum_seed`
+(which would invalidate the uuid-derived seed) — and on a block group
+whose bitmaps are not materialised (`BLOCK_UNINIT`/`INODE_UNINIT`).
+Growing an extent tree beyond a single index level (depth ≥ 2), and
+`remove`/`truncate` of a file whose mapping is neither the classic map
+nor a depth-0/depth-1 extent tree, are likewise refused rather than
+half-built or orphaning blocks (`AGENTS.md` §2.1 / §5.4). Such volumes
+stay fully **readable**.
 
 ## Limitations
 
-- Mutation is gated to the unchecksummed, non-`64bit` feature set above.
+- Mutation is gated to the feature allow-list above; an unsupported
+  feature leaves the volume read-only (fail closed).
 - Extent-tree growth is gated to a single index level (depth ≤ 1); a
   deeper tree is refused, never half-built (the read path still maps
   any depth).
@@ -164,15 +188,23 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
   sparse extension past EOF; `truncate` shrink-then-grow; directory
   creation (`.`/`..`) and removal (empty vs. `Busy`); inode reuse after
   `remove`; `write_at`/`truncate` directory and not-found guards;
-  free-inode exhaustion; the fail-closed refusal of mutation on a
-  `metadata_csum` volume; and the depth-0 → depth-1 extent-tree growth
-  (sparse writes overflowing the inline root, read-back + remount
-  persistence, a sparse hole between extents, and depth-1
-  `truncate`-to-zero and `remove` freeing and reusing the tree).
+  free-inode exhaustion; the fail-closed refusal of mutation on an
+  unsupported (`checksum_seed`) feature set; and the depth-0 → depth-1
+  extent-tree growth (sparse writes overflowing the inline root,
+  read-back + remount persistence, a sparse hole between extents, and
+  depth-1 `truncate`-to-zero and `remove` freeing and reusing the tree).
 - The `register` capability gate and `into_block` round-trip.
 
-44/44 host-side tests pass. A `pjdfstest`-equivalent POSIX suite and an
-end-to-end QEMU vertical are tracked in `.junie/next-session-prompt.md`.
+44/44 in-tree unit tests pass. A separate integration suite
+(`tests/checksummed.rs`, 5 tests) mutates **real `mke2fs 1.47.0`**
+`metadata_csum` and `gdt_csum` fixtures (committed under
+`tests/fixtures/`) and re-verifies every on-disk checksum with an
+*independent* crc implementation — both on the pristine image (proving
+the reference crc matches `mke2fs`) and after a
+`create`/`write`/`truncate`/`mkdir`/`remove` cycle (proving the driver
+wrote correct checksums). The mutated images also pass `e2fsck -f`
+cleanly. A `pjdfstest`-equivalent POSIX suite is tracked in
+`.junie/next-session-prompt.md`.
 
 ## Public surface
 

@@ -955,12 +955,18 @@ fn write_to_a_missing_child_is_not_found() {
 }
 
 #[test]
-fn mutation_is_refused_on_a_checksummed_volume() {
+fn mutation_is_refused_on_an_unsupported_feature_set() {
+    // The `metadata_csum`/`gdt_csum` and `64bit` feature sets are now
+    // mutated in place (see `tests/checksummed.rs`, which validates the
+    // maintained checksums against real `mke2fs` images). Mutation still
+    // fails closed (§5.4) on a feature the write path cannot maintain.
+    // `checksum_seed` (incompat 0x2000) is one: it would invalidate the
+    // `crc32c(~0, uuid)` seed, so the volume stays read-only.
     let mut data = build_image();
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
-    set_le32(&mut data, sb + 0x64, RO_COMPAT_METADATA_CSUM); // s_feature_ro_compat
+    set_le32(&mut data, sb + 0x60, INCOMPAT_FILETYPE | 0x2000); // + checksum_seed
     let mut fs = Ext4::open(MockBlock { data }).expect("opens read-only");
-    // Reads still work; only mutation is refused (fail closed, §5.4).
+    // Reads still work; only mutation is refused.
     assert!(fs.lookup(fs.root(), b"hello.txt").is_ok());
     assert_eq!(
         fs.create(fs.root(), b"x", NodeKind::RegularFile),

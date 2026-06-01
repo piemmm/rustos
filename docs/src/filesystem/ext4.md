@@ -11,7 +11,9 @@ a separate trait rather than a widening of the shipped one
 
 ext4 is the dominant Linux on-disk format, so reading existing volumes
 (installation media, foreign disks) was the first need; mutation arrived
-later behind the separate `FilesystemWrite` trait.
+later behind the separate `FilesystemWrite` trait, and now maintains the
+on-disk checksums (`metadata_csum`/`gdt_csum`) and wide 64-bit
+descriptors a real `mkfs.ext4` image carries.
 
 ## On-disk support
 
@@ -124,20 +126,36 @@ when no leaf survives. A tree that would need a second index level
 (depth ≥ 2) is refused (see below); the driver never builds one, and the
 read path still maps any depth on disk.
 
-### Mutation scope (fail closed)
+### Checksums and wide descriptors
 
-Maintaining a volume's metadata checksums and wide 64-bit descriptors
-correctly is a prerequisite for safe mutation, so the write path refuses
-(`DriverError::Unsupported`) any volume carrying the `metadata_csum`,
-`gdt_csum`/`uninit_bg`, or `64bit` features — a default `mkfs.ext4`
-image is therefore writable only when created without those features
-(e.g. `mkfs.ext4 -O ^metadata_csum,^64bit`), while every such volume
-stays fully **readable**. `remove`/`truncate` of a file whose mapping is
-not the classic map or an inline depth-0 extent root is likewise refused
-rather than orphaning blocks. Likewise, growing an extent tree beyond a
-single index level (depth ≥ 2) is refused rather than half-built. This
-is a deliberate, documented boundary (`AGENTS.md` §2.1 / §5.4), not a
-silent best-effort.
+The write path maintains every on-disk checksum a volume carries, so a
+default `mkfs.ext4` image (`metadata_csum`, `extent`, `64bit`) is mutated
+in place. The checksum primitives are **first-party** — a storage
+checksum is not a cryptographic primitive, so `AGENTS.md` §2.12's "never
+roll your own" does not apply:
+
+- **`metadata_csum`** uses crc32c (reversed polynomial `0x82F6_3B78`,
+  seeded with `crc32c(~0, s_uuid)`) for the superblock `s_checksum`,
+  each group descriptor `bg_checksum`, the block/inode-bitmap checksums,
+  every inode (`i_checksum_lo`/`hi`, seeded per inode by number and
+  generation), each directory leaf's `ext4_dir_entry_tail`, and each
+  allocated extent block's `ext4_extent_tail`.
+- **`gdt_csum`/`uninit_bg`** uses crc16 (reversed polynomial `0xA001`)
+  for the legacy group-descriptor checksum.
+- **`64bit`** descriptors carry the high halves of the bitmap checksums
+  and `bg_itable_unused`, which the allocator also maintains.
+
+Mutation still **fails closed** (`DriverError::Unsupported`) on a feature
+the write path cannot maintain — anything outside the supported
+`incompat`/`ro_compat` allow-list, e.g. `bigalloc`, `meta_bg`,
+`inline_data`, or an explicit `checksum_seed` (which would invalidate the
+uuid-derived seed) — and on an uninitialised block group
+(`BLOCK_UNINIT`/`INODE_UNINIT`). `remove`/`truncate` of a file whose
+mapping is neither the classic map nor a depth-0/depth-1 extent tree,
+and growing an extent tree beyond a single index level (depth ≥ 2), are
+refused rather than orphaning blocks or half-building a tree. Such
+volumes stay fully **readable**. This is a deliberate, documented
+boundary (`AGENTS.md` §2.1 / §5.4), not a silent best-effort.
 
 ## Capabilities
 
@@ -164,13 +182,23 @@ non-directory rejection, sparse extension, `truncate` shrink-then-grow,
 directory creation with `.`/`..` and removal (empty vs. `Busy`), inode
 reuse after `remove`, the `write_at`/`truncate` directory and
 not-found guards, free-inode exhaustion, the fail-closed refusal of
-mutation on a `metadata_csum` volume, the depth-0 → depth-1 extent-tree
-growth (sparse writes that overflow the inline root, with read-back and
-remount persistence, a sparse hole between extents, and depth-1
-`truncate`-to-zero and `remove` freeing and reusing the tree's blocks),
-and the POSIX-ACL decode —
+mutation on an unsupported (`checksum_seed`) feature set, the depth-0 →
+depth-1 extent-tree growth (sparse writes that overflow the inline root,
+with read-back and remount persistence, a sparse hole between extents,
+and depth-1 `truncate`-to-zero and `remove` freeing and reusing the
+tree's blocks), and the POSIX-ACL decode —
 standalone `decode`/`find` units (both value-base conventions, bad
 version, the inline budget cap, unrelated attributes) plus end-to-end
 `security` reads of an external xattr block, a garbage block, and an
-inline ACL in a 256-byte-inode volume. A `pjdfstest`-equivalent POSIX
-suite and an end-to-end QEMU vertical remain future work.
+inline ACL in a 256-byte-inode volume.
+
+A separate integration suite (`tests/checksummed.rs`) validates the
+checksum maintenance against **real `mke2fs 1.47.0`** images committed
+under `tests/fixtures/` — one `metadata_csum,extent,64bit` volume and one
+legacy `gdt_csum` volume. It recomputes every on-disk checksum with an
+*independent* crc implementation, both on the pristine fixture (proving
+the reference crc matches `mke2fs`) and after a
+`create`/`write`/`truncate`/`mkdir`/`remove` cycle (proving the driver
+wrote correct checksums); the mutated images also pass `e2fsck -f`
+cleanly. A `pjdfstest`-equivalent POSIX suite and an end-to-end QEMU
+vertical remain future work.
