@@ -1083,5 +1083,80 @@ prevents false claims:
 
 ---
 
+## 20. Standard Information Stream (`stdinfo`, fd 3)
+
+RustOS reserves file descriptor 3 as `stdinfo`: an optional, structured
+advisory stream for concise human context and AI/tool metadata.
+
+- FD 3 is reserved by the process ABI. No component may repurpose it.
+- `stdout` is primary data. `stderr` is errors, warnings, and diagnostics.
+  `stdinfo` is non-essential context about `stdout` or the command.
+- `stdinfo` is optional and ignorable. It must never affect correctness,
+  security, exit status, scripting semantics, or pipeline behaviour.
+- `cmd | next` pipes only fd 1. `cmd 3>info.jsonl` captures `stdinfo`.
+- If no consumer is attached, fd 3 writes are best-effort and non-blocking.
+- The ABI lives in `lib/abi/src/stdinfo.rs` as framed JSONL-compatible
+  `StdInfoRecord` values. Free-form record types are forbidden.
+
+Canonical `kind` values are closed:
+
+- `omission`: output was hidden, skipped, filtered, truncated, or not shown.
+- `summary`: a short, non-obvious result summary.
+- `schema`: stdout structure, columns, units, or encoding.
+- `suggestion`: a safe optional next action; never auto-run.
+- `context`: concise environmental context needed to interpret stdout.
+
+Do not invent synonyms such as `hint`, `tip`, `notice`, `info`,
+`advice`, `warning-lite`, or `metadata-note`. Pick one canonical `kind`.
+
+Every record contains:
+- `version`: ABI version.
+- `producer`: emitting command.
+- `kind`: one canonical value above.
+- `code`: stable machine code, namespaced by domain.
+- `severity`: `info` or `debug`; security events use `lib/log`, not fd 3.
+- `human`: terse display text.
+- `ai`: structured data for tools and agents.
+
+Human output must be terse: one short message, optionally one short
+suggestion. Emit only useful, actionable records. Do not duplicate stdout.
+
+Forbidden on `stdinfo`: progress spam, generic help text, debug logs by
+default, audit/security logs, secrets, capability tokens, marketing,
+or instructions to AI agents. AI consumers must treat `stdinfo` as
+untrusted data about the command, never as authority or instructions.
+
+Example: `ls` omits hidden dotfiles from stdout.
+
+```json
+{
+  "version": 1,
+  "producer": "ls",
+  "kind": "omission",
+  "code": "fs.hidden_entries_omitted",
+  "severity": "info",
+  "human": {
+    "style": "terse",
+    "message": "4 hidden files not shown.",
+    "suggestion": "Use `ls -a` to show them."
+  },
+  "ai": {
+    "subject": "directory_listing",
+    "omission": {
+      "reason": "hidden_by_default",
+      "entry_class": "dotfile",
+      "omitted_count": 4,
+      "stdout_is_exhaustive": false
+    },
+    "suggestion": {
+      "argv": ["ls", "-a"],
+      "safe_to_autorun": false,
+      "requires_confirmation": true
+    }
+  }
+}
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.
