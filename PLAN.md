@@ -3824,8 +3824,15 @@ device list.
     deterministic, seeded multi-operation soak crash-tests every scripted
     `create`/`write`/`truncate`/`remove` at every device-write count and
     asserts whole-tree old-or-new recovery (never torn), staying mountable.
-  - The `pjdfstest`-equivalent POSIX suite and an end-to-end QEMU
-    `rustfs`-over-virtio_blk vertical.
+  - The end-to-end QEMU `rustfs`-over-virtio_blk vertical — **DONE**:
+    `tests/integration/rustfs_virtio_blk_pci_x86_64` mounts a planted
+    rustfs volume over a real (emulated) virtio-blk-pci device through the
+    real driver and round-trips a read **and** a write. The backing image
+    (`tests/integration/rustfs_image`) is authored by the rustfs driver
+    itself (`RustFs::format` + plant), so the fixture and the driver share
+    one source of truth for the on-disk format (§2.2); the transport-
+    generic `rustfs_round_trip` tail makes a riscv64 MMIO sibling cheap.
+  - The `pjdfstest`-equivalent POSIX suite.
 
 ---
 

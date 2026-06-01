@@ -75,6 +75,19 @@ asserting the recovered whole-tree snapshot equals the volume either
 exactly before or exactly after the operation (never an intermediate) and
 stays mountable, with both rollbacks and replays observed across the run.
 
+## End-to-end QEMU vertical
+
+`tests/integration/rustfs_virtio_blk_pci_x86_64` mounts a planted rustfs
+volume over a **real (emulated) virtio-blk-pci device** under QEMU, using
+the same shared bring-up as the FAT32 vertical, and round-trips a read
+**and** a write (`cargo xtask test --qemu`). The backing image comes from
+the `tests/integration/rustfs_image` fixture, which the **real rustfs
+driver itself** authors — it formats an in-memory volume and plants the
+file through the driver's own write path — so the fixture and the driver
+share one source of truth for the on-disk format (`AGENTS.md` §2.2). The
+device tail (`rustfs_round_trip`) is generic over the virtio transport, so
+a riscv64 MMIO sibling runs identical code.
+
 The `pjdfstest`-equivalent POSIX suite is tracked in
 `.junie/next-session-prompt.md`.
 

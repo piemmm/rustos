@@ -46,3 +46,9 @@ rustos-qemu = { path = "../qemu", version = "=0.0.0" }
 # tail reads, so the planted layout and the guest's expectations share
 # one source of truth (`AGENTS.md` §2.2).
 rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }
+# `test --qemu` likewise plants the Stage 5 rustfs vertical's backing
+# image from the `rustos-test-rustfs-image` fixture, which the real
+# rustfs driver itself authors (format + plant), so the planted layout
+# and the guest's expectations share one source of truth (`AGENTS.md`
+# §2.2).
+rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }

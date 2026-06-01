@@ -168,9 +168,19 @@ boot_pdpt:
 boot_pds:
     .skip 4096 * 4
 
+// The bootstrap stack the BSP runs on for the whole pre-handoff boot
+// path and, in the QEMU integration verticals, for the device-bring-up
+// scenario the audit observer drives synchronously (a real driver +
+// filesystem mounted in the boot thread). That scenario nests the
+// virtio bring-up, a signed-`.rxe` load/reload, and a full filesystem
+// `open` (which stages whole blocks through on-stack scratch buffers)
+// onto this stack, so 16 KiB was marginal; 64 KiB gives ample headroom
+// and keeps an overflow from silently corrupting the adjacent
+// `boot_pds` page tables. `KERNEL_STACK_BYTES` in `rustos-kernel`
+// tracks this value (its static assert pins the lower bound).
 .align 16
 boot_stack_bottom:
-    .skip 16384
+    .skip 65536
 boot_stack_top:
 
 // -- Long-mode GDT.
