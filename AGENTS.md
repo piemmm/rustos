@@ -1162,34 +1162,40 @@ Example: `ls` omits hidden dotfiles from stdout.
 
 RustOS is 64-bit-time-native. No kernel ABI, userland ABI, IPC type,
 log format, native filesystem, archive index, or persistent OS metadata
-may store time as 32-bit seconds.
+may store absolute time as 32-bit seconds.
 
 - The canonical time ABI lives in `lib/abi/src/time.rs` as `Time64`
   and `Duration64`: signed 64-bit seconds plus nanoseconds.
+- `Time64` is RustOS's equivalent of Linux's `timespec64`, not
+  seconds-only `time64_t`. Seconds-only values may exist internally,
+  but not as ABI or persistent absolute-time storage.
 - Do not expose `time_t`, `usize`, `isize`, `u32`, or `i32` as ABI or
   persistent time storage. Pointer width is not time width.
 - All syscalls, IPC, `sysinfo`, `stdinfo`, logs, scheduler metadata,
   file metadata, and native on-disk formats use `Time64`.
 - RustFS stores `created`, `modified`, `accessed`, and `changed`
-  timestamps as 64-bit seconds plus nanoseconds. Every new RustOS-native
-  filesystem must do the same.
+  timestamps as true `Time64`. Every new RustOS-native filesystem must
+  do the same.
 - Filesystem drivers must preserve the widest timestamp range and
   precision supported by the mounted on-disk format.
-- New ext-family filesystems created by RustOS must enable the widest
-  timestamp encoding supported by that format. Older ext2/ext3/ext4
-  volumes remain supported, but their historic timestamp limits are
-  treated as compatibility constraints, not RustOS ABI precedent.
-- Legacy or foreign filesystems such as FAT32 may retain their on-disk
-  timestamp limits. Their drivers must declare range and precision
-  limits through the filesystem capability API.
+- New ext-family compatibility filesystems created by RustOS must enable
+  the widest timestamp encoding supported by that exact format and inode
+  layout. RustOS must not pretend that legacy ext2/ext3 or restricted
+  ext4 layouts provide full native `Time64` storage.
+- Older ext2/ext3/ext4 volumes remain supported, but their timestamp
+  limits are compatibility constraints, not RustOS ABI precedent.
+- Legacy or foreign filesystems such as FAT32 may retain their real
+  on-disk timestamp limits. Their drivers must declare range, precision,
+  timezone, and representability limits through the filesystem capability
+  API.
 - Converting from `Time64` to a narrower on-disk timestamp is checked.
-  Silent truncation, wrapping, saturation, timezone guessing, or loss of
-  nanoseconds is forbidden.
-- If a timestamp cannot be represented by the target filesystem, the
-  operation fails with `TimestampOutOfRange` unless the caller explicitly
-  requested a documented lossy policy.
-- Tests must cover dates before 1970, after 2038, and beyond any legacy
-  filesystem boundary the driver supports.
+  Silent truncation, wrapping, saturation, timezone guessing, or
+  undeclared precision loss is forbidden.
+- If an exact timestamp cannot be represented by the target filesystem,
+  exact-preservation operations fail with `TimestampOutOfRange` unless
+  the caller explicitly requested a documented lossy policy.
+- Tests must cover dates before 1970, after 2038, and beyond every
+  legacy filesystem boundary the driver claims to support.
 
 ---
 
