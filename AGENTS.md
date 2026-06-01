@@ -146,6 +146,8 @@ rustos/
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
+│   ├── theme/           # Shared desktop theme definition: dark/light
+│   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── util/            # Strictly justified utilities.
 │   └── virtio/          # Bus-agnostic virtio split-virtqueue protocol
 │                        #   (Transport trait, queues, DMA slabs).

@@ -76,6 +76,7 @@
 # Desktop
 
 - [Compositing window manager](./desktop/wm.md)
+- [Desktop theming](./desktop/theming.md)
 
 # ABI
 

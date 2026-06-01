@@ -12,6 +12,8 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::Compositor;
 
+use rustos_theme::{ThemeId, ThemeRegistry};
+
 fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
         width_px: w,
@@ -482,4 +484,46 @@ fn present_propagates_driver_error() {
     let mut display = MockDisplay::new(m);
     display.fail = true;
     assert_eq!(c.present(&mut display), Err(DriverError::DeviceFault));
+}
+
+// ---- shared theme integration (lib/theme) ---------------------------
+
+#[test]
+fn active_theme_drives_compositor_background() {
+    // The compositor sources its root background from the active theme,
+    // and a runtime theme switch (dark -> light) changes the colour the
+    // screen clears to. One shared definition drives the WM (§10).
+    let mut themes = ThemeRegistry::with_builtins();
+    let dark_bg = themes.active().palette().desktop;
+    let mut c = Compositor::new(mode(2, 2), dark_bg.into()).expect("compositor");
+    c.composite();
+    assert_eq!(frame_pixel(&c, 0, 0), dark_bg.to_array());
+
+    themes
+        .set_active(ThemeId::LIGHT)
+        .expect("light is built in");
+    let light_bg = themes.active().palette().desktop;
+    assert_ne!(light_bg, dark_bg);
+    let mut c = Compositor::new(mode(2, 2), light_bg.into()).expect("compositor");
+    c.composite();
+    assert_eq!(frame_pixel(&c, 0, 0), light_bg.to_array());
+}
+
+#[test]
+fn theme_corner_radius_shapes_windows() {
+    // A window takes its corner radius from the active theme's metrics
+    // through the single compositor rounded-corner path (§2.2): the
+    // rounded corner still reveals the background behind it.
+    let themes = ThemeRegistry::with_builtins();
+    let radius = themes.active().metrics().window_corner_radius;
+    let corners = Corners::from_radius(radius);
+    assert_eq!(corners, Corners::Rounded { radius });
+    assert_eq!(Corners::from_radius(0), Corners::Square);
+
+    let mut c = Compositor::new(mode(20, 20), BLUE).expect("compositor");
+    let id = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
+    assert!(c.set_corners(id, corners));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 0, 0), [0, 0, 255, 255]); // corner clipped to bg
+    assert_eq!(frame_pixel(&c, 10, 10), [255, 0, 0, 255]); // centre opaque
 }

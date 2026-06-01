@@ -1325,6 +1325,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-theme"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-useradd"
 version = "0.0.0"
 dependencies = [
@@ -1347,6 +1351,7 @@ name = "rustos-wm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-theme",
 ]
 
 [[package]]

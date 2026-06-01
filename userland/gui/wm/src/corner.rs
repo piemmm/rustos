@@ -29,6 +29,21 @@ pub enum Corners {
 }
 
 impl Corners {
+    /// The corner style for a theme corner radius (`AGENTS.md` §10).
+    ///
+    /// A radius of `0` is the square opt-out; any other radius rounds.
+    /// This lets a window or the taskbar take its corner radius straight
+    /// from the active theme's [`Metrics`](rustos_theme::Metrics) without
+    /// the caller re-deciding what "no rounding" means.
+    #[must_use]
+    pub const fn from_radius(radius: u32) -> Self {
+        if radius == 0 {
+            Self::Square
+        } else {
+            Self::Rounded { radius }
+        }
+    }
+
     /// Coverage in `0..=255` for pixel `(x, y)` of a `width`×`height`
     /// surface.
     ///

@@ -38,6 +38,7 @@ members = [
     "lib/log",
     "lib/procinfo",
     "lib/sync",
+    "lib/theme",
     "lib/util",
     "lib/virtio",
 

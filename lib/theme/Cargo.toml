@@ -1,0 +1,18 @@
+[package]
+name = "rustos-theme"
+description = "RustOS shared desktop theme definition: the runtime-switchable dark/light palettes, corner-radius metrics, fonts, and cursors that drive the window manager, taskbar, and default apps from one place (§6, §10 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies on purpose: this crate is pure theme *data*. The
+# compositing colour algebra lives in `userland/gui/wm`; this crate owns the
+# authored design tokens it (and the taskbar and default apps) read, so it
+# stays at the bottom of the §17.4 layering and is depended on, never
+# depends.

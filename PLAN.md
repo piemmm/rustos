@@ -4530,15 +4530,38 @@ device list.
   - **`Compositor`** window ops (add/move/raise/remove, opacity, corners,
     visibility, surface replace) each mark damage; fails closed on a
     too-large/short-stride/unsupported-format mode (`None`, §2.9/§2.1).
-  - 46 headless unit tests; no `unsafe`, no `unwrap`/`expect`/`panic!` in
-    production paths. Docs `docs/src/desktop/wm.md` (+ SUMMARY) and the
-    crate `README.md`.
+  - 48 headless unit tests (46 compositor-core + 2 theme-integration);
+    no `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs
+    `docs/src/desktop/wm.md` (+ SUMMARY) and the crate `README.md`.
+- **Shared theme definition — DONE (increment).** `lib/theme`
+  (`rustos-theme`, `no_std`+`alloc`, **zero dependencies**, `Layer::Lib`)
+  is the single shared theme definition the WM, taskbar, and default apps
+  read (`AGENTS.md` §6/§10). It lives in `lib/*` because sibling userland
+  crates may not depend on one another (§17.4) — the same reasoning as
+  `lib/procinfo`. It is pure *data*:
+  - **`Palette`** — eight semantic `Rgba` colour roles as fixed fields
+    (illegal states unrepresentable, §2.11); **`Metrics`** — window /
+    taskbar / popup corner radii + border thickness; **`Fonts`** — a UI
+    and a monospace `FontSpec`; **`CursorSet`** — one asset id per
+    `CursorKind`.
+  - **Built-in default dark + light `Theme`s**, plus `ThemeRegistry`:
+    runtime `set_active`/`register`, both fail-closed (`ThemeError`,
+    §5.4/§2.9). `active()` is panic-free (built-ins held in a fixed-size
+    array).
+  - **No duplicated colour algebra (§2.2):** the theme `Rgba` carries no
+    compositing arithmetic; it meets the compositor at one edge, the
+    WM's `From<Rgba> for Color`, and a window's corner style comes from a
+    theme radius through the WM's single rounded-corner path
+    (`Corners::from_radius`).
+  - 13 unit tests (+ a doctest); docs `docs/src/desktop/theming.md`
+    (+ SUMMARY) and the crate `README.md` (tier `experimental`).
+    `userland/gui/wm` is its first consumer.
 - **Still to do this stage:** GPU-accelerated compositor path, input
   routing (focus, click-to-activate, drag-and-drop), the
   `userland/gui/taskbar` (start menu + session controls, task list,
-  clock + notification area, rounded edges via the WM path), the shared
-  dark/light theme definition + themed cursor set, and the default
-  filesystem-browser and terminal-emulator apps.
+  clock + notification area, rounded edges via the WM path), wiring the
+  theme through the taskbar + default apps and the themed cursor *assets*,
+  and the default filesystem-browser and terminal-emulator apps.
 
 ---
 

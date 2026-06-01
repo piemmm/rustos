@@ -142,3 +142,21 @@ impl Pixel {
         }
     }
 }
+
+impl From<rustos_theme::Rgba> for Color {
+    /// Adopt a theme colour token as a straight-alpha compositor colour.
+    ///
+    /// The theme owns the authored colour *data*; the compositor owns the
+    /// premultiplied-alpha arithmetic. This is the one edge where the two
+    /// meet, so the colour algebra is never duplicated into the theme
+    /// crate (`AGENTS.md` §2.2). The channel layout is identical, so the
+    /// conversion is a field move.
+    fn from(rgba: rustos_theme::Rgba) -> Self {
+        Self {
+            r: rgba.r,
+            g: rgba.g,
+            b: rgba.b,
+            a: rgba.a,
+        }
+    }
+}
