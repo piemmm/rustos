@@ -16,6 +16,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod appinfo;
 pub mod capability;
 pub mod driver;
 pub mod error;
@@ -29,6 +30,12 @@ pub mod syscalls;
 pub mod sysinfo;
 pub mod time;
 
+pub use appinfo::{
+    body_len as appinfo_body_len, mime_type_at, resolve_library, validate_bundle_layout,
+    AppInfoHeader, BundleEntry, BundleLayoutError, LibraryError, LibraryScope, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
+};
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
     BufferClass, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, MmioMapError,

@@ -441,6 +441,15 @@ name = "rustos-abi"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-appmgr"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-arch-aarch64"
 version = "0.0.0"
 dependencies = [

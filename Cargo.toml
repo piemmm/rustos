@@ -72,6 +72,7 @@ members = [
     "userland/system/drvhost",
     "userland/system/sysinfod",
     "userland/system/init",
+    "userland/system/appmgr",
     "userland/system/installer",
     "userland/session/login",
     "userland/shell/shell",

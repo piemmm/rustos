@@ -154,6 +154,8 @@ rustos/
 │   ├── system/          # Long-running system services.
 │   │   ├── init/        # PID 1.
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
+│   │   ├── appmgr/      # Application bundle loader: .app layout + AppInfo
+│   │   │                #   verification + dynamic-loader policy (§16.4/§16.5).
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
 │   │   └── login/       # Text + graphical login (graphical falls back to text).

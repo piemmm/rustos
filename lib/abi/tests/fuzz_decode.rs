@@ -30,7 +30,7 @@ use rustos_abi::sysinfo::{
     SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{IpcMessageHeader, ManifestHeader};
+use rustos_abi::{AppInfoHeader, IpcMessageHeader, ManifestHeader};
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -73,6 +73,11 @@ fn exercise(bytes: &[u8]) {
     if let Ok(header) = ManifestHeader::from_bytes(bytes) {
         let encoded = header.to_le_bytes();
         let redecoded = ManifestHeader::from_bytes(&encoded)
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(header) = AppInfoHeader::from_bytes(bytes) {
+        let redecoded = AppInfoHeader::from_bytes(&header.to_le_bytes())
             .expect("round-trip of an accepted header must succeed");
         assert_eq!(header, redecoded);
     }

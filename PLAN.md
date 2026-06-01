@@ -3957,7 +3957,7 @@ device list.
 **Docs**
 - `docs/src/userland/{init,login,shell,utilities}.md`.
 
-**Status: in progress.**
+**Status: complete.**
 - **System Information API ABI (`lib/abi/src/sysinfo.rs`) — DONE.** The
   `sysinfo-v1` surface (`rustos_abi::sysinfo`, §16.6) is implemented: a
   versioned (`SYSINFO_VERSION_V1`), frozen query registry
@@ -4421,9 +4421,34 @@ device list.
   both new decoders enrolled in the `lib/abi` fuzz harness, §19.6); docs
   `docs/src/userland/utilities.md` (`mount` section), `docs/src/abi/sysinfo.md`,
   `docs/src/userland/sysinfod.md`, and the crate `README.md`.
-- The remaining Stage 6 deliverable (the `.app` bundle / dynamic-loader
-  policy, §16.4/§16.5) is not yet started; every core CLI utility is now
-  done.
+- **Application-bundle loader + dynamic-loader policy
+  (`userland/system/appmgr` + `lib/abi/src/appinfo.rs`) — DONE.** The
+  frozen `abi-v1` `appinfo` surface defines the fixed `/Apps/<Name>.app/`
+  layout (`BundleEntry` + `validate_bundle_layout`, §16.5), the signed
+  `AppInfoHeader` manifest (bundle id/name/version, capability + MIME
+  counts, syscall-table hash, a `content_hash` binding the signature to the
+  bundle's contents, Ed25519 signer key + signature; `WIRE_LEN` 340,
+  fail-closed `from_bytes`, `body_len`/`mime_type_at` body readers), and the
+  §16.4 dynamic-loader policy `resolve_library` (a reference resolves only
+  against the bundle's own `Libraries/` or `/System/Libraries/`, `..`
+  refused). `rustos-appmgr` is the user-space service (installed to
+  `/System/Services/appmgr`): `AppLoader::load` runs a fail-closed pipeline
+  (§5.4) — validate layout, decode + ABI-check the manifest, constant-time
+  syscall-hash match (§9/§19.2), verify the signature via the injected
+  `Verifier`, constant-time content-hash match (§16.5), then grant the
+  manifest request **intersected** with the launching user's grants (no
+  ambient authority, §4/§5.2) — and `AppLoader::resolve_library` applies the
+  §16.4 policy. The filesystem (`BundleStore`) and crypto (`Verifier`) seams
+  are injected, so the security-relevant code is testable without a kernel;
+  the loader never executes anything (the caller spawns the verified `Run`
+  binary with the computed ceiling, the same gate `init`/`drvhost` use).
+  `no_std` (with `alloc`), deps only `rustos-abi`/`rustos-caps`/`rustos-log`
+  (§17.4); no `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+  Audit `EventId` range `11000..12000`. 14 new `lib/abi` tests (+
+  `AppInfoHeader::from_bytes` enrolled in the §19.6 fuzz harness) and 16
+  `appmgr` tests; docs `docs/src/abi/appinfo.md` and
+  `docs/src/userland/appmgr.md` (+ SUMMARY links) and both `README.md`s.
+  **Every Stage 6 deliverable is now done.**
 
 ---
 

@@ -70,12 +70,14 @@
 - [Networking service](./userland/net_icmp.md)
 - [Default shell](./userland/shell.md)
 - [Text login](./userland/login.md)
+- [Application bundle loader](./userland/appmgr.md)
 - [Core CLI utilities](./userland/utilities.md)
 
 # ABI
 
 - [Driver traits (`abi-v1`)](./abi/driver_traits.md)
 - [System Information API (`sysinfo-v1`)](./abi/sysinfo.md)
+- [Application bundles (`AppInfo`, `abi-v1`)](./abi/appinfo.md)
 - [64-bit-native time (`abi-v1`)](./abi/time.md)
 - [Standard Information Stream (`stdinfo`, fd 3)](./abi/stdinfo.md)
 
