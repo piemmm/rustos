@@ -4,9 +4,9 @@
 RustOS desktop (`AGENTS.md` §10). All compositing happens in user space;
 the kernel only ships framebuffer access through a capability, and no
 non-GUI crate depends on it (`AGENTS.md` §17.3). This page documents the
-**compositor core** delivered as the first Stage 7 increment; GPU
-acceleration, input routing, theming, and the taskbar build on it in
-later increments.
+**compositor core** and the **input router** delivered in the first
+Stage 7 increments; GPU acceleration, theming, and the taskbar build on
+them in later increments.
 
 ## Pipeline
 
@@ -49,6 +49,37 @@ anti-aliasing is exactly reproducible in tests. The radius is clamped to
 half the shorter side. The taskbar's rounded edges reuse this same path
 rather than a second implementation (`AGENTS.md` §2.2).
 
+## Input routing
+
+`InputRouter` is the desktop's input-policy layer over the compositor's
+scene graph. It tracks the pointer position and the focused window and
+turns device-level pointer events (`InputEvent`) into window-manager
+actions, reporting each through `InputResponse`:
+
+- **Hit-testing** — `Compositor::window_at` returns the top-most visible
+  window whose bounds contain a point, walking the z-order from the top
+  down. Rounded corners are cosmetic and do not carve holes out of a
+  window's input region (`AGENTS.md` §2.2).
+- **Click-to-activate** — a primary-button press over a window raises it
+  to the top of the z-order and gives it focus, returning
+  `Activated { window, local }` with the press position in the window's
+  surface coordinates. A press on the desktop background clears focus
+  (`DesktopPressed`).
+- **Move-grabs** — dragging a window is an explicit grab started by
+  `InputRouter::begin_move` (which decorations call when a press lands on
+  a window's move handle, e.g. a title bar), not a behaviour armed on
+  every press. Holding the grab offset constant, subsequent pointer
+  motion drags the window (`Moved`); releasing the primary button, or the
+  window vanishing mid-drag, ends it (`MoveEnded`). Separating content
+  clicks from window dragging avoids a "drag anywhere" hack
+  (`AGENTS.md` §2.1).
+
+The router models *which* window owns the keyboard (`focused`); the key
+encoding itself is a separate ABI concern and is not invented in the
+compositor (`AGENTS.md` §2.4). The router never panics and fails closed:
+`begin_move` without a focused (or still-known) window starts no grab
+(`AGENTS.md` §2.9).
+
 ## Damage tracking
 
 `DamageRegion` records the screen rectangles that changed since the last
@@ -71,4 +102,6 @@ crate.
 framebuffer: premultiplied-alpha correctness (fully-opaque and
 fully-transparent edge cases), per-region alpha blending, rounded-corner
 masking, z-order and raise, window move/hide/remove with damage repaint,
-channel-order encoding, and the `Display` present seam.
+channel-order encoding, the `Display` present seam, and input routing
+(hit-testing, click-to-activate focus and raise, desktop-clears-focus,
+move-grab drag, and the fail-closed grab edge cases).

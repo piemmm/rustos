@@ -111,6 +111,22 @@ impl Compositor {
         self.windows.iter().find(|w| w.id() == id)
     }
 
+    /// The top-most visible window whose bounds contain `point`, or
+    /// `None` when the point lands on the desktop background.
+    ///
+    /// Hit-testing walks the z-order from the top down and uses each
+    /// window's rectangular [`bounds`](Window::bounds); rounded corners
+    /// are a cosmetic compositing effect (`AGENTS.md` §2.2) and do not
+    /// carve holes out of a window's input region.
+    #[must_use]
+    pub fn window_at(&self, point: Point) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .rev()
+            .find(|w| w.is_visible() && w.bounds().contains(point))
+            .map(Window::id)
+    }
+
     /// Move a window to a new screen position; both the old and new
     /// covered rectangles are marked dirty.
     pub fn move_window(&mut self, id: WindowId, origin: Point) -> bool {

@@ -4592,12 +4592,31 @@ device list.
   - 20 headless unit tests; no `unsafe`, no `unwrap`/`expect`/`panic!` in
     production paths. Docs `docs/src/desktop/taskbar.md` (+ SUMMARY) and the
     crate `README.md`.
-- **Still to do this stage:** GPU-accelerated compositor path, input
-  routing (focus, click-to-activate, drag-and-drop) and wiring the taskbar
-  hit-test/model to live window-manager events, taskbar pixel rendering
-  into a WM surface, wiring the theme colours/fonts through the taskbar +
-  default apps and the themed cursor *assets*, and the default
-  filesystem-browser and terminal-emulator apps.
+- **Input routing — DONE (increment).** `userland/gui/wm` gains an
+  `input` module: `Compositor::window_at` is the top-most-visible-window
+  hit-test (z-order walked top-down; rounded corners are cosmetic and do
+  not carve the input region, §2.2), and `InputRouter`
+  (`PointerButton`/`InputEvent`/`InputResponse`) is the input-policy
+  layer over the scene graph. It tracks the pointer and the focused
+  window, raises + focuses the window under a primary press
+  (*click-to-activate*, reporting `Activated { window, local }`), clears
+  focus on a desktop-background press (`DesktopPressed`), and drives an
+  **explicit** interactive window move-grab — `begin_move` arms the grab
+  (decorations call it on a title-bar press) rather than arming a move on
+  every press, so content clicks and window dragging stay separated
+  (§2.1, no "drag anywhere" hack). The router holds *which* window owns
+  the keyboard (`focused`); the key encoding stays an ABI concern not
+  invented in the compositor (§2.4). Fails closed (`begin_move` with no
+  focus, grabbed window removed mid-drag → `MoveEnded`); no `unsafe`,
+  no `unwrap`/`expect`/`panic!`. 8 new headless tests (51 total). Docs
+  `docs/src/desktop/wm.md` and the crate `README.md` updated.
+- **Still to do this stage:** GPU-accelerated compositor path, wiring
+  the taskbar hit-test/model and the WM input router to live
+  pointer/keyboard device events (and the taskbar–WM event glue, lifted
+  into `lib/*` per §17.4), taskbar pixel rendering into a WM surface,
+  wiring the theme colours/fonts through the taskbar + default apps and
+  the themed cursor *assets*, and the default filesystem-browser and
+  terminal-emulator apps.
 
 ---
 

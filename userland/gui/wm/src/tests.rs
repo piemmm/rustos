@@ -492,3 +492,185 @@ fn theme_corner_radius_shapes_windows() {
     assert_eq!(frame_pixel(&c, 0, 0), [0, 0, 255, 255]); // corner clipped to bg
     assert_eq!(frame_pixel(&c, 10, 10), [255, 0, 0, 255]); // centre opaque
 }
+
+// ---- input routing ---------------------------------------------------
+
+use crate::input::{InputEvent, InputResponse, InputRouter, PointerButton};
+
+fn press_primary() -> InputEvent {
+    InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    }
+}
+
+fn release_primary() -> InputEvent {
+    InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    }
+}
+
+fn moved(x: i32, y: i32) -> InputEvent {
+    InputEvent::PointerMoved {
+        to: Point::new(x, y),
+    }
+}
+
+#[test]
+fn hit_test_picks_top_most_visible_window() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let bottom = c.add_window(Point::new(0, 0), opaque(20, 20, RED));
+    let top = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+
+    // Overlap region resolves to the higher window.
+    assert_eq!(c.window_at(Point::new(15, 15)), Some(top));
+    // Only the bottom window covers this point.
+    assert_eq!(c.window_at(Point::new(2, 2)), Some(bottom));
+    // Background.
+    assert_eq!(c.window_at(Point::new(35, 35)), None);
+
+    // A hidden window is not hit even where it lies on top.
+    assert!(c.set_visible(top, false));
+    assert_eq!(c.window_at(Point::new(15, 15)), Some(bottom));
+}
+
+#[test]
+fn press_activates_raises_and_focuses() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let bottom = c.add_window(Point::new(0, 0), opaque(30, 30, RED));
+    let top = c.add_window(Point::new(20, 0), opaque(20, 30, RED));
+    let mut router = InputRouter::new();
+
+    // Press on the bottom window where the top does not cover it.
+    let r = router.handle(moved(5, 5), &mut c);
+    assert_eq!(r, InputResponse::Ignored);
+    let r = router.handle(press_primary(), &mut c);
+    assert_eq!(
+        r,
+        InputResponse::Activated {
+            window: bottom,
+            local: Point::new(5, 5),
+        }
+    );
+    assert_eq!(router.focused(), Some(bottom));
+    // The activated window is now the top of the z-order: in the
+    // overlap it wins, while a point only `top` covers still hits `top`.
+    assert_eq!(c.window_at(Point::new(22, 5)), Some(bottom)); // overlap now bottom-on-top
+    assert_eq!(c.window_at(Point::new(35, 5)), Some(top)); // only top covers here
+}
+
+#[test]
+fn press_on_desktop_clears_focus() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+
+    router.handle(moved(5, 5), &mut c);
+    assert!(matches!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::Activated { window, .. } if window == win
+    ));
+    assert_eq!(router.focused(), Some(win));
+
+    // Click the background.
+    router.handle(moved(30, 30), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::DesktopPressed
+    );
+    assert_eq!(router.focused(), None);
+}
+
+#[test]
+fn non_primary_buttons_do_not_change_focus() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.add_window(Point::new(0, 0), opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+
+    router.handle(moved(5, 5), &mut c);
+    let r = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut c,
+    );
+    assert_eq!(r, InputResponse::Ignored);
+    assert_eq!(router.focused(), None);
+}
+
+#[test]
+fn move_grab_drags_focused_window() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    // Activate, then begin a move-grab (as decorations would on a
+    // title-bar press) and drag.
+    router.handle(moved(15, 12), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert!(router.begin_move(&c));
+    assert!(router.is_moving());
+
+    // Pointer moves by (+20, +8); window tracks it, grab offset (5, 2)
+    // preserved.
+    let r = router.handle(moved(35, 20), &mut c);
+    assert_eq!(
+        r,
+        InputResponse::Moved {
+            window: win,
+            origin: Point::new(30, 18),
+        }
+    );
+    assert_eq!(
+        c.window(win).map(super::window::Window::origin),
+        Some(Point::new(30, 18))
+    );
+
+    // Release ends the grab; further motion no longer moves the window.
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::MoveEnded { window: win }
+    );
+    assert!(!router.is_moving());
+    assert_eq!(router.handle(moved(60, 60), &mut c), InputResponse::Ignored);
+    assert_eq!(
+        c.window(win).map(super::window::Window::origin),
+        Some(Point::new(30, 18))
+    );
+}
+
+#[test]
+fn begin_move_fails_closed_without_focus() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.add_window(Point::new(0, 0), opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+
+    assert!(!router.begin_move(&c));
+    assert!(!router.is_moving());
+}
+
+#[test]
+fn drag_ends_if_grabbed_window_removed() {
+    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    router.handle(moved(15, 15), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert!(router.begin_move(&c));
+
+    assert!(c.remove(win));
+    assert_eq!(
+        router.handle(moved(40, 40), &mut c),
+        InputResponse::MoveEnded { window: win }
+    );
+    assert!(!router.is_moving());
+}
+
+#[test]
+fn pointer_position_tracks_motion() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    assert_eq!(router.pointer(), Point::ORIGIN);
+    router.handle(moved(7, 9), &mut c);
+    assert_eq!(router.pointer(), Point::new(7, 9));
+}

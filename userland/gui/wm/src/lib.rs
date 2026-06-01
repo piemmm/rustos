@@ -23,9 +23,15 @@
 //!   recomposited.
 //! - **The [`Compositor`]**: a z-ordered [`Window`] stack composited
 //!   over an opaque background into a [`DisplayMode`]-shaped byte frame.
+//! - **Input routing** ([`input`]): the [`InputRouter`] tracks the
+//!   pointer and the focused window, raises and focuses the window
+//!   under a primary press (*click-to-activate*), and drives
+//!   interactive window move-grabs.
 //!
-//! GPU acceleration, input routing, theming, and the taskbar build on
-//! this core in later Stage 7 increments.
+//! GPU acceleration, theming, and the taskbar build on this core in
+//! later Stage 7 increments.
+//!
+//! [`InputRouter`]: input::InputRouter
 //!
 //! [`Surface`]: surface::Surface
 //! [`Window`]: window::Window
@@ -42,6 +48,7 @@ pub mod compositor;
 pub mod corner;
 pub mod damage;
 pub mod geometry;
+pub mod input;
 pub mod surface;
 pub mod window;
 
@@ -53,5 +60,6 @@ pub use compositor::Compositor;
 pub use corner::Corners;
 pub use damage::DamageRegion;
 pub use geometry::{Point, Rect};
+pub use input::{InputEvent, InputResponse, InputRouter, PointerButton};
 pub use surface::Surface;
 pub use window::{Window, WindowId};
