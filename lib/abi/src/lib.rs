@@ -20,10 +20,12 @@ pub mod capability;
 pub mod driver;
 pub mod error;
 pub mod ipc;
+pub(crate) mod le;
 pub mod manifest;
 pub mod rxe;
 pub mod syscall;
 pub mod syscalls;
+pub mod sysinfo;
 
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
@@ -44,6 +46,14 @@ pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
     SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,
+};
+pub use sysinfo::{
+    encoded_query_table, spec_for as sysinfo_spec_for, KernelMemoryStats, ProcessListRequest,
+    ProcessRecord, ProcessState, SysinfoQueryId, SysinfoQuerySpec, SysinfoRequestHeader,
+    SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
+    MACHINE_ID_LEN, PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
 
 /// ABI version tag for the frozen `abi-v1` interface.

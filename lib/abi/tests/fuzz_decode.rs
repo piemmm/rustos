@@ -25,6 +25,10 @@
 //! bit-flip harness is an exhaustive boundary sweep, not a random one,
 //! so it runs once regardless of the budget.
 
+use rustos_abi::sysinfo::{
+    KernelMemoryStats, ProcessListRequest, ProcessRecord, SysinfoRequestHeader, SystemIdentity,
+    Uptime,
+};
 use rustos_abi::{IpcMessageHeader, ManifestHeader};
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
@@ -70,6 +74,36 @@ fn exercise(bytes: &[u8]) {
         let redecoded = ManifestHeader::from_bytes(&encoded)
             .expect("round-trip of an accepted header must succeed");
         assert_eq!(header, redecoded);
+    }
+    if let Ok(header) = SysinfoRequestHeader::from_bytes(bytes) {
+        let redecoded = SysinfoRequestHeader::from_bytes(&header.to_le_bytes())
+            .expect("round-trip of an accepted header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(req) = ProcessListRequest::from_bytes(bytes) {
+        let redecoded = ProcessListRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = ProcessRecord::from_bytes(bytes) {
+        let redecoded = ProcessRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(stats) = KernelMemoryStats::from_bytes(bytes) {
+        let redecoded = KernelMemoryStats::from_bytes(&stats.to_le_bytes())
+            .expect("round-trip of accepted stats must succeed");
+        assert_eq!(stats, redecoded);
+    }
+    if let Ok(up) = Uptime::from_bytes(bytes) {
+        let redecoded = Uptime::from_bytes(&up.to_le_bytes())
+            .expect("round-trip of an accepted uptime must succeed");
+        assert_eq!(up, redecoded);
+    }
+    if let Ok(id) = SystemIdentity::from_bytes(bytes) {
+        let redecoded = SystemIdentity::from_bytes(&id.to_le_bytes())
+            .expect("round-trip of an accepted identity must succeed");
+        assert_eq!(id, redecoded);
     }
 }
 

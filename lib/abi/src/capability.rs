@@ -83,6 +83,31 @@ impl CapabilityId {
     /// it (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
     /// checks before state touches).
     pub const MMIO_MAP: Self = Self(12);
+    /// Query system information beyond the caller's own principal.
+    ///
+    /// Required by the System Information API (`AGENTS.md` §16.6) for
+    /// queries whose answer spans principals other than the caller —
+    /// for example listing every process on the system rather than
+    /// only the caller's own. Unprivileged, self-scoped queries ("list
+    /// my own processes") require no capability; this one gates the
+    /// global view (`AGENTS.md` §5.4 — capability checks before state
+    /// touches).
+    pub const SYSINFO_GLOBAL: Self = Self(13);
+    /// Query kernel-internal system information.
+    ///
+    /// Required by the System Information API (`AGENTS.md` §16.6) for
+    /// queries that expose kernel-internal state — for example kernel
+    /// memory statistics — which a global-but-unprivileged observer
+    /// must not see.
+    pub const SYSINFO_KERNEL: Self = Self(14);
+    /// Read the detected hardware tree through the System Information
+    /// API.
+    ///
+    /// Required by the privileged hardware-tree query (`AGENTS.md`
+    /// §18.4): the tree is exposed read-only to tools through the
+    /// System Information API, and there is no path that bypasses this
+    /// capability check.
+    pub const SYSINFO_HW: Self = Self(15);
 
     /// Construct a [`CapabilityId`] from its raw value, validating the range.
     ///
@@ -162,6 +187,9 @@ mod tests {
         assert_eq!(CapabilityId::MEM_DMA.as_u16(), 10);
         assert_eq!(CapabilityId::IRQ_BIND.as_u16(), 11);
         assert_eq!(CapabilityId::MMIO_MAP.as_u16(), 12);
+        assert_eq!(CapabilityId::SYSINFO_GLOBAL.as_u16(), 13);
+        assert_eq!(CapabilityId::SYSINFO_KERNEL.as_u16(), 14);
+        assert_eq!(CapabilityId::SYSINFO_HW.as_u16(), 15);
     }
 
     #[test]
@@ -183,5 +211,8 @@ mod tests {
         assert!(CapabilityId::MEM_DMA.index() < 256);
         assert!(CapabilityId::IRQ_BIND.index() < 256);
         assert!(CapabilityId::MMIO_MAP.index() < 256);
+        assert!(CapabilityId::SYSINFO_GLOBAL.index() < 256);
+        assert!(CapabilityId::SYSINFO_KERNEL.index() < 256);
+        assert!(CapabilityId::SYSINFO_HW.index() < 256);
     }
 }

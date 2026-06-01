@@ -3937,6 +3937,32 @@ device list.
 **Docs**
 - `docs/src/userland/{init,login,shell,utilities}.md`.
 
+**Status: in progress.**
+- **System Information API ABI (`lib/abi/src/sysinfo.rs`) — DONE.** The
+  `sysinfo-v1` surface (`rustos_abi::sysinfo`, §16.6) is implemented: a
+  versioned (`SYSINFO_VERSION_V1`), frozen query registry
+  (`SysinfoQueryId` + `SysinfoQuerySpec` + `SYSINFO_QUERIES`) with a
+  canonical hashable byte image (`ENCODED_QUERY_TABLE` /
+  `encoded_query_table`) and per-query `required_capability`/`audit`
+  (same §9 discipline as the syscall table). Six queries are pinned:
+  `SELF_PROCESS_LIST` (no cap), `GLOBAL_PROCESS_LIST` (`CAP_SYSINFO_GLOBAL`),
+  `KERNEL_MEMORY_STATS` (`CAP_SYSINFO_KERNEL`), `HARDWARE_TREE`
+  (`CAP_SYSINFO_HW`), `SYSTEM_IDENTITY`, and `UPTIME`. The three new
+  capabilities `CAP_SYSINFO_GLOBAL/KERNEL/HW` (`CapabilityId` 13/14/15)
+  were added with frozen-id tests. A versioned `SysinfoRequestHeader`
+  envelope (`SYI1` magic, fail-closed decode) frames typed payloads:
+  `ProcessListRequest` (offset/limit paging), `ProcessRecord` +
+  `ProcessState`, `KernelMemoryStats`, `Uptime`, and `SystemIdentity` —
+  all `#[repr(C)]`, allocation-free, little-endian, with `to_le_bytes` /
+  `from_bytes`. The shared little-endian read/write helpers were extracted
+  into a `pub(crate) mod le` (deduplicating `ipc.rs`, §2.2). 22 new abi
+  unit tests; every new `from_bytes` is enrolled in the `lib/abi` fuzz
+  harness (§19.6). Docs: `docs/src/abi/sysinfo.md` (+ SUMMARY link). No
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+- Remaining Stage 6 deliverables (`init`, `shell`, `login`, the core CLI
+  utilities, `sysinfod`, and the `.app` bundle / dynamic-loader policy)
+  are not yet started.
+
 ---
 
 ## Stage 7 — Graphics, Window Manager, Iconbar

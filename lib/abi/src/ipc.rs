@@ -5,6 +5,7 @@
 //! fields encoded little-endian on the wire; layout and field order are part
 //! of the frozen `abi-v1` contract.
 
+use crate::le::{read_u16, read_u32, read_u64};
 use crate::Errno;
 
 /// Magic number identifying an `abi-v1` IPC message (`"IPC1"` little-endian).
@@ -107,22 +108,22 @@ impl IpcMessageHeader {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let magic = u32_le(bytes, 0);
+        let magic = read_u32(bytes, 0);
         if magic != IPC_MESSAGE_HEADER_MAGIC {
             return Err(Errno::BadMagic);
         }
-        let version = u16_le(bytes, 4);
+        let version = read_u16(bytes, 4);
         if u32::from(version) != crate::ABI_VERSION_CURRENT {
             return Err(Errno::AbiVersionUnsupported);
         }
-        let flags = u16_le(bytes, 6);
-        let endpoint = u64_le(bytes, 8);
-        let sender = u64_le(bytes, 16);
-        let payload_len = u32_le(bytes, 24);
+        let flags = read_u16(bytes, 6);
+        let endpoint = read_u64(bytes, 8);
+        let sender = read_u64(bytes, 16);
+        let payload_len = read_u32(bytes, 24);
         if payload_len > IPC_MESSAGE_MAX_PAYLOAD_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let reserved = u32_le(bytes, 28);
+        let reserved = read_u32(bytes, 28);
         if reserved != 0 {
             return Err(Errno::BadMagic);
         }
@@ -136,35 +137,6 @@ impl IpcMessageHeader {
             reserved,
         })
     }
-}
-
-#[inline]
-fn u16_le(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn u32_le(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-#[inline]
-fn u64_le(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-        bytes[offset + 4],
-        bytes[offset + 5],
-        bytes[offset + 6],
-        bytes[offset + 7],
-    ])
 }
 
 #[cfg(test)]

@@ -70,6 +70,7 @@
 # ABI
 
 - [Driver traits (`abi-v1`)](./abi/driver_traits.md)
+- [System Information API (`sysinfo-v1`)](./abi/sysinfo.md)
 
 # Platforms
 
