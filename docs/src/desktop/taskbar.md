@@ -101,14 +101,24 @@ palette.
 
 ## Start menu
 
-The start menu is **not** an application launcher at this stage. It is
-populated only with the session controls — log out, lock, shut down, restart
-— each carried by a `MenuEntry` with a stable `MenuEntryId` and a `MenuAction`.
-`StartMenu::activate` returns the entry's action and closes the menu; an
-unknown id changes nothing and returns `None` (fail closed, `AGENTS.md` §5.4 /
-§2.9). Launcher entries are a later increment: they arrive as a new
-`MenuAction` variant, so the list/activate interface does not change when they
-land (`AGENTS.md` §2.4 — extend, do not creep).
+The start menu is seeded with the session controls — log out, lock, shut
+down, restart — occupying the fixed ids `1..=4`, and may additionally carry
+**application launcher** entries appended after them. Both kinds are ordinary
+`MenuEntry` values with a stable `MenuEntryId` and a `MenuAction`
+(`Session(SessionControl)` or `Launch(LauncherId)`), distinguished only by
+that action; the launcher's human-readable name is the entry's own label, so
+the session controls' static labels are never copied. `StartMenu::activate`
+returns the entry's action and closes the menu; an unknown id changes nothing
+and returns `None` (fail closed, `AGENTS.md` §5.4 / §2.9).
+
+`StartMenu::add_launcher(launcher, label)` appends a launcher entry, assigning
+it the next id after the current maximum so the session controls keep their
+position and id no matter how many launchers are added — the list/activate
+interface did not change when launchers landed (`AGENTS.md` §2.4 — extend, do
+not creep). The taskbar holds no capability to spawn processes: activating a
+launcher only reports its `LauncherId`, and the session glue (the window
+manager / `appmgr`) resolves it to an application bundle and launches it
+(`AGENTS.md` §16.5).
 
 ### Popup geometry and rendering
 
@@ -188,7 +198,9 @@ joins this once installed font faces exist.
 ## Tests
 
 The crate's headless unit tests cover edge/orientation, the start-menu
-session-control population and fail-closed activation, the task-list
+session-control population and fail-closed activation, appending launcher
+entries (next id after the session controls, app-supplied label, `Launch`
+action) and activating one, the task-list
 focus/minimise rule, notification add/remove deduplication, the region layout
 and hit-testing for a bottom bar, vertical-bar layout, all four edges,
 overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the

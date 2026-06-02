@@ -1,12 +1,20 @@
 //! The start menu and its entries.
 //!
-//! The start-menu button sits at the leading end of the taskbar. The menu
-//! is deliberately **not** an application launcher at this stage: it is
-//! populated only with the session controls (log out, lock, shut down,
-//! restart). It is shaped so launcher entries can be added later — as a new
-//! [`MenuAction`] variant carried by ordinary [`MenuEntry`] values — without
-//! changing the public list/activate interface (`PLAN.md` Stage 7).
+//! The start-menu button sits at the leading end of the taskbar. The menu is
+//! seeded with the session controls (log out, lock, shut down, restart) and
+//! may additionally carry **application launcher** entries appended after
+//! them. Both kinds are ordinary [`MenuEntry`] values distinguished by their
+//! [`MenuAction`], so adding launchers did not change the public
+//! list/activate interface (`AGENTS.md` §2.4 — extend, do not creep;
+//! `PLAN.md` Stage 7).
+//!
+//! The taskbar never launches anything itself: activating a launcher entry
+//! reports its [`LauncherId`] so the session glue (the window manager /
+//! `appmgr`) starts the matching application bundle (`AGENTS.md` §16.5). The
+//! taskbar holds no capability to spawn processes.
 
+use alloc::borrow::Cow;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A session-control action offered by the start menu.
@@ -41,42 +49,64 @@ impl SessionControl {
     }
 }
 
+/// A stable identifier for the application an [`MenuAction::Launch`] entry
+/// starts.
+///
+/// The taskbar does not resolve or spawn applications: it reports the chosen
+/// `LauncherId` to its caller, which maps it to an application bundle and
+/// launches it (`AGENTS.md` §16.5). The id is opaque to the taskbar and is
+/// assigned by whoever populates the menu.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct LauncherId(pub u32);
+
 /// What activating a [`MenuEntry`] does.
 ///
-/// Today every entry is a [`SessionControl`]. Launcher entries are a future
-/// increment: they arrive as a new variant here, so the
-/// [`StartMenu::entries`] / [`StartMenu::activate`] interface does not change
-/// when they land (`AGENTS.md` §2.4 — extend, do not creep).
+/// Both variants are [`Copy`], so a [`MenuEntry`]'s action travels by value
+/// through the input router without borrowing the menu (`AGENTS.md` §2.4).
+/// The entry's *display label* is stored on the [`MenuEntry`] itself
+/// ([`MenuEntry::label`]), which is why a launcher's human-readable name does
+/// not live here.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
     /// Invoke a session control.
     Session(SessionControl),
+    /// Launch the application identified by this [`LauncherId`].
+    Launch(LauncherId),
 }
 
 /// A stable identifier for a [`MenuEntry`] within a menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct MenuEntryId(pub u32);
 
-/// One row of the start menu: a stable id and the action it triggers.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// One row of the start menu: a stable id, the action it triggers, and the
+/// label shown for it.
+///
+/// The label is owned by the entry so a launcher can carry an
+/// application-supplied name while a session control reuses its static label
+/// without allocating (`AGENTS.md` §2.2 / §2.3).
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MenuEntry {
     /// The entry's stable id, unique within its menu.
     pub id: MenuEntryId,
     /// The action performed when the entry is activated.
     pub action: MenuAction,
+    label: Cow<'static, str>,
 }
 
 impl MenuEntry {
     /// The entry's display label.
     #[must_use]
-    pub const fn label(&self) -> &'static str {
-        match self.action {
-            MenuAction::Session(control) => control.label(),
-        }
+    pub fn label(&self) -> &str {
+        &self.label
     }
 }
 
 /// The start menu: an open/closed toggle and an ordered list of entries.
+///
+/// The session controls occupy the fixed ids `1..=4` at the head of the list;
+/// launcher entries appended with [`add_launcher`](Self::add_launcher) follow
+/// them with ascending ids, so the session controls keep a stable position
+/// and id regardless of how many launchers are present.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartMenu {
     open: bool,
@@ -94,6 +124,7 @@ impl StartMenu {
             entries.push(MenuEntry {
                 id: MenuEntryId(ordinal.saturating_add(1)),
                 action: MenuAction::Session(control),
+                label: Cow::Borrowed(control.label()),
             });
         }
         Self {
@@ -138,6 +169,23 @@ impl StartMenu {
         self.entries.is_empty()
     }
 
+    /// Append a launcher entry that starts `launcher` and is shown as `label`,
+    /// returning the [`MenuEntryId`] assigned to it.
+    ///
+    /// The new entry follows every existing one and takes the next id after
+    /// the current maximum, so already-assigned ids never move (`AGENTS.md`
+    /// §2.4). The taskbar only records the launcher; the caller resolves and
+    /// starts the application when the entry is activated (`AGENTS.md` §16.5).
+    pub fn add_launcher(&mut self, launcher: LauncherId, label: impl Into<String>) -> MenuEntryId {
+        let id = MenuEntryId(self.next_id());
+        self.entries.push(MenuEntry {
+            id,
+            action: MenuAction::Launch(launcher),
+            label: Cow::Owned(label.into()),
+        });
+        id
+    }
+
     /// Activate the entry with `id`, closing the menu, and return its
     /// action. An unknown id changes nothing and returns `None` (fail
     /// closed, `AGENTS.md` §5.4 / §2.9).
@@ -145,6 +193,16 @@ impl StartMenu {
         let action = self.entries.iter().find(|e| e.id == id)?.action;
         self.open = false;
         Some(action)
+    }
+
+    /// The next free entry id: one past the current maximum, saturating so a
+    /// full id space fails closed rather than wrapping (`AGENTS.md` §2.9).
+    fn next_id(&self) -> u32 {
+        self.entries
+            .iter()
+            .map(|entry| entry.id.0)
+            .max()
+            .map_or(1, |max| max.saturating_add(1))
     }
 }
 

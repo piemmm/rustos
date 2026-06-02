@@ -4801,6 +4801,28 @@ device list.
   `unwrap`/`expect`/`panic!` in production paths. 10 new headless tests
   (51 total). Docs `docs/src/desktop/taskbar.md` and the crate
   `README.md`.
+- **Start-menu launcher entries — DONE (increment).** The start menu was
+  seeded with session controls and *shaped* so launcher entries could be
+  added later as a new `MenuAction` variant without changing the
+  list/activate interface (§2.4); that increment is now done.
+  `userland/gui/taskbar`'s `menu` module gains `MenuAction::Launch(LauncherId)`
+  alongside `Session(SessionControl)` (both `Copy`, so the action still travels
+  by value through the input router and the `Copy` `TaskbarResponse`), and a
+  `MenuEntry` now owns its display label as a `Cow<'static, str>` — session
+  controls keep their static labels borrowed while a launcher carries an
+  application-supplied name without the session labels allocating (§2.2/§2.3).
+  `StartMenu::add_launcher(launcher, label)` appends a launcher after the fixed
+  session ids `1..=4`, assigning the next id after the current maximum
+  (saturating, §2.9) so already-assigned ids never move. The popup geometry
+  (`menu_layout` from `start_menu.len()`), the rendering (`render_menu` draws
+  `entry.label()` through the existing `rustos-font`/`rustos-raster` path), and
+  the modal `TaskbarInput` selection path all carry the new variant unchanged
+  — no second path (§2.2). The taskbar holds no spawn capability: activating a
+  launcher only reports its `LauncherId`, which the session glue (WM/`appmgr`)
+  resolves to a bundle and launches (§16.5). 3 new headless tests (54 total);
+  no `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs
+  `docs/src/desktop/taskbar.md`, the crate `README.md`, and the crate-root
+  module docs.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**

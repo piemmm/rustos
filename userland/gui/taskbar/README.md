@@ -33,10 +33,15 @@ owns:
   (`StartMenuDismissed`) without acting on what it landed on — one click does
   one thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
   region, is `Ignored` (fail closed, `AGENTS.md` §2.9).
-- **Start menu** — `StartMenu` holds only the session controls (log out,
-  lock, shut down, restart) at this stage; it is shaped so launcher entries
-  can be added later as a new `MenuAction` variant without changing the
-  list/activate interface (`AGENTS.md` §2.4). `MenuLayout::compute` is its
+- **Start menu** — `StartMenu` is seeded with the session controls (log out,
+  lock, shut down, restart) on the fixed ids `1..=4`, and `add_launcher`
+  appends **application launcher** entries after them. Both kinds are ordinary
+  `MenuEntry` values distinguished by their `MenuAction`
+  (`Session(SessionControl)` or `Launch(LauncherId)`), so launchers were added
+  without changing the list/activate interface (`AGENTS.md` §2.4). The taskbar
+  cannot spawn processes: activating a launcher only reports its `LauncherId`,
+  which the session glue resolves to an application bundle and starts
+  (`AGENTS.md` §16.5). `MenuLayout::compute` is its
   popup geometry: the panel opens *outward* from the start button on the
   bar's edge (above a bottom bar, below a top bar, to the inner side of a
   left/right bar) with one scale-aware row per entry, and `MenuLayout::hit_test`
@@ -83,6 +88,5 @@ in production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7)
 
-The live window-manager IPC wiring, notification-icon artwork, selecting a
-font face from the theme's `FontSpec` roles once installed fonts exist, and
-launcher entries in the start menu.
+The live window-manager IPC wiring, notification-icon artwork, and selecting a
+font face from the theme's `FontSpec` roles once installed fonts exist.

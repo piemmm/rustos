@@ -8,7 +8,7 @@ use rustos_theme::Theme;
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse};
 use crate::layout::{BarLayout, Hit, MenuLayout};
-use crate::menu::{MenuAction, MenuEntryId, SessionControl, StartMenu};
+use crate::menu::{LauncherId, MenuAction, MenuEntryId, SessionControl, StartMenu};
 use crate::notifications::{IconId, NotificationArea};
 use crate::render::{render, render_menu};
 use crate::taskbar::{Taskbar, TaskbarConfig};
@@ -76,6 +76,37 @@ fn start_menu_unknown_entry_is_fail_closed() {
     menu.toggle();
     assert_eq!(menu.activate(MenuEntryId(9999)), None);
     assert!(menu.is_open(), "an unknown id changes nothing");
+}
+
+#[test]
+fn add_launcher_appends_after_session_controls() {
+    let mut menu = StartMenu::with_session_controls();
+    let files = menu.add_launcher(LauncherId(42), "Files");
+    let terminal = menu.add_launcher(LauncherId(7), "Terminal");
+
+    // Launchers take the next ids after the fixed session ids 1..=4.
+    assert_eq!(files, MenuEntryId(5));
+    assert_eq!(terminal, MenuEntryId(6));
+    assert_eq!(menu.len(), 6);
+
+    // The session controls keep their position, id, and label.
+    assert_eq!(menu.entries()[0].id, MenuEntryId(1));
+    assert_eq!(menu.entries()[2].label(), "Shut Down");
+
+    // The launchers carry their app-supplied label and a Launch action.
+    assert_eq!(menu.entries()[4].label(), "Files");
+    assert_eq!(menu.entries()[4].action, MenuAction::Launch(LauncherId(42)));
+    assert_eq!(menu.entries()[5].label(), "Terminal");
+    assert_eq!(menu.entries()[5].action, MenuAction::Launch(LauncherId(7)));
+}
+
+#[test]
+fn activating_a_launcher_reports_its_action_and_closes() {
+    let mut menu = StartMenu::with_session_controls();
+    let id = menu.add_launcher(LauncherId(99), "Browser");
+    menu.toggle();
+    assert_eq!(menu.activate(id), Some(MenuAction::Launch(LauncherId(99))));
+    assert!(!menu.is_open(), "selecting an entry closes the menu");
 }
 
 // ---- task list ------------------------------------------------------
@@ -932,6 +963,32 @@ fn pressing_outside_the_open_menu_dismisses_it_without_acting() {
         bar.tasks().focused(),
         None,
         "the click did not reach the task"
+    );
+}
+
+#[test]
+fn pressing_a_launcher_entry_selects_it_and_closes_the_menu() {
+    let mut bar = bottom_bar();
+    let files = bar.start_menu_mut().add_launcher(LauncherId(42), "Files");
+    let mut input = TaskbarInput::new();
+    // Open the menu via the start button.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: true }
+    );
+
+    // With five entries the popup panel is (0,600,200,160); the launcher row
+    // (entries[4]) spans y 728..760, so press its middle.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 744),
+        TaskbarResponse::MenuEntrySelected {
+            id: files,
+            action: MenuAction::Launch(LauncherId(42)),
+        }
+    );
+    assert!(
+        !bar.start_menu().is_open(),
+        "selecting a launcher closes the menu"
     );
 }
 

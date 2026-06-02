@@ -4,11 +4,12 @@
 //! edge (`AGENTS.md` §10, `PLAN.md` Stage 7). Along its main axis it is laid
 //! out as:
 //!
-//! - **Leading end** — a [`StartMenu`] button. The menu is *not* an
-//!   application launcher; at this stage it holds only session controls
-//!   (log out, lock, shut down, restart). It is built so launcher entries
-//!   can be added later (a new [`MenuAction`] variant) without changing the
-//!   list/activate interface.
+//! - **Leading end** — a [`StartMenu`] button. The menu is seeded with the
+//!   session controls (log out, lock, shut down, restart) and may carry
+//!   **application launcher** entries appended after them
+//!   ([`StartMenu::add_launcher`]). Both kinds are ordinary [`MenuEntry`]
+//!   values distinguished by their [`MenuAction`], so launchers were added
+//!   without changing the list/activate interface (`AGENTS.md` §2.4).
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
 //! - **Trailing end** — a clock anchored to the very end, with a
@@ -65,7 +66,7 @@ pub use clock::Clock;
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, MenuLayout};
-pub use menu::{MenuAction, MenuEntry, MenuEntryId, SessionControl, StartMenu};
+pub use menu::{LauncherId, MenuAction, MenuEntry, MenuEntryId, SessionControl, StartMenu};
 pub use notifications::{IconId, NotificationArea, NotificationIcon};
 pub use render::{render, render_menu};
 pub use taskbar::{Taskbar, TaskbarConfig};
