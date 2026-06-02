@@ -96,6 +96,7 @@ members = [
     "userland/apps/ps",
     "userland/apps/rm",
     "userland/apps/setcap",
+    "userland/apps/terminal",
     "userland/apps/useradd",
     "userland/gui/wm",
     "userland/gui/taskbar",

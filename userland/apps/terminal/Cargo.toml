@@ -1,0 +1,34 @@
+[package]
+name = "rustos-terminal"
+description = "RustOS terminal emulator: a character-cell screen model fed by an injected shell byte stream and rendered with the shared theme (§10 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen `Errno` the shell I/O seam reports failures with; the terminal
+# invents no parallel error set for the kernel boundary (§2.2) and never links
+# a kernel or driver crate (§17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# Shared integer screen geometry (`Rect`) — the same vocabulary the window
+# manager and taskbar use, lifted to `lib/*` so the app reuses it without
+# depending on the window manager (§17.4, §2.2).
+rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The single shared theme definition (§10): the terminal takes its colours from
+# the active theme so it stays consistent with the window manager and taskbar.
+rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
+# primitives the window manager paints with, lifted to `lib/*` so the app
+# renders its screen into a `Surface` without duplicating the colour algebra
+# (§17.4, §2.2).
+rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# Shared text rasteriser (`BitmapFont`) — the built-in monospace face and glyph
+# blitter, lifted to `lib/*` (§16.4) so the app draws its cells without
+# depending on the window manager (§17.4).
+rustos-font = { path = "../../../lib/font", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -4897,6 +4897,33 @@ device list.
   `docs/src/desktop/apps.md` (+ SUMMARY) and the crate `README.md`. **Still
   open here:** the VFS-backed `DirectorySource`, live pointer/keyboard input,
   and presenting the window through the WM (deferred wiring).
+- **Terminal emulator — DONE (increment).** `userland/apps/terminal`
+  (`rustos-terminal`, `no_std`+`alloc`, deps only `rustos-abi` + the shared
+  desktop `lib/*` crates `geometry`/`theme`/`raster`/`font`, §17.4) is the
+  default graphical terminal (`AGENTS.md` §10). Like the file browser it is a
+  screen **model** plus a **renderer**, both driven by an injected
+  `ShellSource` seam (`read`/`write` over the kernel boundary `Errno`),
+  testable against an in-memory queue without a kernel (§7). `Grid` is the
+  fixed `cols`×`rows` character-cell screen with a cursor, exposing the
+  cursor-relative operations (write-with-wrap-and-scroll, the C0 moves,
+  absolute/relative positioning, the ANSI erase operations, clear); every one
+  is total and saturating, so a hostile byte stream can never index out of
+  bounds or panic (§2.9). `Parser` is the ground/escape/CSI state machine that
+  turns shell output bytes into those operations — printable ASCII, the C0
+  controls, and a CSI subset (`A`/`B`/`C`/`D`, `H`/`f`, `J`, `K`) — consuming
+  any unrecognised escape, unsupported final byte, or high byte without
+  disturbing the screen (§2.9), keeping the model free of parsing concerns
+  (§2.3). `Terminal` glues them to the seam: `pump` reads-and-applies and
+  `send`/`send_str` forward input, never echoing on the screen's behalf (echo
+  is the shell's job) and surfacing a seam `Errno` while leaving the screen
+  unchanged (§5.4). `render` paints the grid into a `lib/raster` `Surface`
+  through the shared `lib/font` monospace face and the theme palette, the
+  cursor cell highlighted with the accent role; the compositor rounds the
+  rectangular surface (§2.2). 23 headless tests; no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. Workspace manifest; docs
+  `docs/src/desktop/apps.md` and the crate `README.md`. **Still open here:**
+  wiring the pseudo-terminal `ShellSource` to a real shell process and
+  presenting the window through the WM (deferred wiring).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
@@ -4908,7 +4935,10 @@ device list.
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
   through the §16.4 image-decoding library in a §19.5 sandbox and caching the
   rasterised/converted forms — this is also how cursor sets are decoded from
-  on-disk assets), and the default terminal-emulator app.
+  on-disk assets). The two default apps — the filesystem browser and the
+  terminal emulator — have both landed (model + renderer over an injected
+  seam); what remains for them is the live VFS/shell channels and WM-presented
+  windows (deferred wiring).
 
 ---
 

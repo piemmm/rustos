@@ -1008,6 +1008,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-terminal"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-font",
+ "rustos-geometry",
+ "rustos-raster",
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-test-drvhost-qemu"
 version = "0.0.0"
 dependencies = [

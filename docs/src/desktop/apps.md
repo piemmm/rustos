@@ -62,5 +62,60 @@ can rather than panicking (`AGENTS.md` §2.9).
 
 The browser model and renderer are complete and headless-tested; wiring the
 VFS-backed `DirectorySource` and the live window-manager surface is deferred
-until the userland VFS client and the taskbar↔WM event glue land. The terminal
-emulator is the other Stage 7 default app and is not yet implemented.
+until the userland VFS client and the taskbar↔WM event glue land.
+
+## Terminal emulator (`rustos-terminal`)
+
+The terminal emulator hosts the system shell and shows its output on a
+character-cell screen rendered through the active theme. Like the browser it is
+split into a screen **model** and a **renderer**, both driven by an injected
+shell I/O seam, so the parsing and rendering logic is testable without a kernel
+(`AGENTS.md` §7).
+
+### The shell seam
+
+`ShellSource::read()` returns the bytes the shell has produced since the last
+call (an empty read is not an error) and `ShellSource::write(bytes)` forwards
+the user's keystrokes. On a running system the seam is a capability-checked
+pseudo-terminal channel to the shell process, so the process-spawn and
+job-control authority lives behind the seam, not in the app.
+
+### The screen model
+
+`Grid` is a fixed `cols`×`rows` rectangle of cells with a cursor; it exposes
+the cursor-relative operations a terminal needs — writing a glyph (wrapping and
+scrolling at the edges), the C0 moves (backspace, tab, line feed, carriage
+return), absolute/relative cursor positioning, the ANSI erase operations, and
+clear. `Parser` is the streaming interpreter from shell output bytes to those
+operations: it handles printable ASCII, the C0 controls, and a subset of ANSI
+CSI escape sequences (cursor movement `A`/`B`/`C`/`D`, positioning `H`/`f`,
+erase-in-line `K`, erase-in-display `J`). Anything else — a byte `>= 0x80`, an
+unrecognised escape, or an unsupported CSI final byte — is consumed without
+disturbing the screen, so an unfamiliar stream degrades to dropped control
+rather than a corrupted display or a panic (`AGENTS.md` §2.9).
+
+`Terminal` ties the grid, the parser, and the seam together: `pump` reads the
+shell's output and applies it to the screen, and `send` / `send_str` forward
+input. The terminal never echoes input itself — echo, line editing, and job
+control are the shell's responsibility, exactly as on a real tty — and a
+failing seam call surfaces the boundary `Errno` while leaving the screen
+unchanged (`AGENTS.md` §5.4).
+
+### Rendering
+
+`render(terminal, theme, viewport)` paints the grid into a `rustos-raster`
+`Surface` sized to the viewport, using the theme's palette for every colour and
+the shared `rustos-font` monospace face for every glyph. Each grid cell maps to
+one glyph cell and the cursor cell is highlighted with the accent role. The
+surface is rectangular; the compositor places and rounds it through its single
+anti-aliased rounded-corner path, so there is no rounding — and no colour
+algebra — in the app (`AGENTS.md` §2.2). Every length saturates so a viewport
+smaller than the grid paints what fits rather than panicking (`AGENTS.md`
+§2.9).
+
+### Still to do
+
+The terminal model and renderer are complete and headless-tested; wiring the
+pseudo-terminal `ShellSource` to a real shell process and presenting the live
+window-manager surface is deferred until the userland process/IPC client and
+the taskbar↔WM event glue land.
