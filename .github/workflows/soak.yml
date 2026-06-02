@@ -1,18 +1,28 @@
 name: soak
 
-# Nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest, and the §7
-# repeated-test soak). The default `all` runs every fuzz harness, every
-# proptest model, and the whole test matrix in parallel, each for 24 h: a
-# flake too rare to surface in the per-PR 100× test run still gets a full
-# night of exposure.
+# Continuous soaks in 12 h blocks (AGENTS.md §19.6 fuzz, §19.7 proptest, and
+# the §7 repeated-test soak). The default `all` runs every fuzz harness, every
+# proptest model, and the whole test matrix in parallel, each for one 12 h
+# block; the job re-dispatches itself when the block finishes, so back-to-back
+# blocks give continuous, unbroken exposure to a flake too rare to surface in
+# the per-PR 100× test run.
 #
 # These cannot run on GitHub-hosted runners: a hosted job is hard-capped well
-# below 24 h. They therefore run on a *self-hosted Linux runner* (see
+# below a 12 h block. They therefore run on a *self-hosted Linux runner* (see
 # tools/ci/github-runner/README.md for how to register one). The job is the
 # same `tools/ci/soak.sh` a cron/systemd/launchd builder runs, so a green soak
 # here and a green soak on a standalone builder are equivalent by construction
-# — the workflow adds only scheduling and log upload, never pipeline logic
-# (AGENTS.md §15: every check lives in `cargo xtask`).
+# — the workflow adds only scheduling, restart, and log upload, never pipeline
+# logic (AGENTS.md §15: every check lives in `cargo xtask`).
+#
+# This job targets a *dedicated* `soak` label, not the bare `[self-hosted,
+# linux]` that `ci.yml` uses. A self-hosted runner executes one job at a time,
+# so if the 12 h soak block ran on the same runner as `ci.yml` it would block
+# every push gate behind it for half a day. Registering a second runner
+# instance on the same host with the extra `soak` label (see the runner README)
+# lets the soak and the per-push `ci` run concurrently and independently: the
+# soak only ever lands on the `soak`-labelled runner, leaving the general
+# `[self-hosted, linux]` runner free for `ci`.
 
 on:
   schedule:
@@ -26,15 +36,21 @@ on:
         default: all
         options: [all, both, fuzz, proptest, test]
       secs:
-        description: "Per-job budget override in seconds (blank = 24 h default; use a small value for a smoke run)"
+        description: "Per-job budget override in seconds (blank = 12 h block default; use a small value for a smoke run)"
         type: string
         default: ""
 
-# Never cancel an in-flight 24 h soak just because the next nightly tick fired;
-# let the running one finish and skip the overlap.
+# Never cancel an in-flight soak block just because the next tick (the cron, or
+# this workflow's own end-of-block re-dispatch) fired; let the running block
+# finish and skip the overlap.
 concurrency:
   group: soak
   cancel-in-progress: false
+
+# The end-of-block re-dispatch step needs to start a new workflow run.
+permissions:
+  actions: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,11 +59,16 @@ env:
 
 jobs:
   soak:
-    name: nightly soaks (parallel)
-    runs-on: [self-hosted, linux]
-    # 24 h budget + parallel fan-out + setup headroom. soak.sh enforces the real
-    # per-job budget; this is just a backstop so a wedged job cannot run forever.
-    timeout-minutes: 1560
+    name: soak block (parallel)
+    # Dedicated `soak` label so the 12 h block runs on its own runner instance
+    # and never queues `ci.yml` (which uses the bare `[self-hosted, linux]`)
+    # behind it; the two run concurrently on the same host (see the runner
+    # README for registering both runner instances).
+    runs-on: [self-hosted, linux, soak]
+    # 12 h block + parallel fan-out + setup/restart headroom (13 h). soak.sh
+    # enforces the real per-job budget; this is just a backstop so a wedged job
+    # cannot run past its block.
+    timeout-minutes: 780
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,7 +82,7 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Run nightly soaks (parallel)
+      - name: Run soak block (parallel)
         env:
           # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them
           # below so a failing reproducer can be pulled off the run.
@@ -69,11 +90,25 @@ jobs:
         run: |
           KIND="${{ github.event.inputs.kind || 'all' }}"
           SECS="${{ github.event.inputs.secs }}"
-          if [ -n "$SECS" ]; then
-            tools/ci/soak.sh "$KIND" --secs "$SECS"
-          else
-            tools/ci/soak.sh "$KIND"
+          # Default each soak block to 12 h (43200 s) so blocks chain back to
+          # back; a dispatch override still wins for smoke runs.
+          if [ -z "$SECS" ]; then
+            SECS=43200
           fi
+          tools/ci/soak.sh "$KIND" --secs "$SECS"
+
+      - name: Re-dispatch the next soak block
+        # Restart immediately so the next 12 h block begins as soon as this one
+        # finishes, giving continuous coverage. The `soak` concurrency group
+        # (cancel-in-progress: false) makes the new run wait for this one to
+        # exit rather than overlapping. Forward the same inputs so an operator's
+        # smoke-run override chains too.
+        if: always() && github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && github.event.inputs.secs == '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run soak.yml --ref "${{ github.ref_name }}" \
+            -f kind="${{ github.event.inputs.kind || 'all' }}"
 
       - name: Upload soak logs
         # Logs are the whole point on failure: §19.6/§19.7 want the crashing
