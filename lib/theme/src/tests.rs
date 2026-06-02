@@ -158,6 +158,46 @@ fn default_registry_matches_with_builtins() {
     assert_eq!(ThemeRegistry::default(), ThemeRegistry::with_builtins());
 }
 
+#[test]
+fn set_appearance_selects_the_matching_builtin() {
+    let mut themes = ThemeRegistry::with_builtins();
+
+    assert_eq!(themes.set_appearance(Appearance::Light), ThemeId::LIGHT);
+    assert_eq!(themes.active_id(), ThemeId::LIGHT);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
+
+    assert_eq!(themes.set_appearance(Appearance::Dark), ThemeId::DARK);
+    assert_eq!(themes.active_id(), ThemeId::DARK);
+    assert_eq!(themes.active().appearance(), Appearance::Dark);
+}
+
+#[test]
+fn toggle_appearance_flips_between_builtins() {
+    let mut themes = ThemeRegistry::with_builtins();
+    assert_eq!(themes.active().appearance(), Appearance::Dark);
+
+    assert_eq!(themes.toggle_appearance(), ThemeId::LIGHT);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
+
+    assert_eq!(themes.toggle_appearance(), ThemeId::DARK);
+    assert_eq!(themes.active().appearance(), Appearance::Dark);
+}
+
+#[test]
+fn toggle_appearance_from_a_custom_theme_lands_on_the_opposite_builtin() {
+    let mut themes = ThemeRegistry::with_builtins();
+    // A custom dark-appearance theme becomes the active one.
+    themes
+        .register(sample_theme(ThemeId(100)))
+        .expect("fresh id");
+    themes.set_active(ThemeId(100)).expect("registered");
+    assert_eq!(themes.active().appearance(), Appearance::Dark);
+
+    // Toggling from a (custom) dark theme lands on the light built-in.
+    assert_eq!(themes.toggle_appearance(), ThemeId::LIGHT);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
+}
+
 fn sample_theme(id: ThemeId) -> Theme {
     Theme::new(
         id,

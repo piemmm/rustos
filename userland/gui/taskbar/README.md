@@ -34,14 +34,17 @@ owns:
   one thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
   region, is `Ignored` (fail closed, `AGENTS.md` §2.9).
 - **Start menu** — `StartMenu` is seeded with the session controls (log out,
-  lock, shut down, restart) on the fixed ids `1..=4`, and `add_launcher`
-  appends **application launcher** entries after them. Both kinds are ordinary
-  `MenuEntry` values distinguished by their `MenuAction`
-  (`Session(SessionControl)` or `Launch(LauncherId)`), so launchers were added
-  without changing the list/activate interface (`AGENTS.md` §2.4). The taskbar
-  cannot spawn processes: activating a launcher only reports its `LauncherId`,
-  which the session glue resolves to an application bundle and starts
-  (`AGENTS.md` §16.5). `MenuLayout::compute` is its
+  lock, shut down, restart) on the fixed ids `1..=4`; `add_launcher` appends
+  **application launcher** entries and `add_appearance_toggle` a **light/dark
+  toggle** after them. All kinds are ordinary `MenuEntry` values distinguished
+  by their `MenuAction` (`Session(SessionControl)`, `Launch(LauncherId)`, or
+  `ToggleAppearance`), so each was added without changing the list/activate
+  interface (`AGENTS.md` §2.4). The taskbar cannot spawn processes or own a
+  theme: activating a launcher reports its `LauncherId` and activating the
+  toggle reports `ToggleAppearance`, which the session glue resolves —
+  launching an application bundle (`AGENTS.md` §16.5) or calling
+  `ThemeRegistry::toggle_appearance` and relaying the new theme (`AGENTS.md`
+  §10). `MenuLayout::compute` is its
   popup geometry: the panel opens *outward* from the start button on the
   bar's edge (above a bottom bar, below a top bar, to the inner side of a
   left/right bar) with one scale-aware row per entry, and `MenuLayout::hit_test`

@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use crate::theme::{Theme, ThemeId};
+use crate::theme::{Appearance, Theme, ThemeId};
 
 /// Why a registry mutation was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -82,6 +82,44 @@ impl ThemeRegistry {
     #[must_use]
     pub fn active_id(&self) -> ThemeId {
         self.active
+    }
+
+    /// Make the built-in theme of the given [`Appearance`] the active one,
+    /// returning its id.
+    ///
+    /// This is the runtime light/dark control's primitive (`AGENTS.md` §10).
+    /// The two built-ins are always present, so selecting one by appearance
+    /// always succeeds — there is no failure mode to surface (contrast
+    /// [`set_active`](Self::set_active), which can name an unregistered id).
+    /// A custom theme that happens to be active is replaced by the matching
+    /// built-in.
+    pub fn set_appearance(&mut self, appearance: Appearance) -> ThemeId {
+        let id = Self::builtin_for(appearance);
+        self.active = id;
+        id
+    }
+
+    /// Switch between the built-in light and dark themes, returning the
+    /// now-active id.
+    ///
+    /// The toggle is driven by the *active* theme's [`Appearance`]: a dark
+    /// theme (built-in or custom) switches to the light built-in and a light
+    /// theme to the dark built-in. This is exactly what a "switch to
+    /// light/dark" desktop control does (`AGENTS.md` §10).
+    pub fn toggle_appearance(&mut self) -> ThemeId {
+        let next = match self.active().appearance() {
+            Appearance::Dark => Appearance::Light,
+            Appearance::Light => Appearance::Dark,
+        };
+        self.set_appearance(next)
+    }
+
+    /// The id of the built-in theme for an [`Appearance`].
+    const fn builtin_for(appearance: Appearance) -> ThemeId {
+        match appearance {
+            Appearance::Dark => ThemeId::DARK,
+            Appearance::Light => ThemeId::LIGHT,
+        }
     }
 
     /// The active theme.

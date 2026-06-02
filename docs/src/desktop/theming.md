@@ -58,6 +58,20 @@ duplicate id each return a `ThemeError` and leave the registry unchanged.
 Because the built-ins are held in a fixed-size array, `active` always returns
 a theme without an `unwrap` or an out-of-bounds index.
 
+### The light/dark control
+
+A "switch to light/dark" desktop control toggles the `Appearance` axis, not a
+specific id. `ThemeRegistry::set_appearance(Appearance)` makes the built-in of
+the requested appearance active, and `toggle_appearance` flips to the opposite
+built-in based on the *active* theme's `Appearance` (a custom dark theme
+toggles to the light built-in, and vice versa). Both return the now-active
+`ThemeId`. Unlike `set_active` they cannot fail: the two built-ins are always
+present, so there is no unknown-id path to surface. The taskbar's start menu
+surfaces this control as a `MenuAction::ToggleAppearance` entry; the taskbar
+holds no registry, so it only reports the action and the session glue performs
+the switch and re-applies the new theme to the window manager, taskbar, and
+apps.
+
 ## Tests
 
 `cargo test -p rustos-theme` covers the built-in palettes (every role
@@ -67,4 +81,7 @@ dark default, runtime dark↔light switching, custom-theme registration and
 activation, and the fail-closed `UnknownTheme`/`DuplicateId` paths. The
 window manager's `cargo test -p rustos-wm` adds the integration tests that
 source the compositor background and a window's corner radius from the active
-theme and verify a dark→light switch changes the cleared screen.
+theme and verify a dark→light switch changes the cleared screen. The
+appearance-toggle tests cover `set_appearance` selecting the matching built-in
+and `toggle_appearance` flipping between built-ins (including from an active
+custom theme).

@@ -109,6 +109,34 @@ fn activating_a_launcher_reports_its_action_and_closes() {
     assert!(!menu.is_open(), "selecting an entry closes the menu");
 }
 
+#[test]
+fn add_appearance_toggle_appends_after_other_entries() {
+    let mut menu = StartMenu::with_session_controls();
+    let launcher = menu.add_launcher(LauncherId(42), "Files");
+    let toggle = menu.add_appearance_toggle("Switch Theme");
+
+    // The toggle takes the next id after the session controls and launcher.
+    assert_eq!(launcher, MenuEntryId(5));
+    assert_eq!(toggle, MenuEntryId(6));
+    assert_eq!(menu.len(), 6);
+
+    // The session controls keep their fixed ids.
+    assert_eq!(menu.entries()[0].id, MenuEntryId(1));
+
+    // The toggle carries its label and the ToggleAppearance action.
+    assert_eq!(menu.entries()[5].label(), "Switch Theme");
+    assert_eq!(menu.entries()[5].action, MenuAction::ToggleAppearance);
+}
+
+#[test]
+fn activating_the_appearance_toggle_reports_its_action_and_closes() {
+    let mut menu = StartMenu::with_session_controls();
+    let id = menu.add_appearance_toggle("Switch Theme");
+    menu.toggle();
+    assert_eq!(menu.activate(id), Some(MenuAction::ToggleAppearance));
+    assert!(!menu.is_open(), "selecting an entry closes the menu");
+}
+
 // ---- task list ------------------------------------------------------
 
 #[test]
@@ -989,6 +1017,32 @@ fn pressing_a_launcher_entry_selects_it_and_closes_the_menu() {
     assert!(
         !bar.start_menu().is_open(),
         "selecting a launcher closes the menu"
+    );
+}
+
+#[test]
+fn pressing_the_appearance_toggle_reports_it_and_closes_the_menu() {
+    let mut bar = bottom_bar();
+    let toggle = bar.start_menu_mut().add_appearance_toggle("Switch Theme");
+    let mut input = TaskbarInput::new();
+    // Open the menu via the start button.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: true }
+    );
+
+    // With five entries the popup panel is (0,600,200,160); the toggle row
+    // (entries[4]) spans y 728..760, so press its middle.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 744),
+        TaskbarResponse::MenuEntrySelected {
+            id: toggle,
+            action: MenuAction::ToggleAppearance,
+        }
+    );
+    assert!(
+        !bar.start_menu().is_open(),
+        "selecting the toggle closes the menu"
     );
 }
 

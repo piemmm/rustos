@@ -2,11 +2,11 @@
 //!
 //! The start-menu button sits at the leading end of the taskbar. The menu is
 //! seeded with the session controls (log out, lock, shut down, restart) and
-//! may additionally carry **application launcher** entries appended after
-//! them. Both kinds are ordinary [`MenuEntry`] values distinguished by their
-//! [`MenuAction`], so adding launchers did not change the public
-//! list/activate interface (`AGENTS.md` §2.4 — extend, do not creep;
-//! `PLAN.md` Stage 7).
+//! may additionally carry **application launcher** entries and a **light/dark
+//! appearance toggle** appended after them. All kinds are ordinary
+//! [`MenuEntry`] values distinguished by their [`MenuAction`], so each was
+//! added without changing the public list/activate interface (`AGENTS.md`
+//! §2.4 — extend, do not creep; `PLAN.md` Stage 7).
 //!
 //! The taskbar never launches anything itself: activating a launcher entry
 //! reports its [`LauncherId`] so the session glue (the window manager /
@@ -61,7 +61,7 @@ pub struct LauncherId(pub u32);
 
 /// What activating a [`MenuEntry`] does.
 ///
-/// Both variants are [`Copy`], so a [`MenuEntry`]'s action travels by value
+/// Every variant is [`Copy`], so a [`MenuEntry`]'s action travels by value
 /// through the input router without borrowing the menu (`AGENTS.md` §2.4).
 /// The entry's *display label* is stored on the [`MenuEntry`] itself
 /// ([`MenuEntry::label`]), which is why a launcher's human-readable name does
@@ -72,6 +72,12 @@ pub enum MenuAction {
     Session(SessionControl),
     /// Launch the application identified by this [`LauncherId`].
     Launch(LauncherId),
+    /// Switch the desktop between its light and dark appearance.
+    ///
+    /// The taskbar holds no theme registry; activating this entry reports the
+    /// action and the session glue performs the switch on the shared
+    /// `rustos_theme::ThemeRegistry` (`AGENTS.md` §10).
+    ToggleAppearance,
 }
 
 /// A stable identifier for a [`MenuEntry`] within a menu.
@@ -181,6 +187,24 @@ impl StartMenu {
         self.entries.push(MenuEntry {
             id,
             action: MenuAction::Launch(launcher),
+            label: Cow::Owned(label.into()),
+        });
+        id
+    }
+
+    /// Append a light/dark appearance-toggle entry shown as `label`,
+    /// returning the [`MenuEntryId`] assigned to it.
+    ///
+    /// Like [`add_launcher`](Self::add_launcher) the entry follows every
+    /// existing one and takes the next free id, so the session controls keep
+    /// their fixed ids (`AGENTS.md` §2.4). Activating it reports
+    /// [`MenuAction::ToggleAppearance`]; the taskbar does not own the theme
+    /// and performs no switch itself (`AGENTS.md` §10).
+    pub fn add_appearance_toggle(&mut self, label: impl Into<String>) -> MenuEntryId {
+        let id = MenuEntryId(self.next_id());
+        self.entries.push(MenuEntry {
+            id,
+            action: MenuAction::ToggleAppearance,
             label: Cow::Owned(label.into()),
         });
         id

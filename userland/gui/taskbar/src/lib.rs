@@ -6,10 +6,11 @@
 //!
 //! - **Leading end** — a [`StartMenu`] button. The menu is seeded with the
 //!   session controls (log out, lock, shut down, restart) and may carry
-//!   **application launcher** entries appended after them
-//!   ([`StartMenu::add_launcher`]). Both kinds are ordinary [`MenuEntry`]
-//!   values distinguished by their [`MenuAction`], so launchers were added
-//!   without changing the list/activate interface (`AGENTS.md` §2.4).
+//!   **application launcher** entries ([`StartMenu::add_launcher`]) and a
+//!   **light/dark appearance toggle** ([`StartMenu::add_appearance_toggle`])
+//!   appended after them. All kinds are ordinary [`MenuEntry`] values
+//!   distinguished by their [`MenuAction`], so each was added without
+//!   changing the list/activate interface (`AGENTS.md` §2.4).
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
 //! - **Trailing end** — a clock anchored to the very end, with a

@@ -103,11 +103,12 @@ palette.
 
 The start menu is seeded with the session controls — log out, lock, shut
 down, restart — occupying the fixed ids `1..=4`, and may additionally carry
-**application launcher** entries appended after them. Both kinds are ordinary
-`MenuEntry` values with a stable `MenuEntryId` and a `MenuAction`
-(`Session(SessionControl)` or `Launch(LauncherId)`), distinguished only by
-that action; the launcher's human-readable name is the entry's own label, so
-the session controls' static labels are never copied. `StartMenu::activate`
+**application launcher** entries and a **light/dark appearance toggle**
+appended after them. All kinds are ordinary `MenuEntry` values with a stable
+`MenuEntryId` and a `MenuAction` (`Session(SessionControl)`,
+`Launch(LauncherId)`, or `ToggleAppearance`), distinguished only by that
+action; a launcher's human-readable name is the entry's own label, so the
+session controls' static labels are never copied. `StartMenu::activate`
 returns the entry's action and closes the menu; an unknown id changes nothing
 and returns `None` (fail closed, `AGENTS.md` §5.4 / §2.9).
 
@@ -119,6 +120,13 @@ not creep). The taskbar holds no capability to spawn processes: activating a
 launcher only reports its `LauncherId`, and the session glue (the window
 manager / `appmgr`) resolves it to an application bundle and launches it
 (`AGENTS.md` §16.5).
+
+`StartMenu::add_appearance_toggle(label)` appends the light/dark control the
+same way — next free id, app-supplied label — so it too left the interface
+unchanged (`AGENTS.md` §2.4). The taskbar owns no theme registry: activating
+the entry reports `MenuAction::ToggleAppearance` and the session glue calls
+`rustos_theme::ThemeRegistry::toggle_appearance` and re-applies the new theme
+to the window manager, taskbar, and apps (`AGENTS.md` §10).
 
 ### Popup geometry and rendering
 
@@ -193,14 +201,19 @@ dark/light switch needs no model relayout (`AGENTS.md` §10). The region
 **colours** and the text **foreground** roles are wired through the same theme
 by `render` (see *Rendering*). The text is drawn with the built-in
 `rustos-font` face today; selecting a face from the theme's `FontSpec` roles
-joins this once installed font faces exist.
+joins this once installed font faces exist. The user *triggers* a runtime
+dark/light switch through the start menu's appearance-toggle entry (see *Start
+menu*): the taskbar reports the request and the session glue performs the
+switch on the shared `ThemeRegistry`, then relays the new theme back here.
 
 ## Tests
 
 The crate's headless unit tests cover edge/orientation, the start-menu
 session-control population and fail-closed activation, appending launcher
 entries (next id after the session controls, app-supplied label, `Launch`
-action) and activating one, the task-list
+action) and activating one, appending the appearance toggle and activating it
+(reporting `ToggleAppearance`, both directly and routed through
+`TaskbarInput`), the task-list
 focus/minimise rule, notification add/remove deduplication, the region layout
 and hit-testing for a bottom bar, vertical-bar layout, all four edges,
 overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the

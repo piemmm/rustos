@@ -32,6 +32,12 @@ data, not code (`AGENTS.md` §10). Both mutators fail closed: an unknown id or
 a duplicate id returns a `ThemeError` and changes nothing (`AGENTS.md` §5.4 /
 §2.9).
 
+The runtime light/dark control toggles the `Appearance` axis rather than a
+specific id: `set_appearance(Appearance)` activates the matching built-in and
+`toggle_appearance` flips to the opposite built-in based on the active theme's
+appearance. Both return the now-active `ThemeId` and cannot fail (the
+built-ins are always present), so there is no error path to surface.
+
 ## Why it lives in `lib/`
 
 Sibling userland crates may not depend on one another (`AGENTS.md` §17.4), so

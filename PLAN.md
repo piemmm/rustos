@@ -4823,6 +4823,29 @@ device list.
   no `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs
   `docs/src/desktop/taskbar.md`, the crate `README.md`, and the crate-root
   module docs.
+- **Runtime light/dark appearance toggle — DONE (increment).** The charter's
+  "default dark theme plus a light theme, switchable at runtime" (§10) gains
+  its runtime *control*. `lib/theme`'s `ThemeRegistry` gains
+  `set_appearance(Appearance)` (activate the built-in of a given appearance)
+  and `toggle_appearance` (flip to the opposite built-in based on the *active*
+  theme's `Appearance`, so a custom dark theme toggles to the light built-in
+  and vice versa); both return the now-active `ThemeId` and cannot fail — the
+  two built-ins are always present, so unlike `set_active` there is no
+  unknown-id path to surface. `userland/gui/taskbar`'s `menu` module gains a
+  third `MenuAction` variant, `ToggleAppearance` (a `Copy` unit variant, so it
+  still travels by value through the modal input router and the `Copy`
+  `TaskbarResponse`), and `StartMenu::add_appearance_toggle(label)` appends it
+  after the session controls and launchers with the next free id — additive,
+  so the default menu and existing tests are unchanged and the list/activate
+  interface did not move (§2.4). The popup geometry, render path, and modal
+  selection routing carry the new variant unchanged — no second path (§2.2).
+  The taskbar owns no theme registry: activating the entry only reports
+  `ToggleAppearance`, and the session glue performs the switch on the shared
+  `ThemeRegistry` and relays the new theme back to the WM/taskbar/apps (§10).
+  3 new `lib/theme` tests (15 total) + 3 new taskbar tests (57 total); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs
+  `docs/src/desktop/{theming,taskbar}.md`, both crate `README.md`s, and the
+  taskbar crate-root module docs.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
