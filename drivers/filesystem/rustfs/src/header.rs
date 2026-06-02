@@ -7,32 +7,48 @@
 //! [`HEADER_LEN`] bytes. The header makes a block self-describing: it records
 //! what the block *is* (`magic`, [`BlockType`], format version), which volume
 //! and object it belongs to (filesystem UUID, owner object, generation),
-//! where it is meant to live (its logical and physical address), and a
-//! checksum over the identity plus the payload.
+//! where it is meant to live (its logical and physical address), and a keyed
+//! authenticator over the identity plus the payload.
 //!
 //! Decoding verifies all of that against the address the reader *expected*,
-//! so a stale, misdirected, wrong-type, or torn block is rejected at decode
-//! time and the caller fails closed (`AGENTS.md` §5.4) rather than trusting
-//! corrupt bytes.
+//! so a stale, misdirected, wrong-type, torn, or bit-rotted block is rejected
+//! at decode time and the caller fails closed (`AGENTS.md` §5.4) rather than
+//! trusting corrupt bytes.
 //!
-//! # Checksum
+//! # Authenticator
 //!
-//! Stage 1 uses the fast physical checksum ([`checksum`]); the keyed
-//! authenticator arrives with encryption (`docs/src/filesystem/rustfs-spec.md` §5, Stage 3/4)
-//! and replaces only [`checksum`], leaving this layout intact.
+//! The block is sealed with an HMAC-SHA256 keyed authenticator
+//! ([`mac_tag`]) computed through `lib/crypto` (`AGENTS.md` §2.12 — crypto is
+//! the standing "don't roll your own" exception). The tag covers every byte
+//! of the block except the tag slot itself, so it authenticates the identity
+//! (type, UUID, owner, generation, logical and physical address, payload
+//! length) *and* the payload (`docs/src/filesystem/rustfs-spec.md` §8). A
+//! block that fails the keyed check — because it is stale, misdirected, torn,
+//! bit-rotted, or sealed under a different key — does not decode, and the
+//! caller falls back to the block's redundant copy
+//! ([`crate::RustFs::read_meta`]).
 
 use rustos_abi::DriverError;
+use rustos_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
 
-/// Magic in a metadata block header's first eight bytes: `"RUSTFSB\2"`.
-pub const HEADER_MAGIC: u64 = 0x5255_5354_4653_4202;
+/// Magic in a metadata block header's first eight bytes: `"RUSTFSB\3"`. The
+/// trailing byte tracks the on-disk block layout; it advanced to `3` when the
+/// fast physical checksum became the keyed authenticator (Stage 3).
+pub const HEADER_MAGIC: u64 = 0x5255_5354_4653_4203;
 
 /// On-disk format version understood by this build. A volume written by a
 /// different version is refused rather than misread.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Fixed size of a metadata-block header, in bytes. The payload of a block
-/// begins at this offset.
-pub const HEADER_LEN: usize = 96;
+/// begins at this offset. It is large enough to hold the 32-byte keyed
+/// authenticator alongside the identity fields.
+pub const HEADER_LEN: usize = 128;
+
+/// Largest device block the authenticator stages through its on-stack
+/// scratch buffer. Matches `crate::MAX_BLOCK_SIZE`; no Tier-1 block device
+/// exceeds it.
+const MAX_META_BLOCK: usize = 4096;
 
 /// The kind of object a metadata block holds. Decoding a block with a
 /// `block_type` other than the one the reader expects is a misdirected or
@@ -99,8 +115,11 @@ const H_GENERATION: usize = 40;
 const H_LOGICAL: usize = 48;
 const H_PHYSICAL: usize = 56;
 const H_PAYLOAD_LEN: usize = 64;
-const H_CHECKSUM: usize = 72;
-const H_CHECKSUM_END: usize = 80;
+// Bytes 68..72 are reserved (zeroed). The keyed authenticator occupies
+// 72..104; bytes 104..HEADER_LEN are reserved (zeroed).
+const H_RESERVED: usize = 68;
+const H_MAC: usize = 72;
+const H_MAC_END: usize = H_MAC + MAC_TAG_LEN;
 
 fn rd_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
@@ -130,29 +149,31 @@ fn wr_u128(buf: &mut [u8], off: usize, value: u128) {
     buf[off..off + 16].copy_from_slice(&value.to_le_bytes());
 }
 
-/// The fast physical checksum (FNV-1a, 64-bit) over every byte of `block`
-/// except the eight-byte checksum slot. Covers the identity *and* the
-/// payload, so any stale, misdirected, or torn write changes the result
-/// (`docs/src/filesystem/rustfs-spec.md` §5). The keyed authenticator (Stage 3/4) replaces
-/// only this function.
+/// The HMAC-SHA256 keyed authenticator over every byte of `block` *except*
+/// the tag slot, computed through `lib/crypto`. Covers the identity *and* the
+/// payload, so any stale, misdirected, torn, or bit-rotted write — or a write
+/// sealed under a different key — changes the result and is rejected
+/// (`docs/src/filesystem/rustfs-spec.md` §5, §8).
+///
+/// The tag slot (`H_MAC..H_MAC_END`) is treated as zero so that the value is
+/// independent of whatever tag the block currently carries; [`BlockHeader::seal`]
+/// zeroes it before sealing and decoding recomputes against the same zeroed
+/// view.
 #[must_use]
-pub fn checksum(block: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    for (i, byte) in block.iter().enumerate() {
-        if (H_CHECKSUM..H_CHECKSUM_END).contains(&i) {
-            continue;
-        }
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
+fn mac_tag(key: &MacKey, block: &[u8]) -> MacTag {
+    let len = block.len().min(MAX_META_BLOCK);
+    let mut scratch = [0u8; MAX_META_BLOCK];
+    scratch[..len].copy_from_slice(&block[..len]);
+    for byte in &mut scratch[H_MAC..H_MAC_END] {
+        *byte = 0;
     }
-    hash
+    hmac_sha256(key, &scratch[..len])
 }
 
 impl BlockHeader {
     /// Write `self` into the first [`HEADER_LEN`] bytes of `block` and seal
-    /// the block with a fresh [`checksum`] over the whole block.
+    /// the block with a fresh keyed authenticator ([`mac_tag`]) over the
+    /// whole block under `key`.
     ///
     /// `block.len()` is the device block size and must be at least
     /// [`HEADER_LEN`]; the caller always passes a full block buffer.
@@ -161,7 +182,7 @@ impl BlockHeader {
     ///
     /// [`DriverError::DeviceFault`] if `block` is shorter than
     /// [`HEADER_LEN`] (a programming error, surfaced rather than panicked).
-    pub fn seal(&self, block: &mut [u8]) -> Result<(), DriverError> {
+    pub fn seal(&self, block: &mut [u8], key: &MacKey) -> Result<(), DriverError> {
         if block.len() < HEADER_LEN {
             return Err(DriverError::DeviceFault);
         }
@@ -174,22 +195,33 @@ impl BlockHeader {
         wr_u64(block, H_LOGICAL, self.logical_addr);
         wr_u64(block, H_PHYSICAL, self.physical_addr);
         wr_u32(block, H_PAYLOAD_LEN, self.payload_len);
-        wr_u32(block, 68, 0);
-        block[H_CHECKSUM..H_CHECKSUM_END].copy_from_slice(&0u64.to_le_bytes());
-        let sum = checksum(block);
-        wr_u64(block, H_CHECKSUM, sum);
+        // Zero the reserved gaps and the tag slot so the sealed bytes are
+        // deterministic regardless of any stale buffer contents.
+        for byte in &mut block[H_RESERVED..H_MAC] {
+            *byte = 0;
+        }
+        for byte in &mut block[H_MAC..H_MAC_END] {
+            *byte = 0;
+        }
+        for byte in &mut block[H_MAC_END..HEADER_LEN] {
+            *byte = 0;
+        }
+        let tag = mac_tag(key, block);
+        block[H_MAC..H_MAC_END].copy_from_slice(&tag);
         Ok(())
     }
 
     /// Decode and fully validate the header of `block`, confirming the
-    /// block is the one the reader expected.
+    /// block is the one the reader expected and that it authenticates under
+    /// `key`.
     ///
     /// Verifies, in order: the block is large enough; the magic and format
-    /// version match; the checksum is intact (rejecting a torn block); the
-    /// `block_type`, filesystem UUID, and physical address match what the
-    /// caller expected (rejecting a wrong-type, foreign-volume, stale, or
-    /// misdirected block). Every failure is [`DriverError::DeviceFault`] so
-    /// the caller fails closed (`AGENTS.md` §5.4).
+    /// version match; the keyed authenticator is intact (rejecting a torn,
+    /// bit-rotted, or wrong-key block); the `block_type`, filesystem UUID, and
+    /// physical address match what the caller expected (rejecting a
+    /// wrong-type, foreign-volume, stale, or misdirected block). Every failure
+    /// is [`DriverError::DeviceFault`] so the caller fails closed
+    /// (`AGENTS.md` §5.4).
     ///
     /// # Errors
     ///
@@ -199,6 +231,7 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
+        key: &MacKey,
     ) -> Result<Self, DriverError> {
         if block.len() < HEADER_LEN {
             return Err(DriverError::DeviceFault);
@@ -206,8 +239,10 @@ impl BlockHeader {
         if rd_u64(block, H_MAGIC) != HEADER_MAGIC || rd_u32(block, H_VERSION) != FORMAT_VERSION {
             return Err(DriverError::DeviceFault);
         }
-        let stored = rd_u64(block, H_CHECKSUM);
-        if stored != checksum(block) {
+        let mut stored = [0u8; MAC_TAG_LEN];
+        stored.copy_from_slice(&block[H_MAC..H_MAC_END]);
+        let expected = mac_tag(key, block);
+        if !ct_eq(&expected, &stored) {
             return Err(DriverError::DeviceFault);
         }
         let block_type =
@@ -246,8 +281,9 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
+        key: &MacKey,
     ) -> Option<Self> {
-        Self::decode_verify(block, expect_type, expect_uuid, expect_physical).ok()
+        Self::decode_verify(block, expect_type, expect_uuid, expect_physical, key).ok()
     }
 }
 
@@ -256,6 +292,7 @@ mod tests {
     use super::*;
 
     const UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+    const KEY: MacKey = [0x5au8; MAC_TAG_LEN];
 
     fn sealed() -> [u8; 512] {
         let mut block = [0u8; 512];
@@ -269,14 +306,14 @@ mod tests {
             payload_len: 16,
         };
         block[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&[1, 2, 3, 4]);
-        header.seal(&mut block).expect("seal");
+        header.seal(&mut block, &KEY).expect("seal");
         block
     }
 
     #[test]
     fn seal_then_decode_round_trips() {
         let block = sealed();
-        let header = BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100)
+        let header = BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &KEY)
             .expect("valid header decodes");
         assert_eq!(header.owner, 7);
         assert_eq!(header.generation, 42);
@@ -289,7 +326,7 @@ mod tests {
         let mut block = sealed();
         block[0] ^= 0xff;
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100),
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &KEY),
             Err(DriverError::DeviceFault)
         );
     }
@@ -298,7 +335,7 @@ mod tests {
     fn wrong_type_is_rejected() {
         let block = sealed();
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::Btree, UUID, 100),
+            BlockHeader::decode_verify(&block, BlockType::Btree, UUID, 100, &KEY),
             Err(DriverError::DeviceFault)
         );
     }
@@ -307,7 +344,7 @@ mod tests {
     fn wrong_expected_address_is_rejected() {
         let block = sealed();
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 101),
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 101, &KEY),
             Err(DriverError::DeviceFault)
         );
     }
@@ -316,17 +353,27 @@ mod tests {
     fn foreign_uuid_is_rejected() {
         let block = sealed();
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID ^ 1, 100),
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID ^ 1, 100, &KEY),
             Err(DriverError::DeviceFault)
         );
     }
 
     #[test]
-    fn flipped_checksum_payload_byte_is_rejected() {
+    fn flipped_payload_byte_is_rejected() {
         let mut block = sealed();
         block[HEADER_LEN] ^= 0xff;
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100),
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &KEY),
+            Err(DriverError::DeviceFault)
+        );
+    }
+
+    #[test]
+    fn wrong_key_is_rejected() {
+        let block = sealed();
+        let other: MacKey = [0x17u8; MAC_TAG_LEN];
+        assert_eq!(
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &other),
             Err(DriverError::DeviceFault)
         );
     }
@@ -334,9 +381,9 @@ mod tests {
     #[test]
     fn try_decode_skips_a_torn_slot() {
         let mut block = sealed();
-        block[H_CHECKSUM] ^= 0xff;
+        block[H_MAC] ^= 0xff;
         assert_eq!(
-            BlockHeader::try_decode(&block, BlockType::TxnRoot, UUID, 100),
+            BlockHeader::try_decode(&block, BlockType::TxnRoot, UUID, 100, &KEY),
             None
         );
     }

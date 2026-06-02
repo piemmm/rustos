@@ -20,19 +20,38 @@ versioned trait** rather than a widening of the shipped one
 ## On-disk format
 
 Fixed-size blocks (the device logical block size, 512–4096 bytes, a power
-of two). The device opens at a **superblock ring** of four slots in the
-first four blocks; everything else — the transaction root, the
+of two). The device opens at a **superblock ring** of four logical slots,
+each a **mirrored pair** of adjacent blocks (eight blocks in all) at the
+start of the device; everything else — the transaction root, the
 copy-on-write inode-tree nodes, the per-file extent-tree nodes, directory
 blocks, and raw file-data blocks — is allocated copy-on-write from the pool
 that follows.
 
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
-identity): its first 96 bytes carry a magic, block type, format version,
+identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
-address, and a fast checksum over identity + payload. Decoding verifies all
-of that against the address the reader expected, so a stale, misdirected,
-wrong-type, or torn block is rejected at decode time and the mount fails
-closed (`AGENTS.md` §5.4). Raw file-data blocks carry no header.
+address, and a **keyed authenticator** (HMAC-SHA256 through `lib/crypto`,
+`AGENTS.md` §2.12) over identity + payload. Decoding verifies all of that
+against the address the reader expected, so a stale, misdirected,
+wrong-type, torn, bit-rotted, or wrong-key block is rejected at decode time
+and the mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
+header.
+
+## Metadata authentication and redundancy (`rustfs-spec.md` §5, §8)
+
+Every metadata block is stored in **two physical copies**: a primary and a
+companion mirror at the adjacent block. One read path serves all metadata —
+superblock-ring slots, transaction roots, B-tree nodes, and directory blocks
+— reading the primary, falling back to the companion when the primary fails
+the keyed authenticator, and **repairing** the bad copy from the good one
+(`rustfs-spec.md` §8 — try redundant copies, repair bad from good). If
+*both* copies fail to authenticate the read fails closed; it never trusts
+corrupt bytes and never panics (`AGENTS.md` §5.4 / §2.9). The companion is
+always `primary + 1`, so metadata is allocated in adjacent pairs and one
+redundancy mechanism covers every metadata block (`AGENTS.md` §2.2). The
+authenticator key is, this stage, a placeholder derived from the volume UUID
+through `lib/crypto`; the real per-volume key hierarchy arrives with
+encryption (`rustfs-spec.md` §15.4).
 
 Inodes are 256-byte records (inode 1 = root, the four §21 `Time64`
 timestamps inline) held in a copy-on-write **inode tree** keyed by inode

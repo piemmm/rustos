@@ -28,25 +28,28 @@ enforced as stored. See [Driver delegation](./overview.md) and the
 
 A volume is a sequence of fixed-size blocks (the device's logical block
 size, between 512 and 4096 bytes, a power of two). The device opens at a
-**superblock ring** of four slots in the first four blocks; everything
-else is allocated copy-on-write from the pool that follows. `RustFs::open`
-re-derives and validates the geometry from the selected superblock slot.
+**superblock ring** of four logical slots, each a **mirrored pair** of
+adjacent blocks (eight blocks in all); everything else is allocated
+copy-on-write from the pool that follows. `RustFs::open` re-derives and
+validates the geometry from the selected superblock slot.
 
 | Region          | Contents                                                  |
 | --------------- | --------------------------------------------------------- |
-| Superblock ring | Blocks 0–3: four slots, each pointing at a committed root.|
+| Superblock ring | Blocks 0–7: four slots, each a mirrored pair of blocks,   |
+|                 | each pointing at a committed root.                        |
 | Pool            | Everything else, allocated copy-on-write: the transaction |
 |                 | root, the inode-tree nodes, the per-file extent-tree      |
 |                 | nodes, directory blocks, and raw file-data blocks.        |
 
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
-identity): its first 96 bytes carry a magic, block type, format version,
+identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
-address, and a fast checksum over identity + payload. Decoding verifies
-all of that against the address the reader *expected*, so a stale,
-misdirected, wrong-type, or torn block is rejected at decode time and the
-mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
-header and use the full block.
+address, and a **keyed authenticator** — an HMAC-SHA256 tag computed
+through `lib/crypto` (`AGENTS.md` §2.12) over identity + payload. Decoding
+verifies all of that against the address the reader *expected*, so a stale,
+misdirected, wrong-type, torn, bit-rotted, or wrong-key block is rejected at
+decode time and the mount fails closed (`AGENTS.md` §5.4). Raw file-data
+blocks carry no header and use the full block.
 
 Inodes are 256-byte records held in a **copy-on-write inode tree** keyed by
 inode number (see the next section); inode 1 is the root directory. Each
@@ -59,14 +62,40 @@ stored on disk and hidden from `read_dir`. The inode record also stores the
 four §21 timestamps. A volume written by a different format version is
 refused rather than misread.
 
-> **Stage 2 of the [specification](./rustfs-spec.md).** The volume is a
-> complete, mountable copy-on-write filesystem whose metadata now scales
-> through B-trees rather than a fixed inode count and a single-indirect file
-> map. Encryption, compression, and dedupe are later stages: the volume is
-> not yet encrypted at rest, and the metadata checksum is the fast physical
-> checksum, not yet the keyed authenticator. The free-block bitmap is rebuilt
-> in memory at mount by walking the trees from the selected root; it is not
-> stored on disk.
+> **Stage 3 of the [specification](./rustfs-spec.md).** The volume is a
+> complete, mountable copy-on-write filesystem whose metadata scales through
+> B-trees, is **authenticated** with a `lib/crypto` keyed MAC, and is stored
+> in **two physical copies** that are repaired from each other (see the next
+> section). Encryption, compression, and dedupe are later stages: the volume
+> is not yet encrypted at rest, and the authenticator key is, this stage, a
+> placeholder derived from the volume UUID through `lib/crypto` rather than a
+> real per-volume key hierarchy (`rustfs-spec.md` §15.4). The free-block
+> bitmap is rebuilt in memory at mount by walking the trees from the selected
+> root; it is not stored on disk.
+
+## Metadata authentication and redundancy (`rustfs-spec.md` §5, §8)
+
+Each metadata block is sealed with a **keyed authenticator** (HMAC-SHA256
+through `lib/crypto`, `AGENTS.md` §2.12 — crypto is the standing "don't roll
+your own" exception) covering the block's identity *and* its payload, so the
+tag detects not only a flipped payload byte but a stale, misdirected,
+wrong-type, torn, or wrong-key block. The key is derived from the volume UUID
+through `lib/crypto` this stage; the real per-volume key hierarchy arrives
+with encryption (`rustfs-spec.md` §15.4).
+
+Every metadata block is stored in **two physical copies** — a primary and a
+companion mirror at the adjacent block (`companion = primary + 1`), so
+metadata is allocated in adjacent pairs. One read path serves all metadata
+— superblock-ring slots, transaction roots, B-tree nodes, and directory
+blocks: it reads the primary, and when the primary fails to authenticate it
+falls back to the companion and **repairs** the primary from the good copy
+(`rustfs-spec.md` §8 — try redundant copies, repair bad from good). If both
+copies fail to authenticate the read fails closed; it never trusts corrupt
+bytes and never panics (`AGENTS.md` §5.4 / §2.9). A directory's content
+blocks are themselves metadata, so they too are mirrored pairs; a regular
+file's data blocks are single-copy and carry no header. Because every
+metadata block obeys the one `primary + 1` rule, there is a single
+redundancy mechanism rather than one per structure (`AGENTS.md` §2.2).
 
 ## Timestamps (§21)
 
@@ -194,7 +223,10 @@ and the VFS only delegates a write to a non-`READ_ONLY` mount.
 
 `cargo test -p rustos-drv-fs-rustfs` formats an in-memory volume and
 exercises: the self-identifying block header rejecting a wrong magic,
-wrong type, wrong expected address, foreign UUID, and a flipped checksum;
+wrong type, wrong expected address, foreign UUID, a flipped payload byte,
+and a wrong authenticator key; a metadata bit-flip being **detected and
+repaired** from the companion mirror, a one-copy superblock corruption still
+mounting via the mirror, and both copies corrupt failing closed;
 `format`/`open` round-trip and rejection of an unformatted device;
 create/lookup/listing across nested directories; read/write with
 block-boundary straddling; extent-backed large files across a remount;
@@ -215,8 +247,10 @@ fully applied or fully absent — never torn.
 
 The mount / metadata-decode path additionally has a `cargo xtask fuzz`
 harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
-valid image plus a fixed-seed PRNG drives `RustFs::open` over arbitrary
-bytes, asserting it never panics and fails closed.
+valid image (which also drives the authenticate-then-fall-back-to-mirror
+path), a duplicated-copy sweep that corrupts *both* copies of each block
+pair, and a fixed-seed PRNG all drive `RustFs::open` over arbitrary bytes,
+asserting it never panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `.junie/next-session-prompt.md`.

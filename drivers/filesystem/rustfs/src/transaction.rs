@@ -17,6 +17,7 @@
 //! step flushed before the next.
 
 use rustos_abi::DriverError;
+use rustos_crypto::MacKey;
 
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 
@@ -63,7 +64,13 @@ impl TxnRoot {
     ///
     /// [`DriverError::DeviceFault`] if `block` cannot hold the payload (a
     /// programming error, surfaced rather than panicked).
-    pub fn seal(&self, block: &mut [u8], fs_uuid: u128, phys: u64) -> Result<(), DriverError> {
+    pub fn seal(
+        &self,
+        block: &mut [u8],
+        fs_uuid: u128,
+        phys: u64,
+        key: &MacKey,
+    ) -> Result<(), DriverError> {
         if block.len() < P_COMMIT_GENERATION + 8 {
             return Err(DriverError::DeviceFault);
         }
@@ -84,7 +91,7 @@ impl TxnRoot {
             physical_addr: phys,
             payload_len: PAYLOAD_LEN,
         };
-        header.seal(block)
+        header.seal(block, key)
     }
 
     /// Decode and validate the transaction root at physical address `phys`,
@@ -100,8 +107,9 @@ impl TxnRoot {
         fs_uuid: u128,
         phys: u64,
         expect_generation: u64,
+        key: &MacKey,
     ) -> Result<Self, DriverError> {
-        let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys)?;
+        let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
         let generation = rd_u64(block, P_GENERATION);
         if generation != header.generation || generation != expect_generation {
             return Err(DriverError::DeviceFault);

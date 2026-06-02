@@ -13,12 +13,29 @@
 //! cleanly *and* whose referenced root also decodes cleanly (`transaction`).
 
 use rustos_abi::DriverError;
+use rustos_crypto::MacKey;
 
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 
-/// Number of superblock-ring slots. Four slots retain a short window of
-/// recent transaction roots while keeping the ring scan trivial.
+/// Number of logical superblock-ring slots. Four slots retain a short window
+/// of recent transaction roots while keeping the ring scan trivial.
 pub const RING_SLOTS: u64 = 4;
+
+/// Physical blocks the ring occupies at the start of the device. Each logical
+/// slot is stored in a **mirrored pair** of adjacent blocks (the primary and
+/// its companion at `primary + 1`), so the committed superblock always has two
+/// physical copies (`docs/src/filesystem/rustfs-spec.md` §5 — critical
+/// metadata copies: 2 minimum). The mirroring uses the same companion rule
+/// (`primary + 1`) as every other metadata block, so there is one redundancy
+/// mechanism, not two (`AGENTS.md` §2.2).
+pub const RING_BLOCKS: u64 = RING_SLOTS * 2;
+
+/// Primary block address of logical ring slot `slot` (`0..RING_SLOTS`); its
+/// companion mirror lives at `slot_block(slot) + 1`.
+#[must_use]
+pub const fn slot_block(slot: u64) -> u64 {
+    slot * 2
+}
 
 // Superblock payload field offsets, relative to the end of the header.
 const P_BLOCK_SIZE: usize = HEADER_LEN;
@@ -70,7 +87,13 @@ impl Superblock {
     ///
     /// [`DriverError::DeviceFault`] if `block` is too small to hold the
     /// payload (a programming error, surfaced rather than panicked).
-    pub fn seal(&self, block: &mut [u8], fs_uuid: u128, phys: u64) -> Result<(), DriverError> {
+    pub fn seal(
+        &self,
+        block: &mut [u8],
+        fs_uuid: u128,
+        phys: u64,
+        key: &MacKey,
+    ) -> Result<(), DriverError> {
         if block.len() < P_ROOT_PHYS + 8 {
             return Err(DriverError::DeviceFault);
         }
@@ -91,7 +114,7 @@ impl Superblock {
             physical_addr: phys,
             payload_len: PAYLOAD_LEN,
         };
-        header.seal(block)
+        header.seal(block, key)
     }
 
     /// Decode and validate a superblock slot living at physical address
@@ -101,8 +124,19 @@ impl Superblock {
     /// On the very first scan the caller does not yet know the volume UUID;
     /// passing `None` accepts whatever UUID a valid slot carries, which the
     /// caller then pins for the rest of the scan. An invalid slot is `None`.
+    ///
+    /// Because the keyed authenticator's key is itself derived from the volume
+    /// UUID (Stage 3 placeholder; Stage 4 introduces the real hierarchy), the
+    /// caller supplies `derive_key` so this scan can authenticate a slot whose
+    /// UUID it is still probing without re-implementing the derivation here
+    /// (`AGENTS.md` §2.2).
     #[must_use]
-    pub fn try_decode(block: &[u8], expect_uuid: Option<u128>, phys: u64) -> Option<(Self, u128)> {
+    pub fn try_decode(
+        block: &[u8],
+        expect_uuid: Option<u128>,
+        phys: u64,
+        derive_key: fn(u128) -> MacKey,
+    ) -> Option<(Self, u128)> {
         if expect_uuid.is_none() && block.len() < HEADER_LEN {
             return None;
         }
@@ -111,7 +145,8 @@ impl Superblock {
             bytes.copy_from_slice(&block[16..32]);
             u128::from_le_bytes(bytes)
         });
-        let header = BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys)?;
+        let key = derive_key(probe_uuid);
+        let header = BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys, &key)?;
         let sb = Self {
             block_size: rd_u32(block, P_BLOCK_SIZE),
             total_blocks: rd_u64(block, P_TOTAL_BLOCKS),

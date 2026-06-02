@@ -511,7 +511,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 |---|---|---|
 | 1 | On-disk headers, superblock ring, transaction roots. | ✓ |
 | 2 | COW metadata trees, inode tree, extent tree, free-space rebuild. | ✓ |
-| 3 | Metadata authentication/checksums and duplicated critical metadata. | |
+| 3 | Metadata authentication/checksums and duplicated critical metadata. | ✓ |
 | 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | |
 | 5 | Data records with physical checksum and logical hash. | |
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | |
@@ -539,5 +539,22 @@ tree** (logical block → `(physical run, length)`, superseding the
 transaction root now names the inode-tree root and the next inode number;
 the mount-time free-space rebuild walks those trees, and a two-cursor
 allocator keeps sequential data contiguous so large writes collapse to one
-extent. Stages 3–12 remain; each implementing session ticks this table and
-`PLAN.md`.
+extent.
+
+Stage 3 replaced the fast physical checksum in the block header with a
+**keyed authenticator** (HMAC-SHA256 through `lib/crypto`, §5/§8) covering
+identity + payload, and gave every metadata block **two physical copies** (a
+primary and a companion mirror at `primary + 1`, §5 — critical metadata
+copies: 2 minimum). One read path serves all metadata — superblock-ring
+slots, transaction roots, B-tree nodes, and directory blocks: it reads the
+primary, falls back to the companion when the primary fails to authenticate,
+and repairs the bad copy from the good one; both copies bad fails closed,
+never a panic (§8, `AGENTS.md` §5.4 / §2.9). Metadata is allocated in
+adjacent pairs, intra-transaction frees are reclaimed immediately so the
+mirroring does not inflate a transaction's peak footprint, and the §16
+acceptance tests for this stage — metadata bit-flip detection and repair from
+the duplicate copy, wrong-key rejection, both-copies-bad fail-closed, crash
+replay, and the extended `fuzz_mount` authenticated-header / duplicated-copy
+sweeps — all pass. The authenticator key is a placeholder derived from the
+volume UUID this stage; the real per-volume key hierarchy arrives in Stage 4.
+Stages 4–12 remain; each implementing session ticks this table and `PLAN.md`.

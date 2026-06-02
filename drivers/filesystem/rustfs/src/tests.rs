@@ -549,6 +549,95 @@ fn free_space_rebuild_matches_authoritative_extents() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Stage 3: keyed metadata authenticator + duplicated critical metadata.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
+    // Corrupt the *primary* copy of a live metadata block (the inode-tree
+    // root). On remount the read must fail the keyed authenticator on the
+    // primary, fall back to the intact companion mirror, serve the data, and
+    // repair the primary on disk (`docs/src/filesystem/rustfs-spec.md` §8).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    let target = fs.inode_tree_root;
+    assert_ne!(target, 0, "the volume has an inode tree");
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    let off = as_usize(target) * bs + HEADER_LEN; // first payload byte
+    let original = bytes[off];
+    bytes[off] ^= 0xff; // wound only the primary copy
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256))
+        .expect("mounts by falling back to the companion mirror");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    let mut buf = [0u8; 5];
+    let n = fs.read_at(node, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"hello");
+
+    // The primary copy was repaired in place from the good companion.
+    let healed = fs.into_block().bytes();
+    let p = as_usize(target) * bs;
+    let c = as_usize(target + 1) * bs;
+    assert_eq!(
+        healed[p..p + bs],
+        healed[c..c + bs],
+        "primary repaired to match its companion mirror"
+    );
+    assert_eq!(healed[off], original, "the corrupted byte is restored");
+}
+
+#[test]
+fn both_metadata_copies_corrupted_fails_closed() {
+    // Wound *both* physical copies of the inode-tree root. Neither
+    // authenticates, so the mount fails closed with an error — never a panic
+    // and never trusting the corrupt bytes (`AGENTS.md` §5.4 / §2.9).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    let target = fs.inode_tree_root;
+    assert_ne!(target, 0);
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
+    bytes[as_usize(target + 1) * bs + HEADER_LEN] ^= 0xff;
+
+    assert!(
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).is_err(),
+        "both copies corrupt must fail closed, not panic or trust corruption"
+    );
+}
+
+#[test]
+fn corrupting_one_superblock_copy_still_mounts_via_the_mirror() {
+    // The superblock ring is mirrored too: wounding the primary block of the
+    // committed slot must not lose the volume — `open` falls back to the
+    // companion and repairs it.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create");
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    // Every ring primary lives at an even block in `0..RING_BLOCKS`; corrupt
+    // the keyed tag of every primary slot, leaving each companion intact.
+    for slot in 0..superblock::RING_SLOTS {
+        let primary = superblock::slot_block(slot);
+        bytes[as_usize(primary) * bs + 80] ^= 0xff; // inside the tag slot
+    }
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256))
+        .expect("mounts from the superblock mirrors");
+    assert!(fs.lookup(fs.root(), b"keep").is_ok());
+}
+
 #[test]
 fn crash_during_multiblock_extent_write_never_tears() {
     // A larger transaction (a 24-block write that grows the extent tree) is

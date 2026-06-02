@@ -3978,7 +3978,15 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    splits/merges across many inodes, many-extent files, contiguous-write
    collapse, free-space-rebuild equality, crash replay, and the extended
    `fuzz_mount`).
-3. Metadata authentication/checksums and duplicated critical metadata.
+3. Metadata authentication/checksums and duplicated critical metadata. ✓
+   (the fast physical checksum became a keyed authenticator — HMAC-SHA256
+   through `lib/crypto` — over identity + payload, and every metadata block
+   is stored in two physical copies, a primary and a companion mirror at
+   `primary + 1`; one read path reads the primary, falls back to the
+   companion, and repairs the bad copy from the good one, while both copies
+   bad fails closed and never panics; tested for bit-flip repair, wrong-key
+   rejection, both-copies-bad fail-closed, crash replay, and the extended
+   `fuzz_mount` authenticated-header / duplicated-copy sweeps).
 4. Encrypted volume creation, key hierarchy, filename/data encryption.
 5. Data records with physical checksum and logical hash.
 6. First-party RustOS zstd codec and RustFS compression integration.
@@ -3994,7 +4002,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–2 complete; Stages 3–12 planned.** The copy-on-write
+**Status: Stages 1–3 complete; Stages 4–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

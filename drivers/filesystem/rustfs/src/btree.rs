@@ -493,12 +493,12 @@ impl<B: Block> RustFs<B> {
         let new_root = self.btree_remove_rec(root, key, spec)?;
         let (level, entries) = self.btree_load_entries(new_root, spec)?;
         if level == 0 && entries.is_empty() {
-            self.free_block(new_root);
+            self.free_meta(new_root);
             return Ok(0);
         }
         if level > 0 && entries.len() == 1 {
             let child = child_ptr(&entries[0].1);
-            self.free_block(new_root);
+            self.free_meta(new_root);
             return Ok(child);
         }
         Ok(new_root)
@@ -569,7 +569,7 @@ impl<B: Block> RustFs<B> {
             } else {
                 left.extend(child);
                 let new_left = self.btree_store_entries(left_phys, child_level, &left, spec)?;
-                self.free_block(child_phys);
+                self.free_meta(child_phys);
                 entries[si] = (left[0].0, child_ptr_bytes(new_left));
                 entries.remove(ci);
             }
@@ -588,7 +588,7 @@ impl<B: Block> RustFs<B> {
             } else {
                 child.extend(right);
                 let new_child = self.btree_store_entries(child_phys, child_level, &child, spec)?;
-                self.free_block(right_phys);
+                self.free_meta(right_phys);
                 entries[ci] = (child[0].0, child_ptr_bytes(new_child));
                 entries.remove(si);
             }

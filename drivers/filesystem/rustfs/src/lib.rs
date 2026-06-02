@@ -59,6 +59,7 @@ pub use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_crypto::{sha256, MacKey};
 
 mod btree;
 mod header;
@@ -69,7 +70,7 @@ mod transaction;
 mod tests;
 
 use header::{BlockHeader, BlockType, HEADER_LEN};
-use superblock::{Superblock, RING_SLOTS};
+use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -347,6 +348,7 @@ fn epoch_clock() -> Time64 {
 pub struct RustFs<B: Block> {
     block: B,
     fs_uuid: u128,
+    mac_key: MacKey,
     block_size: usize,
     total_blocks: u64,
     inode_hint: u32,
@@ -453,17 +455,64 @@ impl<B: Block> RustFs<B> {
         self.block.write_blocks(phys, &buf[..bs])
     }
 
+    /// The companion mirror of metadata block `phys`: its adjacent block at
+    /// `phys + 1`. Every metadata block is stored twice — at `phys` and at
+    /// `companion(phys)` — so a stale, torn, or bit-rotted copy can be
+    /// repaired from the other (`docs/src/filesystem/rustfs-spec.md` §5, §8).
+    /// One rule covers superblock-ring slots, transaction roots, B-tree nodes,
+    /// and directory blocks, so there is a single redundancy mechanism
+    /// (`AGENTS.md` §2.2).
+    const fn companion(phys: u64) -> u64 {
+        phys + 1
+    }
+
+    /// Write a sealed metadata block to both its primary location `phys` and
+    /// its companion mirror, so the two physical copies are identical. The
+    /// header in `buf` names `phys` as its physical address; the companion
+    /// stores the same bytes and is verified against `phys` on read.
+    fn write_meta(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.write_block(phys, buf)?;
+        self.write_block(Self::companion(phys), buf)
+    }
+
     /// Read and validate the metadata block at `phys`, confirming it is the
     /// `expect_type` block at that address.
+    ///
+    /// Reads the primary copy first; if it fails to authenticate (stale,
+    /// misdirected, torn, bit-rotted, or wrong-key), it falls back to the
+    /// companion mirror and, when that copy is good, **repairs** the primary
+    /// from it (`docs/src/filesystem/rustfs-spec.md` §8 — try redundant
+    /// copies, repair bad from good). On success `buf` holds the good block's
+    /// bytes. If neither copy authenticates the read fails closed with
+    /// [`DriverError::DeviceFault`] (`AGENTS.md` §5.4).
     fn read_meta(
         &mut self,
         phys: u64,
         expect_type: BlockType,
         buf: &mut [u8],
     ) -> Result<BlockHeader, DriverError> {
-        self.read_block(phys, buf)?;
         let bs = self.block_size;
-        BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys)
+        self.read_block(phys, buf)?;
+        if let Ok(header) =
+            BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)
+        {
+            return Ok(header);
+        }
+        // Primary failed: fall back to the companion mirror, validating it
+        // against the *primary's* identity (both copies carry that address).
+        self.read_block(Self::companion(phys), buf)?;
+        let header =
+            BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
+        // The companion is good: repair the primary copy from it.
+        self.write_block(phys, buf)?;
+        Ok(header)
+    }
+
+    /// Mark a metadata block and its companion mirror used in the free-space
+    /// bitmap (the rebuild and live paths both account for both copies).
+    fn mark_meta_used(&mut self, phys: u64) {
+        self.mark_used(phys);
+        self.mark_used(Self::companion(phys));
     }
 
     /// Whether `phys` was allocated by the current, not-yet-committed
@@ -476,7 +525,11 @@ impl<B: Block> RustFs<B> {
     }
 
     /// Allocate one free block from the pool, marking it used and private to
-    /// the current transaction.
+    /// the current transaction. For `metadata` the returned block is the
+    /// **primary** of a mirrored pair: its companion at `companion(primary)`
+    /// is reserved at the same time, so the two physical copies a metadata
+    /// block needs (`docs/src/filesystem/rustfs-spec.md` §5) are always
+    /// adjacent.
     ///
     /// Data and metadata draw from opposite ends of the pool: file data scans
     /// **upward** from the low end and metadata (tree nodes, the transaction
@@ -484,60 +537,113 @@ impl<B: Block> RustFs<B> {
     /// the two streams apart lets a large sequential write land in physically
     /// contiguous blocks even though it interleaves extent-tree growth, so it
     /// collapses to one extent run rather than fragmenting (`docs/src/filesystem/rustfs-spec.md`
-    /// §6). `metadata` also lets that stream draw on the last
-    /// [`METADATA_RESERVE`] free blocks so a delete or other shrinking
-    /// transaction can still copy-on-write itself on an otherwise-full volume;
-    /// data allocation stops at the reserve and fails closed with
-    /// [`DriverError::NoSpace`].
+    /// §6). Metadata also draws on the last [`METADATA_RESERVE`] free blocks so
+    /// a delete or other shrinking transaction can still copy-on-write itself
+    /// on an otherwise-full volume; data allocation stops at the reserve and
+    /// fails closed with [`DriverError::NoSpace`].
     fn alloc_block(&mut self, metadata: bool) -> Result<u64, DriverError> {
-        if !metadata && self.free_count <= METADATA_RESERVE {
+        if metadata {
+            self.alloc_meta_pair()
+        } else {
+            self.alloc_data_block()
+        }
+    }
+
+    /// Mark `block` used, private to this transaction, and recorded for
+    /// rollback.
+    fn claim_block(&mut self, block: u64) {
+        self.mark_used(block);
+        if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
+            *slot = true;
+        }
+        self.txn_allocated.push(block);
+    }
+
+    /// Allocate one data block, scanning **upward** from the low end.
+    fn alloc_data_block(&mut self) -> Result<u64, DriverError> {
+        if self.free_count <= METADATA_RESERVE {
             return Err(DriverError::NoSpace);
         }
-        let start = RING_SLOTS;
+        let start = RING_BLOCKS;
         let total = self.total_blocks;
         let span = total.saturating_sub(start);
         let mut scanned = 0u64;
-        let mut block = if metadata {
-            self.meta_cursor.clamp(start, total - 1)
-        } else {
-            self.alloc_cursor.max(start)
-        };
+        let mut block = self.alloc_cursor.max(start);
         while scanned < span {
-            if metadata {
-                if block < start {
-                    block = total - 1;
-                }
-            } else if block >= total {
+            if block >= total {
                 block = start;
             }
             if !self.bit_used(block) {
-                self.mark_used(block);
-                if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
-                    *slot = true;
-                }
-                self.txn_allocated.push(block);
-                if metadata {
-                    self.meta_cursor = block.saturating_sub(1).max(start);
-                } else {
-                    self.alloc_cursor = block + 1;
-                }
+                self.claim_block(block);
+                self.alloc_cursor = block + 1;
                 return Ok(block);
             }
-            if metadata {
-                block = block.saturating_sub(1);
-            } else {
-                block += 1;
-            }
+            block += 1;
             scanned += 1;
         }
         Err(DriverError::NoSpace)
     }
 
-    /// Defer-free a block: it is reclaimed only after the transaction commits,
-    /// so a block reachable from the committed root is never reused mid-flight.
+    /// Allocate a mirrored metadata pair, scanning **downward** from the high
+    /// end for two adjacent free blocks `(primary, primary + 1)`. Returns the
+    /// primary; both blocks are claimed. Fails closed with
+    /// [`DriverError::NoSpace`] when no adjacent free pair remains
+    /// (`AGENTS.md` §5.4 / §2.9) — never a panic.
+    fn alloc_meta_pair(&mut self) -> Result<u64, DriverError> {
+        let start = RING_BLOCKS;
+        let total = self.total_blocks;
+        // `hi` is the companion (upper) block; the primary is `hi - 1`, which
+        // must stay at or above the reserved ring region.
+        let mut hi = self.meta_cursor.clamp(start + 1, total - 1);
+        let span = total.saturating_sub(start + 1);
+        let mut scanned = 0u64;
+        while scanned <= span {
+            if hi < start + 1 {
+                hi = total - 1;
+            }
+            let primary = hi - 1;
+            if !self.bit_used(hi) && !self.bit_used(primary) {
+                self.claim_block(primary);
+                self.claim_block(hi);
+                self.meta_cursor = primary.saturating_sub(1).max(start + 1);
+                return Ok(primary);
+            }
+            hi = hi.saturating_sub(1);
+            scanned += 1;
+        }
+        Err(DriverError::NoSpace)
+    }
+
+    /// Free a block. A block allocated **by this transaction** (still private,
+    /// never published in any committed root) is reclaimed *immediately*, so a
+    /// transaction that repeatedly copies-on-writes the same metadata — e.g. an
+    /// extent tree that splits and re-merges as a large write streams in — does
+    /// not pin every superseded copy until commit. Reusing such a block within
+    /// the same transaction is safe for crash consistency: nothing committed
+    /// ever referenced it. A block inherited from an earlier committed root is
+    /// instead deferred and reclaimed only at [`Self::finish_txn`], so a block
+    /// reachable from the last committed root is never reused mid-flight
+    /// (`docs/src/filesystem/rustfs-spec.md` §2).
     fn free_block(&mut self, phys: u64) {
-        if phys != 0 {
+        if phys == 0 {
+            return;
+        }
+        if self.is_txn_private(phys) {
+            self.mark_free(phys);
+            if let Some(slot) = self.txn_private.get_mut(as_usize(phys)) {
+                *slot = false;
+            }
+        } else {
             self.txn_freed.push(phys);
+        }
+    }
+
+    /// Defer-free a metadata block and its companion mirror together (they are
+    /// always allocated and freed as a unit).
+    fn free_meta(&mut self, phys: u64) {
+        if phys != 0 {
+            self.free_block(phys);
+            self.free_block(Self::companion(phys));
         }
     }
 
@@ -558,7 +664,7 @@ impl<B: Block> RustFs<B> {
         } else {
             let p = self.alloc_block(true)?;
             if old_phys != 0 {
-                self.free_block(old_phys);
+                self.free_meta(old_phys);
             }
             p
         };
@@ -573,8 +679,8 @@ impl<B: Block> RustFs<B> {
             payload_len,
         };
         let bs = self.block_size;
-        header.seal(&mut buf[..bs])?;
-        self.write_block(new_phys, buf)?;
+        header.seal(&mut buf[..bs], &self.mac_key)?;
+        self.write_meta(new_phys, buf)?;
         Ok(new_phys)
     }
 
@@ -671,9 +777,9 @@ impl<B: Block> RustFs<B> {
             inode_tree_root: self.inode_tree_root,
             next_ino: self.next_ino,
         };
-        root.seal(&mut buf[..bs], self.fs_uuid, root_phys)?;
-        self.write_block(root_phys, &buf)?;
-        let slot = self.ring_pos % RING_SLOTS;
+        root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
+        self.write_meta(root_phys, &buf)?;
+        let slot = slot_block(self.ring_pos % RING_SLOTS);
         let sb = Superblock {
             block_size: as_u32(bs),
             total_blocks: self.total_blocks,
@@ -681,13 +787,14 @@ impl<B: Block> RustFs<B> {
             generation: next_gen,
             root_phys,
         };
-        sb.seal(&mut buf[..bs], self.fs_uuid, slot)?;
-        self.write_block(slot, &buf)?;
-        // Commit point passed: the new root is durably published.
+        sb.seal(&mut buf[..bs], self.fs_uuid, slot, &self.mac_key)?;
+        self.write_meta(slot, &buf)?;
+        // Commit point passed: the new root (and its mirror) is durably
+        // published, as is the superblock slot pointing at it.
         self.generation = next_gen;
         self.ring_pos = self.ring_pos.wrapping_add(1);
         self.root_phys = root_phys;
-        self.free_block(old_root);
+        self.free_meta(old_root);
         self.finish_txn();
         Ok(())
     }
@@ -701,13 +808,14 @@ impl<B: Block> RustFs<B> {
             return Err(DriverError::Unsupported);
         }
         let total_blocks = geo.block_count;
-        if total_blocks <= RING_SLOTS + 8 {
+        if total_blocks <= RING_BLOCKS + 8 {
             return Err(DriverError::NoSpace);
         }
         let words = as_usize(total_blocks.div_ceil(64));
         let mut fs = Self {
             block,
             fs_uuid: 0,
+            mac_key: derive_mac_key(0),
             block_size,
             total_blocks,
             inode_hint: 0,
@@ -723,12 +831,12 @@ impl<B: Block> RustFs<B> {
             txn_private: vec![false; as_usize(total_blocks)],
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
-            alloc_cursor: RING_SLOTS,
+            alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
         };
-        for slot in 0..RING_SLOTS {
-            fs.mark_used(slot);
+        for block in 0..RING_BLOCKS {
+            fs.mark_used(block);
         }
         Ok(fs)
     }
@@ -758,6 +866,7 @@ impl<B: Block> RustFs<B> {
         }
         fs.inode_hint = inode_hint;
         fs.fs_uuid = derive_uuid(fs.total_blocks, inode_hint, fs.block_size);
+        fs.mac_key = derive_mac_key(fs.fs_uuid);
 
         fs.begin();
         let now = (fs.clock)();
@@ -793,51 +902,54 @@ impl<B: Block> RustFs<B> {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn open(block: B) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
-        let bs = fs.block_size;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut best: Option<(Superblock, u128, u64, u64)> = None;
+        let mut best: Option<(Superblock, u128, u64)> = None;
         let mut uuid_pin: Option<u128> = None;
         for slot in 0..RING_SLOTS {
-            fs.read_block(slot, &mut buf)?;
-            let Some((sb, uuid)) = Superblock::try_decode(&buf[..bs], uuid_pin, slot) else {
+            let primary = slot_block(slot);
+            let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf) else {
                 continue;
             };
             if sb.block_size as usize != fs.block_size || sb.total_blocks != fs.total_blocks {
                 continue;
             }
-            if sb.root_phys < RING_SLOTS || sb.root_phys >= fs.total_blocks {
+            if sb.root_phys < RING_BLOCKS || sb.root_phys >= fs.total_blocks {
                 continue;
             }
-            fs.read_block(sb.root_phys, &mut buf)?;
-            if TxnRoot::decode_verify(&buf[..bs], uuid, sb.root_phys, sb.generation).is_err() {
+            if fs
+                .read_txn_root(uuid, sb.root_phys, sb.generation, &mut buf)
+                .is_err()
+            {
                 continue;
             }
             uuid_pin = Some(uuid);
-            if best.map_or(true, |(b, _, _, _)| sb.generation > b.generation) {
-                best = Some((sb, uuid, slot, sb.generation));
+            if best.map_or(true, |(b, _, _)| sb.generation > b.generation) {
+                best = Some((sb, uuid, slot));
             }
         }
-        let (sb, uuid, best_slot, _) = best.ok_or(DriverError::BadMagic)?;
+        let (sb, uuid, best_slot) = best.ok_or(DriverError::BadMagic)?;
 
         fs.fs_uuid = uuid;
+        fs.mac_key = derive_mac_key(uuid);
         fs.inode_hint = sb.inode_count;
         fs.generation = sb.generation;
         fs.root_phys = sb.root_phys;
         fs.ring_pos = best_slot + 1;
 
-        fs.read_block(sb.root_phys, &mut buf)?;
-        let root = TxnRoot::decode_verify(&buf[..bs], uuid, sb.root_phys, sb.generation)?;
+        let root = fs.read_txn_root(uuid, sb.root_phys, sb.generation, &mut buf)?;
         fs.inode_tree_root = root.inode_tree_root;
         fs.next_ino = root.next_ino;
 
         // Rebuild the free-block bitmap by walking the live trees: the
-        // superblock ring, the published transaction root, every inode-tree
-        // node, and, for each inode, its extent-tree nodes plus the physical
-        // runs they map (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable).
-        fs.mark_used(sb.root_phys);
+        // superblock ring (reserved in `bootstrap`), the published transaction
+        // root, every inode-tree node, and, for each inode, its extent-tree
+        // nodes plus the physical runs they map. Every metadata block accounts
+        // for both its physical copies (`docs/src/filesystem/rustfs-spec.md`
+        // §4 — free space is rebuildable; §5 — two copies).
+        fs.mark_meta_used(sb.root_phys);
         let inode_spec = inode_spec();
         for node in fs.btree_collect_nodes(fs.inode_tree_root, inode_spec)? {
-            fs.mark_used(node);
+            fs.mark_meta_used(node);
         }
         let inodes = fs.btree_collect_entries(fs.inode_tree_root, inode_spec)?;
         for (ino, value) in inodes {
@@ -845,9 +957,65 @@ impl<B: Block> RustFs<B> {
             let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
             fs.mark_inode_blocks(ino, &inode)?;
         }
-        fs.alloc_cursor = RING_SLOTS;
+        fs.alloc_cursor = RING_BLOCKS;
         fs.meta_cursor = fs.total_blocks - 1;
         Ok(fs)
+    }
+
+    /// Read a superblock-ring slot at primary block `primary`, falling back to
+    /// its companion mirror and repairing the primary from a good companion
+    /// (`docs/src/filesystem/rustfs-spec.md` §8). Returns the decoded slot and
+    /// its UUID, or `None` when neither copy authenticates (the ring scan then
+    /// skips the slot). The authenticator key is derived from the UUID via
+    /// [`derive_mac_key`], so a not-yet-pinned slot can still be verified.
+    fn read_sb_slot(
+        &mut self,
+        primary: u64,
+        uuid_pin: Option<u128>,
+        buf: &mut [u8],
+    ) -> Option<(Superblock, u128)> {
+        let bs = self.block_size;
+        self.read_block(primary, buf).ok()?;
+        if let Some((sb, uuid)) =
+            Superblock::try_decode(&buf[..bs], uuid_pin, primary, derive_mac_key)
+        {
+            return Some((sb, uuid));
+        }
+        self.read_block(Self::companion(primary), buf).ok()?;
+        let (sb, uuid) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, derive_mac_key)?;
+        let _ = self.write_block(primary, buf);
+        Some((sb, uuid))
+    }
+
+    /// Read the transaction root at `root_phys`, falling back to its companion
+    /// mirror and repairing the primary from a good companion
+    /// (`docs/src/filesystem/rustfs-spec.md` §8). On success `buf` holds the
+    /// good root's bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] when neither copy is a valid committed
+    /// root for `expect_generation` (the ring scan treats that as "this slot
+    /// did not commit" and falls back).
+    fn read_txn_root(
+        &mut self,
+        uuid: u128,
+        root_phys: u64,
+        expect_generation: u64,
+        buf: &mut [u8],
+    ) -> Result<TxnRoot, DriverError> {
+        let bs = self.block_size;
+        let key = derive_mac_key(uuid);
+        self.read_block(root_phys, buf)?;
+        if let Ok(root) =
+            TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
+        {
+            return Ok(root);
+        }
+        self.read_block(Self::companion(root_phys), buf)?;
+        let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
+        self.write_block(root_phys, buf)?;
+        Ok(root)
     }
 
     /// Mark every extent-tree node and every physical run reachable from
@@ -856,12 +1024,22 @@ impl<B: Block> RustFs<B> {
     fn mark_inode_blocks(&mut self, ino: u32, inode: &Inode) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
         for node in self.btree_collect_nodes(inode.extent_root, spec)? {
-            self.mark_used(node);
+            self.mark_meta_used(node);
         }
+        // A directory's content blocks are themselves metadata
+        // ([`BlockType::Directory`], mirrored pairs); a regular file's are
+        // single-copy data. Account for the directory mirror so the rebuilt
+        // free set matches the live one (`docs/src/filesystem/rustfs-spec.md`
+        // §5).
+        let is_dir = inode.is_dir();
         for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
             let (phys, len) = decode_extent(&value);
             for b in 0..len {
-                self.mark_used(phys + b);
+                if is_dir {
+                    self.mark_meta_used(phys + b);
+                } else {
+                    self.mark_used(phys + b);
+                }
             }
         }
         Ok(())
@@ -975,16 +1153,25 @@ impl<B: Block> RustFs<B> {
 
     /// Free every physical run backing `inode` (number `ino`) and every node
     /// of its extent tree, leaving an empty zero-length file.
+    ///
+    /// A directory's content blocks are metadata mirrored pairs, so they are
+    /// freed with their companion ([`Self::free_meta`]); a regular file's are
+    /// single-copy data ([`Self::free_block`]).
     fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
+        let is_dir = inode.is_dir();
         for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
             let (phys, len) = decode_extent(&value);
             for b in 0..len {
-                self.free_block(phys + b);
+                if is_dir {
+                    self.free_meta(phys + b);
+                } else {
+                    self.free_block(phys + b);
+                }
             }
         }
         for node in self.btree_collect_nodes(inode.extent_root, spec)? {
-            self.free_block(node);
+            self.free_meta(node);
         }
         inode.extent_root = 0;
         inode.size = 0;
@@ -1470,6 +1657,26 @@ fn derive_uuid(total_blocks: u64, inode_count: u32, block_size: usize) -> u128 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     (u128::from(hash) << 64) | u128::from(hash ^ 0x5255_5354_4653_5631)
+}
+
+/// Derive the volume's keyed-metadata-authenticator key from its UUID.
+///
+/// This is the **Stage 3 placeholder** key derivation: a real per-volume key
+/// hierarchy (rooted in the installer's RNG and the user's credentials)
+/// arrives with encryption in Stage 4 (`docs/src/filesystem/rustfs-spec.md`
+/// §15.4). It is *not* a secret key yet — the UUID is stored in the clear in
+/// every header — so this stage hardens metadata against corruption and
+/// misdirection, not against a forging attacker; that is Stage 4's job. What
+/// matters now is that the derivation routes through `lib/crypto` rather than
+/// hand-rolling a primitive (`AGENTS.md` §2.12), and that the key is stable
+/// per volume so every metadata block authenticates under it.
+fn derive_mac_key(fs_uuid: u128) -> MacKey {
+    // Domain-separate the input so this key can never collide with another
+    // use of the UUID, then hash through `lib/crypto`'s SHA-256.
+    let mut input = [0u8; 32];
+    input[..16].copy_from_slice(b"rustfs/meta-mac\0");
+    input[16..32].copy_from_slice(&fs_uuid.to_le_bytes());
+    sha256(&input)
 }
 
 impl<B: Block> FilesystemRead for RustFs<B> {

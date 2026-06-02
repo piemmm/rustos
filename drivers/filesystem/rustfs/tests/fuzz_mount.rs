@@ -16,9 +16,14 @@
 //! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a fixed-seed
 //! LCG draws pseudo-random images, and a structured sweep flips every byte of
 //! a real formatted image to hammer the §8 block-identity checks (magic, type,
-//! address, checksum). A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`]
-//! sweep; `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the
-//! PRNG loop to a wall-clock budget.
+//! address, keyed authenticator). Stage 3 added the keyed metadata
+//! authenticator and a redundant mirror copy of every metadata block, so the
+//! single-byte sweep also exercises the authenticate-then-fall-back-to-the-
+//! mirror path, and a dedicated **duplicated-copy sweep** corrupts *both*
+//! copies of each block pair to hammer the both-copies-bad fail-closed path. A
+//! plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep; `cargo xtask
+//! fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a
+//! wall-clock budget.
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
@@ -33,6 +38,10 @@ const IMAGE_LEN: usize = BLOCK_SIZE as usize * 64;
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 50_000;
+
+/// Byte offset inside the 32-byte keyed-tag slot (72..104) of the 128-byte
+/// block header; flipping it always breaks a block's authenticator.
+const TAG_OFFSET: usize = 80;
 
 /// In-RAM device over a fixed-size byte image.
 struct MemBlock {
@@ -170,6 +179,26 @@ fn open_never_panics_on_arbitrary_images() {
     for i in 0..base.len() {
         let mut image = base.clone();
         image[i] ^= 0xff;
+        exercise(&image);
+    }
+
+    // Duplicated-copy sweep (Stage 3): every metadata block is mirrored at the
+    // adjacent block, and `open` falls back to — and repairs from — the mirror
+    // when one copy fails the keyed authenticator. Corrupt the keyed-tag byte
+    // of BOTH a block and its companion so neither copy authenticates,
+    // exercising the both-copies-bad path. `open` must still return a
+    // `Result`, never panic (`AGENTS.md` §2.9 / §19.6).
+    let bs = BLOCK_SIZE as usize;
+    let blocks = usize::try_from(BLOCK_COUNT).unwrap_or(0);
+    for b in 0..blocks {
+        let primary = bs * b + TAG_OFFSET;
+        let companion = bs * (b + 1) + TAG_OFFSET;
+        if companion >= base.len() {
+            break;
+        }
+        let mut image = base.clone();
+        image[primary] ^= 0xff;
+        image[companion] ^= 0xff;
         exercise(&image);
     }
 

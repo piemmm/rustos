@@ -16,6 +16,13 @@ workspace = true
 # here are the vetted RustCrypto SHA-2 and dalek-cryptography Ed25519
 # implementations. Versions are pinned; bumping a pin requires an audit pass.
 sha2 = { version = "=0.10.9", default-features = false }
+# RustCrypto's audited HMAC. It is the keyed metadata authenticator RustFS
+# seals every metadata block with (`docs/src/filesystem/rustfs-spec.md` §5,
+# §8): a stale, misdirected, torn, or bit-rotted metadata block fails the
+# keyed check and is repaired from its redundant copy. `default-features =
+# false` keeps it `no_std`; it reuses the same vetted `digest`/`sha2` stack
+# already pulled in above, so the audit footprint grows by one crate.
+hmac = { version = "=0.12.1", default-features = false }
 # RustCrypto's audited ChaCha20-Poly1305 AEAD. It backs the encrypted-swap
 # layer (`AGENTS.md` §4): the kernel pages secrets out only through an
 # authenticated cipher. `default-features = false` keeps this `no_std` and

@@ -10,6 +10,11 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The keyed metadata authenticator that seals every metadata block
+# (`docs/src/filesystem/rustfs-spec.md` §5, §8). Crypto is the standing
+# "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
+# `lib/crypto`, never a hand-rolled primitive.
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 
 [lints]
 workspace = true
