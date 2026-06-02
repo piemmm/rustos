@@ -45,6 +45,14 @@ duplicate or unknown id rather than panicking (`AGENTS.md` §5.4 / §2.9).
 Swapping the active set replaces the whole pointer look at runtime — no
 window-manager change.
 
+On-disk cursor sets follow the desktop's **SVG-first** asset rule
+(`AGENTS.md` §10): a replaceable set under `/System/Graphics` is authored as
+SVG and decoded — through the curated §16.4 image-decoding library in a §19.5
+parser sandbox — into the in-memory `VectorCursor`/`CursorTheme` form shown
+here. The built-in set is constructed in code as the always-present fallback;
+decoding cursor sets from those SVG assets is the open Stage 7 increment
+(`PLAN.md`).
+
 ## In the compositor
 
 The window manager owns the active `CursorRegistry`. It resolves a

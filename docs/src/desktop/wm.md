@@ -102,6 +102,29 @@ scanline, and an unsupported pixel format is refused at construction
 rather than guessed (`AGENTS.md` §2.1). There is no `unsafe` in the
 crate.
 
+## Graphical assets (SVG-first)
+
+Every WM/desktop graphical asset — cursors, icons, notification glyphs,
+window-chrome artwork, and theme decorations — is authored as **SVG**
+(`AGENTS.md` §10). One scalable source keeps the asset crisp at any DPI or
+UI `Scale`, the same reasoning that makes the cursors vector artwork
+(see [Pointer cursors](./cursors.md)).
+
+SVG is a *source* format, not a hot-path format. An asset is decoded and
+rasterised/converted **once** at the active `Scale` into the fast-draw form
+the compositor blits — a `lib/raster` `Surface`, or an intermediate vector
+form such as `lib/cursor`'s — and that form is cached, re-rendered only when
+the scale or theme changes, so compositing never touches an SVG parser and
+the desktop stays quick. There is exactly one rasterisation/blend path
+(`lib/raster`); the asset pipeline does not add a second (`AGENTS.md` §2.2).
+
+SVG is untrusted input, so decoding runs through the curated §16.4
+image-decoding shared library inside a minimum-capability parser sandbox
+(`AGENTS.md` §19.5); a malformed or unrenderable asset fails closed to a
+fallback rather than crashing the compositor (`AGENTS.md` §2.9).
+Pre-rasterised bitmaps may exist as a cache or fallback, never as the only
+path.
+
 ## Tests
 
 `cargo test -p rustos-wm` runs the headless suite against a virtual

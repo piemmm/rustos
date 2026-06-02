@@ -414,6 +414,22 @@ an update to this section.
   driving colours, corner radii, fonts, and cursors for the WM, taskbar, and
   default apps through one shared theme definition; adding a theme is data,
   not new code.
+- Graphical assets are SVG-first. SVG is the canonical, scalable **source**
+  format for every WM/desktop graphical asset — cursors, icons,
+  notification-area glyphs, window-chrome artwork, and theme decorations — so
+  one authored asset stays crisp at any DPI / UI scale (the variable-DPI rule
+  below). SVG is never parsed or drawn on the hot compositing path: each asset
+  is rasterised/converted **once** at the active `rustos_geometry::Scale` into
+  the fast-draw form the compositor blits (a `lib/raster` `Surface`, or an
+  intermediate vector form such as `lib/cursor`'s), and that converted form is
+  cached and re-rendered only when the scale or theme changes — so the desktop
+  stays quick. There is exactly one rasterisation/blend path (`lib/raster`); an
+  asset pipeline must not grow a second one (§2.2). SVG decoding is untrusted
+  input: it goes through the curated §16.4 image-decoding shared library run in
+  a §19.5 minimum-capability parser sandbox, never an ad-hoc per-asset parser,
+  and a malformed or unrenderable asset fails closed to a fallback rather than
+  crashing the compositor (§2.9). Pre-rasterised bitmap assets may exist as a
+  cache/fallback but are never the only path.
 - Variable DPI is a first-class, **settable** desktop property, not an
   afterthought: the same image must be comfortable on a low-DPI monitor and
   a high-DPI panel, with the user free to pick the density that suits them.
@@ -426,8 +442,9 @@ an update to this section.
   consume it, so the scaling arithmetic is never duplicated (§2.2). The scale
   is changeable at runtime (like the theme) and an out-of-range scale is
   rejected at construction rather than producing a degenerate desktop (§5.4 /
-  §2.9). Cursors are vector artwork rasterised at the active scale, so the
-  pointer is crisp at any DPI; bitmap assets are never the only path.
+  §2.9). Cursors are SVG-authored vector artwork (the SVG-first asset rule
+  above) rasterised at the active scale, so the pointer is crisp at any DPI;
+  bitmap assets are never the only path.
 - Login: `userland/session/login` always starts in text mode and offers to launch the
   graphical session. If no graphics driver loads, the graphical option is
   hidden — never crashed, never errored.
@@ -594,7 +611,8 @@ Authoritative subdirectories:
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.
-├── Graphics/    # WM, compositor assets, cursors, icons.
+├── Graphics/    # WM/compositor assets: SVG sources (cursors, icons,
+│             #   chrome) plus their rasterised caches (§10).
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.
 ├── Security/    # Users, Groups, capability authority, keys, policy.
@@ -639,7 +657,8 @@ The permitted classes are:
 
 - Windowing / compositor client
 - Font rendering
-- Image decoding
+- Image decoding (raster formats plus vector SVG; SVG is the canonical
+  source format for WM/desktop graphical assets — see §10)
 - Media (audio/video) decoding and playback
 - Archive extraction
 - Printing

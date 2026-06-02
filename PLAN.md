@@ -4486,6 +4486,18 @@ device list.
   WM, taskbar, and default apps through one shared theme definition; adding a
   theme is data, not new code.
 - Default cursor set (themed).
+- **SVG-first graphical assets** (`AGENTS.md` §10). Every WM/desktop
+  graphical asset — cursors, icons, notification glyphs, window-chrome
+  artwork, theme decorations — is authored as **SVG** so one source stays
+  crisp at any DPI / UI `Scale`. SVG is never parsed or drawn on the hot
+  compositing path: an asset is rasterised/converted **once** at the active
+  scale into the fast-draw form the compositor blits (a `lib/raster`
+  `Surface`, or an intermediate vector form like `lib/cursor`'s) and that
+  form is cached, re-rendered only on a scale or theme change — so the
+  desktop stays quick. There is one rasterisation/blend path (`lib/raster`),
+  never a second (§2.2); SVG decoding is untrusted input and runs through the
+  curated §16.4 image-decoding shared library inside a §19.5 parser sandbox,
+  failing closed to a fallback rather than crashing the compositor (§2.9).
 - Default apps under `userland/apps/`:
   - **Filesystem browser**: navigates the §16 filesystem layout, honouring
     capability-gated permissions; no `/proc`/`/sys` fabrication (§16.1).
@@ -4746,9 +4758,12 @@ device list.
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted
   into `lib/*` per §17.4), notification-icon artwork, selecting a font face
-  from the theme's `FontSpec` roles once installed fonts exist, decoding
-  cursor sets from on-disk assets under `/System/Graphics`, and the default
-  filesystem-browser and terminal-emulator apps.
+  from the theme's `FontSpec` roles once installed fonts exist, the
+  **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
+  through the §16.4 image-decoding library in a §19.5 sandbox and caching the
+  rasterised/converted forms — this is also how cursor sets are decoded from
+  on-disk assets), and the default filesystem-browser and terminal-emulator
+  apps.
 
 ---
 
