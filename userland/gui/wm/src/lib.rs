@@ -27,6 +27,10 @@
 //!   pointer and the focused window, raises and focuses the window
 //!   under a primary press (*click-to-activate*), and drives
 //!   interactive window move-grabs.
+//! - **Pointer cursor overlay** ([`cursor`]): a scalable, colourful,
+//!   replaceable [`CursorImage`](rustos_cursor::CursorImage) from
+//!   `lib/cursor`, composited as the top-most layer so its hotspot
+//!   tracks the pointer (`AGENTS.md` §2.2 / §2.4).
 //!
 //! GPU acceleration, theming, and the taskbar build on this core in
 //! later Stage 7 increments.
@@ -46,6 +50,7 @@ extern crate alloc;
 pub mod color;
 pub mod compositor;
 pub mod corner;
+pub mod cursor;
 pub mod damage;
 pub mod geometry;
 pub mod input;
@@ -58,6 +63,7 @@ mod tests;
 pub use color::{Color, Pixel};
 pub use compositor::Compositor;
 pub use corner::Corners;
+pub use cursor::CursorLayer;
 pub use damage::DamageRegion;
 pub use geometry::{Point, Rect};
 pub use input::{InputEvent, InputResponse, InputRouter, PointerButton};

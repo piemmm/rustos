@@ -567,3 +567,94 @@ fn pointer_position_tracks_motion() {
     router.handle(moved(7, 9), &mut c);
     assert_eq!(router.pointer(), Point::new(7, 9));
 }
+
+/// A solid opaque `size`×`size` cursor image in `color`, hotspot at the
+/// top-left, built through the shared cursor library.
+fn solid_cursor(size: u32, color: Color) -> rustos_cursor::CursorImage {
+    use rustos_cursor::{Shape, VectorCursor, Vertex};
+    let s = i32::try_from(size).expect("small");
+    let shape = Shape::new(
+        color,
+        alloc::vec![
+            Vertex::new(0, 0),
+            Vertex::new(s, 0),
+            Vertex::new(s, s),
+            Vertex::new(0, s),
+        ],
+    );
+    VectorCursor::new(size, 0, 0, alloc::vec![shape])
+        .rasterise(100)
+        .expect("renderable")
+}
+
+#[test]
+fn cursor_overlay_composites_over_the_desktop() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(8, RED), Point::new(10, 10));
+    assert_eq!(c.cursor_bounds(), Some(Rect::new(10, 10, 8, 8)));
+    c.composite();
+    // Under the cursor: red. Away from it: the blue desktop.
+    assert_eq!(frame_pixel(&c, 12, 12), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 30, 30), [0, 0, 255, 255]);
+}
+
+#[test]
+fn cursor_overlay_draws_above_windows() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let green = Color::rgb(0, 255, 0);
+    c.add_window(Point::new(0, 0), opaque(40, 40, green));
+    c.set_cursor(solid_cursor(8, RED), Point::new(4, 4));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 5, 5), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 30, 30), [0, 255, 0, 255]);
+}
+
+#[test]
+fn moving_the_cursor_restores_pixels_behind_it() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+
+    assert!(c.move_cursor(Point::new(20, 20)));
+    c.composite();
+    // The vacated area is the blue desktop again; the new area is red.
+    assert_eq!(frame_pixel(&c, 4, 4), [0, 0, 255, 255]);
+    assert_eq!(frame_pixel(&c, 22, 22), [255, 0, 0, 255]);
+}
+
+#[test]
+fn hiding_the_cursor_restores_the_pixels_beneath() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+
+    assert!(c.hide_cursor());
+    assert_eq!(c.cursor_bounds(), None);
+    c.composite();
+    assert_eq!(frame_pixel(&c, 4, 4), [0, 0, 255, 255]);
+}
+
+#[test]
+fn move_and_hide_cursor_fail_closed_without_a_cursor() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    assert!(!c.move_cursor(Point::new(5, 5)));
+    assert!(!c.hide_cursor());
+    assert_eq!(c.cursor_bounds(), None);
+}
+
+#[test]
+fn replacing_the_cursor_image_marks_both_footprints_dirty() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
+    c.composite();
+    assert!(!c.has_damage());
+
+    // A larger cursor at the same hotspot: setting it must re-dirty the area.
+    c.set_cursor(solid_cursor(12, RED), Point::new(2, 2));
+    assert!(c.has_damage());
+    c.composite();
+    assert_eq!(c.cursor_bounds(), Some(Rect::new(2, 2, 12, 12)));
+    assert_eq!(frame_pixel(&c, 12, 12), [255, 0, 0, 255]);
+}

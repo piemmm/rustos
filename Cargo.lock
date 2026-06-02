@@ -547,6 +547,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-cursor"
+version = "0.0.0"
+dependencies = [
+ "rustos-geometry",
+ "rustos-raster",
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-drv-bus-mmio"
 version = "0.0.0"
 dependencies = [
@@ -1375,6 +1384,7 @@ name = "rustos-wm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-cursor",
  "rustos-geometry",
  "rustos-raster",
  "rustos-theme",

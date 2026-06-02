@@ -4670,13 +4670,43 @@ device list.
   (§17.4). 4 new headless tests (31 total); no `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths. Docs
   `docs/src/desktop/taskbar.md` and the crate `README.md`.
+- **Pointer cursors — DONE (increment).** `lib/cursor` (`rustos-cursor`,
+  `no_std`, `#![forbid(unsafe_code)]`, deps only `lib/raster` +
+  `lib/geometry` + `lib/theme`, `Layer::Lib`) makes the desktop's cursors
+  *richer than a fill mask* (§10): a `VectorCursor` is an ordered stack of
+  filled, colourful `Shape`s (polygon + straight-alpha `Color`) over a
+  square design grid, plus a hotspot.
+  - **Vectorised + scalable:** `rasterise(scale_percent)` maps the design
+    grid to pixels at any scale (100 = 1px/unit, 200 = 2×, …) with 4×4
+    supersampled anti-aliasing, compositing each shape through `lib/raster`'s
+    single premultiplied-alpha `Pixel::over` path (no colour algebra
+    duplicated, §2.2); it yields a `CursorImage` (a `Surface` + the hotspot
+    in pixel coords). Degenerate cursor/scale → `None`, never a panic (§2.9).
+  - **Colourful:** every layer carries colour + alpha; the built-in set draws
+    a light body over a dark outline and a genuine two-tone busy disc.
+  - **Replaceable cursor sets:** `CursorTheme` binds one `VectorCursor` per
+    `rustos_theme::CursorKind` (fixed fields, total lookup, §2.11);
+    `CursorRegistry` holds the available sets + the active one keyed by
+    `CursorSetId`, with fail-closed `register`/`set_active` (§5.4/§2.9). A
+    different look is data, not code.
+  - 17 unit tests + a doctest; added to `AGENTS.md` §3's `lib/` list and the
+    workspace manifest; crate `README.md` (tier `experimental`) and docs
+    `docs/src/desktop/cursors.md` (+ SUMMARY).
+  - **Wired into the compositor:** `userland/gui/wm` gains a `cursor` module
+    (`CursorLayer`) and the `Compositor` now composites the cursor as the
+    top-most overlay above all windows: `set_cursor`/`move_cursor`/
+    `hide_cursor`/`cursor_bounds`, each marking the old+new footprints dirty
+    so only those pixels recomposite (the same damage model the window stack
+    uses) and hiding restores the pixels beneath. The WM depends on
+    `lib/cursor` (§17.4); 6 new headless tests (45 total).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted
   into `lib/*` per §17.4), notification-icon artwork, selecting a font face
-  from the theme's `FontSpec` roles once installed fonts exist plus the
-  themed cursor *assets*, and the default filesystem-browser and
-  terminal-emulator apps.
+  from the theme's `FontSpec` roles once installed fonts exist, decoding
+  cursor sets from on-disk assets under `/System/Graphics` and choosing the
+  cursor `CursorKind` from interaction state, and the default
+  filesystem-browser and terminal-emulator apps.
 
 ---
 

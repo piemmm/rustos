@@ -142,6 +142,10 @@ rustos/
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
+│   ├── cursor/          # Shared pointer cursors: scalable, colourful,
+│   │                    #   vectorised cursor shapes rasterised onto a raster
+│   │                    #   Surface + replaceable cursor sets keyed by the
+│   │                    #   theme's CursorKind (§10, §17.4).
 │   ├── font/            # Shared text rasterisation: a built-in monospace
 │   │                    #   bitmap font + glyph blitter onto a raster Surface
 │   │                    #   for the taskbar and apps (§16.4, §17.4).

@@ -21,8 +21,11 @@ use alloc::vec::Vec;
 use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
 use rustos_abi::DriverError;
 
+use rustos_cursor::CursorImage;
+
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
+use crate::cursor::CursorLayer;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
@@ -41,6 +44,7 @@ pub struct Compositor {
     background: Color,
     order: ChannelOrder,
     windows: Vec<Window>,
+    cursor: Option<CursorLayer>,
     back: Surface,
     frame: Vec<u8>,
     damage: DamageRegion,
@@ -73,6 +77,7 @@ impl Compositor {
             background,
             order,
             windows: Vec::new(),
+            cursor: None,
             back,
             frame,
             damage: DamageRegion::new(),
@@ -185,6 +190,53 @@ impl Compositor {
         self.windows.len()
     }
 
+    /// Show `image` as the pointer cursor with its hotspot at `pointer`,
+    /// replacing any current cursor. The old and new covered rectangles are
+    /// marked dirty so the overlay is recomposited in place.
+    ///
+    /// The artwork comes from `lib/cursor` (a scalable, colourful, vector
+    /// cursor rasterised at the display scale); the compositor only places
+    /// and blends it (`AGENTS.md` §2.2 / §2.4).
+    pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) {
+        if let Some(cursor) = &self.cursor {
+            self.damage.add(cursor.bounds());
+        }
+        let cursor = CursorLayer::new(image, pointer);
+        self.damage.add(cursor.bounds());
+        self.cursor = Some(cursor);
+    }
+
+    /// Move the pointer cursor so its hotspot sits at `pointer`, marking the
+    /// old and new covered rectangles dirty. Returns `false` when no cursor
+    /// is shown.
+    pub fn move_cursor(&mut self, pointer: Point) -> bool {
+        let Some(cursor) = &mut self.cursor else {
+            return false;
+        };
+        let before = cursor.bounds();
+        cursor.set_pointer(pointer);
+        let after = cursor.bounds();
+        self.damage.add(before);
+        self.damage.add(after);
+        true
+    }
+
+    /// Hide the pointer cursor, marking its covered rectangle dirty so the
+    /// pixels beneath it are restored. Returns `false` when none was shown.
+    pub fn hide_cursor(&mut self) -> bool {
+        let Some(cursor) = self.cursor.take() else {
+            return false;
+        };
+        self.damage.add(cursor.bounds());
+        true
+    }
+
+    /// The screen rectangle the cursor currently covers, if one is shown.
+    #[must_use]
+    pub fn cursor_bounds(&self) -> Option<Rect> {
+        self.cursor.as_ref().map(CursorLayer::bounds)
+    }
+
     /// Whether any pixels are pending recomposition.
     #[must_use]
     pub fn has_damage(&self) -> bool {
@@ -254,6 +306,11 @@ impl Compositor {
         let mut acc = self.background.premultiply();
         for window in &self.windows {
             if let Some(src) = window.sample(x, y) {
+                acc = src.over(acc);
+            }
+        }
+        if let Some(cursor) = &self.cursor {
+            if let Some(src) = cursor.sample(x, y) {
                 acc = src.over(acc);
             }
         }

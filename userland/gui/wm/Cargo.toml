@@ -25,6 +25,12 @@ rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # theme. `lib/theme` is the single source the taskbar and apps read too, so
 # the colours stay consistent without any sibling-crate dependency (§17.4).
 rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The shared pointer-cursor library (§10, §17.4): the compositor resolves a
+# `CursorKind` to a scalable, colourful vector cursor and composites the
+# rasterised `CursorImage` as a top overlay. The cursor format lives in
+# `lib/cursor`, not the window manager, so a different cursor set is data
+# (§2.2 / §2.4).
+rustos-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
 
 [lints]
 workspace = true

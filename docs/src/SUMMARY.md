@@ -78,6 +78,7 @@
 - [Compositing window manager](./desktop/wm.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
 - [Desktop theming](./desktop/theming.md)
+- [Pointer cursors](./desktop/cursors.md)
 
 # ABI
 
