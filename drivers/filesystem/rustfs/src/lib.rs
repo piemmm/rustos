@@ -59,9 +59,10 @@ pub use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use rustos_crypto::{sha256, MacKey};
+use rustos_crypto::{AeadKey, MacKey};
 
 mod btree;
+mod crypto;
 mod header;
 mod superblock;
 mod transaction;
@@ -69,7 +70,12 @@ mod transaction;
 #[cfg(test)]
 mod tests;
 
-use header::{BlockHeader, BlockType, HEADER_LEN};
+use crypto::{
+    decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
+};
+pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
+
+use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
 
@@ -349,6 +355,13 @@ pub struct RustFs<B: Block> {
     block: B,
     fs_uuid: u128,
     mac_key: MacKey,
+    /// AEAD key encrypting directory-entry names at rest (`crypto` module).
+    filename_key: AeadKey,
+    /// AEAD key encrypting file data at rest (`crypto` module).
+    content_key: AeadKey,
+    /// Encoded plaintext crypto discovery header (the wrapped master key and
+    /// its salt) written into every superblock-ring slot at commit.
+    crypto_header: [u8; CRYPTO_HEADER_LEN],
     block_size: usize,
     total_blocks: u64,
     inode_hint: u32,
@@ -396,8 +409,24 @@ fn extent_spec(ino: u32) -> btree::TreeSpec {
 }
 
 impl<B: Block> RustFs<B> {
+    /// Directory slots per block. The block's tail holds the per-block crypto
+    /// trailer (nonce + tag) that encrypts the entry names at rest, so the
+    /// slots occupy `[HEADER_LEN, block_size - CRYPTO_TRAILER)`.
     fn dirents_per_block(&self) -> usize {
-        (self.block_size - HEADER_LEN) / DIRENT_SIZE
+        (self.block_size - HEADER_LEN - CRYPTO_TRAILER) / DIRENT_SIZE
+    }
+
+    /// First byte of the per-block crypto trailer: the offset where a data or
+    /// directory block's encrypted region ends and its nonce + tag begin.
+    fn crypto_trailer_offset(&self) -> usize {
+        self.block_size - CRYPTO_TRAILER
+    }
+
+    /// Usable file-content bytes per data block: the block minus its crypto
+    /// trailer (nonce + tag). File offsets map through this capacity, not the
+    /// raw device block size.
+    fn data_capacity(&self) -> u64 {
+        (self.block_size - CRYPTO_TRAILER) as u64
     }
 
     // --- in-memory used-block bitmap ---
@@ -441,6 +470,14 @@ impl<B: Block> RustFs<B> {
     /// Consume the filesystem and return the backing block device.
     pub fn into_block(self) -> B {
         self.block
+    }
+
+    /// Install a freshly derived or unwrapped key set as the volume's working
+    /// keys (`crypto` module).
+    fn apply_keys(&mut self, keys: &VolumeKeys) {
+        self.mac_key = keys.mac_key;
+        self.filename_key = keys.filename_key;
+        self.content_key = keys.content_key;
     }
 
     /// Read the raw block at `phys` into the first `block_size` bytes of `buf`.
@@ -496,6 +533,7 @@ impl<B: Block> RustFs<B> {
         if let Ok(header) =
             BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)
         {
+            self.decrypt_meta_payload(expect_type, buf, phys)?;
             return Ok(header);
         }
         // Primary failed: fall back to the companion mirror, validating it
@@ -503,9 +541,32 @@ impl<B: Block> RustFs<B> {
         self.read_block(Self::companion(phys), buf)?;
         let header =
             BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
-        // The companion is good: repair the primary copy from it.
+        // The companion is good: repair the primary copy from it (the
+        // still-encrypted bytes), then decrypt the caller's copy.
         self.write_block(phys, buf)?;
+        self.decrypt_meta_payload(expect_type, buf, phys)?;
         Ok(header)
+    }
+
+    /// After a metadata block authenticates, decrypt its at-rest-encrypted
+    /// payload in place for the caller. Only directory blocks carry an
+    /// encrypted payload (the entry names); every other metadata block is
+    /// authenticated-only and returned unchanged. The block authenticated
+    /// before this point, so decryption cannot yield mis-decrypted bytes
+    /// (`docs/src/filesystem/rustfs-spec.md` §6 read path).
+    fn decrypt_meta_payload(
+        &self,
+        block_type: BlockType,
+        buf: &mut [u8],
+        phys: u64,
+    ) -> Result<(), DriverError> {
+        if block_type != BlockType::Directory {
+            return Ok(());
+        }
+        let off = self.crypto_trailer_offset();
+        let (region, trailer) = buf[HEADER_LEN..self.block_size].split_at_mut(off - HEADER_LEN);
+        decrypt_region(&self.filename_key, region, trailer, phys)
+            .map_err(|_| DriverError::DeviceFault)
     }
 
     /// Mark a metadata block and its companion mirror used in the free-space
@@ -669,11 +730,23 @@ impl<B: Block> RustFs<B> {
             p
         };
         let payload_len = as_u32(self.block_size - HEADER_LEN);
+        let next_gen = self.generation.wrapping_add(1);
+        // A directory block's entry names are encrypted at rest under the
+        // filename key before the block is authenticated, so the keyed
+        // authenticator seals the ciphertext (encrypt-then-MAC; the read path
+        // authenticates then decrypts — `docs/src/filesystem/rustfs-spec.md`
+        // §6, §7). Other metadata blocks are authenticated-only.
+        if block_type == BlockType::Directory {
+            let off = self.crypto_trailer_offset();
+            let (region, trailer) = buf[HEADER_LEN..self.block_size].split_at_mut(off - HEADER_LEN);
+            encrypt_region(&self.filename_key, region, trailer, new_phys, next_gen)
+                .map_err(|_| DriverError::DeviceFault)?;
+        }
         let header = BlockHeader {
             block_type,
             fs_uuid: self.fs_uuid,
             owner,
-            generation: self.generation.wrapping_add(1),
+            generation: next_gen,
             logical_addr: logical,
             physical_addr: new_phys,
             payload_len,
@@ -787,7 +860,13 @@ impl<B: Block> RustFs<B> {
             generation: next_gen,
             root_phys,
         };
-        sb.seal(&mut buf[..bs], self.fs_uuid, slot, &self.mac_key)?;
+        sb.seal(
+            &mut buf[..bs],
+            self.fs_uuid,
+            slot,
+            &self.mac_key,
+            &self.crypto_header,
+        )?;
         self.write_meta(slot, &buf)?;
         // Commit point passed: the new root (and its mirror) is durably
         // published, as is the superblock slot pointing at it.
@@ -815,7 +894,10 @@ impl<B: Block> RustFs<B> {
         let mut fs = Self {
             block,
             fs_uuid: 0,
-            mac_key: derive_mac_key(0),
+            mac_key: [0u8; rustos_crypto::MAC_KEY_LEN],
+            filename_key: [0u8; rustos_crypto::AEAD_KEY_LEN],
+            content_key: [0u8; rustos_crypto::AEAD_KEY_LEN],
+            crypto_header: [0u8; CRYPTO_HEADER_LEN],
             block_size,
             total_blocks,
             inode_hint: 0,
@@ -847,11 +929,13 @@ impl<B: Block> RustFs<B> {
     /// in the superblock for tools, and a value below two is still rejected so
     /// at least the root directory fits.
     ///
-    /// The volume's structure (superblock ring + a first committed transaction
-    /// root holding the empty root directory) is written, but encryption,
-    /// compression, and dedupe are later stages of the staged build
-    /// (`docs/src/filesystem/rustfs-spec.md` §15): a volume is a complete, mountable
-    /// copy-on-write filesystem but is not yet encrypted at rest.
+    /// The volume is encrypted at rest under `volume_key` (the installer's /
+    /// recovery flow's key material): `format` provisions the per-volume key
+    /// hierarchy (a wrapped master key deriving the metadata-authentication,
+    /// filename, and content keys) and stores only the wrapped master key on
+    /// disk. There is **no** plaintext layout path
+    /// (`docs/src/filesystem/rustfs-spec.md` §5, §7). Compression and dedupe
+    /// remain later stages of the staged build (§15).
     ///
     /// # Errors
     ///
@@ -859,14 +943,21 @@ impl<B: Block> RustFs<B> {
     /// * [`DriverError::NoSpace`] if the device is too small or `inode_hint`
     ///   is below two.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
-    pub fn format(block: B, inode_hint: u32) -> Result<Self, DriverError> {
+    pub fn format(block: B, inode_hint: u32, volume_key: &VolumeKey) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
         if inode_hint < 2 {
             return Err(DriverError::NoSpace);
         }
         fs.inode_hint = inode_hint;
         fs.fs_uuid = derive_uuid(fs.total_blocks, inode_hint, fs.block_size);
-        fs.mac_key = derive_mac_key(fs.fs_uuid);
+        // Provision the per-volume key hierarchy: a master key wrapped under
+        // the caller's volume key, deriving the metadata-authentication,
+        // filename, and content keys. There is no plaintext path
+        // (`docs/src/filesystem/rustfs-spec.md` §5, §7).
+        let (crypto_header, keys) =
+            crypto::provision(volume_key, fs.fs_uuid).map_err(|_| DriverError::DeviceFault)?;
+        fs.apply_keys(&keys);
+        crypto_header.encode(&mut fs.crypto_header);
 
         fs.begin();
         let now = (fs.clock)();
@@ -894,17 +985,32 @@ impl<B: Block> RustFs<B> {
     /// A crash during a previous commit leaves an earlier committed root
     /// selected rather than a torn one (`docs/src/filesystem/rustfs-spec.md` §14).
     ///
+    /// The volume is encrypted: `volume_key` must be the key material the
+    /// volume was formatted with. `open` recovers the key hierarchy by
+    /// unwrapping the master key stored in a superblock slot's discovery
+    /// header; a wrong key never unwraps and the mount is refused with
+    /// [`DriverError::PermissionDenied`], fail-closed (`AGENTS.md` §5.4),
+    /// never a panic (§2.9).
+    ///
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if the device block size is unsupported.
+    /// * [`DriverError::PermissionDenied`] if `volume_key` does not unwrap the
+    ///   volume (wrong key on an otherwise-valid rustfs volume).
     /// * [`DriverError::BadMagic`] if no committed superblock slot validates
     ///   (e.g. the device is not a rustfs volume).
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    pub fn open(block: B) -> Result<Self, DriverError> {
+    pub fn open(block: B, volume_key: &VolumeKey) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
+        // Establish the volume keys before reading any authenticated metadata:
+        // unwrap the master key from a superblock slot's plaintext discovery
+        // header under `volume_key`. This sets `fs_uuid` and the working keys,
+        // or fails closed on a wrong key.
+        fs.establish_keys(volume_key, &mut buf)?;
+
         let mut best: Option<(Superblock, u128, u64)> = None;
-        let mut uuid_pin: Option<u128> = None;
+        let uuid_pin: Option<u128> = Some(fs.fs_uuid);
         for slot in 0..RING_SLOTS {
             let primary = slot_block(slot);
             let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf) else {
@@ -922,21 +1028,18 @@ impl<B: Block> RustFs<B> {
             {
                 continue;
             }
-            uuid_pin = Some(uuid);
             if best.map_or(true, |(b, _, _)| sb.generation > b.generation) {
                 best = Some((sb, uuid, slot));
             }
         }
-        let (sb, uuid, best_slot) = best.ok_or(DriverError::BadMagic)?;
+        let (sb, _uuid, best_slot) = best.ok_or(DriverError::BadMagic)?;
 
-        fs.fs_uuid = uuid;
-        fs.mac_key = derive_mac_key(uuid);
         fs.inode_hint = sb.inode_count;
         fs.generation = sb.generation;
         fs.root_phys = sb.root_phys;
         fs.ring_pos = best_slot + 1;
 
-        let root = fs.read_txn_root(uuid, sb.root_phys, sb.generation, &mut buf)?;
+        let root = fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
         fs.inode_tree_root = root.inode_tree_root;
         fs.next_ino = root.next_ino;
 
@@ -962,12 +1065,63 @@ impl<B: Block> RustFs<B> {
         Ok(fs)
     }
 
+    /// Establish the working key set by unwrapping the master key with
+    /// `volume_key` from a superblock slot's plaintext crypto discovery header
+    /// (`crypto` module). Sets [`Self::fs_uuid`], the working keys, and the
+    /// encoded discovery header that every commit re-publishes.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::PermissionDenied`] if a structurally-valid rustfs
+    ///   superblock is present but `volume_key` does not unwrap it (wrong key)
+    ///   — fail-closed (`AGENTS.md` §5.4).
+    /// * [`DriverError::BadMagic`] if no slot even looks like a rustfs
+    ///   superblock (the device is not a rustfs volume).
+    fn establish_keys(
+        &mut self,
+        volume_key: &VolumeKey,
+        buf: &mut [u8],
+    ) -> Result<(), DriverError> {
+        let mut saw_structure = false;
+        for slot in 0..RING_SLOTS {
+            let primary = slot_block(slot);
+            for phys in [primary, Self::companion(primary)] {
+                if self.read_block(phys, buf).is_err() {
+                    continue;
+                }
+                if rd_u64(buf, 0) != HEADER_MAGIC || rd_u32(buf, 12) != FORMAT_VERSION {
+                    continue;
+                }
+                saw_structure = true;
+                let Some(header) = CryptoHeader::decode(&buf[superblock::CRYPTO_OFFSET..]) else {
+                    continue;
+                };
+                if let Ok(keys) = crypto::unwrap(volume_key, &header) {
+                    let mut uuid_bytes = [0u8; 16];
+                    uuid_bytes.copy_from_slice(&buf[16..32]);
+                    self.fs_uuid = u128::from_le_bytes(uuid_bytes);
+                    self.apply_keys(&keys);
+                    self.crypto_header.copy_from_slice(
+                        &buf[superblock::CRYPTO_OFFSET
+                            ..superblock::CRYPTO_OFFSET + CRYPTO_HEADER_LEN],
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        Err(if saw_structure {
+            DriverError::PermissionDenied
+        } else {
+            DriverError::BadMagic
+        })
+    }
+
     /// Read a superblock-ring slot at primary block `primary`, falling back to
     /// its companion mirror and repairing the primary from a good companion
     /// (`docs/src/filesystem/rustfs-spec.md` §8). Returns the decoded slot and
     /// its UUID, or `None` when neither copy authenticates (the ring scan then
-    /// skips the slot). The authenticator key is derived from the UUID via
-    /// [`derive_mac_key`], so a not-yet-pinned slot can still be verified.
+    /// skips the slot). Authenticated under the volume's metadata-authentication
+    /// key, recovered in [`Self::establish_keys`].
     fn read_sb_slot(
         &mut self,
         primary: u64,
@@ -977,12 +1131,12 @@ impl<B: Block> RustFs<B> {
         let bs = self.block_size;
         self.read_block(primary, buf).ok()?;
         if let Some((sb, uuid)) =
-            Superblock::try_decode(&buf[..bs], uuid_pin, primary, derive_mac_key)
+            Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)
         {
             return Some((sb, uuid));
         }
         self.read_block(Self::companion(primary), buf).ok()?;
-        let (sb, uuid) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, derive_mac_key)?;
+        let (sb, uuid) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?;
         let _ = self.write_block(primary, buf);
         Some((sb, uuid))
     }
@@ -1005,7 +1159,7 @@ impl<B: Block> RustFs<B> {
         buf: &mut [u8],
     ) -> Result<TxnRoot, DriverError> {
         let bs = self.block_size;
-        let key = derive_mac_key(uuid);
+        let key = self.mac_key;
         self.read_block(root_phys, buf)?;
         if let Ok(root) =
             TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
@@ -1149,6 +1303,44 @@ impl<B: Block> RustFs<B> {
             self.free_block(old_ptr);
         }
         Ok(new)
+    }
+
+    /// Read the data block at `phys` and decrypt its content in place under the
+    /// content key, leaving the plaintext in `buf[..data_capacity()]`. The AEAD
+    /// authenticates before yielding plaintext, so a bit-flip in the ciphertext
+    /// or its trailer fails closed rather than mis-decrypting
+    /// (`docs/src/filesystem/rustfs-spec.md` §6, §7).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] on a read failure or failed authentication.
+    fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.read_block(phys, buf)?;
+        let cap = as_usize(self.data_capacity());
+        let bs = self.block_size;
+        let (region, trailer) = buf[..bs].split_at_mut(cap);
+        decrypt_region(&self.content_key, region, trailer, phys)
+            .map_err(|_| DriverError::DeviceFault)
+    }
+
+    /// Encrypt the content in `buf[..data_capacity()]` under the content key
+    /// and write the resulting block (ciphertext plus nonce + tag trailer) to
+    /// `phys`. The nonce is unique per `(phys, generation)` so copy-on-write
+    /// never reuses a `(key, nonce)` pair (`crypto` module).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] on a seal failure or a block write failure.
+    fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let cap = as_usize(self.data_capacity());
+        let bs = self.block_size;
+        let next_gen = self.generation.wrapping_add(1);
+        {
+            let (region, trailer) = buf[..bs].split_at_mut(cap);
+            encrypt_region(&self.content_key, region, trailer, phys, next_gen)
+                .map_err(|_| DriverError::DeviceFault)?;
+        }
+        self.write_block(phys, buf)
     }
 
     /// Free every physical run backing `inode` (number `ino`) and every node
@@ -1350,22 +1542,24 @@ impl<B: Block> RustFs<B> {
         if offset >= inode.size || out.is_empty() {
             return Ok(0);
         }
-        let bs = self.block_size as u64;
+        // File offsets map through the data-block content capacity (the block
+        // minus its crypto trailer), not the raw device block size.
+        let cap = self.data_capacity();
         let end = inode.size.min(offset + out.len() as u64);
         let mut done = 0usize;
         let mut pos = offset;
         let mut data = [0u8; MAX_BLOCK_SIZE];
         while pos < end {
-            let bi = pos / bs;
-            let within = as_usize(pos % bs);
-            let chunk = as_usize((bs - within as u64).min(end - pos));
+            let bi = pos / cap;
+            let within = as_usize(pos % cap);
+            let chunk = as_usize((cap - within as u64).min(end - pos));
             let ptr = self.block_ptr(inode, bi)?;
             if ptr == 0 {
                 for byte in &mut out[done..done + chunk] {
                     *byte = 0;
                 }
             } else {
-                self.read_block(ptr, &mut data)?;
+                self.read_data_block(ptr, &mut data)?;
                 out[done..done + chunk].copy_from_slice(&data[within..within + chunk]);
             }
             done += chunk;
@@ -1385,30 +1579,31 @@ impl<B: Block> RustFs<B> {
         if data.is_empty() {
             return Ok(0);
         }
-        let bs = self.block_size;
+        let cap = self.data_capacity();
+        let capu = as_usize(cap);
         let end = offset
             .checked_add(data.len() as u64)
             .ok_or(DriverError::LengthOutOfRange)?;
-        if end.div_ceil(bs as u64) > self.max_file_blocks() {
+        if end.div_ceil(cap) > self.max_file_blocks() {
             return Err(DriverError::LengthOutOfRange);
         }
         let mut done = 0usize;
         let mut pos = offset;
         let mut blk = [0u8; MAX_BLOCK_SIZE];
         while done < data.len() {
-            let bi = pos / bs as u64;
-            let within = as_usize(pos % bs as u64);
-            let chunk = (bs - within).min(data.len() - done);
+            let bi = pos / cap;
+            let within = as_usize(pos % cap);
+            let chunk = (capu - within).min(data.len() - done);
             let old_ptr = self.block_ptr(inode, bi)?;
-            for byte in &mut blk[..bs] {
+            for byte in &mut blk[..capu] {
                 *byte = 0;
             }
-            if (within != 0 || chunk != bs) && old_ptr != 0 {
-                self.read_block(old_ptr, &mut blk)?;
+            if (within != 0 || chunk != capu) && old_ptr != 0 {
+                self.read_data_block(old_ptr, &mut blk)?;
             }
             blk[within..within + chunk].copy_from_slice(&data[done..done + chunk]);
             let new_ptr = self.cow_data(old_ptr)?;
-            self.write_block(new_ptr, &blk)?;
+            self.write_data_block(new_ptr, &mut blk)?;
             self.extent_assign(inode, ino, bi, new_ptr)?;
             done += chunk;
             pos += chunk as u64;
@@ -1422,25 +1617,25 @@ impl<B: Block> RustFs<B> {
     /// Shrink or grow file `inode` (number `ino`) to `size`, freeing whole
     /// truncated runs and copy-on-writing the partial tail block.
     fn truncate_file(&mut self, inode: &mut Inode, ino: u32, size: u64) -> Result<(), DriverError> {
-        let bs = self.block_size as u64;
-        if size.div_ceil(bs) > self.max_file_blocks() {
+        let cap = self.data_capacity();
+        if size.div_ceil(cap) > self.max_file_blocks() {
             return Err(DriverError::LengthOutOfRange);
         }
         if size < inode.size {
-            let keep = size.div_ceil(bs);
+            let keep = size.div_ceil(cap);
             self.free_extent_tail(inode, ino, keep)?;
-            let tail = as_usize(size % bs);
+            let tail = as_usize(size % cap);
             if tail != 0 {
-                let bi = size / bs;
+                let bi = size / cap;
                 let old_ptr = self.block_ptr(inode, bi)?;
                 if old_ptr != 0 {
                     let mut blk = [0u8; MAX_BLOCK_SIZE];
-                    self.read_block(old_ptr, &mut blk)?;
-                    for byte in &mut blk[tail..as_usize(bs)] {
+                    self.read_data_block(old_ptr, &mut blk)?;
+                    for byte in &mut blk[tail..as_usize(cap)] {
                         *byte = 0;
                     }
                     let new_ptr = self.cow_data(old_ptr)?;
-                    self.write_block(new_ptr, &blk)?;
+                    self.write_data_block(new_ptr, &mut blk)?;
                     self.extent_assign(inode, ino, bi, new_ptr)?;
                 }
             }
@@ -1657,26 +1852,6 @@ fn derive_uuid(total_blocks: u64, inode_count: u32, block_size: usize) -> u128 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     (u128::from(hash) << 64) | u128::from(hash ^ 0x5255_5354_4653_5631)
-}
-
-/// Derive the volume's keyed-metadata-authenticator key from its UUID.
-///
-/// This is the **Stage 3 placeholder** key derivation: a real per-volume key
-/// hierarchy (rooted in the installer's RNG and the user's credentials)
-/// arrives with encryption in Stage 4 (`docs/src/filesystem/rustfs-spec.md`
-/// §15.4). It is *not* a secret key yet — the UUID is stored in the clear in
-/// every header — so this stage hardens metadata against corruption and
-/// misdirection, not against a forging attacker; that is Stage 4's job. What
-/// matters now is that the derivation routes through `lib/crypto` rather than
-/// hand-rolling a primitive (`AGENTS.md` §2.12), and that the key is stable
-/// per volume so every metadata block authenticates under it.
-fn derive_mac_key(fs_uuid: u128) -> MacKey {
-    // Domain-separate the input so this key can never collide with another
-    // use of the UUID, then hash through `lib/crypto`'s SHA-256.
-    let mut input = [0u8; 32];
-    input[..16].copy_from_slice(b"rustfs/meta-mac\0");
-    input[16..32].copy_from_slice(&fs_uuid.to_le_bytes());
-    sha256(&input)
 }
 
 impl<B: Block> FilesystemRead for RustFs<B> {

@@ -512,7 +512,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 1 | On-disk headers, superblock ring, transaction roots. | ✓ |
 | 2 | COW metadata trees, inode tree, extent tree, free-space rebuild. | ✓ |
 | 3 | Metadata authentication/checksums and duplicated critical metadata. | ✓ |
-| 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | |
+| 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | ✓ |
 | 5 | Data records with physical checksum and logical hash. | |
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | |
@@ -555,6 +555,28 @@ mirroring does not inflate a transaction's peak footprint, and the §16
 acceptance tests for this stage — metadata bit-flip detection and repair from
 the duplicate copy, wrong-key rejection, both-copies-bad fail-closed, crash
 replay, and the extended `fuzz_mount` authenticated-header / duplicated-copy
-sweeps — all pass. The authenticator key is a placeholder derived from the
-volume UUID this stage; the real per-volume key hierarchy arrives in Stage 4.
-Stages 4–12 remain; each implementing session ticks this table and `PLAN.md`.
+sweeps — all pass. The authenticator key was a placeholder derived from the
+volume UUID in Stage 3; Stage 4 replaced it with the real per-volume key
+hierarchy.
+
+Stage 4 made RustFS **encrypted at rest with no plaintext mode** (§5, §7).
+`format` now takes a caller-supplied volume key and provisions a per-volume
+key hierarchy through `lib/crypto` (`AGENTS.md` §2.12): a master key, wrapped
+(AEAD) under a KDF of the volume key and stored only in wrapped form in every
+superblock slot's plaintext discovery region, derives the
+metadata-authentication key (the Stage-3 `MacKey` seam, no longer a UUID
+placeholder), the filename key, and the content key. `open` recovers the keys
+by unwrapping the master key; a wrong key never authenticates the wrapped
+blob, so the mount is refused with `PermissionDenied`, fail-closed (§5.4),
+never a panic (§2.9). File data and directory-entry names are encrypted with
+`lib/crypto`'s ChaCha20-Poly1305 AEAD — each data and directory block carries
+a 28-byte nonce+tag trailer, so a bit-flip in encrypted data or a name is
+detected on read rather than mis-decrypted; directory blocks are
+encrypt-then-MAC and the read path authenticates then decrypts. There is no
+code path that lays out an unencrypted volume. The §16 acceptance tests for
+this stage — wrong key refuses mount, plaintext cannot be created (the
+filename and content are absent from the raw bytes), filename + data round
+trip across a remount, an encrypted-data bit-flip is detected, crash replay
+at every commit step, and the extended `fuzz_mount` encrypted-open sweep —
+all pass. Stages 5–12 remain; each implementing session ticks this table and
+`PLAN.md`.

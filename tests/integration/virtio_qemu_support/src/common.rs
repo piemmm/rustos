@@ -390,7 +390,7 @@ pub fn rustfs_round_trip<Tr: Transport>(
     if geo.block_count != image::TOTAL_SECTORS || geo.block_size as usize != image::SECTOR_BYTES {
         return Err("rustfs device geometry mismatch");
     }
-    let mut fs = RustFs::open(blk).map_err(|_| "rustfs mount")?;
+    let mut fs = RustFs::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "rustfs mount")?;
     env.log("virtio-qemu: rustfs volume mounted");
 
     let root = fs.root();

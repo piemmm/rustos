@@ -95,8 +95,13 @@ fn fixed_clock() -> Time64 {
     Time64::from_secs(1_700_000_000)
 }
 
+/// The volume key every test formats and reopens with. `RustFS` has no
+/// plaintext mode (`docs/src/filesystem/rustfs-spec.md` §5), so every test
+/// volume is encrypted under this fixed key.
+const TEST_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
 fn fmt(block_size: u32, block_count: u64, inodes: u32) -> RustFs<MemBlock> {
-    RustFs::format(MemBlock::new(block_size, block_count), inodes)
+    RustFs::format(MemBlock::new(block_size, block_count), inodes, &TEST_KEY)
         .expect("format a blank device")
         .with_clock(fixed_clock)
 }
@@ -105,14 +110,17 @@ fn fmt(block_size: u32, block_count: u64, inodes: u32) -> RustFs<MemBlock> {
 fn format_then_open_round_trips() {
     let fs = fmt(512, 256, 32);
     let bytes = fs.into_block().bytes();
-    let reopened = RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).expect("reopen");
+    let reopened = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.root(), NodeId::from_raw(1));
 }
 
 #[test]
 fn open_rejects_an_unformatted_device() {
     let dev = MemBlock::new(512, 256);
-    assert!(matches!(RustFs::open(dev), Err(DriverError::BadMagic)));
+    assert!(matches!(
+        RustFs::open(dev, &TEST_KEY),
+        Err(DriverError::BadMagic)
+    ));
 }
 
 #[test]
@@ -141,7 +149,7 @@ fn create_write_read_back_and_survive_remount() {
 
     // Survive a remount.
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).expect("reopen");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"file").expect("lookup after remount");
     let mut back2 = alloc::vec![0u8; 9000];
     let mut done = 0;
@@ -291,7 +299,7 @@ fn timestamps_round_trip_extreme_values() {
     fn future() -> Time64 {
         Time64::from_secs(4_200_000_000)
     }
-    let mut fs = RustFs::format(MemBlock::new(512, 256), 32)
+    let mut fs = RustFs::format(MemBlock::new(512, 256), 32, &TEST_KEY)
         .expect("format")
         .with_clock(old);
     let root = fs.root();
@@ -306,7 +314,7 @@ fn timestamps_round_trip_extreme_values() {
     fs = fs.with_clock(future);
     fs.set_security(node, sec).expect("set_security");
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).expect("reopen");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"t").unwrap();
     assert_eq!(fs.security(node).unwrap(), sec);
     assert_eq!(fs.times(node).unwrap().changed, future());
@@ -323,7 +331,7 @@ fn superblock_ring_selects_the_highest_committed_generation() {
             .expect("create");
     }
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).expect("reopen");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     for i in 0..8 {
         let name = alloc::format!("g{i}");
         assert!(fs.lookup(fs.root(), name.as_bytes()).is_ok());
@@ -349,7 +357,7 @@ fn crash_at_every_write_count_during_commit_never_tears() {
     for budget in 0..64u32 {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
         dev.write_budget = Some(budget);
-        let mut fs = RustFs::open(dev).expect("baseline opens");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
         let root = fs.root();
         // The single transaction may be cut short at `budget` writes.
         let _ = fs.write_at(root, b"new", 0, b"freshdata");
@@ -357,7 +365,7 @@ fn crash_at_every_write_count_during_commit_never_tears() {
 
         // Re-open from the (possibly torn) image: it must mount, and the
         // pre-existing files must always be intact.
-        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256))
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
             .expect("post-crash mount always succeeds");
         let root = fs.root();
         let keep = fs.lookup(root, b"keep").expect("keep always survives");
@@ -420,7 +428,7 @@ fn inode_tree_grows_and_shrinks_across_many_inodes() {
     // Survive a remount: every inode is reachable and the free-space rebuild
     // matched (open would have failed otherwise).
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096)).expect("reopen");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen");
     let root = fs.root();
     for i in 0..count {
         let name = alloc::format!("f{i:04}");
@@ -440,7 +448,7 @@ fn inode_tree_grows_and_shrinks_across_many_inodes() {
 
     // The survivors persist across another remount.
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096)).expect("reopen2");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen2");
     let root = fs.root();
     for i in (1..count).step_by(2) {
         let name = alloc::format!("f{i:04}");
@@ -457,14 +465,17 @@ fn file_with_many_noncontiguous_extents_round_trips() {
     let root = fs.root();
     fs.create(root, b"sparse", NodeKind::RegularFile)
         .expect("create");
-    let bs = 512u64;
-    let bs_bytes = 512usize;
+    // Each run fills exactly one data block, so the stride is the data-block
+    // *content* capacity (the block minus its crypto trailer), not the raw
+    // device block size — writing at every other logical block leaves holes.
+    let cap = fs.data_capacity();
+    let cap_bytes = as_usize(cap);
     let runs = 80u8;
     for i in 0..runs {
         let val = i.wrapping_add(1);
-        let block = alloc::vec![val; bs_bytes];
-        let off = u64::from(i) * 2 * bs;
-        assert_eq!(fs.write_at(root, b"sparse", off, &block), Ok(bs_bytes));
+        let block = alloc::vec![val; cap_bytes];
+        let off = u64::from(i) * 2 * cap;
+        assert_eq!(fs.write_at(root, b"sparse", off, &block), Ok(cap_bytes));
     }
     let node = fs.lookup(root, b"sparse").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
@@ -477,22 +488,22 @@ fn file_with_many_noncontiguous_extents_round_trips() {
         let node = fs.lookup(fs.root(), b"sparse").expect("lookup");
         for i in 0..runs {
             let val = i.wrapping_add(1);
-            let mut got = alloc::vec![0u8; bs_bytes];
-            fs.read_at(node, u64::from(i) * 2 * bs, &mut got)
+            let mut got = alloc::vec![0u8; cap_bytes];
+            fs.read_at(node, u64::from(i) * 2 * cap, &mut got)
                 .expect("read run");
-            assert_eq!(got, alloc::vec![val; bs_bytes], "run {i} wrong");
+            assert_eq!(got, alloc::vec![val; cap_bytes], "run {i} wrong");
             // The block between this run and the next is a hole reading zero.
             if i + 1 < runs {
-                let mut hole = alloc::vec![0xFFu8; bs_bytes];
-                fs.read_at(node, u64::from(i) * 2 * bs + bs, &mut hole)
+                let mut hole = alloc::vec![0xFFu8; cap_bytes];
+                fs.read_at(node, u64::from(i) * 2 * cap + cap, &mut hole)
                     .expect("read hole");
-                assert_eq!(hole, alloc::vec![0u8; bs_bytes], "hole {i} not zero");
+                assert_eq!(hole, alloc::vec![0u8; cap_bytes], "hole {i} not zero");
             }
         }
     };
     check(&mut fs);
     let bytes = fs.into_block().bytes();
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 4096)).expect("reopen");
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 4096), &TEST_KEY).expect("reopen");
     check(&mut fs);
 }
 
@@ -542,7 +553,7 @@ fn free_space_rebuild_matches_authoritative_extents() {
     let live = fs.free.clone();
 
     let bytes = fs.into_block().bytes();
-    let rebuilt = RustFs::open(MemBlock::from_bytes(bytes, 4096, 2048)).expect("reopen");
+    let rebuilt = RustFs::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
     assert_eq!(
         rebuilt.free, live,
         "mount-time free-space rebuild must equal the authoritative live set"
@@ -573,7 +584,7 @@ fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
     let original = bytes[off];
     bytes[off] ^= 0xff; // wound only the primary copy
 
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256))
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("mounts by falling back to the companion mirror");
     let node = fs.lookup(fs.root(), b"f").expect("file survives");
     let mut buf = [0u8; 5];
@@ -611,7 +622,7 @@ fn both_metadata_copies_corrupted_fails_closed() {
     bytes[as_usize(target + 1) * bs + HEADER_LEN] ^= 0xff;
 
     assert!(
-        RustFs::open(MemBlock::from_bytes(bytes, 512, 256)).is_err(),
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).is_err(),
         "both copies corrupt must fail closed, not panic or trust corruption"
     );
 }
@@ -633,7 +644,7 @@ fn corrupting_one_superblock_copy_still_mounts_via_the_mirror() {
         let primary = superblock::slot_block(slot);
         bytes[as_usize(primary) * bs + 80] ^= 0xff; // inside the tag slot
     }
-    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256))
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("mounts from the superblock mirrors");
     assert!(fs.lookup(fs.root(), b"keep").is_ok());
 }
@@ -655,12 +666,12 @@ fn crash_during_multiblock_extent_write_never_tears() {
     for budget in 0..160u32 {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 512);
         dev.write_budget = Some(budget);
-        let mut fs = RustFs::open(dev).expect("baseline opens");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
         let root = fs.root();
         let _ = fs.write_at(root, b"f", 0, &new);
         let bytes = fs.into_block().bytes();
 
-        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512))
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY)
             .expect("post-crash mount always succeeds");
         let node = fs.lookup(fs.root(), b"f").expect("file survives");
         let mut got = alloc::vec![0u8; 512 * 24];
@@ -678,4 +689,122 @@ fn crash_during_multiblock_extent_write_never_tears() {
             "torn multi-block contents at budget {budget}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4: per-volume key hierarchy + filename/data encryption.
+// ---------------------------------------------------------------------------
+
+/// Whether `haystack` contains the byte run `needle` anywhere.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn wrong_volume_key_refuses_the_mount() {
+    // A volume formatted under one key never mounts under another: the wrapped
+    // master key fails to authenticate, so `open` fails closed with
+    // `PermissionDenied` (`AGENTS.md` §5.4) — never a panic, never a misread.
+    let mut fs = fmt(512, 256, 32);
+    fs.create(fs.root(), b"f", NodeKind::RegularFile)
+        .expect("create");
+    let bytes = fs.into_block().bytes();
+
+    let mut wrong = TEST_KEY;
+    wrong[0] ^= 0x01;
+    assert!(matches!(
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 512, 256), &wrong),
+        Err(DriverError::PermissionDenied)
+    ));
+    // The correct key still mounts the very same image.
+    RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("the right key still mounts");
+}
+
+#[test]
+fn no_plaintext_filename_or_data_at_rest() {
+    // RustFS has no plaintext mode: a distinctive filename and file content
+    // must be absent from the raw on-disk bytes (encrypted at rest).
+    let name: &[u8] = b"ZxQvBnMkLpSecret";
+    let payload = {
+        let mut v = alloc::vec::Vec::new();
+        for _ in 0..200 {
+            v.extend_from_slice(b"PLAINTEXT-MARKER");
+        }
+        v
+    };
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, name, NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    let bytes = fs.into_block().bytes();
+
+    assert!(
+        !contains(&bytes, name),
+        "the filename must not appear in cleartext on disk"
+    );
+    assert!(
+        !contains(&bytes, b"PLAINTEXT-MARKER"),
+        "the file content must not appear in cleartext on disk"
+    );
+}
+
+#[test]
+fn filename_and_data_round_trip_through_encryption_across_remount() {
+    // The encrypted name and a multi-block encrypted payload decrypt back to
+    // exactly what was written, across a remount.
+    let name: &[u8] = b"document.txt";
+    let payload = alloc::vec![0xC3u8; 512 * 5 + 17];
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, name, NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    // The name decrypts: lookup by the cleartext name succeeds.
+    let node = fs.lookup(fs.root(), name).expect("encrypted name decrypts");
+    let mut back = alloc::vec![0u8; payload.len()];
+    let mut done = 0usize;
+    while done < payload.len() {
+        let off = u64::try_from(done).unwrap();
+        let n = fs.read_at(node, off, &mut back[done..]).expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    assert_eq!(back, payload, "encrypted data round-trips across a remount");
+}
+
+#[test]
+fn bit_flip_in_encrypted_data_is_detected() {
+    // Flipping a byte of an encrypted data block's ciphertext must be caught by
+    // the AEAD authenticator on read — a failed decrypt fails closed
+    // (`AGENTS.md` §5.4), never returning mis-decrypted bytes.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let payload = alloc::vec![0x77u8; 300];
+    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"f").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("read inode");
+    let phys = fs.block_ptr(&inode, 0).expect("data block pointer");
+    assert_ne!(phys, 0, "the file has a data block");
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(phys) * bs] ^= 0xff; // wound the ciphertext
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    let mut buf = [0u8; 300];
+    assert!(
+        fs.read_at(node, 0, &mut buf).is_err(),
+        "a bit-flip in encrypted data must be detected, not mis-decrypted"
+    );
 }

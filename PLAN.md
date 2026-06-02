@@ -3987,7 +3987,20 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    bad fails closed and never panics; tested for bit-flip repair, wrong-key
    rejection, both-copies-bad fail-closed, crash replay, and the extended
    `fuzz_mount` authenticated-header / duplicated-copy sweeps).
-4. Encrypted volume creation, key hierarchy, filename/data encryption.
+4. Encrypted volume creation, key hierarchy, filename/data encryption. ✓
+   (`format`/`open` take a caller-supplied volume key; a per-volume master
+   key is wrapped (AEAD) under a KDF of the volume key through `lib/crypto`
+   — `lib/crypto/src/kdf.rs` — and stored only in wrapped form in the
+   superblock's plaintext discovery region, deriving the
+   metadata-authentication, filename, and content keys; a wrong key refuses
+   the mount with `PermissionDenied`, fail-closed. File data and
+   directory-entry names are encrypted at rest with ChaCha20-Poly1305
+   (28-byte nonce+tag trailer per data/directory block; directory blocks
+   are encrypt-then-MAC), so an encrypted-data/name bit-flip is detected on
+   read. No plaintext layout exists; tested for wrong-key refusal,
+   no-plaintext-at-rest, filename+data remount round-trip, encrypted-data
+   bit-flip detection, crash replay, and the extended `fuzz_mount`
+   encrypted-open sweep.)
 5. Data records with physical checksum and logical hash.
 6. First-party RustOS zstd codec and RustFS compression integration.
 7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
@@ -4002,7 +4015,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–3 complete; Stages 4–12 planned.** The copy-on-write
+**Status: Stages 1–4 complete; Stages 5–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

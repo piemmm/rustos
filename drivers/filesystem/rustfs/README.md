@@ -35,7 +35,8 @@ address, and a **keyed authenticator** (HMAC-SHA256 through `lib/crypto`,
 against the address the reader expected, so a stale, misdirected,
 wrong-type, torn, bit-rotted, or wrong-key block is rejected at decode time
 and the mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
-header.
+header; their last 28 bytes are the per-block crypto trailer (nonce + AEAD
+tag, see *Encryption* below).
 
 ## Metadata authentication and redundancy (`rustfs-spec.md` §5, §8)
 
@@ -49,9 +50,30 @@ the keyed authenticator, and **repairing** the bad copy from the good one
 corrupt bytes and never panics (`AGENTS.md` §5.4 / §2.9). The companion is
 always `primary + 1`, so metadata is allocated in adjacent pairs and one
 redundancy mechanism covers every metadata block (`AGENTS.md` §2.2). The
-authenticator key is, this stage, a placeholder derived from the volume UUID
-through `lib/crypto`; the real per-volume key hierarchy arrives with
-encryption (`rustfs-spec.md` §15.4).
+metadata-authentication key is the volume's, derived from the per-volume
+master key (see *Encryption* below); a volume opened with the wrong key never
+recovers it.
+
+## Encryption (`rustfs-spec.md` §5, §7)
+
+RustFS is **encrypted by default and has no plaintext mode**: there is no
+code path that lays out an unencrypted volume.
+`RustFs::format(block, inode_hint, &volume_key)` provisions a per-volume key
+hierarchy through `lib/crypto` (`AGENTS.md` §2.12) — a master key wrapped
+(AEAD) under a KDF of the caller-supplied volume key and stored only in
+wrapped form in every superblock slot's plaintext discovery region, deriving
+the metadata-authentication (HMAC), filename (AEAD), and content (AEAD) keys.
+`RustFs::open(block, &volume_key)` unwraps the master key; a wrong key never
+authenticates the wrapped blob, so the mount is refused with
+`PermissionDenied`, fail-closed (`AGENTS.md` §5.4), never a panic (§2.9).
+File data and directory-entry names are encrypted at rest with
+ChaCha20-Poly1305 (`lib/crypto/src/aead.rs`): each data and directory block
+carries a 28-byte nonce+tag trailer, so a bit-flip in encrypted data or a
+name is detected on read rather than mis-decrypted (directory blocks are
+encrypt-then-MAC; the read path authenticates then decrypts). The master key
+and salt are derived deterministically from the volume key and UUID this
+stage (no platform RNG in the driver yet); a random RNG-sourced master key is
+a later refinement.
 
 Inodes are 256-byte records (inode 1 = root, the four §21 `Time64`
 timestamps inline) held in a copy-on-write **inode tree** keyed by inode
@@ -85,12 +107,10 @@ so a delete can copy-on-write itself even on a full volume. No
 `unwrap`/`expect`/`panic!` and no `unsafe`.
 
 > **Staged build.** A volume is a complete, mountable copy-on-write
-> filesystem with B-tree metadata today, but encryption, compression, and
-> dedupe are later stages of the
-> [specification](../../../docs/src/filesystem/rustfs-spec.md): a volume is
-> not yet encrypted at rest, and the metadata checksum is the fast physical
-> checksum, not yet the keyed authenticator (which will arrive via
-> `lib/crypto`).
+> filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in
+> two physical copies, and **at-rest encryption** under a per-volume key
+> hierarchy (Stage 4). Compression and dedupe are later stages of the
+> [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
 
@@ -120,7 +140,11 @@ rebuild matching the authoritative live set, `truncate` prefix survival,
 `remove` reclaiming space after `NoSpace`, the fail-closed
 extremes (`Busy`/`LengthOutOfRange`/`NotFound`), the per-inode security
 record and four §21 timestamps (incl. pre-1970 / far-future) round-tripping
-across a remount, superblock-ring generation selection, and a
+across a remount, superblock-ring generation selection, the Stage-4
+encryption acceptance tests (wrong key refuses the mount while the right key
+mounts, a filename and content are absent from the raw on-disk bytes,
+filename + data round-trip through encryption across a remount, and a
+bit-flip in an encrypted data block is detected), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —

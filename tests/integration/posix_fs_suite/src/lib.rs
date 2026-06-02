@@ -31,7 +31,11 @@ use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::MountFlags;
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::RustFs;
+use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+
+/// Volume key the suite formats its rustfs test volume with. `RustFS` is
+/// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5).
+const SUITE_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 pub use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
@@ -196,7 +200,7 @@ pub fn cred_with_groups<'a>(
 /// runtime condition.
 #[must_use]
 pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
-    let fs = RustFs::format(VecBlock::new(TOTAL_SECTORS), INODE_COUNT)
+    let fs = RustFs::format(VecBlock::new(TOTAL_SECTORS), INODE_COUNT, &SUITE_KEY)
         .expect("format the fixed-geometry rustfs test volume");
 
     let mut vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));

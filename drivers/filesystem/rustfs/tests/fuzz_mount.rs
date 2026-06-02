@@ -28,7 +28,12 @@
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::RustFs;
+use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+
+/// Volume key the fuzz image is formatted and reopened with. `RustFS` is
+/// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5); the fuzz
+/// sweep exercises the encrypted-volume open path under this fixed key.
+const FUZZ_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 const BLOCK_SIZE: u32 = 512;
 const BLOCK_COUNT: u64 = 64;
@@ -127,10 +132,10 @@ fn exercise(image: &[u8]) {
     let mut store = image.to_vec();
     store.resize(IMAGE_LEN, 0);
     let dev = MemBlock { store };
-    if let Ok(fs) = RustFs::open(dev) {
+    if let Ok(fs) = RustFs::open(dev, &FUZZ_KEY) {
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().store;
-        let _ = RustFs::open(MemBlock { store: bytes });
+        let _ = RustFs::open(MemBlock { store: bytes }, &FUZZ_KEY);
     }
 }
 
@@ -145,6 +150,7 @@ fn formatted_image() -> Vec<u8> {
             store: vec![0u8; IMAGE_LEN],
         },
         16,
+        &FUZZ_KEY,
     )
     .expect("format a blank fuzz device");
     let root = fs.root();

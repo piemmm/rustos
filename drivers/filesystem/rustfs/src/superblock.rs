@@ -15,6 +15,7 @@
 use rustos_abi::DriverError;
 use rustos_crypto::MacKey;
 
+use crate::crypto::CRYPTO_HEADER_LEN;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 
 /// Number of logical superblock-ring slots. Four slots retain a short window
@@ -43,8 +44,16 @@ const P_TOTAL_BLOCKS: usize = HEADER_LEN + 8;
 const P_INODE_COUNT: usize = HEADER_LEN + 16;
 const P_GENERATION: usize = HEADER_LEN + 24;
 const P_ROOT_PHYS: usize = HEADER_LEN + 32;
-/// Bytes of meaningful superblock payload following the header.
-const PAYLOAD_LEN: u32 = 40;
+/// Offset, within the block, of the plaintext crypto discovery header — the
+/// wrapped master key and its salt (`crate::crypto`). It follows the geometry
+/// fields and precedes the keyed authenticator written by the header.
+pub const CRYPTO_OFFSET: usize = HEADER_LEN + 40;
+/// Bytes of meaningful superblock payload following the header: the 40-byte
+/// geometry block plus the crypto discovery header.
+// `CRYPTO_HEADER_LEN` is a tiny compile-time constant (< 256), so the
+// `usize`-to-`u32` widening cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
+const PAYLOAD_LEN: u32 = 40 + CRYPTO_HEADER_LEN as u32;
 
 fn rd_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
@@ -93,8 +102,9 @@ impl Superblock {
         fs_uuid: u128,
         phys: u64,
         key: &MacKey,
+        crypto_header: &[u8; CRYPTO_HEADER_LEN],
     ) -> Result<(), DriverError> {
-        if block.len() < P_ROOT_PHYS + 8 {
+        if block.len() < CRYPTO_OFFSET + CRYPTO_HEADER_LEN {
             return Err(DriverError::DeviceFault);
         }
         for byte in block.iter_mut() {
@@ -105,6 +115,7 @@ impl Superblock {
         wr_u32(block, P_INODE_COUNT, self.inode_count);
         wr_u64(block, P_GENERATION, self.generation);
         wr_u64(block, P_ROOT_PHYS, self.root_phys);
+        block[CRYPTO_OFFSET..CRYPTO_OFFSET + CRYPTO_HEADER_LEN].copy_from_slice(crypto_header);
         let header = BlockHeader {
             block_type: BlockType::Superblock,
             fs_uuid,
@@ -125,17 +136,16 @@ impl Superblock {
     /// passing `None` accepts whatever UUID a valid slot carries, which the
     /// caller then pins for the rest of the scan. An invalid slot is `None`.
     ///
-    /// Because the keyed authenticator's key is itself derived from the volume
-    /// UUID (Stage 3 placeholder; Stage 4 introduces the real hierarchy), the
-    /// caller supplies `derive_key` so this scan can authenticate a slot whose
-    /// UUID it is still probing without re-implementing the derivation here
-    /// (`AGENTS.md` §2.2).
+    /// The keyed authenticator's `key` is the volume's metadata-authentication
+    /// key, which the caller has already recovered by unwrapping the master
+    /// key with the volume key (`crate::crypto`); the scan only authenticates
+    /// slots under it, it does not derive it.
     #[must_use]
     pub fn try_decode(
         block: &[u8],
         expect_uuid: Option<u128>,
         phys: u64,
-        derive_key: fn(u128) -> MacKey,
+        key: &MacKey,
     ) -> Option<(Self, u128)> {
         if expect_uuid.is_none() && block.len() < HEADER_LEN {
             return None;
@@ -145,8 +155,7 @@ impl Superblock {
             bytes.copy_from_slice(&block[16..32]);
             u128::from_le_bytes(bytes)
         });
-        let key = derive_key(probe_uuid);
-        let header = BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys, &key)?;
+        let header = BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys, key)?;
         let sb = Self {
             block_size: rd_u32(block, P_BLOCK_SIZE),
             total_blocks: rd_u64(block, P_TOTAL_BLOCKS),
