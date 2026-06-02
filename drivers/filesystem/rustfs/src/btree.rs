@@ -626,6 +626,30 @@ impl<B: Block> RustFs<B> {
         Ok(())
     }
 
+    /// Parse the level and, for an internal node, the child pointers out of an
+    /// already-verified node buffer `buf`. Used by the scrub verifying walk,
+    /// which authenticates each node itself (counting any companion repair)
+    /// before recursing, so it must not re-read the node through the
+    /// repair-on-read [`crate::RustFs::read_meta`] path. A leaf returns level
+    /// `0` and no children.
+    pub(crate) fn btree_node_children(&self, buf: &[u8]) -> (u32, Vec<u64>) {
+        let level = node_level(buf);
+        let count = node_count(buf);
+        if level == 0 {
+            return (0, Vec::new());
+        }
+        let cap = self.btree_internal_cap();
+        let mut children = Vec::with_capacity(count.min(cap));
+        for i in 0..count.min(cap) {
+            let base = N_ENTRIES + i * INTERNAL_STRIDE;
+            if base + INTERNAL_STRIDE > self.block_size {
+                break;
+            }
+            children.push(rd_u64(buf, base + 8));
+        }
+        (level, children)
+    }
+
     /// Collect every `(key, value)` leaf entry of the tree, in key order.
     pub(crate) fn btree_collect_entries(
         &mut self,

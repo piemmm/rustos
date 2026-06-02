@@ -281,6 +281,60 @@ the index key, so dedupe can never cross a domain. With a single volume key
 today there is exactly one domain, but the keying already enforces the rule for
 when multiple domains arrive.
 
+## Online scrub (`rustfs-spec.md` §12)
+
+`RustFs::scrub` is an **online** verify-and-repair pass: it walks the live
+volume while it stays mounted, leaning on the redundancy and integrity seams
+the earlier stages already built rather than rebuilding structure offline
+(that is the later `check`). It is an inherent driver operation, not a
+widening of a frozen `Filesystem*` ABI trait (`AGENTS.md` §2.4), and is
+**capability-gated** on `CAP_FS_MOUNT` — without it scrub fails closed with
+`PermissionDenied` and logs the refusal (`AGENTS.md` §5.4).
+
+What scrub verifies, and what it repairs versus records:
+
+- **Metadata (verify + repair).** Every live metadata block — the committed
+  superblock slot, the transaction root, the inode and per-file extent
+  B-trees, and the chunk and reverse-reference trees — is authenticated in
+  **both** physical copies. A copy that fails the keyed authenticator is
+  **repaired from its good companion** (the same redundancy seam `open` uses),
+  and the repair is counted. A block whose **both** copies fail is recorded as
+  an unrepairable finding — fail-closed, never a panic (`AGENTS.md` §5.4 /
+  §2.9).
+- **Data (verify + record).** Every live file-data block is run through the
+  integrity read pipeline and any failure is classified by its layer —
+  `Physical` (fast checksum), `Aead` (tag), or `Logical` (plaintext hash) — and
+  **recorded**. Deep repair / reconstruction of data is a later stage; scrub
+  records honestly rather than pretending to fix what it cannot.
+- **Refcounts + reverse references (verify + repair).** The chunk refcounts and
+  reverse-reference sets are **recomputed from the live inode/extent trees**
+  and compared with the on-disk chunk and reverse-reference trees
+  (`rustfs-spec.md` §9). A divergence is a finding; scrub corrects it toward the
+  extent-derived truth without dropping a referrer (a wrong refcount is reset, a
+  bogus referrer struck out, a stale shared record removed). A genuinely shared
+  block missing its chunk record is recorded but not fabricated (that
+  reconstruction belongs to the offline `check`).
+
+**Resumable + interrupt-safe.** Scrub takes a `ScrubBudget`:
+`ScrubBudget::Unlimited` verifies the whole volume in one call, while
+`ScrubBudget::Inodes(n)` verifies a bounded number of inodes, then persists a
+**scrub-progress record** — a `BlockType::ScrubProgress` block reached from the
+transaction root, holding the resume cursor and the accumulated counts — and
+returns so the caller can resume later. The accumulated `ScrubReport` of a
+completed scrub is identical whether it ran in one call or many. The progress
+record is **rebuildable** metadata (`rustfs-spec.md` §4): a crash mid-scrub
+leaves a fully mountable volume and ordinary crash recovery never needs scrub
+(§14); a corrupt progress record simply restarts the scrub rather than failing
+the mount. The cursor is cleared when the pass completes.
+
+**Report, never silent mutation.** Scrub returns a structured `ScrubReport`
+(blocks checked, faults per class, repairs made, divergences corrected,
+unrepairable findings) and logs its closing outcome through `lib/log` with a
+stable event ID in the `rustfs` `12000` range (`AGENTS.md` §5.4 / §19.4). A
+clean scrub of a clean volume changes nothing on disk and is idempotent —
+metadata copy-repairs are direct block writes, and a transaction is committed
+only when scrub actually corrected something or persisted a cursor.
+
 ## Timestamps (§21)
 
 Every inode stores four 64-bit-native `Time64` timestamps —
@@ -450,7 +504,20 @@ side is written, **refcount-to-zero freeing** the chunk with the mount-time
 free-space rebuild agreeing, the **dedupe index rebuilding** from the chunk
 tree at mount and yielding the same sharing, dedupe staying **within the
 encryption domain**, and integrity + compression still holding on a **shared**
-chunk across a remount and a COW rewrite; the per-inode security record and
+chunk across a remount and a COW rewrite; the Stage-8 online-scrub acceptance
+tests — a **clean scrub** of a populated volume reporting zero faults and
+changing nothing (idempotent), scrub **detecting and repairing** a single-copy
+metadata corruption from its companion and reporting the repair, scrub
+**detecting and classifying** an injected data-block `Physical` and `Logical`
+fault without panicking, scrub **detecting and correcting** an injected
+refcount and a reverse-reference divergence against the on-disk chunk trees,
+scrub being **resumable** (a budgeted one-inode-per-call pass reaching the same
+result as one uninterrupted pass and clearing its cursor on completion) with a
+**crash mid-scrub still mounting** and resuming, a **shared chunk accounted
+once** with the dedupe domain preserved, the scrub being **capability-gated**
+on `CAP_FS_MOUNT` (refused and logged otherwise), and integrity + compression +
+dedupe invariants still holding across a scrub, a remount, and a COW rewrite;
+the per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
 highest committed generation; and a **crash-replay sweep** that faults the
@@ -467,7 +534,11 @@ pair, and a fixed-seed PRNG all drive `RustFs::open` over arbitrary bytes,
 asserting it never panics and fails closed. Since Stage 7 the fuzz image is
 populated with duplicate-content files and a reflink, so the sweep also drives
 the **chunk/refcount** and **reverse-reference** record decode paths that
-mount rebuilds the dedupe index from. The first-party compression codec
+mount rebuilds the dedupe index from. Since Stage 8 the base image is left with
+a **paused scrub**, and each successful mount additionally runs a bounded
+`scrub`, so the sweep also drives the **scrub-progress** record decode path
+(`load_scrub_progress`), asserting it too never panics and fails closed. The
+first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`rustfs-spec.md` §10,
 `AGENTS.md` §19.6), it round-trips structured inputs and feeds corrupted

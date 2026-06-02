@@ -146,6 +146,26 @@ is **scoped to the encryption domain** (§7) — the domain is carried in every
 chunk record and index key. The write pipeline is `dedupe → compress →
 encrypt`, so only unique records are compressed (§10).
 
+## Online scrub (`rustfs-spec.md` §12)
+
+`RustFs::scrub` is an **online**, resumable verify-and-repair pass over the
+mounted volume, **capability-gated** on `CAP_FS_MOUNT` (refused fail-closed and
+logged otherwise). It authenticates **both** physical copies of every live
+metadata block (superblock slot, transaction root, the inode/extent B-trees,
+and the chunk/reverse-reference trees), **repairing** a bad copy from its good
+companion and recording a both-copies-bad block as unrepairable; runs every
+live file-data block through the integrity pipeline and **classifies** any
+fault (`Physical`/`Aead`/`Logical`) without panicking (deep data repair is a
+later stage); and **recomputes** the chunk refcounts and reverse-reference sets
+from the live extents, **correcting** a divergence toward that truth without
+dropping a referrer. A `ScrubBudget::Inodes(n)` call is resumable: it persists
+a rebuildable **scrub-progress record** (reached from the transaction root)
+holding the cursor and accumulated counts and resumes to the same
+`ScrubReport`; a crash mid-scrub still mounts (ordinary recovery never needs
+scrub). Scrub returns a structured `ScrubReport` and logs its outcome through
+`lib/log` with a stable event ID; a clean scrub changes nothing and is
+idempotent.
+
 ## Crash consistency (copy-on-write + superblock ring)
 
 Every operation is a transaction. A block reachable from the last
@@ -175,7 +195,9 @@ so a delete can copy-on-write itself even on a full volume. No
 > compression** of every data record before encryption with a raw-store
 > fallback (Stage 6), and **deduplication** with a chunk/refcount tree, a
 > reverse-reference tree, reflinks, and a rebuildable byte-verified dedupe
-> index (Stage 7). Scrub and the later stages remain in the
+> index (Stage 7), and a resumable, capability-gated **online scrub** that
+> verifies and repairs metadata, classifies data faults, and reconciles
+> refcounts (Stage 8). The remaining stages stay in the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -188,6 +210,8 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
+- `CAP_FS_MOUNT` to run `RustFs::scrub` (the online verify-and-repair pass);
+  without it scrub fails closed with `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
   non-`READ_ONLY` mount. The driver runs in user space; it does not
@@ -225,7 +249,13 @@ overwriting one sharer copying-on-write while the other stays intact, a
 reflink sharing until written, refcount-to-zero freeing the chunk with the
 free-space rebuild agreeing, the dedupe index rebuilding at mount, dedupe
 staying within the encryption domain, and integrity + compression holding on a
-shared chunk), and a
+shared chunk), the Stage-8 online-scrub tests (a clean/idempotent scrub
+changing nothing, single-copy metadata repair from the companion, data
+`Physical`/`Logical` fault classification, refcount and reverse-reference
+divergence detection and correction, resumability matching an uninterrupted
+pass plus a crash-mid-scrub remount, a shared chunk accounted once within its
+encryption domain, the `CAP_FS_MOUNT` gate, and integrity + compression +
+dedupe invariants surviving a scrub/remount/COW rewrite), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
@@ -234,7 +264,9 @@ never torn.
 The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
 mount / metadata-decode path (`fuzz_mount`, which since Stage 7 also decodes
-the chunk/refcount and reverse-reference records via the dedupe-index rebuild)
+the chunk/refcount and reverse-reference records via the dedupe-index rebuild,
+and since Stage 8 also drives the scrub-progress record decode by running a
+bounded scrub on every successful mount)
 and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
 (`AGENTS.md` §19.6).
 

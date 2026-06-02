@@ -644,6 +644,7 @@ dependencies = [
  "rustos-abi",
  "rustos-compress",
  "rustos-crypto",
+ "rustos-log",
 ]
 
 [[package]]

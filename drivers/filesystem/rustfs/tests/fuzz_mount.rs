@@ -31,8 +31,23 @@
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
+use rustos_drv_fs_rustfs::{RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN};
+use rustos_log::{Event, Sink};
+
+/// Capability set granting the scrub gate (`CAP_FS_MOUNT`).
+struct AllCaps;
+impl CapabilityQuery for AllCaps {
+    fn holds(&self, _cap: CapabilityId) -> bool {
+        true
+    }
+}
+
+/// Log sink that discards the scrub's findings.
+struct NullSink;
+impl Sink for NullSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
 
 /// Volume key the fuzz image is formatted and reopened with. `RustFS` is
 /// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5); the fuzz
@@ -136,7 +151,12 @@ fn exercise(image: &[u8]) {
     let mut store = image.to_vec();
     store.resize(IMAGE_LEN, 0);
     let dev = MemBlock { store };
-    if let Ok(fs) = RustFs::open(dev, &FUZZ_KEY) {
+    if let Ok(mut fs) = RustFs::open(dev, &FUZZ_KEY) {
+        // Drive the Stage-8 scrub-progress decode path: a bounded scrub reads
+        // and decodes any persisted scrub-progress record (`load_scrub_progress`)
+        // before resuming. Like `open` it must return a `Result`, never panic,
+        // for any device contents (`AGENTS.md` §2.9 / §19.6).
+        let _ = fs.scrub(&AllCaps, &NullSink, ScrubBudget::Inodes(1));
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().store;
         let _ = RustFs::open(MemBlock { store: bytes }, &FUZZ_KEY);
@@ -182,6 +202,10 @@ fn formatted_image() -> Vec<u8> {
     // the reverse-reference tree even if the duplicate-content sharing above
     // is reclaimed; it is best-effort on the tiny fuzz device.
     let _ = fs.reflink(root, b"f0", b"f0clone");
+    // Leave a scrub paused mid-pass so the base image carries a persisted
+    // scrub-progress record (Stage 8): the sweep then hammers that on-disk
+    // decode path too. Best-effort on the tiny fuzz device.
+    let _ = fs.scrub(&AllCaps, &NullSink, ScrubBudget::Inodes(1));
     fs.into_block().store
 }
 

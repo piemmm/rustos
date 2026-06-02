@@ -65,6 +65,11 @@ pub enum BlockType {
     Btree = 3,
     /// A directory data block.
     Directory = 4,
+    /// A scrub-progress record: the resumable cursor and accumulated counts
+    /// of an online scrub (`docs/src/filesystem/rustfs-spec.md` §4 rebuildable
+    /// metadata, §12). It is reached from the transaction root and never
+    /// required for ordinary crash recovery (§14).
+    ScrubProgress = 5,
 }
 
 impl BlockType {
@@ -81,6 +86,7 @@ impl BlockType {
             2 => Some(Self::TxnRoot),
             3 => Some(Self::Btree),
             4 => Some(Self::Directory),
+            5 => Some(Self::ScrubProgress),
             _ => None,
         }
     }

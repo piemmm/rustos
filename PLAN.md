@@ -4056,7 +4056,30 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    the domain rule, and integrity + compression on a shared chunk; the soak
    fill switched to distinct per-file content and `fuzz_mount` extended to the
    chunk/reverse-ref decode.)
-8. Online scrub.
+8. Online scrub. ✓ (`RustFs::scrub` is a resumable, interrupt-safe,
+   capability-gated (`CAP_FS_MOUNT`) online verify-and-repair pass —
+   `src/scrub.rs`. It authenticates **both** physical copies of every live
+   metadata block (superblock slot, transaction root, the inode/extent
+   B-trees, the chunk/reverse-reference trees), repairing a bad copy from its
+   good companion (Stage 3 seam) and recording a both-copies-bad block as
+   unrepairable; runs every live data block through the Stage 5/6 pipeline and
+   classifies any fault by its `DataFault` (`Physical`/`Aead`/`Logical`),
+   recording it (deep data repair is later); and recomputes the chunk
+   refcounts + reverse-reference sets from the live extents, correcting a
+   divergence toward that truth without dropping a referrer. A
+   `ScrubBudget::Inodes(n)` call persists a rebuildable scrub-progress record
+   (`BlockType::ScrubProgress`, reached from the transaction root, holding the
+   resume cursor + accumulated counts) and resumes to the identical
+   `ScrubReport`; a crash mid-scrub still mounts (ordinary recovery never needs
+   scrub) and a corrupt progress record restarts the scrub. Scrub reports a
+   structured `ScrubReport` and logs its outcome through `lib/log` with a
+   stable event ID (`12000` range); a clean scrub changes nothing and is
+   idempotent. Tested: clean/idempotent, single-copy metadata repair, data
+   `Physical`/`Logical` classification, refcount + reverse-ref divergence
+   detect-and-correct, resumability matching one pass + crash-mid-scrub
+   remount, shared-chunk-once within the domain, the capability gate, and
+   integrity + compression + dedupe surviving a scrub/remount/COW rewrite;
+   `fuzz_mount` extended to drive the scrub-progress decode.)
 9. Offline check and rescue.
 10. TRIM/discard queues and mkfs-time discard.
 11. Device-health baselines and health-triggered scrub.
@@ -4067,7 +4090,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–7 complete; Stages 8–12 planned.** The copy-on-write
+**Status: Stages 1–8 complete; Stages 9–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

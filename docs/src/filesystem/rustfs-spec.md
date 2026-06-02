@@ -560,7 +560,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 5 | Data records with physical checksum and logical hash. | ✓ |
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | ✓ |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | ✓ |
-| 8 | Online scrub. | |
+| 8 | Online scrub. | ✓ |
 | 9 | Offline check and rescue. | |
 | 10 | TRIM/discard queues and mkfs-time discard. | |
 | 11 | Device health baselines and health-triggered scrub. | |
@@ -710,5 +710,41 @@ shared chunk across a remount and a COW rewrite — all pass, alongside the
 crash-replay sweep, the 1 GiB `fssoak` (its fill now uses distinct per-file
 content so dedupe does not mask exhaustion), the posix suite, the QEMU
 vertical, and the `fuzz_mount` harness extended to decode the chunk and
-reverse-reference records. Stages 8–12 remain; each implementing session
+reverse-reference records.
+
+Stage 8 added **online scrub** (§12), a resumable, interrupt-safe
+verify-and-repair pass that walks the live volume while it stays mounted and
+leans on the redundancy and integrity seams the earlier stages built
+(structure rebuild is the later `check`, not scrub). `RustFs::scrub` is an
+inherent driver operation (not a widening of a frozen `Filesystem*` trait,
+`AGENTS.md` §2.4), **capability-gated** on `CAP_FS_MOUNT` (refused
+fail-closed and logged otherwise, §5.4). It (1) authenticates **both** physical
+copies of every live metadata block — the committed superblock slot, the
+transaction root, the inode and per-file extent B-trees, and the chunk and
+reverse-reference trees — **repairing** a bad copy from its good companion
+(the Stage 3 seam) and recording a both-copies-bad block as unrepairable
+(never a panic, §5.4 / §2.9); (2) runs every live file-data block through the
+Stage 5/6 pipeline and **classifies** any failure by its `integrity::DataFault`
+(`Physical`/`Aead`/`Logical`), recording it (deep data repair is a later
+stage); and (3) **recomputes** the chunk refcounts and reverse-reference sets
+from the live inode/extent trees and reconciles them with the on-disk trees
+(§9), correcting a divergence toward the extent-derived truth without dropping
+a referrer. Scrub is **resumable**: a `ScrubBudget::Inodes(n)` call persists a
+rebuildable **scrub-progress record** (a `BlockType::ScrubProgress` block
+reached from the transaction root, holding the resume cursor and accumulated
+counts, §4) and resumes to the identical accumulated `ScrubReport`; a crash
+mid-scrub leaves a mountable volume (ordinary recovery never needs scrub, §14)
+and a corrupt progress record simply restarts the scrub. Scrub **reports,
+never silently mutates** — it returns a structured `ScrubReport` and logs its
+outcome through `lib/log` with a stable event ID (§5.4 / §19.4), and a clean
+scrub changes nothing and is idempotent. The §16 acceptance tests for this
+stage — clean/idempotent scrub, single-copy metadata repair from the
+companion, data `Physical`/`Logical` fault classification, refcount and
+reverse-reference divergence detection and correction, resumability matching an
+uninterrupted pass plus a crash-mid-scrub remount, a shared chunk accounted
+once within its encryption domain, the capability gate, and integrity +
+compression + dedupe invariants surviving a scrub/remount/COW rewrite — all
+pass, alongside the crash-replay sweep, the 1 GiB `fssoak`, the posix suite,
+the QEMU vertical, and the `fuzz_mount` harness extended to drive the
+scrub-progress decode path. Stages 9–12 remain; each implementing session
 ticks this table and `PLAN.md`.

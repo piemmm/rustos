@@ -67,6 +67,7 @@ mod crypto;
 mod dedupe;
 mod header;
 mod integrity;
+mod scrub;
 mod superblock;
 mod transaction;
 
@@ -81,6 +82,7 @@ use integrity::{
     logical_hash, physical_checksum, read_compression, write_compression, Compression, DataFault,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
+pub use scrub::{ScrubBudget, ScrubReport};
 
 use dedupe::{chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeKey, REVERSE_REF_CAP};
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
@@ -383,6 +385,10 @@ pub struct RustFs<B: Block> {
     /// Root of the authoritative reverse-reference tree, `0` until a chunk
     /// records referrers (`dedupe` module).
     reverse_ref_tree_root: u64,
+    /// Physical block of the scrub-progress record, `0` when no online scrub
+    /// is mid-pass. Rebuildable metadata reached from the transaction root
+    /// (`scrub` module, `docs/src/filesystem/rustfs-spec.md` §4, §12).
+    scrub_progress_root: u64,
     /// The volume's deduplication domain (`crypto` module, §7). Dedupe never
     /// crosses it.
     dedupe_domain: u64,
@@ -403,6 +409,7 @@ pub struct RustFs<B: Block> {
     saved_next_ino: u64,
     saved_chunk_tree_root: u64,
     saved_reverse_ref_tree_root: u64,
+    saved_scrub_progress_root: u64,
     alloc_cursor: u64,
     meta_cursor: u64,
     clock: fn() -> Time64,
@@ -877,6 +884,7 @@ impl<B: Block> RustFs<B> {
         self.saved_next_ino = self.next_ino;
         self.saved_chunk_tree_root = self.chunk_tree_root;
         self.saved_reverse_ref_tree_root = self.reverse_ref_tree_root;
+        self.saved_scrub_progress_root = self.scrub_progress_root;
     }
 
     /// Discard an operation that failed before committing: restore the inode
@@ -887,6 +895,7 @@ impl<B: Block> RustFs<B> {
         self.next_ino = self.saved_next_ino;
         self.chunk_tree_root = self.saved_chunk_tree_root;
         self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
+        self.scrub_progress_root = self.saved_scrub_progress_root;
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
             self.mark_free(block);
@@ -932,6 +941,7 @@ impl<B: Block> RustFs<B> {
             next_ino: self.next_ino,
             chunk_tree_root: self.chunk_tree_root,
             reverse_ref_tree_root: self.reverse_ref_tree_root,
+            scrub_progress_root: self.scrub_progress_root,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, &buf)?;
@@ -990,6 +1000,7 @@ impl<B: Block> RustFs<B> {
             next_ino: u64::from(ROOT_INO) + 1,
             chunk_tree_root: 0,
             reverse_ref_tree_root: 0,
+            scrub_progress_root: 0,
             dedupe_domain: 0,
             dedupe_index: BTreeMap::new(),
             root_phys: 0,
@@ -1002,6 +1013,7 @@ impl<B: Block> RustFs<B> {
             saved_next_ino: 0,
             saved_chunk_tree_root: 0,
             saved_reverse_ref_tree_root: 0,
+            saved_scrub_progress_root: 0,
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
@@ -1134,6 +1146,7 @@ impl<B: Block> RustFs<B> {
         fs.next_ino = root.next_ino;
         fs.chunk_tree_root = root.chunk_tree_root;
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
+        fs.scrub_progress_root = root.scrub_progress_root;
 
         // Rebuild the free-block bitmap by walking the live trees: the
         // superblock ring (reserved in `bootstrap`), the published transaction
@@ -1145,6 +1158,13 @@ impl<B: Block> RustFs<B> {
         // (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable;
         // §5 — two copies).
         fs.mark_meta_used(sb.root_phys);
+        // A scrub interrupted mid-pass leaves its rebuildable progress record
+        // reachable from the root; account for its mirrored pair so the
+        // rebuilt free set matches the live one (§4 rebuildable metadata, §5
+        // two copies). It never blocks an ordinary mount (§14).
+        if fs.scrub_progress_root != 0 {
+            fs.mark_meta_used(fs.scrub_progress_root);
+        }
         for node in fs.btree_collect_nodes(fs.chunk_tree_root, chunk_spec())? {
             fs.mark_meta_used(node);
         }

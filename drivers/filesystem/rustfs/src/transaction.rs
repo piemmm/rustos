@@ -30,10 +30,11 @@ const P_INODE_TREE_ROOT: usize = HEADER_LEN + 8;
 const P_NEXT_INO: usize = HEADER_LEN + 16;
 const P_CHUNK_TREE_ROOT: usize = HEADER_LEN + 24;
 const P_REVERSE_REF_TREE_ROOT: usize = HEADER_LEN + 32;
-const P_COMMIT_MAGIC: usize = HEADER_LEN + 40;
-const P_COMMIT_GENERATION: usize = HEADER_LEN + 48;
+const P_SCRUB_PROGRESS_ROOT: usize = HEADER_LEN + 40;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 48;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 56;
 /// Bytes of meaningful transaction-root payload following the header.
-const PAYLOAD_LEN: u32 = 56;
+const PAYLOAD_LEN: u32 = 64;
 
 fn rd_u64(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
@@ -62,6 +63,12 @@ pub struct TxnRoot {
     /// Physical block of the reverse-reference-tree root, or `0` when no chunk
     /// has recorded referrers yet (`docs/src/filesystem/rustfs-spec.md` §4, §9).
     pub reverse_ref_tree_root: u64,
+    /// Physical block of the scrub-progress record, or `0` when no online
+    /// scrub is mid-pass. It holds a resumable scrub's cursor and accumulated
+    /// counts (rebuildable metadata, `docs/src/filesystem/rustfs-spec.md` §4,
+    /// §12); a crash mid-scrub leaves it set but never blocks an ordinary
+    /// mount (§14).
+    pub scrub_progress_root: u64,
 }
 
 impl TxnRoot {
@@ -90,6 +97,7 @@ impl TxnRoot {
         wr_u64(block, P_NEXT_INO, self.next_ino);
         wr_u64(block, P_CHUNK_TREE_ROOT, self.chunk_tree_root);
         wr_u64(block, P_REVERSE_REF_TREE_ROOT, self.reverse_ref_tree_root);
+        wr_u64(block, P_SCRUB_PROGRESS_ROOT, self.scrub_progress_root);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -135,6 +143,7 @@ impl TxnRoot {
             next_ino: rd_u64(block, P_NEXT_INO),
             chunk_tree_root: rd_u64(block, P_CHUNK_TREE_ROOT),
             reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
+            scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
         })
     }
 }
