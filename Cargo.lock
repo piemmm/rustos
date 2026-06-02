@@ -691,6 +691,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-input"
+version = "0.0.0"
+dependencies = [
+ "rustos-geometry",
+]
+
+[[package]]
 name = "rustos-installer"
 version = "0.0.0"
 
@@ -976,6 +983,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-font",
  "rustos-geometry",
+ "rustos-input",
  "rustos-raster",
  "rustos-theme",
 ]
@@ -1386,6 +1394,7 @@ dependencies = [
  "rustos-abi",
  "rustos-cursor",
  "rustos-geometry",
+ "rustos-input",
  "rustos-raster",
  "rustos-theme",
 ]

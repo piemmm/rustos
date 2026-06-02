@@ -1,10 +1,12 @@
 //! Headless unit tests for the taskbar layout, model, and rendering.
 
 use rustos_geometry::{Point, Rect, Scale};
+use rustos_input::{InputEvent, PointerButton};
 use rustos_raster::{Color, Pixel, Surface};
 use rustos_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
+use crate::input::{TaskbarInput, TaskbarResponse};
 use crate::layout::{BarLayout, Hit};
 use crate::menu::{MenuAction, MenuEntryId, SessionControl, StartMenu};
 use crate::notifications::{IconId, NotificationArea};
@@ -616,5 +618,179 @@ fn task_title_too_long_for_its_slot_is_truncated_not_overflowing() {
             role(theme.palette().on_surface)
         ),
         "task 0's title does not spill past its slot"
+    );
+}
+
+// ---- input routing --------------------------------------------------
+
+/// A 1000×800 bottom bar with the dark theme, the configuration every
+/// hit-testing test above uses.
+fn bottom_bar() -> Taskbar {
+    Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark())
+}
+
+/// Move the pointer to `(x, y)` and press the primary button there.
+fn press_at(input: &mut TaskbarInput, bar: &mut Taskbar, x: i32, y: i32) -> TaskbarResponse {
+    input.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(x, y),
+        },
+        bar,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        bar,
+    )
+}
+
+#[test]
+fn pressing_the_start_button_toggles_the_menu() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    assert!(!bar.start_menu().is_open());
+
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: true }
+    );
+    assert!(bar.start_menu().is_open());
+
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: false }
+    );
+    assert!(!bar.start_menu().is_open());
+}
+
+#[test]
+fn pressing_a_task_slot_applies_the_activate_rule() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().add(TaskId(2), "Browser");
+    let mut input = TaskbarInput::new();
+
+    // Slot 0 spans x 48..208; press its middle.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 770),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Activated
+        }
+    );
+    assert_eq!(bar.tasks().focused(), Some(TaskId(1)));
+
+    // Pressing the focused task again minimises it.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 770),
+        TaskbarResponse::TaskActivated {
+            id: TaskId(1),
+            outcome: ActivateOutcome::Minimised
+        }
+    );
+    assert!(bar.tasks().is_minimised(TaskId(1)));
+}
+
+#[test]
+fn pressing_a_notification_icon_reports_its_id() {
+    let mut bar = bottom_bar();
+    bar.notifications_mut().add(IconId(1), "icon.network");
+    bar.notifications_mut().add(IconId(2), "icon.volume");
+    let mut input = TaskbarInput::new();
+
+    // With two icons, notifications[0] spans x 872..896.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 880, 770),
+        TaskbarResponse::NotificationActivated { id: IconId(1) }
+    );
+    // notifications[1] spans x 896..920.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 900, 770),
+        TaskbarResponse::NotificationActivated { id: IconId(2) }
+    );
+}
+
+#[test]
+fn pressing_the_clock_is_reported() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    assert_eq!(
+        press_at(&mut input, &mut bar, 950, 770),
+        TaskbarResponse::ClockPressed
+    );
+}
+
+#[test]
+fn a_press_that_misses_every_region_changes_nothing() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    // A gap in the (empty) task region, and a point above the bar entirely.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 500, 770),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        press_at(&mut input, &mut bar, 500, 100),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.start_menu().is_open());
+}
+
+#[test]
+fn non_primary_buttons_and_releases_are_ignored() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    input.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(10, 770),
+        },
+        &mut bar,
+    );
+    // The secondary button over the start button does not toggle the menu.
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary
+            },
+            &mut bar
+        ),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            },
+            &mut bar
+        ),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.start_menu().is_open());
+}
+
+#[test]
+fn pointer_motion_tracks_position_without_acting() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerMoved {
+                to: Point::new(950, 770),
+            },
+            &mut bar,
+        ),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(input.pointer(), Point::new(950, 770));
+    // A press with no further motion acts at the tracked position (the clock).
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            },
+            &mut bar
+        ),
+        TaskbarResponse::ClockPressed
     );
 }

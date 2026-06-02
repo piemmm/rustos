@@ -31,6 +31,11 @@ rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # `lib/cursor`, not the window manager, so a different cursor set is data
 # (§2.2 / §2.4).
 rustos-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
+# The shared pointer input-event vocabulary (§6, §17.4): `PointerButton` and
+# `InputEvent` are defined once in `lib/input` and re-exported here, so the
+# taskbar — which may not depend on the window manager — routes the same
+# device events without duplicating the vocabulary (§2.2).
+rustos-input = { path = "../../../lib/input", version = "=0.0.0" }
 
 [lints]
 workspace = true

@@ -24,7 +24,11 @@ router**:
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
-  move-grabs; `Compositor::window_at` is the top-most hit-test.
+  move-grabs; `Compositor::window_at` is the top-most hit-test. The
+  device-level `PointerButton`/`InputEvent` vocabulary it consumes lives
+  in the shared `rustos-input` crate (re-exported here) so the taskbar
+  routes the same events without depending on the window manager
+  (`AGENTS.md` §17.4).
 - Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
   `rustos_cursor::CursorImage` composited as the top-most layer so its
   hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4).
@@ -44,9 +48,9 @@ Stage 7 increments.
 ## Properties
 
 - `no_std` (+ `alloc`); depends only on the shared `lib/*` crates
-  (`rustos-abi`, `rustos-raster`, `rustos-geometry`, `rustos-theme`,
-  `rustos-cursor`) — never on a sibling userland crate (`AGENTS.md`
-  §17.4).
+  (`rustos-abi`, `rustos-raster`, `rustos-geometry`, `rustos-input`,
+  `rustos-theme`, `rustos-cursor`) — never on a sibling userland crate
+  (`AGENTS.md` §17.4).
 - No `unsafe`; no `unwrap`/`expect`/`panic!` in production paths — every
   fallible entry point returns a `Result`/`Option` (`AGENTS.md` §2.9).
 

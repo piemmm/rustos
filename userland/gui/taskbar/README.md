@@ -23,6 +23,12 @@ owns:
   under it (start button, a task, a notification icon, or the clock) for
   input routing. A region slot that does not fit is `Rect::EMPTY` and is never
   hit.
+- **Input routing** — `TaskbarInput` consumes the shared `rustos-input`
+  `InputEvent` stream (the same one the window manager routes) and turns a
+  primary press into a `TaskbarResponse`: toggling the start menu, applying
+  the task activate/minimise rule, or reporting a notification-icon or clock
+  press. Anything else, or a press that misses every region, is `Ignored`
+  (fail closed, `AGENTS.md` §2.9).
 - **Start menu** — `StartMenu` holds only the session controls (log out,
   lock, shut down, restart) at this stage; it is shaped so launcher entries
   can be added later as a new `MenuAction` variant without changing the
@@ -51,12 +57,13 @@ same one it uses for windows. There is no second implementation
 ## Dependencies and layering
 
 The crate depends only on `lib/*`: `rustos-geometry` (the shared `Point` /
-`Rect` vocabulary), `rustos-raster` (the premultiplied-alpha `Color`/`Surface`
-the window manager also paints with), `rustos-font` (the shared text
-rasteriser, `AGENTS.md` §16.4), and `rustos-theme` (the single shared theme
-definition). It does **not** depend on the window manager or any sibling
-userland crate, and nothing depends on it in turn
-(`AGENTS.md` §17.4, §17.3): the desktop is an optional, one-way-dependent
+`Rect` vocabulary), `rustos-input` (the shared `PointerButton`/`InputEvent`
+vocabulary the window manager also routes), `rustos-raster` (the
+premultiplied-alpha `Color`/`Surface` the window manager also paints with),
+`rustos-font` (the shared text rasteriser, `AGENTS.md` §16.4), and
+`rustos-theme` (the single shared theme definition). It does **not** depend on
+the window manager or any sibling userland crate, and nothing depends on it in
+turn (`AGENTS.md` §17.4, §17.3): the desktop is an optional, one-way-dependent
 frontend, so a headless image omits it cleanly.
 
 It is `no_std` (with `alloc`). No `unsafe`, and no `unwrap`/`expect`/`panic!`

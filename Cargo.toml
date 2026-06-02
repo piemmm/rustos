@@ -38,6 +38,7 @@ members = [
     "lib/cursor",
     "lib/font",
     "lib/geometry",
+    "lib/input",
     "lib/log",
     "lib/procinfo",
     "lib/raster",

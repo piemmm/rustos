@@ -27,40 +27,12 @@ use crate::geometry::Point;
 use crate::window::{Window, WindowId};
 use crate::Compositor;
 
-/// The pointer buttons the desktop distinguishes.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PointerButton {
-    /// The primary (typically left) button: activates and grabs.
-    Primary,
-    /// The secondary (typically right) button: context actions.
-    Secondary,
-    /// The middle button.
-    Middle,
-}
-
-/// A device-level input event delivered to the [`InputRouter`].
-///
-/// Button events act at the pointer's current position; that position
-/// is updated only by [`InputEvent::PointerMoved`], exactly as a real
-/// pointing device reports motion separately from clicks.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum InputEvent {
-    /// The pointer moved to an absolute screen position.
-    PointerMoved {
-        /// New pointer position, in screen coordinates.
-        to: Point,
-    },
-    /// A pointer button was pressed at the current pointer position.
-    PointerPressed {
-        /// The button that went down.
-        button: PointerButton,
-    },
-    /// A pointer button was released at the current pointer position.
-    PointerReleased {
-        /// The button that came up.
-        button: PointerButton,
-    },
-}
+// The device-level pointer vocabulary the router consumes is shared with the
+// taskbar, which routes the same events but may not depend on the window
+// manager (`AGENTS.md` §17.4). It therefore lives in `lib/input`; the
+// compositor re-exports it so callers keep referring to
+// `rustos_wm::{InputEvent, PointerButton}` (§2.2 — one definition).
+pub use rustos_input::{InputEvent, PointerButton};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

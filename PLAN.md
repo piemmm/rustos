@@ -4754,10 +4754,36 @@ device list.
   the current pointer untouched rather than blanking it (§2.9); no
   `unsafe`, no `unwrap`/`expect`/`panic!`. 7 new headless tests (52
   total). Docs `docs/src/desktop/cursors.md` and the crate `README.md`.
-- **Still to do this stage:** GPU-accelerated compositor path, wiring
-  the taskbar hit-test/model and the WM input router to live
-  pointer/keyboard device events (and the taskbar–WM event glue, lifted
-  into `lib/*` per §17.4), notification-icon artwork, selecting a font face
+- **Shared input-event vocabulary + taskbar input router — DONE
+  (increment).** The device-level pointer vocabulary the desktop routes
+  (`PointerButton`, `InputEvent`) was defined inside `userland/gui/wm`,
+  but the taskbar must route the **same** events to hit-test its regions
+  and may not depend on the window manager (§17.4). Per §6 / §2.2 it now
+  lives in `lib/input` (`rustos-input`, `no_std`,
+  `#![forbid(unsafe_code)]`, dep only `lib/geometry`, `Layer::Lib`) — the
+  same lift as `lib/geometry` and `lib/raster`. `rustos-wm` re-exports the
+  types (behaviour-neutral; its `input` module keeps the WM-specific
+  `InputRouter`/`InputResponse`), so there is exactly one definition. The
+  taskbar gains an `input` module: `TaskbarInput` consumes the shared
+  `InputEvent` stream — the taskbar counterpart of the WM's `InputRouter`
+  — tracking the pointer from motion events and acting only on a primary
+  press, which it hit-tests against the current `BarLayout` and dispatches
+  to the model as a `TaskbarResponse` (start-menu toggle, the task
+  activate/minimise rule, or a notification-icon / clock press). A
+  non-primary button, a release, or a press that misses every region is
+  `Ignored` (fail closed, §2.9); selecting an entry inside an open start
+  menu stays a later increment (the popup geometry). 4 new `lib/input`
+  tests + 7 new taskbar tests (41 total); `rustos-wm` keeps its 52 tests.
+  Added to `AGENTS.md` §3's `lib/` list and the workspace manifest; docs
+  `docs/src/desktop/taskbar.md` (+ Input-routing section) and the
+  `rustos-input` / taskbar / WM `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths.
+- **Still to do this stage:** GPU-accelerated compositor path, wiring the
+  now-shared input routers (the WM `InputRouter` and the taskbar
+  `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
+  pointer/keyboard device events and the taskbar–WM event glue,
+  start-menu popup geometry + entry routing, notification-icon artwork,
+  selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, the
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
   through the §16.4 image-decoding library in a §19.5 sandbox and caching the

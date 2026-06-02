@@ -153,6 +153,9 @@ rustos/
 │   │                    #   the desktop DPI / UI Scale (logical->physical
 │   │                    #   pixels) for the WM, taskbar, cursors, and apps
 │   │                    #   (§10, §17.4).
+│   ├── input/           # Shared pointer input-event vocabulary
+│   │                    #   (PointerButton/InputEvent) routed by the WM and
+│   │                    #   taskbar (§17.4).
 │   ├── log/             # Structured logging.
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).

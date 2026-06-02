@@ -13,6 +13,11 @@ publish.workspace = true
 # window manager uses, lifted to `lib/*` so the taskbar reuses it without
 # depending on the window manager (§17.4, §2.2).
 rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# Shared pointer input-event vocabulary (`PointerButton`/`InputEvent`) — the
+# same device events the window manager routes, lifted to `lib/*` so the
+# taskbar routes them to its regions without depending on the window manager
+# (§17.4, §2.2).
+rustos-input = { path = "../../../lib/input", version = "=0.0.0" }
 # Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
 # primitives the window manager paints with, lifted to `lib/*` so the taskbar
 # renders its regions into a `Surface` without depending on the window manager

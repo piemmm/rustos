@@ -6,8 +6,9 @@ GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 the geometry of every region, pointer hit-testing for input routing, the
 start-menu / task-list / notification-area state machines, and painting those
 regions — including the clock label and task-title **text** — into a themed
-pixel surface. Notification-icon artwork and the live window-manager IPC build
-on this model in later increments.
+pixel surface, plus **routing** pointer presses into taskbar actions.
+Notification-icon artwork and the live window-manager IPC build on this model
+in later increments.
 
 ## Where it sits
 
@@ -15,11 +16,13 @@ As a `userland/gui/*` crate the taskbar depends only on `lib/*`: the shared
 [`rustos-geometry`](../lib/overview.md) coordinate types, the shared
 `rustos-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
 window manager also paints with), the shared `rustos-font` text rasteriser
-(the built-in bitmap face and glyph blitter, `AGENTS.md` §16.4), and the
-shared [`rustos-theme`](theming.md) definition. It never depends on the
-window manager or on any sibling userland crate, and nothing depends on it in
-turn (`AGENTS.md` §17.4, §17.3) — the desktop is an optional,
-one-way-dependent frontend, so a headless image simply omits it.
+(the built-in bitmap face and glyph blitter, `AGENTS.md` §16.4), the shared
+`rustos-input` pointer-event vocabulary (the same `PointerButton`/`InputEvent`
+the window manager routes), and the shared [`rustos-theme`](theming.md)
+definition. It never depends on the window manager or on any sibling userland
+crate, and nothing depends on it in turn (`AGENTS.md` §17.4, §17.3) — the
+desktop is an optional, one-way-dependent frontend, so a headless image simply
+omits it.
 
 ## Layout
 
@@ -48,7 +51,8 @@ pathological screen size or extent fails closed *inside* the bar rather than
 wrapping (`AGENTS.md` §2.9); a task or icon slot that does not fit its region
 is `Rect::EMPTY` and therefore never hit. `BarLayout::hit_test` maps a
 pointer to the `Hit` element under it (start button, a task index, a
-notification index, or the clock), which is what input routing will dispatch.
+notification index, or the clock), which is what input routing dispatches
+(see *Input routing*).
 
 ## Rounded edges
 
@@ -119,6 +123,29 @@ Adding a task with a duplicate id, or removing/activating an unknown id,
 changes nothing and is reported as such — the window manager assigns unique
 ids, so a clash signals a bug rather than a benign retry.
 
+## Input routing
+
+`TaskbarInput` is the taskbar's input router, the counterpart of the window
+manager's `InputRouter`. It consumes the **same** shared `rustos-input`
+`InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
+the pointer position from motion events and acting only on a primary-button
+press. A press is hit-tested against the current `BarLayout` and dispatched to
+the model, reported as a `TaskbarResponse`:
+
+- a press on the **start button** toggles the start menu
+  (`StartMenuToggled { open }`);
+- a press on a **task slot** applies the click-to-activate / minimise rule and
+  reports the `ActivateOutcome` (`TaskActivated { id, outcome }`);
+- a press on a **notification icon** reports its `IconId`
+  (`NotificationActivated`);
+- a press on the **clock** reports `ClockPressed`.
+
+A non-primary button, a release, or a press that misses every region changes
+nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
+Selecting an entry *inside* an open start menu is not routed here: the menu is
+a popup whose geometry is a later increment, so this router covers the bar
+itself, the surface the window manager already composites.
+
 ## Theming
 
 The taskbar reads its corner radius from the active theme and adopts a new one
@@ -143,4 +170,8 @@ theme colour, including that a dark↔light switch repaints the background. The
 text tests assert that a set clock label paints `on_surface` glyphs inside the
 clock region (and an empty label paints none), that a focused task's title is
 drawn in `on_accent`, and that a title too long for its slot is truncated
-rather than spilling into the next slot.
+rather than spilling into the next slot. The input-routing tests assert that a
+primary press on the start button toggles the menu, on a task slot applies the
+activate/minimise rule, and on a notification icon and the clock reports them,
+and that a non-primary button, a release, a miss, and pointer motion all leave
+the model unchanged.

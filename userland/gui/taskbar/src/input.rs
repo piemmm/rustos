@@ -1,0 +1,131 @@
+//! Routing pointer input into taskbar actions.
+//!
+//! The [`TaskbarInput`] router turns a stream of device-level pointer
+//! [`InputEvent`]s into actions against a [`Taskbar`]: a primary-button press
+//! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
+//! and drives the model — toggling the start menu, applying the
+//! click-to-activate / minimise rule to a task, or reporting a press on a
+//! notification icon or the clock.
+//!
+//! It is the taskbar counterpart of the window manager's input router, and it
+//! consumes the **same** shared [`rustos_input`] event vocabulary, so the
+//! desktop routes one event type to both (`AGENTS.md` §17.4, §2.2). Like that
+//! router it holds no pixels, tracks the pointer position from motion events,
+//! applies presses at that position, and never panics: a press that misses
+//! every region changes nothing (`AGENTS.md` §2.9).
+//!
+//! Selecting an entry *inside* an open start menu is not routed here: the
+//! menu is a popup whose geometry is a separate, later increment. This router
+//! covers the bar itself — the surface the window manager already composites.
+
+use rustos_geometry::Point;
+use rustos_input::{InputEvent, PointerButton};
+
+use crate::layout::Hit;
+use crate::notifications::IconId;
+use crate::taskbar::Taskbar;
+use crate::tasks::{ActivateOutcome, TaskId};
+
+/// What a [`TaskbarInput`] press did to the taskbar.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TaskbarResponse {
+    /// The event changed no taskbar state (a non-primary button, a release,
+    /// pointer motion, or a press that missed every region).
+    Ignored,
+    /// The start button was pressed, toggling the start menu. `open` is the
+    /// menu's new state.
+    StartMenuToggled {
+        /// `true` if the menu is now showing.
+        open: bool,
+    },
+    /// A task slot was pressed, applying the click-to-activate / minimise
+    /// rule to that task.
+    TaskActivated {
+        /// The task whose slot was pressed.
+        id: TaskId,
+        /// What the click did, so the caller can drive the window manager.
+        outcome: ActivateOutcome,
+    },
+    /// A notification icon was pressed.
+    NotificationActivated {
+        /// The icon that was pressed.
+        id: IconId,
+    },
+    /// The clock was pressed.
+    ClockPressed,
+}
+
+/// Routes pointer input into [`Taskbar`] actions.
+///
+/// The router's only state is the current pointer position, updated by
+/// [`InputEvent::PointerMoved`]; presses act at that position, exactly as a
+/// real pointing device reports motion separately from clicks.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TaskbarInput {
+    pointer: Point,
+}
+
+impl TaskbarInput {
+    /// Create a router with the pointer at the screen origin.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The current pointer position in screen coordinates.
+    #[must_use]
+    pub const fn pointer(&self) -> Point {
+        self.pointer
+    }
+
+    /// Process one input `event` against `taskbar`, returning what changed.
+    ///
+    /// Only a primary-button press acts; pointer motion updates the tracked
+    /// position, and every other event is [`TaskbarResponse::Ignored`].
+    pub fn handle(&mut self, event: InputEvent, taskbar: &mut Taskbar) -> TaskbarResponse {
+        match event {
+            InputEvent::PointerMoved { to } => {
+                self.pointer = to;
+                TaskbarResponse::Ignored
+            }
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            } => self.press_primary(taskbar),
+            InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
+                TaskbarResponse::Ignored
+            }
+        }
+    }
+
+    /// Handle a primary-button press at the current pointer position.
+    fn press_primary(&mut self, taskbar: &mut Taskbar) -> TaskbarResponse {
+        let Some(hit) = taskbar.hit_test(self.pointer) else {
+            return TaskbarResponse::Ignored;
+        };
+        match hit {
+            Hit::StartButton => {
+                let open = taskbar.start_menu_mut().toggle();
+                TaskbarResponse::StartMenuToggled { open }
+            }
+            Hit::Task(index) => {
+                let Some(id) = taskbar.tasks().entries().get(index).map(|entry| entry.id) else {
+                    return TaskbarResponse::Ignored;
+                };
+                let outcome = taskbar.tasks_mut().activate(id);
+                TaskbarResponse::TaskActivated { id, outcome }
+            }
+            Hit::Notification(index) => {
+                let Some(id) = taskbar
+                    .notifications()
+                    .icons()
+                    .get(index)
+                    .map(|icon| icon.id)
+                else {
+                    return TaskbarResponse::Ignored;
+                };
+                TaskbarResponse::NotificationActivated { id }
+            }
+            Hit::Clock => TaskbarResponse::ClockPressed,
+        }
+    }
+}
