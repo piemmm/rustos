@@ -4778,11 +4778,34 @@ device list.
   `docs/src/desktop/taskbar.md` (+ Input-routing section) and the
   `rustos-input` / taskbar / WM `README.md`s. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths.
+- **Start-menu popup geometry + entry routing — DONE (increment).**
+  `userland/gui/taskbar` gains the start menu's popup geometry and the
+  routing that selects an entry inside it (previously deferred by the
+  taskbar input router). `MenuLayout::compute` (in `layout.rs`, reusing
+  the bar's saturating conversion helpers so nothing is duplicated, §2.2)
+  opens the popup *outward* from the start button on the bar's edge —
+  above a bottom bar, below a top bar, to the inner side of a left/right
+  bar — with one *scale-aware* row per entry and the theme's
+  `popup_corner_radius`; `MenuLayout::hit_test` maps a pointer to the
+  entry index. `Taskbar` stores `popup_corner_radius` and exposes
+  `menu_layout()`. `TaskbarInput` now treats the open menu as **modal**
+  (§2.1, one click does one thing): a primary press inside the popup
+  selects the entry under the pointer (new `MenuEntrySelected`), a press
+  on the start button still toggles it shut, and a press anywhere else
+  dismisses it (new `StartMenuDismissed`) without acting on what it
+  landed on. `render_menu` paints the open popup through the bar's
+  existing `rustos-font`/`rustos-raster` path (no second blitter or
+  rounded-corner path, §2.2), returning `None` when closed; the WM
+  places and rounds the rectangular surface via `MenuLayout::corner_radius`.
+  All arithmetic saturates and fails closed (§2.9); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. 10 new headless tests
+  (51 total). Docs `docs/src/desktop/taskbar.md` and the crate
+  `README.md`.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
   pointer/keyboard device events and the taskbar–WM event glue,
-  start-menu popup geometry + entry routing, notification-icon artwork,
+  notification-icon artwork,
   selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, the
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`

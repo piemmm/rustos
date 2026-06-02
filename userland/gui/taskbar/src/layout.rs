@@ -16,8 +16,15 @@ use alloc::vec::Vec;
 
 use rustos_geometry::{Point, Rect, Scale};
 
-use crate::edge::Orientation;
+use crate::edge::{Edge, Orientation};
 use crate::taskbar::TaskbarConfig;
+
+/// Width of the start-menu popup, in *logical* pixels at the reference
+/// density (scaled to physical pixels by [`Scale`]).
+const MENU_WIDTH: u32 = 200;
+/// Height of one start-menu entry row, in *logical* pixels at the reference
+/// density (scaled to physical pixels by [`Scale`]).
+const MENU_ROW_HEIGHT: u32 = 32;
 
 /// The element of the taskbar under a pointer, returned by
 /// [`BarLayout::hit_test`].
@@ -160,6 +167,90 @@ impl BarLayout {
             return Some(Hit::Task(index));
         }
         None
+    }
+}
+
+/// The computed geometry of the start-menu popup.
+///
+/// The popup is the transient surface the start button opens. Like the bar
+/// itself it is a *rectangular* buffer the window manager places and rounds:
+/// [`MenuLayout::compute`] reports the popup [`panel`](Self::panel), the
+/// [`corner_radius`](Self::corner_radius) the compositor applies through its
+/// single anti-aliased rounded-corner path (`AGENTS.md` §2.2), and one
+/// [`Rect`] per menu entry stacked along the panel. The popup opens *outward*
+/// from the bar: above a bottom bar, below a top bar, and to the inner side of
+/// a left/right bar, with its leading edge aligned to the start button.
+///
+/// All arithmetic saturates, so a pathological screen or scale fails closed
+/// rather than wrapping (`AGENTS.md` §2.9).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuLayout {
+    /// The whole popup panel.
+    pub panel: Rect,
+    /// The corner radius the window manager applies to the popup (`AGENTS.md`
+    /// §2.2). `0` is square.
+    pub corner_radius: u32,
+    /// One row per menu entry, in entry order, stacked from the panel's top.
+    pub entries: Vec<Rect>,
+}
+
+impl MenuLayout {
+    /// Compute the popup geometry for a menu of `entry_count` entries opened
+    /// from `start_button` on the `bar` pinned to `edge`, applying
+    /// `popup_corner_radius` at the desktop `scale`.
+    ///
+    /// `bar` and `start_button` are the already-scaled *physical* rectangles
+    /// from a [`BarLayout`]; the popup's own width, row height, and corner
+    /// radius are *logical* lengths converted through `scale`, so the
+    /// logical→physical conversion is the one in [`Scale::scale_length`],
+    /// never re-derived (`AGENTS.md` §2.2 / §10).
+    #[must_use]
+    pub fn compute(
+        edge: Edge,
+        bar: Rect,
+        start_button: Rect,
+        popup_corner_radius: u32,
+        scale: Scale,
+        entry_count: usize,
+    ) -> Self {
+        let width = scale.scale_length(MENU_WIDTH);
+        let row_height = scale.scale_length(MENU_ROW_HEIGHT);
+        let corner_radius = scale.scale_length(popup_corner_radius);
+        let panel_height = row_height.saturating_mul(to_u32(entry_count));
+
+        let (x, y) = match edge {
+            Edge::Top => (start_button.left(), bar.bottom()),
+            Edge::Bottom => (
+                start_button.left(),
+                bar.top().saturating_sub(to_i32(panel_height)),
+            ),
+            Edge::Left => (bar.right(), start_button.top()),
+            Edge::Right => (bar.left().saturating_sub(to_i32(width)), start_button.top()),
+        };
+        let panel = Rect::new(x, y, width, panel_height);
+
+        let mut entries = Vec::with_capacity(entry_count);
+        for index in 0..entry_count {
+            let offset = row_height.saturating_mul(to_u32(index));
+            let row_top = y.saturating_add(to_i32(offset));
+            entries.push(Rect::new(x, row_top, width, row_height));
+        }
+
+        Self {
+            panel,
+            corner_radius,
+            entries,
+        }
+    }
+
+    /// The index of the entry under `point`, or `None` for a point outside the
+    /// panel or on a gap between rows.
+    #[must_use]
+    pub fn hit_test(&self, point: Point) -> Option<usize> {
+        if !self.panel.contains(point) {
+            return None;
+        }
+        self.entries.iter().position(|row| row.contains(point))
     }
 }
 

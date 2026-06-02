@@ -7,10 +7,10 @@ use rustos_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse};
-use crate::layout::{BarLayout, Hit};
+use crate::layout::{BarLayout, Hit, MenuLayout};
 use crate::menu::{MenuAction, MenuEntryId, SessionControl, StartMenu};
 use crate::notifications::{IconId, NotificationArea};
-use crate::render::render;
+use crate::render::{render, render_menu};
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
 
@@ -793,4 +793,215 @@ fn pointer_motion_tracks_position_without_acting() {
         ),
         TaskbarResponse::ClockPressed
     );
+}
+
+// ---- start-menu popup geometry --------------------------------------
+
+#[test]
+fn menu_popup_opens_above_a_bottom_bar() {
+    let theme = Theme::dark();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    let menu = bar.menu_layout();
+
+    // The bar sits at y 760..800 with a 48-wide start button at x 0; the
+    // four-entry popup (200×32 rows) opens upward from the bar's top edge.
+    assert_eq!(menu.panel, Rect::new(0, 632, 200, 128));
+    assert_eq!(menu.corner_radius, theme.metrics().popup_corner_radius);
+    assert_eq!(menu.entries.len(), 4);
+    assert_eq!(menu.entries[0], Rect::new(0, 632, 200, 32));
+    assert_eq!(menu.entries[3], Rect::new(0, 728, 200, 32));
+    // The rows stack contiguously and the panel exactly covers them.
+    assert_eq!(menu.entries[3].bottom(), menu.panel.bottom());
+}
+
+#[test]
+fn menu_popup_opens_outward_on_every_edge() {
+    let theme = Theme::dark();
+    let base = TaskbarConfig::bottom_bar(1000, 800);
+
+    // Top bar: popup drops below the bar (bar height 40).
+    let top = Taskbar::new(
+        TaskbarConfig {
+            edge: Edge::Top,
+            ..base
+        },
+        &theme,
+    );
+    assert_eq!(top.menu_layout().panel, Rect::new(0, 40, 200, 128));
+
+    // Bottom bar: popup rises above the bar.
+    let bottom = Taskbar::new(
+        TaskbarConfig {
+            edge: Edge::Bottom,
+            ..base
+        },
+        &theme,
+    );
+    assert_eq!(bottom.menu_layout().panel, Rect::new(0, 632, 200, 128));
+
+    // Left bar (width 40): popup opens to the right, aligned to the top
+    // start button.
+    let left = Taskbar::new(
+        TaskbarConfig {
+            edge: Edge::Left,
+            ..base
+        },
+        &theme,
+    );
+    assert_eq!(left.menu_layout().panel, Rect::new(40, 0, 200, 128));
+
+    // Right bar (bar at x 960): popup opens to the left of the bar.
+    let right = Taskbar::new(
+        TaskbarConfig {
+            edge: Edge::Right,
+            ..base
+        },
+        &theme,
+    );
+    assert_eq!(right.menu_layout().panel, Rect::new(760, 0, 200, 128));
+}
+
+#[test]
+fn menu_popup_scales_with_dpi() {
+    let theme = Theme::dark();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
+    bar.set_scale(Scale::from_percent(200).expect("200% is in range"));
+    let menu = bar.menu_layout();
+
+    // The logical 200×32 rows and the 6px popup radius all double at 200%.
+    assert_eq!(menu.panel.width, 400);
+    assert_eq!(menu.panel.height, 256);
+    assert_eq!(menu.entries[0], Rect::new(0, 1664, 400, 64));
+    assert_eq!(menu.corner_radius, theme.metrics().popup_corner_radius * 2);
+}
+
+#[test]
+fn menu_popup_hit_test_resolves_entries() {
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let menu = bar.menu_layout();
+    // Middle of the first and last rows.
+    assert_eq!(menu.hit_test(Point::new(100, 648)), Some(0));
+    assert_eq!(menu.hit_test(Point::new(100, 744)), Some(3));
+    // Outside the panel entirely (on the bar, below the popup).
+    assert_eq!(menu.hit_test(Point::new(100, 780)), None);
+    // To the right of the 200-wide panel.
+    assert_eq!(menu.hit_test(Point::new(300, 648)), None);
+}
+
+// ---- start-menu popup input routing ---------------------------------
+
+#[test]
+fn pressing_a_menu_entry_selects_it_and_closes_the_menu() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    // Open the menu via the start button.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: true }
+    );
+
+    // Press the first entry ("Log Out"); the panel is (0,632,200,128).
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 648),
+        TaskbarResponse::MenuEntrySelected {
+            id: MenuEntryId(1),
+            action: MenuAction::Session(SessionControl::LogOut),
+        }
+    );
+    assert!(
+        !bar.start_menu().is_open(),
+        "selecting an entry closes the menu"
+    );
+}
+
+#[test]
+fn pressing_outside_the_open_menu_dismisses_it_without_acting() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    let mut input = TaskbarInput::new();
+    press_at(&mut input, &mut bar, 10, 770); // open the menu
+
+    // A press on a task slot while the menu is open dismisses the menu and
+    // does *not* activate the task (one click does one thing, §2.1).
+    assert_eq!(
+        press_at(&mut input, &mut bar, 100, 770),
+        TaskbarResponse::StartMenuDismissed
+    );
+    assert!(!bar.start_menu().is_open());
+    assert_eq!(
+        bar.tasks().focused(),
+        None,
+        "the click did not reach the task"
+    );
+}
+
+#[test]
+fn pressing_the_start_button_while_open_toggles_it_shut() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    press_at(&mut input, &mut bar, 10, 770); // open
+    assert!(bar.start_menu().is_open());
+
+    // The start button keeps its toggle behaviour even while the menu is open.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 10, 770),
+        TaskbarResponse::StartMenuToggled { open: false }
+    );
+    assert!(!bar.start_menu().is_open());
+}
+
+// ---- start-menu popup rendering -------------------------------------
+
+#[test]
+fn render_menu_is_none_when_the_menu_is_closed() {
+    let theme = Theme::dark();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    assert!(!bar.start_menu().is_open());
+    assert!(render_menu(&bar, &theme).is_none());
+}
+
+#[test]
+fn render_menu_paints_the_panel_and_entry_labels() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.start_menu_mut().toggle();
+
+    let menu = bar.menu_layout();
+    let surface = render_menu(&bar, &theme).expect("an open menu renders");
+    assert_eq!(surface.width(), menu.panel.width);
+    assert_eq!(surface.height(), menu.panel.height);
+
+    // The panel background is the raised surface colour, and the first
+    // entry's label ("Log Out") draws on_surface text inside its row.
+    assert_eq!(
+        pixel_at(&surface, menu.panel, 190, 700),
+        role(palette.surface_raised)
+    );
+    assert!(
+        region_has_pixel(
+            &surface,
+            menu.panel,
+            menu.entries[0],
+            role(palette.on_surface)
+        ),
+        "the first entry's label draws on_surface text in its row"
+    );
+}
+
+#[test]
+fn menu_popup_compute_is_fail_closed_for_an_empty_menu() {
+    // A zero-entry popup has a zero-height panel and no rows; it never
+    // panics and hit-tests to nothing (§2.9).
+    let layout = MenuLayout::compute(
+        Edge::Bottom,
+        Rect::new(0, 760, 1000, 40),
+        Rect::new(0, 760, 48, 40),
+        6,
+        Scale::ONE,
+        0,
+    );
+    assert!(layout.panel.is_empty());
+    assert!(layout.entries.is_empty());
+    assert_eq!(layout.hit_test(Point::new(0, 760)), None);
 }

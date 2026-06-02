@@ -27,12 +27,22 @@ owns:
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a `TaskbarResponse`: toggling the start menu, applying
   the task activate/minimise rule, or reporting a notification-icon or clock
-  press. Anything else, or a press that misses every region, is `Ignored`
-  (fail closed, `AGENTS.md` §2.9).
+  press. While the start menu is open it is modal: a press inside the popup
+  selects the entry under the pointer (`MenuEntrySelected`), a press on the
+  start button toggles the menu shut, and a press anywhere else dismisses it
+  (`StartMenuDismissed`) without acting on what it landed on — one click does
+  one thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
+  region, is `Ignored` (fail closed, `AGENTS.md` §2.9).
 - **Start menu** — `StartMenu` holds only the session controls (log out,
   lock, shut down, restart) at this stage; it is shaped so launcher entries
   can be added later as a new `MenuAction` variant without changing the
-  list/activate interface (`AGENTS.md` §2.4).
+  list/activate interface (`AGENTS.md` §2.4). `MenuLayout::compute` is its
+  popup geometry: the panel opens *outward* from the start button on the
+  bar's edge (above a bottom bar, below a top bar, to the inner side of a
+  left/right bar) with one scale-aware row per entry, and `MenuLayout::hit_test`
+  maps a pointer to the entry under it. Like the bar the popup is a
+  rectangular surface the window manager places and rounds through its single
+  rounded-corner path (`MenuLayout::corner_radius`, §2.2).
 - **Task list** — `TaskList` tracks one entry per top-level window with the
   familiar click-to-activate / minimise-restore rule.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
@@ -44,7 +54,9 @@ owns:
   each in the foreground role matching its background and truncated to fit its
   region. The surface is rectangular — the window manager rounds it (see
   below) — and the colour/blit algebra is reused from `lib/*`, never
-  duplicated (`AGENTS.md` §2.2).
+  duplicated (`AGENTS.md` §2.2). `render_menu` paints the open start-menu
+  popup the same way — a raised-surface panel with each entry's label drawn
+  on top — returning `None` when the menu is closed.
 
 ## Rounded edges
 

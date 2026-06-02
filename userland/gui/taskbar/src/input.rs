@@ -14,14 +14,18 @@
 //! applies presses at that position, and never panics: a press that misses
 //! every region changes nothing (`AGENTS.md` §2.9).
 //!
-//! Selecting an entry *inside* an open start menu is not routed here: the
-//! menu is a popup whose geometry is a separate, later increment. This router
-//! covers the bar itself — the surface the window manager already composites.
+//! While the start menu is open the router treats it as modal: a primary press
+//! inside the popup ([`Taskbar::menu_layout`]) activates the entry under the
+//! pointer, a press on the start button toggles the menu shut, and a press
+//! anywhere else dismisses the menu (the standard click-away behaviour)
+//! without also acting on what it landed on — one click does one thing
+//! (`AGENTS.md` §2.1).
 
 use rustos_geometry::Point;
 use rustos_input::{InputEvent, PointerButton};
 
 use crate::layout::Hit;
+use crate::menu::{MenuAction, MenuEntryId};
 use crate::notifications::IconId;
 use crate::taskbar::Taskbar;
 use crate::tasks::{ActivateOutcome, TaskId};
@@ -53,6 +57,17 @@ pub enum TaskbarResponse {
     },
     /// The clock was pressed.
     ClockPressed,
+    /// An entry inside the open start menu was selected, which closed the
+    /// menu. The caller performs the entry's `action`.
+    MenuEntrySelected {
+        /// The entry that was selected.
+        id: MenuEntryId,
+        /// The action the selected entry triggers.
+        action: MenuAction,
+    },
+    /// A press outside the open start menu (but not on the start button)
+    /// dismissed it, changing nothing else.
+    StartMenuDismissed,
 }
 
 /// Routes pointer input into [`Taskbar`] actions.
@@ -99,7 +114,16 @@ impl TaskbarInput {
 
     /// Handle a primary-button press at the current pointer position.
     fn press_primary(&mut self, taskbar: &mut Taskbar) -> TaskbarResponse {
-        let Some(hit) = taskbar.hit_test(self.pointer) else {
+        let hit = taskbar.hit_test(self.pointer);
+
+        // While the menu is open it is modal: every press except one on the
+        // start button (which toggles it shut, handled below) routes to the
+        // popup or dismisses the menu.
+        if taskbar.start_menu().is_open() && hit != Some(Hit::StartButton) {
+            return self.press_open_menu(taskbar);
+        }
+
+        let Some(hit) = hit else {
             return TaskbarResponse::Ignored;
         };
         match hit {
@@ -126,6 +150,28 @@ impl TaskbarInput {
                 TaskbarResponse::NotificationActivated { id }
             }
             Hit::Clock => TaskbarResponse::ClockPressed,
+        }
+    }
+
+    /// Handle a primary press while the start menu is open: select the entry
+    /// under the pointer, or dismiss the menu if the press misses the popup.
+    fn press_open_menu(&mut self, taskbar: &mut Taskbar) -> TaskbarResponse {
+        let layout = taskbar.menu_layout();
+        let Some(index) = layout.hit_test(self.pointer) else {
+            taskbar.start_menu_mut().close();
+            return TaskbarResponse::StartMenuDismissed;
+        };
+        let Some(id) = taskbar
+            .start_menu()
+            .entries()
+            .get(index)
+            .map(|entry| entry.id)
+        else {
+            return TaskbarResponse::Ignored;
+        };
+        match taskbar.start_menu_mut().activate(id) {
+            Some(action) => TaskbarResponse::MenuEntrySelected { id, action },
+            None => TaskbarResponse::Ignored,
         }
     }
 }

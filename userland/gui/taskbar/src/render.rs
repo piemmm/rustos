@@ -21,7 +21,8 @@ use rustos_geometry::{Point, Rect};
 use rustos_raster::{Color, Surface};
 use rustos_theme::{Palette, Theme};
 
-use crate::layout::BarLayout;
+use crate::layout::{BarLayout, MenuLayout};
+use crate::menu::StartMenu;
 use crate::taskbar::Taskbar;
 use crate::tasks::TaskList;
 
@@ -98,6 +99,46 @@ fn paint(
         Align::Centre,
     );
 
+    Some(surface)
+}
+
+/// Paint the open start-menu popup into a [`Surface`] using `theme`'s palette.
+///
+/// Returns `None` when the menu is closed (there is nothing to draw) or when
+/// the popup's pixel dimensions cannot be allocated, so the caller fails
+/// closed rather than panicking (`AGENTS.md` §2.9). The window manager places
+/// the returned surface above the bar and rounds it with
+/// [`MenuLayout::corner_radius`], exactly as it rounds the bar (§2.2).
+#[must_use]
+pub fn render_menu(taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
+    if !taskbar.start_menu().is_open() {
+        return None;
+    }
+    let layout = taskbar.menu_layout();
+    paint_menu(&layout, taskbar.start_menu(), theme.palette())
+}
+
+/// Fill the popup panel, then draw each entry's label into a fresh surface.
+fn paint_menu(layout: &MenuLayout, menu: &StartMenu, palette: &Palette) -> Option<Surface> {
+    if layout.panel.is_empty() {
+        return None;
+    }
+    let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
+    let origin = layout.panel.origin;
+    let font = BitmapFont::mono5x7();
+
+    surface.fill(palette.surface_raised.into());
+    for (row, entry) in layout.entries.iter().zip(menu.entries()) {
+        draw_label(
+            &mut surface,
+            origin,
+            *row,
+            entry.label(),
+            palette.on_surface.into(),
+            &font,
+            Align::Leading,
+        );
+    }
     Some(surface)
 }
 

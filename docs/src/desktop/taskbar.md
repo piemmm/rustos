@@ -6,9 +6,10 @@ GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 the geometry of every region, pointer hit-testing for input routing, the
 start-menu / task-list / notification-area state machines, and painting those
 regions — including the clock label and task-title **text** — into a themed
-pixel surface, plus **routing** pointer presses into taskbar actions.
-Notification-icon artwork and the live window-manager IPC build on this model
-in later increments.
+pixel surface, the **start-menu popup** geometry and rendering, plus
+**routing** pointer presses into taskbar actions (including selecting an entry
+in the open menu). Notification-icon artwork and the live window-manager IPC
+build on this model in later increments.
 
 ## Where it sits
 
@@ -109,6 +110,27 @@ unknown id changes nothing and returns `None` (fail closed, `AGENTS.md` §5.4 /
 `MenuAction` variant, so the list/activate interface does not change when they
 land (`AGENTS.md` §2.4 — extend, do not creep).
 
+### Popup geometry and rendering
+
+`MenuLayout::compute` is the start-menu popup's geometry. The popup opens
+*outward* from the start button on the bar's edge — above a bottom bar, below
+a top bar, and to the inner side of a left or right bar — with its leading
+edge aligned to the start button. It carries the popup `panel` rectangle, the
+`corner_radius` taken from the theme's `popup_corner_radius`, and one `Rect`
+per entry stacked down the panel. The popup width, row height, and radius are
+*logical* lengths converted to physical pixels through the one shared
+`Scale::scale_length`, so the menu scales with the desktop DPI exactly as the
+bar does (`AGENTS.md` §10, §2.2), and all arithmetic saturates so a
+pathological screen or scale fails closed (`AGENTS.md` §2.9).
+`MenuLayout::hit_test` maps a pointer to the entry index under it.
+
+Like the bar, the popup is a *rectangular* surface the window manager places
+and rounds: `render_menu` paints a raised-surface panel with each entry's
+label drawn on top through the same `rustos-font` / `rustos-raster` path the
+bar uses (no second blitter or rounded-corner path, `AGENTS.md` §2.2), and
+returns `None` when the menu is closed. `Taskbar::menu_layout` computes the
+geometry from the current state.
+
 ## Task list
 
 `TaskList` holds one `TaskEntry` per top-level window. At most one task is
@@ -142,9 +164,16 @@ the model, reported as a `TaskbarResponse`:
 
 A non-primary button, a release, or a press that misses every region changes
 nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
-Selecting an entry *inside* an open start menu is not routed here: the menu is
-a popup whose geometry is a later increment, so this router covers the bar
-itself, the surface the window manager already composites.
+
+While the start menu is **open** the router treats it as modal, so a click
+lands on exactly one thing (`AGENTS.md` §2.1):
+
+- a press inside the popup selects the entry under the pointer, performing its
+  action and closing the menu (`MenuEntrySelected { id, action }`);
+- a press on the **start button** keeps its toggle behaviour and closes the
+  menu (`StartMenuToggled { open: false }`);
+- a press **anywhere else** dismisses the menu without acting on what it
+  landed on (`StartMenuDismissed`) — the standard click-away behaviour.
 
 ## Theming
 
@@ -174,4 +203,10 @@ rather than spilling into the next slot. The input-routing tests assert that a
 primary press on the start button toggles the menu, on a task slot applies the
 activate/minimise rule, and on a notification icon and the clock reports them,
 and that a non-primary button, a release, a miss, and pointer motion all leave
-the model unchanged.
+the model unchanged. A further group covers the start-menu popup: that it
+opens outward on each edge and scales with DPI, that its rows hit-test
+correctly, that a press inside the open popup selects the entry and closes the
+menu, that a press outside it dismisses the menu without activating the task
+beneath, that the start button still toggles it shut, that `render_menu`
+paints the panel and entry labels (and is `None` when closed), and that an
+empty menu produces a fail-closed empty popup.

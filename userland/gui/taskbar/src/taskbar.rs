@@ -11,7 +11,7 @@ use rustos_theme::Theme;
 
 use crate::clock::Clock;
 use crate::edge::Edge;
-use crate::layout::{BarLayout, Hit};
+use crate::layout::{BarLayout, Hit, MenuLayout};
 use crate::menu::StartMenu;
 use crate::notifications::NotificationArea;
 use crate::tasks::TaskList;
@@ -92,6 +92,7 @@ pub struct Taskbar {
     config: TaskbarConfig,
     scale: Scale,
     corner_radius: u32,
+    popup_corner_radius: u32,
     start_menu: StartMenu,
     tasks: TaskList,
     notifications: NotificationArea,
@@ -107,6 +108,7 @@ impl Taskbar {
             config,
             scale: Scale::ONE,
             corner_radius: theme.metrics().taskbar_corner_radius,
+            popup_corner_radius: theme.metrics().popup_corner_radius,
             start_menu: StartMenu::with_session_controls(),
             tasks: TaskList::new(),
             notifications: NotificationArea::new(),
@@ -188,6 +190,7 @@ impl Taskbar {
     /// dark/light switch needs no relayout of the model (`AGENTS.md` §10).
     pub fn apply_theme(&mut self, theme: &Theme) {
         self.corner_radius = theme.metrics().taskbar_corner_radius;
+        self.popup_corner_radius = theme.metrics().popup_corner_radius;
     }
 
     /// Reposition or resize the bar.
@@ -212,5 +215,25 @@ impl Taskbar {
     #[must_use]
     pub fn hit_test(&self, point: Point) -> Option<Hit> {
         self.layout().hit_test(point)
+    }
+
+    /// Compute the start-menu popup's geometry for the current state.
+    ///
+    /// The popup opens outward from the start button on the bar's edge and
+    /// carries one row per start-menu entry; the window manager places and
+    /// rounds it exactly as it does the bar (`AGENTS.md` §2.2). This is
+    /// meaningful only while [`StartMenu::is_open`](crate::StartMenu::is_open)
+    /// is `true`; the caller checks that.
+    #[must_use]
+    pub fn menu_layout(&self) -> MenuLayout {
+        let bar = self.layout();
+        MenuLayout::compute(
+            self.config.edge,
+            bar.bar,
+            bar.start_button,
+            self.popup_corner_radius,
+            self.scale,
+            self.start_menu.len(),
+        )
     }
 }
