@@ -12,6 +12,13 @@ owns:
   notification-icon area packed before the clock, and the clock anchored to
   the trailing end. All arithmetic saturates, so a degenerate screen size
   fails closed inside the bar (`AGENTS.md` §2.9).
+- **Variable DPI** — the bar's extents, thickness, and corner radius are
+  *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
+  takes a `rustos-geometry` `Scale` and converts the logical lengths to
+  physical pixels through the one shared `Scale::scale_length` (`AGENTS.md`
+  §10, §2.2). A `Taskbar` carries a settable `scale()`/`set_scale()`, so a
+  runtime DPI change relays the bar at the new density without rebuilding its
+  model — exactly as a theme switch does.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
   under it (start button, a task, a notification icon, or the clock) for
   input routing. A region slot that does not fit is `Rect::EMPTY` and is never

@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_geometry::{Point, Rect};
+use rustos_geometry::{Point, Rect, Scale};
 
 use crate::edge::Orientation;
 use crate::taskbar::TaskbarConfig;
@@ -60,14 +60,26 @@ pub struct BarLayout {
 
 impl BarLayout {
     /// Compute the layout for `config` with `task_count` running tasks and
-    /// `icon_count` notification icons, applying `corner_radius`.
+    /// `icon_count` notification icons, applying `corner_radius` at the
+    /// desktop `scale`.
+    ///
+    /// The screen dimensions in `config` are *physical* pixels (the real
+    /// framebuffer), while the bar's extents, thickness, and the
+    /// `corner_radius` are *logical* pixels authored at the reference
+    /// density; `scale` converts those logical lengths into physical pixels
+    /// so the bar stays a comfortable physical size across panel densities
+    /// (`AGENTS.md` §10).
     #[must_use]
     pub fn compute(
         config: &TaskbarConfig,
         corner_radius: u32,
+        scale: Scale,
         task_count: usize,
         icon_count: usize,
     ) -> Self {
+        let scaled = config.scaled(scale);
+        let config = &scaled;
+        let corner_radius = scale.scale_length(corner_radius);
         let orientation = config.edge.orientation();
         let (main_total, cross_size) = match orientation {
             Orientation::Horizontal => (config.screen_width, config.screen_height),

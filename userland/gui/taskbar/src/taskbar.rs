@@ -6,7 +6,7 @@
 //! produces a [`BarLayout`] on demand from the current state and answers
 //! pointer hits for input routing.
 
-use rustos_geometry::Point;
+use rustos_geometry::{Point, Scale};
 use rustos_theme::Theme;
 
 use crate::clock::Clock;
@@ -16,7 +16,13 @@ use crate::menu::StartMenu;
 use crate::notifications::NotificationArea;
 use crate::tasks::TaskList;
 
-/// Where the taskbar sits and how big each region is, in physical pixels.
+/// Where the taskbar sits and how big each region is.
+///
+/// The screen dimensions are *physical* pixels (the real framebuffer). The
+/// extents and `thickness` are *logical* pixels authored at the reference
+/// density (`rustos_geometry::REFERENCE_DPI`); the desktop's [`Scale`]
+/// converts them to physical pixels at layout time, so the bar stays a
+/// comfortable physical size across panel densities (`AGENTS.md` §10).
 ///
 /// Extents are measured along the bar's main axis (width for a horizontal
 /// bar, height for a vertical one); `thickness` is the cross-axis size.
@@ -41,6 +47,27 @@ pub struct TaskbarConfig {
 }
 
 impl TaskbarConfig {
+    /// This configuration with every *logical* extent and the thickness
+    /// converted to physical pixels at `scale`, leaving the physical screen
+    /// dimensions and the edge untouched.
+    ///
+    /// [`BarLayout::compute`](crate::layout::BarLayout::compute) uses this so
+    /// the logical→physical conversion is the one in
+    /// [`Scale::scale_length`], never re-derived here (`AGENTS.md` §2.2).
+    #[must_use]
+    pub fn scaled(&self, scale: Scale) -> Self {
+        Self {
+            edge: self.edge,
+            screen_width: self.screen_width,
+            screen_height: self.screen_height,
+            thickness: scale.scale_length(self.thickness),
+            start_button_extent: scale.scale_length(self.start_button_extent),
+            task_extent: scale.scale_length(self.task_extent),
+            icon_extent: scale.scale_length(self.icon_extent),
+            clock_extent: scale.scale_length(self.clock_extent),
+        }
+    }
+
     /// A conventional horizontal bottom bar for a `screen_width` ×
     /// `screen_height` screen, using the house-style extents.
     #[must_use]
@@ -63,6 +90,7 @@ impl TaskbarConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Taskbar {
     config: TaskbarConfig,
+    scale: Scale,
     corner_radius: u32,
     start_menu: StartMenu,
     tasks: TaskList,
@@ -77,6 +105,7 @@ impl Taskbar {
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
+            scale: Scale::ONE,
             corner_radius: theme.metrics().taskbar_corner_radius,
             start_menu: StartMenu::with_session_controls(),
             tasks: TaskList::new(),
@@ -89,6 +118,18 @@ impl Taskbar {
     #[must_use]
     pub const fn config(&self) -> &TaskbarConfig {
         &self.config
+    }
+
+    /// The desktop UI scale the bar lays out at.
+    #[must_use]
+    pub const fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// Set the desktop UI scale, so a runtime DPI change relays the bar at
+    /// the new density without rebuilding its model (`AGENTS.md` §10).
+    pub fn set_scale(&mut self, scale: Scale) {
+        self.scale = scale;
     }
 
     /// The corner radius the window manager applies to the bar (`AGENTS.md`
@@ -160,6 +201,7 @@ impl Taskbar {
         BarLayout::compute(
             &self.config,
             self.corner_radius,
+            self.scale,
             self.tasks.len(),
             self.notifications.len(),
         )

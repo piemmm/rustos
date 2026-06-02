@@ -149,8 +149,10 @@ rustos/
 │   ├── font/            # Shared text rasterisation: a built-in monospace
 │   │                    #   bitmap font + glyph blitter onto a raster Surface
 │   │                    #   for the taskbar and apps (§16.4, §17.4).
-│   ├── geometry/        # Shared integer screen geometry (Point/Rect) for
-│   │                    #   the WM, taskbar, and graphical apps (§17.4).
+│   ├── geometry/        # Shared integer screen geometry (Point/Rect) plus
+│   │                    #   the desktop DPI / UI Scale (logical->physical
+│   │                    #   pixels) for the WM, taskbar, cursors, and apps
+│   │                    #   (§10, §17.4).
 │   ├── log/             # Structured logging.
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
@@ -412,6 +414,20 @@ an update to this section.
   driving colours, corner radii, fonts, and cursors for the WM, taskbar, and
   default apps through one shared theme definition; adding a theme is data,
   not new code.
+- Variable DPI is a first-class, **settable** desktop property, not an
+  afterthought: the same image must be comfortable on a low-DPI monitor and
+  a high-DPI panel, with the user free to pick the density that suits them.
+  Every desktop length — theme corner radii and border thicknesses, font
+  sizes, taskbar extents, window chrome — is authored in *logical* pixels at
+  a fixed reference density (`rustos_geometry::REFERENCE_DPI`) and converted
+  to a panel's *physical* pixels through one shared DPI / UI scale factor
+  (`rustos_geometry::Scale`). There is exactly one logical→physical
+  conversion (`Scale::scale_length`); the WM, taskbar, cursors, and apps all
+  consume it, so the scaling arithmetic is never duplicated (§2.2). The scale
+  is changeable at runtime (like the theme) and an out-of-range scale is
+  rejected at construction rather than producing a degenerate desktop (§5.4 /
+  §2.9). Cursors are vector artwork rasterised at the active scale, so the
+  pointer is crisp at any DPI; bitmap assets are never the only path.
 - Login: `userland/session/login` always starts in text mode and offers to launch the
   graphical session. If no graphics driver loads, the graphical option is
   hidden — never crashed, never errored.

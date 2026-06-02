@@ -11,9 +11,17 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   size) with checked `intersection`, `union`, and half-open `contains`. A
   zero-width or zero-height rectangle is *empty*, the canonical "covers
   nothing" value used by damage tracking and clipping.
+- `Scale` — the desktop DPI / UI scale factor (`AGENTS.md` §10): the ratio of
+  physical to logical pixels as a percentage of `REFERENCE_DPI` (96).
+  `Scale::ONE` is 1:1; `from_percent`/`from_dpi` build a scale and fail closed
+  outside `MIN_PERCENT..=MAX_PERCENT`; `scale_length` is the single
+  logical→physical conversion every GUI consumer shares (§2.2), so a desktop
+  authored in logical pixels stays a comfortable physical size across panel
+  densities.
 
 All edge arithmetic widens through `i64`/`u32` so a pathological coordinate
-saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9).
+saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9). `Scale`
+widens through `u64` and saturates the same way.
 
 ## Why it lives in `lib/`
 

@@ -4699,6 +4699,27 @@ device list.
     so only those pixels recomposite (the same damage model the window stack
     uses) and hiding restores the pixels beneath. The WM depends on
     `lib/cursor` (§17.4); 6 new headless tests (45 total).
+- **Variable DPI / UI scale — DONE (increment).** Variable DPI is now a
+  binding, **settable** desktop property (`AGENTS.md` §10): the same image is
+  comfortable on a low- or high-DPI panel and the user picks the density.
+  `lib/geometry` gains `Scale` — the desktop's single DPI / UI scale factor
+  (a percentage of `REFERENCE_DPI = 96`): `Scale::ONE`, `from_percent` /
+  `from_dpi` (fail-closed to `MIN_PERCENT..=MAX_PERCENT`, §5.4/§2.9),
+  `percent` / `dpi`, and the one shared logical→physical conversion
+  `scale_length` (u64-widened, saturating, §2.9). Desktop lengths are
+  *logical* pixels at the reference density; consumers scale them, so the
+  conversion is never duplicated (§2.2). The taskbar consumes it:
+  `TaskbarConfig` extents/thickness are logical, `BarLayout::compute` takes a
+  `Scale` (scaling the extents via `TaskbarConfig::scaled` and the theme
+  corner radius), and `Taskbar` carries a settable `scale()`/`set_scale()`
+  so a runtime DPI change relays the bar without rebuilding its model — the
+  same shape as the runtime theme switch. `lib/theme` `Metrics`/`FontSpec`
+  docs now state their values are logical pixels scaled by `Scale`; cursors
+  were already DPI-driven (vector artwork rasterised at the active scale).
+  5 new `lib/geometry` tests (12 total) + 3 new taskbar tests (34 total); no
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs:
+  `AGENTS.md` §10 + §3, `lib/geometry` and taskbar `README.md`,
+  `docs/src/desktop/dpi.md` (+ SUMMARY).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted

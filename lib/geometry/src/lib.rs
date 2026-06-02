@@ -13,10 +13,20 @@
 //! coordinate fails closed rather than wrapping (`AGENTS.md` §2.9). There is
 //! no rendering or compositing arithmetic here — that is the window
 //! manager's job — so nothing is duplicated (§2.2).
+//!
+//! The crate also owns [`Scale`], the desktop's single DPI / UI scale factor:
+//! desktop lengths are authored in *logical* pixels at a reference density
+//! and converted to a panel's *physical* pixels through one shared
+//! [`Scale::scale_length`], so variable-DPI support is not re-implemented per
+//! consumer (`AGENTS.md` §10 / §2.2).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+
+mod scale;
+
+pub use scale::{Scale, REFERENCE_DPI};
 
 /// A point in screen space.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]

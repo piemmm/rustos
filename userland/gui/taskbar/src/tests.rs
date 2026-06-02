@@ -1,6 +1,6 @@
 //! Headless unit tests for the taskbar layout, model, and rendering.
 
-use rustos_geometry::{Point, Rect};
+use rustos_geometry::{Point, Rect, Scale};
 use rustos_raster::{Color, Pixel, Surface};
 use rustos_theme::Theme;
 
@@ -154,7 +154,7 @@ fn notifications_add_remove_and_dedup() {
 
 fn bottom_layout(tasks: usize, icons: usize) -> BarLayout {
     let config = TaskbarConfig::bottom_bar(1000, 800);
-    BarLayout::compute(&config, 12, tasks, icons)
+    BarLayout::compute(&config, 12, Scale::ONE, tasks, icons)
 }
 
 #[test]
@@ -231,6 +231,7 @@ fn every_edge_pins_the_bar_correctly() {
             ..base
         },
         12,
+        Scale::ONE,
         0,
         0,
     );
@@ -242,6 +243,7 @@ fn every_edge_pins_the_bar_correctly() {
             ..base
         },
         12,
+        Scale::ONE,
         0,
         0,
     );
@@ -253,6 +255,7 @@ fn every_edge_pins_the_bar_correctly() {
             ..base
         },
         12,
+        Scale::ONE,
         0,
         0,
     );
@@ -264,6 +267,7 @@ fn every_edge_pins_the_bar_correctly() {
             ..base
         },
         12,
+        Scale::ONE,
         0,
         0,
     );
@@ -276,7 +280,7 @@ fn vertical_bar_lays_regions_along_y() {
         edge: Edge::Left,
         ..TaskbarConfig::bottom_bar(1000, 800)
     };
-    let layout = BarLayout::compute(&config, 12, 1, 0);
+    let layout = BarLayout::compute(&config, 12, Scale::ONE, 1, 0);
     assert_eq!(layout.start_button, Rect::new(0, 0, 40, 48));
     assert_eq!(layout.clock, Rect::new(0, 720, 40, 80));
     assert_eq!(layout.tasks[0], Rect::new(0, 48, 40, 160));
@@ -290,7 +294,7 @@ fn tiny_screen_keeps_regions_inside_the_bar() {
     // A degenerate screen far smaller than the extents must not panic and
     // must keep every region within the bar (fail closed, §2.9).
     let config = TaskbarConfig::bottom_bar(20, 10);
-    let layout = BarLayout::compute(&config, 0, 3, 3);
+    let layout = BarLayout::compute(&config, 0, Scale::ONE, 3, 3);
     let bar = layout.bar;
     for region in [
         layout.start_button,
@@ -303,6 +307,46 @@ fn tiny_screen_keeps_regions_inside_the_bar() {
         assert!(region.right() <= bar.right());
         assert!(region.bottom() <= bar.bottom());
     }
+}
+
+// ---- DPI / scale ----------------------------------------------------
+
+#[test]
+fn doubling_the_scale_doubles_logical_lengths() {
+    // A large physical screen so nothing clamps: the logical extents simply
+    // double at 200%, while the physical screen dimensions are untouched.
+    let config = TaskbarConfig::bottom_bar(4000, 2000);
+    let scale = Scale::from_percent(200).expect("200% is in range");
+    let layout = BarLayout::compute(&config, 12, scale, 1, 0);
+
+    assert_eq!(layout.bar, Rect::new(0, 1920, 4000, 80));
+    assert_eq!(layout.corner_radius, 24);
+    assert_eq!(layout.start_button, Rect::new(0, 1920, 96, 80));
+    assert_eq!(layout.clock, Rect::new(3840, 1920, 160, 80));
+    assert_eq!(layout.tasks[0], Rect::new(96, 1920, 320, 80));
+}
+
+#[test]
+fn scale_one_is_identical_to_the_unscaled_layout() {
+    let config = TaskbarConfig::bottom_bar(1000, 800);
+    let scaled = BarLayout::compute(&config, 12, Scale::ONE, 2, 2);
+    assert_eq!(scaled, bottom_layout(2, 2));
+}
+
+#[test]
+fn set_scale_relays_the_bar_at_the_new_density() {
+    let theme = Theme::dark();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
+    assert_eq!(bar.scale(), Scale::ONE);
+    let unscaled = bar.layout().start_button.width;
+
+    bar.set_scale(Scale::from_dpi(rustos_geometry::REFERENCE_DPI * 2).expect("192 DPI"));
+    assert_eq!(bar.scale().percent(), 200);
+    assert_eq!(bar.layout().start_button.width, unscaled * 2);
+    assert_eq!(
+        bar.layout().corner_radius,
+        theme.metrics().taskbar_corner_radius * 2
+    );
 }
 
 // ---- taskbar (theming integration) ----------------------------------
