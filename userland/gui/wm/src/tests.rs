@@ -658,3 +658,145 @@ fn replacing_the_cursor_image_marks_both_footprints_dirty() {
     assert_eq!(c.cursor_bounds(), Some(Rect::new(2, 2, 12, 12)));
     assert_eq!(frame_pixel(&c, 12, 12), [255, 0, 0, 255]);
 }
+
+// ---- cursor selection from interaction state -------------------------
+
+use crate::select::{desired_cursor, CursorController};
+use rustos_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use rustos_geometry::Scale;
+use rustos_theme::CursorKind;
+
+#[test]
+fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
+
+    // Default hint is the plain arrow.
+    assert_eq!(c.window_cursor(win), Some(CursorKind::Arrow));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert_eq!(c.window_cursor(win), Some(CursorKind::Text));
+
+    // An unknown window changes nothing.
+    let ghost = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
+    assert!(c.remove(ghost));
+    assert!(!c.set_window_cursor(ghost, CursorKind::Pointer));
+    assert_eq!(c.window_cursor(ghost), None);
+}
+
+#[test]
+fn desired_cursor_reflects_the_window_under_the_pointer() {
+    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    // Over the desktop background: the plain arrow.
+    router.handle(moved(50, 50), &mut c);
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+
+    // Over a default window: still the arrow.
+    router.handle(moved(15, 15), &mut c);
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+
+    // The window advertises a text cursor over its content.
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+
+    // Moving back to the background returns to the arrow.
+    router.handle(moved(50, 50), &mut c);
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+}
+
+#[test]
+fn move_grab_outranks_the_window_hint() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+
+    router.handle(moved(15, 15), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert!(router.begin_move(&c));
+
+    // While dragging, the move cursor wins over the window's text hint.
+    assert!(router.is_moving());
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Move);
+
+    router.handle(release_primary(), &mut c);
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+}
+
+#[test]
+fn controller_installs_and_switches_the_cursor_shape() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(Scale::ONE);
+
+    // First refresh over the desktop installs the arrow.
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Arrow);
+    assert!(c.cursor_bounds().is_some());
+
+    // A repeat refresh with the same kind does no work.
+    assert!(!ctrl.refresh(&router, &mut c));
+
+    // Moving over the text window switches the shape.
+    router.handle(moved(20, 20), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Text);
+}
+
+#[test]
+fn set_scale_without_a_cursor_re_renders_nothing() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let router = InputRouter::new();
+    let mut ctrl = CursorController::new(Scale::ONE);
+
+    // No cursor shown yet: a scale change records the new scale but has
+    // nothing to re-render, so it draws nothing.
+    let bigger = Scale::from_percent(200).expect("valid scale");
+    assert!(!ctrl.set_scale(bigger, &router, &mut c));
+    assert_eq!(ctrl.scale(), bigger);
+    assert!(c.cursor_bounds().is_none());
+}
+
+#[test]
+fn controller_re_renders_on_scale_change() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(Scale::ONE);
+
+    // Show a cursor at 1:1, then raise the scale: its footprint enlarges.
+    router.handle(moved(10, 10), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    let small = c.cursor_bounds().expect("cursor shown");
+    let bigger = Scale::from_percent(200).expect("valid scale");
+    assert!(ctrl.set_scale(bigger, &router, &mut c));
+    let large = c.cursor_bounds().expect("cursor shown");
+    assert_eq!(ctrl.scale(), bigger);
+    assert!(large.width > small.width);
+    assert!(large.height > small.height);
+}
+
+#[test]
+fn controller_re_renders_on_registry_swap() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(Scale::ONE);
+
+    router.handle(moved(10, 10), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+
+    // A registry that selects an alternative set re-renders the cursor.
+    let mut registry = CursorRegistry::with_builtin();
+    let custom = CursorSetId::new("alt");
+    registry
+        .register(custom, CursorTheme::builtin())
+        .expect("register");
+    registry.set_active(custom).expect("activate");
+    assert!(ctrl.set_registry(registry, &router, &mut c));
+    assert_eq!(ctrl.registry().active_id(), custom);
+    assert!(c.cursor_bounds().is_some());
+}

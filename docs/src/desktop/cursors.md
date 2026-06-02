@@ -53,3 +53,27 @@ composites the resulting `CursorImage` as the top-most overlay so the hotspot
 tracks the pointer. Moving the pointer marks the cursor's old and new
 rectangles dirty, so only those pixels are recomposited (the same damage model
 the window stack uses), and hiding the cursor restores the pixels beneath it.
+
+## Choosing the shape from interaction state
+
+Which `CursorKind` to show is decided from what the user is doing, not hard
+coded per window action. The window manager's `select` module
+(`userland/gui/wm`) holds that policy:
+
+- `desired_cursor(router, compositor)` is a pure function of state. An
+  in-flight window move-grab outranks everything and yields `Move`; otherwise
+  the pointer takes the **cursor hint** of the top-most window under it; over
+  the desktop background it is the plain `Arrow`.
+- Each window carries a `cursor_hint` (default `Arrow`) that its owner sets
+  through `Compositor::set_window_cursor` — a text view advertises `Text`, a
+  control `Pointer`, a working view `Busy`. Changing a hint is window state,
+  not pixels, so it marks no damage; the displayed pointer updates the next
+  time the policy runs.
+- `CursorController` ties the policy to the artwork. It owns the active
+  `CursorRegistry` and the desktop `Scale` and remembers the kind on screen.
+  `refresh` runs the policy and, only when the chosen kind changes, rasterises
+  the matching cursor at the current scale and installs it. A runtime cursor-set
+  swap (`set_registry`) or DPI change (`set_scale`) re-renders the current kind
+  in place. Rasterisation can fail for a degenerate cursor or scale; the
+  controller then fails closed, leaving the current pointer untouched rather
+  than blanking it (`AGENTS.md` §2.9).

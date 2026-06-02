@@ -1,5 +1,7 @@
 //! Windows: a placed surface with compositing attributes.
 
+use rustos_theme::CursorKind;
+
 use crate::color::{div255, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect};
@@ -16,7 +18,7 @@ use crate::surface::Surface;
 pub struct WindowId(pub(crate) u64);
 
 /// A window: a [`Surface`] placed at a screen [`Point`] with a
-/// per-window opacity and corner style.
+/// per-window opacity, corner style, and pointer-cursor hint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Window {
     id: WindowId,
@@ -25,11 +27,17 @@ pub struct Window {
     opacity: u8,
     corners: Corners,
     visible: bool,
+    cursor: CursorKind,
 }
 
 impl Window {
     /// Build a fully-opaque, square-cornered, visible window from a
-    /// surface placed at `origin`.
+    /// surface placed at `origin`. The pointer-cursor hint defaults to the
+    /// plain [`CursorKind::Arrow`]; a window whose content wants a
+    /// different pointer (an editor's text I-beam, a control's hand) sets
+    /// it through [`Compositor::set_window_cursor`].
+    ///
+    /// [`Compositor::set_window_cursor`]: crate::Compositor::set_window_cursor
     pub(crate) fn new(id: WindowId, origin: Point, surface: Surface) -> Self {
         Self {
             id,
@@ -38,6 +46,7 @@ impl Window {
             opacity: 255,
             corners: Corners::Square,
             visible: true,
+            cursor: CursorKind::Arrow,
         }
     }
 
@@ -63,6 +72,15 @@ impl Window {
     #[must_use]
     pub const fn corners(&self) -> Corners {
         self.corners
+    }
+
+    /// The pointer-cursor hint for this window's content: the
+    /// [`CursorKind`] the compositor shows while the pointer rests over
+    /// the window and no higher-priority interaction (such as a window
+    /// move-grab) is in progress.
+    #[must_use]
+    pub const fn cursor_hint(&self) -> CursorKind {
+        self.cursor
     }
 
     /// `true` if the window participates in composition.
@@ -120,6 +138,10 @@ impl Window {
 
     pub(crate) fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+    }
+
+    pub(crate) fn set_cursor_hint(&mut self, cursor: CursorKind) {
+        self.cursor = cursor;
     }
 
     pub(crate) fn replace_surface(&mut self, surface: Surface) {

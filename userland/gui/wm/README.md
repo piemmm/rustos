@@ -25,13 +25,27 @@ router**:
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
   move-grabs; `Compositor::window_at` is the top-most hit-test.
+- Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
+  `rustos_cursor::CursorImage` composited as the top-most layer so its
+  hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4).
+- Cursor selection (`select`): `desired_cursor` chooses the
+  `rustos_theme::CursorKind` from live interaction state — a window
+  move-grab shows the move cursor, otherwise the pointer takes the
+  per-window `cursor_hint` of the window under it (set with
+  `Compositor::set_window_cursor`), and the desktop background shows the
+  plain arrow. `CursorController` owns the active `CursorRegistry` and the
+  desktop `Scale`, applies that policy, and rasterises the chosen artwork
+  through `Compositor::set_cursor`, failing closed if a cursor cannot be
+  rasterised.
 
-GPU acceleration, theming, and the taskbar build on this core in later
+GPU acceleration and the default apps build on this core in later
 Stage 7 increments.
 
 ## Properties
 
-- `no_std` (+ `alloc`); the only dependency is `rustos-abi` (`AGENTS.md`
+- `no_std` (+ `alloc`); depends only on the shared `lib/*` crates
+  (`rustos-abi`, `rustos-raster`, `rustos-geometry`, `rustos-theme`,
+  `rustos-cursor`) — never on a sibling userland crate (`AGENTS.md`
   §17.4).
 - No `unsafe`; no `unwrap`/`expect`/`panic!` in production paths — every
   fallible entry point returns a `Result`/`Option` (`AGENTS.md` §2.9).
@@ -48,4 +62,7 @@ blending, rounded-corner masking, z-order, window move/hide/remove with
 damage repaint, channel-order encoding, the present seam, and input
 routing (hit-testing, click-to-activate focus and raise,
 desktop-clears-focus, move-grab drag, and the fail-closed grab edge
-cases).
+cases), the cursor overlay (compositing above windows, move/hide repaint
+with damage), and cursor selection (the move-grab/window-hint/desktop
+policy, controller shape switching, and re-rendering on scale and
+cursor-set changes).

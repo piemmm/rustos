@@ -31,6 +31,10 @@
 //!   replaceable [`CursorImage`](rustos_cursor::CursorImage) from
 //!   `lib/cursor`, composited as the top-most layer so its hotspot
 //!   tracks the pointer (`AGENTS.md` §2.2 / §2.4).
+//! - **Cursor selection** ([`select`]): the [`CursorController`]
+//!   chooses the [`CursorKind`](rustos_theme::CursorKind) from live
+//!   interaction state (move-grab, the window under the pointer, the
+//!   desktop) and installs the matching artwork.
 //!
 //! GPU acceleration, theming, and the taskbar build on this core in
 //! later Stage 7 increments.
@@ -54,6 +58,7 @@ pub mod cursor;
 pub mod damage;
 pub mod geometry;
 pub mod input;
+pub mod select;
 pub mod surface;
 pub mod window;
 
@@ -67,5 +72,6 @@ pub use cursor::CursorLayer;
 pub use damage::DamageRegion;
 pub use geometry::{Point, Rect};
 pub use input::{InputEvent, InputResponse, InputRouter, PointerButton};
+pub use select::{desired_cursor, CursorController};
 pub use surface::Surface;
 pub use window::{Window, WindowId};

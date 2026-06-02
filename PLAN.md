@@ -4720,13 +4720,34 @@ device list.
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs:
   `AGENTS.md` §10 + §3, `lib/geometry` and taskbar `README.md`,
   `docs/src/desktop/dpi.md` (+ SUMMARY).
+- **Cursor selection from interaction state — DONE (increment).**
+  `userland/gui/wm` gains a `select` module that chooses which
+  `rustos_theme::CursorKind` the pointer shows from live interaction
+  state, so the cursor *shape* now follows what the user is doing — not
+  just the cursor *artwork* (§10). `desired_cursor(router, compositor)`
+  is a pure policy: an in-flight window move-grab outranks everything and
+  yields `Move`; otherwise the pointer takes the **cursor hint** of the
+  top-most window under it; over the desktop background it is the plain
+  `Arrow`. Each `Window` carries a `cursor_hint` (default `Arrow`, fixed
+  field — total lookup, §2.11) its owner sets through the new
+  `Compositor::set_window_cursor`; a hint change is window state, not
+  pixels, so it marks no damage. `CursorController` ties the policy to the
+  artwork: it owns the active `CursorRegistry` and the desktop `Scale`,
+  remembers the kind on screen, and `refresh` rasterises and installs the
+  chosen cursor through the existing `set_cursor` path **only when the
+  kind changes** (pointer *motion* stays the separate `move_cursor`
+  path, §2.2 — no second cursor pipeline); a runtime cursor-set swap
+  (`set_registry`) or DPI change (`set_scale`) re-renders the current
+  kind in place. Fails closed: an unrasterisable cursor or scale leaves
+  the current pointer untouched rather than blanking it (§2.9); no
+  `unsafe`, no `unwrap`/`expect`/`panic!`. 7 new headless tests (52
+  total). Docs `docs/src/desktop/cursors.md` and the crate `README.md`.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted
   into `lib/*` per §17.4), notification-icon artwork, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, decoding
-  cursor sets from on-disk assets under `/System/Graphics` and choosing the
-  cursor `CursorKind` from interaction state, and the default
+  cursor sets from on-disk assets under `/System/Graphics`, and the default
   filesystem-browser and terminal-emulator apps.
 
 ---

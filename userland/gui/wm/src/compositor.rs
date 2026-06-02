@@ -22,6 +22,7 @@ use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
 use rustos_abi::DriverError;
 
 use rustos_cursor::CursorImage;
+use rustos_theme::CursorKind;
 
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
@@ -188,6 +189,29 @@ impl Compositor {
     #[must_use]
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Set the pointer-cursor hint for the window named by `id` — the
+    /// [`CursorKind`] shown while the pointer rests over the window
+    /// (`crate::select`). Returns `false` for an unknown id.
+    ///
+    /// The hint is window state, not pixels: changing it does not redraw
+    /// the window (the cursor is the separate top overlay), so no damage
+    /// is marked. The displayed pointer updates when the selection policy
+    /// next runs over this window.
+    pub fn set_window_cursor(&mut self, id: WindowId, kind: CursorKind) -> bool {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        window.set_cursor_hint(kind);
+        true
+    }
+
+    /// The pointer-cursor hint of the window named by `id`, or `None` for
+    /// an unknown id.
+    #[must_use]
+    pub fn window_cursor(&self, id: WindowId) -> Option<CursorKind> {
+        self.window(id).map(Window::cursor_hint)
     }
 
     /// Show `image` as the pointer cursor with its hotspot at `pointer`,
