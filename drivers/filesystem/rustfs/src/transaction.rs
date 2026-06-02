@@ -146,4 +146,37 @@ impl TxnRoot {
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
         })
     }
+
+    /// Decode and validate the transaction root at physical address `phys`
+    /// **without** an externally-supplied expected generation: the root is
+    /// accepted when its header authenticates and its inline commit record is
+    /// internally consistent (the commit magic is present and the commit
+    /// generation matches the header generation). Used by the offline rescue
+    /// path (Stage 9), which scans for committed roots when the superblock ring
+    /// no longer names one; the generation it recovers is the root's own.
+    ///
+    /// Returns `None` for any block that is not a valid committed root at
+    /// `phys` (corruption is surfaced as a skip, never panicked — `AGENTS.md`
+    /// §2.9).
+    #[must_use]
+    pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, key: &MacKey) -> Option<Self> {
+        let header = BlockHeader::try_decode(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
+        let generation = rd_u64(block, P_GENERATION);
+        if generation != header.generation {
+            return None;
+        }
+        if rd_u64(block, P_COMMIT_MAGIC) != COMMIT_MAGIC
+            || rd_u64(block, P_COMMIT_GENERATION) != generation
+        {
+            return None;
+        }
+        Some(Self {
+            generation,
+            inode_tree_root: rd_u64(block, P_INODE_TREE_ROOT),
+            next_ino: rd_u64(block, P_NEXT_INO),
+            chunk_tree_root: rd_u64(block, P_CHUNK_TREE_ROOT),
+            reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
+            scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
+        })
+    }
 }

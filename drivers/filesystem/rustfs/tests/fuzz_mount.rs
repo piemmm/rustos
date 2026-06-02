@@ -32,7 +32,7 @@
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
-use rustos_drv_fs_rustfs::{RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{RescueSink, RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN};
 use rustos_log::{Event, Sink};
 
 /// Capability set granting the scrub gate (`CAP_FS_MOUNT`).
@@ -47,6 +47,14 @@ impl CapabilityQuery for AllCaps {
 struct NullSink;
 impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
+}
+
+/// Rescue sink that discards every recovered block: the harness only cares
+/// that the rescue scan/extract decode path never panics for any device
+/// contents (`AGENTS.md` §2.9 / §19.6).
+struct NullRescueSink;
+impl RescueSink for NullRescueSink {
+    fn emit_block(&mut self, _inode: u32, _logical_block: u64, _size: u64, _data: &[u8]) {}
 }
 
 /// Volume key the fuzz image is formatted and reopened with. `RustFS` is
@@ -157,10 +165,30 @@ fn exercise(image: &[u8]) {
         // before resuming. Like `open` it must return a `Result`, never panic,
         // for any device contents (`AGENTS.md` §2.9 / §19.6).
         let _ = fs.scrub(&AllCaps, &NullSink, ScrubBudget::Inodes(1));
+        // Drive the Stage-9 offline check on a mounted handle: it re-walks
+        // every tree, rebuilds the derived state, and reconciles refcounts. It
+        // too must return a `Result`, never panic.
+        let _ = fs.check(&AllCaps, &NullSink);
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().store;
         let _ = RustFs::open(MemBlock { store: bytes }, &FUZZ_KEY);
     }
+    // Drive the Stage-9 rescue decode path on the raw image, which does not
+    // require a mountable volume: it scans every block for a self-identifying
+    // transaction root (`TxnRoot::decode_any`) and runs the recovered
+    // inode/extent metadata through the integrity pipeline. Like `open` it must
+    // return a `Result`, never panic, for any device contents.
+    let mut rescue_store = image.to_vec();
+    rescue_store.resize(IMAGE_LEN, 0);
+    let _ = RustFs::rescue(
+        MemBlock {
+            store: rescue_store,
+        },
+        &FUZZ_KEY,
+        &AllCaps,
+        &NullSink,
+        &mut NullRescueSink,
+    );
 }
 
 /// A real formatted image, populated with several inodes (so the inode tree

@@ -1966,3 +1966,360 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
     let node_b = fs.lookup(root, b"b").expect("lookup b");
     assert_eq!(read_all(&mut fs, node_b, cap), body);
 }
+
+// ---------------------------------------------------------------------------
+// Stage 9: offline check and rescue.
+// ---------------------------------------------------------------------------
+
+use crate::check::{self, RescueSink};
+use crate::CheckReport;
+
+/// A rescue sink that collects every emitted block keyed by `(inode, logical)`.
+struct CollectSink {
+    blocks: alloc::collections::BTreeMap<(u32, u64), alloc::vec::Vec<u8>>,
+}
+impl CollectSink {
+    fn new() -> Self {
+        Self {
+            blocks: alloc::collections::BTreeMap::new(),
+        }
+    }
+}
+impl RescueSink for CollectSink {
+    fn emit_block(&mut self, inode: u32, logical_block: u64, _size: u64, data: &[u8]) {
+        self.blocks.insert((inode, logical_block), data.to_vec());
+    }
+}
+
+/// Run a full check with all capabilities granted, asserting it succeeds.
+fn check_full(fs: &mut RustFs<MemBlock>) -> CheckReport {
+    fs.check(&GrantAll, &NullSink).expect("check")
+}
+
+#[test]
+fn check_requires_the_fs_mount_capability() {
+    let mut fs = populated();
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.check(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(check::CHECK_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
+    // A check of a clean, populated volume reports a sound structure, rebuilds
+    // the derived state (always), repairs nothing, and changes nothing on disk
+    // — running it again is identical (`docs/src/filesystem/rustfs-spec.md`
+    // §12).
+    let before = populated().into_block().bytes();
+    let mut fs =
+        RustFs::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
+
+    let sink = RecordingSink::new();
+    let report = fs.check(&GrantAll, &sink).expect("check");
+    assert!(report.complete);
+    assert!(report.structure_sound, "{report:?}");
+    assert!(report.rebuilt_derived_state);
+    assert_eq!(report.unrecoverable_findings, 0);
+    assert!(!report.made_repairs(), "a clean check repairs nothing");
+    assert_eq!(report.orphaned_inodes, 0);
+    assert_eq!(report.dangling_entries, 0);
+    assert!(report.directories_checked > 0, "directories were walked");
+    assert!(
+        sink.saw(check::CHECK_CLEAN),
+        "a clean check logs CHECK_CLEAN"
+    );
+
+    // A clean check mutates nothing on disk.
+    let after = fs.into_block().bytes();
+    assert_eq!(after, before, "a clean check must change nothing");
+
+    // Idempotent: a second check agrees.
+    let mut fs = RustFs::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
+    let again = check_full(&mut fs);
+    assert_eq!(again, report, "check is idempotent on a clean volume");
+}
+
+#[test]
+fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
+    // The free-space bitmap and the dedupe index are rebuildable derived state
+    // (§4, §9), never authoritative. A corrupt derivation must never keep a
+    // sound volume unmountable: check rebuilds both from the authoritative
+    // trees, and the result matches a freshly mounted reference.
+    let bytes = populated().into_block().bytes();
+    let reference =
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
+    let good_free = reference.free.clone();
+    let good_count = reference.free_count;
+    assert!(
+        !reference.dedupe_index.is_empty(),
+        "the populated volume has shared chunks indexed"
+    );
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    // Wreck the in-memory derived state: flip the free bitmap and clear the
+    // dedupe index.
+    for word in &mut fs.free {
+        *word = !*word;
+    }
+    fs.free_count = 0;
+    fs.dedupe_index.clear();
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert!(report.rebuilt_derived_state);
+    assert_eq!(fs.free, good_free, "the free bitmap was rebuilt");
+    assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
+    assert!(
+        !fs.dedupe_index.is_empty(),
+        "the dedupe index was rebuilt from the chunk trees"
+    );
+    // The volume is mountable and the structure is sound.
+    assert!(report.structure_sound, "{report:?}");
+    let bytes = fs.into_block().bytes();
+    assert!(RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).is_ok());
+}
+
+#[test]
+fn check_reclaims_an_orphaned_inode() {
+    // An inode no directory reaches is an orphan. Check detects it, reclaims it
+    // (freeing its slot), and the volume stays sound
+    // (`docs/src/filesystem/rustfs-spec.md` §12).
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+
+    // Inject an orphan: allocate an inode and never link it into any directory.
+    fs.begin();
+    let sec = Security::new(0o644, 0, 0);
+    let orphan = fs
+        .alloc_inode(&Inode::empty(KIND_FILE, sec, fixed_clock()))
+        .expect("alloc orphan");
+    fs.commit().expect("commit orphan");
+    assert!(fs.read_inode(orphan).is_ok(), "the orphan exists pre-check");
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.orphaned_inodes, 1, "{report:?}");
+    assert_eq!(report.orphans_reclaimed, 1);
+    assert!(report.made_repairs());
+    assert!(report.structure_sound, "the orphan was safely reclaimed");
+
+    // The orphan is gone, and the named file is untouched.
+    assert_eq!(fs.read_inode(orphan), Err(DriverError::NotFound));
+    assert!(fs.lookup(fs.root(), b"keep").is_ok());
+
+    // A re-check finds nothing left to reclaim.
+    let again = check_full(&mut fs);
+    assert_eq!(again.orphans_reclaimed, 0);
+    assert!(again.structure_sound);
+}
+
+#[test]
+fn check_corrects_a_refcount_divergence_and_reports_what_it_cannot_fix() {
+    // Check reuses the scrub verification core: it corrects a refcount
+    // divergence it can fix, and reports a data integrity fault it cannot
+    // safely repair as an unrecoverable finding
+    // (`docs/src/filesystem/rustfs-spec.md` §9, §12).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    // Tamper the on-disk chunk refcount to a value the extents do not support.
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+    fs.begin();
+    fs.chunk_put(
+        shared,
+        &ChunkRecord {
+            refcount: 9,
+            ..record
+        },
+    )
+    .expect("put");
+    fs.commit().expect("commit");
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert!(report.verification.refcount_divergences >= 1, "{report:?}");
+    assert!(report.verification.divergences_corrected >= 1);
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        2,
+        "the refcount was corrected toward the extent-derived truth"
+    );
+    // The correctable divergence does not leave an unrecoverable finding.
+    assert_eq!(report.unrecoverable_findings, 0, "{report:?}");
+}
+
+#[test]
+fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
+    // A both-layers-corrupt data block (a deep fault check does not yet
+    // reconstruct) is recorded as an unrecoverable finding, not silently
+    // ignored or pretended fixed (`AGENTS.md` §2.1).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, &alloc::vec![0x33u8; 400])
+        .expect("write");
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let bs = 4096usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(phys) * bs] ^= 0x01; // wound the ciphertext (physical fault)
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.verification.data_physical_faults, 1, "{report:?}");
+    assert!(
+        !report.structure_sound,
+        "an unrepaired data fault is reported, not hidden"
+    );
+    assert!(report.unrecoverable_findings >= 1);
+}
+
+/// Byte offset inside the keyed-tag slot of a metadata-block header; flipping
+/// it breaks that block's authenticator (mirrors the fuzz harness constant).
+const HEADER_TAG_BYTE: usize = HEADER_LEN - 48 + 8; // inside H_MAC..H_MAC_END
+
+/// Wound the keyed authenticator of every superblock-ring block (both copies
+/// of every slot) so the volume no longer mounts, while leaving the plaintext
+/// crypto discovery header and every other metadata block intact.
+fn damage_superblock_ring(bytes: &mut [u8], bs: usize) {
+    for block in 0..RING_BLOCKS {
+        bytes[as_usize(block) * bs + HEADER_TAG_BYTE] ^= 0xff;
+    }
+}
+
+#[test]
+fn rescue_requires_the_fs_mount_capability() {
+    let bytes = populated().into_block().bytes();
+    let sink = RecordingSink::new();
+    let mut out = CollectSink::new();
+    assert_eq!(
+        RustFs::rescue(
+            MemBlock::from_bytes(bytes, 4096, 512),
+            &TEST_KEY,
+            &GrantNone,
+            &sink,
+            &mut out,
+        ),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(check::RESCUE_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn rescue_discovers_a_root_and_extracts_files_from_a_damaged_ring() {
+    // With the superblock ring wounded the volume no longer mounts, but rescue
+    // recovers the keys from the surviving discovery header, scans for a valid
+    // transaction root, and extracts the readable file data
+    // (`docs/src/filesystem/rustfs-spec.md` §12).
+    let bs = 4096usize;
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = read_all_pattern(cap + cap / 2); // two logical blocks
+    fs.create(root, b"doc", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"doc", 0, &body).expect("write");
+    let doc_node = fs.lookup(root, b"doc").expect("lookup");
+    let doc_ino = u32::try_from(doc_node.raw()).unwrap();
+    let mut bytes = fs.into_block().bytes();
+
+    // The wounded ring makes an ordinary mount fail closed.
+    damage_superblock_ring(&mut bytes, bs);
+    assert!(
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).is_err(),
+        "the damaged ring no longer mounts normally"
+    );
+
+    let sink = RecordingSink::new();
+    let mut out = CollectSink::new();
+    let report = RustFs::rescue(
+        MemBlock::from_bytes(bytes.clone(), 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &sink,
+        &mut out,
+    )
+    .expect("rescue");
+    assert!(report.found_root(), "rescue discovered a valid root");
+    assert!(report.files_mapped >= 1);
+    assert_eq!(report.blocks_extracted, 2, "{report:?}");
+    assert_eq!(report.blocks_skipped, 0);
+    assert!(sink.saw(check::RESCUE_COMPLETE));
+
+    // The recovered blocks reconstruct the file content.
+    let b0 = out.blocks.get(&(doc_ino, 0)).expect("block 0 recovered");
+    let b1 = out.blocks.get(&(doc_ino, 1)).expect("block 1 recovered");
+    assert_eq!(&b0[..cap], &body[..cap]);
+    assert_eq!(&b1[..body.len() - cap], &body[cap..]);
+
+    // Rescue is read-only on the damaged volume: the device is unchanged.
+    let after = RustFs::rescue(
+        MemBlock::from_bytes(bytes.clone(), 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut CollectSink::new(),
+    );
+    assert!(after.is_ok(), "rescue is repeatable and never mutates");
+}
+
+#[test]
+fn rescue_never_emits_a_block_that_fails_integrity() {
+    // A data block whose integrity check fails is skipped, never handed back
+    // (`docs/src/filesystem/rustfs-spec.md` §6, §12). The good block of the
+    // same file is still extracted.
+    let bs = 4096usize;
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = read_all_pattern(2 * cap); // exactly two logical blocks
+    fs.create(root, b"doc", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"doc", 0, &body).expect("write");
+    let doc_node = fs.lookup(root, b"doc").expect("lookup");
+    let doc_ino = u32::try_from(doc_node.raw()).unwrap();
+    let bad_phys = data_block_phys(&mut fs, b"doc", 1);
+    let mut bytes = fs.into_block().bytes();
+
+    // Wound the second block's ciphertext (a physical-checksum fault) and the
+    // ring (so rescue is the recovery path).
+    bytes[as_usize(bad_phys) * bs] ^= 0x01;
+    damage_superblock_ring(&mut bytes, bs);
+
+    let mut out = CollectSink::new();
+    let report = RustFs::rescue(
+        MemBlock::from_bytes(bytes, 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut out,
+    )
+    .expect("rescue");
+    assert!(report.found_root());
+    assert_eq!(report.blocks_extracted, 1, "only the good block is emitted");
+    assert_eq!(report.blocks_skipped, 1, "the corrupt block is skipped");
+    assert!(
+        out.blocks.contains_key(&(doc_ino, 0)),
+        "the readable block is recovered"
+    );
+    assert!(
+        !out.blocks.contains_key(&(doc_ino, 1)),
+        "a block that fails integrity is never emitted"
+    );
+}

@@ -63,6 +63,7 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use rustos_crypto::{AeadKey, MacKey};
 
 mod btree;
+mod check;
 mod crypto;
 mod dedupe;
 mod header;
@@ -74,6 +75,7 @@ mod transaction;
 #[cfg(test)]
 mod tests;
 
+pub use check::{CheckReport, RescueReport, RescueSink};
 use crypto::{
     decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
 };
@@ -413,6 +415,12 @@ pub struct RustFs<B: Block> {
     alloc_cursor: u64,
     meta_cursor: u64,
     clock: fn() -> Time64,
+    /// When `true`, the repair-on-read paths (`read_meta`, `read_sb_slot`,
+    /// `read_txn_root`) skip writing a good companion back over a bad primary,
+    /// so the handle never mutates the backing device. The offline
+    /// [`RustFs::rescue`] sets it: rescue is read-only on the damaged volume by
+    /// default (`docs/src/filesystem/rustfs-spec.md` §12).
+    read_only: bool,
 }
 
 /// A dedupe-index candidate: the physical block of a chunk plus the
@@ -626,8 +634,12 @@ impl<B: Block> RustFs<B> {
         let header =
             BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
         // The companion is good: repair the primary copy from it (the
-        // still-encrypted bytes), then decrypt the caller's copy.
-        self.write_block(phys, buf)?;
+        // still-encrypted bytes), then decrypt the caller's copy. A read-only
+        // handle (rescue) skips the repair write so it never mutates the
+        // damaged device (`docs/src/filesystem/rustfs-spec.md` §12).
+        if !self.read_only {
+            self.write_block(phys, buf)?;
+        }
         self.decrypt_meta_payload(expect_type, buf, phys)?;
         Ok(header)
     }
@@ -1017,6 +1029,7 @@ impl<B: Block> RustFs<B> {
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
+            read_only: false,
         };
         for block in 0..RING_BLOCKS {
             fs.mark_used(block);
@@ -1148,41 +1161,9 @@ impl<B: Block> RustFs<B> {
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
         fs.scrub_progress_root = root.scrub_progress_root;
 
-        // Rebuild the free-block bitmap by walking the live trees: the
-        // superblock ring (reserved in `bootstrap`), the published transaction
-        // root, every inode-tree node, and, for each inode, its extent-tree
-        // nodes plus the physical runs they map. The chunk/refcount and
-        // reverse-reference tree nodes are metadata too; their data records
-        // are shared chunks already marked through the referring inodes'
-        // extents. Every metadata block accounts for both its physical copies
-        // (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable;
-        // §5 — two copies).
-        fs.mark_meta_used(sb.root_phys);
-        // A scrub interrupted mid-pass leaves its rebuildable progress record
-        // reachable from the root; account for its mirrored pair so the
-        // rebuilt free set matches the live one (§4 rebuildable metadata, §5
-        // two copies). It never blocks an ordinary mount (§14).
-        if fs.scrub_progress_root != 0 {
-            fs.mark_meta_used(fs.scrub_progress_root);
-        }
-        for node in fs.btree_collect_nodes(fs.chunk_tree_root, chunk_spec())? {
-            fs.mark_meta_used(node);
-        }
-        for node in fs.btree_collect_nodes(fs.reverse_ref_tree_root, reverse_ref_spec())? {
-            fs.mark_meta_used(node);
-        }
-        let inode_spec = inode_spec();
-        for node in fs.btree_collect_nodes(fs.inode_tree_root, inode_spec)? {
-            fs.mark_meta_used(node);
-        }
-        let inodes = fs.btree_collect_entries(fs.inode_tree_root, inode_spec)?;
-        for (ino, value) in inodes {
-            let inode = Inode::decode(&value)?.ok_or(DriverError::DeviceFault)?;
-            let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
-            fs.mark_inode_blocks(ino, &inode)?;
-        }
-        fs.alloc_cursor = RING_BLOCKS;
-        fs.meta_cursor = fs.total_blocks - 1;
+        // Rebuild the free-block bitmap by walking the live trees (§4 — free
+        // space is rebuildable).
+        fs.rebuild_free_space()?;
         // Rebuild the in-memory dedupe index from the authoritative chunk and
         // reverse-reference trees (§9 — the index is rebuildable, never
         // authoritative).
@@ -1262,7 +1243,9 @@ impl<B: Block> RustFs<B> {
         }
         self.read_block(Self::companion(primary), buf).ok()?;
         let (sb, uuid) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?;
-        let _ = self.write_block(primary, buf);
+        if !self.read_only {
+            let _ = self.write_block(primary, buf);
+        }
         Some((sb, uuid))
     }
 
@@ -1293,8 +1276,56 @@ impl<B: Block> RustFs<B> {
         }
         self.read_block(Self::companion(root_phys), buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
-        self.write_block(root_phys, buf)?;
+        if !self.read_only {
+            self.write_block(root_phys, buf)?;
+        }
         Ok(root)
+    }
+
+    /// Rebuild the in-memory free-block bitmap from scratch by walking the
+    /// live trees: the superblock ring (always reserved), the published
+    /// transaction root, the scrub-progress record if a scrub is mid-pass,
+    /// every chunk/reverse-reference and inode-tree node, and, for each inode,
+    /// its extent-tree nodes plus the physical runs they map. Every metadata
+    /// block accounts for both its physical copies
+    /// (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable;
+    /// §5 — two copies).
+    ///
+    /// The free bitmap is rebuildable derived state, never authoritative, so
+    /// this is the single rebuild walk shared by [`Self::open`] (mount) and the
+    /// offline [`Self::check`] (`AGENTS.md` §2.2). It is idempotent: a second
+    /// rebuild of an unchanged volume produces the same bitmap.
+    fn rebuild_free_space(&mut self) -> Result<(), DriverError> {
+        for word in &mut self.free {
+            *word = 0;
+        }
+        self.free_count = self.total_blocks;
+        for block in 0..RING_BLOCKS {
+            self.mark_used(block);
+        }
+        self.mark_meta_used(self.root_phys);
+        if self.scrub_progress_root != 0 {
+            self.mark_meta_used(self.scrub_progress_root);
+        }
+        for node in self.btree_collect_nodes(self.chunk_tree_root, chunk_spec())? {
+            self.mark_meta_used(node);
+        }
+        for node in self.btree_collect_nodes(self.reverse_ref_tree_root, reverse_ref_spec())? {
+            self.mark_meta_used(node);
+        }
+        let inode_spec = inode_spec();
+        for node in self.btree_collect_nodes(self.inode_tree_root, inode_spec)? {
+            self.mark_meta_used(node);
+        }
+        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec)?;
+        for (ino, value) in inodes {
+            let inode = Inode::decode(&value)?.ok_or(DriverError::DeviceFault)?;
+            let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
+            self.mark_inode_blocks(ino, &inode)?;
+        }
+        self.alloc_cursor = RING_BLOCKS;
+        self.meta_cursor = self.total_blocks - 1;
+        Ok(())
     }
 
     /// Mark every extent-tree node and every physical run reachable from

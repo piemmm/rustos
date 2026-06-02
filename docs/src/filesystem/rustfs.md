@@ -335,6 +335,67 @@ clean scrub of a clean volume changes nothing on disk and is idempotent —
 metadata copy-repairs are direct block writes, and a transaction is committed
 only when scrub actually corrected something or persisted a cursor.
 
+## Offline check and rescue (`rustfs-spec.md` §12)
+
+Scrub is the *online* verifier; `check` and `rescue` are the *offline*
+recovery operations it deliberately does not attempt. Both reuse the seams the
+earlier stages built rather than re-implementing them (`AGENTS.md` §2.2): the
+§8 block identity + companion mirror, the `DataFault` classes, the
+chunk/reverse-reference trees, and the free-space / dedupe-index rebuilds.
+
+**`RustFs::check` — offline structural validation, repair, and index
+rebuild.** `check` runs on a **mounted handle** (a volume that opens is the
+input) and is the **superset** of the online scrub's checks plus structural
+rebuild. It is **capability-gated** on `CAP_FS_MOUNT` (fail-closed and logged
+otherwise) and:
+
+- **rebuilds the rebuildable derived state first** — the free-space bitmap (§4)
+  and the in-memory dedupe index (§9) — from the authoritative trees, so a
+  corrupt derivation can **never** keep a sound volume unmountable. This shares
+  the one `rebuild_free_space` walk `open` uses;
+- **verifies and repairs** metadata copies, classifies data-integrity faults,
+  and reconciles refcounts / reverse references against the live extents, by
+  reusing the online scrub's verification core (`verify_everything`);
+- **validates the directory tree** by walking it from the root: an entry
+  pointing at a missing inode is a *dangling* finding (reported, not
+  auto-deleted — removing a live name is not a safe automatic repair); and
+- **detects and reclaims orphaned inodes** — live inodes the directory tree no
+  longer reaches — freeing their data blocks (releasing any shared-chunk
+  references) and their inode slot.
+
+`check` returns a structured `CheckReport` (the embedded scrub `verification`,
+directories checked, dangling entries, orphans found/reclaimed, whether the
+derived state was rebuilt, and the count of findings it could **not** safely
+repair) and logs its outcome with a stable `rustfs` `12000`-range event ID. A
+clean check changes nothing on disk and is idempotent; it commits only when it
+actually corrected or reclaimed something.
+
+**`RustFs::rescue` — damaged-volume root discovery and file extraction.**
+`rescue` does **not** require a mountable filesystem. It is an associated
+function (it takes the block device, not a mounted handle), capability-gated on
+`CAP_FS_MOUNT`, and **read-only** on the damaged volume — the repair-on-read
+paths are suppressed for its duration, so it never writes to the device. It:
+
+1. recovers the volume keys from a surviving superblock **discovery header**
+   (the wrapped master key, plaintext at rest), so a wounded superblock ring
+   does not stop key recovery;
+2. **scans** every physical block for a self-identifying §8 transaction root
+   whose inline commit record validates (`TxnRoot::decode_any`, which needs no
+   externally-supplied generation), and picks the **highest-generation** valid
+   root — so it recovers a usable root even when the ring no longer names one;
+3. **maps** the inode/extent metadata that root names to files; and
+4. **extracts** each file's readable data, running every recovered block
+   through the Stage 5/6 integrity pipeline and emitting only blocks that pass
+   to a caller-supplied `RescueSink` — a block that fails integrity is skipped
+   and counted, **never handed back** (§6).
+
+`rescue` returns a structured `RescueReport` (roots found, the chosen
+generation, files mapped, blocks extracted, blocks skipped, unreadable inodes)
+and logs its outcome with a stable event ID. Because the driver owns no
+destination filesystem, extraction streams recovered plaintext blocks to the
+`RescueSink` the caller provides (a recovery host writes them to a safe
+volume).
+
 ## Timestamps (§21)
 
 Every inode stores four 64-bit-native `Time64` timestamps —
@@ -517,7 +578,17 @@ result as one uninterrupted pass and clearing its cursor on completion) with a
 once** with the dedupe domain preserved, the scrub being **capability-gated**
 on `CAP_FS_MOUNT` (refused and logged otherwise), and integrity + compression +
 dedupe invariants still holding across a scrub, a remount, and a COW rewrite;
-the per-inode security record and
+the Stage-9 offline check/rescue acceptance tests — a **clean check** reporting
+a sound structure and rebuilding nothing (idempotent, changing nothing on
+disk), check **rebuilding** a deliberately corrupted free-space bitmap and
+dedupe-index derivation from the authoritative trees with the volume staying
+mountable, check **reclaiming an orphaned inode** and **correcting a refcount
+divergence** while **reporting** an unrepairable data fault it cannot safely
+fix, check being **capability-gated**, `rescue` **discovering a valid root and
+extracting** files from a volume whose superblock ring is wounded (and being
+read-only/repeatable), and `rescue` **never emitting a block that fails** the
+Stage 5/6 integrity pipeline while still recovering the good blocks; the
+per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
 highest committed generation; and a **crash-replay sweep** that faults the
@@ -537,7 +608,11 @@ the **chunk/refcount** and **reverse-reference** record decode paths that
 mount rebuilds the dedupe index from. Since Stage 8 the base image is left with
 a **paused scrub**, and each successful mount additionally runs a bounded
 `scrub`, so the sweep also drives the **scrub-progress** record decode path
-(`load_scrub_progress`), asserting it too never panics and fails closed. The
+(`load_scrub_progress`), asserting it too never panics and fails closed. Since
+Stage 9 each successful mount additionally runs the offline `check`, and every
+image (mountable or not) is also fed to `RustFs::rescue`, so the sweep drives
+the **transaction-root scan** (`TxnRoot::decode_any`) and the rescue extraction
+pipeline over arbitrary bytes, asserting both never panic and fail closed. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`rustfs-spec.md` §10,

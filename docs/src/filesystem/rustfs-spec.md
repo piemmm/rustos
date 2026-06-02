@@ -561,7 +561,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | ✓ |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | ✓ |
 | 8 | Online scrub. | ✓ |
-| 9 | Offline check and rescue. | |
+| 9 | Offline check and rescue. | ✓ |
 | 10 | TRIM/discard queues and mkfs-time discard. | |
 | 11 | Device health baselines and health-triggered scrub. | |
 | 12 | Fuzz, proptest, crash-replay, and corruption-injection suites. | |
@@ -746,5 +746,43 @@ once within its encryption domain, the capability gate, and integrity +
 compression + dedupe invariants surviving a scrub/remount/COW rewrite — all
 pass, alongside the crash-replay sweep, the 1 GiB `fssoak`, the posix suite,
 the QEMU vertical, and the `fuzz_mount` harness extended to drive the
-scrub-progress decode path. Stages 9–12 remain; each implementing session
-ticks this table and `PLAN.md`.
+scrub-progress decode path.
+
+Stage 9 added **offline check and rescue** (§12), the recovery operations
+scrub deliberately does not attempt. Both reuse the seams the earlier stages
+built rather than re-implementing them (`AGENTS.md` §2.2) — the §8 block
+identity + companion mirror, the `DataFault` classes, the chunk/reverse-ref
+trees, and the free-space / dedupe-index rebuilds. `RustFs::check` is the
+**offline superset** of the online scrub, run on a mounted handle and
+**capability-gated** on `CAP_FS_MOUNT`: it rebuilds the rebuildable derived
+state first — the free-space bitmap (§4) and the dedupe index (§9) — from the
+authoritative trees (sharing the one `rebuild_free_space` walk `open` uses), so
+a corrupt derivation can never keep a sound volume unmountable; reuses the
+scrub verification core (`verify_everything`) to verify/repair metadata copies,
+classify data faults, and reconcile refcounts; validates the directory tree
+(an entry to a missing inode is a *dangling* finding, reported not auto-
+deleted); and detects and **reclaims orphaned inodes**. It returns a structured
+`CheckReport` (the embedded scrub `verification`, directories checked, dangling
+entries, orphans found/reclaimed, derived-state rebuilt, and the count of
+findings it could not safely fix), is idempotent, and commits only when it
+actually repaired something. `RustFs::rescue` extracts data from a volume too
+damaged to mount: it is **read-only** on the device (the repair-on-read writes
+are suppressed) and capability-gated, recovers the keys from a surviving
+superblock discovery header, **scans** every block for a self-identifying
+transaction root whose commit record validates (`TxnRoot::decode_any`, needing
+no externally-supplied generation), picks the highest-generation root, maps its
+inode/extent metadata to files, and **extracts** the readable file data,
+running every block through the Stage 5/6 integrity pipeline and emitting only
+blocks that pass to a caller-supplied `RescueSink` (a failing block is skipped,
+never handed back). It returns a structured `RescueReport`. The §16 acceptance
+tests for this stage — a clean check sound and rebuilding nothing (idempotent),
+check rebuilding a corrupt free-space/dedupe derivation with the volume staying
+mountable, check reclaiming an orphan and correcting a refcount divergence
+while reporting an unrepairable data fault, the check + rescue capability
+gates, rescue discovering a root and extracting files from a wounded
+superblock ring (read-only and repeatable), and rescue never emitting a block
+that fails integrity — all pass, alongside the crash-replay sweep, the 1 GiB
+`fssoak`, the posix suite, the QEMU vertical, and the `fuzz_mount` harness
+extended to drive the offline `check` and the `rescue` root-scan / extraction
+decode paths. Stages 10–12 remain; each implementing session ticks this table
+and `PLAN.md`.

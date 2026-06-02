@@ -166,6 +166,34 @@ scrub). Scrub returns a structured `ScrubReport` and logs its outcome through
 `lib/log` with a stable event ID; a clean scrub changes nothing and is
 idempotent.
 
+## Offline check and rescue (`rustfs-spec.md` §12)
+
+Scrub is the online verifier; `check` and `rescue` are the offline recovery
+operations it does not attempt, reusing the same seams rather than duplicating
+them (`AGENTS.md` §2.2).
+
+`RustFs::check` is the **offline superset** of scrub, run on a mounted handle
+and **capability-gated** on `CAP_FS_MOUNT`. It rebuilds the rebuildable derived
+state first — the free-space bitmap (§4) and the dedupe index (§9) — from the
+authoritative trees (the same `rebuild_free_space` walk `open` uses), so a
+corrupt derivation can never keep a sound volume unmountable; reuses the scrub
+verification core to verify/repair metadata copies, classify data faults, and
+reconcile refcounts; validates the directory tree (an entry to a missing inode
+is a *dangling* finding, reported not auto-deleted); and detects and
+**reclaims orphaned inodes**. It returns a structured `CheckReport`, is
+idempotent, and commits only when it actually repaired something.
+
+`RustFs::rescue` recovers files from a volume too damaged to mount. It is an
+associated function (it takes the block device), **read-only** on the device
+(the repair-on-read writes are suppressed), and capability-gated. It recovers
+the keys from a surviving superblock discovery header, **scans** every block
+for a self-identifying transaction root whose commit record validates
+(`TxnRoot::decode_any`), picks the highest-generation root, maps its
+inode/extent metadata to files, and **extracts** the readable file data —
+running every block through the Stage 5/6 integrity pipeline and emitting only
+blocks that pass to a caller-supplied `RescueSink` (a failing block is skipped,
+never handed back). It returns a structured `RescueReport`.
+
 ## Crash consistency (copy-on-write + superblock ring)
 
 Every operation is a transaction. A block reachable from the last
@@ -197,7 +225,11 @@ so a delete can copy-on-write itself even on a full volume. No
 > reverse-reference tree, reflinks, and a rebuildable byte-verified dedupe
 > index (Stage 7), and a resumable, capability-gated **online scrub** that
 > verifies and repairs metadata, classifies data faults, and reconciles
-> refcounts (Stage 8). The remaining stages stay in the
+> refcounts (Stage 8), and **offline `check` and `rescue`** — `check` the
+> mounted-handle structural validator that rebuilds the derived state,
+> reconciles refcounts, validates directories, and reclaims orphaned inodes,
+> and `rescue` the read-only damaged-volume root scanner and integrity-gated
+> file extractor (Stage 9). The remaining stages stay in the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -210,8 +242,10 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
-- `CAP_FS_MOUNT` to run `RustFs::scrub` (the online verify-and-repair pass);
-  without it scrub fails closed with `PermissionDenied`.
+- `CAP_FS_MOUNT` to run `RustFs::scrub` (online verify-and-repair),
+  `RustFs::check` (offline structural validation/rebuild), and `RustFs::rescue`
+  (damaged-volume extraction); without it each fails closed with
+  `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
   non-`READ_ONLY` mount. The driver runs in user space; it does not
@@ -255,7 +289,14 @@ changing nothing, single-copy metadata repair from the companion, data
 divergence detection and correction, resumability matching an uninterrupted
 pass plus a crash-mid-scrub remount, a shared chunk accounted once within its
 encryption domain, the `CAP_FS_MOUNT` gate, and integrity + compression +
-dedupe invariants surviving a scrub/remount/COW rewrite), and a
+dedupe invariants surviving a scrub/remount/COW rewrite), the Stage-9 offline
+check/rescue tests (a clean check sound and rebuilding nothing/idempotent,
+check rebuilding a corrupt free-space and dedupe-index derivation with the
+volume staying mountable, check reclaiming an orphan and correcting a refcount
+divergence while reporting an unrepairable data fault, the check + rescue
+capability gates, rescue discovering a root and extracting files from a wounded
+superblock ring read-only/repeatably, and rescue never emitting a block that
+fails integrity), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
@@ -266,7 +307,10 @@ shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
 mount / metadata-decode path (`fuzz_mount`, which since Stage 7 also decodes
 the chunk/refcount and reverse-reference records via the dedupe-index rebuild,
 and since Stage 8 also drives the scrub-progress record decode by running a
-bounded scrub on every successful mount)
+bounded scrub on every successful mount, and since Stage 9 also runs the
+offline `check` on every successful mount and feeds every image to
+`RustFs::rescue`, driving the transaction-root scan and extraction decode
+paths)
 and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
 (`AGENTS.md` §19.6).
 

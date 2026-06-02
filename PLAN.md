@@ -4080,7 +4080,34 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    remount, shared-chunk-once within the domain, the capability gate, and
    integrity + compression + dedupe surviving a scrub/remount/COW rewrite;
    `fuzz_mount` extended to drive the scrub-progress decode.)
-9. Offline check and rescue.
+9. Offline check and rescue. ✓ (`RustFs::check` and `RustFs::rescue` —
+   `src/check.rs`. Both reuse the earlier stages' seams rather than
+   re-implementing them (`AGENTS.md` §2.2). `check` is the offline superset of
+   the online scrub, run on a mounted handle and capability-gated
+   (`CAP_FS_MOUNT`): it rebuilds the rebuildable derived state first — the
+   free-space bitmap (§4) and the dedupe index (§9) — from the authoritative
+   trees (the one shared `rebuild_free_space` walk `open` uses), reuses the
+   scrub verification core (`verify_everything`) to verify/repair metadata
+   copies, classify data faults, and reconcile refcounts, validates the
+   directory tree from the root (an entry to a missing inode is a *dangling*
+   finding, reported not auto-deleted), and detects and reclaims orphaned
+   inodes; it returns a structured `CheckReport`, is idempotent, and commits
+   only when it repaired something. `rescue` extracts files from a volume too
+   damaged to mount: read-only on the device (the repair-on-read writes are
+   suppressed) and capability-gated, it recovers the keys from a surviving
+   superblock discovery header, scans every block for a self-identifying
+   transaction root whose commit record validates (`TxnRoot::decode_any`),
+   picks the highest-generation root, maps its inode/extent metadata to files,
+   and extracts the readable data through the Stage 5/6 integrity pipeline,
+   emitting only blocks that pass to a caller-supplied `RescueSink`; it returns
+   a structured `RescueReport`. New `12000`-range event IDs in `src/check.rs`.
+   Tested: clean check sound/idempotent, check rebuilding a corrupt
+   free-space/dedupe derivation with the volume staying mountable, orphan
+   reclaim + refcount-divergence correction while reporting an unrepairable
+   data fault, the check + rescue capability gates, rescue discovering a root
+   and extracting from a wounded superblock ring (read-only/repeatable), and
+   rescue never emitting a block that fails integrity; `fuzz_mount` extended to
+   drive the offline `check` and the `rescue` root-scan / extraction paths.)
 10. TRIM/discard queues and mkfs-time discard.
 11. Device-health baselines and health-triggered scrub.
 12. Fuzz, proptest, crash-replay, and corruption-injection suites.
@@ -4090,7 +4117,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–8 complete; Stages 9–12 planned.** The copy-on-write
+**Status: Stages 1–9 complete; Stages 10–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

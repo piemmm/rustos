@@ -170,7 +170,7 @@ const SP_COUNT_FIELDS: usize = 10;
 
 /// Outcome of verifying one metadata block's two physical copies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum MetaStatus {
+pub(crate) enum MetaStatus {
     /// Both copies authenticated.
     Clean,
     /// One copy was bad and repaired from its good companion.
@@ -290,6 +290,28 @@ impl<B: Block> RustFs<B> {
         Ok((report, mutated))
     }
 
+    /// One unbounded verification pass over the whole volume, shared with the
+    /// offline [`crate::RustFs::check`] (Stage 9, `AGENTS.md` §2.2): the
+    /// volume-wide metadata, then every inode's metadata and data blocks, then
+    /// the refcount/reverse-reference reconcile against the live extents.
+    /// Returns `true` when the reconcile corrected on-disk refcount state (so
+    /// the caller commits the new root). The metadata copy-repairs it performs
+    /// are direct block writes, not transactional.
+    pub(crate) fn verify_everything(
+        &mut self,
+        report: &mut ScrubReport,
+    ) -> Result<bool, DriverError> {
+        self.scrub_global_metadata(report)?;
+        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec())?;
+        for (ino_key, value) in &inodes {
+            let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
+            if let Some(inode) = Inode::decode(value)? {
+                self.scrub_inode(ino, &inode, report)?;
+            }
+        }
+        self.scrub_refcounts(&inodes, report)
+    }
+
     /// Determine where this scrub call starts: resume the persisted cursor and
     /// counts of an in-progress scrub, or start fresh by verifying the global
     /// metadata once and beginning the inode walk at the root inode. A corrupt
@@ -370,7 +392,11 @@ impl<B: Block> RustFs<B> {
     /// tree was readable. The walk authenticates each node itself rather than
     /// going through the repair-on-read [`crate::RustFs::read_meta`], so a
     /// repair it performs is counted exactly once.
-    fn scrub_btree(&mut self, root: u64, report: &mut ScrubReport) -> Result<bool, DriverError> {
+    pub(crate) fn scrub_btree(
+        &mut self,
+        root: u64,
+        report: &mut ScrubReport,
+    ) -> Result<bool, DriverError> {
         if root == 0 {
             return Ok(true);
         }
@@ -397,7 +423,11 @@ impl<B: Block> RustFs<B> {
     /// repairing a bad copy from its good companion (Stage 3 seam). Discards
     /// the verified bytes; use [`Self::scrub_meta_into`] when the caller needs
     /// them (to recurse into a tree).
-    fn scrub_meta(&mut self, phys: u64, expect_type: BlockType) -> Result<MetaStatus, DriverError> {
+    pub(crate) fn scrub_meta(
+        &mut self,
+        phys: u64,
+        expect_type: BlockType,
+    ) -> Result<MetaStatus, DriverError> {
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         self.scrub_meta_into(phys, expect_type, &mut buf)
     }
@@ -407,7 +437,7 @@ impl<B: Block> RustFs<B> {
     /// its good companion; a both-copies-bad block is reported as
     /// [`MetaStatus::Unrepairable`] (recorded, never panicked — `AGENTS.md`
     /// §5.4 / §2.9).
-    fn scrub_meta_into(
+    pub(crate) fn scrub_meta_into(
         &mut self,
         phys: u64,
         expect_type: BlockType,
@@ -457,7 +487,7 @@ impl<B: Block> RustFs<B> {
 
 impl ScrubReport {
     /// Fold one metadata-block verification result into the report.
-    fn note_meta(&mut self, status: MetaStatus) {
+    pub(crate) fn note_meta(&mut self, status: MetaStatus) {
         self.metadata_blocks_checked += 1;
         match status {
             MetaStatus::Clean => {}
@@ -467,7 +497,7 @@ impl ScrubReport {
     }
 
     /// Fold one data-block integrity fault into the report, keyed by class.
-    fn note_data_fault(&mut self, fault: DataFault) {
+    pub(crate) fn note_data_fault(&mut self, fault: DataFault) {
         match fault {
             DataFault::Physical => self.data_physical_faults += 1,
             DataFault::Aead => self.data_aead_faults += 1,
@@ -483,7 +513,7 @@ impl<B: Block> RustFs<B> {
     /// extent-derived references are the liveness truth, so a divergence is
     /// corrected toward them without dropping a referrer. Returns `true` when a
     /// correction was made (so the caller commits the new root).
-    fn scrub_refcounts(
+    pub(crate) fn scrub_refcounts(
         &mut self,
         inodes: &[(u64, Vec<u8>)],
         report: &mut ScrubReport,
