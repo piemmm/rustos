@@ -142,6 +142,9 @@ rustos/
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
+│   ├── font/            # Shared text rasterisation: a built-in monospace
+│   │                    #   bitmap font + glyph blitter onto a raster Surface
+│   │                    #   for the taskbar and apps (§16.4, §17.4).
 │   ├── geometry/        # Shared integer screen geometry (Point/Rect) for
 │   │                    #   the WM, taskbar, and graphical apps (§17.4).
 │   ├── log/             # Structured logging.

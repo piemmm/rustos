@@ -9,6 +9,7 @@
 use rustos_geometry::Point;
 use rustos_theme::Theme;
 
+use crate::clock::Clock;
 use crate::edge::Edge;
 use crate::layout::{BarLayout, Hit};
 use crate::menu::StartMenu;
@@ -66,6 +67,7 @@ pub struct Taskbar {
     start_menu: StartMenu,
     tasks: TaskList,
     notifications: NotificationArea,
+    clock: Clock,
 }
 
 impl Taskbar {
@@ -79,6 +81,7 @@ impl Taskbar {
             start_menu: StartMenu::with_session_controls(),
             tasks: TaskList::new(),
             notifications: NotificationArea::new(),
+            clock: Clock::new(),
         }
     }
 
@@ -126,6 +129,17 @@ impl Taskbar {
     /// The notification area, mutably.
     pub fn notifications_mut(&mut self) -> &mut NotificationArea {
         &mut self.notifications
+    }
+
+    /// The clock.
+    #[must_use]
+    pub const fn clock(&self) -> &Clock {
+        &self.clock
+    }
+
+    /// The clock, mutably, so the caller can update its label.
+    pub fn clock_mut(&mut self) -> &mut Clock {
+        &mut self.clock
     }
 
     /// Adopt a new theme, updating the corner radius the window manager will

@@ -365,6 +365,12 @@ fn pixel_at(surface: &Surface, bar: Rect, x: i32, y: i32) -> Pixel {
     surface.get(lx, ly).expect("point lies inside the bar")
 }
 
+/// Whether any pixel inside screen-space `region` was painted `want`.
+fn region_has_pixel(surface: &Surface, bar: Rect, region: Rect, want: Pixel) -> bool {
+    (region.top()..region.bottom())
+        .any(|y| (region.left()..region.right()).any(|x| pixel_at(surface, bar, x, y) == want))
+}
+
 #[test]
 fn rendered_surface_matches_bar_dimensions() {
     let theme = Theme::dark();
@@ -477,5 +483,94 @@ fn theme_switch_repaints_the_background() {
         dark.palette().surface_raised,
         light.palette().surface_raised,
         "dark and light differ, so the repaint is observable"
+    );
+}
+
+// ---- text rendering -------------------------------------------------
+
+#[test]
+fn clock_label_paints_foreground_text() {
+    let theme = Theme::dark();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.clock_mut().set_label("12:00");
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert!(
+        region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.clock,
+            role(theme.palette().on_surface)
+        ),
+        "the clock label draws on_surface text inside the clock region"
+    );
+}
+
+#[test]
+fn empty_clock_paints_no_text() {
+    let theme = Theme::dark();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    assert_eq!(bar.clock().label(), "");
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.clock,
+            role(theme.palette().on_surface)
+        ),
+        "an empty clock label draws no foreground text"
+    );
+}
+
+#[test]
+fn focused_task_title_is_drawn_in_the_on_accent_role() {
+    let theme = Theme::dark();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().activate(TaskId(1));
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    let slot = layout.tasks[0];
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, role(theme.palette().on_accent)),
+        "the focused task title draws on_accent text over the accent slot"
+    );
+}
+
+#[test]
+fn task_title_too_long_for_its_slot_is_truncated_not_overflowing() {
+    // A long title in a narrow slot must paint inside the slot and never
+    // spill into the slot to its right (fail closed, §2.9).
+    let theme = Theme::dark();
+    let config = TaskbarConfig {
+        task_extent: 24,
+        ..TaskbarConfig::bottom_bar(1000, 800)
+    };
+    let mut bar = Taskbar::new(config, &theme);
+    bar.tasks_mut().add(TaskId(1), "A very long window title");
+    bar.tasks_mut().add(TaskId(2), "Second");
+
+    let layout = bar.layout();
+    let surface = render(&bar, &theme).expect("bar renders");
+    // The second slot is filled with the plain surface role; its title is
+    // "Second" in on_surface. No on_surface text from task 1 may appear in
+    // slot 2 before slot 2's own glyphs — assert slot 1's text stays put by
+    // checking the gap is clean: the right edge column of slot 0 carries no
+    // foreground from an overflow.
+    let slot0 = layout.tasks[0];
+    let overflow_probe = Rect::new(slot0.right(), slot0.top(), 1, slot0.height);
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.bar,
+            overflow_probe,
+            role(theme.palette().on_surface)
+        ),
+        "task 0's title does not spill past its slot"
     );
 }

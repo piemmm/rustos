@@ -648,6 +648,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-font"
+version = "0.0.0"
+dependencies = [
+ "rustos-raster",
+]
+
+[[package]]
 name = "rustos-geometry"
 version = "0.0.0"
 
@@ -958,6 +965,7 @@ dependencies = [
 name = "rustos-taskbar"
 version = "0.0.0"
 dependencies = [
+ "rustos-font",
  "rustos-geometry",
  "rustos-raster",
  "rustos-theme",

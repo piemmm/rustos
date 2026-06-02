@@ -48,6 +48,7 @@
 
 extern crate alloc;
 
+pub mod clock;
 pub mod edge;
 pub mod layout;
 pub mod menu;
@@ -59,6 +60,7 @@ pub mod tasks;
 #[cfg(test)]
 mod tests;
 
+pub use clock::Clock;
 pub use edge::{Edge, Orientation};
 pub use layout::{BarLayout, Hit};
 pub use menu::{MenuAction, MenuEntry, MenuEntryId, SessionControl, StartMenu};

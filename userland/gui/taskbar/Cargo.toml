@@ -18,6 +18,10 @@ rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # renders its regions into a `Surface` without depending on the window manager
 # and without duplicating the colour algebra (§17.4, §2.2).
 rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# Shared text rasteriser (`BitmapFont`) — the built-in bitmap face and glyph
+# blitter, lifted to `lib/*` (§16.4) so the taskbar draws the clock and task
+# titles without depending on the window manager (§17.4).
+rustos-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The single shared theme definition (§10): the taskbar takes its corner
 # radius (and, in later increments, colours/fonts) from the active theme so
 # it stays consistent with the window manager and apps.

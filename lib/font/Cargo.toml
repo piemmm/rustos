@@ -1,0 +1,18 @@
+[package]
+name = "rustos-font"
+description = "RustOS shared text rasterisation primitives: a built-in monospace bitmap font and a glyph blitter that draws onto a lib/raster surface, used by the taskbar and the default apps without depending on the window manager (§6, §16.4, §17.4 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The pixel buffer and premultiplied-alpha colour algebra glyphs are blitted
+# into and blended with. Text rendering owns no colour arithmetic of its own
+# (§2.2); it composites through `lib/raster`'s single `Pixel::over` path.
+rustos-raster = { path = "../raster", version = "=0.0.0" }
+
+[lints]
+workspace = true

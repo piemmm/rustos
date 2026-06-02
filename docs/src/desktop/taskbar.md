@@ -5,20 +5,21 @@ GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 `PLAN.md` Stage 7). This page describes the **layout, model, and rendering**:
 the geometry of every region, pointer hit-testing for input routing, the
 start-menu / task-list / notification-area state machines, and painting those
-regions into a themed pixel surface. Glyph rendering (clock and task-title
-text), notification-icon artwork, and the live window-manager IPC build on
-this model in later increments.
+regions — including the clock label and task-title **text** — into a themed
+pixel surface. Notification-icon artwork and the live window-manager IPC build
+on this model in later increments.
 
 ## Where it sits
 
 As a `userland/gui/*` crate the taskbar depends only on `lib/*`: the shared
 [`rustos-geometry`](../lib/overview.md) coordinate types, the shared
 `rustos-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
-window manager also paints with), and the shared [`rustos-theme`](theming.md)
-definition. It never depends on the window manager or on any sibling userland
-crate, and nothing depends on it in turn (`AGENTS.md` §17.4, §17.3) — the
-desktop is an optional, one-way-dependent frontend, so a headless image
-simply omits it.
+window manager also paints with), the shared `rustos-font` text rasteriser
+(the built-in bitmap face and glyph blitter, `AGENTS.md` §16.4), and the
+shared [`rustos-theme`](theming.md) definition. It never depends on the
+window manager or on any sibling userland crate, and nothing depends on it in
+turn (`AGENTS.md` §17.4, §17.3) — the desktop is an optional,
+one-way-dependent frontend, so a headless image simply omits it.
 
 ## Layout
 
@@ -36,7 +37,10 @@ From the leading end to the trailing end:
   the notification area, holding one fixed-width slot per running task.
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
-- **Clock** — anchored to the trailing end.
+- **Clock** — anchored to the trailing end. Its display text is held by a
+  `Clock` model whose label the caller sets (formatting a `Time64` value into
+  a string is an upstream concern, `AGENTS.md` §21); the bar stores only the
+  text to draw.
 
 `BarLayout::compute` turns the config plus the current task and icon counts
 into the screen `Rect` of every region. All arithmetic saturates, so a
@@ -66,6 +70,18 @@ filling each region with a colour role from the active theme's `Palette`:
   and the plain **surface** colour otherwise — which the palette guarantees
   reads as distinct from the raised background;
 - each notification icon slot is the **muted** foreground colour.
+
+On top of those fills, `render` draws **text** with the shared `rustos-font`
+`BitmapFont` (the built-in 5×7 monospace face): the clock label is centred in
+the clock region, and each task slot shows its window title aligned to the
+leading edge. Each label takes the foreground role that matches its background
+— `on_accent` over a focused (accent) slot, the **muted** foreground over a
+minimised slot, and `on_surface` otherwise (and for the clock over the raised
+bar) — so text stays legible after a theme switch. A label is truncated to the
+characters that fit its region, so text never spills into a neighbouring slot
+(`AGENTS.md` §2.9), and glyphs are composited through `rustos-raster`'s one
+premultiplied-alpha `over` path — no blitter or colour algebra is duplicated
+here (`AGENTS.md` §2.2).
 
 The surface is rectangular: the taskbar paints no corners. The window manager
 presents it and applies `BarLayout::corner_radius` through its single
@@ -108,8 +124,10 @@ ids, so a clash signals a bug rather than a benign retry.
 The taskbar reads its corner radius from the active theme and adopts a new one
 with `Taskbar::apply_theme`; the rest of its state is untouched, so a runtime
 dark/light switch needs no model relayout (`AGENTS.md` §10). The region
-**colours** are wired through the same theme by `render` (see *Rendering*);
-the **fonts** join them when glyph rendering lands in a later increment.
+**colours** and the text **foreground** roles are wired through the same theme
+by `render` (see *Rendering*). The text is drawn with the built-in
+`rustos-font` face today; selecting a face from the theme's `FontSpec` roles
+joins this once installed font faces exist.
 
 ## Tests
 
@@ -121,4 +139,8 @@ overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the
 theme-driven corner radius. The rendering tests assert the painted surface
 matches the bar dimensions and that the background, start button, focused /
 unfocused / minimised task slots, and notification icons take the expected
-theme colour, including that a dark↔light switch repaints the background.
+theme colour, including that a dark↔light switch repaints the background. The
+text tests assert that a set clock label paints `on_surface` glyphs inside the
+clock region (and an empty label paints none), that a focused task's title is
+drawn in `on_accent`, and that a title too long for its slot is truncated
+rather than spilling into the next slot.

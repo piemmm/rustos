@@ -4642,13 +4642,41 @@ device list.
   `docs/src/desktop/taskbar.md`; the taskbar now depends on `lib/geometry` +
   `lib/raster` + `lib/theme` only (§17.4). Glyph rendering (clock/task-title
   text) and notification-icon artwork remain for a later increment.
+- **Shared font library — DONE (increment).** `lib/font` (`rustos-font`,
+  `no_std`, `#![forbid(unsafe_code)]`, dep only `lib/raster`, `Layer::Lib`)
+  is the single shared **text rasteriser** — one of the curated §16.4
+  shared-library classes. It owns a built-in **5×7 monospace bitmap atlas**
+  (`glyphs`) covering printable ASCII (space..`~`), written as binary row
+  literals so the data is self-documenting (§2.11), and `BitmapFont` (`font`):
+  a face (atlas + metrics) plus the glyph blitter. `draw_text` composites each
+  lit glyph pixel through `lib/raster`'s single premultiplied-alpha
+  `Pixel::over` path — no colour algebra duplicated (§2.2); an out-of-range
+  character renders a visible fallback box and off-screen pixels clip rather
+  than panic (§2.9). `text_width` gives the tight one-line bounding width.
+  Like `lib/geometry`/`lib/theme`/`lib/raster` it lives in `lib/*` so the
+  taskbar and apps draw text without depending on the window manager (§17.4).
+  10 unit tests; added to `AGENTS.md` §3's `lib/` list and the workspace
+  manifest; crate `README.md` (tier `experimental`).
+- **Taskbar text rendering — DONE (increment).** `userland/gui/taskbar`
+  gains a `clock` module (`Clock` holds the caller-set display label;
+  formatting a `Time64` value stays upstream, §21) and its `render` module
+  now draws **text** with `lib/font`'s `BitmapFont::mono5x7`: the clock label
+  centred in the clock region and each task slot's window title aligned to its
+  leading edge. Each label takes the foreground role matching its background
+  (`on_accent` over a focused/accent slot, the muted role over a minimised
+  slot, `on_surface` otherwise and for the clock), and is truncated to the
+  characters that fit so text never spills into a neighbour (§2.9). The bar
+  now depends on `lib/geometry` + `lib/raster` + `lib/font` + `lib/theme`
+  (§17.4). 4 new headless tests (31 total); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. Docs
+  `docs/src/desktop/taskbar.md` and the crate `README.md`.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring
   the taskbar hit-test/model and the WM input router to live
   pointer/keyboard device events (and the taskbar–WM event glue, lifted
-  into `lib/*` per §17.4), glyph/text and icon-artwork rendering on top of
-  the themed region fills now produced, wiring the theme *fonts* through the
-  taskbar + default apps and the themed cursor *assets*, and the default
-  filesystem-browser and terminal-emulator apps.
+  into `lib/*` per §17.4), notification-icon artwork, selecting a font face
+  from the theme's `FontSpec` roles once installed fonts exist plus the
+  themed cursor *assets*, and the default filesystem-browser and
+  terminal-emulator apps.
 
 ---
 
