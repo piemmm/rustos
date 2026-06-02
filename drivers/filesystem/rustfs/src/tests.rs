@@ -925,9 +925,9 @@ fn data_block_integrity_layers_are_distinct_and_fail_closed() {
 fn identical_content_shares_a_logical_hash_distinct_content_differs() {
     // The logical content hash names the plaintext: two blocks with identical
     // content carry the same stored hash (the seam Stage 7 dedupe keys on),
-    // while a single differing byte changes it. The hash is over plaintext, so
-    // it matches even though the two blocks encrypt to different ciphertext
-    // (distinct `(phys, generation)` nonces).
+    // while a single differing byte changes it. Stage 7 acts on that hash:
+    // identical content is stored once and shared (refcount 2), distinct
+    // content is not.
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
     let full = as_usize(fs.data_capacity());
@@ -958,15 +958,24 @@ fn identical_content_shares_a_logical_hash_distinct_content_differs() {
     assert_ne!(ha, hc, "different plaintext hashes differently");
     // The hash genuinely depends on content, not a zeroed placeholder.
     assert_ne!(ha, [0u8; LOGICAL_HASH_LEN]);
-    // Confirm the two same-content blocks really are stored as distinct
-    // ciphertext, so the equal hash is a property of the plaintext.
+    // The two same-content files share one physical chunk (refcount 2), while
+    // the differing file is stored separately and keeps the implicit single
+    // reference (Stage 7 dedupe).
     let pa = data_block_phys(&mut fs, b"a", 0);
     let pb = data_block_phys(&mut fs, b"b", 0);
-    let bs = 512usize;
-    let bytes = fs.into_block().bytes();
-    let ca = &bytes[as_usize(pa) * bs..as_usize(pa) * bs + full];
-    let cb = &bytes[as_usize(pb) * bs..as_usize(pb) * bs + full];
-    assert_ne!(ca, cb, "same plaintext encrypts to different ciphertext");
+    let pc = data_block_phys(&mut fs, b"c", 0);
+    assert_eq!(pa, pb, "identical content shares one physical chunk");
+    assert_ne!(pa, pc, "different content is not shared");
+    assert_eq!(
+        fs.data_refcount(pa).expect("refcount"),
+        2,
+        "the shared chunk is referenced twice"
+    );
+    assert_eq!(
+        fs.data_refcount(pc).expect("refcount"),
+        1,
+        "the unique block keeps the implicit single reference"
+    );
 }
 
 #[test]
@@ -1166,4 +1175,353 @@ fn integrity_still_detected_on_a_compressed_block() {
             Err(DataFault::Logical)
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7: chunk table, refcounts, reverse refs, reflinks, dedupe index.
+// ---------------------------------------------------------------------------
+
+/// The inode number behind file `name` under the root.
+fn file_ino(fs: &mut RustFs<MemBlock>, name: &[u8]) -> u32 {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    u32::try_from(node.raw()).unwrap()
+}
+
+/// The number of records in the chunk/refcount tree (one per shared chunk).
+fn chunk_count(fs: &mut RustFs<MemBlock>) -> usize {
+    fs.btree_collect_entries(fs.chunk_tree_root, chunk_spec())
+        .expect("walk chunk tree")
+        .len()
+}
+
+#[test]
+fn byte_verify_before_share_refuses_to_merge_unequal_data() {
+    // A dedupe-index entry is only ever a *hint*: before sharing, the
+    // candidate's bytes are compared to the incoming record, so two blocks
+    // whose index keys collide but whose bytes differ are never merged (§9 —
+    // merging unequal data is corruption). A natural logical-hash collision is
+    // infeasible, so the colliding index entry is injected through the
+    // in-memory index seam.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+
+    let content_a = alloc::vec![0x11u8; cap];
+    let content_b = alloc::vec![0x22u8; cap];
+    assert_eq!(fs.write_at(root, b"b", 0, &content_b), Ok(cap));
+    let pb = data_block_phys(&mut fs, b"b", 0);
+    let b_ino = file_ino(&mut fs, b"b");
+
+    // Forge an index entry that maps content A's key to content B's block,
+    // simulating a hash collision. The pre-share byte check must reject it.
+    let mut block_a = alloc::vec![0u8; cap];
+    block_a.copy_from_slice(&content_a);
+    let hash_a = logical_hash(&block_a);
+    let key = dedupe_key(fs.dedupe_domain, u32::try_from(cap).unwrap(), &hash_a);
+    fs.dedupe_index.insert(
+        key,
+        DedupeCandidate {
+            phys: pb,
+            inode: b_ino,
+            logical: 0,
+        },
+    );
+
+    assert_eq!(fs.write_at(root, b"a", 0, &content_a), Ok(cap));
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    assert_ne!(
+        pa, pb,
+        "unequal data is never merged despite a colliding key"
+    );
+
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    assert_eq!(read_all(&mut fs, node_a, cap), content_a);
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_b, cap), content_b);
+}
+
+#[test]
+fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
+    // Two files with identical content share one immutable chunk (refcount 2).
+    // Overwriting one copies-on-write a fresh chunk for the writer and drops
+    // the shared chunk's refcount, leaving the other sharer's data intact (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let original = alloc::vec![0x5Au8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &original), Ok(cap));
+    assert_eq!(fs.write_at(root, b"b", 0, &original), Ok(cap));
+
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(data_block_phys(&mut fs, b"b", 0), shared, "they share");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    // Overwrite "a"; it must copy-on-write off the shared chunk.
+    let replacement = alloc::vec![0xA5u8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &replacement), Ok(cap));
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    assert_ne!(pa, shared, "the writer copied on write");
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        1,
+        "the surviving sharer holds the chunk's implicit single reference"
+    );
+
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    assert_eq!(read_all(&mut fs, node_a, cap), replacement);
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(
+        read_all(&mut fs, node_b, cap),
+        original,
+        "other side intact"
+    );
+}
+
+#[test]
+fn reflink_shares_chunks_until_one_side_is_written() {
+    // A reflink is a copy-on-write clone: it shares every data block with the
+    // source (refcount 2) until a side is written, when only the written
+    // blocks diverge (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create src");
+    let body = read_all_pattern(cap * 3);
+    assert_eq!(fs.write_at(root, b"src", 0, &body), Ok(body.len()));
+
+    let dst = fs.reflink(root, b"src", b"dst").expect("reflink");
+    assert_eq!(fs.node_info(dst).expect("info").size, body.len() as u64);
+    let dst_node = fs.lookup(root, b"dst").expect("lookup dst");
+    assert_eq!(
+        read_all(&mut fs, dst_node, body.len()),
+        body,
+        "clone matches"
+    );
+    for bi in 0..3u64 {
+        let ps = data_block_phys(&mut fs, b"src", bi);
+        let pd = data_block_phys(&mut fs, b"dst", bi);
+        assert_eq!(ps, pd, "reflink shares block {bi}");
+        assert_eq!(fs.data_refcount(ps).expect("refcount"), 2);
+    }
+
+    // Writing the middle block of the clone diverges only that block.
+    let patch = alloc::vec![0x7Eu8; cap];
+    let at = u64::try_from(cap).unwrap();
+    assert_eq!(fs.write_at(root, b"dst", at, &patch), Ok(cap));
+    assert_ne!(
+        data_block_phys(&mut fs, b"dst", 1),
+        data_block_phys(&mut fs, b"src", 1),
+        "the written block diverged"
+    );
+    assert_eq!(
+        data_block_phys(&mut fs, b"dst", 0),
+        data_block_phys(&mut fs, b"src", 0),
+        "untouched blocks still share"
+    );
+    let src_node = fs.lookup(root, b"src").expect("lookup src");
+    assert_eq!(read_all(&mut fs, src_node, body.len()), body, "src intact");
+    let mut expected = body.clone();
+    expected[cap..cap * 2].copy_from_slice(&patch);
+    assert_eq!(read_all(&mut fs, dst_node, body.len()), expected);
+}
+
+#[test]
+fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
+    // Sharing creates one chunk record (refcount 2). Removing one sharer drops
+    // it to the implicit single reference (the record disappears); removing the
+    // last frees the physical block. A remount's free-space rebuild agrees:
+    // the freed space is reusable and the chunk tree is empty (§9, §4).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x42u8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(root, b"b", 0, &body), Ok(cap));
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(chunk_count(&mut fs), 1, "one shared chunk recorded");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    fs.remove(root, b"a").expect("remove a");
+    assert_eq!(chunk_count(&mut fs), 0, "back to one implicit reference");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 1);
+    // "b" still reads its data from the surviving block.
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_b, cap), body);
+
+    fs.remove(root, b"b").expect("remove b");
+
+    // The remount rebuilds free space from the trees; the chunk tree is empty
+    // and the volume mounts cleanly, so the freed block is accounted for.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    assert_eq!(chunk_count(&mut fs), 0);
+    assert!(fs.dedupe_index.is_empty(), "index rebuilt empty");
+    // The reclaimed space is reusable.
+    fs.create(fs.root(), b"c", NodeKind::RegularFile)
+        .expect("create c");
+    assert_eq!(fs.write_at(fs.root(), b"c", 0, &body), Ok(cap));
+}
+
+#[test]
+fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
+    // The dedupe index is rebuildable, never authoritative: after a remount it
+    // is rebuilt from the chunk + reverse-reference trees and yields the same
+    // sharing — a third identical write joins the existing chunk (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = alloc::vec![0x3Cu8; cap];
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    let root = fs.root();
+    assert_eq!(chunk_count(&mut fs), 1, "the shared chunk survives");
+
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create c");
+    assert_eq!(fs.write_at(root, b"c", 0, &body), Ok(cap));
+    assert_eq!(
+        data_block_phys(&mut fs, b"c", 0),
+        shared,
+        "the rebuilt index re-finds the shared chunk"
+    );
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        3,
+        "the third writer joined the shared chunk"
+    );
+}
+
+#[test]
+fn dedupe_is_scoped_to_the_encryption_domain() {
+    // Every chunk record carries the volume's encryption domain, and the
+    // dedupe-index key is domain-scoped, so dedupe never crosses a domain (§7).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = alloc::vec![0x6Du8; cap];
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("chunk get").expect("shared");
+    assert_eq!(
+        record.domain, fs.dedupe_domain,
+        "the chunk belongs to the volume's domain"
+    );
+
+    // The index key is domain-scoped: a key built with a different domain does
+    // not resolve to the chunk, so a foreign domain could never share it.
+    let mut block = alloc::vec![0u8; cap];
+    block.copy_from_slice(&body);
+    let hash = logical_hash(&block);
+    let len = u32::try_from(cap).unwrap();
+    assert!(
+        fs.dedupe_index
+            .contains_key(&dedupe_key(fs.dedupe_domain, len, &hash)),
+        "the chunk is indexed under its own domain"
+    );
+    assert!(
+        !fs.dedupe_index
+            .contains_key(&dedupe_key(fs.dedupe_domain ^ 0x1, len, &hash)),
+        "a different domain keys to a different slot"
+    );
+}
+
+#[test]
+fn integrity_and_compression_hold_on_a_shared_chunk() {
+    // A shared chunk is still a §6 data record: compressed at rest, integrity-
+    // protected, and byte-exact across a remount and a COW rewrite. Corrupting
+    // the shared physical block fails closed for *every* sharer (§5.4 / §6).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    // Compressible, identical content so the two files share one chunk.
+    let mut body = alloc::vec::Vec::new();
+    while body.len() < cap {
+        body.extend_from_slice(b"RustOS rustfs dedupe ");
+    }
+    body.truncate(cap);
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+    assert!(
+        stored_compression(&mut fs, b"a", 0).compressed,
+        "the shared chunk is stored compressed"
+    );
+
+    // Round-trips across a remount.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    let root = fs.root();
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_a, cap), body);
+    assert_eq!(read_all(&mut fs, node_b, cap), body);
+
+    // Corrupting the shared at-rest block is caught for both sharers (the fast
+    // physical checksum covers the at-rest bytes).
+    let base = as_usize(shared) * 4096;
+    let mut bytes = fs.into_block().bytes();
+    bytes[base] ^= 0x01;
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount2");
+    let root = fs.root();
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    let mut buf = alloc::vec![0u8; cap];
+    assert!(
+        matches!(
+            fs.read_at(node_a, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ),
+        "corruption of the shared chunk fails closed for sharer a"
+    );
+    assert!(
+        matches!(
+            fs.read_at(node_b, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ),
+        "corruption of the shared chunk fails closed for sharer b"
+    );
+}
+
+/// A deterministic, high-entropy buffer of `len` bytes — distinct per block, so
+/// it is neither compressible nor deduplicable (used to exercise reflink block
+/// sharing without accidental cross-block dedupe).
+fn read_all_pattern(len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..len {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        out.push(state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes()[0]);
+    }
+    out
 }

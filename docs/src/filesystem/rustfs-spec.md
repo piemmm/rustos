@@ -559,7 +559,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | ✓ |
 | 5 | Data records with physical checksum and logical hash. | ✓ |
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | ✓ |
-| 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | |
+| 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | ✓ |
 | 8 | Online scrub. | |
 | 9 | Offline check and rescue. | |
 | 10 | TRIM/discard queues and mkfs-time discard. | |
@@ -672,5 +672,43 @@ remount and a COW rewrite, integrity still catching a physical and a logical
 corruption on a compressed block, and a new `fuzz_compress` decode harness
 wired into `cargo xtask ci` and the soak — all pass, alongside the
 crash-replay sweep, the 1 GiB `fssoak`, the posix suite, and the QEMU
-vertical. Stages 7–12 remain; each implementing session ticks this table and
-`PLAN.md`.
+vertical.
+
+Stage 7 added **deduplication**, the chunk/refcount machinery the §4 model
+names (§9, §6). A data record ("chunk") may be **shared** by more than one
+`(file, logical block)`; sharing is **exact and verified** — a candidate is
+taken only after its bytes are confirmed byte-identical to the incoming
+record, so a missed duplicate is acceptable but unequal data is never merged
+(§9). Two new copy-on-write trees reuse the one generic `src/btree.rs`
+(`AGENTS.md` §2.2) and are named by the transaction root: a **chunk/refcount
+tree** (keyed by a chunk's physical block → referrer count, encryption
+domain, logical hash, length) and a **reverse-reference tree** (the same key →
+the `(inode, logical block)` referrers, for scrub/check/health and safe
+discard). To keep ordinary writes cheap, an unshared block carries an
+*implicit* reference count of one and has **no** record in either tree; the
+first share promotes it to an explicit chunk (refcount 2) and the last drop
+frees it (`src/lib.rs` `store_block` / `release_block_ref` / `share_block_ref`).
+Shared chunks are immutable: overwriting one sharer copies-on-write a fresh
+record and drops the old refcount, leaving the other sharer intact. A
+**reflink** (`RustFs::reflink`) is a copy-on-write clone that shares every
+block with its source until a side is written. Discovery is driven by an
+in-memory **dedupe index** (`(domain, length, logical hash) → candidate`)
+that is **rebuilt from the chunk + reverse-reference trees at mount and is
+never authoritative** (§9): every candidate is liveness-checked (its recorded
+referrer's extent map still points at it) and byte-verified before sharing,
+so a stale entry can never merge wrong data. Dedupe is **scoped to the
+encryption domain** (§7) — the domain is carried in every chunk record and
+index key — and the pipeline order is **`dedupe → compress → encrypt`** so
+only unique records are compressed (§10). The §16 acceptance tests for this
+stage — identical content sharing one chunk (refcount 2) while distinct
+content does not, byte-verify-before-share refusing an injected colliding
+entry, COW-on-overwrite leaving the other sharer intact, a reflink sharing
+until written, refcount-to-zero freeing the chunk with the free-space rebuild
+agreeing, the dedupe index rebuilding at mount and yielding the same sharing,
+dedupe staying within the domain, and integrity + compression holding on a
+shared chunk across a remount and a COW rewrite — all pass, alongside the
+crash-replay sweep, the 1 GiB `fssoak` (its fill now uses distinct per-file
+content so dedupe does not mask exhaustion), the posix suite, the QEMU
+vertical, and the `fuzz_mount` harness extended to decode the chunk and
+reverse-reference records. Stages 8–12 remain; each implementing session
+ticks this table and `PLAN.md`.

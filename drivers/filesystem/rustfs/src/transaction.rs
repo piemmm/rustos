@@ -28,10 +28,12 @@ const COMMIT_MAGIC: u64 = 0x5246_5343_4d4d_4954;
 const P_GENERATION: usize = HEADER_LEN;
 const P_INODE_TREE_ROOT: usize = HEADER_LEN + 8;
 const P_NEXT_INO: usize = HEADER_LEN + 16;
-const P_COMMIT_MAGIC: usize = HEADER_LEN + 24;
-const P_COMMIT_GENERATION: usize = HEADER_LEN + 32;
+const P_CHUNK_TREE_ROOT: usize = HEADER_LEN + 24;
+const P_REVERSE_REF_TREE_ROOT: usize = HEADER_LEN + 32;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 40;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 48;
 /// Bytes of meaningful transaction-root payload following the header.
-const PAYLOAD_LEN: u32 = 40;
+const PAYLOAD_LEN: u32 = 56;
 
 fn rd_u64(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
@@ -54,6 +56,12 @@ pub struct TxnRoot {
     /// The next inode number to hand out (the allocation high-water mark);
     /// every live inode number is below it.
     pub next_ino: u64,
+    /// Physical block of the chunk/refcount-tree root, or `0` when the volume
+    /// holds no shared chunks yet (`docs/src/filesystem/rustfs-spec.md` §4, §9).
+    pub chunk_tree_root: u64,
+    /// Physical block of the reverse-reference-tree root, or `0` when no chunk
+    /// has recorded referrers yet (`docs/src/filesystem/rustfs-spec.md` §4, §9).
+    pub reverse_ref_tree_root: u64,
 }
 
 impl TxnRoot {
@@ -80,6 +88,8 @@ impl TxnRoot {
         wr_u64(block, P_GENERATION, self.generation);
         wr_u64(block, P_INODE_TREE_ROOT, self.inode_tree_root);
         wr_u64(block, P_NEXT_INO, self.next_ino);
+        wr_u64(block, P_CHUNK_TREE_ROOT, self.chunk_tree_root);
+        wr_u64(block, P_REVERSE_REF_TREE_ROOT, self.reverse_ref_tree_root);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -123,6 +133,8 @@ impl TxnRoot {
             generation,
             inode_tree_root: rd_u64(block, P_INODE_TREE_ROOT),
             next_ino: rd_u64(block, P_NEXT_INO),
+            chunk_tree_root: rd_u64(block, P_CHUNK_TREE_ROOT),
+            reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
         })
     }
 }

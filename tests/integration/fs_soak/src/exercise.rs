@@ -22,13 +22,23 @@ use crate::{RamBlock, SoakFs};
 /// count modest, so the fill is not dominated by directory growth.
 const FILL_FILE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Deterministic content byte for `(seed, file, offset)`. Taking the low
-/// byte of a wrapping mix avoids any narrowing `as` cast.
+/// Deterministic content byte for `(seed, file, offset)`. The inputs are run
+/// through a SplitMix64-style avalanche so adjacent offsets yield unrelated
+/// bytes: every block is then high-entropy and distinct, so the content is
+/// neither compressible nor deduplicable and the fill genuinely consumes
+/// physical blocks (a flat ramp would collide mod 256 and dedupe away under
+/// `docs/src/filesystem/rustfs-spec.md` §9). Taking the low byte avoids any
+/// narrowing `as` cast.
 fn byte_at(seed: u64, file: u64, offset: u64) -> u8 {
-    seed.wrapping_mul(0x0100_0000_01B3)
-        .wrapping_add(file.wrapping_mul(0x9E37_79B1))
-        .wrapping_add(offset)
-        .to_le_bytes()[0]
+    let mut x = seed
+        ^ file.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ offset.wrapping_mul(0xD1B5_4A32_D192_ED03);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    x ^= x >> 33;
+    x.to_le_bytes()[0]
 }
 
 /// Build `len` bytes of deterministic content for file `file`.
@@ -291,7 +301,12 @@ fn exercise_exhaustion<F: SoakFs>(
     device_bytes: u64,
     seed: u64,
 ) -> Result<(), String> {
-    let body = vec![0xABu8; FILL_FILE_BYTES];
+    // Each fill file gets *distinct* content (a per-file id mixed into every
+    // byte). RustFS deduplicates identical data records, so filling with one
+    // repeated buffer would share a single chunk and never exhaust the volume;
+    // unique content makes the fill genuinely consume space and reach
+    // `NoSpace` (`docs/src/filesystem/rustfs-spec.md` §9).
+    let fill_base = 0x5000_0000u64;
     let max_files = (device_bytes / FILL_FILE_BYTES as u64) + 16;
     let mut idx = 0u64;
     let mut last_fill: Option<Vec<u8>> = None;
@@ -309,6 +324,7 @@ fn exercise_exhaustion<F: SoakFs>(
                 return Err(format!("seed {seed:#x}: fill create: unexpected {e:?}"));
             }
         }
+        let body = content(seed, fill_base + idx, FILL_FILE_BYTES);
         match fs.write_at(root, &name, 0, &body) {
             Ok(_) => {
                 last_fill = Some(name);

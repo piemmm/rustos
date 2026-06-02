@@ -4032,7 +4032,30 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    remount and COW rewrite, integrity still catching physical + logical
    corruption on a compressed block; a new `fuzz_compress` decode harness wired
    into `cargo xtask ci` and the soak.)
-7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
+7. Chunk table, refcounts, reverse refs, reflinks, dedupe index. ✓
+   (deduplication is mandatory and exact, keyed on the Stage-5 logical hash:
+   a physical data record — a chunk — may be shared by more than one
+   `(file, logical block)`, but only after a byte-verify confirms the
+   candidate equals the incoming record (a missed duplicate is fine,
+   merging unequal data is corruption). Two copy-on-write trees reuse the
+   one generic `src/btree.rs` and are named by the transaction root: a
+   chunk/refcount tree (physical block → refcount, domain, logical hash,
+   length) and a reverse-reference tree (physical block → `(inode, logical
+   block)` referrers). An unshared block keeps an implicit refcount of one
+   with no tree record; the first share promotes it to refcount 2 and the
+   last drop frees it; shared chunks are immutable so overwriting one
+   sharer copies-on-write and leaves the others intact. `RustFs::reflink`
+   is a COW clone sharing chunks until written. An in-memory dedupe index
+   (`(domain, length, logical hash) → candidate`) is rebuilt from the trees
+   at mount and is never authoritative — every candidate is liveness- and
+   byte-checked before sharing. Dedupe is scoped to the encryption domain
+   (§7), and the pipeline is `dedupe → compress → encrypt`. Tested: identical
+   content sharing one chunk while distinct does not, byte-verify-before-share
+   refusing an injected collision, COW-on-overwrite, reflink, refcount-to-zero
+   freeing with the free-space rebuild agreeing, the index rebuilding at mount,
+   the domain rule, and integrity + compression on a shared chunk; the soak
+   fill switched to distinct per-file content and `fuzz_mount` extended to the
+   chunk/reverse-ref decode.)
 8. Online scrub.
 9. Offline check and rescue.
 10. TRIM/discard queues and mkfs-time discard.
@@ -4044,7 +4067,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–6 complete; Stages 7–12 planned.** The copy-on-write
+**Status: Stages 1–7 complete; Stages 8–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

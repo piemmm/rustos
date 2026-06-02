@@ -124,6 +124,28 @@ logical hash still names the plaintext. Decompression is panic-free: a
 malformed frame fails closed to `DeviceFault`, never a panic (`AGENTS.md`
 §2.9).
 
+## Deduplication (`rustfs-spec.md` §9, §6)
+
+Deduplication is **mandatory and exact** and keys on the Stage-5 logical hash.
+A physical data record (a **chunk**) may be **shared** by more than one
+`(file, logical block)`, but only after its bytes are confirmed
+**byte-identical** to the incoming record — a missed duplicate is acceptable,
+merging unequal data is corruption (§9). Two copy-on-write trees, both the one
+generic `src/btree.rs` (`AGENTS.md` §2.2) and both named by the transaction
+root, back it: a **chunk/refcount tree** (physical block → refcount, domain,
+logical hash, length) and a **reverse-reference tree** (physical block →
+`(inode, logical block)` referrers). An unshared block carries an *implicit*
+refcount of one and has no record in either tree; the first share promotes it
+to an explicit chunk (refcount 2) and the last drop frees it. Shared chunks
+are immutable — overwriting one sharer copies-on-write a fresh record and
+leaves the others intact. A **reflink** (`RustFs::reflink`) clones a file by
+sharing its chunks until a side is written. Discovery uses an in-memory
+**dedupe index** rebuilt from the trees at mount and **never authoritative**:
+every candidate is liveness-checked and byte-verified before sharing. Dedupe
+is **scoped to the encryption domain** (§7) — the domain is carried in every
+chunk record and index key. The write pipeline is `dedupe → compress →
+encrypt`, so only unique records are compressed (§10).
+
 ## Crash consistency (copy-on-write + superblock ring)
 
 Every operation is a transaction. A block reachable from the last
@@ -151,7 +173,9 @@ so a delete can copy-on-write itself even on a full volume. No
 > hierarchy, and a per-data-record **integrity field** (logical content hash
 > + physical checksum) verified on every read (Stage 5), and **first-party
 > compression** of every data record before encryption with a raw-store
-> fallback (Stage 6). Dedupe is a later stage of the
+> fallback (Stage 6), and **deduplication** with a chunk/refcount tree, a
+> reverse-reference tree, reflinks, and a rebuildable byte-verified dedupe
+> index (Stage 7). Scrub and the later stages remain in the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -194,7 +218,14 @@ surviving a remount and a copy-on-write rewrite), the Stage-6 compression
 tests (an incompressible record stored raw and round-tripping, a compressible
 file shrinking its at-rest footprint yet reading back byte-identical across a
 remount and a COW rewrite, and integrity still catching a physical and a
-logical corruption on a compressed block), and a
+logical corruption on a compressed block), the Stage-7 dedupe tests (identical
+content sharing one physical chunk at refcount 2 while distinct content does
+not, byte-verify-before-share refusing an injected colliding index entry,
+overwriting one sharer copying-on-write while the other stays intact, a
+reflink sharing until written, refcount-to-zero freeing the chunk with the
+free-space rebuild agreeing, the dedupe index rebuilding at mount, dedupe
+staying within the encryption domain, and integrity + compression holding on a
+shared chunk), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
@@ -202,8 +233,10 @@ never torn.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
-mount / metadata-decode path (`fuzz_mount`) and the first-party compression
-decoder (`fuzz_compress`, in `lib/compress`) (`AGENTS.md` §19.6).
+mount / metadata-decode path (`fuzz_mount`, which since Stage 7 also decodes
+the chunk/refcount and reverse-reference records via the dedupe-index rebuild)
+and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
+(`AGENTS.md` §19.6).
 
 ## End-to-end QEMU vertical
 

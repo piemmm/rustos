@@ -2,13 +2,17 @@
 //! (`AGENTS.md` §19.5 / §19.6).
 //!
 //! [`RustFs::open`] decodes a device's superblock ring, transaction root,
-//! inode-tree nodes, and per-file extent-tree nodes — all self-identifying
-//! metadata (`header` / `superblock` / `transaction` / `btree`) read from a
-//! backing store that, on a real system, may have been written by anything.
-//! The base image is populated with several files and a multi-extent file so
-//! the sweep spends its time near real inode-tree and extent-tree nodes, not
-//! just the superblock ring. Per §19.6 that decode path is driven by a fuzz
-//! harness whose single invariant is:
+//! inode-tree nodes, per-file extent-tree nodes, and — since Stage 7 — the
+//! chunk/refcount tree and the reverse-reference tree (mount rebuilds the
+//! dedupe index from them, decoding every `ChunkRecord` and reverse-reference
+//! record). All are self-identifying metadata (`header` / `superblock` /
+//! `transaction` / `btree` / `dedupe`) read from a backing store that, on a
+//! real system, may have been written by anything. The base image is
+//! populated with several files, a multi-extent file, **duplicate-content
+//! files, and a reflink** so the sweep spends its time near real inode-tree,
+//! extent-tree, chunk-tree, and reverse-reference nodes, not just the
+//! superblock ring. Per §19.6 that decode path is driven by a fuzz harness
+//! whose single invariant is:
 //!
 //! * `open` never panics for any device contents — it returns `Ok` for a
 //!   genuinely valid volume and `Err` (fail closed) for everything else.
@@ -163,6 +167,9 @@ fn formatted_image() -> Vec<u8> {
             break;
         }
         // Two non-adjacent blocks build an extent record beyond the trivial.
+        // The identical content across files also makes block 0 a *shared*
+        // chunk, so the chunk/refcount and reverse-reference trees exist and
+        // their decode paths are swept (Stage 7).
         let _ = fs.write_at(root, name.as_bytes(), 0, &[0xA5u8; 16]);
         let _ = fs.write_at(
             root,
@@ -171,6 +178,10 @@ fn formatted_image() -> Vec<u8> {
             &[0x5Au8; 16],
         );
     }
+    // A reflink guarantees a shared chunk with multiple referrers, populating
+    // the reverse-reference tree even if the duplicate-content sharing above
+    // is reclaimed; it is best-effort on the tiny fuzz device.
+    let _ = fs.reflink(root, b"f0", b"f0clone");
     fs.into_block().store
 }
 

@@ -73,6 +73,7 @@ const CTX_WRAP_NONCE: &[u8] = b"rustfs/wrap-nonce";
 const CTX_META: &[u8] = b"rustfs/meta-mac";
 const CTX_FILENAME: &[u8] = b"rustfs/filename";
 const CTX_CONTENT: &[u8] = b"rustfs/content";
+const CTX_DEDUPE: &[u8] = b"rustfs/dedupe-domain";
 
 /// The fully-derived set of working keys for a mounted volume.
 ///
@@ -88,6 +89,13 @@ pub struct VolumeKeys {
     pub filename_key: AeadKey,
     /// AEAD key encrypting file data at rest.
     pub content_key: AeadKey,
+    /// Stable per-volume deduplication-domain identifier (§7). Dedupe is
+    /// allowed only within one domain; with a single volume key today there
+    /// is exactly one domain, but it is carried in every chunk record and
+    /// index key so the cross-domain rule holds once domains arrive. It is
+    /// derived from the master key, not secret in itself, and is an
+    /// identifier rather than a key.
+    pub dedupe_domain: u64,
 }
 
 /// The plaintext crypto discovery header stored in every superblock slot.
@@ -139,10 +147,14 @@ fn wrap_nonce(volume_key: &VolumeKey, salt: &[u8; SALT_LEN]) -> AeadNonce {
 
 /// Grow the working key set from the master key.
 fn derive_volume_keys(master: &[u8; 32]) -> VolumeKeys {
+    let domain_material = derive_key(master, CTX_DEDUPE);
+    let mut domain_bytes = [0u8; 8];
+    domain_bytes.copy_from_slice(&domain_material[..8]);
     VolumeKeys {
         mac_key: derive_key(master, CTX_META),
         filename_key: derive_key(master, CTX_FILENAME),
         content_key: derive_key(master, CTX_CONTENT),
+        dedupe_domain: u64::from_le_bytes(domain_bytes),
     }
 }
 

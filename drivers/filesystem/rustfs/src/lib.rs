@@ -46,6 +46,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -63,6 +64,7 @@ use rustos_crypto::{AeadKey, MacKey};
 
 mod btree;
 mod crypto;
+mod dedupe;
 mod header;
 mod integrity;
 mod superblock;
@@ -80,6 +82,7 @@ use integrity::{
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
 
+use dedupe::{chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeKey, REVERSE_REF_CAP};
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
@@ -374,6 +377,22 @@ pub struct RustFs<B: Block> {
     ring_pos: u64,
     inode_tree_root: u64,
     next_ino: u64,
+    /// Root of the authoritative chunk/refcount tree, `0` until a chunk is
+    /// shared (`dedupe` module, `docs/src/filesystem/rustfs-spec.md` §4, §9).
+    chunk_tree_root: u64,
+    /// Root of the authoritative reverse-reference tree, `0` until a chunk
+    /// records referrers (`dedupe` module).
+    reverse_ref_tree_root: u64,
+    /// The volume's deduplication domain (`crypto` module, §7). Dedupe never
+    /// crosses it.
+    dedupe_domain: u64,
+    /// In-memory, rebuildable dedupe index (§9 — never authoritative): a
+    /// `(domain, length, logical hash)` key mapping to a candidate chunk and
+    /// the referrer that introduced it. Rebuilt from the chunk + reverse-ref
+    /// trees at [`RustFs::open`]; every candidate is liveness-checked and
+    /// byte-verified before sharing, so a stale entry can never merge unequal
+    /// data.
+    dedupe_index: BTreeMap<DedupeKey, DedupeCandidate>,
     root_phys: u64,
     free: Vec<u64>,
     free_count: u64,
@@ -382,9 +401,22 @@ pub struct RustFs<B: Block> {
     txn_private: Vec<bool>,
     saved_inode_tree_root: u64,
     saved_next_ino: u64,
+    saved_chunk_tree_root: u64,
+    saved_reverse_ref_tree_root: u64,
     alloc_cursor: u64,
     meta_cursor: u64,
     clock: fn() -> Time64,
+}
+
+/// A dedupe-index candidate: the physical block of a chunk plus the
+/// `(inode, logical block)` referrer that introduced it, so a foreground
+/// lookup can confirm the candidate is still live (its referrer's extent map
+/// still points at it) before byte-verifying and sharing (`dedupe` module).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct DedupeCandidate {
+    phys: u64,
+    inode: u32,
+    logical: u64,
 }
 
 /// Value width of one extent record: physical start block plus run length.
@@ -482,12 +514,47 @@ impl<B: Block> RustFs<B> {
         self.block
     }
 
+    /// Create `dst_name` in directory `dir` as a **reflink** of the existing
+    /// regular file `src_name`: a copy-on-write clone that shares every data
+    /// block with the source until either side is written
+    /// (`docs/src/filesystem/rustfs-spec.md` §9). The two files read back
+    /// identically, share their physical chunks (refcount ≥ 2), and diverge
+    /// only block-by-block as each is overwritten.
+    ///
+    /// This is an inherent driver operation, not part of a frozen
+    /// `Filesystem*` ABI trait, so it does not widen a shipped interface
+    /// (`AGENTS.md` §2.4).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `src_name` does not exist.
+    /// * [`DriverError::Busy`] if `dst_name` already exists.
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory or the
+    ///   source is not a regular file.
+    /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or too long.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block or metadata
+    ///   failure (fail-closed, `AGENTS.md` §5.4 / §2.9).
+    pub fn reflink(
+        &mut self,
+        dir: NodeId,
+        src_name: &[u8],
+        dst_name: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        self.begin();
+        let result = self.reflink_inner(dir, src_name, dst_name);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
     /// Install a freshly derived or unwrapped key set as the volume's working
     /// keys (`crypto` module).
     fn apply_keys(&mut self, keys: &VolumeKeys) {
         self.mac_key = keys.mac_key;
         self.filename_key = keys.filename_key;
         self.content_key = keys.content_key;
+        self.dedupe_domain = keys.dedupe_domain;
     }
 
     /// Read the raw block at `phys` into the first `block_size` bytes of `buf`.
@@ -808,6 +875,8 @@ impl<B: Block> RustFs<B> {
         self.txn_freed.clear();
         self.saved_inode_tree_root = self.inode_tree_root;
         self.saved_next_ino = self.next_ino;
+        self.saved_chunk_tree_root = self.chunk_tree_root;
+        self.saved_reverse_ref_tree_root = self.reverse_ref_tree_root;
     }
 
     /// Discard an operation that failed before committing: restore the inode
@@ -816,6 +885,8 @@ impl<B: Block> RustFs<B> {
     fn rollback(&mut self) {
         self.inode_tree_root = self.saved_inode_tree_root;
         self.next_ino = self.saved_next_ino;
+        self.chunk_tree_root = self.saved_chunk_tree_root;
+        self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
             self.mark_free(block);
@@ -859,6 +930,8 @@ impl<B: Block> RustFs<B> {
             generation: next_gen,
             inode_tree_root: self.inode_tree_root,
             next_ino: self.next_ino,
+            chunk_tree_root: self.chunk_tree_root,
+            reverse_ref_tree_root: self.reverse_ref_tree_root,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, &buf)?;
@@ -915,6 +988,10 @@ impl<B: Block> RustFs<B> {
             ring_pos: 0,
             inode_tree_root: 0,
             next_ino: u64::from(ROOT_INO) + 1,
+            chunk_tree_root: 0,
+            reverse_ref_tree_root: 0,
+            dedupe_domain: 0,
+            dedupe_index: BTreeMap::new(),
             root_phys: 0,
             free: vec![0u64; words],
             free_count: total_blocks,
@@ -923,6 +1000,8 @@ impl<B: Block> RustFs<B> {
             txn_private: vec![false; as_usize(total_blocks)],
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
+            saved_chunk_tree_root: 0,
+            saved_reverse_ref_tree_root: 0,
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
@@ -944,8 +1023,9 @@ impl<B: Block> RustFs<B> {
     /// hierarchy (a wrapped master key deriving the metadata-authentication,
     /// filename, and content keys) and stores only the wrapped master key on
     /// disk. There is **no** plaintext layout path
-    /// (`docs/src/filesystem/rustfs-spec.md` §5, §7). Compression and dedupe
-    /// remain later stages of the staged build (§15).
+    /// (`docs/src/filesystem/rustfs-spec.md` §5, §7). A fresh volume holds no
+    /// shared chunks, so the chunk/refcount and reverse-reference trees and the
+    /// dedupe index start empty and grow on demand (§9).
     ///
     /// # Errors
     ///
@@ -1052,14 +1132,25 @@ impl<B: Block> RustFs<B> {
         let root = fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
         fs.inode_tree_root = root.inode_tree_root;
         fs.next_ino = root.next_ino;
+        fs.chunk_tree_root = root.chunk_tree_root;
+        fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
 
         // Rebuild the free-block bitmap by walking the live trees: the
         // superblock ring (reserved in `bootstrap`), the published transaction
         // root, every inode-tree node, and, for each inode, its extent-tree
-        // nodes plus the physical runs they map. Every metadata block accounts
-        // for both its physical copies (`docs/src/filesystem/rustfs-spec.md`
-        // §4 — free space is rebuildable; §5 — two copies).
+        // nodes plus the physical runs they map. The chunk/refcount and
+        // reverse-reference tree nodes are metadata too; their data records
+        // are shared chunks already marked through the referring inodes'
+        // extents. Every metadata block accounts for both its physical copies
+        // (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable;
+        // §5 — two copies).
         fs.mark_meta_used(sb.root_phys);
+        for node in fs.btree_collect_nodes(fs.chunk_tree_root, chunk_spec())? {
+            fs.mark_meta_used(node);
+        }
+        for node in fs.btree_collect_nodes(fs.reverse_ref_tree_root, reverse_ref_spec())? {
+            fs.mark_meta_used(node);
+        }
         let inode_spec = inode_spec();
         for node in fs.btree_collect_nodes(fs.inode_tree_root, inode_spec)? {
             fs.mark_meta_used(node);
@@ -1072,6 +1163,10 @@ impl<B: Block> RustFs<B> {
         }
         fs.alloc_cursor = RING_BLOCKS;
         fs.meta_cursor = fs.total_blocks - 1;
+        // Rebuild the in-memory dedupe index from the authoritative chunk and
+        // reverse-reference trees (§9 — the index is rebuildable, never
+        // authoritative).
+        fs.rebuild_dedupe_index()?;
         Ok(fs)
     }
 
@@ -1301,18 +1396,293 @@ impl<B: Block> RustFs<B> {
         Ok(())
     }
 
-    /// Copy-on-write a raw (header-less) data block: reuse `old_ptr` when it is
-    /// private to this transaction, else allocate a fresh block and defer-free
-    /// the old one. Returns the block's physical address (unwritten).
-    fn cow_data(&mut self, old_ptr: u64) -> Result<u64, DriverError> {
-        if old_ptr != 0 && self.is_txn_private(old_ptr) {
+    /// Copy-on-write the raw data block referenced at `(ino, bi)`: reuse
+    /// `old_ptr` in place only when it is private to this transaction **and**
+    /// not a shared chunk (a shared chunk is immutable, §9 — overwriting
+    /// shared data creates a new physical record). Otherwise allocate a fresh
+    /// block and drop the old reference. Returns the (unwritten) block.
+    fn cow_data(&mut self, old_ptr: u64, ino: u32, bi: u64) -> Result<u64, DriverError> {
+        if old_ptr != 0 && self.is_txn_private(old_ptr) && self.data_refcount(old_ptr)? == 1 {
             return Ok(old_ptr);
         }
         let new = self.alloc_block(false)?;
         if old_ptr != 0 {
-            self.free_block(old_ptr);
+            self.release_block_ref(old_ptr, ino, bi)?;
         }
         Ok(new)
+    }
+
+    /// Store the plaintext in `blk[..data_capacity()]` as the data record for
+    /// `(ino, bi)`, currently backed by `old_ptr` (`0` if unmapped).
+    ///
+    /// Deduplication is attempted first: if a live, byte-identical chunk in the
+    /// same encryption domain already exists, `(ino, bi)` is pointed at it and
+    /// no new physical block is written
+    /// (`docs/src/filesystem/rustfs-spec.md` §4, §6, §9). Otherwise the block is
+    /// copy-on-written, sealed, and the dedupe index records it as a future
+    /// candidate. Sharing is only ever taken after the candidate's bytes are
+    /// confirmed equal, so unequal data is never merged (§9).
+    fn store_block(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        bi: u64,
+        old_ptr: u64,
+        blk: &mut [u8],
+    ) -> Result<(), DriverError> {
+        let capu = as_usize(self.data_capacity());
+        let hash = logical_hash(&blk[..capu]);
+        let domain = self.dedupe_domain;
+        if let Some(cand) = self.dedupe_lookup(domain, &hash, &blk[..capu])? {
+            if cand.phys == old_ptr {
+                // The position already points at this exact record; the COW
+                // would be a no-op, so leave the mapping untouched.
+                return Ok(());
+            }
+            self.share_block_ref(cand, ino, bi, domain, &hash)?;
+            if old_ptr != 0 {
+                self.release_block_ref(old_ptr, ino, bi)?;
+            }
+            self.extent_assign(inode, ino, bi, cand.phys)?;
+            return Ok(());
+        }
+        let new_ptr = self.cow_data(old_ptr, ino, bi)?;
+        self.write_data_block(new_ptr, blk)?;
+        self.extent_assign(inode, ino, bi, new_ptr)?;
+        self.index_insert(domain, &hash, new_ptr, ino, bi);
+        Ok(())
+    }
+
+    /// Look up the chunk/refcount record for the data block at `phys`, or
+    /// `None` when the block is not a shared chunk (its reference count is the
+    /// implicit `1`, `docs/src/filesystem/rustfs-spec.md` §9).
+    fn chunk_get(&mut self, phys: u64) -> Result<Option<ChunkRecord>, DriverError> {
+        match self.btree_get(self.chunk_tree_root, phys, chunk_spec())? {
+            Some(value) => Ok(Some(
+                ChunkRecord::decode(&value).ok_or(DriverError::DeviceFault)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert or replace the chunk/refcount record for the block at `phys`.
+    fn chunk_put(&mut self, phys: u64, record: &ChunkRecord) -> Result<(), DriverError> {
+        self.chunk_tree_root =
+            self.btree_insert(self.chunk_tree_root, phys, &record.encode(), chunk_spec())?;
+        Ok(())
+    }
+
+    /// Drop the chunk/refcount record for the block at `phys` (it returns to
+    /// the implicit reference count of `1`).
+    fn chunk_remove(&mut self, phys: u64) -> Result<(), DriverError> {
+        self.chunk_tree_root = self.btree_remove(self.chunk_tree_root, phys, chunk_spec())?;
+        Ok(())
+    }
+
+    /// The current referrer list for the shared chunk at `phys`, or an empty
+    /// list when the block records no referrers (it is not yet shared).
+    fn reverse_refs(&mut self, phys: u64) -> Result<Vec<dedupe::Referrer>, DriverError> {
+        match self.btree_get(self.reverse_ref_tree_root, phys, reverse_ref_spec())? {
+            Some(value) => dedupe::decode_reverse_ref(&value).ok_or(DriverError::DeviceFault),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Insert or replace the reverse-reference record for the chunk at `phys`.
+    fn reverse_refs_put(
+        &mut self,
+        phys: u64,
+        referrers: &[dedupe::Referrer],
+    ) -> Result<(), DriverError> {
+        let value = dedupe::encode_reverse_ref(referrers);
+        self.reverse_ref_tree_root =
+            self.btree_insert(self.reverse_ref_tree_root, phys, &value, reverse_ref_spec())?;
+        Ok(())
+    }
+
+    /// Drop the reverse-reference record for the chunk at `phys`.
+    fn reverse_refs_remove(&mut self, phys: u64) -> Result<(), DriverError> {
+        self.reverse_ref_tree_root =
+            self.btree_remove(self.reverse_ref_tree_root, phys, reverse_ref_spec())?;
+        Ok(())
+    }
+
+    /// The reference count of the data block at `phys`: the stored chunk record
+    /// when shared, otherwise the implicit `1`.
+    fn data_refcount(&mut self, phys: u64) -> Result<u64, DriverError> {
+        Ok(self.chunk_get(phys)?.map_or(1, |record| record.refcount))
+    }
+
+    /// Drop the reference `(ino, bi)` holds on the data block at `phys`.
+    ///
+    /// A block with the implicit reference count of `1` is freed outright. A
+    /// shared chunk is decremented and the `(ino, bi)` referrer struck from its
+    /// reverse-reference list; when only one referrer remains the chunk returns
+    /// to the implicit count and keeps its (now sole) physical block
+    /// (`docs/src/filesystem/rustfs-spec.md` §9).
+    fn release_block_ref(&mut self, phys: u64, ino: u32, bi: u64) -> Result<(), DriverError> {
+        let Some(record) = self.chunk_get(phys)? else {
+            self.free_block(phys);
+            return Ok(());
+        };
+        let mut referrers = self.reverse_refs(phys)?;
+        referrers.retain(|&(r_ino, r_bi)| !(r_ino == ino && r_bi == bi));
+        let remaining = record.refcount.saturating_sub(1);
+        if remaining <= 1 {
+            self.chunk_remove(phys)?;
+            self.reverse_refs_remove(phys)?;
+        } else {
+            let updated = ChunkRecord {
+                refcount: remaining,
+                ..record
+            };
+            self.chunk_put(phys, &updated)?;
+            self.reverse_refs_put(phys, &referrers)?;
+        }
+        Ok(())
+    }
+
+    /// Add a reference from `(new_ino, new_bi)` to the existing data block at
+    /// `cand.phys`, promoting it from an implicit single reference to a shared
+    /// chunk on first share (recording both the original referrer carried in
+    /// `cand` and the new one) or bumping its count and appending the referrer
+    /// thereafter (`docs/src/filesystem/rustfs-spec.md` §9).
+    fn share_block_ref(
+        &mut self,
+        cand: DedupeCandidate,
+        new_ino: u32,
+        new_bi: u64,
+        domain: u64,
+        logical_hash: &[u8; LOGICAL_HASH_LEN],
+    ) -> Result<(), DriverError> {
+        if let Some(record) = self.chunk_get(cand.phys)? {
+            let mut referrers = self.reverse_refs(cand.phys)?;
+            referrers.push((new_ino, new_bi));
+            let updated = ChunkRecord {
+                refcount: record.refcount + 1,
+                ..record
+            };
+            self.chunk_put(cand.phys, &updated)?;
+            self.reverse_refs_put(cand.phys, &referrers)?;
+        } else {
+            let record = ChunkRecord {
+                refcount: 2,
+                domain,
+                length: as_u32(as_usize(self.data_capacity())),
+                logical_hash: *logical_hash,
+            };
+            self.chunk_put(cand.phys, &record)?;
+            self.reverse_refs_put(cand.phys, &[(cand.inode, cand.logical), (new_ino, new_bi)])?;
+        }
+        Ok(())
+    }
+
+    /// Find a live, byte-identical, shareable chunk for `content` in `domain`,
+    /// consulting the rebuildable dedupe index (§9 — never authoritative).
+    ///
+    /// A candidate is returned only when it is still live (its recorded
+    /// referrer's extent map still points at it), has room for another referrer
+    /// ([`REVERSE_REF_CAP`]), and its bytes are confirmed equal to `content`.
+    /// A candidate that fails the liveness or byte check is a stale index entry
+    /// and is dropped; a full candidate is left in place but not shared (the
+    /// write proceeds unique, an allowed missed duplicate, §9).
+    fn dedupe_lookup(
+        &mut self,
+        domain: u64,
+        logical_hash: &[u8; LOGICAL_HASH_LEN],
+        content: &[u8],
+    ) -> Result<Option<DedupeCandidate>, DriverError> {
+        let key = dedupe_key(domain, as_u32(content.len()), logical_hash);
+        let Some(cand) = self.dedupe_index.get(&key).copied() else {
+            return Ok(None);
+        };
+        if !self.candidate_is_live(cand)? {
+            self.dedupe_index.remove(&key);
+            return Ok(None);
+        }
+        if usize::try_from(self.data_refcount(cand.phys)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP
+        {
+            return Ok(None);
+        }
+        if !self.byte_identical(cand.phys, content) {
+            self.dedupe_index.remove(&key);
+            return Ok(None);
+        }
+        Ok(Some(cand))
+    }
+
+    /// Whether `cand`'s recorded referrer still maps its logical block to
+    /// `cand.phys`; if not, the index entry is stale (the referrer was
+    /// overwritten or removed).
+    fn candidate_is_live(&mut self, cand: DedupeCandidate) -> Result<bool, DriverError> {
+        let inode = match self.read_inode(cand.inode) {
+            Ok(inode) => inode,
+            Err(DriverError::NotFound) => return Ok(false),
+            Err(other) => return Err(other),
+        };
+        if inode.is_dir() {
+            return Ok(false);
+        }
+        Ok(self.block_ptr(&inode, cand.logical)? == cand.phys)
+    }
+
+    /// Whether the data block at `phys` decodes to plaintext byte-identical to
+    /// `content`. A read or integrity failure reads as "not identical" so a
+    /// damaged candidate is never shared (`AGENTS.md` §5.4).
+    fn byte_identical(&mut self, phys: u64, content: &[u8]) -> bool {
+        let capu = as_usize(self.data_capacity());
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        match self.read_data_block(phys, &mut buf) {
+            Ok(()) => content.len() <= capu && buf[..content.len()] == *content,
+            Err(_) => false,
+        }
+    }
+
+    /// Record the freshly written unique block at `phys` as a future dedupe
+    /// candidate for `content` in `domain`, introduced by referrer `(ino, bi)`.
+    fn index_insert(
+        &mut self,
+        domain: u64,
+        logical_hash: &[u8; LOGICAL_HASH_LEN],
+        phys: u64,
+        ino: u32,
+        bi: u64,
+    ) {
+        let key = dedupe_key(domain, as_u32(as_usize(self.data_capacity())), logical_hash);
+        self.dedupe_index.insert(
+            key,
+            DedupeCandidate {
+                phys,
+                inode: ino,
+                logical: bi,
+            },
+        );
+    }
+
+    /// Rebuild the in-memory dedupe index from the authoritative chunk and
+    /// reverse-reference trees at mount (§9 — the index is rebuildable). Each
+    /// shared chunk contributes one candidate keyed by its stored domain,
+    /// length, and logical hash, attributed to its first recorded referrer.
+    fn rebuild_dedupe_index(&mut self) -> Result<(), DriverError> {
+        self.dedupe_index.clear();
+        let chunks = self.btree_collect_entries(self.chunk_tree_root, chunk_spec())?;
+        for (phys, value) in chunks {
+            let record = ChunkRecord::decode(&value).ok_or(DriverError::DeviceFault)?;
+            let referrers = self.reverse_refs(phys)?;
+            let Some(&(ino, bi)) = referrers.first() else {
+                return Err(DriverError::DeviceFault);
+            };
+            let key = dedupe_key(record.domain, record.length, &record.logical_hash);
+            self.dedupe_index.insert(
+                key,
+                DedupeCandidate {
+                    phys,
+                    inode: ino,
+                    logical: bi,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Byte offset of a data block's compression descriptor: immediately after
@@ -1485,13 +1855,13 @@ impl<B: Block> RustFs<B> {
     fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
         let is_dir = inode.is_dir();
-        for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
+        for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
             let (phys, len) = decode_extent(&value);
             for b in 0..len {
                 if is_dir {
                     self.free_meta(phys + b);
                 } else {
-                    self.free_block(phys + b);
+                    self.release_block_ref(phys + b, ino, start + b)?;
                 }
             }
         }
@@ -1735,9 +2105,7 @@ impl<B: Block> RustFs<B> {
                 self.read_data_block(old_ptr, &mut blk)?;
             }
             blk[within..within + chunk].copy_from_slice(&data[done..done + chunk]);
-            let new_ptr = self.cow_data(old_ptr)?;
-            self.write_data_block(new_ptr, &mut blk)?;
-            self.extent_assign(inode, ino, bi, new_ptr)?;
+            self.store_block(inode, ino, bi, old_ptr, &mut blk)?;
             done += chunk;
             pos += chunk as u64;
         }
@@ -1767,9 +2135,7 @@ impl<B: Block> RustFs<B> {
                     for byte in &mut blk[tail..as_usize(cap)] {
                         *byte = 0;
                     }
-                    let new_ptr = self.cow_data(old_ptr)?;
-                    self.write_data_block(new_ptr, &mut blk)?;
-                    self.extent_assign(inode, ino, bi, new_ptr)?;
+                    self.store_block(inode, ino, bi, old_ptr, &mut blk)?;
                 }
             }
         }
@@ -1794,7 +2160,7 @@ impl<B: Block> RustFs<B> {
             }
             let cut = keep.max(start);
             for b in cut..end {
-                self.free_block(phys + (b - start));
+                self.release_block_ref(phys + (b - start), ino, b)?;
             }
             inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
             if cut > start {
@@ -1894,6 +2260,90 @@ impl<B: Block> RustFs<B> {
         self.write_inode(dir_ino, &dir_inode)?;
         self.commit()?;
         Ok(NodeId::from_raw(u64::from(child_ino)))
+    }
+
+    /// Create `dst_name` in `dir` as a reflink of the existing regular file
+    /// `src_name`: a copy-on-write clone that **shares** every data block with
+    /// the source until one side is written
+    /// (`docs/src/filesystem/rustfs-spec.md` §9). Each shared block's chunk is
+    /// reference-counted, so a later overwrite of either side copies-on-write a
+    /// fresh record and leaves the other intact ([`Self::cow_data`]).
+    fn reflink_inner(
+        &mut self,
+        dir: NodeId,
+        src_name: &[u8],
+        dst_name: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        Self::check_name(dst_name)?;
+        let now = (self.clock)();
+        let dir_ino = self.ino_of(dir)?;
+        let mut dir_inode = self.read_inode(dir_ino)?;
+        if !dir_inode.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        let src_ino = self
+            .dir_lookup(&dir_inode, src_name)?
+            .ok_or(DriverError::NotFound)?;
+        let src = self.read_inode(src_ino)?;
+        if src.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        if self.dir_lookup(&dir_inode, dst_name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        let mut dst = Inode::empty(KIND_FILE, src.sec, now);
+        let dst_ino = self.alloc_inode(&dst)?;
+        let cap = self.data_capacity();
+        for bi in 0..src.size.div_ceil(cap) {
+            let src_ptr = self.block_ptr(&src, bi)?;
+            if src_ptr == 0 {
+                continue;
+            }
+            self.clone_block_ref(src_ino, &mut dst, dst_ino, bi, src_ptr)?;
+        }
+        dst.size = src.size;
+        self.write_inode(dst_ino, &dst)?;
+        self.add_entry(&mut dir_inode, dir_ino, dst_ino, dst_name)?;
+        dir_inode.times.modified = now;
+        dir_inode.times.changed = now;
+        self.write_inode(dir_ino, &dir_inode)?;
+        self.commit()?;
+        Ok(NodeId::from_raw(u64::from(dst_ino)))
+    }
+
+    /// Point logical block `bi` of `dst` at the data block `src_ptr` already
+    /// held by `(src_ino, bi)`, sharing the chunk. When that chunk has reached
+    /// the reverse-reference cap ([`REVERSE_REF_CAP`]) the block is copied
+    /// uniquely for `dst` instead, so the referrer set stays exact and bounded
+    /// (`docs/src/filesystem/rustfs-spec.md` §9).
+    fn clone_block_ref(
+        &mut self,
+        src_ino: u32,
+        dst: &mut Inode,
+        dst_ino: u32,
+        bi: u64,
+        src_ptr: u64,
+    ) -> Result<(), DriverError> {
+        let capu = as_usize(self.data_capacity());
+        let domain = self.dedupe_domain;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        self.read_data_block(src_ptr, &mut buf)?;
+        let hash = logical_hash(&buf[..capu]);
+        if usize::try_from(self.data_refcount(src_ptr)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP {
+            let new_ptr = self.alloc_block(false)?;
+            self.write_data_block(new_ptr, &mut buf)?;
+            self.extent_assign(dst, dst_ino, bi, new_ptr)?;
+            self.index_insert(domain, &hash, new_ptr, dst_ino, bi);
+            return Ok(());
+        }
+        let cand = DedupeCandidate {
+            phys: src_ptr,
+            inode: src_ino,
+            logical: bi,
+        };
+        self.share_block_ref(cand, dst_ino, bi, domain, &hash)?;
+        self.extent_assign(dst, dst_ino, bi, src_ptr)?;
+        Ok(())
     }
 
     fn write_inner(

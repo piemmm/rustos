@@ -205,9 +205,11 @@ dependency** (`AGENTS.md` §2.12 / §16.4; `rustfs-spec.md` §3). It is a
 low-CPU profile (a greedy hash-table match finder, LZ4-style literal/match
 tokens, no entropy stage), not a maximum-ratio one.
 
-On the §6 write path the order is `compress → encrypt`. The plaintext logical
-hash is taken first (it always names the plaintext, so the Stage 7 dedupe seam
-is unaffected), then the record is compressed; when the compressed frame is
+On the §6 write path the order is `dedupe → compress → encrypt` (see
+*Deduplication* below — only **unique** records are compressed). The plaintext
+logical hash is taken first (it always names the plaintext and is the dedupe
+key), then, if the record is not shared with an existing chunk, it is
+compressed; when the compressed frame is
 **not smaller** than the logical block capacity the record is stored **raw**
 (the §10 adaptive choice — incompressible data is never inflated). On the read
 path the order is `physical checksum → decrypt → decompress → verify logical
@@ -228,6 +230,56 @@ maps exactly one file block. Decompression is panic-free: a malformed or
 truncated compressed frame returns an error (surfaced as the fail-closed
 `DriverError::DeviceFault`), never a panic (`rustfs-spec.md` §10, `AGENTS.md`
 §2.9).
+
+## Deduplication
+
+Deduplication is **mandatory and exact** (`rustfs-spec.md` §1, §9). A physical
+data record — a **chunk** — may be **shared** by more than one `(file, logical
+block)`, and it keys on the Stage-5 **logical hash** (the SHA-256 of the
+plaintext). Sharing is **exact and verified**: a candidate is taken only after
+its stored bytes are confirmed **byte-identical** to the incoming record, so a
+missed duplicate is acceptable but unequal data is never merged (§9 — merging
+unequal data is corruption).
+
+Two copy-on-write trees back it, both the **same** generic `src/btree.rs`
+(`AGENTS.md` §2.2 — no second B-tree), and both named by the transaction root
+alongside the inode-tree root:
+
+- **Chunk/refcount tree.** Keyed by a chunk's physical block; the value is the
+  referrer count, the encryption domain, the plaintext logical hash, and the
+  logical length. It is authoritative for safe freeing.
+- **Reverse-reference tree.** Keyed by the same physical block; the value is the
+  capped list of `(inode, logical block)` referrers, needed by scrub / check /
+  health and by safe discard.
+
+To keep ordinary writes cheap, an **unshared** block carries an *implicit*
+reference count of one and has **no** record in either tree. The first time a
+block is shared it is promoted to an explicit chunk (refcount 2, both referrers
+recorded); further shares bump the count and append a referrer; dropping a
+reference decrements it, and dropping the last reference frees the physical
+block. A chunk that falls back to a single referrer returns to the implicit
+state (its records are removed) and keeps its block. Shared chunks are
+**immutable**: overwriting one sharer copies-on-write a fresh record for the
+writer and drops the old refcount, leaving every other sharer's data intact.
+
+Discovery uses an in-memory **dedupe index** — `(domain, length, logical hash)
+→ candidate` — that is **rebuilt from the chunk and reverse-reference trees at
+mount and is never authoritative** (§9). Before sharing, a candidate is
+**liveness-checked** (its recorded referrer's extent map must still point at
+it) and then **byte-verified**; a candidate that fails either check is a stale
+index entry and is dropped, never shared. This is what lets the fast in-memory
+index be approximate without ever risking a wrong merge.
+
+A **reflink** (`RustFs::reflink`) is a copy-on-write clone of a file that
+shares every data block with its source until a side is written, when only the
+written blocks diverge. It is an inherent driver operation, not a widening of a
+frozen `Filesystem*` ABI trait (`AGENTS.md` §2.4).
+
+Dedupe is **scoped to the encryption domain** (`rustfs-spec.md` §7): the domain
+(derived from the volume's master key) is carried in every chunk record and in
+the index key, so dedupe can never cross a domain. With a single volume key
+today there is exactly one domain, but the keying already enforces the rule for
+when multiple domains arrive.
 
 ## Timestamps (§21)
 
@@ -320,7 +372,10 @@ addressing a target as a `(dir, name)` pair. `write_at` extends files
 (zero-filling sparse gaps), `truncate` shrinks (freeing the tail and
 copy-on-write zeroing the partial last block) or grows, and `remove`
 refuses a non-empty directory with `Busy`. A `NodeId` is the inode index;
-node identity is stable across a remount.
+node identity is stable across a remount. The driver additionally exposes
+`RustFs::reflink(dir, src, dst)` — a copy-on-write clone that shares the
+source's data chunks until a side is written (see *Deduplication*) — as an
+inherent operation, not a widening of a frozen ABI trait (`AGENTS.md` §2.4).
 
 ## End-to-end QEMU vertical
 
@@ -379,13 +434,23 @@ read; the Stage-5 data-integrity acceptance tests — a data block's three
 integrity layers (physical checksum, AEAD, logical hash) each detecting
 **its own** class of corruption and all failing closed, identical plaintext
 sharing **one logical hash** while different plaintext differs (the dedupe
-seam) even though the two blocks encrypt to distinct ciphertext, and the
+seam) — identical content now also sharing one physical chunk (refcount 2)
+while distinct content does not — and the
 integrity field surviving a remount and a copy-on-write rewrite; the Stage-6
 compression acceptance tests — an **incompressible record stored raw** and
 reading back byte-identical, a **compressible file shrinking its at-rest
 footprint** yet reading back byte-identical across a remount and a COW
 rewrite, and the integrity layers still catching a physical and a logical
-corruption on a **compressed** block; the per-inode security record and
+corruption on a **compressed** block; the Stage-7 dedupe acceptance tests —
+two files with identical content **sharing one physical chunk** (refcount 2)
+while distinct content does not, **byte-verify-before-share** refusing an
+injected colliding index entry, overwriting one sharer **copying-on-write** a
+fresh chunk and leaving the other intact, a **reflink** sharing chunks until a
+side is written, **refcount-to-zero freeing** the chunk with the mount-time
+free-space rebuild agreeing, the **dedupe index rebuilding** from the chunk
+tree at mount and yielding the same sharing, dedupe staying **within the
+encryption domain**, and integrity + compression still holding on a **shared**
+chunk across a remount and a COW rewrite; the per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
 highest committed generation; and a **crash-replay sweep** that faults the
@@ -399,7 +464,10 @@ harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
 path), a duplicated-copy sweep that corrupts *both* copies of each block
 pair, and a fixed-seed PRNG all drive `RustFs::open` over arbitrary bytes,
-asserting it never panics and fails closed. The first-party compression codec
+asserting it never panics and fails closed. Since Stage 7 the fuzz image is
+populated with duplicate-content files and a reflink, so the sweep also drives
+the **chunk/refcount** and **reverse-reference** record decode paths that
+mount rebuilds the dedupe index from. The first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`rustfs-spec.md` §10,
 `AGENTS.md` §19.6), it round-trips structured inputs and feeds corrupted
