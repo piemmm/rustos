@@ -199,7 +199,7 @@ fn draw_label(
         Align::Centre => 0,
     };
     let usable = rect.width.saturating_sub(inset.saturating_mul(2));
-    let fitted = fit(text, max_chars(font, usable));
+    let fitted = font.truncate_to_width(text, usable);
     if fitted.is_empty() {
         return;
     }
@@ -219,25 +219,6 @@ fn draw_label(
         .saturating_sub(origin.y)
         .saturating_add(to_i32(y_offset));
     font.draw_text(surface, x, y, fitted, color);
-}
-
-/// How many glyphs of [`font`](BitmapFont) fit in `width` pixels, accounting
-/// for the tight bounding width (no trailing inter-glyph gap).
-fn max_chars(font: &BitmapFont, width: u32) -> usize {
-    if width < font.glyph_width() {
-        return 0;
-    }
-    let extra = width - font.glyph_width();
-    let advance = font.advance().max(1);
-    (1 + extra / advance) as usize
-}
-
-/// Truncate `text` to at most `max` characters on a `char` boundary.
-fn fit(text: &str, max: usize) -> &str {
-    match text.char_indices().nth(max) {
-        Some((byte, _)) => &text[..byte],
-        None => text,
-    }
 }
 
 /// Fill a screen-space `rect` into the bar-local surface, offsetting by the

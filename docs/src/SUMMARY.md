@@ -81,6 +81,7 @@
 - [Desktop theming](./desktop/theming.md)
 - [Pointer cursors](./desktop/cursors.md)
 - [Variable DPI and UI scale](./desktop/dpi.md)
+- [Default desktop apps](./desktop/apps.md)
 
 # ABI
 

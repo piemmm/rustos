@@ -90,6 +90,31 @@ impl BitmapFont {
         }
     }
 
+    /// The longest prefix of `text` whose rendered width fits within `width`
+    /// pixels, truncated on a `char` boundary.
+    ///
+    /// This is the shared truncation every fixed-width text region uses to
+    /// keep a label from spilling past its box (the taskbar's clock and task
+    /// titles, the file browser's path bar and entry names), so the
+    /// fit-to-width arithmetic lives in one place rather than being repeated
+    /// per consumer (`AGENTS.md` §2.2). A `width` too small for even one glyph
+    /// yields the empty string; a `text` that already fits is returned whole.
+    /// Arithmetic saturates, so a pathological width never wraps (`AGENTS.md`
+    /// §2.9).
+    #[must_use]
+    pub fn truncate_to_width<'a>(&self, text: &'a str, width: u32) -> &'a str {
+        if width < self.glyph_width {
+            return "";
+        }
+        let extra = width - self.glyph_width;
+        let advance = self.advance.max(1);
+        let capacity = (1 + extra / advance) as usize;
+        match text.char_indices().nth(capacity) {
+            Some((byte, _)) => &text[..byte],
+            None => text,
+        }
+    }
+
     /// Draw `text` onto `surface` with its top-left corner at `(x, y)` in
     /// `color`, returning the pen x-coordinate after the last glyph.
     ///

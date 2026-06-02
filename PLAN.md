@@ -4872,19 +4872,43 @@ device list.
   open here:** relaying the active theme to the WM and apps over live IPC, and
   resolving the forwarded launcher / session-control actions once the
   window-manager and process capabilities are wired (deferred Stage 6 work).
+- **Filesystem browser — DONE (increment).** `userland/apps/files`
+  (`rustos-files`, `no_std`+`alloc`, deps only `rustos-abi` + the shared
+  desktop `lib/*` crates `geometry`/`theme`/`raster`/`font`, §17.4) is the
+  default graphical file manager (`AGENTS.md` §10/§16). It is a navigation
+  **model** plus a **renderer** driven by an injected `DirectorySource`
+  (`list(components) -> Result<Vec<Entry>, Errno>`) — VFS-backed on a running
+  system, an in-memory tree in tests (§7). `Browser` owns the current path,
+  entries, and a selection cursor; descend (`open_index`/`open_selected`),
+  climb (`go_up`, `Ok(false)` at the root — not an error), and `refresh` are
+  **transactional and fail closed**: the target is listed *before* any state
+  changes, so a refused/failing read (`BrowseError::Source(Errno)`), a file
+  target (`NotADirectory`), or an out-of-range index (`NoSuchEntry`) leaves
+  the browser where it was (§5.4). It shows exactly the source's entries — no
+  `/proc`/`/sys` fabrication (§16.1) — and makes no permission decision of its
+  own (the §5.3 check lives in the VFS). `render` paints a path bar plus a
+  scrolling, selection-highlighted entry list into a `lib/raster` `Surface`
+  using the theme palette and the `lib/font` face; the compositor rounds the
+  rectangular surface (§2.2). The fit-to-width truncation moved into
+  `lib/font` as `BitmapFont::truncate_to_width`, the single path the taskbar
+  renderer now also uses — no duplication (§2.2). 14 headless `rustos-files`
+  tests + 2 new `lib/font` tests (14 total); no `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. Workspace manifest; docs
+  `docs/src/desktop/apps.md` (+ SUMMARY) and the crate `README.md`. **Still
+  open here:** the VFS-backed `DirectorySource`, live pointer/keyboard input,
+  and presenting the window through the WM (deferred wiring).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
   pointer/keyboard device events and the taskbar–WM event glue (presenting and
-  placing the start-menu popup surface, and relaying the session's theme switch
-  over live IPC), notification-icon artwork,
-  selecting a font face
+  placing the start-menu popup surface, presenting the file-browser window, and
+  relaying the session's theme switch over live IPC), notification-icon
+  artwork, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, the
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
   through the §16.4 image-decoding library in a §19.5 sandbox and caching the
   rasterised/converted forms — this is also how cursor sets are decoded from
-  on-disk assets), and the default filesystem-browser and terminal-emulator
-  apps.
+  on-disk assets), and the default terminal-emulator app.
 
 ---
 

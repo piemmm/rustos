@@ -87,6 +87,7 @@ members = [
     "userland/apps/chmod",
     "userland/apps/chown",
     "userland/apps/cp",
+    "userland/apps/files",
     "userland/apps/getcap",
     "userland/apps/groupadd",
     "userland/apps/ls",

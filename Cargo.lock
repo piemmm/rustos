@@ -665,6 +665,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-files"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-font",
+ "rustos-geometry",
+ "rustos-raster",
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-font"
 version = "0.0.0"
 dependencies = [

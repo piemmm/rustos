@@ -1,0 +1,38 @@
+//! The directory-read seam the browser is built on.
+//!
+//! [`DirectorySource`] is the one thing the browser needs from the outside
+//! world: the children of an absolute path. Keeping it a trait means the
+//! navigation and rendering logic is exhaustively testable against an
+//! in-memory tree without a kernel, exactly as `appmgr`'s `BundleStore` and
+//! `ps`'s transport are injected seams (`AGENTS.md` §7).
+//!
+//! On a running system the source is backed by the VFS: a `list` call is a
+//! capability-checked directory read, so the §5.3 permission decision and the
+//! §16 path policy live in the VFS, not here. The browser shows exactly the
+//! entries the source returns — it never fabricates a `/proc`/`/sys`-style
+//! synthetic entry (`AGENTS.md` §16.1).
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use rustos_abi::Errno;
+
+use crate::entry::Entry;
+
+/// A read-only view of the filesystem's directory structure.
+pub trait DirectorySource {
+    /// List the children of the directory named by `components`
+    /// (root-first; an empty slice is the root directory `/`).
+    ///
+    /// The returned entries are taken as authoritative and shown verbatim;
+    /// iteration order is the source's own stable order. The browser does not
+    /// sort, filter, or add to them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel boundary's [`Errno`] when the directory cannot be
+    /// listed — for example [`Errno::PermissionDenied`] when the caller lacks
+    /// the capability to read it (`AGENTS.md` §5.3) or [`Errno::NotFound`]
+    /// when it does not exist.
+    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno>;
+}

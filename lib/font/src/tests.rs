@@ -36,6 +36,30 @@ fn text_width_is_the_tight_bounding_width() {
 }
 
 #[test]
+fn truncate_to_width_keeps_what_fits() {
+    let font = BitmapFont::mono5x7();
+    // One glyph needs `glyph_width` (5) pixels; each further glyph adds
+    // `advance` (6). Less than one glyph fits nothing.
+    assert_eq!(font.truncate_to_width("System", 4), "");
+    assert_eq!(font.truncate_to_width("System", 5), "S");
+    // 5 + 6 = 11 fits two glyphs; a third needs 5 + 2*6 = 17.
+    assert_eq!(font.truncate_to_width("System", 11), "Sy");
+    assert_eq!(font.truncate_to_width("System", 16), "Sy");
+    assert_eq!(font.truncate_to_width("System", 17), "Sys");
+    // A string that already fits is returned whole, untouched.
+    assert_eq!(font.truncate_to_width("Sy", 1000), "Sy");
+    assert_eq!(font.truncate_to_width("", 1000), "");
+}
+
+#[test]
+fn truncate_to_width_cuts_on_a_char_boundary() {
+    let font = BitmapFont::mono5x7();
+    // Multi-byte chars must not be split mid-byte.
+    let truncated = font.truncate_to_width("é€ß", 5);
+    assert_eq!(truncated, "é");
+}
+
+#[test]
 fn space_glyph_paints_nothing() {
     let font = BitmapFont::mono5x7();
     let mut surface = surface(8, 8);
