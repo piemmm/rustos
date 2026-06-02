@@ -76,8 +76,8 @@ use crypto::{
 };
 pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
 use integrity::{
-    logical_hash, physical_checksum, DataFault, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN,
-    PHYS_CHECKSUM_LEN,
+    logical_hash, physical_checksum, read_compression, write_compression, Compression, DataFault,
+    COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
 
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
@@ -428,11 +428,15 @@ impl<B: Block> RustFs<B> {
     }
 
     /// Usable file-content bytes per data block: the block minus its crypto
-    /// trailer (nonce + tag) and its data-integrity trailer (logical hash +
-    /// physical checksum, `integrity` module). File offsets map through this
-    /// capacity, not the raw device block size.
+    /// trailer (nonce + tag), its compression descriptor, and its
+    /// data-integrity trailer (logical hash + physical checksum, `integrity`
+    /// module). File offsets map through this capacity, not the raw device
+    /// block size. A logical block always maps this many plaintext bytes even
+    /// when compression stores fewer bytes at rest
+    /// (`docs/src/filesystem/rustfs-spec.md` §10).
     fn data_capacity(&self) -> u64 {
-        (self.block_size - CRYPTO_TRAILER - DATA_INTEGRITY_TRAILER) as u64
+        (self.block_size - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER)
+            as u64
     }
 
     // --- in-memory used-block bitmap ---
@@ -1311,10 +1315,16 @@ impl<B: Block> RustFs<B> {
         Ok(new)
     }
 
-    /// Byte offset of a data block's logical-hash field: immediately after the
-    /// content region and its crypto trailer (`integrity` module).
-    fn logical_hash_offset(&self) -> usize {
+    /// Byte offset of a data block's compression descriptor: immediately after
+    /// the content region and its crypto trailer (`integrity` module).
+    fn compression_desc_offset(&self) -> usize {
         as_usize(self.data_capacity()) + CRYPTO_TRAILER
+    }
+
+    /// Byte offset of a data block's logical-hash field: immediately after the
+    /// compression descriptor (`integrity` module).
+    fn logical_hash_offset(&self) -> usize {
+        self.compression_desc_offset() + COMPRESSION_DESCRIPTOR_LEN
     }
 
     /// Byte offset of a data block's physical-checksum field: immediately after
@@ -1359,11 +1369,30 @@ impl<B: Block> RustFs<B> {
         if physical_checksum(&buf[..csum_off]) != stored {
             return Err(DataFault::Physical);
         }
+        let desc_off = self.compression_desc_offset();
         let hash_off = self.logical_hash_offset();
         {
-            let (region, rest) = buf[..hash_off].split_at_mut(cap);
+            let (region, rest) = buf[..desc_off].split_at_mut(cap);
             decrypt_region(&self.content_key, region, &rest[..CRYPTO_TRAILER], phys)
                 .map_err(|_| DataFault::Aead)?;
+        }
+        // Decompress after decrypt and before verifying the logical hash
+        // (`docs/src/filesystem/rustfs-spec.md` §6 read path). The hash always
+        // covers the recovered plaintext, so the Stage 7 dedupe seam is
+        // unaffected by whether the record was stored compressed or raw.
+        let desc = read_compression(&buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN])?;
+        if desc.compressed {
+            let stored_len = as_usize(u64::from(desc.stored_len));
+            if stored_len > cap {
+                return Err(DataFault::Logical);
+            }
+            let mut plain = [0u8; MAX_BLOCK_SIZE];
+            let produced = rustos_compress::decompress(&buf[..stored_len], &mut plain[..cap])
+                .map_err(|_| DataFault::Logical)?;
+            if produced != cap {
+                return Err(DataFault::Logical);
+            }
+            buf[..cap].copy_from_slice(&plain[..cap]);
         }
         let mut expect = [0u8; LOGICAL_HASH_LEN];
         expect.copy_from_slice(&buf[hash_off..hash_off + LOGICAL_HASH_LEN]);
@@ -1373,11 +1402,20 @@ impl<B: Block> RustFs<B> {
         Ok(())
     }
 
-    /// Encrypt the content in `buf[..data_capacity()]` under the content key,
-    /// seal the data-integrity trailer (logical hash of the plaintext, then a
+    /// Compress the content in `buf[..data_capacity()]`, encrypt the stored
+    /// representation under the content key, seal the compression descriptor
+    /// and the data-integrity trailer (logical hash of the plaintext, then a
     /// fast physical checksum over the at-rest bytes), and write the resulting
     /// block to `phys`. The nonce is unique per `(phys, generation)` so
     /// copy-on-write never reuses a `(key, nonce)` pair (`crypto` module).
+    ///
+    /// The pipeline is the spec's: `compress -> encrypt`
+    /// (`docs/src/filesystem/rustfs-spec.md` §6, §10). Compression runs over
+    /// the plaintext; when the compressed frame is not smaller than the
+    /// logical capacity the record is stored **raw** (a §1 allowed adaptive
+    /// choice). Either way the full content slot is encrypted, so the crypto
+    /// and integrity layers are identical for compressed and raw records and
+    /// the logical hash always names the plaintext.
     ///
     /// # Errors
     ///
@@ -1385,12 +1423,36 @@ impl<B: Block> RustFs<B> {
     fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
         let next_gen = self.generation.wrapping_add(1);
-        // The logical hash names the *plaintext*, so it is taken before
-        // encryption (`docs/src/filesystem/rustfs-spec.md` §6 write path).
+        // The logical hash names the *plaintext*, so it is taken before both
+        // compression and encryption (`docs/src/filesystem/rustfs-spec.md` §6
+        // write path).
         let hash = logical_hash(&buf[..cap]);
+
+        // Compress the plaintext into scratch; keep it only when it wins (the
+        // frame is strictly smaller than the logical capacity), otherwise store
+        // the record raw. The content slot is always `cap` bytes — a compressed
+        // record stores fewer *at-rest* bytes but a logical block still maps one
+        // file block, so the slot is zero-padded after the compressed frame.
+        let mut scratch = [0u8; MAX_BLOCK_SIZE];
+        let desc = match rustos_compress::compress(&buf[..cap], &mut scratch[..cap]) {
+            Ok(n) if n < cap => {
+                buf[..n].copy_from_slice(&scratch[..n]);
+                buf[n..cap].fill(0);
+                Compression {
+                    compressed: true,
+                    stored_len: as_u32(n),
+                }
+            }
+            _ => Compression {
+                compressed: false,
+                stored_len: as_u32(cap),
+            },
+        };
+
+        let desc_off = self.compression_desc_offset();
         let hash_off = self.logical_hash_offset();
         {
-            let (region, trailer) = buf[..hash_off].split_at_mut(cap);
+            let (region, trailer) = buf[..desc_off].split_at_mut(cap);
             encrypt_region(
                 &self.content_key,
                 region,
@@ -1400,9 +1462,14 @@ impl<B: Block> RustFs<B> {
             )
             .map_err(|_| DriverError::DeviceFault)?;
         }
+        write_compression(
+            &mut buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN],
+            desc,
+        );
         buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(&hash);
         // The physical checksum covers the at-rest representation: ciphertext,
-        // crypto trailer, and logical hash — everything before the checksum.
+        // crypto trailer, compression descriptor, and logical hash — everything
+        // before the checksum.
         let csum_off = self.phys_checksum_offset();
         let checksum = physical_checksum(&buf[..csum_off]);
         buf[csum_off..csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&checksum);

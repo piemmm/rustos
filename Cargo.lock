@@ -541,6 +541,10 @@ name = "rustos-collections"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-compress"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-cp"
 version = "0.0.0"
 dependencies = [
@@ -638,6 +642,7 @@ name = "rustos-drv-fs-rustfs"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-compress",
  "rustos-crypto",
 ]
 

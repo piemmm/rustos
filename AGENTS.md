@@ -143,6 +143,9 @@ rustos/
 │   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
+│   ├── compress/        # First-party LZ (zstd-fast-style) codec. RustFS
+│   │                    #   compresses every data record with it; no external
+│   │                    #   zstd/compression dependency (§2.12, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── cursor/          # Shared pointer cursors: scalable, colourful,
 │   │                    #   vectorised cursor shapes rasterised onto a raster

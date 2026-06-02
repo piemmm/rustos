@@ -4014,7 +4014,24 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    tested for the three corruption classes each detected distinctly,
    identical-vs-different logical hash (the Stage 7 dedupe seam), and
    integrity surviving a remount and a copy-on-write rewrite).
-6. First-party RustOS zstd codec and RustFS compression integration.
+6. First-party RustOS zstd codec and RustFS compression integration. ✓
+   (a first-party LZ "zstd-fast-style" codec landed as the new `lib/compress`
+   crate — `no_std`, allocation-free, no external zstd/compression dependency
+   per `AGENTS.md` §2.12 / §16.4; `compress`/`decompress` are `Result`-based
+   and panic-free, malformed input returns an error. RustFS wires it into the
+   §6 data-record pipeline: on write `compress → encrypt` with an
+   incompressible record stored **raw** (the §10 adaptive choice), on read
+   `physical checksum → decrypt → decompress → verify logical hash`. A per-
+   block compression descriptor (state + at-rest stored length) sits between
+   the crypto trailer and the logical hash, so the physical checksum covers it;
+   the full content slot is always encrypted so the Stage-4 crypto and Stage-5
+   integrity layers are identical for compressed and raw records and the
+   logical hash still names the plaintext (the Stage 7 dedupe seam is
+   unchanged). Tested: codec round-trip / corpus / known-answer / malformed /
+   incompressible; rustfs incompressible-raw, compressible-shrinks across a
+   remount and COW rewrite, integrity still catching physical + logical
+   corruption on a compressed block; a new `fuzz_compress` decode harness wired
+   into `cargo xtask ci` and the soak.)
 7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
 8. Online scrub.
 9. Offline check and rescue.
@@ -4027,7 +4044,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–5 complete; Stages 6–12 planned.** The copy-on-write
+**Status: Stages 1–6 complete; Stages 7–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

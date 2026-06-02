@@ -15,6 +15,11 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
 # `lib/crypto`, never a hand-rolled primitive.
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The first-party LZ codec every file-data record is compressed with before
+# encryption (`docs/src/filesystem/rustfs-spec.md` §6, §10). It is first-party,
+# not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the
+# crypto carve-out): RustFS must have no external compression dependency.
+rustos-compress = { path = "../../../lib/compress", version = "=0.0.0" }
 
 [lints]
 workspace = true

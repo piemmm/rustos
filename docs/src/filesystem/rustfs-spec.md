@@ -296,10 +296,13 @@ inode/range details for health, scrub, and check.
 > caught before the AEAD), authenticates-and-decrypts, then verifies the
 > logical hash over the recovered plaintext; each layer fails closed and is
 > kept internally distinct (`integrity::DataFault`). `physical location` is the
-> extent map (Stage 2). `chunk id`, `chunk generation`, `compression state`,
-> and `encryption domain` arrive with the chunk/refcount table and dedupe
-> (Stage 7) and compression (Stage 6); until then a data record is named by its
-> `(file, logical block)` extent and the integrity trailer above.
+> extent map (Stage 2). The **compression state** field lands in Stage 6 as a
+> per-block descriptor (a state byte plus the at-rest stored length) placed
+> between the crypto trailer and the logical hash, so the physical checksum
+> covers it (`drivers/filesystem/rustfs/src/integrity.rs`). `chunk id`, `chunk
+> generation`, and `encryption domain` arrive with the chunk/refcount table and
+> dedupe (Stage 7); until then a data record is named by its `(file, logical
+> block)` extent and the trailer above.
 
 ---
 
@@ -339,6 +342,20 @@ The v1 target is a low-CPU zstd-fast-style profile, not maximum ratio.
 
 The first-party codec must include corpus tests, known-answer tests, malformed
 input tests, and fuzz targets.
+
+> **Stage 6 implementation.** The first-party codec is the `lib/compress`
+> crate (`AGENTS.md` §16.4 lists compression as a curated shared-library
+> class): a `no_std`, allocation-free LZ77 codec with a `"RLZ1"` frame and
+> LZ4-style token sequences — no external zstd/compression dependency (§3,
+> `AGENTS.md` §2.12). RustFS compresses each file-data record before
+> encrypting it (`compress → encrypt`) and stores the record raw when the
+> compressed frame is not smaller than the logical block capacity. The read
+> path decompresses after decrypting and before verifying the logical hash, so
+> the hash still names the plaintext. *Dedupe before compression* and
+> *compress only unique records* are satisfied trivially while dedupe is
+> pending (Stage 7): every record is unique today, so every record is
+> compressed; the order is preserved (`dedupe → compress → encrypt`) for when
+> the dedupe stage lands.
 
 ---
 
@@ -541,7 +558,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 3 | Metadata authentication/checksums and duplicated critical metadata. | ✓ |
 | 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | ✓ |
 | 5 | Data records with physical checksum and logical hash. | ✓ |
-| 6 | First-party RustOS zstd codec and RustFS compression integration. | |
+| 6 | First-party RustOS zstd codec and RustFS compression integration. | ✓ |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | |
 | 8 | Online scrub. | |
 | 9 | Offline check and rescue. | |
@@ -625,5 +642,35 @@ plaintext sharing one logical hash while different plaintext differs (the
 Stage 7 dedupe seam) even though the two blocks encrypt to distinct
 ciphertext, and the integrity field surviving a remount and a copy-on-write
 rewrite — all pass, alongside the crash-replay sweep, the 1 GiB `fssoak`, the
-posix suite, and the QEMU vertical. Stages 6–12 remain; each implementing
-session ticks this table and `PLAN.md`.
+posix suite, and the QEMU vertical.
+
+Stage 6 made compression **mandatory and always on** (§1, §10) with a
+**first-party RustOS codec — no external zstd/compression dependency** (§3,
+`AGENTS.md` §2.12 / §16.4). The codec landed as the new `lib/compress` crate:
+a low-CPU, byte-oriented LZ77 ("zstd-fast-style") codec with a `"RLZ1"` frame
+header, a greedy hash-table match finder, and LZ4-style literal/match token
+sequences. It is `no_std`, allocates nothing (it works through caller-provided
+slices), and is panic-free — `compress`/`decompress` are `Result`-based, the
+declared output length is bounds-checked against the destination before any
+byte is produced, and malformed compressed input returns an error, never a
+panic (§10, §2.9). RustFS wires it into the §6 data-record pipeline: on write
+the plaintext is hashed (the logical hash still names the plaintext, before
+compression), then `compress → encrypt`, storing the record **raw** when the
+compressed frame is not smaller than the logical capacity (the §1/§10 allowed
+adaptive choice); on read `physical checksum → decrypt → decompress → verify
+logical hash`. The §8 data-record **compression state** field is a per-block
+descriptor (a state byte plus the at-rest stored length) placed between the
+crypto trailer and the logical hash, so the fast physical checksum still
+covers it; `data_capacity()` shrank by that descriptor accordingly. The full
+content slot is always encrypted, so the Stage-4 crypto and Stage-5 integrity
+layers are identical for compressed and raw records, and the logical hash
+(the Stage 7 dedupe seam) is unchanged. The §16 acceptance tests for this
+stage — codec round-trip / corpus / known-answer / malformed-input, an
+incompressible record stored raw and round-tripping, a compressible file
+shrinking its at-rest footprint yet reading back byte-identical across a
+remount and a COW rewrite, integrity still catching a physical and a logical
+corruption on a compressed block, and a new `fuzz_compress` decode harness
+wired into `cargo xtask ci` and the soak — all pass, alongside the
+crash-replay sweep, the 1 GiB `fssoak`, the posix suite, and the QEMU
+vertical. Stages 7–12 remain; each implementing session ticks this table and
+`PLAN.md`.

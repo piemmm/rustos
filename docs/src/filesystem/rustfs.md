@@ -167,13 +167,14 @@ the plaintext.
   keys on (`rustfs-spec.md` §9) — and a single changed plaintext byte changes
   it, catching a corruption that survived decryption.
 - **Physical checksum** (8 bytes). A fast, non-cryptographic checksum over the
-  block's at-rest bytes (ciphertext + crypto trailer + logical hash). It is
-  verified **first** on read, so media or transport bit rot is caught cheaply
-  before the AEAD runs.
+  block's at-rest bytes (ciphertext + crypto trailer + compression descriptor +
+  logical hash). It is verified **first** on read, so media or transport bit
+  rot is caught cheaply before the AEAD runs.
 
-The write path is the spec's: take the logical hash of the plaintext, encrypt
-the content, then checksum the at-rest block. The read path reverses it: verify
-the physical checksum, decrypt-and-authenticate, then verify the logical hash.
+The write path is the spec's: take the logical hash of the plaintext, compress
+then encrypt the content (see *Compression* below), then checksum the at-rest
+block. The read path reverses it: verify the physical checksum,
+decrypt-and-authenticate, decompress, then verify the logical hash.
 Each layer fails closed to a `DriverError` (never a panic, `AGENTS.md` §5.4 /
 §2.9) and is kept internally distinct (`integrity::DataFault` —
 `Physical`/`Aead`/`Logical`) so a media fault is not confused with a tamper or
@@ -193,6 +194,40 @@ one) takes precedence over the spec's named primitive. The physical checksum is
 a first-party FNV-1a — a checksum is not a cryptographic primitive, so §2.12
 does not bar rolling it, and the block's keyed authenticity still rests on the
 AEAD and the metadata MAC.
+
+## Compression
+
+Compression is **mandatory and always on** (`rustfs-spec.md` §1, §10): every
+file-data record is compressed before it is encrypted. The codec is
+**first-party** — the `lib/compress` crate, a `no_std`, allocation-free LZ77
+("zstd-fast-style") codec — and RustFS takes **no external zstd/compression
+dependency** (`AGENTS.md` §2.12 / §16.4; `rustfs-spec.md` §3). It is a
+low-CPU profile (a greedy hash-table match finder, LZ4-style literal/match
+tokens, no entropy stage), not a maximum-ratio one.
+
+On the §6 write path the order is `compress → encrypt`. The plaintext logical
+hash is taken first (it always names the plaintext, so the Stage 7 dedupe seam
+is unaffected), then the record is compressed; when the compressed frame is
+**not smaller** than the logical block capacity the record is stored **raw**
+(the §10 adaptive choice — incompressible data is never inflated). On the read
+path the order is `physical checksum → decrypt → decompress → verify logical
+hash`; a record stored raw skips the decompress step.
+
+Which path a record took is recorded in a per-block **compression descriptor**
+(the §8 data-record *compression state* field, `src/integrity.rs`): one state
+byte plus the little-endian `u32` length of the at-rest stored representation.
+It sits between the crypto trailer and the logical hash, so the fast physical
+checksum covers it and a corrupted descriptor is caught before the AEAD runs.
+`data_capacity()` reserves it alongside the crypto and integrity trailers.
+
+The whole fixed-size content slot is always encrypted regardless of whether
+the record compressed, so the Stage-4 crypto and Stage-5 integrity layers are
+**identical** for compressed and raw records — a compressed record simply
+stores fewer at-rest bytes inside the same slot, while a logical block still
+maps exactly one file block. Decompression is panic-free: a malformed or
+truncated compressed frame returns an error (surfaced as the fail-closed
+`DriverError::DeviceFault`), never a panic (`rustfs-spec.md` §10, `AGENTS.md`
+§2.9).
 
 ## Timestamps (§21)
 
@@ -345,8 +380,12 @@ integrity layers (physical checksum, AEAD, logical hash) each detecting
 **its own** class of corruption and all failing closed, identical plaintext
 sharing **one logical hash** while different plaintext differs (the dedupe
 seam) even though the two blocks encrypt to distinct ciphertext, and the
-integrity field surviving a remount and a copy-on-write rewrite; the
-per-inode security record and
+integrity field surviving a remount and a copy-on-write rewrite; the Stage-6
+compression acceptance tests — an **incompressible record stored raw** and
+reading back byte-identical, a **compressible file shrinking its at-rest
+footprint** yet reading back byte-identical across a remount and a COW
+rewrite, and the integrity layers still catching a physical and a logical
+corruption on a **compressed** block; the per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
 highest committed generation; and a **crash-replay sweep** that faults the
@@ -360,7 +399,12 @@ harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
 path), a duplicated-copy sweep that corrupts *both* copies of each block
 pair, and a fixed-seed PRNG all drive `RustFs::open` over arbitrary bytes,
-asserting it never panics and fails closed.
+asserting it never panics and fails closed. The first-party compression codec
+has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
+the spec's required "compression decode" target (`rustfs-spec.md` §10,
+`AGENTS.md` §19.6), it round-trips structured inputs and feeds corrupted
+frames and pure noise to `rustos_compress::decompress`, asserting it never
+panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `.junie/next-session-prompt.md`.

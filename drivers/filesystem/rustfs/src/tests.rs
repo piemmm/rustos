@@ -1002,11 +1002,168 @@ fn integrity_survives_remount_and_a_cow_rewrite() {
 
 #[test]
 fn data_block_capacity_reserves_the_integrity_trailer() {
-    // A file-data block stores the device block minus both the crypto trailer
-    // and the data-integrity trailer (logical hash + physical checksum).
+    // A file-data block stores the device block minus the crypto trailer, the
+    // compression descriptor, and the data-integrity trailer (logical hash +
+    // physical checksum).
     let fs = fmt(512, 256, 32);
     assert_eq!(
         fs.data_capacity(),
-        (512 - CRYPTO_TRAILER - DATA_INTEGRITY_TRAILER) as u64
+        (512 - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER) as u64
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6: first-party compression on the §6 data-record pipeline.
+// ---------------------------------------------------------------------------
+
+/// Read the on-disk compression descriptor of file `name`'s logical block
+/// `bi` (the §8 data-record compression-state field).
+fn stored_compression(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> Compression {
+    let phys = data_block_phys(fs, name, bi);
+    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    fs.read_block(phys, &mut raw).expect("raw read");
+    let off = fs.compression_desc_offset();
+    read_compression(&raw[off..off + COMPRESSION_DESCRIPTOR_LEN]).expect("descriptor parses")
+}
+
+/// A pseudo-random, incompressible buffer of `len` bytes.
+fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    let mut state: u32 = 0x1234_5678;
+    for _ in 0..len {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.push(u8::try_from(state >> 24).unwrap_or(0));
+    }
+    out
+}
+
+#[test]
+fn incompressible_record_is_stored_raw_and_round_trips() {
+    // Pseudo-random data does not compress, so the §10 adaptive choice stores
+    // it raw — yet it must still read back byte-identically.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"r", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    let payload = incompressible(cap);
+    assert_eq!(fs.write_at(root, b"r", 0, &payload), Ok(payload.len()));
+
+    let desc = stored_compression(&mut fs, b"r", 0);
+    assert!(!desc.compressed, "incompressible data is stored raw");
+    assert_eq!(
+        as_usize(u64::from(desc.stored_len)),
+        cap,
+        "a raw record occupies the whole content slot"
+    );
+
+    let node = fs.lookup(fs.root(), b"r").expect("file survives");
+    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+}
+
+#[test]
+fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() {
+    // A compressible block stores fewer at-rest bytes (the §10 win), and reads
+    // back byte-identical across a remount and a copy-on-write rewrite, with
+    // the logical hash (Stage 7 dedupe seam) unchanged by compression.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    // Three full blocks of a short repeating pattern: highly compressible.
+    let mut payload = alloc::vec::Vec::new();
+    while payload.len() < cap * 3 {
+        payload.extend_from_slice(b"RustOS rustfs ");
+    }
+    payload.truncate(cap * 3);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+
+    let desc = stored_compression(&mut fs, b"c", 0);
+    assert!(desc.compressed, "a repetitive block compresses");
+    assert!(
+        as_usize(u64::from(desc.stored_len)) < cap,
+        "a compressed record shrinks its at-rest footprint: {} >= {cap}",
+        desc.stored_len
+    );
+
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"c").expect("file survives");
+    assert_eq!(
+        read_all(&mut fs, node, payload.len()),
+        payload,
+        "compressed data reads back byte-identical after a remount"
+    );
+
+    // A copy-on-write rewrite of a middle region re-compresses fresh blocks.
+    let patch = alloc::vec![0x5Au8; cap];
+    let at = u64::try_from(cap).unwrap();
+    assert_eq!(fs.write_at(fs.root(), b"c", at, &patch), Ok(patch.len()));
+    let mut expected = payload.clone();
+    expected[cap..cap * 2].copy_from_slice(&patch);
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
+    let node = fs.lookup(fs.root(), b"c").expect("file still there");
+    assert_eq!(
+        read_all(&mut fs, node, expected.len()),
+        expected,
+        "compressed data verifies after a COW rewrite"
+    );
+}
+
+#[test]
+fn integrity_still_detected_on_a_compressed_block() {
+    // The Stage-5 integrity layers still guard a compressed record: a physical
+    // (media) corruption and a logical-hash mismatch are both caught and fail
+    // closed (`AGENTS.md` §5.4 / §2.9).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    let payload = alloc::vec![0x00u8; cap];
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert!(
+        stored_compression(&mut fs, b"c", 0).compressed,
+        "a constant block compresses"
+    );
+
+    let phys = data_block_phys(&mut fs, b"c", 0);
+    let csum_off = fs.phys_checksum_offset();
+    let hash_off = fs.logical_hash_offset();
+    let bs = 512usize;
+    let base = as_usize(phys) * bs;
+    let baseline = fs.into_block().bytes();
+
+    let reopen = |bytes: alloc::vec::Vec<u8>| {
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
+    };
+
+    // Physical: a flipped at-rest byte is caught by the fast checksum.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Physical)
+        );
+    }
+    // Logical: corrupt the stored plaintext hash and repair the checksum, so
+    // the AEAD passes but the post-decompression hash mismatches.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base + hash_off] ^= 0x01;
+        let fixed = physical_checksum(&bytes[base..base + csum_off]);
+        bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Logical)
+        );
+    }
 }

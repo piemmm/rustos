@@ -48,6 +48,65 @@ pub const PHYS_CHECKSUM_LEN: usize = 8;
 /// [`PHYS_CHECKSUM_LEN`]-byte physical checksum.
 pub const DATA_INTEGRITY_TRAILER: usize = LOGICAL_HASH_LEN + PHYS_CHECKSUM_LEN;
 
+/// Bytes of the per-data-block **compression descriptor**
+/// (`docs/src/filesystem/rustfs-spec.md` §8 — the data-record *compression
+/// state* field). It sits between the crypto trailer and the logical hash, so
+/// the fast physical checksum covers it (a corrupted descriptor is caught by
+/// the §6 first-layer check before the AEAD runs). The layout is one state
+/// byte followed by the little-endian `u32` length of the at-rest stored
+/// representation (the compressed-or-raw bytes the AEAD covers).
+pub const COMPRESSION_DESCRIPTOR_LEN: usize = 1 + 4;
+
+/// Descriptor state byte for a record stored raw (compression did not win, so
+/// the content slot holds the plaintext directly,
+/// `docs/src/filesystem/rustfs-spec.md` §10).
+pub const COMPRESSION_RAW: u8 = 0;
+
+/// Descriptor state byte for a record stored compressed with the first-party
+/// codec (`rustos_compress`).
+pub const COMPRESSION_LZ: u8 = 1;
+
+/// Whether a data record's stored representation is compressed, and how many
+/// bytes of the content slot that representation occupies.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Compression {
+    /// `true` when the content slot holds an `rustos_compress` frame; `false`
+    /// when it holds the plaintext raw.
+    pub compressed: bool,
+    /// Bytes of the content slot the stored representation occupies: the
+    /// compressed frame length, or the full logical capacity when raw.
+    pub stored_len: u32,
+}
+
+/// Serialise a [`Compression`] descriptor into the first
+/// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `dst`. The caller guarantees
+/// `dst.len() >= COMPRESSION_DESCRIPTOR_LEN`.
+pub fn write_compression(dst: &mut [u8], desc: Compression) {
+    dst[0] = if desc.compressed {
+        COMPRESSION_LZ
+    } else {
+        COMPRESSION_RAW
+    };
+    dst[1..5].copy_from_slice(&desc.stored_len.to_le_bytes());
+}
+
+/// Parse a [`Compression`] descriptor from the first
+/// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `src`. An unknown state byte is
+/// rejected as corruption (`AGENTS.md` §5.4 — fail closed). The caller
+/// guarantees `src.len() >= COMPRESSION_DESCRIPTOR_LEN`.
+pub fn read_compression(src: &[u8]) -> Result<Compression, DataFault> {
+    let compressed = match src[0] {
+        COMPRESSION_RAW => false,
+        COMPRESSION_LZ => true,
+        _ => return Err(DataFault::Logical),
+    };
+    let stored_len = u32::from_le_bytes([src[1], src[2], src[3], src[4]]);
+    Ok(Compression {
+        compressed,
+        stored_len,
+    })
+}
+
 /// Which integrity layer rejected a data block. Surfaced to the caller as a
 /// single [`rustos_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
 /// is frozen, `AGENTS.md` §9), but kept distinct internally so a media /

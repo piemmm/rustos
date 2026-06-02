@@ -36,9 +36,10 @@ against the address the reader expected, so a stale, misdirected,
 wrong-type, torn, bit-rotted, or wrong-key block is rejected at decode time
 and the mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
 header; their tail holds a 28-byte per-block crypto trailer (nonce + AEAD
-tag, see *Encryption* below) and a 40-byte data-integrity trailer (logical
-content hash + physical checksum, see *Data integrity* below), so a data
-block holds `block_size - 68` bytes of file content.
+tag, see *Encryption* below), a 5-byte compression descriptor (see
+*Compression* below), and a 40-byte data-integrity trailer (logical content
+hash + physical checksum, see *Data integrity* below), so a data block holds
+`block_size - 73` bytes of file content.
 
 ## Metadata authentication and redundancy (`rustfs-spec.md` §5, §8)
 
@@ -84,8 +85,9 @@ Every file-data block carries a two-layer **data-integrity field**
 hash** of the block's plaintext (taken before encryption, recomputed after
 decryption) and an 8-byte **physical checksum** over the at-rest bytes
 (verified first, before the AEAD). The write path hashes the plaintext,
-encrypts, then checksums; the read path verifies the checksum, decrypts, then
-verifies the hash. Each layer fails closed to a `DriverError` and is kept
+compresses, encrypts, then checksums; the read path verifies the checksum,
+decrypts, decompresses, then verifies the hash. Each layer fails closed to a
+`DriverError` and is kept
 internally distinct (`integrity::DataFault` — `Physical`/`Aead`/`Logical`),
 never a panic (`AGENTS.md` §5.4 / §2.9). Identical plaintext shares one logical
 hash — the seam Stage 7 dedupe keys on (`rustfs-spec.md` §9). The hash uses
@@ -104,6 +106,23 @@ a contiguous write stays a single record. Both are the one generic B-tree in
 `src/btree.rs` (`AGENTS.md` §2.2). Directories are block-addressed payloads of
 64-byte slots reached through the extent map; `.`/`..` are stored on disk and
 hidden from `read_dir`.
+
+## Compression (`rustfs-spec.md` §6, §10)
+
+Compression is **mandatory and always on**, with a **first-party** codec — the
+`lib/compress` crate, a `no_std`, allocation-free LZ77 ("zstd-fast-style")
+codec — and **no external zstd/compression dependency** (`AGENTS.md` §2.12 /
+§16.4). On write the order is `compress → encrypt`; a record whose compressed
+frame is not smaller than the logical block capacity is stored **raw** (the
+§10 adaptive choice). On read the order is `physical checksum → decrypt →
+decompress → verify logical hash`. A per-block **compression descriptor** (a
+state byte plus the at-rest stored length) records which path the record took;
+it sits between the crypto trailer and the logical hash so the physical
+checksum covers it. The full content slot is always encrypted, so the crypto
+and integrity layers are identical for compressed and raw records and the
+logical hash still names the plaintext. Decompression is panic-free: a
+malformed frame fails closed to `DeviceFault`, never a panic (`AGENTS.md`
+§2.9).
 
 ## Crash consistency (copy-on-write + superblock ring)
 
@@ -130,8 +149,9 @@ so a delete can copy-on-write itself even on a full volume. No
 > filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in
 > two physical copies, **at-rest encryption** under a per-volume key
 > hierarchy, and a per-data-record **integrity field** (logical content hash
-> + physical checksum) verified on every read (Stage 5). Compression and
-> dedupe are later stages of the
+> + physical checksum) verified on every read (Stage 5), and **first-party
+> compression** of every data record before encryption with a raw-store
+> fallback (Stage 6). Dedupe is a later stage of the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -170,15 +190,20 @@ bit-flip in an encrypted data block is detected), the Stage-5 data-integrity
 tests (each of the three layers — physical checksum, AEAD, logical hash —
 detecting its own corruption class and failing closed, identical plaintext
 sharing one logical hash while different plaintext differs, and integrity
-surviving a remount and a copy-on-write rewrite), and a
+surviving a remount and a copy-on-write rewrite), the Stage-6 compression
+tests (an incompressible record stored raw and round-tripping, a compressible
+file shrinking its at-rest footprint yet reading back byte-identical across a
+remount and a COW rewrite, and integrity still catching a physical and a
+logical corruption on a compressed block), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
 never torn.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
-shared cross-filesystem exerciser, and a `cargo xtask fuzz` harness
-(`fuzz_mount`) fuzzes the mount / metadata-decode path (`AGENTS.md` §19.6).
+shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
+mount / metadata-decode path (`fuzz_mount`) and the first-party compression
+decoder (`fuzz_compress`, in `lib/compress`) (`AGENTS.md` §19.6).
 
 ## End-to-end QEMU vertical
 
