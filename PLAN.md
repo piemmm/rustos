@@ -3936,6 +3936,55 @@ device list.
 
 ---
 
+## Stage 5 follow-up — RustFS v1 (next-generation on-disk format)
+
+**Dependencies:** Stage 5 (the shipping journaled-COW `rustfs` driver, the
+VFS policy layer, and the frozen `Filesystem*` traits) and `lib/crypto`.
+
+**Goal.** Evolve the native filesystem into the full RustFS v1 design:
+copy-on-write, **always encrypted**, checksummed, compressed,
+deduplicating, SSD-aware, and recoverable (scrub / check / rescue). The
+authoritative implementation spec is `.junie/RUSTFS.md`; the
+book-rendered, doc-CI-covered mirror is `docs/src/filesystem/rustfs_v1.md`.
+RustFS v1 has **one mandatory profile** — every feature is on and not
+tunable — and **no external zstd/compression dependency** (the codec is
+first-party, `AGENTS.md` §2.12); crypto goes through `lib/crypto` only.
+
+**Staged delivery.** Delivered **one stage per session, bottom-up**, in the
+`.junie/RUSTFS.md` §15 order, behind the existing frozen `FilesystemRead` /
+`FilesystemWrite` / `FilesystemSecurity` / `FilesystemTimestamps` traits so
+the VFS and the shipping `rustfs` driver are never regressed (parallel
+implementations, not a `cfg` collapse — `AGENTS.md` §2.2 carve-out). The
+live next-session prompt is `.junie/next-rustfs-prompt.md`; the status
+legend is `.junie/RUSTFS.md` §18. The 12 stages:
+
+1. On-disk headers, superblock ring, transaction roots.
+2. COW metadata trees (inode, extent) and free-space rebuild.
+3. Metadata authentication/checksums and duplicated critical metadata.
+4. Encrypted volume creation, key hierarchy, filename/data encryption.
+5. Data records with physical checksum and logical hash.
+6. First-party RustOS zstd codec and RustFS compression integration.
+7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
+8. Online scrub.
+9. Offline check and rescue.
+10. TRIM/discard queues and mkfs-time discard.
+11. Device-health baselines and health-triggered scrub.
+12. Fuzz, proptest, crash-replay, and corruption-injection suites.
+
+**Docs**
+- `docs/src/filesystem/rustfs_v1.md` (added; the spec mirror, in
+  `SUMMARY.md` and cross-linked from the filesystem overview). Each stage
+  expands it with what actually landed.
+
+**Status: planned — spec staged and documented; no implementation stage
+started.** The RustFS v1 spec was brought into the documentation book so
+`cargo xtask docs-check` validates it, `.junie/RUSTFS.md` gained the §18
+staged-delivery legend, and `.junie/next-rustfs-prompt.md` carries the
+Stage 1 prompt (headers / superblock ring / transaction roots). Each
+implementing session ticks the stage here and in `.junie/RUSTFS.md` §18.
+
+---
+
 ## Stage 6 — Userland Foundations
 
 **Dependencies:** Stages 2–5 sufficient for at least one platform.

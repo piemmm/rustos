@@ -131,6 +131,8 @@ rustos/
 │   │   ├── ext4/
 │   │   ├── fat32/
 │   │   └── rustfs/      # Native, POSIX-compliant, capability-aware FS.
+│   │                    #   v1 target (.junie/RUSTFS.md, staged): COW,
+│   │                    #   encrypted, checksummed, compressed, dedup.
 │   ├── input/
 │   ├── network/
 │   ├── storage/

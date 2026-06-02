@@ -60,6 +60,7 @@
 - [Permissions](./filesystem/permissions.md)
 - [FAT32 driver](./filesystem/fat32.md)
 - [rustfs driver](./filesystem/rustfs.md)
+- [RustFS v1 specification](./filesystem/rustfs_v1.md)
 - [ext4 driver](./filesystem/ext4.md)
 - [POSIX conformance suite](./filesystem/posix_suite.md)
 - [Filesystem soak](./filesystem/soak.md)

@@ -21,7 +21,10 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
-[Permissions](./permissions.md).
+[Permissions](./permissions.md). The next-generation native format — a
+copy-on-write, always-encrypted, checksummed, compressed, deduplicating
+filesystem being delivered in stages behind these same traits — is
+specified in [RustFS v1](./rustfs_v1.md).
 
 ## The VFS tree
 
