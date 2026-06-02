@@ -1,0 +1,119 @@
+//! The transaction root and its inline commit record
+//! (`.junie/RUSTFS.md` §14).
+//!
+//! A transaction root is the single block a committed transaction publishes
+//! through the superblock ring (`superblock` module). It is a self-identifying
+//! block ([`BlockType::TxnRoot`]) whose payload names the roots of the
+//! copy-on-write metadata the transaction produced — at Stage 1, the inode
+//! map — and ends with a **commit record**: a commit magic plus a second copy
+//! of the generation.
+//!
+//! Co-locating the commit record in the same sealed block makes commit atomic
+//! against a torn write: the block's checksum (`header`) and the commit
+//! record are validated together, so a half-written root is rejected and the
+//! ring falls back to the previous committed root. The commit order is
+//! therefore: write every copy-on-write block, write this root (carrying its
+//! commit record), then publish the superblock slot pointing at it — each
+//! step flushed before the next.
+
+use rustos_abi::DriverError;
+
+use crate::header::{BlockHeader, BlockType, HEADER_LEN};
+
+/// Commit-record magic stored in the root payload trailer: `"RFSCMMIT"`.
+const COMMIT_MAGIC: u64 = 0x5246_5343_4d4d_4954;
+
+// Transaction-root payload field offsets, relative to the end of the header.
+const P_GENERATION: usize = HEADER_LEN;
+const P_MAP_INDEX_PHYS: usize = HEADER_LEN + 8;
+const P_INODE_BLOCKS: usize = HEADER_LEN + 16;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 24;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 32;
+/// Bytes of meaningful transaction-root payload following the header.
+const PAYLOAD_LEN: u32 = 40;
+
+fn rd_u64(buf: &[u8], off: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&buf[off..off + 8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
+    buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// One decoded transaction root.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TxnRoot {
+    /// Transaction generation this root commits.
+    pub generation: u64,
+    /// Physical block of the inode-map index block, or `0` when the volume
+    /// holds no inode blocks yet.
+    pub map_index_phys: u64,
+    /// Number of inode blocks the inode map indexes.
+    pub inode_blocks: u64,
+}
+
+impl TxnRoot {
+    /// Encode this root and its commit record into `block`, sealing it with a
+    /// header naming physical address `phys` and `fs_uuid`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if `block` cannot hold the payload (a
+    /// programming error, surfaced rather than panicked).
+    pub fn seal(&self, block: &mut [u8], fs_uuid: u128, phys: u64) -> Result<(), DriverError> {
+        if block.len() < P_COMMIT_GENERATION + 8 {
+            return Err(DriverError::DeviceFault);
+        }
+        for byte in block.iter_mut() {
+            *byte = 0;
+        }
+        wr_u64(block, P_GENERATION, self.generation);
+        wr_u64(block, P_MAP_INDEX_PHYS, self.map_index_phys);
+        wr_u64(block, P_INODE_BLOCKS, self.inode_blocks);
+        wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
+        wr_u64(block, P_COMMIT_GENERATION, self.generation);
+        let header = BlockHeader {
+            block_type: BlockType::TxnRoot,
+            fs_uuid,
+            owner: 0,
+            generation: self.generation,
+            logical_addr: 0,
+            physical_addr: phys,
+            payload_len: PAYLOAD_LEN,
+        };
+        header.seal(block)
+    }
+
+    /// Decode and validate the transaction root at physical address `phys`,
+    /// rejecting a torn block, a foreign UUID, a generation mismatch, or an
+    /// absent/incomplete commit record.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the root is invalid; the caller treats
+    /// that as "this slot did not commit" and falls back in the ring.
+    pub fn decode_verify(
+        block: &[u8],
+        fs_uuid: u128,
+        phys: u64,
+        expect_generation: u64,
+    ) -> Result<Self, DriverError> {
+        let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys)?;
+        let generation = rd_u64(block, P_GENERATION);
+        if generation != header.generation || generation != expect_generation {
+            return Err(DriverError::DeviceFault);
+        }
+        if rd_u64(block, P_COMMIT_MAGIC) != COMMIT_MAGIC
+            || rd_u64(block, P_COMMIT_GENERATION) != generation
+        {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(Self {
+            generation,
+            map_index_phys: rd_u64(block, P_MAP_INDEX_PHYS),
+            inode_blocks: rd_u64(block, P_INODE_BLOCKS),
+        })
+    }
+}

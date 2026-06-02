@@ -1,9 +1,12 @@
 # rustfs driver
 
 `rustfs` (`drivers/filesystem/rustfs`, crate `rustos-drv-fs-rustfs`) is the
-**native RustOS filesystem**: a block-backed, journaled, copy-on-write
-filesystem that stores full POSIX metadata plus an inline access-control
-list and an optional capability gate **per inode** (`AGENTS.md` §5.3). It
+**native RustOS filesystem**: a block-backed, copy-on-write filesystem that
+stores full POSIX metadata plus an inline access-control list and an
+optional capability gate **per inode** (`AGENTS.md` §5.3). There is exactly
+one on-disk version — `rustfs` is built up internally in the stages of
+`.junie/RUSTFS.md`, but the driver and its format are a single shipping
+thing, not a `v1`/`v2` pair. It
 sits behind any `rustos_abi::driver::block::Block` device and is exposed
 through the versioned `FilesystemRead` and `FilesystemWrite` traits — never
 by widening the frozen mount/unmount `Filesystem` trait (`AGENTS.md` §2.4 /
@@ -24,27 +27,44 @@ enforced as stored. See [Driver delegation](./overview.md) and the
 ## On-disk layout
 
 A volume is a sequence of fixed-size blocks (the device's logical block
-size, between 512 and 4096 bytes, a power of two). The regions tile the
-device in order; `RustFs::open` re-derives and validates the geometry from
-the superblock:
+size, between 512 and 4096 bytes, a power of two). The device opens at a
+**superblock ring** of four slots in the first four blocks; everything
+else is allocated copy-on-write from the pool that follows. `RustFs::open`
+re-derives and validates the geometry from the selected superblock slot.
 
-| Region        | Contents                                                    |
-| ------------- | ----------------------------------------------------------- |
-| Superblock    | Block 0: magic, version (2), geometry, region offsets, root.|
-| Inode table   | Fixed 256-byte inode records; index 1 is the root.          |
-| Data bitmap   | One bit per data block.                                     |
-| Journal       | One header block plus a fixed-size redo-log data area.      |
-| Data          | File and directory data blocks, and indirect-pointer blocks.|
+| Region          | Contents                                                  |
+| --------------- | --------------------------------------------------------- |
+| Superblock ring | Blocks 0–3: four slots, each pointing at a committed root.|
+| Pool            | Everything else, allocated copy-on-write: the transaction |
+|                 | root, the inode map, inode blocks, directory blocks,      |
+|                 | indirect-pointer blocks, and raw file-data blocks.        |
 
-Each inode holds 12 direct block pointers plus one single-indirect block,
-so a file spans up to `12 + block_size/8` blocks. Directories are ordinary
-block-addressed payloads of 64-byte slots (`inode`, `name_len`, name);
-`.` and `..` are stored on disk and hidden from `read_dir`.
+Every **metadata** block is self-identifying (`AGENTS.md` §8 block
+identity): its first 96 bytes carry a magic, block type, format version,
+the volume UUID, an owner object, a generation, its logical and physical
+address, and a fast checksum over identity + payload. Decoding verifies
+all of that against the address the reader *expected*, so a stale,
+misdirected, wrong-type, or torn block is rejected at decode time and the
+mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
+header and use the full block.
 
-The inode record also stores the four §21 timestamps; format version 2
-reduced the direct-pointer count from 16 to 12 to make room for them
-without growing the fixed 256-byte record. A version-1 volume is refused
-rather than misread.
+Inodes are 256-byte records reached through a two-level **copy-on-write
+inode map** (an index block pointing at map blocks, which point at the
+packed inode blocks); index 1 is the root. Each inode holds 12 direct
+block pointers plus one single-indirect block, so a file spans up to
+`12 + (block_size - 96)/8` blocks. Directories are block-addressed
+payloads of 64-byte slots (`inode`, `name_len`, name); `.` and `..` are
+stored on disk and hidden from `read_dir`. The inode record also stores
+the four §21 timestamps. A volume written by a different format version is
+refused rather than misread.
+
+> **Stage 1 of `.junie/RUSTFS.md`.** The volume is a complete, mountable
+> copy-on-write filesystem, but encryption, compression, and dedupe are
+> later stages: a Stage-1 volume is not yet encrypted at rest, and the
+> metadata checksum is the fast physical checksum, not yet the keyed
+> authenticator. The free-block bitmap and inode-allocation bitmap are
+> rebuilt in memory at mount by walking the selected root; they are not
+> stored on disk.
 
 ## Timestamps (§21)
 
@@ -73,25 +93,28 @@ in-range timestamps rather than panicking or inventing a time
 `created` is set once and never changed. Installing a different clock
 never rewrites timestamps already on disk.
 
-## Copy-on-write and journaling
+## Copy-on-write and the superblock ring
 
 `rustfs` keeps metadata and data consistent across a crash without
-`fsck` (`AGENTS.md` §2.5):
+`fsck` (`AGENTS.md` §2.5). Every operation is a transaction, and a block
+reachable from the last committed transaction root is **never overwritten
+in place**:
 
-- **File data is copy-on-write.** A write allocates a *fresh* data block,
-  writes the new contents there, re-points the inode, and frees the old
-  block. A crash before commit leaves the old block intact, so a reader
-  never observes a torn block.
-- **Metadata is journaled.** The data-block bitmap, inode-table blocks,
-  directory blocks, and indirect blocks of a single operation are staged
-  into the journal's redo-log area. Commit writes a checksummed record,
-  then checkpoints each staged image to its home block. A mount **replays**
-  a committed-but-un-checkpointed transaction and **discards** an
-  uncommitted or checksum-mismatched one, so the metadata is always at a
-  transaction boundary.
-
-The staged block images live in the on-disk journal, not in RAM; only the
-small list of home block numbers is held in memory.
+- **Copy-on-write everywhere.** A modified metadata or data block is
+  written to a freshly allocated block; the block that referenced it is
+  itself copy-on-written to point at the new location, up to the inode
+  map. Blocks superseded by the transaction are *deferred-freed* — marked
+  reusable only after the transaction commits — so the previous committed
+  tree stays wholly intact until the new one is durable.
+- **Commit order (`.junie/RUSTFS.md` §14).** Write the copy-on-write
+  blocks, write the new transaction root carrying its inline commit
+  record, then publish the next superblock-ring slot (round-robin)
+  pointing at that root. `open` scans the ring and selects the
+  highest-generation slot whose root *and* commit record validate. A
+  crash before the slot is published leaves the previous committed root
+  selected; a crash mid-publish overwrites only the oldest ring slot, so
+  the most recent committed root always survives — the mount lands on a
+  whole transaction boundary, never a torn one.
 
 ## Operations
 
@@ -135,27 +158,26 @@ and the VFS only delegates a write to a non-`READ_ONLY` mount.
 ## Test surface
 
 `cargo test -p rustos-drv-fs-rustfs` formats an in-memory volume and
-exercises: `format`/`open` round-trip and rejection of an unformatted
-device; create/lookup/listing (including the buffer-size guard and the
-`.`/`..` skip); read/write with block-boundary straddling and sparse
-zero-fill; single-indirect large files across a remount; `truncate` shrink
-and grow; `remove` and name reuse; the non-empty-directory `Busy` guard;
-the per-inode security record (mode, owner, ACL, capability gate) round-
-tripping across a remount; the four §21 `Time64` timestamps defaulting to
-the epoch without a clock, being stamped per the POSIX model, tracking
-directory create/remove, persisting across a remount, and round-tripping
-pre-1970 and post-2038 instants without truncation; copy-on-write
-overwrite persistence; the `register` capability gate; a
-**crash-consistency sweep** that faults the
-device after every possible write count during a journalled overwrite and
-asserts the result is always either fully the old or fully the new
-contents — never torn — with both outcomes observed; and a **journal
-soak** that drives a deterministic, seeded stream of
-`create`/`write`/`truncate`/`remove` operations and crash-tests *every*
-operation at *every* device-write count, asserting the recovered whole-
-tree snapshot equals the volume either exactly before or exactly after the
-operation (never an intermediate) and remains mountable, with rollbacks
-and replays both observed across the run.
+exercises: the self-identifying block header rejecting a wrong magic,
+wrong type, wrong expected address, foreign UUID, and a flipped checksum;
+`format`/`open` round-trip and rejection of an unformatted device;
+create/lookup/listing across nested directories; read/write with
+block-boundary straddling; single-indirect large files across a remount;
+`truncate` keeping the surviving prefix; `remove` reclaiming space so a
+full volume can allocate again; the fail-closed extremes
+(`Busy`/`LengthOutOfRange`/`NotFound`); the per-inode security record and
+the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
+round-tripping across a remount; superblock-ring selection of the
+highest committed generation; and a **crash-replay sweep** that faults the
+device after every possible write count during a single committing
+transaction and asserts the re-opened volume always mounts, the
+pre-existing file is always intact, and the in-flight write is either
+fully applied or fully absent — never torn.
+
+The mount / metadata-decode path additionally has a `cargo xtask fuzz`
+harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
+valid image plus a fixed-seed PRNG drives `RustFs::open` over arbitrary
+bytes, asserting it never panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `.junie/next-session-prompt.md`.

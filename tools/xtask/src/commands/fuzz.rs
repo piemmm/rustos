@@ -67,6 +67,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_swap",
         description: "encrypted-swap restore path (untrusted swap-device bytes)",
     },
+    Target {
+        package: "rustos-drv-fs-rustfs",
+        test: "fuzz_mount",
+        description: "rustfs mount / metadata decode (superblock ring, root, inode map)",
+    },
 ];
 
 /// How long to run each harness.
@@ -331,6 +336,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-net-icmp");
+    }
+
+    #[test]
+    fn rustfs_mount_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_mount"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-drv-fs-rustfs");
     }
 
     #[test]

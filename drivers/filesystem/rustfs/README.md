@@ -1,12 +1,16 @@
 # `rustos-drv-fs-rustfs` — native RustOS filesystem driver
 
-Stage 5 deliverable. `rustfs` is the **native RustOS filesystem**: a
-block-backed, journaled, copy-on-write filesystem that stores full POSIX
-metadata plus an inline access-control list and an optional capability
-gate **per inode** (`AGENTS.md` §5.3). It sits behind any
-`rustos_abi::driver::block::Block` device and is exposed through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead`,
-`FilesystemWrite`, and `FilesystemSecurity` traits.
+`rustfs` is the **native RustOS filesystem**: a block-backed, copy-on-write
+filesystem that stores full POSIX metadata plus an inline access-control
+list and an optional capability gate **per inode** (`AGENTS.md` §5.3). It
+sits behind any `rustos_abi::driver::block::Block` device and is exposed
+through the versioned `rustos_abi::driver::filesystem::FilesystemRead`,
+`FilesystemWrite`, `FilesystemSecurity`, and `FilesystemTimestamps` traits.
+
+There is exactly **one** on-disk version. `rustfs` is built up internally
+in the stages of `.junie/RUSTFS.md`, but the driver and its format are a
+single shipping thing — not a `v1`/`v2` pair. This crate is the only
+implementation.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
 `DriverHandle` — it cannot perform I/O — so each I/O surface is a **new
@@ -16,85 +20,96 @@ versioned trait** rather than a widening of the shipped one
 ## On-disk format
 
 Fixed-size blocks (the device logical block size, 512–4096 bytes, a power
-of two). The regions tile the device in order — superblock, inode table
-(256-byte records, index 1 = root), data-block bitmap, journal (one header
-block + a redo-log data area), then data blocks. Each inode has 16 direct
-block pointers plus one single-indirect block. Directories are
-block-addressed payloads of 64-byte slots; `.`/`..` are stored on disk and
-hidden from `read_dir`.
+of two). The device opens at a **superblock ring** of four slots in the
+first four blocks; everything else — the transaction root, the
+copy-on-write inode map, inode blocks, directory blocks, indirect-pointer
+blocks, and raw file-data blocks — is allocated copy-on-write from the
+pool that follows.
 
-## Crash consistency
+Every **metadata** block is self-identifying (`AGENTS.md` §8 block
+identity): its first 96 bytes carry a magic, block type, format version,
+the volume UUID, an owner object, a generation, its logical and physical
+address, and a fast checksum over identity + payload. Decoding verifies all
+of that against the address the reader expected, so a stale, misdirected,
+wrong-type, or torn block is rejected at decode time and the mount fails
+closed (`AGENTS.md` §5.4). Raw file-data blocks carry no header.
 
-- **File data is copy-on-write**: a write goes to a freshly allocated
-  block, the inode is re-pointed, and the old block is freed — a crash
-  never exposes a torn data block.
-- **Metadata is journaled** (physical redo log): a transaction's modified
-  bitmap / inode / directory / indirect blocks are staged into the journal,
-  a checksummed commit record is written, then the images are checkpointed
-  to their home blocks. A mount replays a committed-but-un-checkpointed
-  transaction and discards an uncommitted one.
+Inodes are 256-byte records (index 1 = root, the four §21 `Time64`
+timestamps inline) reached through a two-level copy-on-write inode map.
+Each inode has 12 direct block pointers plus one single-indirect block.
+Directories are block-addressed payloads of 64-byte slots; `.`/`..` are
+stored on disk and hidden from `read_dir`.
 
-The staged block images live in the on-disk journal; only the home block
-numbers are held in RAM (no large in-memory staging buffer). No
+## Crash consistency (copy-on-write + superblock ring)
+
+Every operation is a transaction. A block reachable from the last
+committed transaction root is **never overwritten in place**: modified
+metadata and data are written copy-on-write to freshly allocated blocks,
+and superseded blocks are deferred-freed (reusable only after the
+transaction commits). The commit order (`.junie/RUSTFS.md` §14) is: write
+the copy-on-write blocks, write the new transaction root carrying its
+inline commit record, then publish the next superblock-ring slot pointing
+at it. `RustFs::open` scans the ring and selects the highest-generation
+slot whose root and commit record validate — so a crash leaves the mount
+on a whole transaction boundary, never a torn one.
+
+The free-block and inode-allocation bitmaps are rebuilt in memory at mount
+by walking the selected root (the crate uses `alloc` for these). No
 `unwrap`/`expect`/`panic!` and no `unsafe`.
+
+> **Staged build.** A volume is a complete, mountable copy-on-write
+> filesystem today, but encryption, compression, and dedupe are later
+> stages of `.junie/RUSTFS.md`: a Stage-1 volume is not yet encrypted at
+> rest, and the metadata checksum is the fast physical checksum, not yet
+> the keyed authenticator (which will arrive via `lib/crypto`).
 
 ## Security
 
 `rustfs` **stores** each inode's owner, mode, ACL, and capability gate. It
-reports the record through the versioned `FilesystemSecurity` trait
-(`security(node) -> NodeSecurity`) and accepts an updated one through
-`RustFs::set_security`, but makes **no** permission decision itself: the
-VFS is the policy point (`AGENTS.md` §5.4). Because the driver implements
-`FilesystemSecurity`, the VFS delegates through its `*_via_secured`
-operations and judges each node against its own stored §5.3 record rather
-than a uniform mount-point template.
+reports the record through `FilesystemSecurity` (`security(node)`) and
+accepts an updated one through `RustFs::set_security`, but makes **no**
+permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
-- The `FilesystemRead`/`FilesystemWrite` methods are reached only through
-  the `DriverHandle` the host minted at load time, and the VFS only
-  delegates a write to a non-`READ_ONLY` mount. The driver runs in user
-  space; it does not request `CAP_DRV_KERNEL`.
+- The read/write methods are reached only through the `DriverHandle` the
+  host minted at load time, and the VFS only delegates a write to a
+  non-`READ_ONLY` mount. The driver runs in user space; it does not
+  request `CAP_DRV_KERNEL`.
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-rustfs` runs 18 host-side tests over an
-in-memory device: format/open (and unformatted-device rejection),
-create/lookup/listing (buffer-size guard, `.`/`..` skip), read/write across
-block boundaries and sparse zero-fill, single-indirect large files across a
-remount, `truncate` shrink/grow, `remove` + name reuse, the non-empty
-directory `Busy` guard, the per-inode security record round-tripping across
-a remount, copy-on-write overwrite persistence, the `register` capability
-gate, a crash-consistency sweep that faults the device after every possible
-write count during a journalled overwrite and asserts the result is always
-fully-old or fully-new — never torn, and a **journal soak** that drives a
-deterministic, seeded stream of `create`/`write`/`truncate`/`remove`
-operations and crash-tests *every* operation at *every* device-write count,
-asserting the recovered whole-tree snapshot equals the volume either
-exactly before or exactly after the operation (never an intermediate) and
-stays mountable, with both rollbacks and replays observed across the run.
+`cargo test -p rustos-drv-fs-rustfs` runs the block-header decode-rejection
+tests (wrong magic / type / address / UUID / flipped checksum) and host
+tests over an in-memory device: format/open (and unformatted-device
+rejection), nested create/lookup/listing, read/write across block
+boundaries, single-indirect large files across a remount, `truncate`
+prefix survival, `remove` reclaiming space after `NoSpace`, the fail-closed
+extremes (`Busy`/`LengthOutOfRange`/`NotFound`), the per-inode security
+record and four §21 timestamps (incl. pre-1970 / far-future) round-tripping
+across a remount, superblock-ring generation selection, and a
+**crash-replay sweep** that faults the device after every write count
+during a committing transaction and asserts the re-opened volume always
+mounts with the in-flight write either fully applied or fully absent —
+never torn.
+
+The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
+shared cross-filesystem exerciser, and a `cargo xtask fuzz` harness
+(`fuzz_mount`) fuzzes the mount / metadata-decode path (`AGENTS.md` §19.6).
 
 ## End-to-end QEMU vertical
 
 `tests/integration/rustfs_virtio_blk_pci_x86_64` mounts a planted rustfs
-volume over a **real (emulated) virtio-blk-pci device** under QEMU, using
-the same shared bring-up as the FAT32 vertical, and round-trips a read
-**and** a write (`cargo xtask test --qemu`). The backing image comes from
-the `tests/integration/rustfs_image` fixture, which the **real rustfs
-driver itself** authors — it formats an in-memory volume and plants the
-file through the driver's own write path — so the fixture and the driver
-share one source of truth for the on-disk format (`AGENTS.md` §2.2). The
-device tail (`rustfs_round_trip`) is generic over the virtio transport, so
-a riscv64 MMIO sibling runs identical code.
-
-The `pjdfstest`-equivalent POSIX suite is tracked in
-`.junie/next-session-prompt.md`.
+volume over a real (emulated) virtio-blk-pci device under QEMU and
+round-trips a read and a write (`cargo xtask test --qemu`). The backing
+image comes from the `tests/integration/rustfs_image` fixture, which the
+real rustfs driver itself authors, so the fixture and the driver share one
+source of truth for the on-disk format (`AGENTS.md` §2.2).
 
 ## Public surface
 
 `AGENTS.md` §8 — the only public *function* is `register`. The `RustFs`
 type is exported so the driver host can construct an instance with
 `RustFs::format` / `RustFs::open`; the host reaches into it through the
-`FilesystemRead`/`FilesystemWrite`/`FilesystemSecurity` traits and the
-`set_security` accessor.
+filesystem traits and the `set_security` accessor.

@@ -13,7 +13,7 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
   path I/O delegates to a driver through the separate versioned
   `FilesystemRead` and `FilesystemWrite` traits (`AGENTS.md` §2.4 / §9).
   The first block-backed driver is the read/write [FAT32 driver](./fat32.md);
-  the native [rustfs driver](./rustfs.md) adds a journaled, copy-on-write
+  the native [rustfs driver](./rustfs.md) adds a copy-on-write
   filesystem that stores per-inode ACLs and capability gates; the
   read/write [ext4 driver](./ext4.md) reads ext2/ext3/ext4 volumes,
   mutates the unchecksummed feature set, and surfaces each inode's stored
@@ -21,10 +21,10 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
-[Permissions](./permissions.md). The next-generation native format — a
-copy-on-write, always-encrypted, checksummed, compressed, deduplicating
-filesystem being delivered in stages behind these same traits — is
-specified in [RustFS v1](./rustfs_v1.md).
+[Permissions](./permissions.md). The native [rustfs](./rustfs.md) format —
+copy-on-write today, growing always-encrypted, checksummed, compressed, and
+deduplicating storage in stages behind these same traits — is the one
+native format; there is no separate `v1`.
 
 ## The VFS tree
 

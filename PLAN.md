@@ -3936,19 +3936,22 @@ device list.
 
 ---
 
-## Stage 5 follow-up — RustFS v1 (next-generation on-disk format)
+## Stage 5 follow-up — RustFS (native on-disk format evolution)
 
-**Dependencies:** Stage 5 (the shipping journaled-COW `rustfs` driver, the
-VFS policy layer, and the frozen `Filesystem*` traits) and `lib/crypto`.
+**Dependencies:** Stage 5 (the VFS policy layer and the frozen
+`Filesystem*` traits) and `lib/crypto`.
 
-**Goal.** Evolve the native filesystem into the full RustFS v1 design:
+**Goal.** Build the native filesystem up to the full RustFS design:
 copy-on-write, **always encrypted**, checksummed, compressed,
-deduplicating, SSD-aware, and recoverable (scrub / check / rescue). The
-authoritative implementation spec is `.junie/RUSTFS.md`; the
-book-rendered, doc-CI-covered mirror is `docs/src/filesystem/rustfs_v1.md`.
-RustFS v1 has **one mandatory profile** — every feature is on and not
-tunable — and **no external zstd/compression dependency** (the codec is
-first-party, `AGENTS.md` §2.12); crypto goes through `lib/crypto` only.
+deduplicating, SSD-aware, and recoverable (scrub / check / rescue). There
+is exactly **one** on-disk version — `rustfs` is grown in stages, but the
+driver and its format are a single shipping thing, not a `v1`/`v2` pair
+(the old journaled driver was fully replaced by this copy-on-write design).
+The authoritative implementation spec is `.junie/RUSTFS.md`; the
+user-facing documentation is `docs/src/filesystem/rustfs.md`. RustFS has
+**one mandatory profile** — every feature is on and not tunable — and **no
+external zstd/compression dependency** (the codec is first-party,
+`AGENTS.md` §2.12); crypto goes through `lib/crypto` only.
 
 **Staged delivery.** Delivered **one stage per session, bottom-up**, in the
 `.junie/RUSTFS.md` §15 order, behind the existing frozen `FilesystemRead` /
@@ -3958,7 +3961,13 @@ implementations, not a `cfg` collapse — `AGENTS.md` §2.2 carve-out). The
 live next-session prompt is `.junie/next-rustfs-prompt.md`; the status
 legend is `.junie/RUSTFS.md` §18. The 12 stages:
 
-1. On-disk headers, superblock ring, transaction roots.
+1. On-disk headers, superblock ring, transaction roots. ✓ (the
+   copy-on-write `rustfs` driver — self-identifying block headers,
+   four-slot superblock ring, transaction root + inline commit record,
+   COW inode map + file/dir/data blocks — fully replaced the old
+   journaled driver; complete, mountable, and exercised by the unit
+   tests, the 1 GiB soak, the posix suite, the QEMU vertical, and the
+   `fuzz_mount` harness).
 2. COW metadata trees (inode, extent) and free-space rebuild.
 3. Metadata authentication/checksums and duplicated critical metadata.
 4. Encrypted volume creation, key hierarchy, filename/data encryption.
@@ -3972,16 +3981,19 @@ legend is `.junie/RUSTFS.md` §18. The 12 stages:
 12. Fuzz, proptest, crash-replay, and corruption-injection suites.
 
 **Docs**
-- `docs/src/filesystem/rustfs_v1.md` (added; the spec mirror, in
-  `SUMMARY.md` and cross-linked from the filesystem overview). Each stage
-  expands it with what actually landed.
+- `docs/src/filesystem/rustfs.md` (the single native-filesystem page; the
+  separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
+  stage expands it with what actually landed.
 
-**Status: planned — spec staged and documented; no implementation stage
-started.** The RustFS v1 spec was brought into the documentation book so
-`cargo xtask docs-check` validates it, `.junie/RUSTFS.md` gained the §18
-staged-delivery legend, and `.junie/next-rustfs-prompt.md` carries the
-Stage 1 prompt (headers / superblock ring / transaction roots). Each
-implementing session ticks the stage here and in `.junie/RUSTFS.md` §18.
+**Status: Stage 1 complete; Stages 2–12 planned.** The copy-on-write
+`rustfs` driver replaced the old journaled implementation outright (no
+`v1` folder, no parallel version): self-identifying block headers, the
+four-slot superblock ring, transaction root + inline commit record, and a
+copy-on-write inode map backing the full POSIX read/write/security/
+timestamp surface. It passes its unit tests, the 1 GiB `fssoak`, the
+posix suite, the rustfs-over-virtio-blk QEMU vertical, and the
+`fuzz_mount` metadata-decode harness. Each subsequent session ticks its
+stage here and in `.junie/RUSTFS.md` §18.
 
 ---
 
