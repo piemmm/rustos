@@ -158,13 +158,14 @@ fn create_write_read_back_and_survive_remount() {
 }
 
 #[test]
-fn indirect_blocks_back_large_files() {
-    // A file larger than DIRECT_PTRS blocks forces the single-indirect path.
+fn extent_tree_backs_large_files() {
+    // A file spanning many blocks exercises the per-file extent tree, which
+    // replaced Stage 1's 12-direct + single-indirect map (no fixed cap).
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
     fs.create(root, b"big", NodeKind::RegularFile)
         .expect("create");
-    let body = alloc::vec![0xCDu8; 512 * (DIRECT_PTRS + 20)];
+    let body = alloc::vec![0xCDu8; 512 * 200];
     assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
     let node = fs.lookup(root, b"big").expect("lookup");
     let mut back = alloc::vec![0u8; body.len()];
@@ -375,5 +376,217 @@ fn crash_at_every_write_count_during_commit_never_tears() {
             let n = fs.read_at(node, 0, &mut nb).expect("read new");
             assert_eq!(&nb[..n], b"freshdata");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: copy-on-write inode tree + per-file extent trees.
+// ---------------------------------------------------------------------------
+
+/// Number of nodes in the inode B-tree (its block count on disk).
+fn inode_tree_nodes(fs: &mut RustFs<MemBlock>) -> usize {
+    let spec = inode_spec();
+    fs.btree_collect_nodes(fs.inode_tree_root, spec)
+        .expect("walk inode tree")
+        .len()
+}
+
+/// Number of nodes in `ino`'s per-file extent tree.
+fn extent_tree_nodes(fs: &mut RustFs<MemBlock>, ino: u32) -> usize {
+    let inode = fs.read_inode(ino).expect("read inode");
+    let spec = extent_spec(ino);
+    fs.btree_collect_nodes(inode.extent_root, spec)
+        .expect("walk extent tree")
+        .len()
+}
+
+#[test]
+fn inode_tree_grows_and_shrinks_across_many_inodes() {
+    // Far more inodes than fit one B-tree node, forcing the inode tree to
+    // split into internal nodes, then deleting half to force borrow/merge.
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    let count = 400u32;
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert!(
+        inode_tree_nodes(&mut fs) > 1,
+        "inode tree should have split past a single node"
+    );
+
+    // Survive a remount: every inode is reachable and the free-space rebuild
+    // matched (open would have failed otherwise).
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096)).expect("reopen");
+    let root = fs.root();
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        assert!(fs.lookup(root, name.as_bytes()).is_ok(), "missing {name}");
+    }
+
+    // Delete every other file: exercises leaf/internal borrow and merge.
+    for i in (0..count).step_by(2) {
+        let name = alloc::format!("f{i:04}");
+        fs.remove(root, name.as_bytes()).expect("remove");
+    }
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        let present = fs.lookup(root, name.as_bytes()).is_ok();
+        assert_eq!(present, i % 2 == 1, "wrong presence for {name}");
+    }
+
+    // The survivors persist across another remount.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096)).expect("reopen2");
+    let root = fs.root();
+    for i in (1..count).step_by(2) {
+        let name = alloc::format!("f{i:04}");
+        assert!(fs.lookup(root, name.as_bytes()).is_ok(), "lost {name}");
+    }
+}
+
+#[test]
+fn file_with_many_noncontiguous_extents_round_trips() {
+    // Writing single blocks at every other logical block leaves holes between
+    // them, so the runs never merge and the per-file extent tree must hold
+    // many records — enough to split past one node.
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"sparse", NodeKind::RegularFile)
+        .expect("create");
+    let bs = 512u64;
+    let bs_bytes = 512usize;
+    let runs = 80u8;
+    for i in 0..runs {
+        let val = i.wrapping_add(1);
+        let block = alloc::vec![val; bs_bytes];
+        let off = u64::from(i) * 2 * bs;
+        assert_eq!(fs.write_at(root, b"sparse", off, &block), Ok(bs_bytes));
+    }
+    let node = fs.lookup(root, b"sparse").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    assert!(
+        extent_tree_nodes(&mut fs, ino) > 1,
+        "extent tree should have split past a single node"
+    );
+
+    let check = |fs: &mut RustFs<MemBlock>| {
+        let node = fs.lookup(fs.root(), b"sparse").expect("lookup");
+        for i in 0..runs {
+            let val = i.wrapping_add(1);
+            let mut got = alloc::vec![0u8; bs_bytes];
+            fs.read_at(node, u64::from(i) * 2 * bs, &mut got)
+                .expect("read run");
+            assert_eq!(got, alloc::vec![val; bs_bytes], "run {i} wrong");
+            // The block between this run and the next is a hole reading zero.
+            if i + 1 < runs {
+                let mut hole = alloc::vec![0xFFu8; bs_bytes];
+                fs.read_at(node, u64::from(i) * 2 * bs + bs, &mut hole)
+                    .expect("read hole");
+                assert_eq!(hole, alloc::vec![0u8; bs_bytes], "hole {i} not zero");
+            }
+        }
+    };
+    check(&mut fs);
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 4096)).expect("reopen");
+    check(&mut fs);
+}
+
+#[test]
+fn large_contiguous_write_collapses_to_few_extents() {
+    // A single sequential write lands in contiguous physical blocks, so the
+    // run-merging extent map keeps it to one record, not one per block.
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0x7Eu8; 4096 * 64];
+    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    let node = fs.lookup(root, b"big").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("inode");
+    let extents = fs
+        .btree_collect_entries(inode.extent_root, extent_spec(ino))
+        .expect("walk extents");
+    assert_eq!(extents.len(), 1, "contiguous write should be one extent");
+}
+
+#[test]
+fn free_space_rebuild_matches_authoritative_extents() {
+    // Build a volume with files, a sparse file, and deletions, then assert the
+    // free-block set rebuilt by walking the trees at mount is byte-for-byte the
+    // set the live filesystem maintained (`docs/src/filesystem/rustfs-spec.md` §16).
+    let mut fs = fmt(4096, 2048, 64);
+    let root = fs.root();
+    for i in 0u8..40 {
+        let name = alloc::format!("d{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+        let body = alloc::vec![i; 4096 * 3];
+        fs.write_at(root, name.as_bytes(), 0, &body).expect("write");
+    }
+    fs.create(root, b"sparse", NodeKind::RegularFile)
+        .expect("create sparse");
+    for i in 0..30u64 {
+        fs.write_at(root, b"sparse", i * 4096 * 2, &alloc::vec![9u8; 4096])
+            .expect("sparse write");
+    }
+    for i in (0u8..40).step_by(3) {
+        let name = alloc::format!("d{i}");
+        fs.remove(root, name.as_bytes()).expect("remove");
+    }
+    let live = fs.free.clone();
+
+    let bytes = fs.into_block().bytes();
+    let rebuilt = RustFs::open(MemBlock::from_bytes(bytes, 4096, 2048)).expect("reopen");
+    assert_eq!(
+        rebuilt.free, live,
+        "mount-time free-space rebuild must equal the authoritative live set"
+    );
+}
+
+#[test]
+fn crash_during_multiblock_extent_write_never_tears() {
+    // A larger transaction (a 24-block write that grows the extent tree) is
+    // faulted after every write count; the file is always either fully the new
+    // contents or fully the old, never a torn mix.
+    let mut base = fmt(512, 512, 32);
+    let root = base.root();
+    base.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let old = alloc::vec![0xAAu8; 512 * 24];
+    base.write_at(root, b"f", 0, &old).expect("seed write");
+    let baseline = base.into_block().bytes();
+    let new = alloc::vec![0x55u8; 512 * 24];
+
+    for budget in 0..160u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 512);
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev).expect("baseline opens");
+        let root = fs.root();
+        let _ = fs.write_at(root, b"f", 0, &new);
+        let bytes = fs.into_block().bytes();
+
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512))
+            .expect("post-crash mount always succeeds");
+        let node = fs.lookup(fs.root(), b"f").expect("file survives");
+        let mut got = alloc::vec![0u8; 512 * 24];
+        let mut done = 0usize;
+        while done < got.len() {
+            let off = u64::try_from(done).unwrap();
+            let n = fs.read_at(node, off, &mut got[done..]).expect("read");
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        assert!(
+            got == old || got == new,
+            "torn multi-block contents at budget {budget}"
+        );
     }
 }

@@ -3947,19 +3947,19 @@ deduplicating, SSD-aware, and recoverable (scrub / check / rescue). There
 is exactly **one** on-disk version — `rustfs` is grown in stages, but the
 driver and its format are a single shipping thing, not a `v1`/`v2` pair
 (the old journaled driver was fully replaced by this copy-on-write design).
-The authoritative implementation spec is `.junie/RUSTFS.md`; the
+The authoritative implementation spec is `docs/src/filesystem/rustfs-spec.md`; the
 user-facing documentation is `docs/src/filesystem/rustfs.md`. RustFS has
 **one mandatory profile** — every feature is on and not tunable — and **no
 external zstd/compression dependency** (the codec is first-party,
 `AGENTS.md` §2.12); crypto goes through `lib/crypto` only.
 
 **Staged delivery.** Delivered **one stage per session, bottom-up**, in the
-`.junie/RUSTFS.md` §15 order, behind the existing frozen `FilesystemRead` /
+`docs/src/filesystem/rustfs-spec.md` §15 order, behind the existing frozen `FilesystemRead` /
 `FilesystemWrite` / `FilesystemSecurity` / `FilesystemTimestamps` traits so
 the VFS and the shipping `rustfs` driver are never regressed (parallel
 implementations, not a `cfg` collapse — `AGENTS.md` §2.2 carve-out). The
 live next-session prompt is `.junie/next-rustfs-prompt.md`; the status
-legend is `.junie/RUSTFS.md` §18. The 12 stages:
+legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
 
 1. On-disk headers, superblock ring, transaction roots. ✓ (the
    copy-on-write `rustfs` driver — self-identifying block headers,
@@ -3968,7 +3968,16 @@ legend is `.junie/RUSTFS.md` §18. The 12 stages:
    journaled driver; complete, mountable, and exercised by the unit
    tests, the 1 GiB soak, the posix suite, the QEMU vertical, and the
    `fuzz_mount` harness).
-2. COW metadata trees (inode, extent) and free-space rebuild.
+2. COW metadata trees (inode, extent) and free-space rebuild. ✓ (one
+   generic copy-on-write B-tree backs both the inode tree, keyed by inode
+   number — superseding the fixed-cap inode map — and a per-file extent
+   tree, logical block → physical run — superseding the 12-direct +
+   single-indirect map; the transaction root names the inode-tree root and
+   next inode number, the mount-time free-space rebuild walks the trees, and
+   a two-cursor allocator keeps sequential data contiguous; tested for
+   splits/merges across many inodes, many-extent files, contiguous-write
+   collapse, free-space-rebuild equality, crash replay, and the extended
+   `fuzz_mount`).
 3. Metadata authentication/checksums and duplicated critical metadata.
 4. Encrypted volume creation, key hierarchy, filename/data encryption.
 5. Data records with physical checksum and logical hash.
@@ -3985,7 +3994,7 @@ legend is `.junie/RUSTFS.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stage 1 complete; Stages 2–12 planned.** The copy-on-write
+**Status: Stages 1–2 complete; Stages 3–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a
@@ -3993,7 +4002,7 @@ copy-on-write inode map backing the full POSIX read/write/security/
 timestamp surface. It passes its unit tests, the 1 GiB `fssoak`, the
 posix suite, the rustfs-over-virtio-blk QEMU vertical, and the
 `fuzz_mount` metadata-decode harness. Each subsequent session ticks its
-stage here and in `.junie/RUSTFS.md` §18.
+stage here and in `docs/src/filesystem/rustfs-spec.md` §18.
 
 ---
 

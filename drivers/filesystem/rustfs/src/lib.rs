@@ -60,6 +60,7 @@ pub use rustos_abi::driver::filesystem::{
 use rustos_abi::time::Time64;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
+mod btree;
 mod header;
 mod superblock;
 mod transaction;
@@ -104,8 +105,6 @@ const DIRENT_SIZE: usize = 64;
 /// Bytes available for a name inside a directory slot.
 const NAME_MAX: usize = DIRENT_SIZE - 8;
 
-/// Number of direct block pointers stored inline in an inode.
-const DIRECT_PTRS: usize = 12;
 /// Maximum number of inline ACL entries stored in an inode.
 const ACL_MAX: usize = 8;
 const _: () = assert!(ACL_MAX == rustos_abi::driver::filesystem::MAX_ACL_ENTRIES);
@@ -164,6 +163,19 @@ fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Encode an extent value: physical start block followed by run length.
+fn encode_extent(phys: u64, len: u64) -> [u8; EXTENT_VALUE_LEN] {
+    let mut value = [0u8; EXTENT_VALUE_LEN];
+    value[0..8].copy_from_slice(&phys.to_le_bytes());
+    value[8..16].copy_from_slice(&len.to_le_bytes());
+    value
+}
+
+/// Decode an extent value into `(physical start, run length)`.
+fn decode_extent(value: &[u8]) -> (u64, u64) {
+    (rd_u64(value, 0), rd_u64(value, 8))
+}
+
 // Inode field byte offsets within a 256-byte record.
 const I_USED: usize = 0;
 const I_KIND: usize = 4;
@@ -181,8 +193,9 @@ const I_ACCESSED: usize = 64;
 const I_CHANGED: usize = 76;
 const I_ACL_BASE: usize = 88;
 const I_ACL_STRIDE: usize = 8;
-const I_DIRECT_BASE: usize = 152;
-const I_INDIRECT: usize = 248;
+/// Physical block of this inode's per-file extent-tree root, or `0` when the
+/// file has no mapped blocks (`btree` module).
+const I_EXTENT_ROOT: usize = 152;
 
 /// In-memory image of one on-disk inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -192,8 +205,9 @@ struct Inode {
     nlink: u32,
     size: u64,
     times: NodeTimes,
-    direct: [u64; DIRECT_PTRS],
-    indirect: u64,
+    /// Physical block of this file's copy-on-write extent-tree root, `0` when
+    /// the file maps no blocks yet.
+    extent_root: u64,
 }
 
 impl Inode {
@@ -209,8 +223,7 @@ impl Inode {
                 accessed: now,
                 changed: now,
             },
-            direct: [0; DIRECT_PTRS],
-            indirect: 0,
+            extent_root: 0,
         }
     }
 
@@ -259,18 +272,13 @@ impl Inode {
             accessed: rd_time(buf, I_ACCESSED)?,
             changed: rd_time(buf, I_CHANGED)?,
         };
-        let mut direct = [0u64; DIRECT_PTRS];
-        for (i, slot) in direct.iter_mut().enumerate() {
-            *slot = rd_u64(buf, I_DIRECT_BASE + i * 8);
-        }
         Ok(Some(Self {
             kind,
             sec,
             nlink: rd_u32(buf, I_NLINK),
             size: rd_u64(buf, I_SIZE),
             times,
-            direct,
-            indirect: rd_u64(buf, I_INDIRECT),
+            extent_root: rd_u64(buf, I_EXTENT_ROOT),
         }))
     }
 
@@ -306,10 +314,7 @@ impl Inode {
             buf[base + 1] = entry.perms;
             wr_u32(buf, base + 4, id);
         }
-        for (i, ptr) in self.direct.iter().enumerate() {
-            wr_u64(buf, I_DIRECT_BASE + i * 8, *ptr);
-        }
-        wr_u64(buf, I_INDIRECT, self.indirect);
+        wr_u64(buf, I_EXTENT_ROOT, self.extent_root);
     }
 }
 
@@ -332,56 +337,65 @@ fn epoch_clock() -> Time64 {
 /// A mounted copy-on-write rustfs volume.
 ///
 /// The on-disk state is the committed transaction root selected from the
-/// superblock ring; the in-memory free-block bitmap, inode-allocation bitmap,
-/// and inode map are rebuilt by walking that root at [`RustFs::open`] and kept
-/// in step as transactions commit. A volume is created with [`RustFs::format`]
-/// and reopened with [`RustFs::open`].
+/// superblock ring. That root names the **inode tree** (a copy-on-write
+/// B-tree keyed by inode number; `btree` module) and the next free inode
+/// number. Each file inode in turn names its own **extent tree** mapping a
+/// logical block offset to a physical run. The in-memory free-block bitmap is
+/// rebuilt by walking those trees at [`RustFs::open`] and kept in step as
+/// transactions commit. A volume is created with [`RustFs::format`] and
+/// reopened with [`RustFs::open`].
 pub struct RustFs<B: Block> {
     block: B,
     fs_uuid: u128,
     block_size: usize,
     total_blocks: u64,
-    inode_count: u32,
+    inode_hint: u32,
     generation: u64,
     ring_pos: u64,
-    inode_map: Vec<u64>,
-    map_index_phys: u64,
-    map_blocks: Vec<u64>,
+    inode_tree_root: u64,
+    next_ino: u64,
     root_phys: u64,
     free: Vec<u64>,
-    inode_used: Vec<bool>,
+    free_count: u64,
     txn_allocated: Vec<u64>,
     txn_freed: Vec<u64>,
     txn_private: Vec<bool>,
-    txn_map_changes: Vec<(usize, u64)>,
-    txn_inode_changes: Vec<(u32, bool)>,
+    saved_inode_tree_root: u64,
+    saved_next_ino: u64,
     alloc_cursor: u64,
+    meta_cursor: u64,
     clock: fn() -> Time64,
 }
 
+/// Value width of one extent record: physical start block plus run length.
+const EXTENT_VALUE_LEN: usize = 16;
+
+/// Free blocks held back from file *data* allocation so a shrinking
+/// transaction (delete, truncate) can always copy-on-write its metadata and
+/// commit a new root even on an otherwise-full volume. Metadata allocation may
+/// draw on this reserve; data allocation stops above it (`alloc_block`).
+const METADATA_RESERVE: u64 = 16;
+
+/// The inode tree's record shape: a 256-byte inode keyed by its number.
+fn inode_spec() -> btree::TreeSpec {
+    btree::TreeSpec {
+        value_len: INODE_SIZE,
+        owner: u64::MAX,
+    }
+}
+
+/// A file's extent-tree record shape: a `(phys, len)` run keyed by its
+/// starting logical block, owned by inode `ino`.
+fn extent_spec(ino: u32) -> btree::TreeSpec {
+    btree::TreeSpec {
+        value_len: EXTENT_VALUE_LEN,
+        owner: u64::from(ino),
+    }
+}
+
 impl<B: Block> RustFs<B> {
-    fn inodes_per_block(&self) -> usize {
-        (self.block_size - HEADER_LEN) / INODE_SIZE
-    }
-
-    fn ptrs_per_block(&self) -> usize {
-        (self.block_size - HEADER_LEN) / 8
-    }
-
     fn dirents_per_block(&self) -> usize {
         (self.block_size - HEADER_LEN) / DIRENT_SIZE
-    }
-
-    /// Inode-map index and the byte offset of inode `ino` inside its block.
-    fn inode_loc(&self, ino: u32) -> Option<(usize, usize)> {
-        if ino == 0 || ino >= self.inode_count {
-            return None;
-        }
-        let per = self.inodes_per_block();
-        Some((
-            ino as usize / per,
-            HEADER_LEN + (ino as usize % per) * INODE_SIZE,
-        ))
     }
 
     // --- in-memory used-block bitmap ---
@@ -396,6 +410,9 @@ impl<B: Block> RustFs<B> {
         let word = as_usize(block / 64);
         let bit = block % 64;
         if let Some(w) = self.free.get_mut(word) {
+            if (*w >> bit) & 1 == 0 {
+                self.free_count = self.free_count.saturating_sub(1);
+            }
             *w |= 1u64 << bit;
         }
     }
@@ -404,6 +421,9 @@ impl<B: Block> RustFs<B> {
         let word = as_usize(block / 64);
         let bit = block % 64;
         if let Some(w) = self.free.get_mut(word) {
+            if (*w >> bit) & 1 == 1 {
+                self.free_count = self.free_count.saturating_add(1);
+            }
             *w &= !(1u64 << bit);
         }
     }
@@ -457,14 +477,37 @@ impl<B: Block> RustFs<B> {
 
     /// Allocate one free block from the pool, marking it used and private to
     /// the current transaction.
-    fn alloc_block(&mut self) -> Result<u64, DriverError> {
+    ///
+    /// Data and metadata draw from opposite ends of the pool: file data scans
+    /// **upward** from the low end and metadata (tree nodes, the transaction
+    /// root, directory blocks) scans **downward** from the high end. Keeping
+    /// the two streams apart lets a large sequential write land in physically
+    /// contiguous blocks even though it interleaves extent-tree growth, so it
+    /// collapses to one extent run rather than fragmenting (`docs/src/filesystem/rustfs-spec.md`
+    /// §6). `metadata` also lets that stream draw on the last
+    /// [`METADATA_RESERVE`] free blocks so a delete or other shrinking
+    /// transaction can still copy-on-write itself on an otherwise-full volume;
+    /// data allocation stops at the reserve and fails closed with
+    /// [`DriverError::NoSpace`].
+    fn alloc_block(&mut self, metadata: bool) -> Result<u64, DriverError> {
+        if !metadata && self.free_count <= METADATA_RESERVE {
+            return Err(DriverError::NoSpace);
+        }
         let start = RING_SLOTS;
         let total = self.total_blocks;
-        let mut scanned = 0u64;
         let span = total.saturating_sub(start);
-        let mut block = self.alloc_cursor.max(start);
+        let mut scanned = 0u64;
+        let mut block = if metadata {
+            self.meta_cursor.clamp(start, total - 1)
+        } else {
+            self.alloc_cursor.max(start)
+        };
         while scanned < span {
-            if block >= total {
+            if metadata {
+                if block < start {
+                    block = total - 1;
+                }
+            } else if block >= total {
                 block = start;
             }
             if !self.bit_used(block) {
@@ -473,10 +516,18 @@ impl<B: Block> RustFs<B> {
                     *slot = true;
                 }
                 self.txn_allocated.push(block);
-                self.alloc_cursor = block + 1;
+                if metadata {
+                    self.meta_cursor = block.saturating_sub(1).max(start);
+                } else {
+                    self.alloc_cursor = block + 1;
+                }
                 return Ok(block);
             }
-            block += 1;
+            if metadata {
+                block = block.saturating_sub(1);
+            } else {
+                block += 1;
+            }
             scanned += 1;
         }
         Err(DriverError::NoSpace)
@@ -505,7 +556,7 @@ impl<B: Block> RustFs<B> {
         let new_phys = if old_phys != 0 && self.is_txn_private(old_phys) {
             old_phys
         } else {
-            let p = self.alloc_block()?;
+            let p = self.alloc_block(true)?;
             if old_phys != 0 {
                 self.free_block(old_phys);
             }
@@ -527,92 +578,55 @@ impl<B: Block> RustFs<B> {
         Ok(new_phys)
     }
 
-    /// Read inode `ino` from its (possibly copy-on-written) inode block.
+    /// Read inode `ino` from the copy-on-write inode tree.
     fn read_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
-        let (idx, off) = self.inode_loc(ino).ok_or(DriverError::NotFound)?;
-        let phys = self.inode_map.get(idx).copied().unwrap_or(0);
-        if phys == 0 {
-            return Err(DriverError::NotFound);
-        }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_meta(phys, BlockType::Inode, &mut buf)?;
-        Inode::decode(&buf[off..off + INODE_SIZE])?.ok_or(DriverError::NotFound)
+        let spec = inode_spec();
+        let value = self
+            .btree_get(self.inode_tree_root, u64::from(ino), spec)?
+            .ok_or(DriverError::NotFound)?;
+        Inode::decode(&value)?.ok_or(DriverError::NotFound)
     }
 
-    /// Copy-on-write inode `ino`'s block with `inode` encoded into its slot.
+    /// Insert or replace inode `ino` in the inode tree (copy-on-write).
     fn write_inode(&mut self, ino: u32, inode: &Inode) -> Result<(), DriverError> {
-        let (idx, off) = self.inode_loc(ino).ok_or(DriverError::NotFound)?;
-        let old = self.inode_map.get(idx).copied().unwrap_or(0);
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        if old != 0 {
-            self.read_meta(old, BlockType::Inode, &mut buf)?;
-        } else {
-            for byte in &mut buf[..self.block_size] {
-                *byte = 0;
-            }
-        }
-        inode.encode(&mut buf[off..off + INODE_SIZE]);
-        let new = self.cow_meta(old, &mut buf, BlockType::Inode, u64::from(ino), idx as u64)?;
-        if new != old {
-            self.txn_map_changes.push((idx, old));
-            self.inode_map[idx] = new;
-        }
+        let spec = inode_spec();
+        let mut value = [0u8; INODE_SIZE];
+        inode.encode(&mut value);
+        self.inode_tree_root =
+            self.btree_insert(self.inode_tree_root, u64::from(ino), &value, spec)?;
         Ok(())
     }
 
-    /// Allocate a free inode index, store `inode` there, and return the index.
+    /// Hand out the next inode number, store `inode` under it, and return it.
     fn alloc_inode(&mut self, inode: &Inode) -> Result<u32, DriverError> {
-        for ino in 1..self.inode_count {
-            if !self.inode_used[ino as usize] {
-                self.txn_inode_changes.push((ino, false));
-                self.inode_used[ino as usize] = true;
-                self.write_inode(ino, inode)?;
-                return Ok(ino);
-            }
-        }
-        Err(DriverError::NoSpace)
+        let ino = u32::try_from(self.next_ino).map_err(|_| DriverError::NoSpace)?;
+        self.next_ino = self.next_ino.wrapping_add(1);
+        self.write_inode(ino, inode)?;
+        Ok(ino)
     }
 
-    /// Mark inode `ino` free and zero its on-disk slot (copy-on-write).
+    /// Remove inode `ino` from the inode tree (copy-on-write).
     fn free_inode(&mut self, ino: u32) -> Result<(), DriverError> {
-        let (idx, off) = self.inode_loc(ino).ok_or(DriverError::NotFound)?;
-        self.txn_inode_changes
-            .push((ino, self.inode_used[ino as usize]));
-        self.inode_used[ino as usize] = false;
-        let old = self.inode_map.get(idx).copied().unwrap_or(0);
-        if old != 0 {
-            let mut buf = [0u8; MAX_BLOCK_SIZE];
-            self.read_meta(old, BlockType::Inode, &mut buf)?;
-            for byte in &mut buf[off..off + INODE_SIZE] {
-                *byte = 0;
-            }
-            let new = self.cow_meta(old, &mut buf, BlockType::Inode, u64::from(ino), idx as u64)?;
-            if new != old {
-                self.txn_map_changes.push((idx, old));
-                self.inode_map[idx] = new;
-            }
-        }
+        let spec = inode_spec();
+        self.inode_tree_root = self.btree_remove(self.inode_tree_root, u64::from(ino), spec)?;
         Ok(())
     }
 
-    /// Reset the per-transaction bookkeeping at the start of an operation.
+    /// Reset the per-transaction bookkeeping at the start of an operation and
+    /// snapshot the published tree state so a failed operation can roll back.
     fn begin(&mut self) {
         self.txn_allocated.clear();
         self.txn_freed.clear();
-        self.txn_map_changes.clear();
-        self.txn_inode_changes.clear();
+        self.saved_inode_tree_root = self.inode_tree_root;
+        self.saved_next_ino = self.next_ino;
     }
 
-    /// Discard an operation that failed before committing: undo the in-memory
-    /// inode map, inode-allocation bitmap, and block allocations. Nothing was
-    /// published, so the committed on-disk root is untouched.
+    /// Discard an operation that failed before committing: restore the inode
+    /// tree root and inode counter and free this transaction's allocations.
+    /// Nothing was published, so the committed on-disk root is untouched.
     fn rollback(&mut self) {
-        while let Some((ino, prev)) = self.txn_inode_changes.pop() {
-            self.inode_used[ino as usize] = prev;
-        }
-        while let Some((idx, prev)) = self.txn_map_changes.pop() {
-            self.inode_map[idx] = prev;
-        }
+        self.inode_tree_root = self.saved_inode_tree_root;
+        self.next_ino = self.saved_next_ino;
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
             self.mark_free(block);
@@ -639,61 +653,23 @@ impl<B: Block> RustFs<B> {
                 *slot = false;
             }
         }
-        self.txn_map_changes.clear();
-        self.txn_inode_changes.clear();
     }
 
-    /// Commit the staged transaction: serialise the inode map to copy-on-write
-    /// blocks, write the new transaction root with its commit record, then
-    /// publish the next superblock-ring slot pointing at it
+    /// Commit the staged transaction. The inode tree and every extent tree are
+    /// already copy-on-written in place as the operation runs, so commit just
+    /// writes the new transaction root naming the inode-tree root, then
+    /// publishes the next superblock-ring slot pointing at it
     /// (`transaction` / `superblock`).
     fn commit(&mut self) -> Result<(), DriverError> {
         let bs = self.block_size;
         let next_gen = self.generation.wrapping_add(1);
-        let per = self.ptrs_per_block();
-        let n_inode_blocks = self.inode_map.len();
-        let n_map_blocks = n_inode_blocks.div_ceil(per).max(1);
-        if n_map_blocks > per {
-            return Err(DriverError::NoSpace);
-        }
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut new_map_blocks = Vec::with_capacity(n_map_blocks);
-        for i in 0..n_map_blocks {
-            for byte in &mut buf[HEADER_LEN..bs] {
-                *byte = 0;
-            }
-            for j in 0..per {
-                let idx = i * per + j;
-                let value = self.inode_map.get(idx).copied().unwrap_or(0);
-                wr_u64(&mut buf, HEADER_LEN + j * 8, value);
-            }
-            let old = self.map_blocks.get(i).copied().unwrap_or(0);
-            let phys = self.cow_meta(old, &mut buf, BlockType::InodeMap, i as u64, i as u64)?;
-            new_map_blocks.push(phys);
-        }
-        let extra: Vec<u64> = self.map_blocks.iter().skip(n_map_blocks).copied().collect();
-        for old in extra {
-            self.free_block(old);
-        }
-        for byte in &mut buf[HEADER_LEN..bs] {
-            *byte = 0;
-        }
-        for (i, phys) in new_map_blocks.iter().enumerate() {
-            wr_u64(&mut buf, HEADER_LEN + i * 8, *phys);
-        }
-        let new_index = self.cow_meta(
-            self.map_index_phys,
-            &mut buf,
-            BlockType::InodeMap,
-            u64::MAX,
-            0,
-        )?;
         let old_root = self.root_phys;
-        let root_phys = self.alloc_block()?;
+        let root_phys = self.alloc_block(true)?;
         let root = TxnRoot {
             generation: next_gen,
-            map_index_phys: new_index,
-            inode_blocks: n_inode_blocks as u64,
+            inode_tree_root: self.inode_tree_root,
+            next_ino: self.next_ino,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys)?;
         self.write_block(root_phys, &buf)?;
@@ -701,7 +677,7 @@ impl<B: Block> RustFs<B> {
         let sb = Superblock {
             block_size: as_u32(bs),
             total_blocks: self.total_blocks,
-            inode_count: self.inode_count,
+            inode_count: self.inode_hint,
             generation: next_gen,
             root_phys,
         };
@@ -710,8 +686,6 @@ impl<B: Block> RustFs<B> {
         // Commit point passed: the new root is durably published.
         self.generation = next_gen;
         self.ring_pos = self.ring_pos.wrapping_add(1);
-        self.map_blocks = new_map_blocks;
-        self.map_index_phys = new_index;
         self.root_phys = root_phys;
         self.free_block(old_root);
         self.finish_txn();
@@ -736,21 +710,21 @@ impl<B: Block> RustFs<B> {
             fs_uuid: 0,
             block_size,
             total_blocks,
-            inode_count: 0,
+            inode_hint: 0,
             generation: 0,
             ring_pos: 0,
-            inode_map: Vec::new(),
-            map_index_phys: 0,
-            map_blocks: Vec::new(),
+            inode_tree_root: 0,
+            next_ino: u64::from(ROOT_INO) + 1,
             root_phys: 0,
             free: vec![0u64; words],
-            inode_used: Vec::new(),
+            free_count: total_blocks,
             txn_allocated: Vec::new(),
             txn_freed: Vec::new(),
             txn_private: vec![false; as_usize(total_blocks)],
-            txn_map_changes: Vec::new(),
-            txn_inode_changes: Vec::new(),
+            saved_inode_tree_root: 0,
+            saved_next_ino: 0,
             alloc_cursor: RING_SLOTS,
+            meta_cursor: total_blocks - 1,
             clock: epoch_clock,
         };
         for slot in 0..RING_SLOTS {
@@ -759,40 +733,31 @@ impl<B: Block> RustFs<B> {
         Ok(fs)
     }
 
-    /// Maximum number of map blocks an inode map of `n_inode_blocks` needs.
-    fn n_map_blocks(&self, n_inode_blocks: usize) -> usize {
-        n_inode_blocks.div_ceil(self.ptrs_per_block()).max(1)
-    }
-
-    /// Lay a fresh, empty rustfs volume onto `block`, formatted for
-    /// `inode_count` inodes, and return it mounted.
+    /// Lay a fresh, empty rustfs volume onto `block` and return it mounted.
+    /// `inode_hint` sizes nothing on disk any more — the inode tree grows on
+    /// demand — but it is retained in the frozen `format` signature and stored
+    /// in the superblock for tools, and a value below two is still rejected so
+    /// at least the root directory fits.
     ///
     /// The volume's structure (superblock ring + a first committed transaction
     /// root holding the empty root directory) is written, but encryption,
     /// compression, and dedupe are later stages of the staged build
-    /// (`.junie/RUSTFS.md` §15): a Stage-1 volume is a complete, mountable
+    /// (`docs/src/filesystem/rustfs-spec.md` §15): a volume is a complete, mountable
     /// copy-on-write filesystem but is not yet encrypted at rest.
     ///
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if the device block size is unsupported.
-    /// * [`DriverError::NoSpace`] if the device is too small, `inode_count` is
-    ///   below two, or the geometry needs more than one inode-map index block.
+    /// * [`DriverError::NoSpace`] if the device is too small or `inode_hint`
+    ///   is below two.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
-    pub fn format(block: B, inode_count: u32) -> Result<Self, DriverError> {
+    pub fn format(block: B, inode_hint: u32) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
-        if inode_count < 2 {
+        if inode_hint < 2 {
             return Err(DriverError::NoSpace);
         }
-        fs.inode_count = inode_count;
-        let per = fs.inodes_per_block();
-        let n_inode_blocks = (inode_count as usize).div_ceil(per);
-        if fs.n_map_blocks(n_inode_blocks) > fs.ptrs_per_block() {
-            return Err(DriverError::NoSpace);
-        }
-        fs.inode_map = vec![0u64; n_inode_blocks];
-        fs.inode_used = vec![false; inode_count as usize];
-        fs.fs_uuid = derive_uuid(fs.total_blocks, inode_count, fs.block_size);
+        fs.inode_hint = inode_hint;
+        fs.fs_uuid = derive_uuid(fs.total_blocks, inode_hint, fs.block_size);
 
         fs.begin();
         let now = (fs.clock)();
@@ -806,9 +771,8 @@ impl<B: Block> RustFs<B> {
         put_dirent(&mut buf, 0, ROOT_INO, b".");
         put_dirent(&mut buf, 1, ROOT_INO, b"..");
         let db = fs.cow_meta(0, &mut buf, BlockType::Directory, u64::from(ROOT_INO), 0)?;
-        root.direct[0] = db;
+        fs.extent_assign(&mut root, ROOT_INO, 0, db)?;
         root.size = bs as u64;
-        fs.inode_used[ROOT_INO as usize] = true;
         fs.write_inode(ROOT_INO, &root)?;
         fs.commit()?;
         Ok(fs)
@@ -819,7 +783,7 @@ impl<B: Block> RustFs<B> {
     /// in-memory free and inode-allocation state by walking it.
     ///
     /// A crash during a previous commit leaves an earlier committed root
-    /// selected rather than a torn one (`.junie/RUSTFS.md` §14).
+    /// selected rather than a torn one (`docs/src/filesystem/rustfs-spec.md` §14).
     ///
     /// # Errors
     ///
@@ -856,137 +820,142 @@ impl<B: Block> RustFs<B> {
         let (sb, uuid, best_slot, _) = best.ok_or(DriverError::BadMagic)?;
 
         fs.fs_uuid = uuid;
-        fs.inode_count = sb.inode_count;
+        fs.inode_hint = sb.inode_count;
         fs.generation = sb.generation;
         fs.root_phys = sb.root_phys;
         fs.ring_pos = best_slot + 1;
 
         fs.read_block(sb.root_phys, &mut buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, sb.root_phys, sb.generation)?;
-        let n_inode_blocks = as_usize(root.inode_blocks);
-        let per = fs.ptrs_per_block();
-        let n_map_blocks = fs.n_map_blocks(n_inode_blocks);
+        fs.inode_tree_root = root.inode_tree_root;
+        fs.next_ino = root.next_ino;
 
-        fs.map_index_phys = root.map_index_phys;
-        fs.map_blocks = Vec::with_capacity(n_map_blocks);
-        fs.inode_map = vec![0u64; n_inode_blocks];
-        if root.map_index_phys != 0 {
-            fs.read_meta(root.map_index_phys, BlockType::InodeMap, &mut buf)?;
-            let mut index = [0u64; MAX_BLOCK_SIZE / 8];
-            for (i, slot) in index.iter_mut().take(n_map_blocks).enumerate() {
-                *slot = rd_u64(&buf, HEADER_LEN + i * 8);
-            }
-            for &map_phys in index.iter().take(n_map_blocks) {
-                fs.map_blocks.push(map_phys);
-            }
-            let mut map_buf = [0u8; MAX_BLOCK_SIZE];
-            for (i, &map_phys) in fs.map_blocks.clone().iter().enumerate() {
-                fs.read_meta(map_phys, BlockType::InodeMap, &mut map_buf)?;
-                for j in 0..per {
-                    let idx = i * per + j;
-                    if idx >= n_inode_blocks {
-                        break;
-                    }
-                    fs.inode_map[idx] = rd_u64(&map_buf, HEADER_LEN + j * 8);
-                }
-            }
-        }
-
-        fs.inode_used = vec![false; sb.inode_count as usize];
+        // Rebuild the free-block bitmap by walking the live trees: the
+        // superblock ring, the published transaction root, every inode-tree
+        // node, and, for each inode, its extent-tree nodes plus the physical
+        // runs they map (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable).
         fs.mark_used(sb.root_phys);
-        if root.map_index_phys != 0 {
-            fs.mark_used(root.map_index_phys);
+        let inode_spec = inode_spec();
+        for node in fs.btree_collect_nodes(fs.inode_tree_root, inode_spec)? {
+            fs.mark_used(node);
         }
-        for &map_phys in &fs.map_blocks.clone() {
-            if map_phys != 0 {
-                fs.mark_used(map_phys);
-            }
-        }
-        for &inode_phys in &fs.inode_map.clone() {
-            if inode_phys != 0 {
-                fs.mark_used(inode_phys);
-            }
-        }
-        for ino in 1..fs.inode_count {
-            match fs.read_inode(ino) {
-                Ok(inode) => {
-                    fs.inode_used[ino as usize] = true;
-                    fs.mark_inode_blocks(&inode)?;
-                }
-                Err(DriverError::NotFound) => {}
-                Err(e) => return Err(e),
-            }
+        let inodes = fs.btree_collect_entries(fs.inode_tree_root, inode_spec)?;
+        for (ino, value) in inodes {
+            let inode = Inode::decode(&value)?.ok_or(DriverError::DeviceFault)?;
+            let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
+            fs.mark_inode_blocks(ino, &inode)?;
         }
         fs.alloc_cursor = RING_SLOTS;
+        fs.meta_cursor = fs.total_blocks - 1;
         Ok(fs)
     }
 
-    /// Mark every data, directory, and indirect block reachable from `inode`
-    /// as used while rebuilding the free bitmap at mount.
-    fn mark_inode_blocks(&mut self, inode: &Inode) -> Result<(), DriverError> {
-        let bs = self.block_size as u64;
-        let blocks = if inode.is_dir() {
-            inode.size / bs
-        } else {
-            inode.size.div_ceil(bs)
-        };
-        for bi in 0..blocks {
-            let ptr = self.block_ptr(inode, bi)?;
-            if ptr != 0 {
-                self.mark_used(ptr);
-            }
+    /// Mark every extent-tree node and every physical run reachable from
+    /// `inode` (number `ino`) as used while rebuilding the free bitmap at
+    /// mount.
+    fn mark_inode_blocks(&mut self, ino: u32, inode: &Inode) -> Result<(), DriverError> {
+        let spec = extent_spec(ino);
+        for node in self.btree_collect_nodes(inode.extent_root, spec)? {
+            self.mark_used(node);
         }
-        if inode.indirect != 0 {
-            self.mark_used(inode.indirect);
+        for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
+            let (phys, len) = decode_extent(&value);
+            for b in 0..len {
+                self.mark_used(phys + b);
+            }
         }
         Ok(())
     }
 
-    /// Largest number of blocks a file can address (direct + one indirect
-    /// block's worth of pointers).
+    /// Upper bound on a file's block count: the whole device. The extent tree
+    /// removes the Stage-1 direct/indirect addressing cap, so a file may span
+    /// the volume (`docs/src/filesystem/rustfs-spec.md` §6).
     fn max_file_blocks(&self) -> u64 {
-        DIRECT_PTRS as u64 + self.ptrs_per_block() as u64
+        self.total_blocks
     }
 
     /// The data block backing logical block `bi` of `inode`, `0` for a hole.
+    /// Resolves the extent run covering `bi` with a floor lookup.
     fn block_ptr(&mut self, inode: &Inode, bi: u64) -> Result<u64, DriverError> {
-        if bi < DIRECT_PTRS as u64 {
-            return Ok(inode.direct[as_usize(bi)]);
+        let spec = extent_spec(0);
+        match self.btree_get_floor(inode.extent_root, bi, spec)? {
+            Some((start, value)) => {
+                let (phys, len) = decode_extent(&value);
+                if bi < start + len {
+                    Ok(phys + (bi - start))
+                } else {
+                    Ok(0)
+                }
+            }
+            None => Ok(0),
         }
-        let idx = as_usize(bi - DIRECT_PTRS as u64);
-        if idx >= self.ptrs_per_block() {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        if inode.indirect == 0 {
-            return Ok(0);
-        }
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_meta(inode.indirect, BlockType::Indirect, &mut buf)?;
-        Ok(rd_u64(&buf, HEADER_LEN + idx * 8))
     }
 
-    /// Point logical block `bi` of `inode` at `ptr`, copy-on-writing the
-    /// single-indirect block (allocating it on first use).
-    fn set_block_ptr(&mut self, inode: &mut Inode, bi: u64, ptr: u64) -> Result<(), DriverError> {
-        if bi < DIRECT_PTRS as u64 {
-            inode.direct[as_usize(bi)] = ptr;
+    /// Drop the mapping for logical block `bi` of `inode` (number `ino`),
+    /// splitting the run that covers it. The physical block is not freed here;
+    /// the caller owns that (e.g. [`cow_data`](Self::cow_data) frees a
+    /// superseded block).
+    fn extent_remove(&mut self, inode: &mut Inode, ino: u32, bi: u64) -> Result<(), DriverError> {
+        let spec = extent_spec(ino);
+        let Some((start, value)) = self.btree_get_floor(inode.extent_root, bi, spec)? else {
+            return Ok(());
+        };
+        let (phys, len) = decode_extent(&value);
+        if bi >= start + len {
             return Ok(());
         }
-        let idx = as_usize(bi - DIRECT_PTRS as u64);
-        if idx >= self.ptrs_per_block() {
-            return Err(DriverError::LengthOutOfRange);
+        inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+        if bi > start {
+            let left = encode_extent(phys, bi - start);
+            inode.extent_root = self.btree_insert(inode.extent_root, start, &left, spec)?;
         }
-        let old = inode.indirect;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        if old != 0 {
-            self.read_meta(old, BlockType::Indirect, &mut buf)?;
-        } else {
-            for byte in &mut buf[HEADER_LEN..self.block_size] {
-                *byte = 0;
+        let end = start + len;
+        if bi + 1 < end {
+            let rphys = phys + (bi + 1 - start);
+            let right = encode_extent(rphys, end - (bi + 1));
+            inode.extent_root = self.btree_insert(inode.extent_root, bi + 1, &right, spec)?;
+        }
+        Ok(())
+    }
+
+    /// Map logical block `bi` of `inode` (number `ino`) to physical block
+    /// `ptr`, merging with a physically contiguous neighbour so a sequential
+    /// write collapses to a single run.
+    fn extent_assign(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        bi: u64,
+        ptr: u64,
+    ) -> Result<(), DriverError> {
+        self.extent_remove(inode, ino, bi)?;
+        if ptr == 0 {
+            return Ok(());
+        }
+        let spec = extent_spec(ino);
+        let mut start = bi;
+        let mut phys = ptr;
+        let mut len = 1u64;
+        if bi > 0 {
+            if let Some((ls, value)) = self.btree_get_floor(inode.extent_root, bi - 1, spec)? {
+                let (lp, ll) = decode_extent(&value);
+                if ls + ll == bi && lp + ll == ptr {
+                    inode.extent_root = self.btree_remove(inode.extent_root, ls, spec)?;
+                    start = ls;
+                    phys = lp;
+                    len = ll + 1;
+                }
             }
         }
-        wr_u64(&mut buf, HEADER_LEN + idx * 8, ptr);
-        inode.indirect = self.cow_meta(old, &mut buf, BlockType::Indirect, 0, 0)?;
+        if let Some((rs, value)) = self.btree_get_floor(inode.extent_root, bi + 1, spec)? {
+            let (rp, rl) = decode_extent(&value);
+            if rs == bi + 1 && phys + len == rp {
+                inode.extent_root = self.btree_remove(inode.extent_root, rs, spec)?;
+                len += rl;
+            }
+        }
+        let value = encode_extent(phys, len);
+        inode.extent_root = self.btree_insert(inode.extent_root, start, &value, spec)?;
         Ok(())
     }
 
@@ -997,28 +966,27 @@ impl<B: Block> RustFs<B> {
         if old_ptr != 0 && self.is_txn_private(old_ptr) {
             return Ok(old_ptr);
         }
-        let new = self.alloc_block()?;
+        let new = self.alloc_block(false)?;
         if old_ptr != 0 {
             self.free_block(old_ptr);
         }
         Ok(new)
     }
 
-    /// Free every data block backing `inode` and its indirect block.
-    fn free_all_blocks(&mut self, inode: &mut Inode) -> Result<(), DriverError> {
-        let bs = self.block_size as u64;
-        let blocks = inode.size.div_ceil(bs);
-        for bi in 0..blocks {
-            let ptr = self.block_ptr(inode, bi)?;
-            if ptr != 0 {
-                self.free_block(ptr);
+    /// Free every physical run backing `inode` (number `ino`) and every node
+    /// of its extent tree, leaving an empty zero-length file.
+    fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
+        let spec = extent_spec(ino);
+        for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
+            let (phys, len) = decode_extent(&value);
+            for b in 0..len {
+                self.free_block(phys + b);
             }
         }
-        if inode.indirect != 0 {
-            self.free_block(inode.indirect);
-            inode.indirect = 0;
+        for node in self.btree_collect_nodes(inode.extent_root, spec)? {
+            self.free_block(node);
         }
-        inode.direct = [0; DIRECT_PTRS];
+        inode.extent_root = 0;
         inode.size = 0;
         Ok(())
     }
@@ -1084,11 +1052,13 @@ impl<B: Block> RustFs<B> {
         Ok(true)
     }
 
-    /// Add directory entry `(child_ino, name)` to `dir`, growing it by one
-    /// copy-on-write block when every existing slot is occupied.
+    /// Add directory entry `(child_ino, name)` to directory `dir` (number
+    /// `dir_ino`), growing it by one copy-on-write block when every existing
+    /// slot is occupied.
     fn add_entry(
         &mut self,
         dir: &mut Inode,
+        dir_ino: u32,
         child_ino: u32,
         name: &[u8],
     ) -> Result<(), DriverError> {
@@ -1104,9 +1074,15 @@ impl<B: Block> RustFs<B> {
             for slot in 0..per {
                 if rd_u32(&buf, HEADER_LEN + slot * DIRENT_SIZE) == 0 {
                     put_dirent(&mut buf, slot, child_ino, name);
-                    let new = self.cow_meta(ptr, &mut buf, BlockType::Directory, 0, blk)?;
+                    let new = self.cow_meta(
+                        ptr,
+                        &mut buf,
+                        BlockType::Directory,
+                        u64::from(dir_ino),
+                        blk,
+                    )?;
                     if new != ptr {
-                        self.set_block_ptr(dir, blk, new)?;
+                        self.extent_assign(dir, dir_ino, blk, new)?;
                     }
                     return Ok(());
                 }
@@ -1120,14 +1096,26 @@ impl<B: Block> RustFs<B> {
             *byte = 0;
         }
         put_dirent(&mut buf, 0, child_ino, name);
-        let new_blk = self.cow_meta(0, &mut buf, BlockType::Directory, 0, blk_index)?;
-        self.set_block_ptr(dir, blk_index, new_blk)?;
+        let new_blk = self.cow_meta(
+            0,
+            &mut buf,
+            BlockType::Directory,
+            u64::from(dir_ino),
+            blk_index,
+        )?;
+        self.extent_assign(dir, dir_ino, blk_index, new_blk)?;
         dir.size += bs as u64;
         Ok(())
     }
 
-    /// Clear the entry named `name` in `dir`, returning the inode it named.
-    fn remove_entry(&mut self, dir: &mut Inode, name: &[u8]) -> Result<u32, DriverError> {
+    /// Clear the entry named `name` in directory `dir` (number `dir_ino`),
+    /// returning the inode it named.
+    fn remove_entry(
+        &mut self,
+        dir: &mut Inode,
+        dir_ino: u32,
+        name: &[u8],
+    ) -> Result<u32, DriverError> {
         let per = self.dirents_per_block();
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         for blk in 0..self.dir_block_count(dir) {
@@ -1148,9 +1136,15 @@ impl<B: Block> RustFs<B> {
                 }
                 if &buf[base + 8..base + 8 + name_len] == name {
                     wr_u32(&mut buf, base, 0);
-                    let new = self.cow_meta(ptr, &mut buf, BlockType::Directory, 0, blk)?;
+                    let new = self.cow_meta(
+                        ptr,
+                        &mut buf,
+                        BlockType::Directory,
+                        u64::from(dir_ino),
+                        blk,
+                    )?;
                     if new != ptr {
-                        self.set_block_ptr(dir, blk, new)?;
+                        self.extent_assign(dir, dir_ino, blk, new)?;
                     }
                     return Ok(ino);
                 }
@@ -1193,10 +1187,11 @@ impl<B: Block> RustFs<B> {
         Ok(done)
     }
 
-    /// Copy-on-write `data` into file `inode` at `offset`.
+    /// Copy-on-write `data` into file `inode` (number `ino`) at `offset`.
     fn write_file(
         &mut self,
         inode: &mut Inode,
+        ino: u32,
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
@@ -1227,7 +1222,7 @@ impl<B: Block> RustFs<B> {
             blk[within..within + chunk].copy_from_slice(&data[done..done + chunk]);
             let new_ptr = self.cow_data(old_ptr)?;
             self.write_block(new_ptr, &blk)?;
-            self.set_block_ptr(inode, bi, new_ptr)?;
+            self.extent_assign(inode, ino, bi, new_ptr)?;
             done += chunk;
             pos += chunk as u64;
         }
@@ -1237,26 +1232,16 @@ impl<B: Block> RustFs<B> {
         Ok(done)
     }
 
-    /// Shrink or grow file `inode` to `size`, copy-on-writing the partial tail.
-    fn truncate_file(&mut self, inode: &mut Inode, size: u64) -> Result<(), DriverError> {
+    /// Shrink or grow file `inode` (number `ino`) to `size`, freeing whole
+    /// truncated runs and copy-on-writing the partial tail block.
+    fn truncate_file(&mut self, inode: &mut Inode, ino: u32, size: u64) -> Result<(), DriverError> {
         let bs = self.block_size as u64;
         if size.div_ceil(bs) > self.max_file_blocks() {
             return Err(DriverError::LengthOutOfRange);
         }
         if size < inode.size {
             let keep = size.div_ceil(bs);
-            let had = inode.size.div_ceil(bs);
-            for bi in keep..had {
-                let ptr = self.block_ptr(inode, bi)?;
-                if ptr != 0 {
-                    self.free_block(ptr);
-                    self.set_block_ptr(inode, bi, 0)?;
-                }
-            }
-            if keep <= DIRECT_PTRS as u64 && inode.indirect != 0 {
-                self.free_block(inode.indirect);
-                inode.indirect = 0;
-            }
+            self.free_extent_tail(inode, ino, keep)?;
             let tail = as_usize(size % bs);
             if tail != 0 {
                 let bi = size / bs;
@@ -1269,7 +1254,7 @@ impl<B: Block> RustFs<B> {
                     }
                     let new_ptr = self.cow_data(old_ptr)?;
                     self.write_block(new_ptr, &blk)?;
-                    self.set_block_ptr(inode, bi, new_ptr)?;
+                    self.extent_assign(inode, ino, bi, new_ptr)?;
                 }
             }
         }
@@ -1277,11 +1262,39 @@ impl<B: Block> RustFs<B> {
         Ok(())
     }
 
+    /// Free every block at or beyond logical block `keep` of `inode` (number
+    /// `ino`), trimming each extent run-wise rather than block-by-block.
+    fn free_extent_tail(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        keep: u64,
+    ) -> Result<(), DriverError> {
+        let spec = extent_spec(ino);
+        for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
+            let (phys, len) = decode_extent(&value);
+            let end = start + len;
+            if end <= keep {
+                continue;
+            }
+            let cut = keep.max(start);
+            for b in cut..end {
+                self.free_block(phys + (b - start));
+            }
+            inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+            if cut > start {
+                let head = encode_extent(phys, cut - start);
+                inode.extent_root = self.btree_insert(inode.extent_root, start, &head, spec)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Map a [`NodeId`] to a validated inode index.
     fn ino_of(&self, node: NodeId) -> Result<u32, DriverError> {
         let raw = node.raw();
         let ino = u32::try_from(raw).map_err(|_| DriverError::NotFound)?;
-        if ino == 0 || ino >= self.inode_count {
+        if ino == 0 || u64::from(ino) >= self.next_ino {
             return Err(DriverError::NotFound);
         }
         Ok(ino)
@@ -1355,12 +1368,12 @@ impl<B: Block> RustFs<B> {
             put_dirent(&mut buf, 0, child_ino, b".");
             put_dirent(&mut buf, 1, dir_ino, b"..");
             let db = self.cow_meta(0, &mut buf, BlockType::Directory, u64::from(child_ino), 0)?;
-            child.direct[0] = db;
+            self.extent_assign(&mut child, child_ino, 0, db)?;
             child.size = bs;
             self.write_inode(child_ino, &child)?;
             dir_inode.nlink += 1;
         }
-        self.add_entry(&mut dir_inode, child_ino, name)?;
+        self.add_entry(&mut dir_inode, dir_ino, child_ino, name)?;
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
@@ -1387,7 +1400,7 @@ impl<B: Block> RustFs<B> {
         if child.is_dir() {
             return Err(DriverError::Unsupported);
         }
-        let written = self.write_file(&mut child, offset, data)?;
+        let written = self.write_file(&mut child, child_ino, offset, data)?;
         let now = (self.clock)();
         child.times.modified = now;
         child.times.accessed = now;
@@ -1410,7 +1423,7 @@ impl<B: Block> RustFs<B> {
         if child.is_dir() {
             return Err(DriverError::Unsupported);
         }
-        self.truncate_file(&mut child, size)?;
+        self.truncate_file(&mut child, child_ino, size)?;
         let now = (self.clock)();
         child.times.modified = now;
         child.times.changed = now;
@@ -1431,12 +1444,12 @@ impl<B: Block> RustFs<B> {
         if child.is_dir() && !self.dir_is_empty(&child)? {
             return Err(DriverError::Busy);
         }
-        self.free_all_blocks(&mut child)?;
+        self.free_all_blocks(&mut child, child_ino)?;
         self.free_inode(child_ino)?;
         if child.is_dir() {
             dir_inode.nlink = dir_inode.nlink.saturating_sub(1);
         }
-        self.remove_entry(&mut dir_inode, name)?;
+        self.remove_entry(&mut dir_inode, dir_ino, name)?;
         let now = (self.clock)();
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
@@ -1446,7 +1459,7 @@ impl<B: Block> RustFs<B> {
 }
 
 /// Derive a non-zero filesystem UUID from the volume geometry. Stage 1 has no
-/// platform RNG dependency (`.junie/RUSTFS.md` §3 — no external crates); a
+/// platform RNG dependency (`docs/src/filesystem/rustfs-spec.md` §3 — no external crates); a
 /// random per-volume UUID arrives with the installer's RNG in a later stage.
 /// The value only needs to be stable and non-zero to anchor the §8 block
 /// identity checks within one volume.

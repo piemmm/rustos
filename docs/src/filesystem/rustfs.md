@@ -5,8 +5,8 @@
 stores full POSIX metadata plus an inline access-control list and an
 optional capability gate **per inode** (`AGENTS.md` §5.3). There is exactly
 one on-disk version — `rustfs` is built up internally in the stages of
-`.junie/RUSTFS.md`, but the driver and its format are a single shipping
-thing, not a `v1`/`v2` pair. It
+its [specification](./rustfs-spec.md), but the driver and its format are a
+single shipping thing, not a `v1`/`v2` pair. It
 sits behind any `rustos_abi::driver::block::Block` device and is exposed
 through the versioned `FilesystemRead` and `FilesystemWrite` traits — never
 by widening the frozen mount/unmount `Filesystem` trait (`AGENTS.md` §2.4 /
@@ -36,8 +36,8 @@ re-derives and validates the geometry from the selected superblock slot.
 | --------------- | --------------------------------------------------------- |
 | Superblock ring | Blocks 0–3: four slots, each pointing at a committed root.|
 | Pool            | Everything else, allocated copy-on-write: the transaction |
-|                 | root, the inode map, inode blocks, directory blocks,      |
-|                 | indirect-pointer blocks, and raw file-data blocks.        |
+|                 | root, the inode-tree nodes, the per-file extent-tree      |
+|                 | nodes, directory blocks, and raw file-data blocks.        |
 
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 96 bytes carry a magic, block type, format version,
@@ -48,22 +48,24 @@ misdirected, wrong-type, or torn block is rejected at decode time and the
 mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
 header and use the full block.
 
-Inodes are 256-byte records reached through a two-level **copy-on-write
-inode map** (an index block pointing at map blocks, which point at the
-packed inode blocks); index 1 is the root. Each inode holds 12 direct
-block pointers plus one single-indirect block, so a file spans up to
-`12 + (block_size - 96)/8` blocks. Directories are block-addressed
-payloads of 64-byte slots (`inode`, `name_len`, name); `.` and `..` are
-stored on disk and hidden from `read_dir`. The inode record also stores
-the four §21 timestamps. A volume written by a different format version is
+Inodes are 256-byte records held in a **copy-on-write inode tree** keyed by
+inode number (see the next section); inode 1 is the root directory. Each
+inode names the root of its own **extent tree**, which maps a file's logical
+block offset to a physical run `(start, length)` — so a file can span the
+whole volume and a large contiguous write collapses to a single extent
+record. Directories are block-addressed payloads of 64-byte slots (`inode`,
+`name_len`, name) reached through the same extent map; `.` and `..` are
+stored on disk and hidden from `read_dir`. The inode record also stores the
+four §21 timestamps. A volume written by a different format version is
 refused rather than misread.
 
-> **Stage 1 of `.junie/RUSTFS.md`.** The volume is a complete, mountable
-> copy-on-write filesystem, but encryption, compression, and dedupe are
-> later stages: a Stage-1 volume is not yet encrypted at rest, and the
-> metadata checksum is the fast physical checksum, not yet the keyed
-> authenticator. The free-block bitmap and inode-allocation bitmap are
-> rebuilt in memory at mount by walking the selected root; they are not
+> **Stage 2 of the [specification](./rustfs-spec.md).** The volume is a
+> complete, mountable copy-on-write filesystem whose metadata now scales
+> through B-trees rather than a fixed inode count and a single-indirect file
+> map. Encryption, compression, and dedupe are later stages: the volume is
+> not yet encrypted at rest, and the metadata checksum is the fast physical
+> checksum, not yet the keyed authenticator. The free-block bitmap is rebuilt
+> in memory at mount by walking the trees from the selected root; it is not
 > stored on disk.
 
 ## Timestamps (§21)
@@ -93,6 +95,39 @@ in-range timestamps rather than panicking or inventing a time
 `created` is set once and never changed. Installing a different clock
 never rewrites timestamps already on disk.
 
+## Copy-on-write metadata trees
+
+Both scalable metadata structures are the **same** generic copy-on-write
+B-tree (`src/btree.rs`), keyed by `u64` (`AGENTS.md` §2.2 — one
+implementation, not two). Each tree node is one self-identifying metadata
+block (`BlockType::Btree`); a leaf holds `(key, value)` records in key order
+and an internal node holds `(separator, child)` records, where the separator
+is the smallest key in the child.
+
+- **Inode tree.** Keyed by inode number, value the 256-byte inode record. It
+  supersedes Stage 1's two-level inode map and removes the format-time
+  `inode_count` cap — the tree grows as inodes are created. The transaction
+  root names the tree's root block and the next inode number to hand out.
+- **Extent tree.** One per file, keyed by logical block offset, value a
+  `(physical start, run length)` extent. It supersedes the 12-direct +
+  single-indirect map; a lookup is a floor query that finds the run covering
+  an offset, and a sequential write merges into the adjacent run so the map
+  stays compact.
+
+Mutations copy-on-write the touched node to a fresh (or transaction-private)
+block and bubble the change up to a new root; nodes split on overflow and
+borrow-or-merge on underflow, all `Result`-based and panic-free with no
+`unsafe`. Block allocation draws file **data** upward from the low end of the
+pool and **metadata** downward from the high end, with a small metadata
+reserve so a delete can always copy-on-write itself and commit even on an
+otherwise-full volume.
+
+The mount-time **free-space rebuild** walks these trees from the selected
+root — every inode-tree node, then each inode's extent-tree nodes and the
+physical runs they map — to reconstruct the in-memory free-block bitmap, so
+the authoritative free set is always derived from live metadata rather than a
+stored bitmap.
+
 ## Copy-on-write and the superblock ring
 
 `rustfs` keeps metadata and data consistent across a crash without
@@ -106,7 +141,7 @@ in place**:
   map. Blocks superseded by the transaction are *deferred-freed* — marked
   reusable only after the transaction commits — so the previous committed
   tree stays wholly intact until the new one is durable.
-- **Commit order (`.junie/RUSTFS.md` §14).** Write the copy-on-write
+- **Commit order (`docs/src/filesystem/rustfs-spec.md` §14).** Write the copy-on-write
   blocks, write the new transaction root carrying its inline commit
   record, then publish the next superblock-ring slot (round-robin)
   pointing at that root. `open` scans the ring and selects the
@@ -162,9 +197,13 @@ exercises: the self-identifying block header rejecting a wrong magic,
 wrong type, wrong expected address, foreign UUID, and a flipped checksum;
 `format`/`open` round-trip and rejection of an unformatted device;
 create/lookup/listing across nested directories; read/write with
-block-boundary straddling; single-indirect large files across a remount;
-`truncate` keeping the surviving prefix; `remove` reclaiming space so a
-full volume can allocate again; the fail-closed extremes
+block-boundary straddling; extent-backed large files across a remount;
+inode-tree growth and shrink (split, borrow, and merge) across many inodes;
+a file with many non-contiguous extents that splits its extent tree; a large
+contiguous write collapsing to a single extent; the mount-time free-space
+rebuild matching the authoritative live set; `truncate` keeping the surviving
+prefix; `remove` reclaiming space so a full volume can allocate again; the
+fail-closed extremes
 (`Busy`/`LengthOutOfRange`/`NotFound`); the per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the

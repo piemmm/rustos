@@ -1,9 +1,9 @@
-//! Self-identifying metadata-block header (`.junie/RUSTFS.md` §8 block
+//! Self-identifying metadata-block header (`docs/src/filesystem/rustfs-spec.md` §8 block
 //! identity).
 //!
 //! Every metadata block rustfs writes — superblock-ring slots, transaction
-//! roots, commit records, the inode map, inode blocks, indirect blocks, and
-//! directory blocks — carries a fixed-size header in its first
+//! roots, commit records, inode-tree and extent-tree nodes, and directory
+//! blocks — carries a fixed-size header in its first
 //! [`HEADER_LEN`] bytes. The header makes a block self-describing: it records
 //! what the block *is* (`magic`, [`BlockType`], format version), which volume
 //! and object it belongs to (filesystem UUID, owner object, generation),
@@ -18,7 +18,7 @@
 //! # Checksum
 //!
 //! Stage 1 uses the fast physical checksum ([`checksum`]); the keyed
-//! authenticator arrives with encryption (`.junie/RUSTFS.md` §5, Stage 3/4)
+//! authenticator arrives with encryption (`docs/src/filesystem/rustfs-spec.md` §5, Stage 3/4)
 //! and replaces only [`checksum`], leaving this layout intact.
 
 use rustos_abi::DriverError;
@@ -44,14 +44,11 @@ pub enum BlockType {
     Superblock = 1,
     /// A transaction root with its inline commit record (`transaction`).
     TxnRoot = 2,
-    /// A block of the copy-on-write inode map.
-    InodeMap = 3,
-    /// A block holding packed inode records.
-    Inode = 4,
-    /// A file's single-indirect pointer block.
-    Indirect = 5,
+    /// A copy-on-write B-tree node — the inode tree or a per-file extent
+    /// tree (`btree` module).
+    Btree = 3,
     /// A directory data block.
-    Directory = 6,
+    Directory = 4,
 }
 
 impl BlockType {
@@ -66,10 +63,8 @@ impl BlockType {
         match raw {
             1 => Some(Self::Superblock),
             2 => Some(Self::TxnRoot),
-            3 => Some(Self::InodeMap),
-            4 => Some(Self::Inode),
-            5 => Some(Self::Indirect),
-            6 => Some(Self::Directory),
+            3 => Some(Self::Btree),
+            4 => Some(Self::Directory),
             _ => None,
         }
     }
@@ -138,7 +133,7 @@ fn wr_u128(buf: &mut [u8], off: usize, value: u128) {
 /// The fast physical checksum (FNV-1a, 64-bit) over every byte of `block`
 /// except the eight-byte checksum slot. Covers the identity *and* the
 /// payload, so any stale, misdirected, or torn write changes the result
-/// (`.junie/RUSTFS.md` §5). The keyed authenticator (Stage 3/4) replaces
+/// (`docs/src/filesystem/rustfs-spec.md` §5). The keyed authenticator (Stage 3/4) replaces
 /// only this function.
 #[must_use]
 pub fn checksum(block: &[u8]) -> u64 {
@@ -303,7 +298,7 @@ mod tests {
     fn wrong_type_is_rejected() {
         let block = sealed();
         assert_eq!(
-            BlockHeader::decode_verify(&block, BlockType::Inode, UUID, 100),
+            BlockHeader::decode_verify(&block, BlockType::Btree, UUID, 100),
             Err(DriverError::DeviceFault)
         );
     }

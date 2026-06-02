@@ -1,12 +1,12 @@
 //! The transaction root and its inline commit record
-//! (`.junie/RUSTFS.md` §14).
+//! (`docs/src/filesystem/rustfs-spec.md` §14).
 //!
 //! A transaction root is the single block a committed transaction publishes
 //! through the superblock ring (`superblock` module). It is a self-identifying
 //! block ([`BlockType::TxnRoot`]) whose payload names the roots of the
-//! copy-on-write metadata the transaction produced — at Stage 1, the inode
-//! map — and ends with a **commit record**: a commit magic plus a second copy
-//! of the generation.
+//! copy-on-write metadata the transaction produced — the inode-tree root and
+//! the next free inode number — and ends with a **commit record**: a commit
+//! magic plus a second copy of the generation.
 //!
 //! Co-locating the commit record in the same sealed block makes commit atomic
 //! against a torn write: the block's checksum (`header`) and the commit
@@ -25,8 +25,8 @@ const COMMIT_MAGIC: u64 = 0x5246_5343_4d4d_4954;
 
 // Transaction-root payload field offsets, relative to the end of the header.
 const P_GENERATION: usize = HEADER_LEN;
-const P_MAP_INDEX_PHYS: usize = HEADER_LEN + 8;
-const P_INODE_BLOCKS: usize = HEADER_LEN + 16;
+const P_INODE_TREE_ROOT: usize = HEADER_LEN + 8;
+const P_NEXT_INO: usize = HEADER_LEN + 16;
 const P_COMMIT_MAGIC: usize = HEADER_LEN + 24;
 const P_COMMIT_GENERATION: usize = HEADER_LEN + 32;
 /// Bytes of meaningful transaction-root payload following the header.
@@ -47,11 +47,12 @@ fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
 pub struct TxnRoot {
     /// Transaction generation this root commits.
     pub generation: u64,
-    /// Physical block of the inode-map index block, or `0` when the volume
-    /// holds no inode blocks yet.
-    pub map_index_phys: u64,
-    /// Number of inode blocks the inode map indexes.
-    pub inode_blocks: u64,
+    /// Physical block of the inode-tree root node, or `0` when the volume
+    /// holds no inodes yet.
+    pub inode_tree_root: u64,
+    /// The next inode number to hand out (the allocation high-water mark);
+    /// every live inode number is below it.
+    pub next_ino: u64,
 }
 
 impl TxnRoot {
@@ -70,8 +71,8 @@ impl TxnRoot {
             *byte = 0;
         }
         wr_u64(block, P_GENERATION, self.generation);
-        wr_u64(block, P_MAP_INDEX_PHYS, self.map_index_phys);
-        wr_u64(block, P_INODE_BLOCKS, self.inode_blocks);
+        wr_u64(block, P_INODE_TREE_ROOT, self.inode_tree_root);
+        wr_u64(block, P_NEXT_INO, self.next_ino);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -112,8 +113,8 @@ impl TxnRoot {
         }
         Ok(Self {
             generation,
-            map_index_phys: rd_u64(block, P_MAP_INDEX_PHYS),
-            inode_blocks: rd_u64(block, P_INODE_BLOCKS),
+            inode_tree_root: rd_u64(block, P_INODE_TREE_ROOT),
+            next_ino: rd_u64(block, P_NEXT_INO),
         })
     }
 }

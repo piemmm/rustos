@@ -1,4 +1,4 @@
-//! The superblock ring (`.junie/RUSTFS.md` §4 / §14).
+//! The superblock ring (`docs/src/filesystem/rustfs-spec.md` §4 / §14).
 //!
 //! A rustfs volume opens at a ring of [`RING_SLOTS`] superblock slots, one
 //! per block at the very start of the device. Each slot is a self-identifying

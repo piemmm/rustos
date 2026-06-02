@@ -1,10 +1,13 @@
 //! Deterministic fuzz harness for the rustfs mount / metadata-decode path
 //! (`AGENTS.md` §19.5 / §19.6).
 //!
-//! [`RustFs::open`] decodes a device's superblock ring, transaction root, and
-//! inode-map blocks — all self-identifying metadata (`header` / `superblock` /
-//! `transaction`) read from a backing store that, on a real system, may have
-//! been written by anything. Per §19.6 that decode path is driven by a fuzz
+//! [`RustFs::open`] decodes a device's superblock ring, transaction root,
+//! inode-tree nodes, and per-file extent-tree nodes — all self-identifying
+//! metadata (`header` / `superblock` / `transaction` / `btree`) read from a
+//! backing store that, on a real system, may have been written by anything.
+//! The base image is populated with several files and a multi-extent file so
+//! the sweep spends its time near real inode-tree and extent-tree nodes, not
+//! just the superblock ring. Per §19.6 that decode path is driven by a fuzz
 //! harness whose single invariant is:
 //!
 //! * `open` never panics for any device contents — it returns `Ok` for a
@@ -18,6 +21,7 @@
 //! PRNG loop to a wall-clock budget.
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
 use rustos_drv_fs_rustfs::RustFs;
 
@@ -121,16 +125,37 @@ fn exercise(image: &[u8]) {
     }
 }
 
-/// A real formatted image, so the PRNG and the structured sweep both spend
-/// most of their time near genuinely valid metadata rather than pure noise.
+/// A real formatted image, populated with several inodes (so the inode tree
+/// splits past a single node) and a file with two non-adjacent blocks (so an
+/// extent-tree node exists). Both the PRNG and the structured sweep then spend
+/// most of their time near genuinely valid tree metadata rather than pure
+/// noise. Populating stops at the first `NoSpace` on the tiny fuzz device.
 fn formatted_image() -> Vec<u8> {
-    let fs = RustFs::format(
+    let mut fs = RustFs::format(
         MemBlock {
             store: vec![0u8; IMAGE_LEN],
         },
         16,
     )
     .expect("format a blank fuzz device");
+    let root = fs.root();
+    for i in 0..6u32 {
+        let name = format!("f{i}");
+        if fs
+            .create(root, name.as_bytes(), NodeKind::RegularFile)
+            .is_err()
+        {
+            break;
+        }
+        // Two non-adjacent blocks build an extent record beyond the trivial.
+        let _ = fs.write_at(root, name.as_bytes(), 0, &[0xA5u8; 16]);
+        let _ = fs.write_at(
+            root,
+            name.as_bytes(),
+            2 * u64::from(BLOCK_SIZE),
+            &[0x5Au8; 16],
+        );
+    }
     fs.into_block().store
 }
 
