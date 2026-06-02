@@ -322,6 +322,65 @@ fn remove_non_empty_directory_is_busy() {
 }
 
 #[test]
+fn creating_files_until_the_inode_table_is_full_reports_no_space() {
+    let mut fs = fresh();
+    let root = fs.root();
+    // The fixture has INODES inodes; root and inode 0 are reserved, so a
+    // bounded run of creates must eventually exhaust the table. The driver
+    // must report NoSpace (the volume is full), never DeviceFault.
+    let mut last = Ok(NodeId::from_raw(0));
+    for i in 0..INODES + 8 {
+        let mut name = *b"f0000000";
+        let mut v = i;
+        for slot in name[1..].iter_mut().rev() {
+            *slot = b'0' + u8::try_from(v % 10).unwrap_or(0);
+            v /= 10;
+        }
+        last = fs.create(root, &name, NodeKind::RegularFile);
+        if last.is_err() {
+            break;
+        }
+    }
+    assert_eq!(last, Err(DriverError::NoSpace));
+}
+
+#[test]
+fn filling_the_data_region_reports_no_space() {
+    // A single file is capped by its addressing limit, so spread the writes
+    // across several files to exhaust the data region itself. Append
+    // block-sized chunks round-robin until allocation fails. The data
+    // region must run dry with a NoSpace error (the volume is full), never
+    // a DeviceFault.
+    const FILES: usize = 4;
+    let mut fs = fresh();
+    let root = fs.root();
+    let names: [&[u8]; FILES] = [b"a", b"b", b"c", b"d"];
+    for name in names {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    let chunk = [0xABu8; BS];
+    let mut offset = [0u64; FILES];
+    let result = 'fill: loop {
+        let mut progressed = false;
+        for (i, name) in names.iter().enumerate() {
+            match fs.write_at(root, name, offset[i], &chunk) {
+                Ok(n) => {
+                    offset[i] += n as u64;
+                    progressed = true;
+                }
+                // This file has reached its addressing limit; the data
+                // region may still have room, so try the next file.
+                Err(DriverError::LengthOutOfRange) => {}
+                other => break 'fill other.map(|_| ()),
+            }
+        }
+        assert!(progressed, "data region never reported NoSpace");
+    };
+    assert_eq!(result, Err(DriverError::NoSpace));
+}
+
+#[test]
 fn security_record_round_trips_and_persists() {
     let mut fs = fresh();
     let root = fs.root();

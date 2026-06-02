@@ -1076,6 +1076,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-fs-soak"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-fs-ext4",
+ "rustos-drv-fs-fat32",
+ "rustos-drv-fs-rustfs",
+]
+
+[[package]]
 name = "rustos-test-ipi-smp-qemu-riscv64"
 version = "0.0.0"
 dependencies = [

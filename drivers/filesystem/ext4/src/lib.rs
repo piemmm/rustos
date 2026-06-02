@@ -50,6 +50,11 @@
 //! classic map nor an extent tree of depth ≤ 1, rather than orphan
 //! blocks (`AGENTS.md` §2.1 / §5.4 — fail closed).
 //!
+//! [`Ext4::format`] lays a fresh, empty volume onto a blank device (no
+//! `mkfs` shell-out, `AGENTS.md` §12/§2.12) using a conservative
+//! checksum-free `filetype`+`extent` feature set the reader accepts, and
+//! hands it straight to [`Ext4::open`].
+//!
 //! No `unwrap`/`expect`/`panic!` and no `unsafe`.
 //!
 //! # Capabilities
@@ -682,6 +687,41 @@ impl<B: Block> Ext4<B> {
                 uuid,
             },
         })
+    }
+
+    /// Lay down a fresh, empty ext4 volume on `block` and return it
+    /// mounted.
+    ///
+    /// The formatter writes a deliberately conservative on-disk feature
+    /// set the read/write path fully supports: `filetype` + `extent`
+    /// (`s_feature_incompat`), no read-only-compat features, 128-byte
+    /// inodes and 32-byte group descriptors, and **no** checksum
+    /// (`metadata_csum`/`gdt_csum`) or `64bit` feature. Every block group
+    /// is fully materialised (no lazy/`UNINIT` groups), so the volume can
+    /// be filled to exhaustion. The block size is 4096 bytes for volumes
+    /// of at least 128 MiB and 1024 bytes otherwise; `blocks_per_group`
+    /// is the bitmap-maximal `8 * block_size`.
+    ///
+    /// `inode_count` is the *minimum* total inode budget; the actual
+    /// count is rounded up to a whole number of inodes per group (at
+    /// least 16 per group). The reserved inodes 1..=10 and an
+    /// extent-mapped empty root directory (inode 2) are laid down; the
+    /// remainder are free.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the device geometry is
+    ///   degenerate or a block write fails.
+    /// * [`DriverError::OutOfRange`] if the device is too small to host a
+    ///   single block group's metadata plus a non-empty data region, or
+    ///   `inode_count` is zero.
+    ///
+    /// # Capabilities
+    ///
+    /// Reached only through the driver's [`DriverHandle`].
+    pub fn format(mut block: B, inode_count: u32) -> Result<Self, DriverError> {
+        format::write_volume(&mut block, inode_count)?;
+        Self::open(block)
     }
 
     /// Consume the driver, returning the underlying block device.
@@ -1322,7 +1362,8 @@ impl<B: Block> Ext4<B> {
 impl<B: Block> Ext4<B> {
     /// Allocate one free data block, returning its zero-filled absolute
     /// block number. Updates the block bitmap, the group-descriptor free
-    /// count, and the superblock free count.
+    /// count, and the superblock free count. Fails with
+    /// [`DriverError::NoSpace`] when every group is full.
     fn alloc_block(&mut self) -> Result<u64, DriverError> {
         let bpg = u64::from(self.layout.blocks_per_group);
         let bs = self.layout.block_size as usize;
@@ -1367,7 +1408,7 @@ impl<B: Block> Ext4<B> {
                 }
             }
         }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Release data block `abs`, clearing its bitmap bit and restoring
@@ -1410,6 +1451,7 @@ impl<B: Block> Ext4<B> {
 
     /// Allocate one free inode, returning its number. `is_dir` bumps the
     /// group's directory count. Updates the inode bitmap and free counts.
+    /// Fails with [`DriverError::NoSpace`] when every group is full.
     fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, DriverError> {
         let ipg = u64::from(self.layout.inodes_per_group);
         let total = u64::from(self.sb_u32(0x00)?);
@@ -1458,7 +1500,7 @@ impl<B: Block> Ext4<B> {
                 }
             }
         }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Lower `bg_itable_unused` (the count of never-used inodes at the
@@ -2794,6 +2836,8 @@ fn node_inode(node: NodeId) -> Result<u32, DriverError> {
     }
     u32::try_from(node.raw()).map_err(|_| DriverError::NotFound)
 }
+
+mod format;
 
 #[cfg(test)]
 mod tests;

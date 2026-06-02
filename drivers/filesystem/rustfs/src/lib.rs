@@ -874,7 +874,7 @@ impl<B: Block> RustFs<B> {
                     }
                     let data_idx = bb * bits_per_block + (byte_idx as u64) * 8 + u64::from(bit);
                     if data_idx >= self.layout.data_blocks {
-                        return Err(DriverError::DeviceFault);
+                        return Err(DriverError::NoSpace);
                     }
                     buf[byte_idx] |= 1 << bit;
                     self.stage_meta(bmblock, &buf)?;
@@ -882,7 +882,7 @@ impl<B: Block> RustFs<B> {
                 }
             }
         }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Mark data block `block` free in the bitmap.
@@ -935,7 +935,7 @@ impl<B: Block> RustFs<B> {
                 return Ok(ino);
             }
         }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Stage a free of inode `ino` (zeroes the record).

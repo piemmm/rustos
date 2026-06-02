@@ -3913,6 +3913,25 @@ device list.
     companion to the QEMU virtio-blk verticals, run on the host against
     the identical driver and VFS code. Docs:
     `docs/src/filesystem/posix_suite.md` and the crate `README.md`.
+  - **First-party formatters + `NoSpace` + in-RAM filesystem soak —
+    DONE.** A new `DriverError::NoSpace` / `Errno::NoSpace` (POSIX
+    `ENOSPC`) distinguishes a healthy-but-full volume from a
+    `DeviceFault` (§5.4); every driver's allocator now returns it on
+    exhaustion. Each driver owns a real, parameterised first-party
+    formatter (no `mkfs` shell-out, §12/§2.12): `RustFs::format`,
+    `Fat32::format`, and a new reader-compatible multi-group
+    `Ext4::format` (`drivers/filesystem/ext4/src/format.rs`:
+    `filetype`+`extent`, no checksum/`64bit`, fully-materialised groups).
+    `tests/integration/fs_soak` (`rustos-test-fs-soak`) formats a
+    ≥ 1 GiB `RamBlock` with each formatter and drives one
+    filesystem-agnostic exerciser over the frozen `FilesystemRead`/`Write`
+    ABI — integrity round-trip + remount re-verify + the fail-closed
+    extremes (`NoSpace`/`Busy`/`LengthOutOfRange`). `cargo xtask fssoak`
+    (`--quick`/`--soak`/`--target`/`--secs`/`--list`, mirroring
+    `proptest`) runs one filesystem at a time; `tools/ci/soak.sh`'s new
+    `fssoak` kind (and `all`) fans the three out into parallel jobs, and
+    `soak.yml` runs them nightly. Docs:
+    `docs/src/filesystem/{soak,ext4}.md` + the three driver READMEs.
     **Stage 5 is now complete.**
 
 ---

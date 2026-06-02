@@ -62,6 +62,7 @@
 - [rustfs driver](./filesystem/rustfs.md)
 - [ext4 driver](./filesystem/ext4.md)
 - [POSIX conformance suite](./filesystem/posix_suite.md)
+- [Filesystem soak](./filesystem/soak.md)
 
 # Userland
 

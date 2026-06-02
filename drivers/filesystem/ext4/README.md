@@ -113,10 +113,44 @@ nor a depth-0/depth-1 extent tree, are likewise refused rather than
 half-built or orphaning blocks (`AGENTS.md` §2.1 / §5.4). Such volumes
 stay fully **readable**.
 
+## Formatting (mkfs)
+
+`Ext4::format(block, inode_count)` lays a fresh, empty volume onto a
+blank `Block` device and returns it mounted (no `mkfs` shell-out —
+`AGENTS.md` §12/§2.12). It is the write-side counterpart of `open()`,
+which stays the single source of truth for the on-disk layout: after
+`format()` the bytes are handed straight to `open()`.
+
+The formatter writes a deliberately conservative on-disk shape the
+read/write path fully supports:
+
+- `filetype` + `extent` (`s_feature_incompat`); no read-only-compat
+  features, **no** checksum (`metadata_csum`/`gdt_csum`), and **no**
+  `64bit` feature, so no checksum maintenance is needed;
+- 128-byte inodes, 32-byte group descriptors;
+- block size 4096 bytes for volumes ≥ 128 MiB, else 1024 bytes;
+  `blocks_per_group = 8 * block_size` (bitmap-maximal). Only whole
+  groups are used, so the reader's group count is exact and no
+  degenerate tail group appears;
+- **every** block group fully materialised — no lazy/`UNINIT` groups —
+  so the volume can be filled to exhaustion;
+- the reserved inodes 1..=10 plus an extent-mapped empty root directory
+  (inode 2); `inode_count` is the minimum total inode budget, rounded up
+  to a whole number per group (≥ 16 per group).
+
+Allocation past the volume's free data blocks or inode budget fails with
+`DriverError::NoSpace` (POSIX `ENOSPC`), distinct from `DeviceFault`
+(`AGENTS.md` §5.4 / §2.9). A device too small for one group plus a data
+region, or a zero `inode_count`, is refused with `OutOfRange`.
+
 ## Limitations
 
 - Mutation is gated to the feature allow-list above; an unsupported
   feature leaves the volume read-only (fail closed).
+- `format()` writes the no-checksum, no-`64bit` subset above; it does
+  not emit `metadata_csum`/`gdt_csum`, backup superblocks, or a journal.
+  Files created on the volume use the classic block map, so a single
+  file reaches at most 12 direct + one single-indirect block.
 - Extent-tree growth is gated to a single index level (depth ≤ 1); a
   deeper tree is refused, never half-built (the read path still maps
   any depth).

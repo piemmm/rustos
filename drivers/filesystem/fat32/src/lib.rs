@@ -110,6 +110,11 @@ const FAT32_EOC_WRITE: u32 = 0x0FFF_FFFF;
 /// The single "bad cluster" sentinel.
 const FAT32_BAD: u32 = 0x0FFF_FFF7;
 
+/// Minimum number of data clusters a genuine FAT32 volume carries. Fewer
+/// clusters than this is, by the FAT specification, a FAT12/FAT16 volume;
+/// [`Fat32::format`] refuses a device too small to reach it.
+const MIN_FAT32_CLUSTERS: u64 = 65_525;
+
 /// Maximum number of UTF-16 code units in a long file name, frozen by
 /// the VFAT specification.
 const MAX_LONG_NAME_UNITS: usize = 255;
@@ -252,12 +257,19 @@ struct DirCursor {
     slot: u64,
 }
 
-/// A read-only FAT32 volume backed by a [`Block`] device.
+/// A FAT32 volume backed by a [`Block`] device.
 pub struct Fat32<B: Block> {
     block: B,
     block_size: u32,
     block_count: u64,
     layout: Layout,
+    /// Forward search hint for the cluster allocator: the cluster to try
+    /// first on the next [`Fat32::alloc_cluster`]. It only moves forward
+    /// (wrapping once at `max_cluster`) and is reset downward whenever a
+    /// lower-numbered cluster is freed, so the allocator amortises to a
+    /// single forward step per allocation while still finding every free
+    /// cluster — turning a sequential fill from O(n²) into O(n).
+    next_free: u32,
 }
 
 /// Read `u16` little-endian from `buf` at `offset`.
@@ -273,6 +285,63 @@ fn le32(buf: &[u8], offset: usize) -> u32 {
         buf[offset + 2],
         buf[offset + 3],
     ])
+}
+
+/// Write `value` little-endian into `buf` at `offset`.
+fn put_le16(buf: &mut [u8], offset: usize, value: u16) {
+    buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Write `value` little-endian into `buf` at `offset`.
+fn put_le32(buf: &mut [u8], offset: usize, value: u32) {
+    buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Choose a FAT32 cluster size (in bytes) for a volume of `total_bytes`,
+/// mirroring the size thresholds a conventional `mkfs.fat` applies. The
+/// result is clamped to a whole number of `bps`-byte sectors in the
+/// `1..=128` sectors-per-cluster range the BPB can express.
+fn pick_cluster_bytes(total_bytes: u64, bps: u64) -> u64 {
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+    let target: u64 = if total_bytes <= 64 * MIB {
+        512
+    } else if total_bytes <= 128 * MIB {
+        1024
+    } else if total_bytes <= 256 * MIB {
+        2048
+    } else if total_bytes <= 8 * GIB {
+        4096
+    } else if total_bytes <= 16 * GIB {
+        8192
+    } else if total_bytes <= 32 * GIB {
+        16384
+    } else {
+        32768
+    };
+    target.max(bps).min(bps * 128)
+}
+
+/// Write `len` zero bytes to `block` starting at device byte `offset`,
+/// staged through a stack scratch buffer one chunk at a time.
+fn write_zeros<B: Block>(
+    block: &mut B,
+    block_size: u32,
+    block_count: u64,
+    offset: u64,
+    len: u64,
+) -> Result<(), DriverError> {
+    let zeros = [0u8; MAX_BLOCK_SIZE as usize];
+    let mut at = offset;
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk = remaining.min(zeros.len() as u64);
+        let chunk_usize = usize::try_from(chunk).map_err(|_| DriverError::DeviceFault)?;
+        device_write(block, block_size, block_count, at, &zeros[..chunk_usize])?;
+        at += chunk;
+        remaining -= chunk;
+    }
+    Ok(())
 }
 
 /// Number of leading bytes of `field` that are not the ASCII padding
@@ -641,7 +710,134 @@ impl<B: Block> Fat32<B> {
                 num_fats,
                 max_cluster,
             },
+            // The first allocatable cluster; the allocator advances it.
+            next_free: 2,
         })
+    }
+
+    /// Lay down a fresh, empty FAT32 volume on `block` and bring it
+    /// online read-write.
+    ///
+    /// The geometry is derived from the device size: a sectors-per-cluster
+    /// is chosen (mirroring `mkfs.fat` thresholds) to keep the cluster count inside
+    /// the FAT32 range, the two mirrored FATs are sized so every data
+    /// cluster is addressable, and the root directory (cluster 2) is
+    /// created empty. The boot sector this function writes is then handed
+    /// straight to [`Fat32::open`], which is the single source of truth for
+    /// the on-disk layout (`AGENTS.md` §2.2) — so a volume `format`
+    /// produces is, by construction, one the driver mounts.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BadMagic`] if the device logical-block size is not
+    ///   a power of two in `512..=4096` (a valid FAT32 sector size), or if
+    ///   the bytes written somehow fail [`Fat32::open`]'s validation.
+    /// * [`DriverError::OutOfRange`] if the device is too small to host a
+    ///   valid FAT32 volume (fewer than the FAT32 minimum of 65525 data
+    ///   clusters) or has more sectors than the 32-bit BPB count addresses.
+    /// * [`DriverError::DeviceFault`] if a block read or write fails.
+    ///
+    /// # Capabilities
+    ///
+    /// Reached only through the driver's [`DriverHandle`].
+    pub fn format(mut block: B) -> Result<Self, DriverError> {
+        const RESERVED_SECTORS: u16 = 32;
+        const NUM_FATS: u8 = 2;
+
+        let geometry = block.geometry()?;
+        let bps = geometry.block_size;
+        if !(512..=MAX_BLOCK_SIZE).contains(&bps) || !bps.is_power_of_two() {
+            return Err(DriverError::BadMagic);
+        }
+        let block_count = geometry.block_count;
+        let total_sectors = u32::try_from(block_count).map_err(|_| DriverError::OutOfRange)?;
+        let bps64 = u64::from(bps);
+        let total_bytes = bps64
+            .checked_mul(block_count)
+            .ok_or(DriverError::OutOfRange)?;
+
+        let cluster_bytes = pick_cluster_bytes(total_bytes, bps64);
+        let bytes_per_cluster = cluster_bytes;
+        let spc = cluster_bytes / bps64;
+        let spc_u8 = u8::try_from(spc).map_err(|_| DriverError::OutOfRange)?;
+
+        let reserved = u64::from(RESERVED_SECTORS);
+        let num_fats = u64::from(NUM_FATS);
+        let entries_per_fat_sector = bps64 / 4;
+
+        // Grow the FAT until it maps every data cluster that fits after it.
+        // `needed` only shrinks as `fat_sectors` grows, so the loop rises
+        // monotonically and terminates.
+        let mut fat_sectors = 1u64;
+        let (clusters, fat_sectors) = loop {
+            let metadata = reserved + num_fats * fat_sectors;
+            let data_sectors = block_count
+                .checked_sub(metadata)
+                .ok_or(DriverError::OutOfRange)?;
+            let clusters = data_sectors / spc;
+            let needed = (clusters + 2).div_ceil(entries_per_fat_sector);
+            if needed <= fat_sectors {
+                break (clusters, fat_sectors);
+            }
+            fat_sectors = needed;
+        };
+
+        if clusters < MIN_FAT32_CLUSTERS {
+            return Err(DriverError::OutOfRange);
+        }
+        let fat_size_32 = u32::try_from(fat_sectors).map_err(|_| DriverError::OutOfRange)?;
+
+        let fat_start_byte = reserved * bps64;
+        let fat_size_bytes = fat_sectors * bps64;
+        let data_start_byte = (reserved + num_fats * fat_sectors) * bps64;
+
+        // Boot sector / BIOS parameter block.
+        let mut boot = [0u8; 512];
+        boot[0] = 0xEB;
+        boot[1] = 0x58;
+        boot[2] = 0x90;
+        boot[3..11].copy_from_slice(b"RUSTOS  ");
+        let bps_u16 = u16::try_from(bps).map_err(|_| DriverError::BadMagic)?;
+        put_le16(&mut boot, 11, bps_u16);
+        boot[13] = spc_u8;
+        put_le16(&mut boot, 14, RESERVED_SECTORS);
+        boot[16] = NUM_FATS;
+        put_le16(&mut boot, 17, 0); // root entry count (0 for FAT32)
+        put_le16(&mut boot, 19, 0); // 16-bit total sectors (0 for FAT32)
+        boot[21] = 0xF8; // media descriptor (non-removable)
+        put_le16(&mut boot, 22, 0); // 16-bit FAT size (0 for FAT32)
+        put_le32(&mut boot, 32, total_sectors);
+        put_le32(&mut boot, 36, fat_size_32);
+        put_le32(&mut boot, 44, 2); // root directory first cluster
+        boot[66] = 0x29; // extended boot signature
+        boot[71..82].copy_from_slice(b"NO NAME    ");
+        boot[82..90].copy_from_slice(b"FAT32   ");
+        boot[510] = 0x55;
+        boot[511] = 0xAA;
+        device_write(&mut block, bps, block_count, 0, &boot)?;
+
+        // Mirrored FATs: zero every entry, then plant the two reserved
+        // entries and the root directory's end-of-chain marker.
+        for fat in 0..num_fats {
+            let base = fat_start_byte + fat * fat_size_bytes;
+            write_zeros(&mut block, bps, block_count, base, fat_size_bytes)?;
+            let mut head = [0u8; 12];
+            head[0..4].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes()); // media | reserved
+            head[4..8].copy_from_slice(&FAT32_EOC_WRITE.to_le_bytes()); // entry 1
+            head[8..12].copy_from_slice(&FAT32_EOC_WRITE.to_le_bytes()); // root EOC
+            device_write(&mut block, bps, block_count, base, &head)?;
+        }
+
+        // Empty root directory: a zeroed cluster reads as end-of-directory.
+        write_zeros(
+            &mut block,
+            bps,
+            block_count,
+            data_start_byte,
+            bytes_per_cluster,
+        )?;
+
+        Self::open(block)
     }
 
     /// Consume the driver, returning the underlying block device.
@@ -724,33 +920,47 @@ impl<B: Block> Fat32<B> {
     }
 
     /// Allocate one free data cluster, mark it end-of-chain, optionally
-    /// zero it, and return its number. Fails with [`DriverError::DeviceFault`]
-    /// when the volume is full.
+    /// zero it, and return its number. Fails with [`DriverError::NoSpace`]
+    /// when no free cluster remains (the volume is full).
     fn alloc_cluster(&mut self, zero: bool) -> Result<u32, DriverError> {
-        let mut candidate = 2u32;
-        while candidate <= self.layout.max_cluster {
+        let max = self.layout.max_cluster;
+        // Clusters 2..=max are allocatable; scan from the hint, wrapping
+        // once, so no free cluster is ever missed.
+        let total = u64::from(max) - 1;
+        let mut candidate = self.next_free.clamp(2, max);
+        let mut scanned = 0u64;
+        while scanned < total {
             if self.fat_entry(candidate)? == 0 {
                 self.set_fat(candidate, FAT32_EOC_WRITE)?;
                 if zero {
                     self.zero_cluster(candidate)?;
                 }
+                self.next_free = if candidate >= max { 2 } else { candidate + 1 };
                 return Ok(candidate);
             }
-            candidate += 1;
+            candidate = if candidate >= max { 2 } else { candidate + 1 };
+            scanned += 1;
         }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Free an entire cluster chain starting at `first`.
     fn free_chain(&mut self, first: u32) -> Result<(), DriverError> {
         let mut cluster = first;
+        let mut min_freed = u32::MAX;
         while (2..=self.layout.max_cluster).contains(&cluster) {
             let next = self.fat_entry(cluster)?;
             self.set_fat(cluster, 0)?;
+            min_freed = min_freed.min(cluster);
             match classify_chain(next) {
                 ChainStep::Next(n) => cluster = n,
                 _ => break,
             }
+        }
+        // Reuse the freed clusters first: rewind the allocator hint to the
+        // lowest cluster just released.
+        if min_freed != u32::MAX {
+            self.next_free = self.next_free.min(min_freed);
         }
         Ok(())
     }
