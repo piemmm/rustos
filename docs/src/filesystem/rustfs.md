@@ -49,9 +49,11 @@ through `lib/crypto` (`AGENTS.md` §2.12) over identity + payload. Decoding
 verifies all of that against the address the reader *expected*, so a stale,
 misdirected, wrong-type, torn, bit-rotted, or wrong-key block is rejected at
 decode time and the mount fails closed (`AGENTS.md` §5.4). Raw file-data
-blocks carry no header; their last 28 bytes are the per-block crypto trailer
-(a 12-byte nonce and a 16-byte AEAD tag, see [Encryption](#encryption)), so a
-data block holds `block_size - 28` bytes of file content.
+blocks carry no header; their tail holds a 28-byte per-block crypto trailer
+(a 12-byte nonce and a 16-byte AEAD tag, see [Encryption](#encryption)) and a
+40-byte **data-integrity trailer** (a 32-byte logical content hash and an
+8-byte physical checksum, see [Data integrity](#data-integrity)), so a data
+block holds `block_size - 68` bytes of file content.
 
 Inodes are 256-byte records held in a **copy-on-write inode tree** keyed by
 inode number (see the next section); inode 1 is the root directory. Each
@@ -66,11 +68,13 @@ hidden from `read_dir`. The inode record also stores the four §21
 timestamps. A volume written by a different format version is refused rather
 than misread.
 
-> **Stage 4 of the [specification](./rustfs-spec.md).** The volume is a
+> **Stage 5 of the [specification](./rustfs-spec.md).** The volume is a
 > complete, mountable copy-on-write filesystem whose metadata scales through
 > B-trees, is **authenticated** with a `lib/crypto` keyed MAC stored in **two
-> physical copies** repaired from each other, and is now **encrypted at rest**
-> under a real per-volume key hierarchy (see [Encryption](#encryption)).
+> physical copies** repaired from each other, is **encrypted at rest** under a
+> real per-volume key hierarchy (see [Encryption](#encryption)), and now carries
+> a per-data-record **integrity field** — a logical content hash plus a fast
+> physical checksum, verified on every read (see [Data integrity](#data-integrity)).
 > RustFS has no plaintext layout. Compression and dedupe are later stages.
 > The free-block bitmap is rebuilt in memory at mount by walking the trees
 > from the selected root; it is not stored on disk.
@@ -147,6 +151,48 @@ no entropy source of its own, so the master key and its salt are derived
 deterministically from the volume key and UUID and wrapped on disk; sourcing
 the master key from the platform RNG is a later refinement (as the random
 per-volume UUID is).
+
+## Data integrity
+
+Every file-data block carries a two-layer **data-integrity field**
+(`rustfs-spec.md` §6, §8), stored in a 40-byte trailer that follows the crypto
+trailer (`src/integrity.rs`). It complements — and is distinct from — the
+Stage-4 AEAD tag: the AEAD proves *authenticity* of the ciphertext, while this
+field gives a cheap media-corruption check plus a content-addressable name for
+the plaintext.
+
+- **Logical content hash** (32 bytes). The hash of the block's *plaintext*
+  content, taken before encryption on write and recomputed after decryption on
+  read. Identical content hashes identically — the seam Stage 7 deduplication
+  keys on (`rustfs-spec.md` §9) — and a single changed plaintext byte changes
+  it, catching a corruption that survived decryption.
+- **Physical checksum** (8 bytes). A fast, non-cryptographic checksum over the
+  block's at-rest bytes (ciphertext + crypto trailer + logical hash). It is
+  verified **first** on read, so media or transport bit rot is caught cheaply
+  before the AEAD runs.
+
+The write path is the spec's: take the logical hash of the plaintext, encrypt
+the content, then checksum the at-rest block. The read path reverses it: verify
+the physical checksum, decrypt-and-authenticate, then verify the logical hash.
+Each layer fails closed to a `DriverError` (never a panic, `AGENTS.md` §5.4 /
+§2.9) and is kept internally distinct (`integrity::DataFault` —
+`Physical`/`Aead`/`Logical`) so a media fault is not confused with a tamper or
+a plaintext mismatch, the seam Stage 8 scrub and Stage 11 health will record
+against.
+
+The logical hash is computed through `lib/crypto`'s audited SHA-256
+(`AGENTS.md` §2.12 — never hand-rolled). The specification's fixed-v1 constant
+names BLAKE3-256; `lib/crypto` exposes only the audited RustCrypto SHA-256, and
+importing a `blake3` crate would widen the trusted computing base with a SIMD
+backend that does not build cleanly on the bare-metal kernel targets (the same
+freestanding-SIMD problem already pinned around for `chacha20` and
+`curve25519-dalek`). SHA-256 is a 256-bit collision-resistant hash that fills
+the integrity-and-dedupe role identically, so RustFS v1 uses it; `AGENTS.md`
+§2.12 (use the audited `lib/crypto` hash, do not hand-roll or import an unvetted
+one) takes precedence over the spec's named primitive. The physical checksum is
+a first-party FNV-1a — a checksum is not a cryptographic primitive, so §2.12
+does not bar rolling it, and the block's keyed authenticity still rests on the
+AEAD and the metadata MAC.
 
 ## Timestamps (§21)
 
@@ -294,7 +340,13 @@ panic) while the right key still mounts, a distinctive filename and file
 content being **absent from the raw on-disk bytes** (no plaintext at rest),
 a filename and file data **round-tripping through encryption across a
 remount**, and a **bit-flip in an encrypted data block being detected** on
-read; the per-inode security record and
+read; the Stage-5 data-integrity acceptance tests — a data block's three
+integrity layers (physical checksum, AEAD, logical hash) each detecting
+**its own** class of corruption and all failing closed, identical plaintext
+sharing **one logical hash** while different plaintext differs (the dedupe
+seam) even though the two blocks encrypt to distinct ciphertext, and the
+integrity field surviving a remount and a copy-on-write rewrite; the
+per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
 highest committed generation; and a **crash-replay sweep** that faults the

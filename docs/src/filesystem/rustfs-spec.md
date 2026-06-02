@@ -169,15 +169,28 @@ metadata block target:       16 KiB
 normal data record target:   128 KiB
 large sequential target:     256 KiB
 small-file storage:          inline or packed fragments
-logical hash:                BLAKE3-256 through lib/crypto
-metadata authenticator:      lib/crypto keyed hash/MAC
-physical checksum:           fast checksum selected by RustOS storage ABI
+logical hash:                SHA-256 through lib/crypto (see note)
+metadata authenticator:      lib/crypto keyed hash/MAC (HMAC-SHA256)
+physical checksum:           FNV-1a 64-bit (fast, first-party)
 critical metadata copies:    2 minimum
 root history:                retained for rollback and safe discard
 ```
 
 A future RustFS format may revise constants globally. A mounted v1 filesystem
 must not expose runtime controls for them.
+
+> **Logical-hash primitive (v1).** This spec originally named BLAKE3-256 for
+> the logical hash, but `AGENTS.md` §2.12 — to which this spec is subordinate —
+> requires cryptographic primitives to come from an audited crate wrapped
+> behind `lib/crypto`, never hand-rolled or freshly imported "because it's
+> easier". `lib/crypto` ships only the audited RustCrypto SHA-256, and adding a
+> `blake3` crate would widen the trusted computing base with a SIMD backend
+> that does not build cleanly on the bare-metal kernel targets (the
+> freestanding-SIMD problem already pinned around for `chacha20` and
+> `curve25519-dalek` in `.cargo/config.toml`). SHA-256 is a 256-bit
+> collision-resistant hash that fills the integrity-and-dedupe role
+> identically, so RustFS v1 uses it; a future format version may switch to
+> BLAKE3 globally once it is available through `lib/crypto`.
 
 ---
 
@@ -273,6 +286,20 @@ compression state, encryption domain, physical location
 On verification failure, RustFS must try redundant copies, repair bad copies
 from good copies, return an error if no valid copy exists, and record affected
 inode/range details for health, scrub, and check.
+
+> **Stage 5 implementation.** Of the data-record fields above, the **plaintext
+> logical hash** (SHA-256 of the block's plaintext content) and the
+> **physical checksum** (FNV-1a over the at-rest block) land in Stage 5,
+> stored in a fixed 40-byte trailer appended to every file-data block after
+> the Stage-4 crypto trailer (`drivers/filesystem/rustfs/src/integrity.rs`).
+> The read path verifies the physical checksum first (media corruption is
+> caught before the AEAD), authenticates-and-decrypts, then verifies the
+> logical hash over the recovered plaintext; each layer fails closed and is
+> kept internally distinct (`integrity::DataFault`). `physical location` is the
+> extent map (Stage 2). `chunk id`, `chunk generation`, `compression state`,
+> and `encryption domain` arrive with the chunk/refcount table and dedupe
+> (Stage 7) and compression (Stage 6); until then a data record is named by its
+> `(file, logical block)` extent and the integrity trailer above.
 
 ---
 
@@ -513,7 +540,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 2 | COW metadata trees, inode tree, extent tree, free-space rebuild. | ✓ |
 | 3 | Metadata authentication/checksums and duplicated critical metadata. | ✓ |
 | 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | ✓ |
-| 5 | Data records with physical checksum and logical hash. | |
+| 5 | Data records with physical checksum and logical hash. | ✓ |
 | 6 | First-party RustOS zstd codec and RustFS compression integration. | |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | |
 | 8 | Online scrub. | |
@@ -578,5 +605,25 @@ this stage — wrong key refuses mount, plaintext cannot be created (the
 filename and content are absent from the raw bytes), filename + data round
 trip across a remount, an encrypted-data bit-flip is detected, crash replay
 at every commit step, and the extended `fuzz_mount` encrypted-open sweep —
-all pass. Stages 5–12 remain; each implementing session ticks this table and
-`PLAN.md`.
+all pass.
+
+Stage 5 added the §6/§8 **data-integrity layer** to every file-data block: a
+40-byte trailer after the Stage-4 crypto trailer holding a **logical content
+hash** (SHA-256 of the plaintext, through `lib/crypto`, §2.12 — see the §5
+logical-hash note on the SHA-256-vs-BLAKE3 choice) and a fast **physical
+checksum** (first-party FNV-1a over the at-rest block,
+`src/integrity.rs`). The write path hashes the plaintext, encrypts, then
+checksums the at-rest block; the read path verifies the physical checksum
+first (so media corruption is caught cheaply before the AEAD),
+authenticates-and-decrypts, then verifies the logical hash over the recovered
+plaintext. Each layer fails closed to a `DriverError` (never a panic, §5.4 /
+§2.9) and is kept internally distinct (`integrity::DataFault` —
+`Physical`/`Aead`/`Logical`), the seam Stage 8 scrub / Stage 11 health will
+record against. The §16 acceptance tests for this stage — each of the three
+layers detecting its own corruption class and failing closed, identical
+plaintext sharing one logical hash while different plaintext differs (the
+Stage 7 dedupe seam) even though the two blocks encrypt to distinct
+ciphertext, and the integrity field surviving a remount and a copy-on-write
+rewrite — all pass, alongside the crash-replay sweep, the 1 GiB `fssoak`, the
+posix suite, and the QEMU vertical. Stages 6–12 remain; each implementing
+session ticks this table and `PLAN.md`.

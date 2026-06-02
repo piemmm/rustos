@@ -35,8 +35,10 @@ address, and a **keyed authenticator** (HMAC-SHA256 through `lib/crypto`,
 against the address the reader expected, so a stale, misdirected,
 wrong-type, torn, bit-rotted, or wrong-key block is rejected at decode time
 and the mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
-header; their last 28 bytes are the per-block crypto trailer (nonce + AEAD
-tag, see *Encryption* below).
+header; their tail holds a 28-byte per-block crypto trailer (nonce + AEAD
+tag, see *Encryption* below) and a 40-byte data-integrity trailer (logical
+content hash + physical checksum, see *Data integrity* below), so a data
+block holds `block_size - 68` bytes of file content.
 
 ## Metadata authentication and redundancy (`rustfs-spec.md` §5, §8)
 
@@ -75,6 +77,24 @@ and salt are derived deterministically from the volume key and UUID this
 stage (no platform RNG in the driver yet); a random RNG-sourced master key is
 a later refinement.
 
+## Data integrity (`rustfs-spec.md` §6, §8)
+
+Every file-data block carries a two-layer **data-integrity field**
+(`src/integrity.rs`), distinct from the AEAD tag: a 32-byte **logical content
+hash** of the block's plaintext (taken before encryption, recomputed after
+decryption) and an 8-byte **physical checksum** over the at-rest bytes
+(verified first, before the AEAD). The write path hashes the plaintext,
+encrypts, then checksums; the read path verifies the checksum, decrypts, then
+verifies the hash. Each layer fails closed to a `DriverError` and is kept
+internally distinct (`integrity::DataFault` — `Physical`/`Aead`/`Logical`),
+never a panic (`AGENTS.md` §5.4 / §2.9). Identical plaintext shares one logical
+hash — the seam Stage 7 dedupe keys on (`rustfs-spec.md` §9). The hash uses
+`lib/crypto`'s audited SHA-256 (`AGENTS.md` §2.12 — never hand-rolled; the
+spec names BLAKE3-256 but `lib/crypto` ships only the audited RustCrypto
+SHA-256 and a `blake3` crate does not build cleanly on the bare-metal targets,
+so §2.12 takes precedence); the physical checksum is a first-party FNV-1a (a
+checksum is not a crypto primitive).
+
 Inodes are 256-byte records (inode 1 = root, the four §21 `Time64`
 timestamps inline) held in a copy-on-write **inode tree** keyed by inode
 number, so metadata scales past any fixed inode count. Each inode names the
@@ -108,8 +128,10 @@ so a delete can copy-on-write itself even on a full volume. No
 
 > **Staged build.** A volume is a complete, mountable copy-on-write
 > filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in
-> two physical copies, and **at-rest encryption** under a per-volume key
-> hierarchy (Stage 4). Compression and dedupe are later stages of the
+> two physical copies, **at-rest encryption** under a per-volume key
+> hierarchy, and a per-data-record **integrity field** (logical content hash
+> + physical checksum) verified on every read (Stage 5). Compression and
+> dedupe are later stages of the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -144,7 +166,11 @@ across a remount, superblock-ring generation selection, the Stage-4
 encryption acceptance tests (wrong key refuses the mount while the right key
 mounts, a filename and content are absent from the raw on-disk bytes,
 filename + data round-trip through encryption across a remount, and a
-bit-flip in an encrypted data block is detected), and a
+bit-flip in an encrypted data block is detected), the Stage-5 data-integrity
+tests (each of the three layers — physical checksum, AEAD, logical hash —
+detecting its own corruption class and failing closed, identical plaintext
+sharing one logical hash while different plaintext differs, and integrity
+surviving a remount and a copy-on-write rewrite), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —

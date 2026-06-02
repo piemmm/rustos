@@ -4001,7 +4001,19 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    no-plaintext-at-rest, filename+data remount round-trip, encrypted-data
    bit-flip detection, crash replay, and the extended `fuzz_mount`
    encrypted-open sweep.)
-5. Data records with physical checksum and logical hash.
+5. Data records with physical checksum and logical hash. ✓ (every
+   file-data block gains a 40-byte data-integrity trailer after the
+   crypto trailer — a logical content hash, SHA-256 of the plaintext
+   through `lib/crypto` (the spec's BLAKE3-256 constant yields to
+   `AGENTS.md` §2.12: use the audited `lib/crypto` hash, no `blake3`
+   crate that does not build cleanly on the bare-metal targets), and a
+   fast first-party FNV-1a physical checksum over the at-rest block; the
+   read path verifies the checksum first (media corruption caught before
+   the AEAD), decrypts, then verifies the logical hash, each layer
+   failing closed and kept internally distinct (`integrity::DataFault`);
+   tested for the three corruption classes each detected distinctly,
+   identical-vs-different logical hash (the Stage 7 dedupe seam), and
+   integrity surviving a remount and a copy-on-write rewrite).
 6. First-party RustOS zstd codec and RustFS compression integration.
 7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
 8. Online scrub.
@@ -4015,7 +4027,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–4 complete; Stages 5–12 planned.** The copy-on-write
+**Status: Stages 1–5 complete; Stages 6–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

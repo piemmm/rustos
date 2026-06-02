@@ -64,6 +64,7 @@ use rustos_crypto::{AeadKey, MacKey};
 mod btree;
 mod crypto;
 mod header;
+mod integrity;
 mod superblock;
 mod transaction;
 
@@ -74,6 +75,10 @@ use crypto::{
     decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
 };
 pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
+use integrity::{
+    logical_hash, physical_checksum, DataFault, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN,
+    PHYS_CHECKSUM_LEN,
+};
 
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
@@ -423,10 +428,11 @@ impl<B: Block> RustFs<B> {
     }
 
     /// Usable file-content bytes per data block: the block minus its crypto
-    /// trailer (nonce + tag). File offsets map through this capacity, not the
-    /// raw device block size.
+    /// trailer (nonce + tag) and its data-integrity trailer (logical hash +
+    /// physical checksum, `integrity` module). File offsets map through this
+    /// capacity, not the raw device block size.
     fn data_capacity(&self) -> u64 {
-        (self.block_size - CRYPTO_TRAILER) as u64
+        (self.block_size - CRYPTO_TRAILER - DATA_INTEGRITY_TRAILER) as u64
     }
 
     // --- in-memory used-block bitmap ---
@@ -1305,41 +1311,101 @@ impl<B: Block> RustFs<B> {
         Ok(new)
     }
 
-    /// Read the data block at `phys` and decrypt its content in place under the
-    /// content key, leaving the plaintext in `buf[..data_capacity()]`. The AEAD
-    /// authenticates before yielding plaintext, so a bit-flip in the ciphertext
-    /// or its trailer fails closed rather than mis-decrypting
-    /// (`docs/src/filesystem/rustfs-spec.md` §6, §7).
+    /// Byte offset of a data block's logical-hash field: immediately after the
+    /// content region and its crypto trailer (`integrity` module).
+    fn logical_hash_offset(&self) -> usize {
+        as_usize(self.data_capacity()) + CRYPTO_TRAILER
+    }
+
+    /// Byte offset of a data block's physical-checksum field: immediately after
+    /// the logical-hash field. The checksum covers everything before it.
+    fn phys_checksum_offset(&self) -> usize {
+        self.logical_hash_offset() + LOGICAL_HASH_LEN
+    }
+
+    /// Read the data block at `phys`, verify its two-layer integrity field, and
+    /// decrypt its content in place, leaving the plaintext in
+    /// `buf[..data_capacity()]` (`docs/src/filesystem/rustfs-spec.md` §6).
+    ///
+    /// The read path is the spec's: verify the fast physical checksum over the
+    /// at-rest block first (so media corruption is caught cheaply, before the
+    /// AEAD), then authenticate-and-decrypt the content, then verify the
+    /// plaintext against its stored logical hash. Each layer is kept distinct
+    /// ([`DataFault`]) even though all three surface as one frozen
+    /// [`DriverError::DeviceFault`] (§9).
     ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] on a read failure or failed authentication.
+    /// [`DriverError::DeviceFault`] on a read failure or on any integrity
+    /// layer failing (`AGENTS.md` §5.4 / §2.9 — fail closed, never a panic).
     fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.read_block(phys, buf)?;
-        let cap = as_usize(self.data_capacity());
-        let bs = self.block_size;
-        let (region, trailer) = buf[..bs].split_at_mut(cap);
-        decrypt_region(&self.content_key, region, trailer, phys)
+        self.read_data_block_classified(phys, buf)
             .map_err(|_| DriverError::DeviceFault)
     }
 
-    /// Encrypt the content in `buf[..data_capacity()]` under the content key
-    /// and write the resulting block (ciphertext plus nonce + tag trailer) to
-    /// `phys`. The nonce is unique per `(phys, generation)` so copy-on-write
-    /// never reuses a `(key, nonce)` pair (`crypto` module).
+    /// As [`read_data_block`](Self::read_data_block), but reports *which*
+    /// integrity layer rejected the block. The classification drives the Stage
+    /// 5 tests and is the seam Stage 8 scrub / Stage 11 health will record
+    /// against; production callers go through
+    /// [`read_data_block`](Self::read_data_block) and see only a fail-closed
+    /// [`DriverError::DeviceFault`].
+    fn read_data_block_classified(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DataFault> {
+        self.read_block(phys, buf)
+            .map_err(|_| DataFault::Physical)?;
+        let cap = as_usize(self.data_capacity());
+        let csum_off = self.phys_checksum_offset();
+        let mut stored = [0u8; PHYS_CHECKSUM_LEN];
+        stored.copy_from_slice(&buf[csum_off..csum_off + PHYS_CHECKSUM_LEN]);
+        if physical_checksum(&buf[..csum_off]) != stored {
+            return Err(DataFault::Physical);
+        }
+        let hash_off = self.logical_hash_offset();
+        {
+            let (region, rest) = buf[..hash_off].split_at_mut(cap);
+            decrypt_region(&self.content_key, region, &rest[..CRYPTO_TRAILER], phys)
+                .map_err(|_| DataFault::Aead)?;
+        }
+        let mut expect = [0u8; LOGICAL_HASH_LEN];
+        expect.copy_from_slice(&buf[hash_off..hash_off + LOGICAL_HASH_LEN]);
+        if logical_hash(&buf[..cap]) != expect {
+            return Err(DataFault::Logical);
+        }
+        Ok(())
+    }
+
+    /// Encrypt the content in `buf[..data_capacity()]` under the content key,
+    /// seal the data-integrity trailer (logical hash of the plaintext, then a
+    /// fast physical checksum over the at-rest bytes), and write the resulting
+    /// block to `phys`. The nonce is unique per `(phys, generation)` so
+    /// copy-on-write never reuses a `(key, nonce)` pair (`crypto` module).
     ///
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] on a seal failure or a block write failure.
     fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
-        let bs = self.block_size;
         let next_gen = self.generation.wrapping_add(1);
+        // The logical hash names the *plaintext*, so it is taken before
+        // encryption (`docs/src/filesystem/rustfs-spec.md` §6 write path).
+        let hash = logical_hash(&buf[..cap]);
+        let hash_off = self.logical_hash_offset();
         {
-            let (region, trailer) = buf[..bs].split_at_mut(cap);
-            encrypt_region(&self.content_key, region, trailer, phys, next_gen)
-                .map_err(|_| DriverError::DeviceFault)?;
+            let (region, trailer) = buf[..hash_off].split_at_mut(cap);
+            encrypt_region(
+                &self.content_key,
+                region,
+                &mut trailer[..CRYPTO_TRAILER],
+                phys,
+                next_gen,
+            )
+            .map_err(|_| DriverError::DeviceFault)?;
         }
+        buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(&hash);
+        // The physical checksum covers the at-rest representation: ciphertext,
+        // crypto trailer, and logical hash — everything before the checksum.
+        let csum_off = self.phys_checksum_offset();
+        let checksum = physical_checksum(&buf[..csum_off]);
+        buf[csum_off..csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&checksum);
         self.write_block(phys, buf)
     }
 

@@ -808,3 +808,205 @@ fn bit_flip_in_encrypted_data_is_detected() {
         "a bit-flip in encrypted data must be detected, not mis-decrypted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stage 5: per-data-record physical checksum + logical content hash.
+// ---------------------------------------------------------------------------
+
+/// The physical address of file `name`'s logical block `bi` on `fs`.
+fn data_block_phys(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> u64 {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("read inode");
+    let phys = fs.block_ptr(&inode, bi).expect("block pointer");
+    assert_ne!(phys, 0, "the file has a mapped data block");
+    phys
+}
+
+/// Read the whole of file `node` into a fresh vector.
+fn read_all(fs: &mut RustFs<MemBlock>, node: NodeId, len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec![0u8; len];
+    let mut done = 0usize;
+    while done < len {
+        let off = u64::try_from(done).unwrap();
+        let n = fs.read_at(node, off, &mut out[done..]).expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    out
+}
+
+#[test]
+fn data_block_integrity_layers_are_distinct_and_fail_closed() {
+    // Each of the two integrity layers — the fast physical checksum and the
+    // logical content hash — plus the Stage-4 AEAD detects its own class of
+    // corruption, and all three fail closed (`AGENTS.md` §5.4 / §2.9). The test
+    // isolates each layer by repairing the checks that sit in front of it.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let payload = alloc::vec![0x77u8; 300];
+    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let csum_off = fs.phys_checksum_offset();
+    let hash_off = fs.logical_hash_offset();
+    let bs = 512usize;
+    let base = as_usize(phys) * bs;
+    let baseline = fs.into_block().bytes();
+
+    let reopen = |bytes: alloc::vec::Vec<u8>| {
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
+    };
+    // Recompute the physical checksum over a block's at-rest bytes so a
+    // corruption can be slipped past the fast check to reach a deeper layer.
+    let repair_checksum = |bytes: &mut alloc::vec::Vec<u8>| {
+        let fixed = physical_checksum(&bytes[base..base + csum_off]);
+        bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
+    };
+
+    // 1. A flipped ciphertext byte is caught by the fast physical checksum
+    //    (it covers the at-rest ciphertext), before the AEAD even runs.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Physical)
+        );
+    }
+    // 2. The same flip, but with the physical checksum repaired, slips past the
+    //    fast check and is caught by the AEAD tag instead.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        repair_checksum(&mut bytes);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Aead)
+        );
+    }
+    // 3. Corrupting the stored logical hash (with the checksum repaired) leaves
+    //    the ciphertext intact, so the AEAD passes but the recomputed plaintext
+    //    hash mismatches — the logical layer catches it.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base + hash_off] ^= 0x01;
+        repair_checksum(&mut bytes);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Logical)
+        );
+    }
+    // The production read path surfaces every layer as a fail-closed
+    // `DeviceFault`, never a panic and never a misread.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let node = fs.lookup(fs.root(), b"f").expect("file survives");
+        let mut buf = [0u8; 300];
+        assert!(matches!(
+            fs.read_at(node, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ));
+    }
+}
+
+#[test]
+fn identical_content_shares_a_logical_hash_distinct_content_differs() {
+    // The logical content hash names the plaintext: two blocks with identical
+    // content carry the same stored hash (the seam Stage 7 dedupe keys on),
+    // while a single differing byte changes it. The hash is over plaintext, so
+    // it matches even though the two blocks encrypt to different ciphertext
+    // (distinct `(phys, generation)` nonces).
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    let full = as_usize(fs.data_capacity());
+    let block = alloc::vec![0xABu8; full];
+    let mut other = block.clone();
+    other[0] ^= 0x01;
+    for name in [b"a".as_slice(), b"b", b"c"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert_eq!(fs.write_at(root, b"a", 0, &block), Ok(full));
+    assert_eq!(fs.write_at(root, b"b", 0, &block), Ok(full));
+    assert_eq!(fs.write_at(root, b"c", 0, &other), Ok(full));
+
+    let stored_hash = |fs: &mut RustFs<MemBlock>, name: &[u8]| -> [u8; LOGICAL_HASH_LEN] {
+        let phys = data_block_phys(fs, name, 0);
+        let mut raw = [0u8; MAX_BLOCK_SIZE];
+        fs.read_block(phys, &mut raw).expect("raw read");
+        let off = fs.logical_hash_offset();
+        let mut hash = [0u8; LOGICAL_HASH_LEN];
+        hash.copy_from_slice(&raw[off..off + LOGICAL_HASH_LEN]);
+        hash
+    };
+    let ha = stored_hash(&mut fs, b"a");
+    let hb = stored_hash(&mut fs, b"b");
+    let hc = stored_hash(&mut fs, b"c");
+    assert_eq!(ha, hb, "identical plaintext shares one logical hash");
+    assert_ne!(ha, hc, "different plaintext hashes differently");
+    // The hash genuinely depends on content, not a zeroed placeholder.
+    assert_ne!(ha, [0u8; LOGICAL_HASH_LEN]);
+    // Confirm the two same-content blocks really are stored as distinct
+    // ciphertext, so the equal hash is a property of the plaintext.
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    let pb = data_block_phys(&mut fs, b"b", 0);
+    let bs = 512usize;
+    let bytes = fs.into_block().bytes();
+    let ca = &bytes[as_usize(pa) * bs..as_usize(pa) * bs + full];
+    let cb = &bytes[as_usize(pb) * bs..as_usize(pb) * bs + full];
+    assert_ne!(ca, cb, "same plaintext encrypts to different ciphertext");
+}
+
+#[test]
+fn integrity_survives_remount_and_a_cow_rewrite() {
+    // A multi-block file's data integrity verifies after a remount, and again
+    // after a copy-on-write overwrite of a middle region writes fresh blocks
+    // with freshly sealed integrity trailers.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let mut expected = alloc::vec![0x33u8; 1500];
+    assert_eq!(fs.write_at(root, b"f", 0, &expected), Ok(expected.len()));
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    assert_eq!(read_all(&mut fs, node, expected.len()), expected);
+
+    let patch = alloc::vec![0x99u8; 600];
+    assert_eq!(fs.write_at(fs.root(), b"f", 100, &patch), Ok(patch.len()));
+    expected[100..700].copy_from_slice(&patch);
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
+    let node = fs.lookup(fs.root(), b"f").expect("file still there");
+    assert_eq!(
+        read_all(&mut fs, node, expected.len()),
+        expected,
+        "integrity verifies after a COW rewrite"
+    );
+}
+
+#[test]
+fn data_block_capacity_reserves_the_integrity_trailer() {
+    // A file-data block stores the device block minus both the crypto trailer
+    // and the data-integrity trailer (logical hash + physical checksum).
+    let fs = fmt(512, 256, 32);
+    assert_eq!(
+        fs.data_capacity(),
+        (512 - CRYPTO_TRAILER - DATA_INTEGRITY_TRAILER) as u64
+    );
+}
