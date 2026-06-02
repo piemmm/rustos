@@ -1,0 +1,24 @@
+[package]
+name = "rustos-desktop-session"
+description = "RustOS desktop session glue: owns the shared theme registry and the taskbar model, performs the runtime light/dark switch, and relays the active theme to the window manager, taskbar, and apps (§10 — PLAN.md Stage 7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The single shared theme definition (§10): the session owns the runtime
+# `ThemeRegistry`, performs the light/dark switch on it, and hands the active
+# theme out to the rest of the desktop. `lib/theme` is the one definition the
+# window manager, taskbar, and apps all read (§6, §17.4).
+rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The taskbar model (§10): the session owns it so it can re-theme the bar in
+# place on a runtime switch and resolve the taskbar's abstract menu actions
+# (e.g. the appearance toggle) against the theme registry the taskbar cannot
+# see. Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
+rustos-taskbar = { path = "../taskbar", version = "=0.0.0" }
+
+[lints]
+workspace = true

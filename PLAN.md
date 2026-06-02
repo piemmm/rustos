@@ -4846,11 +4846,38 @@ device list.
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. Docs
   `docs/src/desktop/{theming,taskbar}.md`, both crate `README.md`s, and the
   taskbar crate-root module docs.
+- **Desktop session glue (light/dark switch) — DONE (increment).** The
+  taskbar reports an abstract `MenuAction::ToggleAppearance` but, by design,
+  owns no theme registry; resolving it is the session glue's job (§10). That
+  glue now exists: `userland/gui/session` (`rustos-desktop-session`, `no_std`,
+  `#![forbid(unsafe_code)]`, deps only `rustos-taskbar` + `rustos-theme`,
+  `Layer::UserGui`) owns the one shared `ThemeRegistry` and the `Taskbar`
+  model. `DesktopSession::resolve` turns a `TaskbarResponse` into a
+  `SessionEvent`: a selection of the appearance-toggle entry is the single
+  response it acts on itself — it calls `ThemeRegistry::toggle_appearance`,
+  re-themes the taskbar in place, and returns `AppearanceChanged(ThemeId)` so
+  the embedder relays the now-active theme (`active_theme()`) to the WM and
+  apps; every other response is `Forward`ed unchanged (a launcher /
+  session-control selection, task activation, notification/clock press all
+  need capabilities the session does not hold, §10/§16.5). `toggle_appearance`,
+  `set_theme`, and `register_theme` expose the same control directly;
+  `set_theme`/`toggle_appearance` re-theme the taskbar through one private
+  apply path, so the relay is never duplicated (§2.2), and `set_theme`/
+  `register_theme` fail closed (`UnknownTheme`/`DuplicateId`) leaving the
+  active theme and the taskbar untouched (§5.4/§2.9). Composing two GUI crates
+  is the permitted `userland/gui/*` edge (§17.4); nothing non-GUI depends on it
+  (§17.3). 6 headless tests. Added to the workspace manifest and `AGENTS.md`
+  §3; docs `docs/src/desktop/session.md` (+ SUMMARY), the crate `README.md`,
+  the crate-root module docs, and the `theming.md` cross-reference. **Still
+  open here:** relaying the active theme to the WM and apps over live IPC, and
+  resolving the forwarded launcher / session-control actions once the
+  window-manager and process capabilities are wired (deferred Stage 6 work).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
-  pointer/keyboard device events and the taskbar–WM event glue,
-  notification-icon artwork,
+  pointer/keyboard device events and the taskbar–WM event glue (presenting and
+  placing the start-menu popup surface, and relaying the session's theme switch
+  over live IPC), notification-icon artwork,
   selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, the
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`

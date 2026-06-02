@@ -98,6 +98,7 @@ members = [
     "userland/apps/useradd",
     "userland/gui/wm",
     "userland/gui/taskbar",
+    "userland/gui/session",
     "userland/net/icmp",
 
     # Tooling

@@ -77,6 +77,7 @@
 
 - [Compositing window manager](./desktop/wm.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
+- [Desktop session glue](./desktop/session.md)
 - [Desktop theming](./desktop/theming.md)
 - [Pointer cursors](./desktop/cursors.md)
 - [Variable DPI and UI scale](./desktop/dpi.md)

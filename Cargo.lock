@@ -556,6 +556,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-desktop-session"
+version = "0.0.0"
+dependencies = [
+ "rustos-taskbar",
+ "rustos-theme",
+]
+
+[[package]]
 name = "rustos-drv-bus-mmio"
 version = "0.0.0"
 dependencies = [

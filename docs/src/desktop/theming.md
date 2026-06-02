@@ -68,9 +68,10 @@ toggles to the light built-in, and vice versa). Both return the now-active
 `ThemeId`. Unlike `set_active` they cannot fail: the two built-ins are always
 present, so there is no unknown-id path to surface. The taskbar's start menu
 surfaces this control as a `MenuAction::ToggleAppearance` entry; the taskbar
-holds no registry, so it only reports the action and the session glue performs
-the switch and re-applies the new theme to the window manager, taskbar, and
-apps.
+holds no registry, so it only reports the action and the session glue
+(`userland/gui/session`, `rustos-desktop-session`) performs the switch on the
+shared registry and re-applies the new theme to the window manager, taskbar,
+and apps. See [Desktop session glue](./session.md).
 
 ## Tests
 

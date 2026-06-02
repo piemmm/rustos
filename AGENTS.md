@@ -181,7 +181,10 @@ rustos/
 │   │   └── shell/       # Default POSIX-ish shell with job control.
 │   ├── gui/             # Graphical desktop components.
 │   │   ├── wm/          # Compositing window manager.
-│   │   └── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
+│   │   ├── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
+│   │   └── session/     # Desktop session glue: owns the shared theme
+│   │                    #   registry + taskbar model, performs the runtime
+│   │                    #   light/dark switch, relays the active theme (§10).
 │   ├── net/             # Userland networking services.
 │   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
 │   └── apps/            # Default apps. Each app is its own crate.
