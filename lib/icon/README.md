@@ -28,6 +28,14 @@ over a resolution-independent design grid, so the same glyph is
   decoded `lib/svg` `SvgImage` (the SVG-first asset rule, `AGENTS.md` §10). A
   malformed or out-of-subset asset fails closed, so the caller substitutes a
   `builtin_icon` glyph rather than crashing (`AGENTS.md` §2.9).
+- `load` — `IconAssetSource` and `IconSet::from_assets(source)`: build a whole
+  icon *set* from on-disk SVG assets (one per `IconKind`, served through the
+  injected seam so the `/System/Graphics` read and its capability stay in
+  userland, `AGENTS.md` §17.4 / §19.5). `IconSet::icon(kind, tint)` is total:
+  a kind that loaded an authored SVG asset keeps its own colours, and a kind
+  whose asset is missing, malformed, or out of subset falls back to the
+  `builtin_icon` glyph tinted with `tint` (`AGENTS.md` §2.9). `ICON_KINDS` is
+  the closed kind list a loader iterates.
 
 ## Where it sits
 

@@ -115,3 +115,96 @@ fn malformed_svg_icon_fails_closed() {
     // The caller substitutes a builtin glyph rather than crashing (§2.9).
     assert!(crate::decode_svg(b"<not-svg/>").is_err());
 }
+
+/// A distinctive single-layer SVG icon whose authored fill (`#ffaa00`) no
+/// built-in glyph uses, so a loaded asset is told apart from a tinted
+/// fallback.
+const LOADED_SVG: &[u8] =
+    br##"<svg viewBox="0 0 24 24"><polygon points="4,4 20,4 12,20" fill="#ffaa00"/></svg>"##;
+
+/// The authored fill of [`LOADED_SVG`].
+const LOADED_FILL: Color = Color::rgb(0xff, 0xaa, 0x00);
+
+/// An in-memory icon-asset source: returns [`LOADED_SVG`] for the listed
+/// kinds and the given bytes for everything else (`None` by default).
+struct TestSource {
+    kinds: &'static [IconKind],
+    other: Option<&'static [u8]>,
+}
+
+impl TestSource {
+    const fn for_kinds(kinds: &'static [IconKind]) -> Self {
+        Self { kinds, other: None }
+    }
+}
+
+impl crate::IconAssetSource for TestSource {
+    fn asset(&self, kind: IconKind) -> Option<&[u8]> {
+        if self.kinds.contains(&kind) {
+            Some(LOADED_SVG)
+        } else {
+            self.other
+        }
+    }
+}
+
+#[test]
+fn icon_set_loads_every_kind_when_all_present() {
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&ALL_KINDS));
+    for kind in ALL_KINDS {
+        assert!(set.is_loaded(kind), "{kind:?} should be loaded");
+        let icon = set.icon(kind, FG);
+        assert_eq!(
+            icon.layers()[0].fill,
+            LOADED_FILL,
+            "{kind:?} kept its colours"
+        );
+    }
+}
+
+#[test]
+fn icon_set_empty_source_falls_back_to_tinted_builtins() {
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[]));
+    for kind in ALL_KINDS {
+        assert!(!set.is_loaded(kind), "{kind:?} should fall back");
+        assert_eq!(set.icon(kind, FG), builtin_icon(kind, FG));
+    }
+}
+
+#[test]
+fn icon_set_mixes_loaded_assets_and_builtin_fallbacks() {
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Bell]));
+    assert!(set.is_loaded(IconKind::Bell));
+    assert_eq!(set.icon(IconKind::Bell, FG).layers()[0].fill, LOADED_FILL);
+    assert!(!set.is_loaded(IconKind::Network));
+    assert_eq!(
+        set.icon(IconKind::Network, FG),
+        builtin_icon(IconKind::Network, FG)
+    );
+}
+
+#[test]
+fn icon_set_malformed_asset_falls_back_per_kind() {
+    // Every kind is served broken bytes; each must fall back to its tinted
+    // built-in glyph rather than failing (§2.9).
+    let source = TestSource {
+        kinds: &[],
+        other: Some(b"<not-svg/>"),
+    };
+    let set = crate::IconSet::from_assets(&source);
+    for kind in ALL_KINDS {
+        assert!(!set.is_loaded(kind));
+        assert_eq!(set.icon(kind, FG), builtin_icon(kind, FG));
+    }
+}
+
+#[test]
+fn icon_set_ignores_tint_for_loaded_asset() {
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Volume]));
+    let red = Color::rgb(255, 0, 0);
+    // The authored asset keeps its own colours regardless of the tint.
+    assert_eq!(
+        set.icon(IconKind::Volume, red).layers()[0].fill,
+        LOADED_FILL
+    );
+}

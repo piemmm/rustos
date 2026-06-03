@@ -308,3 +308,109 @@ fn malformed_svg_cursor_fails_closed() {
     // The caller substitutes a built-in cursor rather than crashing (§2.9).
     assert!(crate::decode_svg(b"<svg></svg>").is_err());
 }
+
+/// A distinctive SVG cursor (design grid 24, hotspot (1, 2)) so a loaded
+/// cursor is told apart from any built-in (design grid 32, origin hotspot).
+const LOADED_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" data-hotspot-x="1" data-hotspot-y="2">
+    <polygon points="1,1 1,17 5,13 9,21 12,19 8,12 14,12" fill="#fff"/>
+</svg>"##;
+
+/// An in-memory cursor-asset source: returns [`LOADED_SVG`] for the listed
+/// kinds and the given bytes for everything else (`None` by default).
+struct TestSource {
+    kinds: &'static [CursorKind],
+    other: Option<&'static [u8]>,
+}
+
+impl TestSource {
+    const fn for_kinds(kinds: &'static [CursorKind]) -> Self {
+        Self { kinds, other: None }
+    }
+}
+
+impl crate::CursorAssetSource for TestSource {
+    fn asset(&self, kind: CursorKind) -> Option<&[u8]> {
+        if self.kinds.contains(&kind) {
+            Some(LOADED_SVG)
+        } else {
+            self.other
+        }
+    }
+}
+
+fn is_loaded(cursor: &VectorCursor) -> bool {
+    cursor.design_size() == 24 && cursor.hotspot_x() == 1 && cursor.hotspot_y() == 2
+}
+
+#[test]
+fn from_assets_loads_every_kind_when_all_present() {
+    let source = TestSource::for_kinds(&EVERY_KIND);
+    let theme = CursorTheme::from_assets(&source);
+    for kind in EVERY_KIND {
+        assert!(is_loaded(theme.cursor(kind)), "{kind:?} should be loaded");
+    }
+}
+
+#[test]
+fn from_assets_empty_source_yields_builtin_set() {
+    let source = TestSource::for_kinds(&[]);
+    let theme = CursorTheme::from_assets(&source);
+    assert_eq!(theme, CursorTheme::builtin());
+    for kind in EVERY_KIND {
+        assert!(!is_loaded(theme.cursor(kind)), "{kind:?} should fall back");
+    }
+}
+
+#[test]
+fn from_assets_mixes_loaded_and_builtin_fallbacks() {
+    let source = TestSource::for_kinds(&[CursorKind::Arrow, CursorKind::Busy]);
+    let theme = CursorTheme::from_assets(&source);
+    let builtin = CursorTheme::builtin();
+    assert!(is_loaded(theme.cursor(CursorKind::Arrow)));
+    assert!(is_loaded(theme.cursor(CursorKind::Busy)));
+    assert_eq!(
+        theme.cursor(CursorKind::Text),
+        builtin.cursor(CursorKind::Text)
+    );
+    assert_eq!(
+        theme.cursor(CursorKind::Pointer),
+        builtin.cursor(CursorKind::Pointer)
+    );
+    assert_eq!(
+        theme.cursor(CursorKind::Move),
+        builtin.cursor(CursorKind::Move)
+    );
+}
+
+#[test]
+fn from_assets_malformed_asset_falls_back_per_kind() {
+    // The arrow asset is broken; it must fall back to the built-in arrow
+    // while every other kind still loads (§2.9).
+    let source = TestSource {
+        kinds: &[
+            CursorKind::Text,
+            CursorKind::Pointer,
+            CursorKind::Move,
+            CursorKind::Busy,
+        ],
+        other: Some(b"<svg></svg>"),
+    };
+    let theme = CursorTheme::from_assets(&source);
+    assert_eq!(
+        theme.cursor(CursorKind::Arrow),
+        CursorTheme::builtin().cursor(CursorKind::Arrow)
+    );
+    assert!(is_loaded(theme.cursor(CursorKind::Text)));
+}
+
+#[test]
+fn from_assets_set_registers_and_activates() {
+    let source = TestSource::for_kinds(&EVERY_KIND);
+    let mut registry = CursorRegistry::with_builtin();
+    let id = CursorSetId::new("on-disk");
+    registry
+        .register(id, CursorTheme::from_assets(&source))
+        .expect("fresh id");
+    registry.set_active(id).expect("registered");
+    assert!(is_loaded(registry.active_cursor(CursorKind::Arrow)));
+}
