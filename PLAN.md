@@ -6744,8 +6744,51 @@ tree (§2.2). No kernel/user ABI surface changed.
    section of `docs/src/desktop/apps.md` describe the shared-vocabulary
    consumer, the xterm-class capabilities, and the honest `TERM`.
 
-C3 (`lib/termcap`, the compiled-in capability database keyed by `TERM`) is the
-next stage and has not been started.
+---
+
+## CURSES Stage C3 — `lib/termcap` (compiled-in capability database)
+
+**Status:** done.
+
+Third stage of `plans/CURSES.md`. A new `lib/*` crate maps a `TERM` value to a
+capability record, compiled in rather than read from a terminfo/termcap file —
+RustOS has no `/etc`, `/usr`, or `/proc` (§16.1). For this work `abi-v1` is
+treated as **not** frozen (the task direction supersedes the charter's and this
+plan's "frozen" language), though C3 adds no kernel/user ABI surface, only a
+new `lib/*` crate.
+
+1. **New `no_std` + `alloc` crate `lib/termcap`** (`rustos-termcap`) — depends
+   on `rustos-vt` and `lib/*` only (§17.4). Modules: `term_type` (the closed,
+   versioned `TermType` set — `Xterm`, `XtermColor`, `Xterm16Color`,
+   `Xterm256Color`, `Alacritty`, `XtermKitty`, `Dumb`, `Vt100`, `Vt220` —
+   `TermType::ALL`, `term_name`, `capabilities`, and the fail-closed
+   `from_term`) and `capabilities` (`ColorDepth`, `MouseReporting`/
+   `MouseSupport`, `ArrowKeys`, `KeyInput`, and the `Capabilities` record with
+   `for_term` and `referenced_ops`).
+2. **Every record is expressed in `lib/vt` terms** (§2.2) — output capabilities
+   are the `rustos_vt::Op`s the terminal accepts, colour is the
+   `rustos_vt::Color` model depth, and arrow-key input is the `Op` those bytes
+   parse back to. The crate defines no second escape-sequence table.
+   `referenced_ops` returns exactly the `Op`s a record names. Mouse reporting,
+   bracketed paste, and the function/editing/keypad keys are recorded as
+   capability *facts*; their byte sequences enter `lib/vt` when the C4 input
+   decoder needs them, never duplicated here.
+3. **`from_term` fails closed** — an unknown or empty `TERM` degrades to
+   `TermType::Dumb` (§2.9, §5.4); parsing never triggers a file read (§16.1).
+   No `unwrap`/`expect`/`panic!`; nothing touches fd 3 (§20).
+4. **Tests** (§7) — `lib/termcap/src/tests.rs`: 13 unit tests — one capability
+   test per `TermType`, the "unknown/empty `TERM` falls back to `Dumb`" test,
+   the `term_name` ↔ `from_term` round-trip, the `ColorDepth::supports` depth
+   checks, and `no_record_emits_a_sequence_absent_from_vt` (every referenced
+   `Op` round-trips through `lib/vt`). Plus the crate-level doctest.
+5. **Registration** (§6) — added to the workspace `Cargo.toml` members, to
+   `AGENTS.md` §3's `lib/` tree, and here; stability tier `experimental` in
+   `lib/termcap/README.md`.
+6. **Docs** (§13) — `docs/src/lib/termcap.md` + `docs/src/SUMMARY.md` entry;
+   rustdoc on every public item with a crate-level doctest.
+
+C4 (`lib/curses`, the TUI/screen-model library built on `lib/vt` + `lib/termcap`)
+is the next stage and has not been started.
 
 ---
 

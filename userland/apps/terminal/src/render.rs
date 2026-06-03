@@ -5,7 +5,7 @@
 //! [`Cell`](rustos_vt::Cell) is drawn with its own rendition: the
 //! [`Attributes`] the shared `lib/vt` parser folded onto
 //! it select the foreground and background, which are resolved against the
-//! active theme's [`Palette`](rustos_theme::Palette) and the standard ANSI
+//! active theme's [`Palette`] and the standard ANSI
 //! colour tables. The surface is the window manager's to place and round: the
 //! terminal paints a *rectangular* buffer and the compositor applies any corner
 //! radius through its single anti-aliased rounded-corner path (`AGENTS.md`

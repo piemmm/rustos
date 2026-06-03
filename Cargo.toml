@@ -47,6 +47,7 @@ members = [
     "lib/rng",
     "lib/svg",
     "lib/sync",
+    "lib/termcap",
     "lib/theme",
     "lib/util",
     "lib/virtio",

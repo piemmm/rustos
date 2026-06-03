@@ -122,6 +122,8 @@ emulator parses exactly what `lib/vt`'s emitter produces.
 
 ### Stage C3 — `lib/termcap`: the compiled-in capability database
 
+**Status: done** (see `PLAN.md`, "CURSES Stage C3").
+
 **Deliverables**
 - New `no_std` crate `lib/termcap`:
   - `enum TermType { Xterm, XtermColor, Xterm16Color, Xterm256Color,

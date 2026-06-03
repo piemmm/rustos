@@ -185,6 +185,11 @@ rustos/
 │   │                    #   filled-polygon vector form the cursors and icons
 │   │                    #   rasterise through lib/raster (§2.2, §2.12, §10).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
+│   ├── termcap/         # Compiled-in terminal capability database
+│   │                    #   (plans/CURSES.md C3): the closed, versioned TermType
+│   │                    #   set + a per-terminal capability record expressed in
+│   │                    #   lib/vt terms (§2.2), with a fail-closed from_term
+│   │                    #   over an untrusted TERM (§2.9, §16.1 — no file read).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── util/            # Strictly justified utilities.

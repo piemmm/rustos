@@ -40,6 +40,7 @@
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-log`](./lib/log.md)
   - [`rustos-rng`](./lib/rng.md)
+  - [`rustos-termcap`](./lib/termcap.md)
   - [`rustos-util`](./lib/util.md)
   - [`rustos-vt`](./lib/vt.md)
 

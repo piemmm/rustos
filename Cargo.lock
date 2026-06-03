@@ -1064,6 +1064,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-termcap"
+version = "0.0.0"
+dependencies = [
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-terminal"
 version = "0.0.0"
 dependencies = [
