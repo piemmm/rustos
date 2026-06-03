@@ -22,6 +22,17 @@
 //! unknown theme fails closed without disturbing the active theme
 //! (`AGENTS.md` §5.4 / §2.9).
 //!
+//! # Presenting the taskbar through the window manager
+//!
+//! [`TaskbarPresenter`] (the [`presenter`] module) is the session's glue to
+//! the compositor: it paints the taskbar's bar — and, while open, its
+//! start-menu popup — with the taskbar's own
+//! [`TaskbarRenderer`](rustos_taskbar::TaskbarRenderer) and presents each as a
+//! window in the [`Compositor`](rustos_wm::Compositor), placed at its computed
+//! origin and rounded through the compositor's single anti-aliased
+//! rounded-corner path (`AGENTS.md` §2.2). Composing the taskbar and window
+//! manager is the permitted `userland/gui/*` edge (§17.4).
+//!
 //! # On-disk graphics assets
 //!
 //! The session also loads the desktop's SVG graphics assets from
@@ -54,10 +65,12 @@
 extern crate alloc;
 
 pub mod assets;
+pub mod presenter;
 pub mod session;
 
 #[cfg(test)]
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};

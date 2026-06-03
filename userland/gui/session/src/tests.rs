@@ -3,13 +3,17 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
 use rustos_abi::Errno;
 use rustos_cursor::CursorTheme;
 use rustos_icon::{IconKind, IconSet};
-use rustos_taskbar::{MenuAction, MenuEntryId, SessionControl, TaskbarConfig, TaskbarResponse};
+use rustos_taskbar::{
+    MenuAction, MenuEntryId, SessionControl, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+};
 use rustos_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
+use rustos_wm::{Color, Compositor, Corners};
 
-use crate::{load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent};
+use crate::{load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent, TaskbarPresenter};
 
 const LABEL: &str = "Toggle Light/Dark";
 
@@ -131,6 +135,229 @@ fn malformed_cursor_asset_falls_back_to_builtin() {
 
 fn session() -> DesktopSession {
     DesktopSession::new(TaskbarConfig::bottom_bar(1920, 1080), LABEL)
+}
+
+/// A headless 1920×1080 RGBA compositor over an opaque black background.
+fn compositor() -> Compositor {
+    let mode = DisplayMode {
+        width_px: 1920,
+        height_px: 1080,
+        stride_bytes: 1920 * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    Compositor::new(
+        mode,
+        Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        },
+    )
+    .expect("the compositor allocates")
+}
+
+#[test]
+fn present_adds_a_bar_window_placed_and_rounded() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+
+    let id = presenter.bar_window().expect("the bar was presented");
+    assert_eq!(comp.window_count(), 1);
+    assert!(presenter.popup_window().is_none(), "the menu is closed");
+
+    let layout = session.taskbar().layout();
+    let window = comp.window(id).expect("the bar window exists");
+    assert_eq!(window.origin(), layout.bar.origin);
+    assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
+    assert_eq!(window.surface().width(), layout.bar.width);
+    assert_eq!(window.surface().height(), layout.bar.height);
+}
+
+#[test]
+fn presenting_twice_reuses_the_bar_window() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    let first = presenter.bar_window().expect("first present");
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    let second = presenter.bar_window().expect("second present");
+
+    assert_eq!(first, second, "the same window is reused");
+    assert_eq!(comp.window_count(), 1, "no second bar window is created");
+}
+
+#[test]
+fn opening_the_menu_presents_a_popup_window() {
+    let mut session = session();
+    session.taskbar_mut().start_menu_mut().toggle();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+
+    let popup = presenter.popup_window().expect("the popup was presented");
+    assert_eq!(comp.window_count(), 2, "bar and popup are both present");
+
+    let layout = session.taskbar().menu_layout();
+    let window = comp.window(popup).expect("the popup window exists");
+    assert_eq!(window.origin(), layout.panel.origin);
+    assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
+}
+
+#[test]
+fn closing_the_menu_removes_the_popup_window() {
+    let mut session = session();
+    session.taskbar_mut().start_menu_mut().toggle();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    let popup = presenter.popup_window().expect("the popup is open");
+
+    session.taskbar_mut().start_menu_mut().toggle();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+
+    assert!(
+        presenter.popup_window().is_none(),
+        "the popup was dismissed"
+    );
+    assert!(comp.window(popup).is_none(), "its window was removed");
+    assert_eq!(comp.window_count(), 1, "only the bar remains");
+    assert!(presenter.bar_window().is_some(), "the bar stays presented");
+}
+
+#[test]
+fn teardown_removes_every_window() {
+    let mut session = session();
+    session.taskbar_mut().start_menu_mut().toggle();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    assert_eq!(comp.window_count(), 2);
+
+    presenter.teardown(&mut comp);
+    assert_eq!(comp.window_count(), 0);
+    assert!(presenter.bar_window().is_none());
+    assert!(presenter.popup_window().is_none());
+}
+
+#[test]
+fn present_recreates_the_bar_when_its_window_was_removed() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    let first = presenter.bar_window().expect("first present");
+
+    assert!(comp.remove(first), "an embedder removed the bar window");
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+
+    let second = presenter.bar_window().expect("the bar was re-created");
+    assert_ne!(first, second, "a fresh window id is minted");
+    assert!(comp.window(second).is_some());
+    assert_eq!(comp.window_count(), 1);
+}
+
+#[test]
+fn a_theme_switch_re_rounds_the_presented_bar() {
+    let mut session = session();
+    session
+        .register_theme(custom_dark(ThemeId(100), 99))
+        .expect("a fresh id registers");
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new();
+    let mut presenter = TaskbarPresenter::new();
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+    let id = presenter.bar_window().expect("the bar was presented");
+    let dark_corners = Corners::from_radius(session.taskbar().layout().corner_radius);
+    assert_eq!(
+        comp.window(id).expect("the bar window").corners(),
+        dark_corners
+    );
+
+    session
+        .set_theme(ThemeId(100))
+        .expect("the id is registered");
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        session.active_theme(),
+    );
+
+    let switched_corners = Corners::from_radius(session.taskbar().layout().corner_radius);
+    assert_eq!(switched_corners, Corners::from_radius(99));
+    assert_eq!(
+        comp.window(id).expect("the same bar window").corners(),
+        switched_corners,
+        "the switched corner radius reached the presented bar"
+    );
+    assert_eq!(comp.window_count(), 1);
 }
 
 /// A custom theme cloned from a built-in but with a distinctive taskbar corner

@@ -19,6 +19,11 @@ rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # (e.g. the appearance toggle) against the theme registry the taskbar cannot
 # see. Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
 rustos-taskbar = { path = "../taskbar", version = "=0.0.0" }
+# The compositing window manager (§10): the session presents the taskbar bar
+# and its start-menu popup as compositor windows, placed and rounded through
+# the window manager's single anti-aliased rounded-corner path (§2.2).
+# Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
+rustos-wm = { path = "../wm", version = "=0.0.0" }
 # The cursor and icon set builders (§10): the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic

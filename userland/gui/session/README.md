@@ -66,14 +66,36 @@ asset is missing, unreadable, malformed, or out of subset keeps its built-in
 artwork, so a corrupt or absent `/System/Graphics` can never blank the
 pointer or a status icon — it simply yields the built-in set.
 
+## Presenting the taskbar through the window manager
+
+`TaskbarPresenter` joins the taskbar to the compositor. The taskbar paints a
+*rectangular* `rustos_raster::Surface` and the window manager composites and
+rounds windows; neither depends on the other (`AGENTS.md` §17.4), so the join
+is session glue. Given a `&mut rustos_wm::Compositor` and the taskbar's own
+`TaskbarRenderer` (which holds the across-frame glyph cache), `present`:
+
+- paints the bar, places it at `BarLayout::bar`'s origin, and rounds it with
+  `Corners::from_radius(BarLayout::corner_radius)` — the compositor's single
+  anti-aliased rounded-corner path, the same one it uses for application
+  windows, never a second one (`AGENTS.md` §2.2);
+- while the start menu is open, paints its popup, places it above the bar at
+  `MenuLayout::panel`'s origin, and rounds it the same way; closing the menu
+  removes the popup window.
+
+The presenter owns only the two compositor `WindowId` tokens it minted, so the
+session composes the GUI crates without holding the window-manager handle. It
+is total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate
+leaves the on-screen window untouched, a window the compositor no longer knows
+is re-created on the next present, and `teardown` removes both windows.
+
 ## Dependencies and layering
 
-The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`
-and the shared `rustos-theme` definition, plus `rustos-cursor` / `rustos-icon`
-(the SVG set builders) and `rustos-abi` (the `Errno` the read seam returns)
-(`AGENTS.md` §17.4). Composing GUI crates is the permitted `userland/gui/*`
-edge; nothing outside `userland/gui/*` depends on it (§17.3), so a headless
-image omits it cleanly.
+The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
+`rustos-wm`, and the shared `rustos-theme` definition, plus `rustos-cursor` /
+`rustos-icon` (the SVG set builders) and `rustos-abi` (the `Errno` the read
+seam returns) (`AGENTS.md` §17.4). Composing GUI crates is the permitted
+`userland/gui/*` edge; nothing outside `userland/gui/*` depends on it (§17.3),
+so a headless image omits it cleanly.
 
 It is `no_std`. `#![forbid(unsafe_code)]`; no `unwrap`/`expect`/`panic!` in
 production paths (`AGENTS.md` §2.9).
@@ -81,8 +103,9 @@ production paths (`AGENTS.md` §2.9).
 ## Still to come (Stage 7)
 
 Relaying the active theme to the window manager and apps over live IPC,
-presenting and placing the start-menu popup surface through the window
-manager, resolving launcher / session-control actions once the process
-and window-manager capabilities are wired (deferred Stage 6 work), and the
-VFS-backed `GraphicsAssetReader` that reads `/System/Graphics` on a running
-system (the in-memory-tested loader and its fallbacks now exist).
+relaying live pointer/keyboard events into the taskbar's input router (the
+`TaskbarPresenter` surface glue now exists), resolving launcher /
+session-control actions once the process and window-manager capabilities are
+wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
+reads `/System/Graphics` on a running system (the in-memory-tested loader and
+its fallbacks now exist).

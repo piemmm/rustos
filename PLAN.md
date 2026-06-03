@@ -5396,12 +5396,35 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   no `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
   VFS-backed `GraphicsAssetReader` for a running system (the in-memory-tested
   loader and its fallbacks now exist).
+- **Taskbar↔WM presentation glue — DONE (increment).** The taskbar paints a
+  *rectangular* `rustos_raster::Surface` and the window manager composites and
+  rounds windows; neither depends on the other (§17.4), so joining them is
+  session glue. `userland/gui/session` gains a `presenter` module:
+  `TaskbarPresenter` (owns only the two compositor `WindowId`s it minted)
+  takes a `&mut rustos_wm::Compositor` and the taskbar's own `TaskbarRenderer`
+  (which holds the across-frame glyph cache) and `present`s the bar and, while
+  the start menu is open, its popup — each painted, placed at its computed
+  origin (`BarLayout::bar` / `MenuLayout::panel`), and rounded with
+  `Corners::from_radius` through the compositor's **single** anti-aliased
+  rounded-corner path, the same one used for application windows (§2.2). It is
+  total and fails closed (§2.9): a render that cannot allocate leaves the
+  on-screen window untouched, closing the menu removes the popup window, a
+  window the compositor no longer knows is re-created on the next present, and
+  `teardown` removes both windows. Composing the taskbar and window-manager
+  GUI crates is the permitted `userland/gui/*` edge (§17.4); the session adds a
+  `rustos-wm` dep. 7 new `rustos-desktop-session` tests (19 total). Docs
+  `docs/src/desktop/session.md` (new presentation section) + the crate
+  `README.md` + crate-root module docs. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** relaying
+  **live** pointer/keyboard events into the routers and the theme switch over
+  IPC; this increment is the surface-presentation glue.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
-  pointer/keyboard device events and the taskbar–WM event glue (presenting and
-  placing the start-menu popup surface, presenting the file-browser window, and
-  relaying the session's theme switch over live IPC), selecting a font face
+  pointer/keyboard device events (the taskbar–WM *surface* glue now exists:
+  `TaskbarPresenter` presents and places the bar and the start-menu popup
+  through the compositor) and relaying the session's theme switch over live
+  IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and
   re-renders only on a scale or theme change has landed — the shared

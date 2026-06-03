@@ -580,6 +580,7 @@ dependencies = [
  "rustos-icon",
  "rustos-taskbar",
  "rustos-theme",
+ "rustos-wm",
 ]
 
 [[package]]

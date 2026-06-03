@@ -49,11 +49,45 @@ is never duplicated (`AGENTS.md` §2.2). `set_theme` fails closed with
 `ThemeError::DuplicateId`, each leaving the active theme and the taskbar
 untouched (`AGENTS.md` §5.4 / §2.9).
 
+## Presenting the taskbar through the window manager
+
+The taskbar paints a *rectangular* `rustos_raster::Surface` and the window
+manager composites and rounds windows; neither depends on the other
+(`AGENTS.md` §17.4). `TaskbarPresenter` is the session's glue between them.
+Given a `&mut rustos_wm::Compositor` and the taskbar's own
+`rustos_taskbar::TaskbarRenderer` (which holds the across-frame glyph cache),
+`present` paints the bar and, while the start menu is open, its popup, and
+presents each as a compositor window:
+
+- the bar is placed at `BarLayout::bar`'s origin and rounded with
+  `Corners::from_radius(BarLayout::corner_radius)` — the compositor's single
+  anti-aliased rounded-corner path, the same one it uses for application
+  windows, never a second one (`AGENTS.md` §2.2);
+- while the menu is open the popup is placed above the bar at
+  `MenuLayout::panel`'s origin and rounded with its `corner_radius`; closing
+  the menu removes the popup window.
+
+The presenter owns only the two compositor `WindowId` tokens it minted — the
+taskbar model, the renderer, and the compositor are the embedder's, so the
+session composes the GUI crates without owning the window-manager handle. It is
+total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate its
+surface leaves the on-screen window untouched rather than blanking the bar, a
+window the compositor no longer knows is re-created on the next present, and
+`teardown` removes both windows so a session shutdown leaves nothing orphaned.
+
+Relaying live pointer/keyboard events into the taskbar's input router and the
+appearance switch to the WM and apps over IPC remain later increments; this
+increment is the surface-presentation glue.
+
 ## Tests
 
 `cargo test -p rustos-desktop-session` covers: the default dark start and the
 seeded appearance-toggle entry; resolving the toggle entry flipping dark↔light
 and forwarding every other response unchanged without touching the theme;
 `set_theme`/`toggle_appearance` relaying the new metrics to the taskbar
-(observed through a custom theme with a distinctive corner radius); and the
-fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar untouched.
+(observed through a custom theme with a distinctive corner radius); the
+fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar untouched;
+and `TaskbarPresenter` placing and rounding the bar, reusing its window across
+presents, showing the popup while the menu is open and removing it when it
+closes, re-creating a window an embedder removed, relaying a switched theme's
+corner radius onto the presented bar, and `teardown` clearing every window.
