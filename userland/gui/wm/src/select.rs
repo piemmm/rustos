@@ -38,8 +38,9 @@
 //! cursor in place and reports that nothing changed rather than blanking the
 //! pointer or panicking.
 
-use rustos_cursor::CursorRegistry;
+use rustos_cursor::{CursorImage, CursorRegistry, CursorSetId};
 use rustos_geometry::Scale;
+use rustos_raster::RasterCache;
 use rustos_theme::CursorKind;
 
 use crate::geometry::Point;
@@ -66,17 +67,30 @@ pub fn desired_cursor(router: &InputRouter, compositor: &Compositor) -> CursorKi
     }
 }
 
+/// The epoch a cached cursor image is valid for: the desktop scale (in
+/// percent) paired with the active cursor-set id. A scale change or a
+/// cursor-set swap moves the epoch on and invalidates every cached image
+/// (`AGENTS.md` §10).
+type CursorEpoch = (u32, CursorSetId);
+
 /// Drives the on-screen pointer shape from interaction state.
 ///
 /// Holds the active [`CursorRegistry`] (the replaceable cursor sets), the
 /// desktop [`Scale`] cursors rasterise at, and the [`CursorKind`] currently
 /// shown. [`refresh`](Self::refresh) applies the [`desired_cursor`] policy
 /// to a compositor.
+///
+/// Each shown [`CursorKind`] is rasterised at most once per scale and cursor
+/// set: a [`RasterCache`] keyed by kind keeps the converted [`CursorImage`]
+/// so re-showing a kind reuses the image and only a scale or set change
+/// re-rasterises (`AGENTS.md` §10). Cursor *motion* never touches the cache;
+/// it moves the existing overlay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorController {
     registry: CursorRegistry,
     scale: Scale,
     kind: CursorKind,
+    cache: RasterCache<CursorKind, CursorImage, CursorEpoch>,
 }
 
 impl CursorController {
@@ -96,6 +110,7 @@ impl CursorController {
             registry,
             scale,
             kind: CursorKind::Arrow,
+            cache: RasterCache::new(),
         }
     }
 
@@ -174,10 +189,14 @@ impl CursorController {
     /// lands on `pointer`. Fails closed (leaving any current cursor
     /// untouched) if the cursor cannot be rasterised (`AGENTS.md` §2.9).
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
+        let epoch: CursorEpoch = (self.scale.percent(), self.registry.active_id());
+        let registry = &self.registry;
         let Some(image) = self
-            .registry
-            .active_cursor(kind)
-            .rasterise(self.scale.percent())
+            .cache
+            .get_or_render(&epoch, kind, || {
+                registry.active_cursor(kind).rasterise(epoch.0)
+            })
+            .cloned()
         else {
             return false;
         };

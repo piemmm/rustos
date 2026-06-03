@@ -33,6 +33,26 @@ supersampled polygon path — there is no second rasterisation path (`AGENTS.md`
 §2.2). The cursor and icon libraries expose the wrappers
 `rustos_cursor::decode_svg` and `rustos_icon::decode_svg`.
 
+## Caching the rasterised form
+
+Rasterising the vector form is the expensive step, so it happens only when its
+result can change. `lib/raster`'s `RasterCache` is the one shared mechanism
+that enforces "convert once, re-render only on a scale or theme change"
+(`AGENTS.md` §10). It is keyed by an asset identity within an *epoch* — a scale
+paired with a theme identity:
+
+- the window manager's `CursorController` caches each on-screen pointer
+  `CursorKind` against the `(scale, cursor-set)` epoch, so re-showing a kind
+  reuses its image and only a scale change or a cursor-set swap re-rasterises;
+- the taskbar's `TaskbarRenderer` caches each notification glyph against the
+  `(tint, pixel-size)` epoch, so the bar repaints its cheap regions every frame
+  but rasterises a glyph only once per theme and scale.
+
+A changed epoch discards every cached entry; a render that fails closed (a
+degenerate asset or scale, §2.9) is not remembered, so the asset is retried
+rather than a failure being cached. Both consumers share this single cache
+rather than each growing its own (`AGENTS.md` §2.2 / §6).
+
 ## Untrusted input
 
 On-disk assets are untrusted (`AGENTS.md` §19.5), so the decoder runs inside a

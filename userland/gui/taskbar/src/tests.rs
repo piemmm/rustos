@@ -10,7 +10,7 @@ use crate::input::{TaskbarInput, TaskbarResponse};
 use crate::layout::{BarLayout, Hit, MenuLayout};
 use crate::menu::{LauncherId, MenuAction, MenuEntryId, SessionControl, StartMenu};
 use crate::notifications::{IconId, NotificationArea};
-use crate::render::{render, render_menu};
+use crate::render::TaskbarRenderer;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
 
@@ -481,7 +481,9 @@ fn rendered_surface_matches_bar_dimensions() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert_eq!(surface.width(), layout.bar.width);
     assert_eq!(surface.height(), layout.bar.height);
 }
@@ -492,7 +494,9 @@ fn background_is_the_raised_surface_colour() {
     let palette = theme.palette();
     // No tasks: a point in the middle of the empty task region is bare bar.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert_eq!(
         pixel_at(&surface, bar.layout().bar, 500, 780),
         role(palette.surface_raised)
@@ -503,7 +507,9 @@ fn background_is_the_raised_surface_colour() {
 fn start_button_is_painted_with_the_accent() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert_eq!(
         pixel_at(&surface, bar.layout().bar, 24, 780),
         role(theme.palette().accent)
@@ -520,7 +526,9 @@ fn focused_task_is_accent_and_others_are_surface() {
     bar.tasks_mut().activate(TaskId(1));
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     // tasks[0] = (48,760,160,40); tasks[1] = (208,760,160,40).
     assert_eq!(
         pixel_at(&surface, layout.bar, 120, 780),
@@ -543,7 +551,9 @@ fn minimised_task_recedes_into_the_background() {
     assert!(bar.tasks().is_minimised(TaskId(1)));
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert_eq!(
         pixel_at(&surface, layout.bar, 120, 780),
         role(palette.surface_raised)
@@ -561,7 +571,9 @@ fn notification_icon_draws_a_glyph_in_the_muted_role() {
     // With one icon: clock starts at 920, so the lone icon slot is
     // notifications[0] = (896,760,24,40).
     let slot = layout.notifications[0];
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     // The glyph paints muted pixels inside its slot ...
     assert!(
         region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
@@ -585,7 +597,9 @@ fn unknown_notification_asset_falls_back_to_a_glyph() {
 
     let layout = bar.layout();
     let slot = layout.notifications[0];
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert!(
         region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
         "an unknown asset draws the generic fallback glyph rather than nothing"
@@ -599,8 +613,9 @@ fn theme_switch_repaints_the_background() {
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
     let layout = bar.layout();
 
-    let dark_surface = render(&bar, &dark).expect("bar renders");
-    let light_surface = render(&bar, &light).expect("bar renders");
+    let mut renderer = TaskbarRenderer::new();
+    let dark_surface = renderer.render(&bar, &dark).expect("bar renders");
+    let light_surface = renderer.render(&bar, &light).expect("bar renders");
     assert_eq!(
         pixel_at(&dark_surface, layout.bar, 500, 780),
         role(dark.palette().surface_raised)
@@ -616,6 +631,41 @@ fn theme_switch_repaints_the_background() {
     );
 }
 
+#[test]
+fn renderer_reuses_cached_glyphs_across_frames_and_retints_on_theme_switch() {
+    let dark = Theme::dark();
+    let light = Theme::light();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
+    bar.notifications_mut().add(IconId(1), "icon.network");
+    let layout = bar.layout();
+    let slot = layout.notifications[0];
+
+    let mut renderer = TaskbarRenderer::new();
+    // Two frames at the same theme and scale are pixel-identical: the cached
+    // glyph is reused, not re-rasterised differently.
+    let first = renderer.render(&bar, &dark).expect("bar renders");
+    let second = renderer.render(&bar, &dark).expect("bar renders");
+    assert_eq!(first.pixels(), second.pixels());
+
+    // A theme switch re-tints the glyph: it now paints the light palette's
+    // muted role and no longer the dark one inside its slot.
+    let switched = renderer.render(&bar, &light).expect("bar renders");
+    assert!(
+        region_has_pixel(
+            &switched,
+            layout.bar,
+            slot,
+            role(light.palette().on_surface_muted)
+        ),
+        "after the switch the glyph draws the light muted role"
+    );
+    assert_ne!(
+        dark.palette().on_surface_muted,
+        light.palette().on_surface_muted,
+        "dark and light muted roles differ, so the re-tint is observable"
+    );
+}
+
 // ---- text rendering -------------------------------------------------
 
 #[test]
@@ -625,7 +675,9 @@ fn clock_label_paints_foreground_text() {
     bar.clock_mut().set_label("12:00");
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert!(
         region_has_pixel(
             &surface,
@@ -644,7 +696,9 @@ fn empty_clock_paints_no_text() {
     assert_eq!(bar.clock().label(), "");
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     assert!(
         !region_has_pixel(
             &surface,
@@ -664,7 +718,9 @@ fn focused_task_title_is_drawn_in_the_on_accent_role() {
     bar.tasks_mut().activate(TaskId(1));
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     let slot = layout.tasks[0];
     assert!(
         region_has_pixel(&surface, layout.bar, slot, role(theme.palette().on_accent)),
@@ -686,7 +742,9 @@ fn task_title_too_long_for_its_slot_is_truncated_not_overflowing() {
     bar.tasks_mut().add(TaskId(2), "Second");
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
+    let surface = TaskbarRenderer::new()
+        .render(&bar, &theme)
+        .expect("bar renders");
     // The second slot is filled with the plain surface role; its title is
     // "Second" in on_surface. No on_surface text from task 1 may appear in
     // slot 2 before slot 2's own glyphs — assert slot 1's text stays put by
@@ -1093,7 +1151,7 @@ fn render_menu_is_none_when_the_menu_is_closed() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     assert!(!bar.start_menu().is_open());
-    assert!(render_menu(&bar, &theme).is_none());
+    assert!(TaskbarRenderer::new().render_menu(&bar, &theme).is_none());
 }
 
 #[test]
@@ -1104,7 +1162,9 @@ fn render_menu_paints_the_panel_and_entry_labels() {
     bar.start_menu_mut().toggle();
 
     let menu = bar.menu_layout();
-    let surface = render_menu(&bar, &theme).expect("an open menu renders");
+    let surface = TaskbarRenderer::new()
+        .render_menu(&bar, &theme)
+        .expect("an open menu renders");
     assert_eq!(surface.width(), menu.panel.width);
     assert_eq!(surface.height(), menu.panel.height);
 

@@ -40,7 +40,12 @@ router**:
   plain arrow. `CursorController` owns the active `CursorRegistry` and the
   desktop `Scale`, applies that policy, and rasterises the chosen artwork
   through `Compositor::set_cursor`, failing closed if a cursor cannot be
-  rasterised.
+  rasterised. It rasterises each `CursorKind` at most once per scale and
+  cursor set: a shared `rustos-raster` `RasterCache` keyed by kind keeps the
+  converted image so re-showing a kind reuses it and only a scale or set
+  change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md` §10) —
+  the same cache the taskbar uses for its notification glyphs (`AGENTS.md`
+  §2.2).
 
 GPU acceleration and the default apps build on this core in later
 Stage 7 increments.
@@ -68,5 +73,5 @@ routing (hit-testing, click-to-activate focus and raise,
 desktop-clears-focus, move-grab drag, and the fail-closed grab edge
 cases), the cursor overlay (compositing above windows, move/hide repaint
 with damage), and cursor selection (the move-grab/window-hint/desktop
-policy, controller shape switching, and re-rendering on scale and
-cursor-set changes).
+policy, controller shape switching, re-rendering on scale and
+cursor-set changes, and reuse of a cached kind when it recurs).

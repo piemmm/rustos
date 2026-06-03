@@ -22,11 +22,13 @@
 
 extern crate alloc;
 
+pub mod cache;
 pub mod color;
 pub mod surface;
 
 #[cfg(test)]
 mod tests;
 
+pub use cache::RasterCache;
 pub use color::{div255, Color, Pixel};
 pub use surface::Surface;

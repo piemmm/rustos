@@ -29,6 +29,17 @@ This crate owns:
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `RasterCache` — the single scale/theme-keyed rasterisation cache. Desktop
+  assets are authored as resolution-independent vector forms and rasterised
+  into a `Surface` only when they can change; the SVG-first rule (`AGENTS.md`
+  §10) requires each asset to be converted **once** at the active scale and
+  re-rendered only on a scale or theme change, never on the hot compositing
+  path. `RasterCache` is keyed by an asset identity within an *epoch* (a scale
+  paired with a theme identity): a changed epoch discards every entry, a
+  stable epoch reuses, and a failed render is not remembered (fail closed,
+  §2.9). The window manager caches pointer cursors and the taskbar caches
+  notification glyphs through this one mechanism rather than each growing its
+  own (`AGENTS.md` §2.2 / §6).
 
 There is exactly one definition of the colour algebra here, so it is never
 duplicated into a sibling crate (`AGENTS.md` §2.2). A theme `Rgba` token meets

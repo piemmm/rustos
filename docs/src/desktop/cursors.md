@@ -95,3 +95,11 @@ coded per window action. The window manager's `select` module
   in place. Rasterisation can fail for a degenerate cursor or scale; the
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
+- The controller rasterises each kind at most once per scale and cursor set: a
+  `rustos-raster` `RasterCache` keyed by `CursorKind` within a
+  `(scale, cursor-set)` epoch keeps the converted `CursorImage`, so toggling
+  back to a previously-shown kind reuses its image and only a scale change or a
+  set swap re-rasterises (the SVG-first "convert once, re-render only on a scale
+  or theme change" rule, `AGENTS.md` §10). It is the same cache the taskbar uses
+  for its notification glyphs — one mechanism, not one per asset kind
+  (`AGENTS.md` §2.2). See [SVG asset decoding](./svg-assets.md).

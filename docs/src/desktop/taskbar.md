@@ -66,8 +66,9 @@ There is no second rounded-corner implementation (`AGENTS.md` §2.2).
 
 ## Rendering
 
-`render` paints the taskbar into a `rustos-raster` `Surface` sized to the bar,
-filling each region with a colour role from the active theme's `Palette`:
+`TaskbarRenderer::render` paints the taskbar into a `rustos-raster` `Surface`
+sized to the bar, filling each region with a colour role from the active
+theme's `Palette`:
 
 - the bar background is the **raised surface** colour;
 - the start button is the **accent**;
@@ -78,7 +79,7 @@ filling each region with a colour role from the active theme's `Palette`:
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour.
 
-On top of those fills, `render` draws **text** with the shared `rustos-font`
+On top of those fills, the renderer draws **text** with the shared `rustos-font`
 `BitmapFont` (the built-in 5×7 monospace face): the clock label is centred in
 the clock region, and each task slot shows its window title aligned to the
 leading edge. Each label takes the foreground role that matches its background
@@ -101,6 +102,13 @@ translated into the bar's local surface space, the translation saturates, and
 panicking (`AGENTS.md` §2.9). Switching themes simply re-renders with the new
 palette.
 
+`TaskbarRenderer` is a small stateful object — the region fills, clock, and
+task titles are cheap to repaint every frame, but the vector notification
+glyphs are not, so it holds a `rustos-raster` `RasterCache` of rasterised
+glyphs across frames. The renderer is the right home for that state: the
+`Taskbar` model stays pure data. `render_menu` needs no cache (the popup draws
+only text), so it stays a `&self` method.
+
 ## Notification icons
 
 The notification area holds an ordered list of status icons, each with a
@@ -114,8 +122,17 @@ glyph is artwork, not a flood fill, so the raised bar background shows through
 around it. The icons rasterise through the *same* supersampled polygon path
 (`Surface::fill_polygon`) the cursors use — there is no second scan converter
 (`AGENTS.md` §2.2) — and a slot too small to hold a glyph paints nothing
-rather than panicking (`AGENTS.md` §2.9). See [Desktop icons](icons.md) for
-the vector representation and the glyph set.
+rather than panicking (`AGENTS.md` §2.9).
+
+Rasterising a glyph is the expensive step, so the `TaskbarRenderer` does it
+only once per tint and size: its `RasterCache` is keyed by `IconKind` within a
+`(tint, pixel-size)` epoch, so repeated frames reuse the cached glyph and only
+a theme change (new tint) or a scale change (new size) re-rasterises — the
+SVG-first "convert once, re-render only on a scale or theme change" rule
+(`AGENTS.md` §10), sharing the one cache the window manager uses for cursors
+(`AGENTS.md` §2.2). See [SVG asset decoding](svg-assets.md) for the caching
+layer and [Desktop icons](icons.md) for the vector representation and the
+glyph set.
 
 ## Start menu
 
@@ -161,7 +178,7 @@ pathological screen or scale fails closed (`AGENTS.md` §2.9).
 `MenuLayout::hit_test` maps a pointer to the entry index under it.
 
 Like the bar, the popup is a *rectangular* surface the window manager places
-and rounds: `render_menu` paints a raised-surface panel with each entry's
+and rounds: `TaskbarRenderer::render_menu` paints a raised-surface panel with each entry's
 label drawn on top through the same `rustos-font` / `rustos-raster` path the
 bar uses (no second blitter or rounded-corner path, `AGENTS.md` §2.2), and
 returns `None` when the menu is closed. `Taskbar::menu_layout` computes the
@@ -217,7 +234,7 @@ The taskbar reads its corner radius from the active theme and adopts a new one
 with `Taskbar::apply_theme`; the rest of its state is untouched, so a runtime
 dark/light switch needs no model relayout (`AGENTS.md` §10). The region
 **colours** and the text **foreground** roles are wired through the same theme
-by `render` (see *Rendering*). The text is drawn with the built-in
+by `TaskbarRenderer::render` (see *Rendering*). The text is drawn with the built-in
 `rustos-font` face today; selecting a face from the theme's `FontSpec` roles
 joins this once installed font faces exist. The user *triggers* a runtime
 dark/light switch through the start menu's appearance-toggle entry (see *Start
@@ -238,7 +255,9 @@ overflow clipping, degenerate (tiny-screen) fail-closed behaviour, and the
 theme-driven corner radius. The rendering tests assert the painted surface
 matches the bar dimensions and that the background, start button, focused /
 unfocused / minimised task slots, and notification icons take the expected
-theme colour, including that a dark↔light switch repaints the background. The
+theme colour, including that a dark↔light switch repaints the background, and
+that a persistent `TaskbarRenderer` reuses its cached glyphs across identical
+frames and re-tints them on a theme switch. The
 text tests assert that a set clock label paints `on_surface` glyphs inside the
 clock region (and an empty label paints none), that a focused task's title is
 drawn in `on_accent`, and that a title too long for its slot is truncated

@@ -5303,16 +5303,39 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `docs/src/desktop/{cursors,icons}.md`, the `rustos-svg`/`rustos-icon`/
   `rustos-cursor` `README.md`s. No `unsafe`, no `unwrap`/`expect`/`panic!` in
   production paths.
+- **SVG-asset caching layer — DONE (increment).** The SVG-first rule's
+  "convert once at the active scale, re-render only on a scale or theme change"
+  (§10) gains its mechanism: a single shared `lib/raster` `RasterCache<K, V, E>`
+  — an epoch-keyed memoisation of rasterised assets. Keyed by an asset identity
+  `K` within an *epoch* `E` (a scale paired with a theme identity): a changed
+  epoch discards every entry, a stable epoch reuses, and a render that fails
+  closed (a degenerate asset/scale, §2.9) is not remembered so it is retried
+  rather than poisoning the cache. The two desktop consumers share this one
+  cache rather than each growing its own (§2.2 / §6): the WM's
+  `CursorController` caches each on-screen `CursorKind` against the
+  `(scale%, CursorSetId)` epoch — re-showing a kind reuses its `CursorImage`,
+  only a scale change or cursor-set swap re-rasterises — and the taskbar's
+  rendering moved from a stateless `render`/`render_menu` free pair into a
+  stateful `TaskbarRenderer` owning a glyph cache keyed by `IconKind` against
+  the `(tint, pixel-size)` epoch, so the bar repaints its cheap regions every
+  frame but rasterises a notification glyph only once per theme and scale (the
+  `Taskbar` model stays pure data; `render_menu` is a cacheless `&self`
+  method). 6 new `lib/raster` tests (27 total), +1 `rustos-wm` test (53), +1
+  `rustos-taskbar` test (59). Docs `docs/src/desktop/svg-assets.md` (new
+  caching section) + `{cursors,taskbar}.md` + the `rustos-raster`/
+  `rustos-wm`/`rustos-taskbar` `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
   pointer/keyboard device events and the taskbar–WM event glue (presenting and
   placing the start-menu popup surface, presenting the file-browser window, and
   relaying the session's theme switch over live IPC), selecting a font face
-  from the theme's `FontSpec` roles once installed fonts exist, and the
-  **caching layer** that converts each SVG asset once at the active scale and
-  re-renders only on a scale or theme change (the `lib/svg` decoder and the
-  `lib/cursor`/`lib/icon` conversions it feeds have landed). The two
+  from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
+  **caching layer** that converts each asset once at the active scale and
+  re-renders only on a scale or theme change has landed — the shared
+  `lib/raster` `RasterCache`, consumed by the WM cursor controller and the
+  taskbar renderer). The two
   default apps — the filesystem browser and the
   terminal emulator — have both landed (model + renderer over an injected
   seam); what remains for them is the live VFS/shell channels and WM-presented

@@ -749,6 +749,32 @@ fn controller_installs_and_switches_the_cursor_shape() {
 }
 
 #[test]
+fn controller_reuses_a_cached_kind_when_it_recurs() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(Scale::ONE);
+
+    // Arrow over the background, then Text over the window.
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    let arrow_bounds = c.cursor_bounds().expect("arrow shown");
+    router.handle(moved(20, 20), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+
+    // Returning to the background re-shows the cached arrow unchanged: same
+    // kind and same footprint as the first time it was rasterised.
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Arrow);
+    assert_eq!(
+        c.cursor_bounds().map(|b| (b.width, b.height)),
+        Some((arrow_bounds.width, arrow_bounds.height))
+    );
+}
+
+#[test]
 fn set_scale_without_a_cursor_re_renders_nothing() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let router = InputRouter::new();

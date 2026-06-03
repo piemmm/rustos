@@ -1,11 +1,12 @@
 //! Painting the taskbar's regions into a pixel [`Surface`].
 //!
-//! [`render`] turns the taskbar's computed [`BarLayout`] and live state into
-//! a premultiplied-alpha [`Surface`] sized to the bar, filling each region
-//! with a colour from the active theme's [`Palette`] and drawing the clock
-//! label and task titles on top with the shared [`BitmapFont`]. The surface is
-//! the window manager's to place and round: the taskbar paints a *rectangular*
-//! buffer and the compositor applies [`BarLayout::corner_radius`] through its
+//! [`TaskbarRenderer::render`] turns the taskbar's computed [`BarLayout`] and
+//! live state into a premultiplied-alpha [`Surface`] sized to the bar, filling
+//! each region with a colour from the active theme's [`Palette`] and drawing
+//! the clock label and task titles on top with the shared [`BitmapFont`]. The
+//! surface is the window manager's to place and round: the taskbar paints a
+//! *rectangular* buffer and the compositor applies [`BarLayout::corner_radius`]
+//! through its
 //! single anti-aliased rounded-corner path, exactly as it rounds windows
 //! (`AGENTS.md` §2.2). There is no rounding — and no colour algebra — here.
 //!
@@ -21,7 +22,7 @@
 use rustos_font::BitmapFont;
 use rustos_geometry::{Point, Rect};
 use rustos_icon::{builtin_icon, IconKind};
-use rustos_raster::{Color, Surface};
+use rustos_raster::{Color, RasterCache, Surface};
 use rustos_theme::{Palette, Theme};
 
 use crate::layout::{BarLayout, MenuLayout};
@@ -36,22 +37,71 @@ const LABEL_PADDING: u32 = 4;
 /// Padding in pixels between a notification slot's edge and its icon glyph.
 const ICON_PADDING: u32 = 4;
 
-/// Paint `taskbar` into a [`Surface`] using `theme`'s palette.
+/// The epoch a cached notification glyph is valid for: the tint it is drawn
+/// in paired with the pixel side it is rasterised to. A theme change moves
+/// the tint on and a scale change moves the side on, and either invalidates
+/// every cached glyph (`AGENTS.md` §10).
+type IconEpoch = (Color, u32);
+
+/// Paints a taskbar into a [`Surface`], caching the rasterised notification
+/// glyphs so each is converted only once per tint and size (`AGENTS.md` §10).
 ///
-/// Returns `None` only if the bar's pixel dimensions cannot be allocated (a
-/// surface that could never exist), so the caller fails closed rather than
-/// panicking (`AGENTS.md` §2.9). The window manager presents the returned
-/// surface and rounds it with [`BarLayout::corner_radius`].
-#[must_use]
-pub fn render(taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
-    let layout = taskbar.layout();
-    paint(
-        &layout,
-        taskbar.tasks(),
-        taskbar.notifications(),
-        taskbar.clock().label(),
-        theme.palette(),
-    )
+/// The renderer holds the icon cache across frames: the bar's regions, clock,
+/// and task titles are cheap to repaint every frame, but the vector
+/// notification glyphs are rasterised through `lib/raster` once per
+/// theme/scale and reused until one changes — the SVG-first "convert once,
+/// re-render only on a scale or theme change" rule, sharing the one
+/// [`RasterCache`] the window manager uses for cursors (`AGENTS.md` §2.2).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TaskbarRenderer {
+    icons: RasterCache<IconKind, Surface, IconEpoch>,
+}
+
+impl TaskbarRenderer {
+    /// A renderer with an empty glyph cache.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            icons: RasterCache::new(),
+        }
+    }
+
+    /// Paint `taskbar` into a [`Surface`] using `theme`'s palette.
+    ///
+    /// Returns `None` only if the bar's pixel dimensions cannot be allocated
+    /// (a surface that could never exist), so the caller fails closed rather
+    /// than panicking (`AGENTS.md` §2.9). The window manager presents the
+    /// returned surface and rounds it with [`BarLayout::corner_radius`].
+    #[must_use]
+    pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
+        let layout = taskbar.layout();
+        paint(
+            &layout,
+            taskbar.tasks(),
+            taskbar.notifications(),
+            taskbar.clock().label(),
+            theme.palette(),
+            &mut self.icons,
+        )
+    }
+
+    /// Paint the open start-menu popup into a [`Surface`] using `theme`'s
+    /// palette.
+    ///
+    /// Returns `None` when the menu is closed (there is nothing to draw) or
+    /// when the popup's pixel dimensions cannot be allocated, so the caller
+    /// fails closed rather than panicking (`AGENTS.md` §2.9). The window
+    /// manager places the returned surface above the bar and rounds it with
+    /// [`MenuLayout::corner_radius`], exactly as it rounds the bar (§2.2). The
+    /// popup draws only text, so it needs no glyph cache.
+    #[must_use]
+    pub fn render_menu(&self, taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
+        if !taskbar.start_menu().is_open() {
+            return None;
+        }
+        let layout = taskbar.menu_layout();
+        paint_menu(&layout, taskbar.start_menu(), theme.palette())
+    }
 }
 
 /// Fill every region, then draw the clock and task titles into a fresh
@@ -62,6 +112,7 @@ fn paint(
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
+    icons: &mut RasterCache<IconKind, Surface, IconEpoch>,
 ) -> Option<Surface> {
     let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
     let origin = layout.bar.origin;
@@ -101,6 +152,7 @@ fn paint(
             *slot,
             &icon.asset,
             palette.on_surface_muted.into(),
+            icons,
         );
     }
 
@@ -115,22 +167,6 @@ fn paint(
     );
 
     Some(surface)
-}
-
-/// Paint the open start-menu popup into a [`Surface`] using `theme`'s palette.
-///
-/// Returns `None` when the menu is closed (there is nothing to draw) or when
-/// the popup's pixel dimensions cannot be allocated, so the caller fails
-/// closed rather than panicking (`AGENTS.md` §2.9). The window manager places
-/// the returned surface above the bar and rounds it with
-/// [`MenuLayout::corner_radius`], exactly as it rounds the bar (§2.2).
-#[must_use]
-pub fn render_menu(taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
-    if !taskbar.start_menu().is_open() {
-        return None;
-    }
-    let layout = taskbar.menu_layout();
-    paint_menu(&layout, taskbar.start_menu(), theme.palette())
 }
 
 /// Fill the popup panel, then draw each entry's label into a fresh surface.
@@ -240,9 +276,19 @@ fn draw_label(
 /// tinted with `color`. The glyph is a scalable [`rustos_icon`] vector icon
 /// resolved from the asset id and rasterised to the slot size at this scale,
 /// then composited onto the bar-local surface through the shared blit path
-/// (`AGENTS.md` §2.2). An empty slot, a slot too small to hold a glyph, or an
-/// unrenderable size paints nothing rather than panicking (`AGENTS.md` §2.9).
-fn draw_icon(surface: &mut Surface, origin: Point, rect: Rect, asset: &str, color: Color) {
+/// (`AGENTS.md` §2.2). The rasterised glyph is taken from `icons`, which keeps
+/// it across frames so it is converted only once per tint and size and
+/// re-rendered only on a theme or scale change (`AGENTS.md` §10). An empty
+/// slot, a slot too small to hold a glyph, or an unrenderable size paints
+/// nothing rather than panicking (`AGENTS.md` §2.9).
+fn draw_icon(
+    surface: &mut Surface,
+    origin: Point,
+    rect: Rect,
+    asset: &str,
+    color: Color,
+    icons: &mut RasterCache<IconKind, Surface, IconEpoch>,
+) {
     if rect.is_empty() {
         return;
     }
@@ -251,14 +297,16 @@ fn draw_icon(surface: &mut Surface, origin: Point, rect: Rect, asset: &str, colo
         .min(rect.height)
         .saturating_sub(ICON_PADDING.saturating_mul(2));
     let kind = IconKind::for_asset(asset_key(asset));
-    let Some(image) = builtin_icon(kind, color).rasterise(side) else {
+    let Some(image) = icons.get_or_render(&(color, side), kind, || {
+        builtin_icon(kind, color).rasterise(side)
+    }) else {
         return;
     };
     let x_offset = rect.width.saturating_sub(side) / 2;
     let y_offset = rect.height.saturating_sub(side) / 2;
     let x = to_i32(local(rect.left(), origin.x).saturating_add(x_offset));
     let y = to_i32(local(rect.top(), origin.y).saturating_add(y_offset));
-    surface.blit(x, y, &image);
+    surface.blit(x, y, image);
 }
 
 /// The glyph key for an asset id: the segment after the last `.`, so the

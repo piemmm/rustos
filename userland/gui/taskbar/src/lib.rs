@@ -21,10 +21,10 @@
 //! The Stage 7 taskbar **layout, model, and rendering**: the geometry of
 //! every region ([`BarLayout`]), pointer [`hit_test`](BarLayout::hit_test)ing
 //! for input routing, the start-menu / task-list / notification-area state
-//! machines, and [`render`]ing those regions into a themed pixel
-//! [`Surface`](rustos_raster::Surface). It sources its corner radius and
-//! colours from the active theme ([`rustos_theme`]) and exposes the radius
-//! through [`BarLayout::corner_radius`]; the taskbar never rounds its own
+//! machines, and the [`TaskbarRenderer`] that paints those regions into a
+//! themed pixel [`Surface`](rustos_raster::Surface). It sources its corner
+//! radius and colours from the active theme ([`rustos_theme`]) and exposes
+//! the radius through [`BarLayout::corner_radius`]; the taskbar never rounds its own
 //! corners — the window manager applies that radius through its single
 //! anti-aliased rounded-corner path (`AGENTS.md` §2.2), exactly as it rounds
 //! windows.
@@ -34,7 +34,7 @@
 //! live IPC wiring to the window manager builds on this model in later Stage 7
 //! increments.
 //!
-//! [`render`]: render::render
+//! [`TaskbarRenderer`]: render::TaskbarRenderer
 //!
 //! # Where it sits
 //!
@@ -70,6 +70,6 @@ pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, MenuLayout};
 pub use menu::{LauncherId, MenuAction, MenuEntry, MenuEntryId, SessionControl, StartMenu};
 pub use notifications::{IconId, NotificationArea, NotificationIcon};
-pub use render::{render, render_menu};
+pub use render::TaskbarRenderer;
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};

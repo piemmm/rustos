@@ -56,15 +56,20 @@ owns:
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).
-- **Rendering** — `render` paints the bar into a `rustos-raster` `Surface`:
-  each region is filled with its theme colour role, then the clock label and
-  task titles are drawn on top with the `rustos-font` built-in bitmap face,
-  each in the foreground role matching its background and truncated to fit its
-  region. The surface is rectangular — the window manager rounds it (see
-  below) — and the colour/blit algebra is reused from `lib/*`, never
-  duplicated (`AGENTS.md` §2.2). `render_menu` paints the open start-menu
-  popup the same way — a raised-surface panel with each entry's label drawn
-  on top — returning `None` when the menu is closed.
+- **Rendering** — `TaskbarRenderer::render` paints the bar into a
+  `rustos-raster` `Surface`: each region is filled with its theme colour role,
+  then the notification-icon glyphs, clock label, and task titles are drawn on
+  top with the `rustos-font` built-in bitmap face, each in the foreground role
+  matching its background and truncated to fit its region. The surface is
+  rectangular — the window manager rounds it (see below) — and the colour/blit
+  algebra is reused from `lib/*`, never duplicated (`AGENTS.md` §2.2). The
+  renderer is stateful so it can hold a `rustos-raster` `RasterCache` of the
+  rasterised notification glyphs across frames: a glyph is converted once per
+  tint and size and re-rendered only on a theme or scale change (the SVG-first
+  rule, `AGENTS.md` §10), sharing the one cache the window manager uses for
+  cursors (`AGENTS.md` §2.2). The `Taskbar` model stays pure data.
+  `render_menu` (a `&self` method, no cache — the popup is text only) paints
+  the open start-menu popup the same way, returning `None` when closed.
 
 ## Rounded edges
 
@@ -91,5 +96,5 @@ in production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7)
 
-The live window-manager IPC wiring, notification-icon artwork, and selecting a
-font face from the theme's `FontSpec` roles once installed fonts exist.
+The live window-manager IPC wiring and selecting a font face from the theme's
+`FontSpec` roles once installed fonts exist.
