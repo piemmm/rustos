@@ -1520,7 +1520,10 @@ mod tests {
         // The closure sees the caller's own address space: page 1
         // resolves to frame 9 with the flags it was mapped with.
         let resolved = h.with_caller_aspace(&ctx, |space, _physmap| space.translate(page(1)));
-        assert_eq!(resolved, Some(Some((Frame(9), MapFlags::READ | MapFlags::USER))));
+        assert_eq!(
+            resolved,
+            Some(Some((Frame(9), MapFlags::READ | MapFlags::USER)))
+        );
     }
 
     /// `with_caller_aspace` fails closed with `None` (never invoking the
