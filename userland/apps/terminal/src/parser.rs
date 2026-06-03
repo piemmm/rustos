@@ -60,9 +60,6 @@ fn apply(grid: &mut Grid, op: Op) {
         Op::Tab => grid.tab(),
         Op::LineFeed => grid.line_feed(),
         Op::CarriageReturn => grid.carriage_return(),
-        // The bell carries no screen effect we model (there is no audible bell
-        // wired), so it is consumed without disturbing the display.
-        Op::Bell => {}
         Op::CursorUp(n) => grid.move_up(n),
         Op::CursorDown(n) => grid.move_down(n),
         Op::CursorForward(n) => grid.move_right(n),
@@ -89,6 +86,21 @@ fn apply(grid: &mut Grid, op: Op) {
             grid.set_attributes(pen);
         }
         Op::SetTitle(title) => grid.set_title(title),
+        // Operations with no effect on the rendered display. The bell carries
+        // no screen change we model (no audible bell is wired). The rest are
+        // *input* a terminal reports to the program (named keys, mouse reports,
+        // paste-run markers) or requests to turn input-reporting modes on and
+        // off: they flow program-ward, and the emulator has no input
+        // back-channel to honour the mode requests through, so a consumer that
+        // renders shell *output* applies no screen change rather than
+        // mislabelling them as display operations (`AGENTS.md` §2.2).
+        Op::Bell
+        | Op::Key(_)
+        | Op::Mouse(_)
+        | Op::SetMouseMode { .. }
+        | Op::SetBracketedPaste(_)
+        | Op::PasteStart
+        | Op::PasteEnd => {}
     }
 }
 

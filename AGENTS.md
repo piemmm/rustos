@@ -149,6 +149,14 @@ rustos/
 │   │                    #   compresses every data record with it; no external
 │   │                    #   zstd/compression dependency (§2.12, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
+│   ├── curses/          # First-party curses / TUI screen-model library
+│   │                    #   (plans/CURSES.md C4): client Window/pad draw model,
+│   │                    #   a minimal-diff renderer that emits the smallest
+│   │                    #   lib/vt op set the TermType supports (colour
+│   │                    #   downgrade truecolour->256->16->mono), and an input
+│   │                    #   decoder to typed key/mouse/paste events. One
+│   │                    #   vocabulary (§2.2), static-linked (§16.4), fail
+│   │                    #   closed (§2.9), outside userland/gui (§17.3/§17.4).
 │   ├── cursor/          # Shared pointer cursors: scalable, colourful,
 │   │                    #   vectorised cursor shapes rasterised onto a raster
 │   │                    #   Surface + replaceable cursor sets keyed by the

@@ -94,6 +94,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_vt",
         description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",
     },
+    Target {
+        package: "rustos-curses",
+        test: "fuzz_curses_input",
+        description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -398,6 +403,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-vt");
+    }
+
+    #[test]
+    fn curses_input_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_curses_input"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-curses");
     }
 
     #[test]

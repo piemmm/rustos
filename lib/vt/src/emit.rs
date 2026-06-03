@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use crate::attr::Sgr;
 use crate::control;
+use crate::key::Key;
 use crate::op::Op;
 
 /// Render `op` to bytes.
@@ -78,6 +79,14 @@ pub fn encode_into(op: &Op, out: &mut Vec<u8>) {
         }
         Op::Sgr(sgr) => encode_sgr(out, *sgr),
         Op::SetTitle(title) => encode_title(out, title),
+        Op::Key(key) => encode_key(out, *key),
+        Op::SetMouseMode { mode, enable } => private_mode(out, mode.mode_number(), *enable),
+        Op::Mouse(report) => encode_mouse(out, report),
+        Op::SetBracketedPaste(enable) => {
+            private_mode(out, control::MODE_BRACKETED_PASTE, *enable);
+        }
+        Op::PasteStart => csi_value(out, control::PASTE_START, control::TILDE),
+        Op::PasteEnd => csi_value(out, control::PASTE_END, control::TILDE),
     }
 }
 
@@ -137,6 +146,35 @@ fn encode_sgr(out: &mut Vec<u8>, sgr: Sgr) {
         push_decimal(out, *param);
     }
     out.push(control::SGR);
+}
+
+/// Write the canonical encoding of a named [`Key`]: `ESC O <byte>` for the keys
+/// with an `SS3` form (`F1`…`F4`), otherwise `CSI <param> ~`.
+fn encode_key(out: &mut Vec<u8>, key: Key) {
+    if let Some(final_byte) = key.ss3_final() {
+        out.push(control::ESC);
+        out.push(control::SS3);
+        out.push(final_byte);
+    } else if let Some(param) = key.tilde_param() {
+        csi_value(out, param, control::TILDE);
+    }
+}
+
+/// Write one SGR mouse report: `CSI < Cb ; Cx ; Cy M` for a press, `… m` for a
+/// release. Coordinates clamp up to `1` so a degenerate `0` round-trips.
+fn encode_mouse(out: &mut Vec<u8>, report: &crate::mouse::MouseReport) {
+    csi(out);
+    out.push(control::MOUSE_SGR);
+    push_decimal(out, report.encode_button());
+    out.push(control::SEPARATOR);
+    push_decimal(out, report.col.max(1));
+    out.push(control::SEPARATOR);
+    push_decimal(out, report.row.max(1));
+    out.push(if report.pressed {
+        control::MOUSE_PRESS
+    } else {
+        control::MOUSE_RELEASE
+    });
 }
 
 /// Write `OSC 0 ; <title> ST` (using the `BEL` string terminator xterm

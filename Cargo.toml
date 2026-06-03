@@ -36,6 +36,7 @@ members = [
     "lib/collections",
     "lib/compress",
     "lib/crypto",
+    "lib/curses",
     "lib/cursor",
     "lib/font",
     "lib/geometry",

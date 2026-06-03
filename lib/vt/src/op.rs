@@ -9,6 +9,8 @@
 use alloc::string::String;
 
 use crate::attr::Sgr;
+use crate::key::Key;
+use crate::mouse::{MouseMode, MouseReport};
 
 /// The region an erase operation clears, relative to the cursor.
 ///
@@ -120,4 +122,23 @@ pub enum Op {
     Sgr(Sgr),
     /// Set the window title (`OSC 0 ; title ST`).
     SetTitle(String),
+    /// A named (function / editing) key (`SS3` or `CSI … ~`). The arrow keys
+    /// are *not* here — in normal cursor mode they are the cursor-movement
+    /// operations above.
+    Key(Key),
+    /// Enable (`CSI ? n h`) or disable (`CSI ? n l`) a mouse-tracking mode.
+    SetMouseMode {
+        /// The tracking protocol.
+        mode: MouseMode,
+        /// `true` to enable, `false` to disable.
+        enable: bool,
+    },
+    /// One SGR-encoded mouse report (`CSI < Cb ; Cx ; Cy M` / `m`).
+    Mouse(MouseReport),
+    /// Enable (`CSI ? 2004 h`) or disable (`CSI ? 2004 l`) bracketed paste.
+    SetBracketedPaste(bool),
+    /// The start of a bracketed paste (`CSI 200 ~`).
+    PasteStart,
+    /// The end of a bracketed paste (`CSI 201 ~`).
+    PasteEnd,
 }

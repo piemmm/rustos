@@ -6835,8 +6835,57 @@ new `lib/*` crate.
 6. **Docs** (§13) — `docs/src/lib/termcap.md` + `docs/src/SUMMARY.md` entry;
    rustdoc on every public item with a crate-level doctest.
 
-C4 (`lib/curses`, the TUI/screen-model library built on `lib/vt` + `lib/termcap`)
-is the next stage and has not been started.
+---
+
+## CURSES Stage C4 — `lib/curses` (TUI / screen-model library, core)
+
+**Status:** done.
+
+Fourth stage of `plans/CURSES.md`. A new `lib/*` crate gives applications a
+client screen model and renders it to a terminal through `lib/vt` +
+`lib/termcap`. For this work `abi-v1` is treated as **not** frozen (the task
+direction supersedes the charter's and this plan's "frozen" language); C4 added
+no kernel/user ABI surface, only `lib/vt` vocabulary and a new `lib/*` crate.
+
+1. **`lib/vt` vocabulary extended** (§2.2, the one place these sequences live) —
+   the function / editing keys (`Key`, `SS3` + `CSI … ~`), the SGR mouse report
+   and the mouse-tracking + bracketed-paste DEC private modes
+   (`MouseReport`/`MouseButton`/`MouseMode`, `Op::Key`/`Op::Mouse`/
+   `Op::SetMouseMode`/`Op::SetBracketedPaste`/`Op::PasteStart`/`Op::PasteEnd`).
+   The emitter and the streaming parser gained an `SS3` state, the `<` SGR-mouse
+   introducer, and `~`/`M`/`m` dispatch, with emit→parse round-trip tests for
+   every new op (fail closed on unknown sequences, §2.9).
+2. **New `no_std` + `alloc` crate `lib/curses`** (`rustos-curses`) — depends on
+   `rustos-vt` + `rustos-termcap` + `lib/*` only (§17.4). Modules: `geom`,
+   `buffer`, `window` (the client `Window`/pad draw model — text, attributes,
+   colours, `draw_box`/border, lines, scrolling region, resize), `color`
+   (`ColorPairs` + the truecolour→256→16→mono `downgrade`), `render` (the
+   minimal-diff renderer + `dumb` full-rewrite fallback), `input`
+   (`Input`/`Event` decoder over `lib/vt`'s parser), and `screen` (the
+   `Screen<T: Tty>` I/O-injected driver: `wnoutrefresh`/`pnoutrefresh`/
+   `doupdate`/`refresh`, mouse + paste enabling, `resize`, `read_events`).
+3. **Minimal-diff, capability-aware output** — `render` emits one cursor move
+   per change-run, one SGR transition per attribute change, one `Print` per
+   glyph; every colour is degraded by `rustos_termcap::ColorDepth` so an
+   unrenderable colour is never emitted (§2.9). One vocabulary end to end: the
+   bytes emitted parse back through `lib/vt`'s consumer.
+4. **Tests** (§7) — `lib/curses/src/tests.rs`: 26 unit tests (window model,
+   golden minimal-diff op sequences, colour-downgrade, per-terminal input
+   decode through `lib/vt`'s emitter, the `Screen` driver over an in-memory
+   `Tty`) plus the crate doctest; `lib/curses/tests/fuzz_curses_input.rs`, the
+   §19.5/§19.6 deterministic fuzz harness registered in
+   `tools/xtask/src/commands/fuzz.rs` `TARGETS` (`fuzz_curses_input`) with a
+   `curses_input_harness_is_registered` test. New `lib/vt` round-trip tests for
+   the keys/mouse/paste ops.
+5. **Registration** (§6) — added to the workspace `Cargo.toml` members, to
+   `AGENTS.md` §3's `lib/` tree, and here; stability tier `experimental` in
+   `lib/curses/README.md`.
+6. **Docs** (§13) — `docs/src/lib/curses.md` + `docs/src/SUMMARY.md` entry;
+   rustdoc on every public item with a crate-level doctest.
+
+C5 (curses completeness — wide/UTF-8 cells, `getch`/timeout/non-blocking input,
+panels-equivalent stacking — plus a first in-tree consumer) is the next stage
+and has not been started.
 
 ---
 
