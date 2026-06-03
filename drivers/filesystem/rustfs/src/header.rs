@@ -70,6 +70,12 @@ pub enum BlockType {
     /// metadata, §12). It is reached from the transaction root and never
     /// required for ordinary crash recovery (§14).
     ScrubProgress = 5,
+    /// A device-health baseline record: the last clean device-health
+    /// snapshot plus the volume's accumulated filesystem-observed fault and
+    /// repair counters (`docs/src/filesystem/rustfs-spec.md` §4, §11). Like
+    /// the scrub-progress record it is reached from the transaction root and
+    /// is never required for ordinary crash recovery (§14).
+    HealthBaseline = 6,
 }
 
 impl BlockType {
@@ -87,6 +93,7 @@ impl BlockType {
             3 => Some(Self::Btree),
             4 => Some(Self::Directory),
             5 => Some(Self::ScrubProgress),
+            6 => Some(Self::HealthBaseline),
             _ => None,
         }
     }

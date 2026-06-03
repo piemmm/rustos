@@ -29,7 +29,7 @@
 //! fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a
 //! wall-clock budget.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
+use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
 use rustos_drv_fs_rustfs::{RescueSink, RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN};
@@ -125,6 +125,25 @@ impl Block for MemBlock {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        // Report telemetry so the persisted health baseline carries a real
+        // snapshot and the sweep exercises the `HealthBaseline` snapshot
+        // decode path (Stage 11), not just the `Unavailable` variant.
+        Ok(DeviceHealth::Available(HealthSnapshot {
+            power_on_hours: 42,
+            unsafe_shutdowns: 1,
+            media_errors: 1,
+            reallocated_sectors: 0,
+            pending_sectors: 0,
+            uncorrectable_sectors: 0,
+            crc_errors: 0,
+            percentage_used: 10,
+            available_spare: 100,
+            temperature_kelvin: 300,
+            critical_warning: false,
+        }))
+    }
 }
 
 /// Deadline for the current run, or `None` for the fixed smoke sweep.
@@ -169,6 +188,11 @@ fn exercise(image: &[u8]) {
         // every tree, rebuilds the derived state, and reconciles refcounts. It
         // too must return a `Result`, never panic.
         let _ = fs.check(&AllCaps, &NullSink);
+        // Drive the Stage-11 health pass: it decodes any persisted
+        // `HealthBaseline` record before classifying and (possibly) triggering
+        // a scrub. Like `open` it must return a `Result`, never panic, for any
+        // device contents (`AGENTS.md` §2.9 / §19.6).
+        let _ = fs.health(&AllCaps, &NullSink);
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().store;
         let _ = RustFs::open(MemBlock { store: bytes }, &FUZZ_KEY);

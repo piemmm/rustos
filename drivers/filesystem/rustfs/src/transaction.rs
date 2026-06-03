@@ -31,10 +31,11 @@ const P_NEXT_INO: usize = HEADER_LEN + 16;
 const P_CHUNK_TREE_ROOT: usize = HEADER_LEN + 24;
 const P_REVERSE_REF_TREE_ROOT: usize = HEADER_LEN + 32;
 const P_SCRUB_PROGRESS_ROOT: usize = HEADER_LEN + 40;
-const P_COMMIT_MAGIC: usize = HEADER_LEN + 48;
-const P_COMMIT_GENERATION: usize = HEADER_LEN + 56;
+const P_HEALTH_BASELINE_ROOT: usize = HEADER_LEN + 48;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 56;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 64;
 /// Bytes of meaningful transaction-root payload following the header.
-const PAYLOAD_LEN: u32 = 64;
+const PAYLOAD_LEN: u32 = 72;
 
 fn rd_u64(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
@@ -69,6 +70,13 @@ pub struct TxnRoot {
     /// §12); a crash mid-scrub leaves it set but never blocks an ordinary
     /// mount (§14).
     pub scrub_progress_root: u64,
+    /// Physical block of the device-health baseline record, or `0` when no
+    /// baseline has been stored yet. It holds the last clean device-health
+    /// snapshot and the volume's accumulated filesystem-observed fault
+    /// counters (`docs/src/filesystem/rustfs-spec.md` §4, §11); a crash
+    /// mid-update leaves the previous baseline (or none) selected and never
+    /// blocks an ordinary mount (§14).
+    pub health_baseline_root: u64,
 }
 
 impl TxnRoot {
@@ -98,6 +106,7 @@ impl TxnRoot {
         wr_u64(block, P_CHUNK_TREE_ROOT, self.chunk_tree_root);
         wr_u64(block, P_REVERSE_REF_TREE_ROOT, self.reverse_ref_tree_root);
         wr_u64(block, P_SCRUB_PROGRESS_ROOT, self.scrub_progress_root);
+        wr_u64(block, P_HEALTH_BASELINE_ROOT, self.health_baseline_root);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -144,6 +153,7 @@ impl TxnRoot {
             chunk_tree_root: rd_u64(block, P_CHUNK_TREE_ROOT),
             reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
+            health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
         })
     }
 
@@ -177,6 +187,7 @@ impl TxnRoot {
             chunk_tree_root: rd_u64(block, P_CHUNK_TREE_ROOT),
             reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
+            health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
         })
     }
 }

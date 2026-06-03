@@ -216,6 +216,31 @@ and no live data is lost. `trim` returns a structured `TrimReport` and logs its
 outcome with a stable event ID. `RustFs::format` issues a full-range discard on
 a discard-capable device before laying down the encrypted structures.
 
+## Device health and health-triggered scrub (`rustfs-spec.md` §11, §15.11)
+
+`rustfs` tracks the volume's health to decide *when* a scrub is worth running,
+reusing the earlier stages' seams (`AGENTS.md` §2.2). The `Block` ABI gains a
+versioned `device_health() -> DeviceHealth` surface (`Available(HealthSnapshot)`
+of SMART/NVMe-style counters, or `Unavailable` — *recorded, not failed*, default
+`Unavailable`). A self-identifying `BlockType::HealthBaseline` block reached from
+the transaction root (like the Stage-8 scrub-progress record) **persists** the
+last clean device snapshot plus the volume's accumulated filesystem-observed
+fault counters — metadata copy-repairs/unrepairable (Stage-3 seam) and per-class
+data faults (Stage-5 seam); both are persisted because a repaired transient
+fault leaves no trace in the live trees (§4). `format` stores the initial
+baseline, and a crash mid-update leaves the previous committed baseline selected
+(§14).
+
+`RustFs::health`, **capability-gated** on `CAP_FS_MOUNT`, reads the current
+telemetry, classifies the volume against the documented
+`HealthThresholds::DEFAULT` (`Healthy` / `Degraded` / `Failing`, the worse of the
+device and filesystem signals — no magic numbers, `AGENTS.md` §2.1), and — when
+the device's unsafe-shutdown or media-error counters have risen since the
+baseline — **triggers a scrub** through the Stage-8 `scrub` machinery (never a
+parallel verifier, §2.2), folding its findings into the counters. It stores the
+current telemetry as the new baseline and returns a structured `HealthReport`,
+logging its outcome with stable event IDs in the `rustfs` `12000..13000` range.
+
 ## Crash consistency (copy-on-write + superblock ring)
 
 Every operation is a transaction. A block reachable from the last
@@ -254,7 +279,13 @@ so a delete can copy-on-write itself even on a full volume. No
 > file extractor (Stage 9), and **safe TRIM/discard** — a block-device discard
 > capability, a rebuildable pending-discard queue that discards only
 > still-unreachable ranges (batched, granularity-aligned, rate-limited), and
-> mkfs-time full-range discard (Stage 10). The remaining stages stay in the
+> mkfs-time full-range discard (Stage 10), and **device-health baselines and
+> health-triggered scrub** — a block-device health surface, a persisted
+> self-identifying baseline of the last clean device snapshot plus accumulated
+> filesystem-observed fault counters, a structured `HealthReport` classified
+> against documented thresholds, and a scrub triggered through the Stage-8
+> machinery when a device-health delta crosses a threshold (Stage 11). The
+> remaining stages stay in the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -269,7 +300,8 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 - `CAP_DRV_LOAD` at `register` time.
 - `CAP_FS_MOUNT` to run `RustFs::scrub` (online verify-and-repair),
   `RustFs::check` (offline structural validation/rebuild), `RustFs::rescue`
-  (damaged-volume extraction), and `RustFs::trim` (TRIM/discard); without it
+  (damaged-volume extraction), `RustFs::trim` (TRIM/discard), and
+  `RustFs::health` (device-health pass + health-triggered scrub); without it
   each fails closed with `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
@@ -327,7 +359,14 @@ blocks coalescing into one granularity-aligned range, inward alignment
 requeuing the unaligned edges, per-request-cap splitting, batch rate-limiting
 that drains over passes, a reallocated and a still-dedupe-shared block never
 being discarded, the transient queue dropping across a crash with no live data
-lost, and mkfs full-range discard recorded-not-failed without support), and a
+lost, and mkfs full-range discard recorded-not-failed without support), the
+Stage-11 device-health tests (the `CAP_FS_MOUNT` gate, a no-telemetry device
+still classifying and persisting a baseline that survives a remount, the
+classification crossing healthy → degraded → failing as the device media-error
+count climbs, an unsafe-shutdown delta triggering a Stage-8 scrub with the
+advanced baseline triggering no further scrub, and the persisted baseline
+surviving a crash at every write count during its update with no live data
+lost), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
@@ -341,7 +380,8 @@ and since Stage 8 also drives the scrub-progress record decode by running a
 bounded scrub on every successful mount, and since Stage 9 also runs the
 offline `check` on every successful mount and feeds every image to
 `RustFs::rescue`, driving the transaction-root scan and extraction decode
-paths)
+paths, and since Stage 11 reports SMART-style telemetry and runs `health` on
+every successful mount, driving the health-baseline record decode path)
 and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
 (`AGENTS.md` §19.6).
 

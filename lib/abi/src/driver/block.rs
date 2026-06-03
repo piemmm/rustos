@@ -59,6 +59,68 @@ impl DiscardCapability {
     }
 }
 
+/// A point-in-time device-health snapshot, modelled on the `SMART` / `NVMe`
+/// telemetry a storage device exposes
+/// (`docs/src/filesystem/rustfs-spec.md` §11).
+///
+/// A filesystem uses it to decide *when* maintenance (a scrub) is worth
+/// running and whether a device is degrading, by comparing successive
+/// snapshots against a stored baseline. Every counter is monotonic over a
+/// device's lifetime, so a later snapshot minus an earlier one is the
+/// activity in between.
+///
+/// A device that exposes no health telemetry reports
+/// [`DeviceHealth::Unavailable`] rather than a zeroed snapshot, so an
+/// absence of data is never mistaken for a perfectly-healthy device
+/// (§11 — *recorded, not failed*).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HealthSnapshot {
+    /// Cumulative powered-on time, in hours. Informational.
+    pub power_on_hours: u64,
+    /// Cumulative count of unsafe / unexpected shutdowns. A rise since the
+    /// last clean baseline is what schedules a metadata scrub (§11).
+    pub unsafe_shutdowns: u64,
+    /// Cumulative media / data-integrity errors the device itself detected.
+    /// A rise since the baseline is what schedules a deep scrub (§11).
+    pub media_errors: u64,
+    /// Cumulative reallocated sectors (ATA) / relocated blocks.
+    pub reallocated_sectors: u64,
+    /// Cumulative sectors pending reallocation.
+    pub pending_sectors: u64,
+    /// Cumulative uncorrectable sectors / blocks.
+    pub uncorrectable_sectors: u64,
+    /// Cumulative interface CRC errors.
+    pub crc_errors: u64,
+    /// Wear indicator: estimated percentage of rated endurance used. `NVMe`
+    /// may report values above `100`, so this is not clamped.
+    pub percentage_used: u16,
+    /// Remaining spare capacity, as a percentage (`0..=100`). A low value
+    /// is a strong failing signal.
+    pub available_spare: u16,
+    /// Composite device temperature, in kelvin. Informational.
+    pub temperature_kelvin: u16,
+    /// `true` when the device itself asserts a critical-health warning
+    /// (e.g. an `NVMe` critical-warning bit). The strongest failing signal.
+    pub critical_warning: bool,
+}
+
+/// The health a block device reports through [`Block::device_health`].
+///
+/// Either the device exposes telemetry ([`DeviceHealth::Available`]) or it
+/// does not ([`DeviceHealth::Unavailable`]). The two states are kept
+/// distinct so a caller never confuses "no data" with "all counters zero"
+/// (`docs/src/filesystem/rustfs-spec.md` §11). A device without telemetry
+/// is *recorded, not failed*: the filesystem's health subsystem stays
+/// enabled regardless.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeviceHealth {
+    /// The device exposes no health telemetry.
+    Unavailable,
+    /// A health snapshot read from the device's telemetry.
+    Available(HealthSnapshot),
+}
+
 /// Trait every block driver implements.
 ///
 /// # Capabilities
@@ -245,6 +307,30 @@ pub trait Block {
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
         let _ = (lba, blocks);
         Err(DriverError::Unsupported)
+    }
+
+    /// Report the device's current health telemetry
+    /// (`docs/src/filesystem/rustfs-spec.md` §11).
+    ///
+    /// Reading health is non-destructive and never fails on a healthy
+    /// device. The default implementation reports
+    /// [`DeviceHealth::Unavailable`]; a driver whose backend exposes
+    /// `SMART` / `NVMe`-style telemetry overrides it. A device without
+    /// telemetry is *recorded, not failed* by the caller (§11), so this
+    /// method does not error merely because health data is unavailable.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the underlying hardware could
+    ///   not be queried.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(DeviceHealth::Unavailable)
     }
 }
 
@@ -548,6 +634,66 @@ mod tests {
         assert_eq!(dev.discard(14, 4), Err(DriverError::LengthOutOfRange));
         assert_eq!(dev.recorded, 1);
         assert_eq!(dev.discarded[0], (4, 4));
+    }
+
+    /// A `Block` device that exposes a fixed health snapshot, mirroring the
+    /// shape a real `SMART` / `NVMe` backend would report and the form the
+    /// `RustFS` health tests assert against.
+    struct HealthyBlock {
+        geo: BlockGeometry,
+        snapshot: HealthSnapshot,
+    }
+
+    impl Block for HealthyBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(self.geo)
+        }
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+            Ok(DeviceHealth::Available(self.snapshot))
+        }
+    }
+
+    #[test]
+    fn default_health_surface_reports_unavailable() {
+        let dev = MockBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            store: [0u8; 1024],
+        };
+        assert_eq!(dev.device_health(), Ok(DeviceHealth::Unavailable));
+    }
+
+    #[test]
+    fn health_block_reports_its_snapshot() {
+        let snapshot = HealthSnapshot {
+            power_on_hours: 1234,
+            unsafe_shutdowns: 3,
+            media_errors: 7,
+            reallocated_sectors: 1,
+            pending_sectors: 0,
+            uncorrectable_sectors: 2,
+            crc_errors: 0,
+            percentage_used: 42,
+            available_spare: 88,
+            temperature_kelvin: 310,
+            critical_warning: false,
+        };
+        let dev = HealthyBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            snapshot,
+        };
+        assert_eq!(dev.device_health(), Ok(DeviceHealth::Available(snapshot)));
     }
 
     #[test]

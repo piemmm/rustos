@@ -68,6 +68,7 @@ mod crypto;
 mod dedupe;
 mod discard;
 mod header;
+mod health;
 mod integrity;
 mod scrub;
 mod superblock;
@@ -82,6 +83,7 @@ use crypto::{
 };
 pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
 pub use discard::{TrimReport, TRIM_BATCH_RANGES};
+pub use health::{HealthReport, HealthState, HealthThresholds};
 use integrity::{
     logical_hash, physical_checksum, read_compression, write_compression, Compression, DataFault,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
@@ -393,6 +395,12 @@ pub struct RustFs<B: Block> {
     /// is mid-pass. Rebuildable metadata reached from the transaction root
     /// (`scrub` module, `docs/src/filesystem/rustfs-spec.md` §4, §12).
     scrub_progress_root: u64,
+    /// Physical block of the device-health baseline record, `0` until a
+    /// baseline is stored (`format` stores the first one). It holds the last
+    /// clean device-health snapshot and the volume's accumulated
+    /// filesystem-observed fault counters, reached from the transaction root
+    /// (`health` module, `docs/src/filesystem/rustfs-spec.md` §4, §11).
+    health_baseline_root: u64,
     /// The volume's deduplication domain (`crypto` module, §7). Dedupe never
     /// crosses it.
     dedupe_domain: u64,
@@ -425,6 +433,7 @@ pub struct RustFs<B: Block> {
     saved_chunk_tree_root: u64,
     saved_reverse_ref_tree_root: u64,
     saved_scrub_progress_root: u64,
+    saved_health_baseline_root: u64,
     alloc_cursor: u64,
     meta_cursor: u64,
     clock: fn() -> Time64,
@@ -910,6 +919,7 @@ impl<B: Block> RustFs<B> {
         self.saved_chunk_tree_root = self.chunk_tree_root;
         self.saved_reverse_ref_tree_root = self.reverse_ref_tree_root;
         self.saved_scrub_progress_root = self.scrub_progress_root;
+        self.saved_health_baseline_root = self.health_baseline_root;
     }
 
     /// Discard an operation that failed before committing: restore the inode
@@ -921,6 +931,7 @@ impl<B: Block> RustFs<B> {
         self.chunk_tree_root = self.saved_chunk_tree_root;
         self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
         self.scrub_progress_root = self.saved_scrub_progress_root;
+        self.health_baseline_root = self.saved_health_baseline_root;
         let allocated = core::mem::take(&mut self.txn_allocated);
         for block in allocated {
             self.mark_free(block);
@@ -985,6 +996,7 @@ impl<B: Block> RustFs<B> {
             chunk_tree_root: self.chunk_tree_root,
             reverse_ref_tree_root: self.reverse_ref_tree_root,
             scrub_progress_root: self.scrub_progress_root,
+            health_baseline_root: self.health_baseline_root,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, &buf)?;
@@ -1044,6 +1056,7 @@ impl<B: Block> RustFs<B> {
             chunk_tree_root: 0,
             reverse_ref_tree_root: 0,
             scrub_progress_root: 0,
+            health_baseline_root: 0,
             dedupe_domain: 0,
             dedupe_index: BTreeMap::new(),
             root_phys: 0,
@@ -1058,6 +1071,7 @@ impl<B: Block> RustFs<B> {
             saved_chunk_tree_root: 0,
             saved_reverse_ref_tree_root: 0,
             saved_scrub_progress_root: 0,
+            saved_health_baseline_root: 0,
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks - 1,
             clock: epoch_clock,
@@ -1129,6 +1143,12 @@ impl<B: Block> RustFs<B> {
         fs.extent_assign(&mut root, ROOT_INO, 0, db)?;
         root.size = bs as u64;
         fs.write_inode(ROOT_INO, &root)?;
+        // mkfs stores a device-health baseline: the initial clean snapshot the
+        // next mount compares against (`docs/src/filesystem/rustfs-spec.md`
+        // §11). A device without health telemetry stores an `Unavailable`
+        // baseline (recorded, not failed) and the health subsystem stays
+        // enabled regardless.
+        fs.store_initial_health_baseline()?;
         fs.commit()?;
         Ok(fs)
     }
@@ -1200,6 +1220,7 @@ impl<B: Block> RustFs<B> {
         fs.chunk_tree_root = root.chunk_tree_root;
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
         fs.scrub_progress_root = root.scrub_progress_root;
+        fs.health_baseline_root = root.health_baseline_root;
 
         // Rebuild the free-block bitmap by walking the live trees (§4 — free
         // space is rebuildable).
@@ -1346,6 +1367,9 @@ impl<B: Block> RustFs<B> {
         self.mark_meta_used(self.root_phys);
         if self.scrub_progress_root != 0 {
             self.mark_meta_used(self.scrub_progress_root);
+        }
+        if self.health_baseline_root != 0 {
+            self.mark_meta_used(self.health_baseline_root);
         }
         for node in self.btree_collect_nodes(self.chunk_tree_root, chunk_spec())? {
             self.mark_meta_used(node);

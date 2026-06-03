@@ -4134,7 +4134,33 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    over passes, a reallocated and a still-dedupe-shared block never
    discarded, the transient queue dropping across a crash with no live data
    lost, and mkfs full-range discard (recorded-not-failed without support).)
-11. Device-health baselines and health-triggered scrub.
+11. Device-health baselines and health-triggered scrub. (**DONE** this
+   session: the `Block` ABI gained a versioned `device_health()` surface
+   (`DeviceHealth::Available(HealthSnapshot)` of SMART/NVMe-style counters, or
+   `Unavailable` — *recorded, not failed*, default `Unavailable`), an `abi-v1`
+   extension alongside the discard surface. A self-identifying
+   `BlockType::HealthBaseline` block reached from the transaction root (like the
+   Stage-8 scrub-progress record) **persists** the last clean device snapshot
+   plus the volume's accumulated filesystem-observed fault counters — metadata
+   copy-repairs/unrepairable (Stage-3 seam) and per-class `DataFault`s (Stage-5
+   seam); both are persisted, not rebuildable, because a repaired transient
+   fault leaves no trace in the live trees (§4). `format` stores the initial
+   baseline; a crash mid-update leaves the previous committed baseline selected
+   (§14). `RustFs::health` (`src/health.rs`), capability-gated on
+   `CAP_FS_MOUNT`, reads the current telemetry, classifies the volume against
+   the documented `HealthThresholds::DEFAULT` (`Healthy`/`Degraded`/`Failing`,
+   worse of device + filesystem signals, no magic numbers, §2.1), and — when
+   the device's unsafe-shutdown (metadata scrub) or media-error (deep scrub)
+   counter has risen since the baseline — **triggers a scrub** through the
+   Stage-8 machinery (no parallel verifier, §2.2), folding its findings into the
+   counters; it stores the new baseline, returns a structured `HealthReport`,
+   and logs with `12000`-range event IDs (`src/health.rs`). Tested: the
+   capability gate, a no-telemetry device still classifying and persisting a
+   baseline surviving a remount, healthy → degraded → failing as media errors
+   climb, an unsafe-shutdown delta triggering a scrub (advanced baseline
+   triggers no further scrub), and the persisted baseline surviving a crash at
+   every write count with no live data lost; `fuzz_mount` extended to report
+   telemetry and drive the health-baseline decode path.)
 12. Fuzz, proptest, crash-replay, and corruption-injection suites.
 
 **Docs**
@@ -4142,7 +4168,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–10 complete; Stages 11–12 planned.** The copy-on-write
+**Status: Stages 1–11 complete; Stage 12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

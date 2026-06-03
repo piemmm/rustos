@@ -447,6 +447,67 @@ read discard capability → full-range discard when supported → create structu
 → flush). A device without discard support is recorded, not failed: a fresh
 volume is still created and mounts.
 
+## Device health and health-triggered scrub (`rustfs-spec.md` §11, §15.11)
+
+`rustfs` keeps a notion of the volume's health so it can decide *when* a scrub
+is worth running, rather than only running one on demand. It reuses the seams
+the earlier stages built (`AGENTS.md` §2.2) and never adds a second integrity
+or scrub path.
+
+**The block-device health surface.** The `Block` ABI exposes
+`device_health() -> DeviceHealth` (an `abi-v1` extension alongside the discard
+surface, never a widening of the frozen read/write methods, `AGENTS.md` §2.4 /
+§9). It returns either `Available(HealthSnapshot)` — the SMART / NVMe-style
+counters (power-on hours, unsafe shutdowns, media/data-integrity errors,
+reallocated/pending/uncorrectable sectors, interface CRC errors, wear,
+available spare, temperature, a device critical-warning bit) — or
+`Unavailable`. The two states are distinct so "no data" is never confused with
+"all counters zero"; a device without telemetry is *recorded, not failed* and
+the health subsystem stays enabled (§11). The default implementation reports
+`Unavailable`, so a backend with no telemetry needs no code.
+
+**The persisted baseline.** A self-identifying `BlockType::HealthBaseline`
+block, reached from the transaction root (exactly like the Stage-8
+scrub-progress record), stores the **last clean device-health snapshot** the
+next pass compares against, plus the volume's **accumulated
+filesystem-observed fault counters** — metadata copy-repairs and
+both-copies-bad blocks (the Stage-3 companion-repair seam) and per-class data
+faults (`Physical` / `Aead` / `Logical`, the Stage-5 seam). Both are
+**persisted**, not rebuildable (§4): a transient fault that was repaired leaves
+no trace in the live trees, so the count is only durable if it is written down.
+The block is the single source of truth; `format` stores the initial baseline
+at mkfs time, and a crash mid-update leaves the previous committed baseline (or
+none) selected and never blocks a mount (§14). A corrupt baseline is simply
+re-established at the next clean pass (§4), never a mount failure.
+
+**The report and thresholds.** `RustFs::health` returns a structured
+`HealthReport` (mirroring `ScrubReport` / `CheckReport` / `TrimReport`) that
+classifies the volume against the documented `HealthThresholds::DEFAULT` —
+`Healthy`, `Degraded`, or `Failing` — taking the worse of the device-reported
+signal and the accumulated filesystem-observed signal. The thresholds are
+explicit, named, and inspectable, with no magic numbers buried in code
+(`AGENTS.md` §2.1 / §11): a single repaired metadata block, a single data
+fault, or any device media error raises a watch-level (`Degraded`) signal,
+while accumulated faults, a device critical warning, exhausted spare, or
+worn-out media raise an act-now (`Failing`) signal. Critical single-device
+health additionally sets `read_only_recommended` (§11).
+
+**Health-triggered scrub.** When the device's unsafe-shutdown counter has risen
+since the baseline a metadata scrub is scheduled; when its media-error counter
+has risen a deep scrub is scheduled (§11). `health` acts on the recommendation
+by running the **Stage-8 `scrub`** — its `CAP_FS_MOUNT` gate, its budget, its
+resumable/interrupt-safe core — never a parallel verifier (`AGENTS.md` §2.2),
+and folds the scrub's findings into the accumulated counters. It then stores
+the current telemetry as the new baseline so the next pass measures a fresh
+delta (a pass with no new device activity triggers no scrub).
+
+`health` is **capability-gated** on `CAP_FS_MOUNT` (the mount-management
+capability that already gates scrub/check/trim; fail-closed and logged
+otherwise, `AGENTS.md` §5.4) and logs its classification — and any triggered
+scrub — through `lib/log` with stable event IDs in the `rustfs`
+`12000..13000` range (`HEALTH_OK` / `HEALTH_DEGRADED` / `HEALTH_FAILING` /
+`HEALTH_SCRUB_TRIGGERED` / `HEALTH_DENIED`).
+
 ## Timestamps (§21)
 
 Every inode stores four 64-bit-native `Time64` timestamps —
@@ -639,6 +700,14 @@ fix, check being **capability-gated**, `rescue` **discovering a valid root and
 extracting** files from a volume whose superblock ring is wounded (and being
 read-only/repeatable), and `rescue` **never emitting a block that fails** the
 Stage 5/6 integrity pipeline while still recovering the good blocks; the
+Stage-11 device-health acceptance tests — `health` being **capability-gated**
+on `CAP_FS_MOUNT` (refused and logged otherwise), a device **without telemetry**
+still classifying and persisting a baseline that survives a remount, the
+classification crossing **healthy → degraded → failing** as the device's
+media-error count climbs across mounts, an **unsafe-shutdown delta triggering a
+scrub** through the Stage-8 machinery (and the advanced baseline triggering no
+further scrub), and the persisted baseline **surviving a crash** at every write
+count during its update with no live data lost; the
 per-inode security record and
 the four §21 `Time64` timestamps (incl. pre-1970 and far-future)
 round-tripping across a remount; superblock-ring selection of the
@@ -663,7 +732,10 @@ a **paused scrub**, and each successful mount additionally runs a bounded
 Stage 9 each successful mount additionally runs the offline `check`, and every
 image (mountable or not) is also fed to `RustFs::rescue`, so the sweep drives
 the **transaction-root scan** (`TxnRoot::decode_any`) and the rescue extraction
-pipeline over arbitrary bytes, asserting both never panic and fail closed. The
+pipeline over arbitrary bytes, asserting both never panic and fail closed. Since
+Stage 11 the fuzz device reports SMART-style telemetry and each successful mount
+additionally runs `health`, so the sweep drives the **health-baseline** record
+decode path too, asserting it never panics and fails closed. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`rustfs-spec.md` §10,

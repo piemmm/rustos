@@ -563,7 +563,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 8 | Online scrub. | ✓ |
 | 9 | Offline check and rescue. | ✓ |
 | 10 | TRIM/discard queues and mkfs-time discard. | ✓ |
-| 11 | Device health baselines and health-triggered scrub. | |
+| 11 | Device health baselines and health-triggered scrub. | ✓ |
 | 12 | Fuzz, proptest, crash-replay, and corruption-injection suites. | |
 
 Stage 1 landed as the copy-on-write `rustfs` driver: self-identifying
@@ -819,5 +819,42 @@ discarded, the transient queue dropping across a crash with no live data lost,
 and mkfs full-range discard (recorded-not-failed without support) — all pass,
 alongside the crash-replay sweep, the 1 GiB `fssoak`, the posix suite, the QEMU
 vertical, and the `fuzz_mount` harness (the discard queue is pure in-memory
-transient state and adds no on-disk decode path). Stages 11–12 remain; each
-implementing session ticks this table and `PLAN.md`.
+transient state and adds no on-disk decode path).
+
+Stage 11 added **device-health baselines and health-triggered scrub** (§11,
+§15.11), giving RustFS a notion of the volume's health so it can decide *when* a
+scrub is worth running, reusing the earlier stages' seams rather than a second
+integrity or scrub path (`AGENTS.md` §2.2). The `Block` ABI gained a versioned
+`device_health()` surface returning `DeviceHealth::Available(HealthSnapshot)` —
+the SMART/NVMe-style counters the §11 health-field list enumerates — or
+`DeviceHealth::Unavailable` (a device without telemetry is *recorded, not
+failed*; the default implementation reports `Unavailable`). A self-identifying
+`BlockType::HealthBaseline` block reached from the transaction root (like the
+Stage-8 scrub-progress record) **persists** the last clean device snapshot the
+next pass compares against plus the volume's accumulated filesystem-observed
+fault counters — metadata copy-repairs/unrepairable (the Stage-3 companion seam)
+and per-class `DataFault`s (the Stage-5 seam); both are persisted, not
+rebuildable, because a repaired transient fault leaves no trace in the live
+trees (§4). `format` stores the initial baseline at mkfs time, and a crash
+mid-update leaves the previous committed baseline (or none) selected and never
+blocks a mount (§14). `RustFs::health` is an inherent driver operation
+**capability-gated** on `CAP_FS_MOUNT` (refused fail-closed and logged
+otherwise, §5.4): it reads the current telemetry, classifies the volume against
+the documented `HealthThresholds::DEFAULT` (`Healthy` / `Degraded` / `Failing`,
+taking the worse of the device and filesystem signals — no magic numbers, §2.1)
+and — when the device's unsafe-shutdown counter (a metadata scrub) or
+media-error counter (a deep scrub) has risen since the baseline — **triggers a
+scrub** through the Stage-8 machinery (its gate, budget, and resumable core,
+never a parallel verifier), folding its findings into the counters. It then
+stores the current telemetry as the new baseline, returns a structured
+`HealthReport`, and logs its classification (and any triggered scrub) with
+stable event IDs in the `rustfs` `12000..13000` range. The §16 acceptance tests
+for this stage — the capability gate, a no-telemetry device still classifying
+and persisting a baseline that survives a remount, the classification crossing
+healthy → degraded → failing as the device media-error count climbs, an
+unsafe-shutdown delta triggering a Stage-8 scrub (and the advanced baseline
+triggering no further scrub), and the persisted baseline surviving a crash at
+every write count during its update with no live data lost — all pass, alongside
+the crash-replay sweep, the 1 GiB `fssoak`, the posix suite, the QEMU vertical,
+and the `fuzz_mount` harness extended to drive the health-baseline decode path.
+Stage 12 remains; each implementing session ticks this table and `PLAN.md`.

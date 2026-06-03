@@ -6,7 +6,7 @@
 //! in-memory [`MemBlock`] double.
 
 use super::*;
-use rustos_abi::driver::block::DiscardCapability;
+use rustos_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeKind,
 };
@@ -23,6 +23,7 @@ struct MemBlock {
     write_budget: Option<u32>,
     discard: Option<DiscardCapability>,
     discarded: alloc::vec::Vec<(u64, u64)>,
+    health: DeviceHealth,
 }
 
 impl MemBlock {
@@ -36,6 +37,7 @@ impl MemBlock {
             write_budget: None,
             discard: None,
             discarded: alloc::vec::Vec::new(),
+            health: DeviceHealth::Unavailable,
         }
     }
 
@@ -48,7 +50,15 @@ impl MemBlock {
             write_budget: None,
             discard: None,
             discarded: alloc::vec::Vec::new(),
+            health: DeviceHealth::Unavailable,
         }
+    }
+
+    /// Set the health telemetry this device reports, so the health path can
+    /// be exercised with a known snapshot.
+    fn with_health(mut self, health: DeviceHealth) -> Self {
+        self.health = health;
+        self
     }
 
     fn bytes(&self) -> alloc::vec::Vec<u8> {
@@ -110,6 +120,10 @@ impl Block for MemBlock {
 
     fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
         Ok(self.discard.unwrap_or_else(DiscardCapability::unsupported))
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(self.health)
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
@@ -2659,4 +2673,212 @@ fn the_discard_queue_is_transient_across_a_remount() {
         fs.lookup(fs.root(), b"gone").is_err(),
         "the removed file stays removed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 11: device-health baselines and health-triggered scrub.
+// ---------------------------------------------------------------------------
+
+/// A benign device-health snapshot: every failing/degraded counter is clear
+/// and spare/wear are healthy, so only the fields a test varies move the
+/// classification.
+fn healthy_snapshot(unsafe_shutdowns: u64, media_errors: u64) -> HealthSnapshot {
+    HealthSnapshot {
+        power_on_hours: 100,
+        unsafe_shutdowns,
+        media_errors,
+        reallocated_sectors: 0,
+        pending_sectors: 0,
+        uncorrectable_sectors: 0,
+        crc_errors: 0,
+        percentage_used: 0,
+        available_spare: 100,
+        temperature_kelvin: 300,
+        critical_warning: false,
+    }
+}
+
+/// Format a 4096-byte volume reporting `health`, then return it mounted.
+fn fmt_health(block_count: u64, health: DeviceHealth) -> RustFs<MemBlock> {
+    RustFs::format(
+        MemBlock::new(4096, block_count).with_health(health),
+        128,
+        &TEST_KEY,
+    )
+    .expect("format with health")
+    .with_clock(fixed_clock)
+}
+
+/// Reopen a 4096-byte volume from `bytes`, reporting `health`.
+fn open_health(
+    bytes: alloc::vec::Vec<u8>,
+    block_count: u64,
+    health: DeviceHealth,
+) -> RustFs<MemBlock> {
+    RustFs::open(
+        MemBlock::from_bytes(bytes, 4096, block_count).with_health(health),
+        &TEST_KEY,
+    )
+    .expect("reopen with health")
+}
+
+#[test]
+fn health_requires_the_fs_mount_capability() {
+    // Reading health (which may trigger a scrub) is capability-gated like the
+    // other privileged FS operations (§13, `AGENTS.md` §5.4): without
+    // `CAP_FS_MOUNT` it fails closed and logs the refusal.
+    let mut fs = fmt_health(256, DeviceHealth::Unavailable);
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.health(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(health::HEALTH_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn health_on_a_device_without_telemetry_still_classifies_and_persists() {
+    // A device that exposes no telemetry still gets a working health
+    // subsystem: the pass classifies from the filesystem-observed counters
+    // alone, persists a baseline block, and never triggers a scrub it has no
+    // signal for (§11; `HealthUnavailable`).
+    let mut fs = fmt_health(256, DeviceHealth::Unavailable);
+    assert_ne!(
+        fs.health_baseline_root, 0,
+        "mkfs stored an initial baseline block"
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(report.state, HealthState::Healthy);
+    assert!(report.device.is_none(), "no telemetry");
+    assert!(report.scrub.is_none(), "no signal, no scrub");
+    assert!(!report.read_only_recommended);
+
+    // The baseline persists across a remount (it is reached from the root).
+    let bytes = fs.into_block().bytes();
+    let mut fs = open_health(bytes, 256, DeviceHealth::Unavailable);
+    assert_ne!(
+        fs.health_baseline_root, 0,
+        "the baseline survived the remount"
+    );
+    let again = fs.health(&GrantAll, &NullSink).expect("health again");
+    assert_eq!(again.state, HealthState::Healthy);
+}
+
+#[test]
+fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
+    // As the device's media-error count climbs across mounts, the volume's
+    // classification crosses the documented thresholds: healthy → degraded →
+    // failing (§11; no magic numbers — see `HealthThresholds::DEFAULT`).
+    let t = HealthThresholds::DEFAULT;
+
+    let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    let report = fs.health(&GrantAll, &NullSink).expect("health clean");
+    assert_eq!(report.state, HealthState::Healthy, "{report:?}");
+    let bytes = fs.into_block().bytes();
+
+    // Media errors at the degraded threshold but below failing.
+    let degraded_errors = t.degraded_media_errors;
+    let mut fs = open_health(
+        bytes,
+        256,
+        DeviceHealth::Available(healthy_snapshot(0, degraded_errors)),
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health degraded");
+    assert_eq!(report.state, HealthState::Degraded, "{report:?}");
+    assert!(
+        report.deep_scrub_recommended,
+        "a media-error delta is a deep scrub"
+    );
+    let bytes = fs.into_block().bytes();
+
+    // Media errors at the failing threshold.
+    let mut fs = open_health(
+        bytes,
+        256,
+        DeviceHealth::Available(healthy_snapshot(0, t.failing_media_errors)),
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health failing");
+    assert_eq!(report.state, HealthState::Failing, "{report:?}");
+    assert!(
+        report.read_only_recommended,
+        "critical device health recommends a read-only mount"
+    );
+}
+
+#[test]
+fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
+    // An unsafe-shutdown delta since the last clean baseline schedules a
+    // metadata scrub, run through the Stage-8 machinery (§11; `AGENTS.md`
+    // §2.2 — no parallel verifier). Once the baseline advances, a pass with no
+    // further delta does not re-scrub.
+    let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    fs.health(&GrantAll, &NullSink).expect("establish baseline");
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
+    let sink = RecordingSink::new();
+    let report = fs.health(&GrantAll, &sink).expect("health");
+    assert_eq!(report.unsafe_shutdown_delta, 3);
+    assert!(report.metadata_scrub_recommended);
+    assert!(report.scrub.is_some(), "the recommendation was acted on");
+    assert!(
+        sink.saw(health::HEALTH_SCRUB_TRIGGERED),
+        "the trigger is logged"
+    );
+    assert!(
+        sink.saw(scrub::SCRUB_CLEAN),
+        "the triggered scrub ran and logged its outcome"
+    );
+    assert_eq!(report.scrubs_triggered, 1);
+
+    // The baseline has advanced to the new snapshot, so a second pass with the
+    // same telemetry sees no delta and triggers no scrub.
+    let bytes = fs.into_block().bytes();
+    let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
+    let report = fs.health(&GrantAll, &NullSink).expect("health 2");
+    assert_eq!(report.unsafe_shutdown_delta, 0);
+    assert!(report.scrub.is_none(), "no new delta, no scrub");
+    assert_eq!(report.scrubs_triggered, 1, "the lifetime count persisted");
+}
+
+#[test]
+fn health_baseline_survives_a_crash_during_its_update() {
+    // The persisted baseline is updated inside a copy-on-write transaction, so
+    // a power loss at any write count during a health pass leaves a mountable
+    // volume with no live data lost (§4, §14): either the new baseline
+    // committed in full or the previous one remains selected.
+    let mut base = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    let root = base.root();
+    base.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    base.write_at(root, b"keep", 0, b"baseline")
+        .expect("write keep");
+    base.health(&GrantAll, &NullSink)
+        .expect("establish baseline");
+    let baseline = base.into_block().bytes();
+
+    for budget in 0..96u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 4096, 256)
+            .with_health(DeviceHealth::Available(healthy_snapshot(5, 5)));
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
+        // The health pass (a scrub plus a baseline commit) may be cut short.
+        let _ = fs.health(&GrantAll, &NullSink);
+        let bytes = fs.into_block().bytes();
+
+        // Re-open from the (possibly torn) image: it must mount, the file must
+        // be intact, and a fresh health pass must still succeed.
+        let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(5, 5)));
+        let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
+        let mut buf = [0u8; 8];
+        let n = fs.read_at(keep, 0, &mut buf).expect("read keep");
+        assert_eq!(
+            &buf[..n],
+            b"baseline",
+            "live data is never lost (budget {budget})"
+        );
+        assert_ne!(fs.health_baseline_root, 0, "a baseline is always selected");
+        fs.health(&GrantAll, &NullSink)
+            .expect("health works after the crash");
+    }
 }
