@@ -1,0 +1,497 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Kernel syscall subsystem - RustOS</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Architecture, security model, and platform reference for RustOS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "ayu";
+            window.path_to_searchindex_js = "../searchindex-eb0bbf16.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-e5bd170d.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RustOS</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos/edit/main/docs/src/architecture/syscalls.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="kernel-syscall-subsystem"><a class="header" href="#kernel-syscall-subsystem">Kernel syscall subsystem</a></h1>
+<p>This page documents the architecture-neutral half of the RustOS syscall
+ABI delivered by Stage 2.7 of <code>PLAN.md</code>: the frozen <code>abi-v1</code> table in
+<code>rustos_abi::syscalls</code> and the generated kernel dispatcher in
+<code>rustos_kernel_syscall::table</code>. The full rustdoc for those modules is
+published alongside this book; refer to the <code>cargo doc --no-deps</code> output
+in <code>target/doc/</code> for the per-item documentation.</p>
+<p>Per-architecture entry stubs that marshal real syscall registers into a
+<code>RawArgs</code> tuple are delivered separately by Stage 3 and are <em>out of
+scope</em> for this page.</p>
+<h2 id="cross-checked-source-of-truth"><a class="header" href="#cross-checked-source-of-truth">Cross-checked source of truth</a></h2>
+<p>The user/kernel syscall contract is split across two files that
+<code>cargo xtask abi-check</code> keeps in lock-step:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Half</th><th>File</th><th>Owner</th></tr>
+</thead>
+<tbody>
+<tr><td>Source</td><td><code>lib/abi/src/syscalls.rs</code></td><td>Frozen <code>abi-v1</code> declaration.</td></tr>
+<tr><td>Generated</td><td><code>kernel/syscall/src/table.rs</code></td><td>Dispatcher + table hash.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Both halves must ship together. Either half existing without the other
+is a hard error; <code>cargo xtask abi-check</code> fails the build at that point.</p>
+<p>The source half exposes a <code>&amp;'static [SyscallSpec]</code> table and a
+deterministic byte encoding <code>ENCODED_TABLE</code>. The kernel half stores the
+SHA-256 fingerprint of that encoding as <code>SYSCALL_TABLE_HASH</code>. The
+<code>xtask</code> recomputes the SHA-256 of <code>ENCODED_TABLE</code> and demands that:</p>
+<ol>
+<li>the byte literal parsed from <code>kernel/syscall/src/table.rs</code> matches
+the freshly computed digest, and</li>
+<li>the linked <code>rustos_kernel_syscall::SYSCALL_TABLE_HASH</code> matches it
+too (catches stale <code>target/</code> caches).</li>
+</ol>
+<p>A negative-path test in <code>tools/xtask/src/commands/abi_check.rs</code>
+mutates one byte of the on-disk hash literal and asserts the check
+fails — proving the diff tool is not a no-op.</p>
+<h2 id="abi-v1-syscall-table"><a class="header" href="#abi-v1-syscall-table"><code>abi-v1</code> syscall table</a></h2>
+<p>The table is <strong>frozen</strong>; entries may not be re-numbered, removed, or
+re-typed. New behaviour ships as <code>abi-v2</code>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: right">No.</th><th>Name</th><th>Args</th><th>Returns</th><th>Required capability</th><th>Audited</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: right">0</td><td><code>yield</code></td><td>—</td><td><code>unit</code></td><td>—</td><td>no</td></tr>
+<tr><td style="text-align: right">1</td><td><code>exit</code></td><td><code>i32 code</code></td><td><code>unit</code></td><td>—</td><td>yes</td></tr>
+<tr><td style="text-align: right">2</td><td><code>ipc_send</code></td><td><code>endpoint</code>, <code>user_ptr</code>, <code>len</code></td><td><code>errno</code></td><td>—</td><td>yes</td></tr>
+<tr><td style="text-align: right">3</td><td><code>ipc_recv</code></td><td><code>endpoint</code>, <code>user_ptr</code>, <code>len</code></td><td><code>errno</code></td><td>—</td><td>no</td></tr>
+<tr><td style="text-align: right">4</td><td><code>cap_query</code></td><td><code>cap</code></td><td><code>u32</code></td><td>—</td><td>no</td></tr>
+<tr><td style="text-align: right">5</td><td><code>cap_delegate</code></td><td><code>target_handle</code>, <code>user_ptr</code></td><td><code>errno</code></td><td>—</td><td>yes</td></tr>
+<tr><td style="text-align: right">6</td><td><code>cap_revoke</code></td><td><code>target_handle</code>, <code>cap</code></td><td><code>errno</code></td><td><code>CAP_USER_ADMIN</code></td><td>yes</td></tr>
+<tr><td style="text-align: right">7</td><td><code>clock_get</code></td><td>—</td><td><code>u64</code></td><td>—</td><td>no</td></tr>
+<tr><td style="text-align: right">8</td><td><code>irq_bind</code></td><td><code>u32 line</code></td><td><code>IrqHandle</code></td><td><code>CAP_IRQ_BIND</code></td><td>yes</td></tr>
+<tr><td style="text-align: right">9</td><td><code>irq_wait</code></td><td><code>IrqHandle handle</code>, <code>u64 timeout_ns</code></td><td><code>errno</code></td><td><code>CAP_IRQ_BIND</code></td><td>no</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="capability-matrix"><a class="header" href="#capability-matrix">Capability matrix</a></h3>
+<p>The dispatcher consults <code>kernel/sec</code>’s <code>TaskCapabilities::has</code> against
+the syscall’s <code>required_capability</code> before any handler runs. The matrix
+is exhaustive — anything not listed below is ungated:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Capability</th><th>Syscalls gated by it</th></tr>
+</thead>
+<tbody>
+<tr><td><code>CAP_USER_ADMIN</code></td><td><code>cap_revoke</code></td></tr>
+<tr><td><code>CAP_IRQ_BIND</code></td><td><code>irq_bind</code>, <code>irq_wait</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>The <code>CAP_IRQ_BIND</code> rationale, the wake-up contract, and the failure
+modes are documented in
+<a href="../security/irq.html"><code>security/irq.md</code></a>.</p>
+<p>A future syscall that needs e.g. <code>CAP_DRV_LOAD</code> lands as a new entry in
+the table and a new row here; existing rows never move.</p>
+<h2 id="argument-validation"><a class="header" href="#argument-validation">Argument validation</a></h2>
+<p>Every register slot of <code>RawArgs</code> is validated against the <code>AbiType</code>
+declared in the source table:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>AbiType</code></th><th>Acceptance rule</th><th>Reject <code>Errno</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>Unit</code></td><td>Slot must be exactly zero.</td><td><code>LengthOutOfRange</code></td></tr>
+<tr><td><code>I32</code></td><td>Upper 32 bits equal the sign extension of the low 32.</td><td><code>OutOfRange</code></td></tr>
+<tr><td><code>U32</code></td><td>Upper 32 bits are zero.</td><td><code>OutOfRange</code></td></tr>
+<tr><td><code>U64</code></td><td>Any value.</td><td>—</td></tr>
+<tr><td><code>Cap</code></td><td><code>&gt;&gt; 16 == 0</code> and within <code>CAPABILITY_ID_MAX</code> (<code>= 255</code>).</td><td><code>OutOfRange</code></td></tr>
+<tr><td><code>UserPtr</code></td><td>Non-null. Page-table walks are the owning subsystem’s job.</td><td><code>BadAlignment</code></td></tr>
+<tr><td><code>Len</code></td><td>Fits in <code>usize</code> on the target.</td><td><code>LengthOutOfRange</code></td></tr>
+<tr><td><code>IpcEndpoint</code></td><td>Any value (opaque handle).</td><td>—</td></tr>
+<tr><td><code>Handle</code></td><td>Any value (opaque handle).</td><td>—</td></tr>
+<tr><td><code>Errno</code></td><td>Never an input; never appears in <code>args</code>.</td><td><code>OutOfRange</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>In addition the dispatcher refuses non-zero data in slots <strong>past</strong>
+<code>arg_count</code> with <code>LengthOutOfRange</code>. This prevents a buggy
+trampoline from smuggling extra register state past a syscall’s
+declared arity.</p>
+<h2 id="error-map"><a class="header" href="#error-map">Error map</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>Errno</code></th><th>When the dispatcher returns it</th></tr>
+</thead>
+<tbody>
+<tr><td><code>OutOfRange</code></td><td>Syscall number above <code>SyscallNumber::MAX</code>, or an argument fails its type check.</td></tr>
+<tr><td><code>NotFound</code></td><td>Number in range but no entry assigned at that index.</td></tr>
+<tr><td><code>PermissionDenied</code></td><td>Caller lacks the syscall’s <code>required_capability</code>.</td></tr>
+<tr><td><code>LengthOutOfRange</code></td><td>Trailing slot non-zero, or <code>Len</code> exceeds host <code>usize</code>.</td></tr>
+<tr><td><code>BadAlignment</code></td><td><code>UserPtr</code> argument is null.</td></tr>
+<tr><td><code>AbiVersionUnsupported</code></td><td><code>verify_table_hash</code> ran at kernel-init time and the recomputed digest disagreed.</td></tr>
+<tr><td><em>(propagated)</em></td><td>Anything else a handler returns is delivered to user space verbatim.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="audit-events"><a class="header" href="#audit-events">Audit events</a></h2>
+<p><code>kernel/syscall</code> reserves the <code>5_000..6_000</code> <code>EventId</code> range. Successful
+dispatches of <em>security-relevant</em> syscalls (<code>SyscallSpec::audit == true</code>)
+emit <code>SYSCALL_INVOKED</code>; refusals always emit, regardless of audit flag.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: right">ID</th><th>Level</th><th>Name</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: right">5000</td><td>Info</td><td><code>SYSCALL_INVOKED</code></td><td>A security-relevant syscall passed every check and was dispatched.</td></tr>
+<tr><td style="text-align: right">5001</td><td>Error</td><td><code>SYSCALL_PERMISSION_DENIED</code></td><td>Caller lacked the required capability.</td></tr>
+<tr><td style="text-align: right">5002</td><td>Error</td><td><code>SYSCALL_UNKNOWN</code></td><td>Number was outside the <code>abi-v1</code> table.</td></tr>
+<tr><td style="text-align: right">5003</td><td>Error</td><td><code>SYSCALL_BAD_ARGUMENTS</code></td><td>Argument validation failed.</td></tr>
+<tr><td style="text-align: right">5004</td><td>Error</td><td><code>SYSCALL_HANDLER_REJECTED</code></td><td>Owning subsystem rejected the call.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Adding an event takes the next free identifier and a new row in this
+table.</p>
+<h2 id="handler-wiring-stage-27-follow-up-f3"><a class="header" href="#handler-wiring-stage-27-follow-up-f3">Handler wiring (Stage 2.7 follow-up (f3))</a></h2>
+<p>The dispatcher trait <code>SyscallHandlers</code> is implemented in <code>kernel/core</code>
+by <code>KernelSyscallHandlers&lt;'a, A&gt;</code> (see
+<code>rustos_kernel_core::syscalls</code>). The struct borrows kernel state and
+forwards every call to the owning subsystem; nothing in this layer
+re-validates arguments — the dispatcher does that first.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Handler</th><th>Forwards to</th><th>Error map</th></tr>
+</thead>
+<tbody>
+<tr><td><code>yield_now</code></td><td><code>Scheduler::yield_current(caller.task_id)</code></td><td><code>NoSuchTask → NotFound</code>, otherwise <code>OutOfRange</code>.</td></tr>
+<tr><td><code>exit</code></td><td><code>CapTable::remove(caller.task_id)</code> then <code>Scheduler::exit(caller.task_id)</code></td><td><code>NoSuchTask → NotFound</code>, otherwise <code>OutOfRange</code>.</td></tr>
+<tr><td><code>ipc_send</code></td><td><em>deferred</em> — named-port registry not landed</td><td>Emits <code>SYSCALL_FEATURE_UNAVAILABLE</code> (<code>feature = ipc_named_ports</code>) + <code>NotFound</code>.</td></tr>
+<tr><td><code>ipc_recv</code></td><td><em>deferred</em> — same as <code>ipc_send</code></td><td>Same.</td></tr>
+<tr><td><code>cap_query</code></td><td><code>caller.caps.has(cap)</code> mapped to <code>0</code> / <code>1</code></td><td>—</td></tr>
+<tr><td><code>cap_delegate</code></td><td><em>deferred</em> — user-memory copy-in not landed (the <code>set_ptr</code> argument cannot be read until Stage 5 / Stage 6)</td><td>Emits <code>SYSCALL_FEATURE_UNAVAILABLE</code> (<code>feature = user_memory_copyin</code>) + <code>NotImplemented</code>.</td></tr>
+<tr><td><code>cap_revoke</code></td><td><code>CapTable::caps_for_mut(target).revoke(cap, audit)</code></td><td>Unknown <code>target</code> → <code>NotFound</code>.</td></tr>
+<tr><td><code>clock_get</code></td><td><code>KernelArch::monotonic_ns(arch.current_cpu())</code>, coarsened unless the caller holds <code>CAP_TIME_HIRES</code></td><td>—</td></tr>
+<tr><td><code>irq_bind</code></td><td><code>IrqTable::bind(line, caller.task_id)</code></td><td><code>LineOutOfRange</code> / <code>LineAlreadyBound</code> → <code>OutOfRange</code>; <code>ArchUnsupported</code> → <code>NotImplemented</code>.</td></tr>
+<tr><td><code>irq_wait</code></td><td><code>IrqTable::try_wait_step</code> polled against <code>KernelArch::monotonic_ns</code>, yielding via <code>Scheduler::yield_current</code> between iterations</td><td><code>Ready</code> → <code>Ok(0)</code>; <code>TimedOut</code> → <code>TimedOut</code>; <code>NotFound</code> → <code>NotFound</code>; scheduler <code>NoSuchTask</code> → <code>NotFound</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>KernelArch::monotonic_ns</code> is a new trait method with <strong>no default
+impl</strong>: every architecture port must opt in so an arch that cannot
+ship a monotonic clock cannot silently leak that flaw into the
+<code>clock_get</code> syscall (<code>AGENTS.md</code> §5.4.5 — fail closed). The x86_64
+port wires it through <code>apic_timer::Calibration</code>’s <code>tsc_per_second</code>
+field, sampled across the same PIT calibration window the LAPIC is
+measured over; the conversion goes through
+<code>Calibration::tsc_ticks_to_ns</code> (saturating).</p>
+<h3 id="clock-resolution-and-side-channels"><a class="header" href="#clock-resolution-and-side-channels">Clock resolution and side channels</a></h3>
+<p><code>clock_get</code> is unprivileged (no <code>required_capability</code>, not audited), so
+every task — including the §19.5 parser sandboxes and untrusted
+<code>userland/apps</code> — can read it. A full-resolution timer is a building
+block for cache- and execution-timing side channels (<code>AGENTS.md</code>
+§19.1), so the value is <strong>gated, not the syscall</strong>: a caller holding
+<code>CAP_TIME_HIRES</code> receives the raw nanosecond reading, while every other
+caller receives the reading floored to <code>COARSE_CLOCK_GRANULARITY_NS</code>
+(one microsecond, <code>lib/abi::time</code>). The flooring is value-only — the
+<code>abi-v1</code> <code>clock_get</code> signature (no args, <code>u64</code> return) is unchanged —
+and <code>coarsen_clock_ns</code> preserves the per-CPU monotonic-non-decreasing
+contract the <code>irq_wait</code> timeout loop relies on. Tightening or relaxing
+the granularity changes only that one constant (<code>AGENTS.md</code> §5.7 —
+security by default).</p>
+<p>The two deferred-feature branches return a stable <code>Errno</code> and emit
+exactly one extra audit record — <code>SYSCALL_FEATURE_UNAVAILABLE</code>
+(id 4020, see <code>kernel/core::audit</code>) — so an external consumer can
+tell apart “handler rejected because the call failed” from “handler
+rejected because the backing subsystem is intentionally inert”
+(<code>AGENTS.md</code> §15.1 — announce the deferral, never stub). The
+dispatcher’s standard <code>SYSCALL_HANDLER_REJECTED</code> record is <em>also</em>
+emitted for syscalls whose <code>SyscallSpec::audit == true</code>
+(<code>ipc_send</code>, <code>cap_delegate</code>); <code>ipc_recv</code> is unaudited so only the
+<code>SYSCALL_FEATURE_UNAVAILABLE</code> record reaches the sink.</p>
+<p><code>exit</code> additionally calls <code>IrqTable::release_for(caller.task_id)</code>
+<strong>before</strong> the capability-record / scheduler eviction so no audited
+capability bit survives past the IRQ subsystem’s binding release
+(<code>docs/src/security/irq.md</code> — the kernel unmasks no lines on exit;
+a freshly created task that wants the same line must re-issue
+<code>irq_bind</code>).</p>
+<p>The Stage 2.7 follow-up tracker in <code>PLAN.md</code> records the
+named-port registry and the user-memory copy-in path as the two
+remaining pieces required to lift these deferrals.</p>
+<h2 id="dispatcher-contract"><a class="header" href="#dispatcher-contract">Dispatcher contract</a></h2>
+<p><code>Dispatcher::dispatch</code> is the <em>only</em> entry point. Calling it runs the
+following sequence — the order matches <code>AGENTS.md</code> §5.4 step for step:</p>
+<ol>
+<li>Caller identification — the <code>CallerContext</code> comes from the per-CPU
+current-task slot owned by <code>kernel/sched</code>; the dispatcher does not
+accept caller-supplied identity.</li>
+<li>Capability check via <code>TaskCapabilities::has</code>.</li>
+<li>Argument validation against the declared <code>AbiType</code>s and trailing-zero
+rule.</li>
+<li>Dispatch through the <code>SyscallHandlers</code> trait. <code>kernel/core</code> provides
+the production implementation; tests substitute a mock.</li>
+<li>Audit emission via the structured sink — exactly one record per
+security-relevant decision.</li>
+</ol>
+<h2 id="per-architecture-entry-stubs"><a class="header" href="#per-architecture-entry-stubs">Per-architecture entry stubs</a></h2>
+<p>The architecture-neutral dispatcher above is reached through a thin
+per-target stub that marshals the platform’s syscall-instruction
+registers into a <code>RawArgs</code> tuple. Stage 3a (c6) landed the x86_64
+stub; Stage 3b/3c/3d will add the remaining Tier-1 ports.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Arch</th><th>Module</th><th>Instruction</th><th>Argument registers</th></tr>
+</thead>
+<tbody>
+<tr><td>x86_64</td><td><code>rustos_arch_x86_64::syscall_entry</code></td><td><code>syscall</code> / <code>sysretq</code> (<code>IA32_LSTAR</code>)</td><td><code>%rdi</code>, <code>%rsi</code>, <code>%rdx</code>, <code>%r10</code>, <code>%r8</code>, <code>%r9</code> (number in <code>%rax</code>)</td></tr>
+<tr><td>aarch64</td><td>— (Stage 3b)</td><td><code>svc #0</code></td><td><code>x0</code>..=<code>x5</code> (number in <code>x8</code>)</td></tr>
+<tr><td>riscv64</td><td>— (Stage 3c)</td><td><code>ecall</code></td><td><code>a0</code>..=<code>a5</code> (number in <code>a7</code>)</td></tr>
+<tr><td>wasm32</td><td>— (Stage 3d)</td><td>host-imported function</td><td>first six i64 arguments</td></tr>
+</tbody>
+</table>
+</div>
+<p>The stub never duplicates the validation surface in
+<code>kernel/syscall::table</code>: it builds a <code>[u64; SYSCALL_MAX_ARGS]</code> in
+the canonical order (matching <code>RawArgs</code>’s <code>#[repr(transparent)]</code>
+layout) and hands it to a binary-installed callback that forwards
+to <code>Dispatcher::dispatch</code>. The full description of the x86_64 stub
+— MSR programming, <code>SyscallTls</code> layout, and the naked entry
+sequence — lives in
+<a href="../platform/x86_64.html#stage-3a-c6--syscallsysret-entry">the x86_64 platform page</a>.</p>
+<h2 id="out-of-scope-stage-27"><a class="header" href="#out-of-scope-stage-27">Out of scope (Stage 2.7)</a></h2>
+<ul>
+<li>New syscalls beyond what Stages 2.1–2.6 require. Adding a syscall
+takes a new <code>SyscallSpec</code> row, a new <code>SyscallHandlers</code> method, and
+an entry in this document — all in the same commit.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/ipc.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/modularity.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/ipc.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/modularity.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

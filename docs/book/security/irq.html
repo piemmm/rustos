@@ -1,0 +1,672 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Hardware interrupts: capability-gated wake-ups - RustOS</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Architecture, security model, and platform reference for RustOS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "ayu";
+            window.path_to_searchindex_js = "../searchindex-eb0bbf16.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-e5bd170d.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RustOS</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos/edit/main/docs/src/security/irq.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="hardware-interrupts-capability-gated-user-space-wake-ups"><a class="header" href="#hardware-interrupts-capability-gated-user-space-wake-ups">Hardware interrupts: capability-gated user-space wake-ups</a></h1>
+<p>This page documents the <code>abi-v1</code> user/kernel contract for delivering
+hardware interrupts to user-space drivers. The contract is exercised
+by the <code>irq_bind</code> / <code>irq_wait</code> syscall pair and gated by the
+<code>CAP_IRQ_BIND</code> capability (<code>lib/abi/src/capability.rs</code>).</p>
+<p>Wake-up plumbing on the kernel side — the per-line wait queue and the
+controller-level mask / unmask sequence — is wired and
+QEMU-validated (see <em>Kernel-side implementation</em> below). The first
+in-kernel consumer of the wait loop, <code>KernelVirtioHost::notify_wait</code>,
+blocks a loaded virtio driver on its device’s pre-bound <code>IrqHandle</code>
+through the same shared primitive (Stage 4.D Item 2-tail.3). This
+page locks down the contract those pieces respect.</p>
+<h2 id="abi-surface"><a class="header" href="#abi-surface">ABI surface</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>SyscallNumber</code></th><th>name</th><th>args</th><th>ret</th><th>required capability</th></tr>
+</thead>
+<tbody>
+<tr><td>8</td><td><code>irq_bind</code></td><td><code>line: u32</code></td><td><code>IrqHandle</code></td><td><code>CAP_IRQ_BIND</code></td></tr>
+<tr><td>9</td><td><code>irq_wait</code></td><td><code>handle: IrqHandle, timeout_ns: u64</code></td><td><code>Result&lt;(), Errno&gt;</code></td><td><code>CAP_IRQ_BIND</code></td></tr>
+</tbody>
+</table>
+</div>
+<ul>
+<li><code>line</code> is the architecture-defined IRQ identifier:
+<ul>
+<li><strong>x86_64</strong> — Global System Interrupt (GSI) reported by ACPI MADT
+(<code>kernel/arch/x86_64::acpi::Madt</code>).</li>
+<li><strong>AArch64</strong> — GIC <code>IntId</code> (SGI / PPI / SPI namespace per the
+GICv3 architecture reference).</li>
+<li><strong>riscv64</strong> — PLIC source number reported by the device tree’s
+<code>interrupts-extended</code> property.</li>
+<li><strong>wasm32</strong> — reserved; the WASM host has no concept of hardware
+interrupts. A call from a WASM userland returns
+<code>Errno::NotImplemented</code>.</li>
+</ul>
+</li>
+<li><code>IrqHandle</code> is the opaque <code>u64</code> newtype in
+<a href="../../../lib/abi/src/syscall.rs"><code>lib/abi/src/syscall.rs</code></a>. The
+kernel reserves <code>IrqHandle::INVALID</code> (<code>0</code>) so a caller-zeroed
+argument cannot be mistaken for a live handle.</li>
+<li><code>timeout_ns</code> is interpreted relative to the kernel monotonic clock
+(<code>clock_get</code>’s reference). The kernel must round up to its tick
+granularity, never down — a caller asking for a 1 ns wait must not
+receive a zero-duration wait.</li>
+</ul>
+<h2 id="capability-check"><a class="header" href="#capability-check">Capability check</a></h2>
+<p><code>CAP_IRQ_BIND = 11</code> is the single gate on both syscalls. The
+dispatcher refuses with <code>Errno::PermissionDenied</code> and emits one
+<code>SyscallPermissionDenied</code> audit record before any state is touched
+(<code>AGENTS.md</code> §5.4 step 2). There is no “open by default” path; a task
+holding no capabilities cannot observe a hardware interrupt under any
+circumstances.</p>
+<p>The same capability gates both ends deliberately: a task that may
+bind a line must be able to wait on it, and the implementation of
+<code>irq_wait</code> re-checks that <code>handle</code> was minted for the calling task
+before any state transition, so a forged handle from another task is
+rejected with <code>Errno::NotFound</code>. Splitting the gate into separate
+<code>CAP_IRQ_BIND</code> / <code>CAP_IRQ_WAIT</code> would add ABI surface without making
+the policy any tighter — the binding step is the security-relevant
+authority.</p>
+<p>The dispatcher emits a <code>SyscallInvoked</code> audit record on every
+successful <code>irq_bind</code> (the spec row sets <code>audit: true</code>); <code>irq_wait</code>
+is <strong>not</strong> audited on success, otherwise a busy driver would drown
+the audit log.</p>
+<h2 id="wake-up-contract"><a class="header" href="#wake-up-contract">Wake-up contract</a></h2>
+<p>A producer of an interrupt — the per-architecture trap dispatcher
+that fields the line at the controller — performs the following
+sequence in this order:</p>
+<ol>
+<li><strong>Mask the line at the controller</strong> (LAPIC EOI inhibit / GIC
+<code>ICACTIVE</code> / PLIC <code>claim</code>) <strong>before</strong> waking the user-space
+waiter. This is the <em>only</em> ordering that prevents the same edge
+from re-firing while the driver is still draining its completion
+queue, and it must happen on the same CPU that took the trap so
+the controller-side state is consistent.</li>
+<li><strong>Mark the line ready</strong> in the kernel-side IRQ table entry
+associated with <code>handle</code>.</li>
+<li><strong>Wake at most one</strong> waiter on the per-handle wait queue. The
+driver is expected to bind one task per line; the kernel must not
+broadcast.</li>
+<li>The woken task observes <code>Ok(())</code> returned from <code>irq_wait</code>. After
+draining its queues the driver re-issues <code>irq_wait</code>, which clears
+the ready flag and re-arms the line at the controller.</li>
+</ol>
+<p>If <code>timeout_ns</code> elapses before step 2 occurs the kernel resumes the
+waiter with <code>Err(Errno::TimedOut)</code>. The handle stays bound and the
+caller may immediately re-issue <code>irq_wait</code>; <code>TimedOut</code> is <strong>not</strong> an
+error in the IRQ subsystem (<code>lib/abi/src/error.rs</code>).</p>
+<h2 id="failure-modes"><a class="header" href="#failure-modes">Failure modes</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>Errno</code></th><th>when</th><th>audit event</th></tr>
+</thead>
+<tbody>
+<tr><td><code>PermissionDenied</code></td><td>caller lacks <code>CAP_IRQ_BIND</code></td><td><code>SyscallPermissionDenied</code></td></tr>
+<tr><td><code>OutOfRange</code></td><td><code>line</code> exceeds the platform’s allowable range</td><td><code>SyscallBadArguments</code></td></tr>
+<tr><td><code>OutOfRange</code></td><td><code>irq_bind</code> <code>line</code> argument carries non-zero upper 32 bits</td><td><code>SyscallBadArguments</code></td></tr>
+<tr><td><code>NotFound</code></td><td><code>irq_wait</code> <code>handle</code> was not minted for the calling task</td><td><code>SyscallHandlerRejected</code></td></tr>
+<tr><td><code>TimedOut</code></td><td><code>irq_wait</code> timeout expired before the line fired</td><td>none (per the audit policy)</td></tr>
+<tr><td><code>NotImplemented</code></td><td>called from a WASM userland or before the IRQ subsystem is wired up</td><td>none</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every audit event listed above already exists in
+<code>kernel/sec::audit</code>; the IRQ subsystem reuses them rather than minting
+new event IDs.</p>
+<h2 id="why-the-kernel-masks-the-line-on-wake-up"><a class="header" href="#why-the-kernel-masks-the-line-on-wake-up">Why the kernel masks the line on wake-up</a></h2>
+<p>A user-space driver cannot reliably mask its own line: the
+controller-level register write is privileged on every Tier-1
+architecture (LAPIC MSR, GIC system register, PLIC MMIO behind a
+kernel-only page mapping). If the kernel left the line unmasked on
+wake-up, an edge-triggered device that fires faster than the driver
+can drain its completion queue would re-enter the trap path and
+either spin the CPU (level-triggered) or back-pressure the controller
+into dropping subsequent edges (edge-triggered). The kernel therefore
+masks the line <em>before</em> it wakes the waiter and unmasks it on the
+driver’s next <code>irq_wait</code> call, which is the moment the driver tells
+the kernel “I am ready for the next edge”. This sequencing is the
+load-bearing safety invariant of the entire user-space IRQ path; the
+follow-up session’s kernel-side test plan exercises it directly.</p>
+<h2 id="out-of-scope-for-this-contract"><a class="header" href="#out-of-scope-for-this-contract">Out of scope for this contract</a></h2>
+<ul>
+<li><strong>IRQ raising / masking by user space.</strong> Neither syscall grants the
+ability to assert or mask a line. Both remain kernel-only.</li>
+<li><strong>Sharing a line between drivers.</strong> <code>abi-v1</code> mints at most one
+binding per <code>(task, line)</code> pair. Shared-IRQ devices (PCI legacy
+pin-based interrupts) are out of scope; the virtio family uses
+MSI/MSI-X or PCIe message-signalled interrupts, which assign one
+GSI per queue and do not share.</li>
+<li><strong>Re-binding after task exit.</strong> <code>Scheduler::exit</code> releases every
+binding the exiting task held; the kernel unmasks no lines on
+task exit (a freshly created task that wants the same line must
+re-issue <code>irq_bind</code>).</li>
+</ul>
+<h2 id="kernel-side-implementation-stage-4d-item-2-tail"><a class="header" href="#kernel-side-implementation-stage-4d-item-2-tail">Kernel-side implementation (Stage 4.D Item 2-tail)</a></h2>
+<p>The kernel-side substrate that backs the contract above lives in
+the <code>kernel/irq</code> crate (<code>rustos-kernel-irq</code>). The crate is <code>no_std</code>,
+holds no global mutable state, and exposes one type, <code>IrqTable</code>,
+together with an <code>IrqController</code> seam the architecture port
+implements:</p>
+<pre><code class="language-text">                  bind(line, caller)                ┌────────────┐
+   syscall ─────────────────────────────────────────►            │
+   irq_bind                                         │  IrqTable  │
+                  try_wait_step(handle, …) ─────────►            │
+   syscall                                          │  (RwLock-  │
+   irq_wait                                         │   guarded  │
+                                                    │   binding  │
+   trap from arch         fire(line, &amp;controller) ──►   table)   │
+   port's IDT vector ───────────────────────────────►            │
+                                                    └────────────┘
+                                                          │
+                                            controller.mask(line)
+                                                          ▼
+                                              architecture port
+                                              (x86_64 IO-APIC,
+                                               aarch64 GIC, …)
+</code></pre>
+<h3 id="invariants"><a class="header" href="#invariants">Invariants</a></h3>
+<ol>
+<li><strong>Mask-before-wake.</strong> <code>IrqTable::fire(line, controller)</code> calls
+<code>controller.mask(line)</code> <em>before</em> it sets the per-entry <code>ready</code>
+flag. The Rust source orders the two operations in that
+sequence; the unit test
+<code>kernel/irq::table::tests::mask_is_observed_before_wake</code>
+installs a probe controller whose <code>mask</code> impl reads the table’s
+own <code>ready</code> flag through a borrow and asserts it is still
+<code>false</code> while <code>mask</code> is in flight. A regression that reorders
+the writes fails the test deterministically.</li>
+<li><strong>Forgery defence in the table.</strong> <code>IrqTable::try_wait_step</code>
+re-verifies the <code>(handle, caller)</code> mapping before any state
+transition. The syscall handler does not need to re-check,
+and the dispatcher does not see forged handles — the
+distinction surfaces only through the standard
+<code>SYSCALL_HANDLER_REJECTED</code> audit record carrying the syscall
+name.</li>
+<li><strong>Lock ordering.</strong> The table’s interior <code>RwLock&lt;Inner&gt;</code> mirrors
+the <code>CapTable</code> lock-ordering policy: the syscall handler
+acquires the IRQ-table write lock for the duration of one
+<code>bind</code> / <code>try_wait_step</code> / <code>release_for</code> call and never holds
+the capability-table lock at the same time. The dispatcher
+releases the cap-table read lock before invoking the handler
+body, so a concurrent <code>cap_revoke</code> cannot deadlock against an
+in-flight <code>irq_wait</code>.</li>
+<li><strong>Idempotent release.</strong> <code>IrqTable::release_for(task)</code> returns
+the number of bindings it dropped; a second call against the
+same task returns zero. The <code>exit</code> syscall handler invokes
+<code>release_for</code> unconditionally before evicting the capability
+record, so a task that holds no IRQ bindings still terminates
+cleanly.</li>
+</ol>
+<h3 id="wait-semantics"><a class="header" href="#wait-semantics">Wait semantics</a></h3>
+<p>The polling loop on top of <code>IrqTable::try_wait_step</code> lives in one
+place — <code>rustos_kernel_irq::block_until_ready</code> — so every in-kernel
+waiter drives the same implementation rather than re-deriving it
+(<code>AGENTS.md</code> §2.2 — no duplication). The loop computes the deadline
+once (<code>start + saturating(timeout)</code>, so <code>u64::MAX</code> does not wrap to a
+tiny value), polls <code>try_wait_step</code>, and yields between polls until
+the line fires, the deadline elapses, or the binding disappears.</p>
+<p>The clock and the cooperative yield are inverted behind the
+two-method <code>IrqWaiter</code> trait, which keeps <code>kernel/irq</code> free of any
+scheduler or architecture dependency:</p>
+<ul>
+<li><code>IrqWaiter::now_ns()</code> — non-decreasing per-CPU clock reading.</li>
+<li><code>IrqWaiter::yield_now()</code> — surrenders the rest of the quantum and
+returns <code>Ok</code> to re-loop, or <code>Err(IrqWaitAbort)</code> to abort (e.g. the
+task can no longer be scheduled).</li>
+</ul>
+<p>Two implementations exist:</p>
+<ul>
+<li><strong><code>irq_wait</code> syscall handler</strong> (<code>kernel/core::syscalls</code>): wraps
+<code>KernelArch::monotonic_ns(arch.current_cpu())</code> and
+<code>Scheduler::yield_current(caller.task_id)</code>. It tolerates
+<code>SchedError::InvalidState</code> (in host-side tests the calling task is
+not marked Running) and re-loops, maps <code>NoSuchTask</code> to
+<code>Errno::NotFound</code>, and fails closed to <code>Errno::OutOfRange</code> on any
+other scheduler error. The loop always terminates because the
+per-CPU monotonic clock is strictly monotonic.</li>
+<li><strong><code>KernelVirtioHost::notify_wait</code></strong> (<code>kernel/virtio</code>): waits on
+the device’s pre-bound
+<code>IrqHandle</code> against the owning task (<code>caller.task()</code>) with an
+unbounded (<code>u64::MAX</code>) timeout. A virtio device signals completion
+on a single MSI / MMIO line, not per-queue, so the wait key is the
+handle, not <code>queue_index</code>; the driver re-scans every used ring on
+wake-up. Because the wake-up is the ready flag that <code>fire</code> sets
+<em>after</em> masking, the mask-before-wake invariant is observed before
+the driver returns from <code>notify_wait</code> — exercised by
+<code>kernel_host::tests::notify_wait_observes_mask_before_wake</code>.</li>
+</ul>
+<p>This design composes existing scheduler primitives only; no new
+scheduler interface is introduced (<code>AGENTS.md</code> §2.4 — no interface
+creep). A power-efficient variant that parks the caller and
+relies on a controller-tick to wake on timeout is queued for a
+future landing alongside the per-arch trap glue; today’s wait
+loop is correct but consumes scheduler quanta while blocked.</p>
+<h3 id="architecture-port-glue"><a class="header" href="#architecture-port-glue">Architecture-port glue</a></h3>
+<p>Each architecture port supplies an <code>IrqController</code> impl. The
+kernel/core default is <code>UnsupportedController</code>, whose <code>mask</code>
+returns <code>MaskError::Unsupported</code>; the kernel binary is expected
+to swap in a real controller during its post-<code>run_phases</code> wiring
+phase:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Architecture</th><th>Production controller</th><th>Status today</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x86_64</code></td><td><code>kernel/rustos-kernel::ioapic_controller::IoApicController</code> — IO-APIC redirection-entry mask via <code>IoApic::set_redirection_entry</code>; trap source from the <code>0x30..=0xFE</code> per-vector ISR thunks (<code>kernel/arch/x86_64/src/external_irq.s</code>) and Rust dispatcher (<code>kernel/arch/x86_64::irq</code>).</td><td><strong>Wired and QEMU-validated</strong> (Stage 4.D Item 2-tail.2 + QEMU validation). <code>BinArch::irq_routing</code> returns the controller; <code>try_boot</code> walks MADT’s IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry <code>masked = true</code>. The <code>tests/integration/irq_qemu_x86_64</code> integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both <code>WaitStep::Ready</code> and the post-fire mask bit.</td></tr>
+<tr><td><code>aarch64</code></td><td>GIC <code>ICACTIVE</code> / distributor mask</td><td>Not wired; <code>UnsupportedController</code> installed.</td></tr>
+<tr><td><code>riscv64</code></td><td><code>tests/integration/riscv64_boot::PlicIrqController</code> — the downstream <code>IrqController</code> bridge over the arch port’s <code>kernel/arch/riscv64::plic::PlicController</code>, whose inherent <code>mask</code> writes the source’s PLIC priority register to zero; S-mode trap vector (<code>kernel/arch/riscv64::trap</code>) claims/completes via the PLIC and bridges to <code>IrqTable::fire</code>.</td><td><strong>Implemented and host-tested</strong>, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the <code>scause</code> decode, the one-shot dispatch slot, and the <code>PlicIrqController</code> bridge (incl. mask-before-wake through <code>IrqTable</code>) are unit-tested; the boot pipeline does not call <code>trap::init_traps</code> until the virtio-mmio verticals wire it. The arch port owns no <code>kernel/irq</code> dependency — the bridge lives downstream (<code>AGENTS.md</code> §17.2).</td></tr>
+<tr><td><code>wasm32</code></td><td>No hardware-interrupt concept</td><td>Permanently <code>UnsupportedController</code> (per the contract above).</td></tr>
+</tbody>
+</table>
+</div>
+<p>The kernel binary records one <code>KERNEL_PHASE_STARTED</code> /
+<code>KERNEL_PHASE_READY</code> pair with <code>phase = "irq"</code> strictly between
+the <code>sched</code> and <code>syscall</code> phase markers. The kernel/core init
+order is therefore <code>log → mem → sec → sched → irq → syscall → ipc</code>, pinned by
+<code>kernel/core::init::Phase::ORDER</code> and the
+<code>run_phases_emits_each_phase_in_documented_order</code> and
+<code>irq_phase_lands_between_sched_and_syscall</code> regression tests.</p>
+<h3 id="x86_64-trap-glue-stage-4d-item-2-tail2"><a class="header" href="#x86_64-trap-glue-stage-4d-item-2-tail2">x86_64 trap glue (Stage 4.D Item 2-tail.2)</a></h3>
+<p>The x86_64 trap path threads an external IRQ end-to-end through:</p>
+<ol>
+<li><strong>IDT vectors <code>0x30..=0xFE</code>.</strong> Reserved for external IRQs.
+Per-vector asm stubs are emitted by an <code>.altmacro</code> / <code>.rept</code>
+loop in <code>kernel/arch/x86_64/src/external_irq.s</code>; the stub
+addresses are published as a <code>.rodata</code> <code>.quad</code> table and
+exposed through <code>kernel/arch/x86_64::irq::external_isr_addr</code>.</li>
+<li><strong>Shared trampoline.</strong> Each per-vector stub pushes the vector
+immediate and jumps to <code>rustos_arch_x86_64_external_irq_common</code>,
+which saves the 15 GPRs into a <code>SavedRegs</code> block and calls
+<code>rustos_arch_x86_64_external_irq_dispatch(*mut SavedRegs, u64)</code>.</li>
+<li><strong>Rust dispatcher.</strong> Reads the installed <code>ExternalIrqDispatchFn</code>
+from a set-once <code>AtomicUsize</code> and writes the LAPIC EOI register
+before returning. The asm trampoline pops GPRs, drops the
+vector qword, and <code>iretq</code>s.</li>
+<li><strong>Vector↔GSI routing.</strong> A read-only-after-init <code>Routing</code> table
+(lock-free, one <code>AtomicU32</code> per reserved vector) maps the IDT
+vector to a GSI. Populated by the kernel binary’s
+<code>try_boot::discover_and_program_io_apics</code> during the
+<code>Phase::Irq</code> step.</li>
+<li><strong>IO-APIC programming.</strong> The kernel binary walks every MADT
+<code>IoApic { id, address, gsi_base }</code> entry, allocates a vector
+per pin from the reserved range, calls
+<code>percpu::install_vector</code> to wire the IDT, calls
+<code>Routing::install(gsi, vector)</code>, and calls
+<code>IoApicController::program_pin(gsi, vector, bsp_lapic_id, masked = true)</code>. Lines start masked; a follow-up driver-host
+commit unmasks them when a userland driver binds.</li>
+<li><strong>Mask-before-wake.</strong> <code>IoApicController::mask</code> re-writes the
+IO-APIC redirection entry with the cached <code>(vector, dest)</code>
+and <code>masked = true</code>, then issues a <code>core::sync::atomic::fence</code>
+with <code>Ordering::SeqCst</code>. The fence pairs with the SeqCst
+load <code>IrqTable::try_wait_step</code> performs on <code>ready</code>,
+guaranteeing every CPU that observes <code>ready = true</code> also
+observes the masked redirection entry. The host test
+<code>ioapic_controller_mask_before_wake_ordering</code> in
+<code>kernel/rustos-kernel::ioapic_controller</code> drives this exact
+path against a <code>RecordingMmio</code> mock and asserts the mask write
+completes before <code>IrqTable::fire</code> returns <code>Marked</code>.</li>
+</ol>
+<p>The <code>KernelArch</code> trait extension surface is two new methods:
+<code>irq_routing(&amp;self) -&gt; IrqRouting</code> (consulted during
+<code>Phase::Irq</code>) and <code>install_irq_dispatch(&amp;self, &amp;'static IrqTable)</code> (called by <code>kernel/core::init</code> immediately after the
+table is constructed, used by the arch port to publish the
+table pointer into its dispatcher slot). Both have safe default
+impls so non-x86_64 ports inherit the conservative
+<code>IrqRouting::unsupported</code> behaviour without source-level change.</p>
+<h3 id="x86_64-qemu-validation-stage-4d-item-2-tail2-qemu"><a class="header" href="#x86_64-qemu-validation-stage-4d-item-2-tail2-qemu">x86_64 QEMU validation (Stage 4.D Item 2-tail.2 QEMU)</a></h3>
+<p><code>tests/integration/irq_qemu_x86_64</code> is the end-to-end regression
+bound for the x86_64 trap path. The crate is a freestanding
+<code>x86_64-unknown-none</code> kernel binary that reuses
+<code>rustos_kernel::boot</code> verbatim and installs a custom audit Sink.
+On observing <code>AuditEvent::BootCompleted</code> the sink:</p>
+<ol>
+<li>Reads the published <code>IrqTable</code> through
+<code>rustos_kernel::arch_wrapper::published_irq_table</code> and the
+typed <code>IoApicController&lt;VolatileIoApicMmio&gt;</code> through
+<code>rustos_kernel::ioapic_controller::published_typed</code>. Both
+accessors expose state already published into set-once slots
+during boot; they perform no new writes (<code>AGENTS.md</code> §2.1).</li>
+<li>Resolves the IDT vector assigned to GSI 2 (legacy ISA IRQ 0
+under QEMU’s PIIX/Q35 <code>InterruptSourceOverride { source: 0, gsi: 2 }</code> mapping) via
+<code>rustos_arch_x86_64::irq::global_routing().vector_for_gsi(2)</code>.</li>
+<li>Binds GSI 2 in the <code>IrqTable</code> against the synthesised
+<code>TaskId(0)</code>, masks the legacy 8259 PIC, unmasks the line via
+<code>IoApicController::unmask</code>, and arms PIT channel 0 in mode 0
+as a one-shot (architectural 1.193182 MHz × 2000-tick reload
+≈ 1.68 ms).</li>
+<li><code>sti</code>s, then spin-polls <code>IrqTable::try_wait_step</code> with <code>hlt</code>
+between polls and a 1 s deadline. The asm trampoline +
+<code>production_external_irq_dispatch</code> chain delivers the IRQ →
+the dispatcher calls <code>IrqTable::fire(2, controller)</code> → the
+controller masks the line + SeqCst-fences → <code>ready</code> flips →
+<code>try_wait_step</code> observes <code>WaitStep::Ready</code>.</li>
+<li><code>cli</code>s and re-reads the IO-APIC redirection-entry low half via
+<code>IoApicController::read_pin_low(2)</code>. Asserts <code>low &amp; (1 &lt;&lt; 16) != 0</code> — the load-bearing evidence that the controller’s mask
+write reached the IO-APIC MMIO window before the wake.</li>
+<li>Flips <code>qemu_exit::exit_success</code>. Any deviation —
+missing slot, no vector bound, <code>WaitStep::TimedOut</code>,
+<code>WaitStep::NotFound</code>, mask bit clear — flips
+<code>qemu_exit::exit_failure</code> with the QEMU serial log attached
+by <code>tools/qemu::Runner</code>.</li>
+</ol>
+<p>The crate is enrolled in <code>tools/xtask::commands::qemu_tests::TESTS</code>
+with a 60 s budget. <code>cargo xtask test --qemu</code> builds and runs it
+alongside the other five freestanding integration crates.</p>
+<h3 id="riscv64-trap-glue-stage-4d-item-4--riscv64-external-irq-controller"><a class="header" href="#riscv64-trap-glue-stage-4d-item-4--riscv64-external-irq-controller">riscv64 trap glue (Stage 4.D Item 4 — riscv64 external-IRQ controller)</a></h3>
+<p>The riscv64 port supplies the same <code>IrqController</code> seam through a
+PLIC, plus the S-mode trap vector that turns a hardware external
+interrupt into an <code>IrqTable::fire</code>. The PLIC register driver and trap
+glue are a pure Arch HAL implementation and own no <code>kernel/irq</code>
+dependency (<code>AGENTS.md</code> §17.2); the <code>IrqController</code> bridge
+(<code>PlicIrqController</code>) lives downstream in
+<code>tests/integration/riscv64_boot</code>. The pieces are implemented and
+host-tested; the boot-to-<code>BootCompleted</code> slice does not yet arm them
+(the <code>virt</code> board reaches <code>BootCompleted</code> with interrupts disabled),
+so the virtio-mmio verticals are the first consumer.</p>
+<ol>
+<li><strong>PLIC controller.</strong> <code>kernel/arch/riscv64::plic::PlicController</code>
+wraps a <code>Plic&lt;M&gt;</code> register driver over the <code>PlicMmio</code> access seam
+(<code>VolatilePlicMmio</code> on the freestanding target, an in-memory mock
+in host tests). <code>arm(source)</code> enables the source in the boot
+hart’s S-mode context bitmap, drops the context threshold to zero,
+and sets a delivering priority; <code>claim</code> / <code>complete</code> wrap the
+per-context claim register.</li>
+<li><strong>Mask-before-wake.</strong> The inherent <code>PlicController::mask</code> masks a
+source by writing its <strong>priority register to zero</strong> — a single
+32-bit MMIO store, after which the source can never out-prioritise
+the (zero) threshold and so cannot re-fire — then issues a
+<code>core::sync::atomic::fence</code> with <code>Ordering::SeqCst</code>. The downstream
+<code>PlicIrqController</code> bridge’s <code>IrqController::mask</code> forwards here. The
+single-store strategy is lock-free: it never read-modify-writes a
+shared word, so it races neither the trap handler’s claim/complete
+nor a concurrent arm/unmask on another source. The host test
+<code>mask_before_wake_through_irq_table</code> (in <code>tests/integration/riscv64_boot</code>)
+drives <code>IrqTable::fire</code> with the bridge and asserts the priority-zero
+write is the last register write before <code>fire</code> returns <code>Marked</code>.</li>
+<li><strong>S-mode trap vector.</strong> <code>kernel/arch/riscv64::trap</code> publishes
+<code>rustos_riscv64_trap_vector</code> (<code>trap.s</code>) and installs it into
+<code>stvec</code> (direct mode) via <code>init_traps</code>, which also sets
+<code>sie.SEIE</code> and <code>sstatus.SIE</code>. The vector saves the interrupted
+context’s caller-saved registers, calls the Rust handler, restores,
+and <code>sret</code>s.</li>
+<li><strong>Dispatch.</strong> The Rust handler reads <code>scause</code>. A synchronous
+exception is unexpected in this slice and fails closed by parking
+the hart (rather than <code>sret</code>-looping the faulting instruction). A
+supervisor external interrupt
+(<code>is_supervisor_external_interrupt</code>) forwards to the one-shot
+<code>set_trap_dispatch</code> callback, which — like the x86_64 dispatcher —
+holds the controller reference and performs the PLIC claim →
+<code>IrqTable::fire</code> (mask-before-wake) → complete handshake.</li>
+</ol>
+<p>The <code>scause</code> decode, the <code>sie</code>/<code>sstatus</code>/<code>scause</code> bit constants, and
+the set-once dispatch slot build on the host so their unit tests run
+under <code>cargo test</code>; the trap vector, <code>init_traps</code>, the handler, and
+<code>VolatilePlicMmio</code> are gated to <code>riscv64-unknown-none-elf</code>.</p>
+<h3 id="test-coverage"><a class="header" href="#test-coverage">Test coverage</a></h3>
+<ul>
+<li><code>kernel/irq</code> ships 18 unit tests covering bind / duplicate
+refusal / out-of-range refusal / ready-after-fire / timeout /
+forgery (no binding, wrong caller) / mask-before-wake ordering /
+controller errors / stray-IRQ containment / release_for
+semantics / handle-uniqueness across rebinds.</li>
+<li><code>kernel/core::syscalls::tests</code> adds 6 syscall-handler tests
+(mint / out-of-range / duplicate / forgery / timeout / pre-fired
+ready) plus an <code>exit_releases_every_irq_binding_owned_by_task</code>
+test that asserts the <code>exit</code> ↔ <code>release_for</code> ordering.</li>
+<li><code>kernel/rustos-kernel::ioapic_controller</code> adds host tests for
+<code>program_pin</code>, <code>mask</code>, <code>unmask</code>, <code>read_pin_low</code>, multi-IO-APIC
+routing, the mask-before-wake ordering against a
+<code>RecordingMmio</code> mock, and out-of-range / unprogrammed-pin
+fail-closed paths.</li>
+<li><code>kernel/rustos-kernel::arch_wrapper</code> adds host tests pinning
+the set-once semantics of the <code>published_irq_controller</code> slot
+and the “still-None until installed” invariant of the
+<code>published_irq_table</code> slot.</li>
+<li><code>kernel/arch/riscv64::plic</code> adds host tests for the SiFive PLIC
+register-offset arithmetic, the S-mode context interleaving,
+<code>arm</code> / <code>unmask</code> / out-of-range refusal, <code>claim</code> / <code>complete</code>
+round-trip, the enable-bitmap toggle, and the mask-before-wake
+ordering through <code>IrqTable</code> against an in-memory <code>MockPlicMmio</code>.</li>
+<li><code>kernel/arch/riscv64::trap</code> adds host tests for the <code>scause</code>
+supervisor-external-interrupt decode (incl. rejecting the same
+code as a synchronous exception and other interrupt causes), the
+<code>sie</code>/<code>sstatus</code>/<code>scause</code> bit constants, and the set-once
+fail-closed semantics of the trap-dispatch slot.</li>
+<li><code>tests/integration/irq_qemu_x86_64</code> is the QEMU-validated
+end-to-end regression bound described above.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../security/captable.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../security/audit_log.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../security/captable.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../security/audit_log.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

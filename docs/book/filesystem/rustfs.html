@@ -1,0 +1,992 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>rustfs driver - RustOS</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Architecture, security model, and platform reference for RustOS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "ayu";
+            window.path_to_searchindex_js = "../searchindex-eb0bbf16.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-e5bd170d.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RustOS</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos/edit/main/docs/src/filesystem/rustfs.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="rustfs-driver"><a class="header" href="#rustfs-driver">rustfs driver</a></h1>
+<p><code>rustfs</code> (<code>drivers/filesystem/rustfs</code>, crate <code>rustos-drv-fs-rustfs</code>) is the
+<strong>native RustOS filesystem</strong>: a block-backed, copy-on-write filesystem that
+stores full POSIX metadata plus an inline access-control list and an
+optional capability gate <strong>per inode</strong> (<code>AGENTS.md</code> §5.3). There is exactly
+one on-disk version — <code>rustfs</code> is built up internally in the stages of
+its <a href="./rustfs-spec.html">specification</a>, but the driver and its format are a
+single shipping thing, not a <code>v1</code>/<code>v2</code> pair. It
+sits behind any <code>rustos_abi::driver::block::Block</code> device and is exposed
+through the versioned <code>FilesystemRead</code> and <code>FilesystemWrite</code> traits — never
+by widening the frozen mount/unmount <code>Filesystem</code> trait (<code>AGENTS.md</code> §2.4 /
+§9).</p>
+<p>The driver <strong>stores</strong> each inode’s owner, mode, ACL, and capability gate
+but makes <strong>no</strong> permission decision itself: the VFS is the policy point
+(<code>AGENTS.md</code> §5.4). The stored record is read back through the versioned
+<code>FilesystemSecurity</code> trait (<code>security(node) -&gt; NodeSecurity</code>) and written
+through <code>RustFs::set_security</code>. Because <code>rustfs</code> implements
+<code>FilesystemSecurity</code>, the kernel host delegates to it through the VFS’s
+<code>*_via_secured</code> operations, which judge each node against its <strong>own</strong>
+stored §5.3 record (<code>Metadata::from_node_security</code>) rather than a uniform
+mount-point template — so an owner-only or capability-gated file is
+enforced as stored. See <a href="./overview.html">Driver delegation</a> and the
+<a href="../abi/driver_traits.html">driver-trait reference</a>.</p>
+<h2 id="on-disk-layout"><a class="header" href="#on-disk-layout">On-disk layout</a></h2>
+<p>A volume is a sequence of fixed-size blocks (the device’s logical block
+size, between 512 and 4096 bytes, a power of two). The device opens at a
+<strong>superblock ring</strong> of four logical slots, each a <strong>mirrored pair</strong> of
+adjacent blocks (eight blocks in all); everything else is allocated
+copy-on-write from the pool that follows. <code>RustFs::open</code> re-derives and
+validates the geometry from the selected superblock slot.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Region</th><th>Contents</th></tr>
+</thead>
+<tbody>
+<tr><td>Superblock ring</td><td>Blocks 0–7: four slots, each a mirrored pair of blocks,</td></tr>
+<tr><td></td><td>each pointing at a committed root.</td></tr>
+<tr><td>Pool</td><td>Everything else, allocated copy-on-write: the transaction</td></tr>
+<tr><td></td><td>root, the inode-tree nodes, the per-file extent-tree</td></tr>
+<tr><td></td><td>nodes, directory blocks, and raw file-data blocks.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every <strong>metadata</strong> block is self-identifying (<code>AGENTS.md</code> §8 block
+identity): its first 128 bytes carry a magic, block type, format version,
+the volume UUID, an owner object, a generation, its logical and physical
+address, and a <strong>keyed authenticator</strong> — an HMAC-SHA256 tag computed
+through <code>lib/crypto</code> (<code>AGENTS.md</code> §2.12) over identity + payload. Decoding
+verifies all of that against the address the reader <em>expected</em>, so a stale,
+misdirected, wrong-type, torn, bit-rotted, or wrong-key block is rejected at
+decode time and the mount fails closed (<code>AGENTS.md</code> §5.4). Raw file-data
+blocks carry no header; their tail holds a 28-byte per-block crypto trailer
+(a 12-byte nonce and a 16-byte AEAD tag, see <a href="#encryption">Encryption</a>) and a
+40-byte <strong>data-integrity trailer</strong> (a 32-byte logical content hash and an
+8-byte physical checksum, see <a href="#data-integrity">Data integrity</a>), so a data
+block holds <code>block_size - 68</code> bytes of file content.</p>
+<p>Inodes are 256-byte records held in a <strong>copy-on-write inode tree</strong> keyed by
+inode number (see the next section); inode 1 is the root directory. Each
+inode names the root of its own <strong>extent tree</strong>, which maps a file’s logical
+block offset to a physical run <code>(start, length)</code> — so a file can span the
+whole volume and a large contiguous write collapses to a single extent
+record. Directories are block-addressed payloads of 64-byte slots (<code>inode</code>,
+<code>name_len</code>, name) reached through the same extent map; the entry names are
+encrypted at rest and the block reserves the same 28-byte crypto trailer at
+its tail (see <a href="#encryption">Encryption</a>). <code>.</code> and <code>..</code> are stored on disk and
+hidden from <code>read_dir</code>. The inode record also stores the four §21
+timestamps. A volume written by a different format version is refused rather
+than misread.</p>
+<blockquote>
+<p><strong>Stage 5 of the <a href="./rustfs-spec.html">specification</a>.</strong> The volume is a
+complete, mountable copy-on-write filesystem whose metadata scales through
+B-trees, is <strong>authenticated</strong> with a <code>lib/crypto</code> keyed MAC stored in <strong>two
+physical copies</strong> repaired from each other, is <strong>encrypted at rest</strong> under a
+real per-volume key hierarchy (see <a href="#encryption">Encryption</a>), and now carries
+a per-data-record <strong>integrity field</strong> — a logical content hash plus a fast
+physical checksum, verified on every read (see <a href="#data-integrity">Data integrity</a>).
+RustFS has no plaintext layout. Compression and dedupe are later stages.
+The free-block bitmap is rebuilt in memory at mount by walking the trees
+from the selected root; it is not stored on disk.</p>
+</blockquote>
+<h2 id="metadata-authentication-and-redundancy-rustfs-specmd-5-8"><a class="header" href="#metadata-authentication-and-redundancy-rustfs-specmd-5-8">Metadata authentication and redundancy (<code>rustfs-spec.md</code> §5, §8)</a></h2>
+<p>Each metadata block is sealed with a <strong>keyed authenticator</strong> (HMAC-SHA256
+through <code>lib/crypto</code>, <code>AGENTS.md</code> §2.12 — crypto is the standing “don’t roll
+your own” exception) covering the block’s identity <em>and</em> its payload, so the
+tag detects not only a flipped payload byte but a stale, misdirected,
+wrong-type, torn, or wrong-key block. The metadata-authentication key is the
+volume’s, derived from the per-volume master key (see
+<a href="#encryption">Encryption</a>); a volume opened with the wrong key never recovers
+it and the mount is refused, fail-closed.</p>
+<p>Every metadata block is stored in <strong>two physical copies</strong> — a primary and a
+companion mirror at the adjacent block (<code>companion = primary + 1</code>), so
+metadata is allocated in adjacent pairs. One read path serves all metadata
+— superblock-ring slots, transaction roots, B-tree nodes, and directory
+blocks: it reads the primary, and when the primary fails to authenticate it
+falls back to the companion and <strong>repairs</strong> the primary from the good copy
+(<code>rustfs-spec.md</code> §8 — try redundant copies, repair bad from good). If both
+copies fail to authenticate the read fails closed; it never trusts corrupt
+bytes and never panics (<code>AGENTS.md</code> §5.4 / §2.9). A directory’s content
+blocks are themselves metadata, so they too are mirrored pairs; a regular
+file’s data blocks are single-copy and carry no header. Because every
+metadata block obeys the one <code>primary + 1</code> rule, there is a single
+redundancy mechanism rather than one per structure (<code>AGENTS.md</code> §2.2).</p>
+<h2 id="encryption"><a class="header" href="#encryption">Encryption</a></h2>
+<p>RustFS is <strong>encrypted by default and has no plaintext mode</strong>
+(<code>rustfs-spec.md</code> §5, §7): there is no code path that lays out an unencrypted
+volume. Every volume is created with a caller-supplied <strong>volume key</strong> (the
+installer’s, recovery flow’s, or storage policy service’s key material):
+<code>RustFs::format(block, inode_hint, &amp;volume_key, &amp;mut entropy)</code> provisions the
+per-volume key hierarchy and <code>RustFs::open(block, &amp;volume_key)</code> recovers it.
+The <code>entropy</code> argument is the <code>EntropySource</code> seam onto the platform RNG
+(<code>lib/rng</code>’s <code>CsRng</code>, <code>AGENTS.md</code> §1/§4); <code>RustFS</code> never reaches for a global
+RNG itself, the concrete generator is injected at the composition root.</p>
+<p>The key hierarchy is grown through <code>lib/crypto</code> only (<code>AGENTS.md</code> §2.12 —
+crypto is the standing “don’t roll your own” exception):</p>
+<pre><code class="language-text">volume key (caller-supplied)
+  -&gt; wrapping key  (KDF)  ── unwraps ──&gt; master key (on disk, AEAD-wrapped)
+                                            -&gt; metadata-authentication key (HMAC-SHA256)
+                                            -&gt; filename key (AEAD)
+                                            -&gt; content  key (AEAD)
+</code></pre>
+<p>The master key is <strong>never stored unwrapped</strong>: only its AEAD-sealed form lives
+on disk, in the plaintext discovery region of every superblock-ring slot (the
+minimal unlock header the spec permits). <code>open</code> derives the wrapping key from
+the supplied volume key, unseals the master key, and derives the working
+keys. A <strong>wrong key</strong> never authenticates the wrapped blob, so the mount is
+refused with <code>PermissionDenied</code>, fail-closed (<code>AGENTS.md</code> §5.4), never a panic
+(§2.9).</p>
+<ul>
+<li><strong>File data</strong> is encrypted per block under the content key with
+ChaCha20-Poly1305 (<code>lib/crypto/src/aead.rs</code>); the block’s 28-byte trailer
+holds the nonce and tag, so a bit-flip in encrypted data is <strong>detected</strong> by
+the authenticator on read rather than silently mis-decrypted.</li>
+<li><strong>Directory-entry names</strong> are encrypted under the filename key the same
+way; the directory block is then sealed with the metadata authenticator
+(encrypt-then-MAC), and the read path authenticates then decrypts.</li>
+<li><strong>Metadata</strong> (superblock, transaction roots, B-tree nodes) stays
+authenticated-only — its confidentiality is not in this stage’s scope,
+though a directory block’s <em>names</em> are encrypted.</li>
+</ul>
+<p>The KDF is HMAC-SHA256 used as a single-block HKDF-Expand
+(<code>lib/crypto/src/kdf.rs</code>), and the AEAD nonce for a data or directory block
+is derived from its <code>(physical address, generation)</code> and stored in the
+trailer, so copy-on-write never reuses a <code>(key, nonce)</code> pair. The master key,
+the wrapping salt, and the wrap nonce are drawn at format time from the
+injected platform RNG, so the master key is <strong>independent of the volume key</strong>
+(and re-wrappable on a future key change) rather than derived from it; only
+the wrapping key stays a deterministic KDF of the volume key and the random
+salt so <code>open</code> can recompute it. The per-volume UUID is likewise a random
+draw. A failed entropy draw fails closed — no volume is laid out with
+predictable key material (<code>AGENTS.md</code> §5.4).</p>
+<h2 id="data-integrity"><a class="header" href="#data-integrity">Data integrity</a></h2>
+<p>Every file-data block carries a two-layer <strong>data-integrity field</strong>
+(<code>rustfs-spec.md</code> §6, §8), stored in a 40-byte trailer that follows the crypto
+trailer (<code>src/integrity.rs</code>). It complements — and is distinct from — the
+Stage-4 AEAD tag: the AEAD proves <em>authenticity</em> of the ciphertext, while this
+field gives a cheap media-corruption check plus a content-addressable name for
+the plaintext.</p>
+<ul>
+<li><strong>Logical content hash</strong> (32 bytes). The hash of the block’s <em>plaintext</em>
+content, taken before encryption on write and recomputed after decryption on
+read. Identical content hashes identically — the seam Stage 7 deduplication
+keys on (<code>rustfs-spec.md</code> §9) — and a single changed plaintext byte changes
+it, catching a corruption that survived decryption.</li>
+<li><strong>Physical checksum</strong> (8 bytes). A fast, non-cryptographic checksum over the
+block’s at-rest bytes (ciphertext + crypto trailer + compression descriptor +
+logical hash). It is verified <strong>first</strong> on read, so media or transport bit
+rot is caught cheaply before the AEAD runs.</li>
+</ul>
+<p>The write path is the spec’s: take the logical hash of the plaintext, compress
+then encrypt the content (see <em>Compression</em> below), then checksum the at-rest
+block. The read path reverses it: verify the physical checksum,
+decrypt-and-authenticate, decompress, then verify the logical hash.
+Each layer fails closed to a <code>DriverError</code> (never a panic, <code>AGENTS.md</code> §5.4 /
+§2.9) and is kept internally distinct (<code>integrity::DataFault</code> —
+<code>Physical</code>/<code>Aead</code>/<code>Logical</code>) so a media fault is not confused with a tamper or
+a plaintext mismatch, the seam Stage 8 scrub and Stage 11 health will record
+against.</p>
+<p>The logical hash is computed through <code>lib/crypto</code>’s audited SHA-256
+(<code>AGENTS.md</code> §2.12 — never hand-rolled). The specification’s fixed-v1 constant
+names BLAKE3-256; <code>lib/crypto</code> exposes only the audited RustCrypto SHA-256, and
+importing a <code>blake3</code> crate would widen the trusted computing base with a SIMD
+backend that does not build cleanly on the bare-metal kernel targets (the same
+freestanding-SIMD problem already pinned around for <code>chacha20</code> and
+<code>curve25519-dalek</code>). SHA-256 is a 256-bit collision-resistant hash that fills
+the integrity-and-dedupe role identically, so RustFS v1 uses it; <code>AGENTS.md</code>
+§2.12 (use the audited <code>lib/crypto</code> hash, do not hand-roll or import an unvetted
+one) takes precedence over the spec’s named primitive. The physical checksum is
+a first-party FNV-1a — a checksum is not a cryptographic primitive, so §2.12
+does not bar rolling it, and the block’s keyed authenticity still rests on the
+AEAD and the metadata MAC.</p>
+<h2 id="compression"><a class="header" href="#compression">Compression</a></h2>
+<p>Compression is <strong>mandatory and always on</strong> (<code>rustfs-spec.md</code> §1, §10): every
+file-data record is compressed before it is encrypted. The codec is
+<strong>first-party</strong> — the <code>lib/compress</code> crate, a <code>no_std</code>, allocation-free LZ77
+(“zstd-fast-style”) codec — and RustFS takes <strong>no external zstd/compression
+dependency</strong> (<code>AGENTS.md</code> §2.12 / §16.4; <code>rustfs-spec.md</code> §3). It is a
+low-CPU profile (a greedy hash-table match finder, LZ4-style literal/match
+tokens, no entropy stage), not a maximum-ratio one.</p>
+<p>On the §6 write path the order is <code>dedupe → compress → encrypt</code> (see
+<em>Deduplication</em> below — only <strong>unique</strong> records are compressed). The plaintext
+logical hash is taken first (it always names the plaintext and is the dedupe
+key), then, if the record is not shared with an existing chunk, it is
+compressed; when the compressed frame is
+<strong>not smaller</strong> than the logical block capacity the record is stored <strong>raw</strong>
+(the §10 adaptive choice — incompressible data is never inflated). On the read
+path the order is <code>physical checksum → decrypt → decompress → verify logical hash</code>; a record stored raw skips the decompress step.</p>
+<p>Which path a record took is recorded in a per-block <strong>compression descriptor</strong>
+(the §8 data-record <em>compression state</em> field, <code>src/integrity.rs</code>): one state
+byte plus the little-endian <code>u32</code> length of the at-rest stored representation.
+It sits between the crypto trailer and the logical hash, so the fast physical
+checksum covers it and a corrupted descriptor is caught before the AEAD runs.
+<code>data_capacity()</code> reserves it alongside the crypto and integrity trailers.</p>
+<p>The whole fixed-size content slot is always encrypted regardless of whether
+the record compressed, so the Stage-4 crypto and Stage-5 integrity layers are
+<strong>identical</strong> for compressed and raw records — a compressed record simply
+stores fewer at-rest bytes inside the same slot, while a logical block still
+maps exactly one file block. Decompression is panic-free: a malformed or
+truncated compressed frame returns an error (surfaced as the fail-closed
+<code>DriverError::DeviceFault</code>), never a panic (<code>rustfs-spec.md</code> §10, <code>AGENTS.md</code>
+§2.9).</p>
+<h2 id="deduplication"><a class="header" href="#deduplication">Deduplication</a></h2>
+<p>Deduplication is <strong>mandatory and exact</strong> (<code>rustfs-spec.md</code> §1, §9). A physical
+data record — a <strong>chunk</strong> — may be <strong>shared</strong> by more than one <code>(file, logical block)</code>, and it keys on the Stage-5 <strong>logical hash</strong> (the SHA-256 of the
+plaintext). Sharing is <strong>exact and verified</strong>: a candidate is taken only after
+its stored bytes are confirmed <strong>byte-identical</strong> to the incoming record, so a
+missed duplicate is acceptable but unequal data is never merged (§9 — merging
+unequal data is corruption).</p>
+<p>Two copy-on-write trees back it, both the <strong>same</strong> generic <code>src/btree.rs</code>
+(<code>AGENTS.md</code> §2.2 — no second B-tree), and both named by the transaction root
+alongside the inode-tree root:</p>
+<ul>
+<li><strong>Chunk/refcount tree.</strong> Keyed by a chunk’s physical block; the value is the
+referrer count, the encryption domain, the plaintext logical hash, and the
+logical length. It is authoritative for safe freeing.</li>
+<li><strong>Reverse-reference tree.</strong> Keyed by the same physical block; the value is the
+capped list of <code>(inode, logical block)</code> referrers, needed by scrub / check /
+health and by safe discard.</li>
+</ul>
+<p>To keep ordinary writes cheap, an <strong>unshared</strong> block carries an <em>implicit</em>
+reference count of one and has <strong>no</strong> record in either tree. The first time a
+block is shared it is promoted to an explicit chunk (refcount 2, both referrers
+recorded); further shares bump the count and append a referrer; dropping a
+reference decrements it, and dropping the last reference frees the physical
+block. A chunk that falls back to a single referrer returns to the implicit
+state (its records are removed) and keeps its block. Shared chunks are
+<strong>immutable</strong>: overwriting one sharer copies-on-write a fresh record for the
+writer and drops the old refcount, leaving every other sharer’s data intact.</p>
+<p>Discovery uses an in-memory <strong>dedupe index</strong> — <code>(domain, length, logical hash) → candidate</code> — that is <strong>rebuilt from the chunk and reverse-reference trees at
+mount and is never authoritative</strong> (§9). Before sharing, a candidate is
+<strong>liveness-checked</strong> (its recorded referrer’s extent map must still point at
+it) and then <strong>byte-verified</strong>; a candidate that fails either check is a stale
+index entry and is dropped, never shared. This is what lets the fast in-memory
+index be approximate without ever risking a wrong merge.</p>
+<p>A <strong>reflink</strong> (<code>RustFs::reflink</code>) is a copy-on-write clone of a file that
+shares every data block with its source until a side is written, when only the
+written blocks diverge. It is an inherent driver operation, not a widening of a
+frozen <code>Filesystem*</code> ABI trait (<code>AGENTS.md</code> §2.4).</p>
+<p>Dedupe is <strong>scoped to the encryption domain</strong> (<code>rustfs-spec.md</code> §7): the domain
+(derived from the volume’s master key) is carried in every chunk record and in
+the index key, so dedupe can never cross a domain. With a single volume key
+today there is exactly one domain, but the keying already enforces the rule for
+when multiple domains arrive.</p>
+<h2 id="sparse-files-rustfs-specmd-19"><a class="header" href="#sparse-files-rustfs-specmd-19">Sparse files (<code>rustfs-spec.md</code> §19)</a></h2>
+<p>Sparse-file support is <strong>always on and not tunable</strong>: a logical all-zero range
+costs metadata only, never a physical data record, a zstd payload, a dedupe
+chunk, or an encrypted data blob. A 10 MiB all-zero file reports a 10 MiB
+logical size while allocating <strong>zero</strong> data blocks.</p>
+<p>A <strong>hole</strong> is an unmapped logical range. RustFS represents holes <em>implicitly</em>
+as the gaps between a file’s extent-tree mappings (the form <code>.junie/SPARSE.md</code>
+§2/§3 permit alongside an explicit ZERO extent), so a hole adds no on-disk
+field and is simply the absence of an extent — there is nothing extra to
+checksum, encrypt, compress, dedupe, scrub, or trim.</p>
+<p>The write path detects zeros <strong>first</strong>: <code>store_block</code> runs a cheap bounded
+all-zero scan (<code>is_all_zero</code>) on the full logical record before the logical
+hash, dedupe lookup, compression, encryption, or physical allocation. An
+all-zero record drops the block’s mapping (making it a hole) and releases any
+prior physical block through the normal COW/refcount/free path — a block still
+held by a reflink, a deduped owner, or a retained recovery root stays live. A
+zero range is never entered in the dedupe index and never compressed; repeated
+<em>non-zero</em> data (e.g. <code>0xFF</code>) is not special-cased and follows the normal
+zstd/RAW path. There is no RLE/FILL mode.</p>
+<p>Reads of a hole synthesise zero bytes with no disk I/O. Extending a file (a
+larger <code>truncate</code>, or a write past EOF) leaves the new range a hole; shrinking
+frees the data extents beyond the new EOF and removed holes need no free. Scrub,
+check, and rescue iterate only the mapped extent runs, so a hole is never read
+and needs no data-block recovery. Because every volume is encrypted, a hole also
+leaves no plaintext data payload for the zero range.</p>
+<h2 id="online-scrub-rustfs-specmd-12"><a class="header" href="#online-scrub-rustfs-specmd-12">Online scrub (<code>rustfs-spec.md</code> §12)</a></h2>
+<p><code>RustFs::scrub</code> is an <strong>online</strong> verify-and-repair pass: it walks the live
+volume while it stays mounted, leaning on the redundancy and integrity seams
+the earlier stages already built rather than rebuilding structure offline
+(that is the later <code>check</code>). It is an inherent driver operation, not a
+widening of a frozen <code>Filesystem*</code> ABI trait (<code>AGENTS.md</code> §2.4), and is
+<strong>capability-gated</strong> on <code>CAP_FS_MOUNT</code> — without it scrub fails closed with
+<code>PermissionDenied</code> and logs the refusal (<code>AGENTS.md</code> §5.4).</p>
+<p>What scrub verifies, and what it repairs versus records:</p>
+<ul>
+<li><strong>Metadata (verify + repair).</strong> Every live metadata block — the committed
+superblock slot, the transaction root, the inode and per-file extent
+B-trees, and the chunk and reverse-reference trees — is authenticated in
+<strong>both</strong> physical copies. A copy that fails the keyed authenticator is
+<strong>repaired from its good companion</strong> (the same redundancy seam <code>open</code> uses),
+and the repair is counted. A block whose <strong>both</strong> copies fail is recorded as
+an unrepairable finding — fail-closed, never a panic (<code>AGENTS.md</code> §5.4 /
+§2.9).</li>
+<li><strong>Data (verify + record).</strong> Every live file-data block is run through the
+integrity read pipeline and any failure is classified by its layer —
+<code>Physical</code> (fast checksum), <code>Aead</code> (tag), or <code>Logical</code> (plaintext hash) — and
+<strong>recorded</strong>. Deep repair / reconstruction of data is a later stage; scrub
+records honestly rather than pretending to fix what it cannot.</li>
+<li><strong>Refcounts + reverse references (verify + repair).</strong> The chunk refcounts and
+reverse-reference sets are <strong>recomputed from the live inode/extent trees</strong>
+and compared with the on-disk chunk and reverse-reference trees
+(<code>rustfs-spec.md</code> §9). A divergence is a finding; scrub corrects it toward the
+extent-derived truth without dropping a referrer (a wrong refcount is reset, a
+bogus referrer struck out, a stale shared record removed). A genuinely shared
+block missing its chunk record is recorded but not fabricated (that
+reconstruction belongs to the offline <code>check</code>).</li>
+</ul>
+<p><strong>Resumable + interrupt-safe.</strong> Scrub takes a <code>ScrubBudget</code>:
+<code>ScrubBudget::Unlimited</code> verifies the whole volume in one call, while
+<code>ScrubBudget::Inodes(n)</code> verifies a bounded number of inodes, then persists a
+<strong>scrub-progress record</strong> — a <code>BlockType::ScrubProgress</code> block reached from the
+transaction root, holding the resume cursor and the accumulated counts — and
+returns so the caller can resume later. The accumulated <code>ScrubReport</code> of a
+completed scrub is identical whether it ran in one call or many. The progress
+record is <strong>rebuildable</strong> metadata (<code>rustfs-spec.md</code> §4): a crash mid-scrub
+leaves a fully mountable volume and ordinary crash recovery never needs scrub
+(§14); a corrupt progress record simply restarts the scrub rather than failing
+the mount. The cursor is cleared when the pass completes.</p>
+<p><strong>Report, never silent mutation.</strong> Scrub returns a structured <code>ScrubReport</code>
+(blocks checked, faults per class, repairs made, divergences corrected,
+unrepairable findings) and logs its closing outcome through <code>lib/log</code> with a
+stable event ID in the <code>rustfs</code> <code>12000</code> range (<code>AGENTS.md</code> §5.4 / §19.4). A
+clean scrub of a clean volume changes nothing on disk and is idempotent —
+metadata copy-repairs are direct block writes, and a transaction is committed
+only when scrub actually corrected something or persisted a cursor.</p>
+<h2 id="offline-check-and-rescue-rustfs-specmd-12"><a class="header" href="#offline-check-and-rescue-rustfs-specmd-12">Offline check and rescue (<code>rustfs-spec.md</code> §12)</a></h2>
+<p>Scrub is the <em>online</em> verifier; <code>check</code> and <code>rescue</code> are the <em>offline</em>
+recovery operations it deliberately does not attempt. Both reuse the seams the
+earlier stages built rather than re-implementing them (<code>AGENTS.md</code> §2.2): the
+§8 block identity + companion mirror, the <code>DataFault</code> classes, the
+chunk/reverse-reference trees, and the free-space / dedupe-index rebuilds.</p>
+<p><strong><code>RustFs::check</code> — offline structural validation, repair, and index
+rebuild.</strong> <code>check</code> runs on a <strong>mounted handle</strong> (a volume that opens is the
+input) and is the <strong>superset</strong> of the online scrub’s checks plus structural
+rebuild. It is <strong>capability-gated</strong> on <code>CAP_FS_MOUNT</code> (fail-closed and logged
+otherwise) and:</p>
+<ul>
+<li><strong>rebuilds the rebuildable derived state first</strong> — the free-space bitmap (§4)
+and the in-memory dedupe index (§9) — from the authoritative trees, so a
+corrupt derivation can <strong>never</strong> keep a sound volume unmountable. This shares
+the one <code>rebuild_free_space</code> walk <code>open</code> uses;</li>
+<li><strong>verifies and repairs</strong> metadata copies, classifies data-integrity faults,
+and reconciles refcounts / reverse references against the live extents, by
+reusing the online scrub’s verification core (<code>verify_everything</code>);</li>
+<li><strong>validates the directory tree</strong> by walking it from the root: an entry
+pointing at a missing inode is a <em>dangling</em> finding (reported, not
+auto-deleted — removing a live name is not a safe automatic repair); and</li>
+<li><strong>detects and reclaims orphaned inodes</strong> — live inodes the directory tree no
+longer reaches — freeing their data blocks (releasing any shared-chunk
+references) and their inode slot.</li>
+</ul>
+<p><code>check</code> returns a structured <code>CheckReport</code> (the embedded scrub <code>verification</code>,
+directories checked, dangling entries, orphans found/reclaimed, whether the
+derived state was rebuilt, and the count of findings it could <strong>not</strong> safely
+repair) and logs its outcome with a stable <code>rustfs</code> <code>12000</code>-range event ID. A
+clean check changes nothing on disk and is idempotent; it commits only when it
+actually corrected or reclaimed something.</p>
+<p><strong><code>RustFs::rescue</code> — damaged-volume root discovery and file extraction.</strong>
+<code>rescue</code> does <strong>not</strong> require a mountable filesystem. It is an associated
+function (it takes the block device, not a mounted handle), capability-gated on
+<code>CAP_FS_MOUNT</code>, and <strong>read-only</strong> on the damaged volume — the repair-on-read
+paths are suppressed for its duration, so it never writes to the device. It:</p>
+<ol>
+<li>recovers the volume keys from a surviving superblock <strong>discovery header</strong>
+(the wrapped master key, plaintext at rest), so a wounded superblock ring
+does not stop key recovery;</li>
+<li><strong>scans</strong> every physical block for a self-identifying §8 transaction root
+whose inline commit record validates (<code>TxnRoot::decode_any</code>, which needs no
+externally-supplied generation), and picks the <strong>highest-generation</strong> valid
+root — so it recovers a usable root even when the ring no longer names one;</li>
+<li><strong>maps</strong> the inode/extent metadata that root names to files; and</li>
+<li><strong>extracts</strong> each file’s readable data, running every recovered block
+through the Stage 5/6 integrity pipeline and emitting only blocks that pass
+to a caller-supplied <code>RescueSink</code> — a block that fails integrity is skipped
+and counted, <strong>never handed back</strong> (§6).</li>
+</ol>
+<p><code>rescue</code> returns a structured <code>RescueReport</code> (roots found, the chosen
+generation, files mapped, blocks extracted, blocks skipped, unreadable inodes)
+and logs its outcome with a stable event ID. Because the driver owns no
+destination filesystem, extraction streams recovered plaintext blocks to the
+<code>RescueSink</code> the caller provides (a recovery host writes them to a safe
+volume).</p>
+<h2 id="trim--discard-rustfs-specmd-11-1510"><a class="header" href="#trim--discard-rustfs-specmd-11-1510">TRIM / discard (<code>rustfs-spec.md</code> §11, §15.10)</a></h2>
+<p><code>rustfs</code> returns freed space to the backing device <strong>safely</strong>: a block is
+discarded only once it is unreachable from every retained root, snapshot,
+reflink, deduped extent, and recovery root. The hard constraint is that discard
+may <strong>never</strong> destroy data reachable from any of those (<code>rustfs-spec.md</code> §11).
+There is no <code>nodiscard</code> / <code>trim=off</code> mode.</p>
+<p><strong>The block-device discard capability.</strong> The <code>Block</code> ABI exposes two methods
+(an <code>abi-v1</code> extension, not a widening of the frozen read/write surface,
+<code>AGENTS.md</code> §2.4 / §9): <code>discard_capability()</code> reports whether the device
+supports discard, its granularity, and a per-request block cap; <code>discard(lba, blocks)</code> issues one aligned discard. A device <strong>without</strong> discard support is
+<em>recorded, not failed</em> — both default to “unsupported” so a backend that cannot
+trim simply reports so.</p>
+<p><strong>The pending-discard queue (mounted trim).</strong> Freed blocks enter a transient,
+in-memory pending-discard queue as a committed transaction reclaims them
+(<code>finish_txn</code>), reusing the existing deferred-free machinery rather than a
+second free-tracking mechanism (<code>AGENTS.md</code> §2.2). <code>RustFs::trim</code> later issues
+the discards:</p>
+<ul>
+<li><strong>Safety by re-check.</strong> A queued block is discarded only if it is <strong>still
+free</strong> at trim time. The mount-time free-space rebuild marks every block
+reachable from the committed root — including every reflink target and every
+deduped chunk at refcount ≥ 1 — as <em>used</em>, so a free block is, by
+construction, unreachable from every retained root. A block freed and then
+reallocated is <em>used</em> again by trim time and is skipped, never discarded.</li>
+<li><strong>Batched, aligned, rate-limited.</strong> Still-free blocks are coalesced into
+contiguous runs, each run is aligned <strong>inward</strong> to the device’s discard
+granularity (the unaligned head/tail edges are requeued), and at most
+<code>TRIM_BATCH_RANGES</code> runs are issued per call; the remainder stays queued for
+the next call.</li>
+<li><strong>No zero-readback assumption.</strong> <code>rustfs</code> never reads a discarded block
+expecting zeroes; discarded blocks are free and are fully rewritten (header +
+integrity + crypto) before they are ever read again.</li>
+</ul>
+<p>The queue is <strong>rebuildable, transient state</strong> (<code>rustfs-spec.md</code> §4): it is never
+persisted, so a crash mid-trim simply drops it — the volume remounts cleanly,
+the queue is empty, and no live data is lost. <code>trim</code> is <strong>capability-gated</strong> on
+<code>CAP_FS_MOUNT</code> (fail-closed, <code>AGENTS.md</code> §5.4) and returns a structured
+<code>TrimReport</code> (whether discard is supported, ranges and blocks discarded, blocks
+skipped as still-in-use, and blocks deferred to a later pass), logging its
+outcome with a stable event ID in the <code>rustfs</code> <code>12000..13000</code> range.</p>
+<p><strong>mkfs-time discard.</strong> On a discard-capable device, <code>format</code> issues a
+full-range discard before laying down the encrypted structures (open device →
+read discard capability → full-range discard when supported → create structures
+→ flush). A device without discard support is recorded, not failed: a fresh
+volume is still created and mounts.</p>
+<h2 id="device-health-and-health-triggered-scrub-rustfs-specmd-11-1511"><a class="header" href="#device-health-and-health-triggered-scrub-rustfs-specmd-11-1511">Device health and health-triggered scrub (<code>rustfs-spec.md</code> §11, §15.11)</a></h2>
+<p><code>rustfs</code> keeps a notion of the volume’s health so it can decide <em>when</em> a scrub
+is worth running, rather than only running one on demand. It reuses the seams
+the earlier stages built (<code>AGENTS.md</code> §2.2) and never adds a second integrity
+or scrub path.</p>
+<p><strong>The block-device health surface.</strong> The <code>Block</code> ABI exposes
+<code>device_health() -&gt; DeviceHealth</code> (an <code>abi-v1</code> extension alongside the discard
+surface, never a widening of the frozen read/write methods, <code>AGENTS.md</code> §2.4 /
+§9). It returns either <code>Available(HealthSnapshot)</code> — the SMART / NVMe-style
+counters (power-on hours, unsafe shutdowns, media/data-integrity errors,
+reallocated/pending/uncorrectable sectors, interface CRC errors, wear,
+available spare, temperature, a device critical-warning bit) — or
+<code>Unavailable</code>. The two states are distinct so “no data” is never confused with
+“all counters zero”; a device without telemetry is <em>recorded, not failed</em> and
+the health subsystem stays enabled (§11). The default implementation reports
+<code>Unavailable</code>, so a backend with no telemetry needs no code.</p>
+<p><strong>The persisted baseline.</strong> A self-identifying <code>BlockType::HealthBaseline</code>
+block, reached from the transaction root (exactly like the Stage-8
+scrub-progress record), stores the <strong>last clean device-health snapshot</strong> the
+next pass compares against, plus the volume’s <strong>accumulated
+filesystem-observed fault counters</strong> — metadata copy-repairs and
+both-copies-bad blocks (the Stage-3 companion-repair seam) and per-class data
+faults (<code>Physical</code> / <code>Aead</code> / <code>Logical</code>, the Stage-5 seam). Both are
+<strong>persisted</strong>, not rebuildable (§4): a transient fault that was repaired leaves
+no trace in the live trees, so the count is only durable if it is written down.
+The block is the single source of truth; <code>format</code> stores the initial baseline
+at mkfs time, and a crash mid-update leaves the previous committed baseline (or
+none) selected and never blocks a mount (§14). A corrupt baseline is simply
+re-established at the next clean pass (§4), never a mount failure.</p>
+<p><strong>The report and thresholds.</strong> <code>RustFs::health</code> returns a structured
+<code>HealthReport</code> (mirroring <code>ScrubReport</code> / <code>CheckReport</code> / <code>TrimReport</code>) that
+classifies the volume against the documented <code>HealthThresholds::DEFAULT</code> —
+<code>Healthy</code>, <code>Degraded</code>, or <code>Failing</code> — taking the worse of the device-reported
+signal and the accumulated filesystem-observed signal. The thresholds are
+explicit, named, and inspectable, with no magic numbers buried in code
+(<code>AGENTS.md</code> §2.1 / §11): a single repaired metadata block, a single data
+fault, or any device media error raises a watch-level (<code>Degraded</code>) signal,
+while accumulated faults, a device critical warning, exhausted spare, or
+worn-out media raise an act-now (<code>Failing</code>) signal. Critical single-device
+health additionally sets <code>read_only_recommended</code> (§11).</p>
+<p><strong>Health-triggered scrub.</strong> When the device’s unsafe-shutdown counter has risen
+since the baseline a metadata scrub is scheduled; when its media-error counter
+has risen a deep scrub is scheduled (§11). <code>health</code> acts on the recommendation
+by running the <strong>Stage-8 <code>scrub</code></strong> — its <code>CAP_FS_MOUNT</code> gate, its budget, its
+resumable/interrupt-safe core — never a parallel verifier (<code>AGENTS.md</code> §2.2),
+and folds the scrub’s findings into the accumulated counters. It then stores
+the current telemetry as the new baseline so the next pass measures a fresh
+delta (a pass with no new device activity triggers no scrub).</p>
+<p><code>health</code> is <strong>capability-gated</strong> on <code>CAP_FS_MOUNT</code> (the mount-management
+capability that already gates scrub/check/trim; fail-closed and logged
+otherwise, <code>AGENTS.md</code> §5.4) and logs its classification — and any triggered
+scrub — through <code>lib/log</code> with stable event IDs in the <code>rustfs</code>
+<code>12000..13000</code> range (<code>HEALTH_OK</code> / <code>HEALTH_DEGRADED</code> / <code>HEALTH_FAILING</code> /
+<code>HEALTH_SCRUB_TRIGGERED</code> / <code>HEALTH_DENIED</code>).</p>
+<h2 id="timestamps-21"><a class="header" href="#timestamps-21">Timestamps (§21)</a></h2>
+<p>Every inode stores four 64-bit-native <code>Time64</code> timestamps —
+<code>created</code>, <code>modified</code>, <code>accessed</code>, and <code>changed</code> — so absolute time is
+never a seconds-only scalar and the full pre-1970 / post-2038 range
+round-trips without truncation (<code>AGENTS.md</code> §21). They are surfaced
+through the versioned <code>FilesystemTimestamps</code> trait
+(<code>times(node) -&gt; NodeTimes</code>), a separate <code>abi-v1</code> extension alongside
+<code>FilesystemSecurity</code> — never a widening of <code>FilesystemRead</code> /
+<code>FilesystemWrite</code> (<code>AGENTS.md</code> §2.4 / §9).</p>
+<p>The driver stamps them from a clock seam installed with
+<code>RustFs::with_clock(clock: fn() -&gt; Time64)</code>; without it every stamp is
+the Unix epoch, so a board with no wall clock yet keeps deterministic,
+in-range timestamps rather than panicking or inventing a time
+(<code>AGENTS.md</code> §2.9). The stamping follows the POSIX model:</p>
+<ul>
+<li><strong>create</strong> sets all four to the creation instant and bumps the parent
+directory’s <code>modified</code>/<code>changed</code>;</li>
+<li><strong>write</strong> advances <code>modified</code>/<code>accessed</code>/<code>changed</code>;</li>
+<li><strong>truncate</strong> advances <code>modified</code>/<code>changed</code>;</li>
+<li><strong>set_security</strong> advances only <code>changed</code> (a metadata change);</li>
+<li><strong>remove</strong> bumps the parent directory’s <code>modified</code>/<code>changed</code>.</li>
+</ul>
+<p><code>created</code> is set once and never changed. Installing a different clock
+never rewrites timestamps already on disk.</p>
+<h2 id="copy-on-write-metadata-trees"><a class="header" href="#copy-on-write-metadata-trees">Copy-on-write metadata trees</a></h2>
+<p>Both scalable metadata structures are the <strong>same</strong> generic copy-on-write
+B-tree (<code>src/btree.rs</code>), keyed by <code>u64</code> (<code>AGENTS.md</code> §2.2 — one
+implementation, not two). Each tree node is one self-identifying metadata
+block (<code>BlockType::Btree</code>); a leaf holds <code>(key, value)</code> records in key order
+and an internal node holds <code>(separator, child)</code> records, where the separator
+is the smallest key in the child.</p>
+<ul>
+<li><strong>Inode tree.</strong> Keyed by inode number, value the 256-byte inode record. It
+supersedes Stage 1’s two-level inode map and removes the format-time
+<code>inode_count</code> cap — the tree grows as inodes are created. The transaction
+root names the tree’s root block and the next inode number to hand out.</li>
+<li><strong>Extent tree.</strong> One per file, keyed by logical block offset, value a
+<code>(physical start, run length)</code> extent. It supersedes the 12-direct +
+single-indirect map; a lookup is a floor query that finds the run covering
+an offset, and a sequential write merges into the adjacent run so the map
+stays compact.</li>
+</ul>
+<p>Mutations copy-on-write the touched node to a fresh (or transaction-private)
+block and bubble the change up to a new root; nodes split on overflow and
+borrow-or-merge on underflow, all <code>Result</code>-based and panic-free with no
+<code>unsafe</code>. Block allocation draws file <strong>data</strong> upward from the low end of the
+pool and <strong>metadata</strong> downward from the high end, with a small metadata
+reserve so a delete can always copy-on-write itself and commit even on an
+otherwise-full volume.</p>
+<p>The mount-time <strong>free-space rebuild</strong> walks these trees from the selected
+root — every inode-tree node, then each inode’s extent-tree nodes and the
+physical runs they map — to reconstruct the in-memory free-block bitmap, so
+the authoritative free set is always derived from live metadata rather than a
+stored bitmap.</p>
+<h2 id="copy-on-write-and-the-superblock-ring"><a class="header" href="#copy-on-write-and-the-superblock-ring">Copy-on-write and the superblock ring</a></h2>
+<p><code>rustfs</code> keeps metadata and data consistent across a crash without
+<code>fsck</code> (<code>AGENTS.md</code> §2.5). Every operation is a transaction, and a block
+reachable from the last committed transaction root is <strong>never overwritten
+in place</strong>:</p>
+<ul>
+<li><strong>Copy-on-write everywhere.</strong> A modified metadata or data block is
+written to a freshly allocated block; the block that referenced it is
+itself copy-on-written to point at the new location, up to the inode
+map. Blocks superseded by the transaction are <em>deferred-freed</em> — marked
+reusable only after the transaction commits — so the previous committed
+tree stays wholly intact until the new one is durable.</li>
+<li><strong>Commit order (<code>docs/src/filesystem/rustfs-spec.md</code> §14).</strong> Write the copy-on-write
+blocks, write the new transaction root carrying its inline commit
+record, then publish the next superblock-ring slot (round-robin)
+pointing at that root. <code>open</code> scans the ring and selects the
+highest-generation slot whose root <em>and</em> commit record validate. A
+crash before the slot is published leaves the previous committed root
+selected; a crash mid-publish overwrites only the oldest ring slot, so
+the most recent committed root always survives — the mount lands on a
+whole transaction boundary, never a torn one.</li>
+</ul>
+<h2 id="operations"><a class="header" href="#operations">Operations</a></h2>
+<p><code>FilesystemRead</code> provides <code>root</code>/<code>node_info</code>/<code>lookup</code>/<code>read_at</code>/<code>read_dir</code>;
+<code>FilesystemWrite</code> provides <code>create</code>/<code>write_at</code>/<code>truncate</code>/<code>remove</code>/<code>flush</code>,
+addressing a target as a <code>(dir, name)</code> pair. <code>write_at</code> extends files
+(zero-filling sparse gaps), <code>truncate</code> shrinks (freeing the tail and
+copy-on-write zeroing the partial last block) or grows, and <code>remove</code>
+refuses a non-empty directory with <code>Busy</code>. A <code>NodeId</code> is the inode index;
+node identity is stable across a remount. The driver additionally exposes
+<code>RustFs::reflink(dir, src, dst)</code> — a copy-on-write clone that shares the
+source’s data chunks until a side is written (see <em>Deduplication</em>) — as an
+inherent operation, not a widening of a frozen ABI trait (<code>AGENTS.md</code> §2.4).</p>
+<h2 id="end-to-end-qemu-vertical"><a class="header" href="#end-to-end-qemu-vertical">End-to-end QEMU vertical</a></h2>
+<p><code>tests/integration/rustfs_virtio_blk_pci_x86_64</code> exercises the driver
+against a <strong>real (emulated) virtio-blk-pci device</strong> under QEMU. It boots
+the production kernel pipeline, brings the block device online through
+the same shared bring-up the virtio-blk and FAT32 verticals use, then
+mounts a planted rustfs volume through <code>RustFs::open</code> (with the fixture’s
+shared volume key), verifies the
+planted file reads back its known contents, and creates + writes + reads
+back a fresh file before signalling success.</p>
+<p>The on-disk image is built by the shared <code>rustos-test-rustfs-image</code>
+fixture (a 1 MiB, 512-byte-block, 64-inode volume). Unlike the
+hand-encoded FAT32 fixture, the rustfs image is authored by the <strong>real
+rustfs driver itself</strong> — the fixture formats an in-memory volume through
+<code>RustFs::format</code> and plants the file through the driver’s own write path
+— so the fixture and the driver can never disagree about the on-disk
+format (<code>AGENTS.md</code> §2.2). The host harness (<code>cargo xtask test --qemu</code>)
+plants exactly that image on the backing disk, and the freestanding guest
+tail names the same planted and to-be-written files through the fixture’s
+constants. The device tail (<code>rustfs_round_trip</code>) is generic over the
+virtio transport, so a riscv64 MMIO sibling runs identical code.</p>
+<h2 id="capabilities"><a class="header" href="#capabilities">Capabilities</a></h2>
+<p>Loading requires <code>CAP_DRV_LOAD</code> at <code>register</code> time. The driver runs in
+user space; it does not request <code>CAP_DRV_KERNEL</code>. The read/write methods
+are reached only through the <code>DriverHandle</code> the host minted at load time,
+and the VFS only delegates a write to a non-<code>READ_ONLY</code> mount.</p>
+<h2 id="test-surface"><a class="header" href="#test-surface">Test surface</a></h2>
+<p><code>cargo test -p rustos-drv-fs-rustfs</code> formats an in-memory volume and
+exercises: the self-identifying block header rejecting a wrong magic,
+wrong type, wrong expected address, foreign UUID, a flipped payload byte,
+and a wrong authenticator key; a metadata bit-flip being <strong>detected and
+repaired</strong> from the companion mirror, a one-copy superblock corruption still
+mounting via the mirror, and both copies corrupt failing closed;
+<code>format</code>/<code>open</code> round-trip and rejection of an unformatted device;
+create/lookup/listing across nested directories; read/write with
+block-boundary straddling; extent-backed large files across a remount;
+inode-tree growth and shrink (split, borrow, and merge) across many inodes;
+a file with many non-contiguous extents that splits its extent tree; a large
+contiguous write collapsing to a single extent; the mount-time free-space
+rebuild matching the authoritative live set; <code>truncate</code> keeping the surviving
+prefix; <code>remove</code> reclaiming space so a full volume can allocate again; the
+fail-closed extremes
+(<code>Busy</code>/<code>LengthOutOfRange</code>/<code>NotFound</code>); the Stage-4 encryption acceptance
+tests — a <strong>wrong key refusing the mount</strong> (<code>PermissionDenied</code>, never a
+panic) while the right key still mounts, a distinctive filename and file
+content being <strong>absent from the raw on-disk bytes</strong> (no plaintext at rest),
+a filename and file data <strong>round-tripping through encryption across a
+remount</strong>, and a <strong>bit-flip in an encrypted data block being detected</strong> on
+read; the Stage-5 data-integrity acceptance tests — a data block’s three
+integrity layers (physical checksum, AEAD, logical hash) each detecting
+<strong>its own</strong> class of corruption and all failing closed, identical plaintext
+sharing <strong>one logical hash</strong> while different plaintext differs (the dedupe
+seam) — identical content now also sharing one physical chunk (refcount 2)
+while distinct content does not — and the
+integrity field surviving a remount and a copy-on-write rewrite; the Stage-6
+compression acceptance tests — an <strong>incompressible record stored raw</strong> and
+reading back byte-identical, a <strong>compressible file shrinking its at-rest
+footprint</strong> yet reading back byte-identical across a remount and a COW
+rewrite, and the integrity layers still catching a physical and a logical
+corruption on a <strong>compressed</strong> block; the Stage-7 dedupe acceptance tests —
+two files with identical content <strong>sharing one physical chunk</strong> (refcount 2)
+while distinct content does not, <strong>byte-verify-before-share</strong> refusing an
+injected colliding index entry, overwriting one sharer <strong>copying-on-write</strong> a
+fresh chunk and leaving the other intact, a <strong>reflink</strong> sharing chunks until a
+side is written, <strong>refcount-to-zero freeing</strong> the chunk with the mount-time
+free-space rebuild agreeing, the <strong>dedupe index rebuilding</strong> from the chunk
+tree at mount and yielding the same sharing, dedupe staying <strong>within the
+encryption domain</strong>, and integrity + compression still holding on a <strong>shared</strong>
+chunk across a remount and a COW rewrite; the Stage-8 online-scrub acceptance
+tests — a <strong>clean scrub</strong> of a populated volume reporting zero faults and
+changing nothing (idempotent), scrub <strong>detecting and repairing</strong> a single-copy
+metadata corruption from its companion and reporting the repair, scrub
+<strong>detecting and classifying</strong> an injected data-block <code>Physical</code> and <code>Logical</code>
+fault without panicking, scrub <strong>detecting and correcting</strong> an injected
+refcount and a reverse-reference divergence against the on-disk chunk trees,
+scrub being <strong>resumable</strong> (a budgeted one-inode-per-call pass reaching the same
+result as one uninterrupted pass and clearing its cursor on completion) with a
+<strong>crash mid-scrub still mounting</strong> and resuming, a <strong>shared chunk accounted
+once</strong> with the dedupe domain preserved, the scrub being <strong>capability-gated</strong>
+on <code>CAP_FS_MOUNT</code> (refused and logged otherwise), and integrity + compression +
+dedupe invariants still holding across a scrub, a remount, and a COW rewrite;
+the Stage-9 offline check/rescue acceptance tests — a <strong>clean check</strong> reporting
+a sound structure and rebuilding nothing (idempotent, changing nothing on
+disk), check <strong>rebuilding</strong> a deliberately corrupted free-space bitmap and
+dedupe-index derivation from the authoritative trees with the volume staying
+mountable, check <strong>reclaiming an orphaned inode</strong> and <strong>correcting a refcount
+divergence</strong> while <strong>reporting</strong> an unrepairable data fault it cannot safely
+fix, check being <strong>capability-gated</strong>, <code>rescue</code> <strong>discovering a valid root and
+extracting</strong> files from a volume whose superblock ring is wounded (and being
+read-only/repeatable), and <code>rescue</code> <strong>never emitting a block that fails</strong> the
+Stage 5/6 integrity pipeline while still recovering the good blocks; the
+Stage-11 device-health acceptance tests — <code>health</code> being <strong>capability-gated</strong>
+on <code>CAP_FS_MOUNT</code> (refused and logged otherwise), a device <strong>without telemetry</strong>
+still classifying and persisting a baseline that survives a remount, the
+classification crossing <strong>healthy → degraded → failing</strong> as the device’s
+media-error count climbs across mounts, an <strong>unsafe-shutdown delta triggering a
+scrub</strong> through the Stage-8 machinery (and the advanced baseline triggering no
+further scrub), and the persisted baseline <strong>surviving a crash</strong> at every write
+count during its update with no live data lost; the
+per-inode security record and
+the four §21 <code>Time64</code> timestamps (incl. pre-1970 and far-future)
+round-tripping across a remount; superblock-ring selection of the
+highest committed generation; and a <strong>crash-replay sweep</strong> that faults the
+device after every possible write count during a single committing
+transaction and asserts the re-opened volume always mounts, the
+pre-existing file is always intact, and the in-flight write is either
+fully applied or fully absent — never torn.</p>
+<p>The Stage-12 suites are the adversarial superset of all of the above
+(<code>rustfs-spec.md</code> §15.12, §16; <code>AGENTS.md</code> §7 / §19.6), reusing the same seams
+rather than adding a second integrity, scrub, or decode path (<code>AGENTS.md</code>
+§2.2). The crash-replay sweep is <strong>generalised to every commit step across
+every representative transaction</strong> — create, write, truncate, remove, reflink,
+scrub, check, trim, and health: each is faulted at every write-budget cut-off
+and the re-opened volume must always mount on a whole transaction boundary,
+with the operation’s effect fully present or fully absent (never torn) and the
+witness file never lost. The <strong>corruption-injection suite</strong> systematically
+wounds each on-disk structure class — superblock-ring slot, transaction root,
+the inode / extent / chunk / reverse-reference B-trees, a directory block, the
+scrub-progress and health-baseline records, and each data-integrity layer — in
+<strong>one</strong> copy and in <strong>both</strong> copies, asserting the documented seam behaviour: a
+single bad copy is always repaired from the companion mirror (mounts, scrub
+reports nothing unrepairable, check is sound, data intact); both copies of
+mount-critical metadata never tear (the mount fails closed or recovers an
+earlier whole, consistent committed root through the superblock ring); a
+both-copies-bad directory still mounts but reads fail closed and scrub records
+it unrepairable; the transient scrub-progress/health-baseline records recover
+gracefully (scrub restarts, health re-derives); and an unmirrored data block’s
+fault is detected, classified by its <code>DataFault</code> layer, and surfaced as a
+fail-closed <code>DeviceFault</code>, never silently repaired.</p>
+<p>The <strong>sparse-file acceptance tests</strong> (<code>rustfs-spec.md</code> §19, <code>.junie/SPARSE.md</code>
+§17) cover all ten mandatory cases: a 10 MiB all-zero file reporting a 10 MiB
+logical size while mapping <strong>zero</strong> data blocks (and reading back zero across a
+remount — also the encrypted-volume case, no plaintext payload); a non-zero
+write into a hole splitting the extent map around the data while the
+surroundings stay zero (ordered, non-overlapping); overwriting data with zeroes
+turning the block into a hole while a reflink keeps seeing the old data;
+<code>truncate</code> up creating a hole and down freeing only the real data extents;
+a reflink preserving holes metadata-only and creating no chunk for a zero range;
+scrub and check validating a sparse file’s metadata with no physical read for a
+hole; and an all-zero record bypassing compression while a repeated non-zero
+constant still compresses.</p>
+<p>The mount / metadata-decode path additionally has a <code>cargo xtask fuzz</code>
+harness (<code>fuzz_mount</code>, <code>AGENTS.md</code> §19.6): a per-byte flip sweep over a
+valid image (which also drives the authenticate-then-fall-back-to-mirror
+path), a duplicated-copy sweep that corrupts <em>both</em> copies of each block
+pair, and a fixed-seed PRNG all drive <code>RustFs::open</code> over arbitrary bytes,
+asserting it never panics and fails closed. Since Stage 7 the fuzz image is
+populated with duplicate-content files and a reflink, so the sweep also drives
+the <strong>chunk/refcount</strong> and <strong>reverse-reference</strong> record decode paths that
+mount rebuilds the dedupe index from. Since Stage 8 the base image is left with
+a <strong>paused scrub</strong>, and each successful mount additionally runs a bounded
+<code>scrub</code>, so the sweep also drives the <strong>scrub-progress</strong> record decode path
+(<code>load_scrub_progress</code>), asserting it too never panics and fails closed. Since
+Stage 9 each successful mount additionally runs the offline <code>check</code>, and every
+image (mountable or not) is also fed to <code>RustFs::rescue</code>, so the sweep drives
+the <strong>transaction-root scan</strong> (<code>TxnRoot::decode_any</code>) and the rescue extraction
+pipeline over arbitrary bytes, asserting both never panic and fail closed. Since
+Stage 11 the fuzz device reports SMART-style telemetry and each successful mount
+additionally runs <code>health</code>, so the sweep drives the <strong>health-baseline</strong> record
+decode path too, asserting it never panics and fails closed. Since Stage 12
+each successful mount additionally <strong>walks every reachable directory</strong>
+(<code>read_dir</code>/<code>lookup</code>, bounded), driving the spec’s required “directory decode”
+target — the encrypted dirent payload the mount-time free-space walk never
+reads — and asserting it never panics and fails closed. The
+first-party compression codec
+has its own <code>cargo xtask fuzz</code> harness (<code>fuzz_compress</code>, in <code>lib/compress</code>):
+the spec’s required “compression decode” target (<code>rustfs-spec.md</code> §10,
+<code>AGENTS.md</code> §19.6), it round-trips structured inputs and feeds corrupted
+frames and pure noise to <code>rustos_compress::decompress</code>, asserting it never
+panics and fails closed.</p>
+<p>The <code>pjdfstest</code>-equivalent POSIX suite remains tracked in
+<code>.junie/next-session-prompt.md</code>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../filesystem/fat32.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../filesystem/rustfs-spec.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../filesystem/fat32.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../filesystem/rustfs-spec.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

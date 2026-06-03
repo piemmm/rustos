@@ -1,0 +1,700 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Kernel scheduler - RustOS</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Architecture, security model, and platform reference for RustOS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "ayu";
+            window.path_to_searchindex_js = "../searchindex-eb0bbf16.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-e5bd170d.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RustOS</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos/edit/main/docs/src/architecture/scheduler.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="kernel-scheduler"><a class="header" href="#kernel-scheduler">Kernel scheduler</a></h1>
+<p><code>kernel/sched</code> ships the architecture-neutral half of RustOS’ SMP
+scheduler. It owns the run queues and the dispatch policy; the
+architecture ports (Stage 3 of <a href="../../../PLAN.html"><code>PLAN.md</code></a>) plug in the
+real IPI and timer surfaces through the [<code>SchedulerArch</code>] trait.</p>
+<p><code>SchedulerArch</code> (and <code>CpuId</code>) are defined in the Arch HAL crate
+<code>kernel/arch/api</code> (<code>AGENTS.md</code> §17.2) and re-exported from <code>kernel/sched</code>
+so the architecture-neutral kernel keeps a single canonical definition
+while the ports implement the trait without depending on <code>kernel/sched</code>
+(§17.4). See <a href="./modularity.html#the-arch-hal-kernelarchapi">Modularity contracts</a>.</p>
+<p>This page is the source of truth for the <em>behaviour</em> the implementation
+must preserve. Read it together with the rustdoc on <code>kernel/sched</code>’s
+public items, and with <a href="../../../AGENTS.html"><code>AGENTS.md</code></a> §4 (“SMP from
+day one”) and §2 (“Non-negotiable rules”).</p>
+<h2 id="scheduler-policies"><a class="header" href="#scheduler-policies">Scheduler policies</a></h2>
+<p>The dispatch <em>policy</em> is pluggable (<code>AGENTS.md</code> §17.1). Two concrete
+policies ship today, each in its own <code>kernel/sched/&lt;impl&gt;</code> crate, and
+both implement the same [<code>SchedulerPolicy</code>] contract so the rest of the
+kernel is agnostic to which one an image links:</p>
+<ul>
+<li><strong>EEVDF</strong> (<code>kernel/sched/eevdf</code>, feature <code>scheduler-eevdf</code>) — the
+<strong>default</strong>. A fully <em>tickless</em> Earliest-Eligible-Virtual-Deadline-First
+policy (see <a href="#eevdf-policy-scheduler-eevdf-default">EEVDF policy</a>).</li>
+<li><strong>MLFQ</strong> (<code>kernel/sched/mlfq</code>, feature <code>scheduler-mlfq</code>) — a
+Multi-Level Feedback Queue with periodic priority boosting (see
+<a href="#mlfq-policy-scheduler-mlfq">MLFQ policy</a>).</li>
+</ul>
+<p><code>kernel/core</code> is the single build-time selection point and enforces that
+<strong>exactly one</strong> <code>scheduler-*</code> feature is active per image. Everything
+below the two policy sections — the IPI hook, the timer entry point, the
+current-task slot, and the invariants — is shared by both policies
+because it lives in the contract, not the policy.</p>
+<h2 id="mlfq-policy-scheduler-mlfq"><a class="header" href="#mlfq-policy-scheduler-mlfq">MLFQ policy (<code>scheduler-mlfq</code>)</a></h2>
+<p>This policy is a <strong>Multi-Level Feedback Queue (MLFQ)</strong> with periodic
+priority boosting, dispatched via <strong>per-CPU work-stealing queues</strong>. The
+policy is the classical MLFQ as described in:</p>
+<blockquote>
+<p>Arpaci-Dusseau, R. H. &amp; Arpaci-Dusseau, A. C. <em>Operating Systems:
+Three Easy Pieces</em>, ch. 8. <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">https://pages.cs.wisc.edu/~remzi/OSTEP/</a></p>
+</blockquote>
+<p>The run-queue is a bounded variant of the Chase–Lev work-stealing
+deque (Chase &amp; Lev, SPAA ’05) with two RustOS-specific simplifications:</p>
+<ol>
+<li>The buffer is bounded, so a misbehaving task source cannot
+amplify into a kernel-wide DoS (<code>AGENTS.md</code> §5).</li>
+<li>The slot payload is the <code>Copy</code> <code>TaskId</code> (a <code>u64</code>), not a typed
+pointer; lost-CAS races therefore cannot leak or double-free.</li>
+</ol>
+<h3 id="bands-and-demotion"><a class="header" href="#bands-and-demotion">Bands and demotion</a></h3>
+<p>Three priority bands, in decreasing order of urgency:
+<code>Priority::High</code>, <code>Priority::Normal</code>, <code>Priority::Low</code>. New tasks default
+to <code>Normal</code>. A task that yields voluntarily
+<code>yields_before_demotion</code> times at its current band is demoted by one
+level (saturating at <code>Low</code>). A task that parks or exits does <em>not</em>
+count as a yield.</p>
+<h3 id="periodic-priority-boost"><a class="header" href="#periodic-priority-boost">Periodic priority boost</a></h3>
+<p>To bound the worst-case starvation latency, every
+<code>boost_interval_ticks</code> (measured against
+[<code>SchedulerArch::ticks_now</code>]) the scheduler promotes every non-exited
+task back to <code>Priority::High</code> and resets its yields-at-band counter.
+The boost is fired by whichever CPU notices the threshold first; the
+CAS on <code>last_boost_tick</code> makes it idempotent across cores. The boost
+does <em>not</em> migrate tasks between queues — instead, the dispatch path
+always reads the <em>task’s</em> current priority, so the change is visible
+from the next time the task is consumed.</p>
+<p>This is what gives the starvation-freedom property exercised by the
+<code>starvation_freedom_via_priority_boost</code> integration test:</p>
+<blockquote>
+<p>For any non-exited task <code>T</code>, the wall-time between two successive
+runs of <code>T</code> is bounded by</p>
+<pre><code class="language-text">boost_interval_ticks · (1 + total_higher_priority_work)
+</code></pre>
+</blockquote>
+<h3 id="per-cpu-run-queues--work-stealing"><a class="header" href="#per-cpu-run-queues--work-stealing">Per-CPU run queues + work-stealing</a></h3>
+<p>Each CPU owns three [<code>RunDeque</code>]s (one per band). A CPU’s
+[<code>step</code>]:</p>
+<ol>
+<li>Performs a priority-boost check.</li>
+<li>Drains the global overflow list (tasks that could not be enqueued on
+their home CPU’s queue because it was full) into its local queues.</li>
+<li>Consumes the highest-priority band that is non-empty.</li>
+<li>If everything local is empty, <strong>work-steals</strong> from a victim CPU
+chosen by the project’s shared non-cryptographic <code>FastRng</code>
+(<code>lib/rng</code>; <code>AGENTS.md</code> §2.2 — no second PRNG), scanning every band,
+then walks the CPU list circularly until either a task is found or
+every other CPU has been probed.</li>
+</ol>
+<p>Both the local consume and the steal use the same <code>RunDeque::steal</code>
+entry point — the queue is a single-end FIFO consumer, so MLFQ
+fairness within a band is preserved. Push is wait-free; consume
+is lock-free with a bounded retry loop on <code>Steal::Retry</code>.</p>
+<h2 id="eevdf-policy-scheduler-eevdf-default"><a class="header" href="#eevdf-policy-scheduler-eevdf-default">EEVDF policy (<code>scheduler-eevdf</code>, default)</a></h2>
+<p>The default policy is <strong>EEVDF — Earliest Eligible Virtual Deadline
+First</strong> (Stoica &amp; Abdel-Wahab, 1995; the same family Linux adopted for
+its fair scheduler in 6.6). It is dispatched via the same per-CPU
+work-stealing structure as MLFQ, but orders tasks by a continuous
+<em>virtual deadline</em> instead of discrete priority bands.</p>
+<h3 id="virtual-time-weight-eligibility-deadline"><a class="header" href="#virtual-time-weight-eligibility-deadline">Virtual time, weight, eligibility, deadline</a></h3>
+<p>Each CPU keeps its own fixed-point <strong>virtual time</strong> <code>V</code>. Each task has a
+<strong>weight</strong> derived from its [<code>Priority</code>] band (<code>High</code>:<code>Normal</code>:<code>Low</code> =
+<code>4</code>:<code>2</code>:<code>1</code>) and two virtual-time markers:</p>
+<ul>
+<li>an <strong>eligible time</strong> <code>ve</code> — the task may run only once <code>V &gt;= ve</code>;</li>
+<li>a <strong>deadline</strong> <code>vd = ve + request / weight</code>, where <code>request</code> is one
+dispatch’s worth of service.</li>
+</ul>
+<p>Admission (spawn / unpark / migration) sets <code>ve = V</code> (zero initial lag)
+and <code>vd = ve + request/weight</code>. On each dispatch the CPU runs the
+<strong>eligible</strong> task with the <strong>earliest</strong> <code>vd</code> (ties broken by <code>TaskId</code>
+for determinism); the task’s fulfilled request then rolls <code>ve</code> forward
+to its old <code>vd</code> and computes the next <code>vd</code>. <code>V</code> advances by
+<code>service / total_weight</code> of the tasks competing on that CPU, so a task
+accrues virtual time inversely to its weight and receives a CPU share
+proportional to it. No task is ever starved: every eligible task has a
+finite, monotonically increasing deadline.</p>
+<h3 id="fully-tickless"><a class="header" href="#fully-tickless">Fully tickless</a></h3>
+<p>Fairness, eligibility, and preemption are driven <strong>entirely by virtual
+time advanced as work is dispatched</strong> — never by a periodic timer tick.
+<code>Scheduler::on_timer_tick</code> is a pure observation counter for this
+policy; no scheduling decision reads it. This is what makes the policy
+tickless: a real arch port can run its timer in one-shot / <code>NO_HZ</code> mode,
+arming it only for the next virtual deadline rather than at a fixed
+frequency. The <code>tickless_weight_proportional_fairness</code> unit test proves
+fairness holds while <code>ticks_now()</code> never moves and <code>on_timer_tick</code> is
+never called.</p>
+<h3 id="per-cpu-queues--work-stealing"><a class="header" href="#per-cpu-queues--work-stealing">Per-CPU queues + work-stealing</a></h3>
+<p>Each CPU owns one virtual-time <code>RunQueue</code> with its own clock. An idle
+CPU steals the earliest-deadline task from a victim chosen by the
+project’s shared non-cryptographic <code>FastRng</code> (<code>lib/rng</code>; <code>AGENTS.md</code>
+§2.2 — no second PRNG) and <strong>rebases</strong> the migrated task’s <code>ve</code>/<code>vd</code> onto the stealing
+CPU’s clock (the EEVDF migration rule — a task carries no lag across
+CPUs). The earliest-eligible-deadline scan is <code>O(n)</code> in the per-CPU
+ready count; a future tree-backed index can replace it behind the
+<code>RunQueue</code> boundary without changing the policy.</p>
+<h2 id="heterogeneous-cpus-performance--efficiency-cores"><a class="header" href="#heterogeneous-cpus-performance--efficiency-cores">Heterogeneous CPUs (performance + efficiency cores)</a></h2>
+<p>Modern asymmetric CPUs — Intel “hybrid” parts, ARM <code>big.LITTLE</code> /
+DynamIQ — pair high-throughput <strong>performance</strong> cores with low-power
+<strong>efficiency</strong> cores. Both policies place work sensibly across such a
+machine; on a homogeneous machine every path below is a strict no-op.</p>
+<h3 id="detecting-the-topology"><a class="header" href="#detecting-the-topology">Detecting the topology</a></h3>
+<p>A logical CPU’s class is a <em>static identity</em> — like its <code>CpuId</code> it never
+changes for the kernel’s lifetime — so it lives in the Arch HAL as
+<code>SchedulerArch::core_class(cpu) -&gt; CoreClass</code> (<code>kernel/arch/api</code>). The
+method is <strong>provided</strong>: it defaults to <code>CoreClass::Performance</code>, so a
+homogeneous machine and any port that has not wired discovery behave
+exactly as before, and the surface stays free of dynamic
+power-management concerns (frequency scaling, deep sleep) which remain
+out of the HAL (<code>AGENTS.md</code> §2.4, §17.2). The architecture port
+discovers the class during early-boot enumeration (<code>kernel/arch/x86_64::hybrid</code>),
+records each core’s class as it comes online, and serves it through the
+override. The host <code>TestArch</code> lets a unit test model an asymmetric
+machine via <code>TestArch::set_core_class</code>.</p>
+<p>The two x86_64 vendors expose the per-core class through different CPUID
+surfaces, so the port reads the vendor string from CPUID leaf 0 and
+dispatches:</p>
+<ul>
+<li><strong>Intel</strong> — the core type is read from CPUID <strong>leaf 0x1A</strong> (Hybrid
+Information Enumeration). Bits 31:24 of <code>EAX</code> carry the type; an Atom
+byte (<code>0x20</code>) is an efficiency core, and any other value — including
+the <code>0</code> a non-hybrid part reports — is a performance core.</li>
+<li><strong>AMD</strong> — there is no leaf-0x1A equivalent. The class comes from the
+Extended CPU Topology <strong>leaf 0x80000026</strong>, probed only after bounding
+the maximum extended leaf via leaf 0x80000000. At the Core level
+(<code>ECX[15:8] == 1</code>), a part that advertises a heterogeneous topology
+(<code>EAX[30]</code>) with an available efficiency ranking (<code>EAX[29]</code>) reports a
+per-core power/efficiency ranking in <code>EBX[23:16]</code>; the lowest tier is
+an efficiency core and every higher tier is a performance core.</li>
+</ul>
+<p>Both decoders <strong>fail conservative</strong>: anything that is not an encoding the
+vendor has actually published — an unknown core type, a non-heterogeneous
+part, a reserved value — is treated as <code>CoreClass::Performance</code>, the safe
+homogeneous default. Neither guesses a class from family/model heuristics
+or frequency tables. The AMD topology encoding is newer than Intel’s and
+is still settling across CPU generations, so the AMD decoder recognises
+only the published ranking field and defers any future encoding change to
+a deliberate, reviewed addition rather than a silent reinterpretation.</p>
+<h3 id="placing-work-by-class"><a class="header" href="#placing-work-by-class">Placing work by class</a></h3>
+<p>Each scheduler snapshots the per-CPU classes at construction and keeps a
+list of the performance and efficiency CPUs. A task’s preferred class
+follows its priority band:</p>
+<ul>
+<li><code>High</code> / <code>Normal</code> (interactive, throughput-sensitive) → a
+<strong>performance</strong> core;</li>
+<li><code>Low</code> (background / idle) → an <strong>efficiency</strong> core.</li>
+</ul>
+<p><code>spawn</code>, <code>unpark</code>, and the dispatch re-enqueue path route a task to a CPU
+of its preferred class (round-robin within the class). If the task’s
+current home is already of the right class it stays put — which is why
+the path is a no-op on a homogeneous machine, where the efficiency pool
+is empty and all work is <code>Performance</code>-class. EEVDF carries the task’s
+competing weight with it across a class migration (the same
+no-lag-across-CPUs rebase that work-stealing uses).</p>
+<h3 id="promotion-and-demotion"><a class="header" href="#promotion-and-demotion">Promotion and demotion</a></h3>
+<p>Under <strong>MLFQ</strong> this single rule produces the promote-then-demote
+behaviour an idle-but-occasionally-busy task needs <em>for free</em>: a <code>Low</code>
+background task lives on an efficiency core; when the periodic priority
+boost lifts it to <code>High</code> to avoid starvation it migrates <strong>up</strong> to a
+performance core on its next turn, and when it is demoted back to <code>Low</code>
+once it settles it migrates <strong>down</strong> to an efficiency core again. Under
+<strong>EEVDF</strong> priority is static, so placement is by band; work-stealing may
+temporarily land a <code>Low</code> task on a performance core, and the task
+migrates back down to an efficiency core on its next yield.</p>
+<p>Liveness is guaranteed regardless of placement: the shared conformance
+suite’s <code>heterogeneous_topology_preserves_liveness</code> test runs a mixed
+<code>High</code>/<code>Low</code> population to completion across performance and efficiency
+cores, asserting no task is stranded, lost, or duplicated. Each policy’s
+own unit tests assert <em>where</em> tasks land.</p>
+<h2 id="ipi-based-preemption-hook"><a class="header" href="#ipi-based-preemption-hook">IPI-based preemption hook</a></h2>
+<p>The scheduler never sleeps or busy-waits on its own. It signals
+“there’s work for you” to a CPU through
+[<code>SchedulerArch::send_ipi</code>], which:</p>
+<ul>
+<li><code>spawn</code> calls after enqueuing a fresh task.</li>
+<li><code>unpark</code> calls after re-enqueueing a previously parked task.</li>
+</ul>
+<p>The arch port decides whether that IPI raises a hardware interrupt
+immediately, schedules a deferred reschedule, or — on
+<code>wasm32-unknown-unknown</code> — drops a message into a
+<code>MessageChannel</code>. The scheduler does <strong>not</strong> assume any latency bound
+on the IPI; correctness only requires that the target CPU eventually
+calls [<code>step</code>].</p>
+<h2 id="timer-driven-preemption-entry-point"><a class="header" href="#timer-driven-preemption-entry-point">Timer-driven preemption entry point</a></h2>
+<p>The inverse direction — <em>arch driving the scheduler</em> on every timer
+tick — is <code>Scheduler::on_timer_tick(cpu)</code>. The arch port’s timer ISR
+(the LAPIC-timer ISR on x86_64; the CNTV/EL1 handler on aarch64; the
+CLINT trap on riscv64; the host worker’s quantum tick on wasm32)
+calls this once per fire, <em>after</em> it has acknowledged the device-
+level interrupt source (EOI on the LAPIC, etc.). The scheduler
+itself never reaches for a timer register; the arch port owns that.</p>
+<p>Under the default tickless EEVDF policy a periodic tick is <strong>not
+required</strong> for correctness (see <a href="#eevdf-policy-scheduler-eevdf-default">EEVDF policy</a>);
+the entry point exists so a port that does run a periodic timer can
+record that it fired. Under MLFQ the same tick also bounds the priority
+boost interval. In both policies <code>on_timer_tick</code> increments the per-CPU
+preemption counter and returns; it does <strong>not</strong> call <code>Scheduler::step</code>.
+The counter is
+observable from <code>Scheduler::preemption_count(cpu)</code> and
+<code>Scheduler::total_preemption_count()</code>. These exist so integration
+tests can assert that preemption is actually firing — a silent
+regression to cooperative scheduling would otherwise pass the
+workload-correctness tests while breaking the security model
+(<code>AGENTS.md</code> §5: a runaway task on one CPU must not be able to
+indefinitely block another).</p>
+<h4 id="why-the-entry-point-does-not-dispatch"><a class="header" href="#why-the-entry-point-does-not-dispatch">Why the entry point does <em>not</em> dispatch</a></h4>
+<p><code>step</code> reads the task registry through an <code>RwLock</code> and locks the
+overflow <code>SpinLock</code>; <code>spawn</code> writes the registry. Both lock kinds
+are explicitly forbidden from interrupt context by <code>lib/sync</code>
+(see <code>lib/sync/src/rwlock.rs</code> module docs: “Process /
+kernel-thread context only. Never from an interrupt handler.”).
+An ISR-driven <code>step</code> would deadlock against the same CPU’s in-
+progress <code>spawn</code> (writer-held registry lock) or a mid-
+<code>drain_overflow_to</code> (held overflow lock).</p>
+<p>The cooperative <code>step</code> loop — driven by every CPU’s kernel-thread
+context — remains the only writer of run-queue state. The ISR’s
+job today is purely observational: bump the counter, return, EOI.
+The integration test’s per-CPU <code>preemption_count &gt;= N</code> assertion
+is what proves the timer is actually firing on every CPU.</p>
+<p>A future commit that lands IRQ-safe locks (an <code>irq::SpinLock</code> from
+<code>lib/sync</code>, plus an IRQ-safe <code>RwLock</code>) can extend
+<code>on_timer_tick</code> to drive a real preemption step without changing
+its public signature.</p>
+<h4 id="trait-neutrality"><a class="header" href="#trait-neutrality">Trait neutrality</a></h4>
+<p>The trait <code>SchedulerArch</code> deliberately gains <em>no</em> new method for
+this path: <code>send_ipi</code> already documents the scheduler-asks-arch
+direction, and the ISR-into-scheduler call is, by construction, a
+method on the scheduler itself rather than on the arch trait
+(<code>AGENTS.md</code> §2.4 — no interface creep).</p>
+<h2 id="current-task-slot"><a class="header" href="#current-task-slot">Current-task slot</a></h2>
+<p><code>Scheduler&lt;A&gt;</code> owns a per-CPU <strong>current-task slot</strong> — one
+<code>AtomicU64</code> per CPU, sentinel <code>0</code> meaning “no task currently
+running on this CPU”. The slot is the publication point the
+syscall entry path reads to recover the caller’s <code>TaskId</code>
+without trusting any caller-supplied value
+(<code>AGENTS.md</code> §5.4 step 1 — identify the caller; kernel-provided,
+not caller-supplied).</p>
+<h3 id="lifecycle"><a class="header" href="#lifecycle">Lifecycle</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>event</th><th>slot effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Scheduler::dispatch</code> (entry)</td><td>publishes the about-to-run task’s id</td></tr>
+<tr><td><code>Scheduler::dispatch</code> (exit)</td><td>clears the slot, every branch</td></tr>
+<tr><td><code>Scheduler::park(id)</code></td><td>clears every CPU’s slot whose entry == id</td></tr>
+<tr><td><code>Scheduler::exit(id)</code></td><td>clears every CPU’s slot whose entry == id</td></tr>
+<tr><td><code>Scheduler::yield_current(id)</code></td><td>re-enqueues <code>id</code> Ready, then clears slot</td></tr>
+</tbody>
+</table>
+</div>
+<p>The slot is exposed read-only through
+<code>Scheduler::current_task(cpu) -&gt; Option&lt;TaskId&gt;</code>. The setter and
+the clear-by-id helpers are private: only the scheduler itself
+mutates the slot, so the lifecycle table above is the entire
+ground truth.</p>
+<h3 id="concurrency-rules"><a class="header" href="#concurrency-rules">Concurrency rules</a></h3>
+<ul>
+<li>The slot is read in <strong>process context</strong> on the issuing CPU only.
+Interrupt-context reads are forbidden — they would race with a
+same-CPU <code>dispatch</code> set/clear pair under
+<code>lib/sync::RwLock</code>’s process-only contract
+(<code>AGENTS.md</code> §1).</li>
+<li>The clear-by-id helper used by <code>park</code> / <code>exit</code> /
+<code>yield_current</code> is a per-slot compare-exchange; a concurrent
+<code>dispatch</code> of a <em>different</em> task on a sibling CPU is therefore
+untouched.</li>
+<li><code>current_task(cpu)</code> returns <code>None</code> for an out-of-range <code>cpu</code>,
+not an error. This matches the policy that an unknown CPU has,
+by definition, no current task — and lets the syscall entry
+path probe the slot without having to validate
+<code>current_cpu()</code> first (the syscall trampoline always supplies
+a valid CPU id; the <code>None</code> return is the defence-in-depth
+fail-closed branch).</li>
+</ul>
+<h3 id="why-this-lives-on-schedulera-and-not-on-schedulerarch"><a class="header" href="#why-this-lives-on-schedulera-and-not-on-schedulerarch">Why this lives on <code>Scheduler&lt;A&gt;</code> and not on <code>SchedulerArch</code></a></h3>
+<p>Adding a method on the arch trait would create both a duplicate
+storage site (every arch port would have to hold a copy) and an
+interface widening for a value the scheduler already publishes
+internally (<code>AGENTS.md</code> §2.4 — no interface creep). The slot is
+mutated only by the scheduler’s own <code>dispatch</code> path, so the
+authoritative copy lives where the writer lives.</p>
+<h3 id="yield_current-vs-body-returned-taskactionyield"><a class="header" href="#yield_current-vs-body-returned-taskactionyield"><code>yield_current</code> vs body-returned <code>TaskAction::Yield</code></a></h3>
+<p><code>Scheduler::yield_current(task_id)</code> models a <strong>voluntary syscall
+yield</strong>: the task is currently in <code>TaskState::Running</code> on its
+CPU, the syscall handler wants to relinquish the rest of its
+quantum, and the scheduler must re-Ready the task and clear the
+slot before the syscall returns to user space.</p>
+<p><code>TaskAction::Yield</code> returned by a task body is the
+<strong>body-loop yield</strong>: it is processed by <code>dispatch</code> along with
+MLFQ demotion bookkeeping (<code>yields_at_band</code> /
+<code>yields_before_demotion</code>). The two notions are deliberately
+distinct so the syscall handler is not on the hook for demotion
+policy, which would be interface creep into the syscall layer.</p>
+<h2 id="invariants"><a class="header" href="#invariants">Invariants</a></h2>
+<p>These hold at every API boundary:</p>
+<ol>
+<li>
+<p><strong>No global mutable state outside per-CPU areas.</strong> The
+<code>Scheduler&lt;A&gt;</code> owns a <code>Box&lt;[CpuState]&gt;</code> and a single
+<code>RwLock&lt;BTreeMap&lt;TaskId, Arc&lt;TaskInner&gt;&gt;&gt;</code> registry, plus a
+<code>SpinLock&lt;Vec&lt;TaskId&gt;&gt;</code> overflow list. Each is documented at its
+field. Static / <code>lazy_static</code> mutable state is forbidden
+(<code>AGENTS.md</code> §2.1).</p>
+</li>
+<li>
+<p><strong>Bounded queues.</strong> Every <code>RunDeque</code> has its capacity fixed at
+construction. Push returns <code>Err(task)</code> on overflow; the scheduler
+routes the task into the overflow list rather than panicking.</p>
+</li>
+<li>
+<p><strong>No <code>panic!</code>, <code>unwrap</code>, <code>expect</code> in the dispatch path.</strong> Every
+reachable failure produces a typed [<code>SchedError</code>].</p>
+</li>
+<li>
+<p><strong>Cancellation safety.</strong> <code>park</code>, <code>unpark</code>, <code>exit</code> can race with the
+task’s own body. The scheduler re-resolves the task’s state after
+the body returns:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>observed state</th><th>body returned</th><th>effective action</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Exited</code></td><td><em>anything</em></td><td><code>Exit</code></td></tr>
+<tr><td><em>anything</em></td><td><code>Exit</code></td><td><code>Exit</code></td></tr>
+<tr><td><code>Parked</code></td><td><em>anything</em></td><td><code>Park</code></td></tr>
+<tr><td><em>anything</em></td><td><code>Park</code></td><td><code>Park</code></td></tr>
+<tr><td>otherwise</td><td><code>Yield</code></td><td><code>Yield</code></td></tr>
+</tbody>
+</table>
+</div>
+</li>
+<li>
+<p><strong>Task identity is stable.</strong> <code>TaskId</code> values are never recycled
+within a single scheduler instance. Stale references therefore
+produce <code>SchedError::NoSuchTask</code> rather than waking the wrong task.</p>
+</li>
+</ol>
+<h2 id="crate-layout-171"><a class="header" href="#crate-layout-171">Crate layout (§17.1)</a></h2>
+<p>The scheduler is split per <code>AGENTS.md</code> §17.1 into a contract crate and
+one policy crate per implementation:</p>
+<ul>
+<li><code>kernel/sched/api</code> (<code>rustos-kernel-sched-api</code>) — the
+<code>SchedulerPolicy</code> trait, the policy-neutral lifecycle vocabulary
+(<code>Priority</code>, <code>TaskState</code>, <code>TaskAction</code>, <code>TaskContext</code>, <code>TaskId</code>,
+<code>SchedError</code>, <code>StepOutcome</code>, <code>SchedulerConfig</code>), the re-exported
+Arch HAL surface (<code>CpuId</code>, <code>SchedulerArch</code>), the host <code>TestArch</code>
+double, and the shared <code>conformance</code> suite.</li>
+<li><code>kernel/sched/eevdf</code> (<code>rustos-kernel-sched-eevdf</code>) — the EEVDF policy
+described above, implementing <code>SchedulerPolicy</code>. This is the default.</li>
+<li><code>kernel/sched/mlfq</code> (<code>rustos-kernel-sched-mlfq</code>) — the MLFQ policy
+described above, implementing <code>SchedulerPolicy</code>. The two are siblings
+(<code>AGENTS.md</code> §2.2 carve-out — parallel policies are deliberate, not
+duplication); adding another policy means adding a sibling crate,
+never editing an existing one.</li>
+<li><code>kernel/core</code> is the single build-time selection point: exactly one
+<code>scheduler-*</code> feature is active per image (<code>scheduler-eevdf</code> by
+default, <code>scheduler-mlfq</code> with <code>--no-default-features --features scheduler-mlfq</code>). It re-exports the chosen policy as
+<code>crate::sched::Scheduler</code>; <code>compile_error!</code> guards reject the
+zero-policy and two-policy configurations. No other crate names a
+concrete policy — they depend on <code>kernel/sched/api</code>.</li>
+</ul>
+<h2 id="test-surface"><a class="header" href="#test-surface">Test surface</a></h2>
+<p>The scheduler’s behaviour is covered by:</p>
+<ul>
+<li>The shared conformance suite <code>kernel/sched/api/src/conformance.rs</code>
+(<code>AGENTS.md</code> §17.1): generic over <code>SchedulerPolicy</code>, it asserts
+correct spawn/dispatch/block/wake and yield semantics, starvation-
+freedom, fairness across bands, and a deadlock-free, lossless,
+bounded-latency stress of 10 000 tasks across 4 simulated cores.
+Every concrete policy must pass it.</li>
+<li><code>kernel/sched/api/tests/conformance.rs</code> runs the suite against the
+in-tree MLFQ policy; <code>kernel/sched/eevdf/tests/conformance.rs</code> runs
+the identical suite against EEVDF — proving the two policies are
+interchangeable behind the contract.</li>
+<li><code>kernel/sched/eevdf/src/scheduler.rs</code> <code>#[cfg(test)] mod tests</code> —
+EEVDF-specific coverage: tickless weight-proportional fairness
+(asserting no tick is ever used), even sharing of equal-weight tasks,
+work-stealing, park/unpark, the current-task slot, and that
+<code>on_timer_tick</code> is observation-only.</li>
+<li><code>kernel/sched/mlfq/tests/scheduler.rs</code> — MLFQ-specific integration
+tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
+preemption, cancellation safety, error surface).</li>
+<li><code>kernel/sched/mlfq/tests/loom.rs</code> — Loom model check over the
+run-queue’s lock-free fast path (single producer racing a single
+stealer for the last element). Compiled into an empty binary when
+<code>--cfg loom</code> is not set so default <code>cargo test</code> stays fast.</li>
+</ul>
+<p>In addition, every module carries <code>#[cfg(test)] mod tests</code> with
+focused unit coverage. The tests use the in-memory [<code>TestArch</code>]
+(gated behind the <code>test-arch</code> Cargo feature) — production builds
+never link the mock.</p>
+<h2 id="debugging"><a class="header" href="#debugging">Debugging</a></h2>
+<ul>
+<li><strong>Stuck CPU?</strong> Check <code>Scheduler::live_task_count</code>. A non-zero count
+with no progress points at a missed IPI (<code>SchedulerArch::send_ipi</code>
+delivered to a CPU that never calls <code>step</code>).</li>
+<li><strong>Task never runs?</strong> Confirm its <code>home_cpu</code> matches a CPU that is
+actually being driven, and that the task is not stuck in
+<code>TaskState::Parked</code> — <code>Scheduler::state_of</code> reports the last
+observed state.</li>
+<li><strong>Steal storm?</strong> <code>Steal::Retry</code> is reported when a victim’s <code>top</code>
+CAS lost; bounded retries (capped in <code>CpuState::pop_highest</code>)
+prevent spinning. Excess retries usually indicate too few tasks
+spread across too many CPUs; profile work generation, not the
+scheduler.</li>
+</ul>
+<h2 id="out-of-scope-stage-23"><a class="header" href="#out-of-scope-stage-23">Out of scope (Stage 2.3)</a></h2>
+<ul>
+<li>Real hardware IPIs and timers — provided by Stage 3 architecture
+ports.</li>
+<li>Capability checks, audit logging, and syscall dispatch (Stages 2.4
+/ 2.5 / 2.6).</li>
+<li>Memory accounting beyond the global heap (Stage 2.7).</li>
+</ul>
+<p>Symbols in <code>inline-code</code> link to their rustdoc page from a generated
+docs build; this file deliberately does not hard-code rustdoc paths
+because they are not reachable from the in-tree link checker. Run
+<code>cargo xtask docs-check</code> and follow the rustdoc cross-reference there
+for the authoritative API surface.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/memory.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/security.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/memory.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/security.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

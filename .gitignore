@@ -12,9 +12,6 @@
 # and are uploaded as release assets.
 /images/
 
-# mdBook output.
-/docs/book/
-
 # Local environment overrides — never commit secrets.
 .env
 .env.*

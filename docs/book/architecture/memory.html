@@ -1,0 +1,543 @@
+<!DOCTYPE HTML>
+<html lang="en" class="rust sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Kernel memory subsystem - RustOS</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Architecture, security model, and platform reference for RustOS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "rust";
+            const default_dark_theme = "ayu";
+            window.path_to_searchindex_js = "../searchindex-eb0bbf16.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-e5bd170d.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('rust')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">RustOS</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/rustos-project/rustos/edit/main/docs/src/architecture/memory.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="memory-subsystem-kernelmem"><a class="header" href="#memory-subsystem-kernelmem">Memory subsystem (<code>kernel/mem</code>)</a></h1>
+<p>Architecture-neutral, host-testable physical and virtual memory
+management. Delivered by Stage 2.2 of <code>PLAN.md</code>. The architecture
+crates (<code>kernel/arch/*</code>, Stage 3) supply the only piece this crate
+does not implement: the real page-table writer behind
+<a href="#3-virtual-memory--page-table-operations"><code>PageTableOps</code></a>.</p>
+<h2 id="layered-design"><a class="header" href="#layered-design">Layered design</a></h2>
+<pre><code class="language-text">                ┌──────────────────────────────────────────────┐
+                │   sensitive — zero-on-free for credentials   │
+                │   (`alloc_sensitive` / `free_sensitive`)     │
+                ├──────────────────────────────────────────────┤
+                │   slab — fixed-size objects + guard pages    │
+                ├──────────────────────────────────────────────┤
+                │   vmm — `AddressSpace&lt;P: PageTableOps&gt;`      │
+                ├──────────────────────────────────────────────┤
+                │   frame — buddy + bitmap physical allocator  │
+                └──────────────────────────────────────────────┘
+                          │
+                  `BootMemoryMap` from `kernel/arch/*`
+</code></pre>
+<p>Every layer above depends only on the layer immediately below it; the
+trait that crosses the architecture boundary lives in
+<a href="#3-virtual-memory--page-table-operations">vmm</a>.</p>
+<h2 id="1-physical-frame-allocator-frame"><a class="header" href="#1-physical-frame-allocator-frame">1. Physical frame allocator (<code>frame</code>)</a></h2>
+<p>Hybrid <strong>buddy + bitmap</strong>:</p>
+<ul>
+<li>A single bitmap covers the whole physical address range described by
+the <a href="../../rustos_kernel_mem/struct.BootMemoryMap.html"><code>BootMemoryMap</code></a>. <code>0 = free</code>, <code>1 = allocated, reserved, or non-existent</code>. The bitmap is the source of truth for ownership, so
+every double-free or stray-free is detected and reported as
+<code>AllocError::InvariantViolation</code>.</li>
+<li>A <code>BTreeSet&lt;usize&gt;</code> per buddy order tracks the starting frame
+indices of free blocks at that order. Splits push two half-blocks
+down one order; merges pop a buddy at the same order and push the
+parent up one order. Merging consults the bitmap so it never
+reaches across a reserved region.</li>
+</ul>
+<p>The allocator never panics on OOM: <code>alloc</code> / <code>alloc_order</code> return
+<code>AllocError::OutOfMemory</code>. The constructor refuses overlapping or
+malformed boot maps.</p>
+<p><strong>Bootloader handoff.</strong> The arch crates synthesise a
+<a href="../../rustos_kernel_mem/struct.BootMemoryMap.html"><code>BootMemoryMap</code></a> from whatever protocol the platform uses (multiboot2,
+UEFI, DTB, WASM) and hand it to <code>FrameAllocator::new</code>. Reserved
+regions are merged into the bitmap as “used” so they can never be
+handed out; usable regions are rounded <em>inward</em> to whole-frame
+boundaries.</p>
+<h2 id="2-slab-allocator-with-guard-pages"><a class="header" href="#2-slab-allocator-with-guard-pages">2. Slab allocator with guard pages</a></h2>
+<p><code>AGENTS.md</code> §4 mandates guard pages around kernel slabs. The slab’s
+backing buffer is laid out as</p>
+<pre><code>[ GUARD | data: object_size × slot_count | GUARD ]
+</code></pre>
+<p>with each guard region being exactly one architectural page.</p>
+<ul>
+<li><strong>On hardware:</strong> the guards are unmapped virtual pages. An overrun
+faults loudly.</li>
+<li><strong>On the host (<code>cargo test</code>):</strong> the guards are filled with <code>0xCC</code>
+and validated on every alloc/free and on demand via
+<code>Slab::check_guards</code>. A pattern mismatch surfaces as
+<code>SlabError::GuardViolation</code> — the same error channel as the
+hardware fault, so callers and tests are written once.</li>
+</ul>
+<p>Each slab also zero-fills a slot on free, preventing leftover bytes
+from leaking into the next caller. This is a cheap defence-in-depth
+measure; for <strong>credentials, keys, and capability tokens</strong> the caller
+must use the sensitive-region API below.</p>
+<h2 id="3-virtual-memory--page-table-operations"><a class="header" href="#3-virtual-memory--page-table-operations">3. Virtual memory &amp; page-table operations</a></h2>
+<p><a href="../../rustos_kernel_mem/struct.AddressSpace.html"><code>AddressSpace&lt;P: PageTableOps&gt;</code></a> is the per-process virtual address
+space. It owns a page-table object and serialises <code>map</code> / <code>unmap</code> /
+<code>translate</code> through it.</p>
+<p>The <a href="../../rustos_kernel_mem/trait.PageTableOps.html"><code>PageTableOps</code></a> trait is the architecture boundary:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>map(page, frame, flags)</code></td><td>Install a translation.</td></tr>
+<tr><td><code>unmap(page)</code></td><td>Tear it down, return the frame.</td></tr>
+<tr><td><code>translate(page)</code></td><td>Read-only lookup. Returns <code>Option</code>, never errors.</td></tr>
+<tr><td><code>flush(page)</code></td><td>TLB flush for the current CPU (no-op on host).</td></tr>
+</tbody>
+</table>
+</div>
+<p>The arch crates land their <code>X86PageTable</code>, <code>Aarch64PageTable</code>, …
+implementations in Stage 3. To keep <code>kernel/mem</code> fully host-testable
+today the crate ships a <code>HostPageTable</code> test double behind
+<code>#[cfg(test)]</code>: a <code>BTreeMap</code>-backed implementation that, additionally,
+enforces W^X (rejects <code>WRITE | EXEC</code> mappings) so the security
+default is exercised in tests.</p>
+<p><code>MapFlags</code> is a small <code>bitflags</code>-style set:
+<code>READ | WRITE | EXEC | USER | NO_CACHE</code>. Architecture code translates
+these into native page-table bits during Stage 3.</p>
+<h2 id="4-sensitive-region-api"><a class="header" href="#4-sensitive-region-api">4. Sensitive-region API</a></h2>
+<p><code>alloc_sensitive(len) -&gt; Result&lt;SensitiveBuffer, AllocError&gt;</code> hands
+back a fixed-size byte buffer that <strong>zeroes itself on drop</strong>, using
+the audited <a href="https://crates.io/crates/zeroize"><code>zeroize</code></a> crate (no
+hand-rolled crypto per <code>AGENTS.md</code> §6). <code>free_sensitive(buf)</code> is a
+named drop equivalent provided for documentation symmetry.</p>
+<p><code>SensitiveBuffer</code> is fixed-size (<code>Box&lt;[u8]&gt;</code>, not <code>Vec&lt;u8&gt;</code>) to avoid
+silent reallocations that would leak a secret into the old
+allocation. Its <code>Debug</code> impl deliberately redacts the contents.</p>
+<h2 id="5-dma-buffers"><a class="header" href="#5-dma-buffers">5. DMA buffers</a></h2>
+<p>User-space drivers (<code>drivers/storage/virtio_blk</code>, <code>drivers/network/virtio_net</code>,
+future NVMe / GPU bus-master devices) need page-aligned, contiguous-by-physical
+buffers that a device can address directly. The
+<a href="../../rustos_kernel_mem/dma/struct.DmaPool.html"><code>DmaPool&lt;P&gt;</code></a> ships that facility,
+composing the layers above:</p>
+<ul>
+<li><strong>Physical contiguity</strong> — frames are taken from the buddy allocator at a
+single buddy order; the buffer is therefore physically contiguous up to
+<code>MAX_ORDER</code> pages.</li>
+<li><strong>Per-process virtual window</strong> — the pool owns a slice of one process’s
+<code>AddressSpace&lt;P&gt;</code>. Each allocation maps <code>data_pages</code> consecutive pages
+with <code>READ | WRITE | USER</code>; no <code>EXEC</code>, no global sharing.</li>
+<li><strong>Guard pages</strong> — every allocation is bracketed by one <em>unmapped</em> virtual
+page on each side, so an overrun faults on the MMU rather than reaching a
+neighbouring allocation.</li>
+<li><strong>CPU access via the direct map</strong> — the bytes the driver reads/writes are
+the buffer’s <em>physical frames</em>, reached through the kernel direct physical
+map (<code>PhysMap</code>): <code>bytes</code> / <code>bytes_mut</code> / <code>slot_base</code> translate the buffer’s
+<code>phys</code> into a pointer. The CPU therefore sees exactly the frames the device
+DMAs to — there is no disconnected copy. Production wires a <code>DirectPhysMap</code>
+(the boot identity map over low physical memory); host tests wire a
+<code>SimPhysMap</code> standing in for physical RAM.</li>
+<li><strong>Zero-on-free</strong> — every byte of the data region is wiped with
+<a href="https://crates.io/crates/zeroize"><code>zeroize</code></a> before the frames return to
+the buddy allocator. A later allocation that lands on the same slot sees
+zeros; a forensic read of free physical memory cannot recover the
+credentials, keys, or capability tokens the buffer once held
+(<code>AGENTS.md</code> §4).</li>
+<li><strong>Bounded failure</strong> — <code>alloc</code> / <code>free</code> return <code>Result&lt;_, DmaError&gt;</code>. No
+panic on resource exhaustion, no <code>expect</code> on hot paths, no <code>unsafe</code> leaks
+across the crate boundary. Allocation requests larger than <code>MAX_ORDER</code>
+return <code>DmaError::SizeUnsupported</code>; exhaustion of either the virtual
+window or the frame allocator returns <code>DmaError::Alloc(OutOfMemory)</code>.</li>
+</ul>
+<pre><code class="language-text">[ guard | data_0 | data_1 | … | data_{n-1} | guard ]
+   |       └────────── mapped (R/W/U) ──────────┘   |
+   └──────────────── unmapped (fault) ──────────────┘
+</code></pre>
+<p>The data frames are reached by the CPU through the direct physical map
+(<code>phys</code>), keyed on each buffer’s <code>phys</code> address, so the driver’s view
+and the device’s view are the same memory.</p>
+<p>The pool itself is <strong>capability-agnostic</strong>: it does not consult the calling
+task’s capability set. The capability gate is the companion module
+<code>kernel/sec::dma</code>, whose <code>alloc_dma</code> / <code>free_dma</code> entry points verify
+<a href="../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MEM_DMA"><code>CapabilityId::MEM_DMA</code></a>
+before dispatching to the pool, and emit
+<a href="../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated"><code>AuditEvent::DmaAllocated</code></a> / <a href="../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied"><code>AuditEvent::DmaAllocDenied</code></a> records on
+every decision (IDs 1030 / 1031, see <a href="./security.html">Security audit catalogue</a>).
+A future syscall wrapper maps gate failures to <code>Errno</code> via
+<code>DmaGateError::as_errno</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Gate error</th><th><code>Errno</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>CapabilityMissing</code></td><td><code>PermissionDenied</code></td></tr>
+<tr><td><code>Pool(ZeroSize)</code></td><td><code>BufferTooSmall</code></td></tr>
+<tr><td><code>Pool(Alloc)</code> / <code>Pool(SizeUnsupported)</code></td><td><code>LengthOutOfRange</code></td></tr>
+<tr><td>Other internal pool failures</td><td><code>OutOfRange</code></td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="51-slab-hand-off-to-user-space-drivers"><a class="header" href="#51-slab-hand-off-to-user-space-drivers">5.1 Slab hand-off to user-space drivers</a></h3>
+<p>The user-space virtio driver crates carry an owned
+<code>DmaSlab { phys, ptr: NonNull&lt;u8&gt;, len, pool_id, slot, /* erased free shim */ }</code> rather than borrowing the pool on every accessor
+(Stage 4.D Item 0a). The pool exposes a single companion accessor,</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub fn slot_base(&amp;self, buf: &amp;DmaBuffer) -&gt; Result&lt;NonNull&lt;u8&gt;, DmaError&gt;;
+<span class="boring">}</span></code></pre>
+<p>that hands out the base pointer of <code>buf</code>’s data slots. The
+disjointness witness is the pool’s slot bitmap (one slot ↔ one
+allocation); the slab carries <code>(pool_id, slot, len)</code> so its drop
+can invoke a type-erased free shim that returns the slot to the
+pool. See <a href="../drivers/virtio.html#dma-ownership-model">Virtio transport — DMA ownership model</a>
+for the consumer-side view. The kernel-side wiring of a
+<code>KernelVirtioHost</code> that builds slabs from <code>alloc_dma</code> is the
+subject of Stage 4.D Item 0.</p>
+<h3 id="52-mmio-register-window-mapper"><a class="header" href="#52-mmio-register-window-mapper">5.2 MMIO register-window mapper</a></h3>
+<p>Device drivers also need their <em>register block</em> mapped — a PCI memory
+BAR or a virtio-MMIO transport slot. <code>kernel/mem::mmio::MmioMap</code>
+provides this. Unlike <a href="../../rustos_kernel_mem/dma/struct.DmaPool.html"><code>DmaPool</code></a> it does <strong>not</strong> allocate
+frames: the physical address is fixed by the hardware, so the mapper
+maps the <em>device’s own</em> frames into a per-process <code>AddressSpace&lt;P&gt;</code>
+with caching disabled (<code>MapFlags::NO_CACHE</code>) and the same unmapped
+guard-page bracketing the DMA pool uses. <code>MmioMap::map(phys_base, len)</code>
+returns an <code>MmioRegion</code>; <code>region_base</code> resolves the region’s device
+physical base through the direct physical map (<code>PhysMap</code>) into the base
+pointer the kernel-side mapper (<code>KernelMmioMapper</code>, in <code>kernel/virtio</code>)
+turns into an
+<a href="../drivers/bus.html#register-window-hand-off">ABI <code>RegisterWindow</code></a>, so
+the window addresses the device’s real registers.</p>
+<p>The mapper is <strong>capability-agnostic</strong>; the gate is
+<code>kernel/sec::mmio</code>, whose <code>map_mmio</code> / <code>unmap_mmio</code> verify
+<a href="../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MMIO_MAP"><code>CapabilityId::MMIO_MAP</code></a> and emit
+<code>MmioMapped</code> / <code>MmioMapDenied</code> audit records (IDs 1040 / 1041, see
+<a href="./security.html">Security audit catalogue</a>). <code>MmioGateError::as_errno</code>
+maps refusals to <code>Errno</code> exactly as the DMA gate does.</p>
+<h2 id="6-result-returning-oom-contract"><a class="header" href="#6-result-returning-oom-contract">6. Result-returning OOM contract</a></h2>
+<p>Every fallible operation in this crate returns
+<code>Result&lt;_, AllocError&gt;</code>. No path panics on out-of-memory
+(<code>AGENTS.md</code> §4). The error variants:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variant</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>OutOfMemory</code></td><td>No free block of the requested size.</td></tr>
+<tr><td><code>SizeUnsupported</code></td><td>Request exceeds the allocator’s capacity / <code>MAX_ORDER</code>.</td></tr>
+<tr><td><code>ZeroSize</code></td><td>Zero-byte / zero-slot requests are rejected.</td></tr>
+<tr><td><code>OutOfRange</code></td><td>Frame / address outside the allocator’s window.</td></tr>
+<tr><td><code>MetadataAllocFailed</code></td><td>Allocator could not bootstrap itself.</td></tr>
+<tr><td><code>InvariantViolation</code></td><td>Double-free, free of a reserved frame, malformed boot map.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="7-unsafe--pointer-arithmetic-discipline"><a class="header" href="#7-unsafe--pointer-arithmetic-discipline">7. Unsafe &amp; pointer arithmetic discipline</a></h2>
+<p>Per <code>AGENTS.md</code> §4, raw pointer arithmetic is confined to the
+<code>ptr</code> module’s bounds-checked helpers (<code>offset_within</code>,
+<code>end_within</code>, <code>slice_within</code>). Every other module routes pointer
+math through them. Every <code>unsafe</code> block carries a <code>// SAFETY:</code>
+rationale per <code>AGENTS.md</code> §2.10, encapsulated behind a safe public
+API; no <code>unsafe</code> leaks across crate boundaries.</p>
+<h2 id="7a-platform-memory-map-sources"><a class="header" href="#7a-platform-memory-map-sources">7a. Platform memory-map sources</a></h2>
+<p>The <code>BootMemoryMap</code> is <em>fed</em> by the architecture port, not constructed
+by <code>kernel/mem</code>. On x86_64 (Stage 3a (a)) the discovery surface lives
+in <code>kernel/arch/x86_64</code>:</p>
+<ul>
+<li><code>multiboot2</code> parses the BIOS-derived memory-map tag (Multiboot2
+type 6) and the EFI memory-map tag (type 17) handed in by GRUB-EFI
+<ul>
+<li>OVMF. Both parsers are zero-copy and <code>no_alloc</code>.</li>
+</ul>
+</li>
+<li><code>bootmemory</code> bridges those typed entries into
+<code>MemoryRegionDescriptor</code>s with a <code>RegionKind</code> mirror that is locked
+to <code>rustos_kernel_mem::RegionKind</code> by a host-side dev-dep
+round-trip test (<code>AGENTS.md</code> §2.2 — no duplication).</li>
+</ul>
+<p>The kernel binary (which links against <code>kernel/mem</code>) is responsible
+for draining the descriptor stream into a <code>BootMemoryMap</code> via
+<code>BootMemoryMap::push</code>. This split keeps <code>kernel/arch/x86_64</code> free of
+<code>alloc</code> so it can be linked into the freestanding Stage-2 QEMU test
+binaries that do not yet provide a <code>#[global_allocator]</code>.</p>
+<h2 id="7b-encrypted-swap-swap"><a class="header" href="#7b-encrypted-swap-swap">7b. Encrypted swap (<code>swap</code>)</a></h2>
+<p>When a pager writes a page of anonymous, stack, or capability-bearing
+memory out to a backing store, that page leaves RAM — and the
+zero-on-free guarantees of <a href="#4-sensitive-region-api">§4</a> and
+<a href="#5-dma-buffers">§5</a> would be void if the bytes could be read back off
+an unencrypted swap device. The <code>swap</code> module closes that gap: every
+page is sealed with <code>lib/crypto</code>’s ChaCha20-Poly1305 AEAD before it
+reaches the device (<code>AGENTS.md</code> §4).</p>
+<p><strong>Fail-closed by construction.</strong> <code>AGENTS.md</code> §4 requires that the kernel
+“refuses to activate a swap device that is not wrapped by the
+encrypted-swap layer”. RustOS enforces this in the type system rather
+than with a runtime flag: a <a href="../../rustos_kernel_mem/swap/trait.SwapBackend.html"><code>SwapBackend</code></a> (the raw, slot-addressed
+device) exposes only opaque <a href="../../rustos_kernel_mem/swap/constant.SWAP_RECORD_LEN.html"><code>SWAP_RECORD_LEN</code></a>-byte records and makes
+no cryptographic decision, and the <strong>only</strong> way to read or write a page
+through it is <a href="../../rustos_kernel_mem/swap/struct.EncryptedSwap.html"><code>EncryptedSwap</code></a>, whose sole constructor
+<a href="../../rustos_kernel_mem/swap/struct.EncryptedSwap.html#method.activate"><code>EncryptedSwap::activate</code></a> takes a <a href="../../rustos_kernel_mem/swap/struct.SwapKey.html"><code>SwapKey</code></a>. There is no plaintext
+code path to fall back to, so plaintext swap is unrepresentable
+(<code>AGENTS.md</code> §2.11).</p>
+<p><strong>Ephemeral per-boot key.</strong> The <a href="../../rustos_kernel_mem/swap/struct.SwapKey.html"><code>SwapKey</code></a> is drawn from the platform
+RNG (the §19.2 entropy source, injected as the <a href="../../rustos_kernel_mem/swap/trait.EntropySource.html"><code>EntropySource</code></a> seam
+until that subsystem lands), zeroed on drop, and never persisted: there
+is no serialisation path and no accessor that copies the key out of the
+crate. A power cycle destroys the key, so paged-out secrets cannot be
+recovered at rest.</p>
+<p><strong>Record layout &amp; nonce discipline.</strong> Each on-device record is
+<code>nonce(12) ‖ tag(16) ‖ ciphertext(4096)</code>. ChaCha20-Poly1305 fails
+catastrophically on <code>(key, nonce)</code> reuse, so each <code>EncryptedSwap</code>
+draws a random 32-bit salt at activation and appends a 64-bit
+monotonic counter; counter exhaustion fails closed
+(<a href="../../rustos_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted"><code>SwapError::NonceExhausted</code></a>) rather than wrapping. The slot index is
+bound as associated data, so a record relocated to a different slot
+fails authentication. On any failure — bad slot, backend fault, or a
+forged/tampered record — <code>load</code> zeroes the caller’s buffer before
+returning the error, so a caller can never observe stale or forged
+plaintext (<code>AGENTS.md</code> §5.4).</p>
+<p>The pager that calls <code>store</code> / <code>load</code>, and the capability gate on
+<em>activating</em> a swap device, are Stage 8 work; this module is the
+cryptographic layer they are required to route through.</p>
+<h2 id="8-testing-strategy"><a class="header" href="#8-testing-strategy">8. Testing strategy</a></h2>
+<ul>
+<li><strong>Unit tests</strong> — alongside each module under <code>#[cfg(all(test, not(loom)))]</code>:
+buddy split/merge, bitmap correctness, slab guard-page detection,
+zero-on-free, OOM paths, and the encrypted-swap round-trip /
+tamper-rejection / fail-closed cases.</li>
+<li><strong>Property tests</strong> — <code>kernel/mem/tests/proptest_frame.rs</code> runs
+randomised alloc/free sequences and asserts the no-double-allocation
+and no-leak invariants, plus the reserved-frame untouchability
+invariant.</li>
+<li><strong>Fuzzing</strong> — <code>kernel/mem/tests/fuzz_swap.rs</code> drives the encrypted-swap
+restore path with arbitrary device contents (<code>AGENTS.md</code> §19.6),
+asserting that tampering is always rejected and the output buffer is
+zeroed on failure.</li>
+<li><strong>Loom tests</strong> — <code>kernel/mem/tests/loom.rs</code> model-checks concurrent
+allocation, gated on <code>RUSTFLAGS="--cfg loom"</code> exactly like
+<code>lib/sync</code>.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/sync.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/scheduler.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/sync.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/scheduler.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
