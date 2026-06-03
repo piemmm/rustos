@@ -66,6 +66,7 @@ mod btree;
 mod check;
 mod crypto;
 mod dedupe;
+mod discard;
 mod header;
 mod integrity;
 mod scrub;
@@ -80,6 +81,7 @@ use crypto::{
     decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
 };
 pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
+pub use discard::{TrimReport, TRIM_BATCH_RANGES};
 use integrity::{
     logical_hash, physical_checksum, read_compression, write_compression, Compression, DataFault,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
@@ -407,6 +409,17 @@ pub struct RustFs<B: Block> {
     txn_allocated: Vec<u64>,
     txn_freed: Vec<u64>,
     txn_private: Vec<bool>,
+    /// Transient, rebuildable (§4) queue of physical blocks that a
+    /// committed transaction returned to the free pool and that have
+    /// not yet been discarded to the device. A block enters here only
+    /// once [`Self::finish_txn`] has marked it free — i.e. it is
+    /// unreachable from the committed root, every reflink, and every
+    /// deduped extent (a shared chunk at refcount >= 1 is never freed,
+    /// `release_block_ref`). [`Self::trim`] re-checks each block is
+    /// still free before discarding, so a crash that drops this queue
+    /// never loses live data (`docs/src/filesystem/rustfs-spec.md`
+    /// §11, §4).
+    pending_discard: Vec<u64>,
     saved_inode_tree_root: u64,
     saved_next_ino: u64,
     saved_chunk_tree_root: u64,
@@ -933,6 +946,24 @@ impl<B: Block> RustFs<B> {
             if let Some(slot) = self.txn_private.get_mut(as_usize(block)) {
                 *slot = false;
             }
+            self.enqueue_discard(block);
+        }
+    }
+
+    /// Queue a now-free block for a later device discard ([`Self::trim`]).
+    ///
+    /// The queue is transient, rebuildable state (§4): it only ever holds
+    /// blocks already marked free, [`Self::trim`] re-checks each is still free
+    /// before discarding, and a crash that drops it loses no live data. The
+    /// queue is capped at the volume's block count so a long-running mount that
+    /// never trims cannot grow it without bound; a dropped entry merely stays
+    /// un-discarded (still free) until a future free or rebuild requeues it.
+    fn enqueue_discard(&mut self, block: u64) {
+        if block < RING_BLOCKS || block >= self.total_blocks {
+            return;
+        }
+        if self.pending_discard.len() < as_usize(self.total_blocks) {
+            self.pending_discard.push(block);
         }
     }
 
@@ -1021,6 +1052,7 @@ impl<B: Block> RustFs<B> {
             txn_allocated: Vec::new(),
             txn_freed: Vec::new(),
             txn_private: vec![false; as_usize(total_blocks)],
+            pending_discard: Vec::new(),
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
             saved_chunk_tree_root: 0,
@@ -1073,6 +1105,14 @@ impl<B: Block> RustFs<B> {
             crypto::provision(volume_key, fs.fs_uuid).map_err(|_| DriverError::DeviceFault)?;
         fs.apply_keys(&keys);
         crypto_header.encode(&mut fs.crypto_header);
+
+        // Tell a discard-capable device the whole volume is free before the
+        // encrypted structures are written (`docs/src/filesystem/rustfs-spec.md`
+        // §11 mkfs flow). Discard is advisory: a device without support, or a
+        // discard fault, must not stop a fresh volume from being created
+        // (recorded, not failed, §11), so the outcome is intentionally not
+        // propagated as a format error.
+        let _ = fs.mkfs_discard();
 
         fs.begin();
         let now = (fs.clock)();

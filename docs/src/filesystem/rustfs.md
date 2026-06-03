@@ -396,6 +396,57 @@ destination filesystem, extraction streams recovered plaintext blocks to the
 `RescueSink` the caller provides (a recovery host writes them to a safe
 volume).
 
+## TRIM / discard (`rustfs-spec.md` §11, §15.10)
+
+`rustfs` returns freed space to the backing device **safely**: a block is
+discarded only once it is unreachable from every retained root, snapshot,
+reflink, deduped extent, and recovery root. The hard constraint is that discard
+may **never** destroy data reachable from any of those (`rustfs-spec.md` §11).
+There is no `nodiscard` / `trim=off` mode.
+
+**The block-device discard capability.** The `Block` ABI exposes two methods
+(an `abi-v1` extension, not a widening of the frozen read/write surface,
+`AGENTS.md` §2.4 / §9): `discard_capability()` reports whether the device
+supports discard, its granularity, and a per-request block cap; `discard(lba,
+blocks)` issues one aligned discard. A device **without** discard support is
+*recorded, not failed* — both default to "unsupported" so a backend that cannot
+trim simply reports so.
+
+**The pending-discard queue (mounted trim).** Freed blocks enter a transient,
+in-memory pending-discard queue as a committed transaction reclaims them
+(`finish_txn`), reusing the existing deferred-free machinery rather than a
+second free-tracking mechanism (`AGENTS.md` §2.2). `RustFs::trim` later issues
+the discards:
+
+- **Safety by re-check.** A queued block is discarded only if it is **still
+  free** at trim time. The mount-time free-space rebuild marks every block
+  reachable from the committed root — including every reflink target and every
+  deduped chunk at refcount ≥ 1 — as *used*, so a free block is, by
+  construction, unreachable from every retained root. A block freed and then
+  reallocated is *used* again by trim time and is skipped, never discarded.
+- **Batched, aligned, rate-limited.** Still-free blocks are coalesced into
+  contiguous runs, each run is aligned **inward** to the device's discard
+  granularity (the unaligned head/tail edges are requeued), and at most
+  `TRIM_BATCH_RANGES` runs are issued per call; the remainder stays queued for
+  the next call.
+- **No zero-readback assumption.** `rustfs` never reads a discarded block
+  expecting zeroes; discarded blocks are free and are fully rewritten (header +
+  integrity + crypto) before they are ever read again.
+
+The queue is **rebuildable, transient state** (`rustfs-spec.md` §4): it is never
+persisted, so a crash mid-trim simply drops it — the volume remounts cleanly,
+the queue is empty, and no live data is lost. `trim` is **capability-gated** on
+`CAP_FS_MOUNT` (fail-closed, `AGENTS.md` §5.4) and returns a structured
+`TrimReport` (whether discard is supported, ranges and blocks discarded, blocks
+skipped as still-in-use, and blocks deferred to a later pass), logging its
+outcome with a stable event ID in the `rustfs` `12000..13000` range.
+
+**mkfs-time discard.** On a discard-capable device, `format` issues a
+full-range discard before laying down the encrypted structures (open device →
+read discard capability → full-range discard when supported → create structures
+→ flush). A device without discard support is recorded, not failed: a fresh
+volume is still created and mounts.
+
 ## Timestamps (§21)
 
 Every inode stores four 64-bit-native `Time64` timestamps —

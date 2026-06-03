@@ -4108,7 +4108,32 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    and extracting from a wounded superblock ring (read-only/repeatable), and
    rescue never emitting a block that fails integrity; `fuzz_mount` extended to
    drive the offline `check` and the `rescue` root-scan / extraction paths.)
-10. TRIM/discard queues and mkfs-time discard.
+10. TRIM/discard queues and mkfs-time discard. (**DONE** this session: the
+   `Block` ABI gained a versioned discard surface (`discard_capability` /
+   `discard`, an `abi-v1` extension, not a widening of the frozen read/write
+   methods); a device without support is *recorded, not failed*. Freed blocks
+   enter a transient, in-memory **pending-discard queue** as a committed
+   transaction reclaims them (`finish_txn`), reusing the deferred-free
+   machinery (no second free-tracker, §2.2). `RustFs::trim`,
+   capability-gated on `CAP_FS_MOUNT`, discards a queued block only if it is
+   **still free** at trim time (a reallocated or still-dedupe-shared block —
+   refcount ≥ 1 — is marked used by the free-space rebuild and skipped,
+   never discarded: the §11 hard constraint), coalesces still-free blocks
+   into contiguous runs aligned **inward** to the device granularity (edges
+   requeued), and rate-limits to `TRIM_BATCH_RANGES` runs per call. It never
+   assumes a discarded block reads back as zero; there is no `nodiscard` /
+   `trim=off` mode. The queue is rebuildable transient state (§4): a crash
+   mid-trim drops it, the volume remounts cleanly, no live data lost.
+   `trim` returns a structured `TrimReport` and logs its outcome with a
+   stable `12000`-range event ID (`src/discard.rs`); `format` issues a
+   full-range discard on a discard-capable device before laying down the
+   encrypted structures. The mock/virtio-blk block devices implement the
+   surface. Tested: the capability gate, unsupported-device queue drain
+   (recorded-not-failed), contiguous-run coalescing, inward alignment with
+   edge requeue, per-request-cap splitting, batch rate-limiting draining
+   over passes, a reallocated and a still-dedupe-shared block never
+   discarded, the transient queue dropping across a crash with no live data
+   lost, and mkfs full-range discard (recorded-not-failed without support).)
 11. Device-health baselines and health-triggered scrub.
 12. Fuzz, proptest, crash-replay, and corruption-injection suites.
 
@@ -4117,7 +4142,7 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–9 complete; Stages 10–12 planned.** The copy-on-write
+**Status: Stages 1–10 complete; Stages 11–12 planned.** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a

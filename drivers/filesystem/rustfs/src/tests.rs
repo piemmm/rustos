@@ -6,6 +6,7 @@
 //! in-memory [`MemBlock`] double.
 
 use super::*;
+use rustos_abi::driver::block::DiscardCapability;
 use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeKind,
 };
@@ -20,6 +21,8 @@ struct MemBlock {
     block_count: u64,
     writes: u32,
     write_budget: Option<u32>,
+    discard: Option<DiscardCapability>,
+    discarded: alloc::vec::Vec<(u64, u64)>,
 }
 
 impl MemBlock {
@@ -31,6 +34,8 @@ impl MemBlock {
             block_count,
             writes: 0,
             write_budget: None,
+            discard: None,
+            discarded: alloc::vec::Vec::new(),
         }
     }
 
@@ -41,11 +46,24 @@ impl MemBlock {
             block_count,
             writes: 0,
             write_budget: None,
+            discard: None,
+            discarded: alloc::vec::Vec::new(),
         }
     }
 
     fn bytes(&self) -> alloc::vec::Vec<u8> {
         self.store.clone()
+    }
+
+    /// Enable discard support with the given granularity and per-request cap
+    /// (`0` means unlimited), so the trim path can be exercised.
+    fn with_discard(mut self, granularity_blocks: u64, max_blocks_per_request: u64) -> Self {
+        self.discard = Some(DiscardCapability {
+            supported: true,
+            granularity_blocks,
+            max_blocks_per_request,
+        });
+        self
     }
 }
 
@@ -87,6 +105,34 @@ impl Block for MemBlock {
         if !drop_write {
             self.store[start..end].copy_from_slice(buf);
         }
+        Ok(())
+    }
+
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(self.discard.unwrap_or_else(DiscardCapability::unsupported))
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        let cap = self.discard.ok_or(DriverError::Unsupported)?;
+        let gran = cap.granularity_blocks.max(1);
+        assert_eq!(lba % gran, 0, "discard lba {lba} not aligned to {gran}");
+        assert_eq!(
+            blocks % gran,
+            0,
+            "discard len {blocks} not aligned to {gran}"
+        );
+        assert_ne!(blocks, 0, "discard of zero blocks");
+        if cap.max_blocks_per_request != 0 {
+            assert!(
+                blocks <= cap.max_blocks_per_request,
+                "discard len {blocks} exceeds per-request cap {}",
+                cap.max_blocks_per_request
+            );
+        }
+        if as_usize(lba) + as_usize(blocks) > as_usize(self.block_count) {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.discarded.push((lba, blocks));
         Ok(())
     }
 }
@@ -2321,5 +2367,296 @@ fn rescue_never_emits_a_block_that_fails_integrity() {
     assert!(
         !out.blocks.contains_key(&(doc_ino, 1)),
         "a block that fails integrity is never emitted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage: TRIM/discard (return freed space to the device, safely; §11).
+// ---------------------------------------------------------------------------
+
+/// Format a fresh volume on a discard-capable [`MemBlock`] and clear the
+/// record of the mkfs-time discard so a trim test starts from a clean slate.
+fn fmt_discard(
+    block_count: u64,
+    granularity_blocks: u64,
+    max_blocks_per_request: u64,
+) -> RustFs<MemBlock> {
+    let block =
+        MemBlock::new(512, block_count).with_discard(granularity_blocks, max_blocks_per_request);
+    let mut fs = RustFs::format(block, 32, &TEST_KEY)
+        .expect("format a discard-capable device")
+        .with_clock(fixed_clock);
+    fs.block.discarded.clear();
+    fs
+}
+
+/// Enqueue every block in `[start, end)` for discard, asserting each is
+/// currently free so the test models the real invariant (only free blocks are
+/// ever queued).
+fn enqueue_free_range(fs: &mut RustFs<MemBlock>, start: u64, end: u64) {
+    for block in start..end {
+        assert!(!fs.bit_used(block), "test block {block} must start free");
+        fs.enqueue_discard(block);
+    }
+}
+
+#[test]
+fn trim_requires_the_fs_mount_capability() {
+    // Fail closed: without CAP_FS_MOUNT trim refuses, logs the refusal, and
+    // leaves the queue untouched (`AGENTS.md` §5.4).
+    let mut fs = fmt_discard(512, 1, 0);
+    enqueue_free_range(&mut fs, 100, 110);
+    let before = fs.pending_discard_count();
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.trim(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(discard::TRIM_DENIED), "the refusal is logged");
+    assert_eq!(fs.pending_discard_count(), before, "the queue is untouched");
+    assert!(fs.block.discarded.is_empty(), "nothing was discarded");
+}
+
+#[test]
+fn trim_on_a_device_without_discard_drains_the_queue() {
+    // Recorded, not failed: a device without discard support drains the queue
+    // and reports `supported = false` (§11). There is no trim=off mode.
+    let mut fs = fmt(512, 512, 32);
+    enqueue_free_range(&mut fs, 100, 110);
+    assert!(fs.pending_discard_count() > 0);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim is never an error");
+    assert!(!report.supported);
+    assert_eq!(report.blocks_discarded, 0);
+    assert_eq!(fs.pending_discard_count(), 0, "the queue is drained");
+    assert!(sink.saw(discard::TRIM_UNSUPPORTED));
+}
+
+#[test]
+fn trim_with_an_empty_queue_is_clean() {
+    let mut fs = fmt_discard(512, 1, 0);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert!(report.supported);
+    assert_eq!(report.ranges_discarded, 0);
+    assert_eq!(report.blocks_discarded, 0);
+    assert!(sink.saw(discard::TRIM_CLEAN));
+    assert!(fs.block.discarded.is_empty());
+}
+
+#[test]
+fn trim_coalesces_contiguous_free_blocks_into_one_range() {
+    // Out-of-order, contiguous free blocks become a single discard range.
+    let mut fs = fmt_discard(512, 1, 0);
+    for block in [105u64, 100, 103, 101, 104, 102] {
+        assert!(!fs.bit_used(block));
+        fs.enqueue_discard(block);
+    }
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(report.ranges_discarded, 1);
+    assert_eq!(report.blocks_discarded, 6);
+    assert_eq!(report.blocks_deferred, 0);
+    assert_eq!(fs.block.discarded, alloc::vec![(100, 6)]);
+    assert_eq!(fs.pending_discard_count(), 0);
+    assert!(sink.saw(discard::TRIM_DISCARDED));
+}
+
+#[test]
+fn trim_aligns_inward_and_requeues_the_unaligned_edges() {
+    // A run is aligned inward to the device granularity; the head and tail that
+    // fall outside the aligned window are requeued for a later pass (§11).
+    let mut fs = fmt_discard(512, 8, 0);
+    enqueue_free_range(&mut fs, 100, 130);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    // align_up(100,8)=104, align_down(130,8)=128 -> discard [104,128).
+    assert_eq!(fs.block.discarded, alloc::vec![(104, 24)]);
+    assert_eq!(report.blocks_discarded, 24);
+    assert_eq!(report.ranges_discarded, 1);
+    // Edges [100,104) and [128,130) -> 4 + 2 = 6 deferred and requeued.
+    assert_eq!(report.blocks_deferred, 6);
+    assert_eq!(fs.pending_discard_count(), 6);
+}
+
+#[test]
+fn trim_run_shorter_than_one_granularity_window_is_requeued_whole() {
+    let mut fs = fmt_discard(512, 8, 0);
+    // [100,104): no multiple of 8 lies inside, so nothing can be discarded.
+    enqueue_free_range(&mut fs, 100, 104);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert!(fs.block.discarded.is_empty());
+    assert_eq!(report.blocks_discarded, 0);
+    assert_eq!(report.blocks_deferred, 4);
+    assert_eq!(fs.pending_discard_count(), 4);
+    assert!(sink.saw(discard::TRIM_CLEAN));
+}
+
+#[test]
+fn trim_splits_a_run_to_the_per_request_cap() {
+    // A run longer than the device's per-request maximum is split into several
+    // aligned discards, each within the cap (the MemBlock double asserts it).
+    let mut fs = fmt_discard(512, 4, 8);
+    enqueue_free_range(&mut fs, 100, 124); // 24 blocks, all multiples-of-4 aligned.
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(
+        fs.block.discarded,
+        alloc::vec![(100, 8), (108, 8), (116, 8)]
+    );
+    assert_eq!(report.ranges_discarded, 3);
+    assert_eq!(report.blocks_discarded, 24);
+    assert_eq!(report.blocks_deferred, 0);
+}
+
+#[test]
+fn trim_skips_a_block_that_was_reallocated() {
+    // A queued block that is no longer free (reallocated since it was freed) is
+    // skipped, never discarded — discard can never touch live data (§11, §14).
+    let mut fs = fmt_discard(512, 1, 0);
+    assert!(!fs.bit_used(100));
+    fs.enqueue_discard(100);
+    fs.mark_used(100); // the block is handed back out before trim runs.
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(report.blocks_skipped_in_use, 1);
+    assert_eq!(report.blocks_discarded, 0);
+    assert!(
+        fs.block.discarded.is_empty(),
+        "the live block is never discarded"
+    );
+}
+
+#[test]
+fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
+    // More distinct runs than the per-call batch limit: the surplus runs stay
+    // queued and a second trim pass drains them (§11).
+    let mut fs = fmt_discard(2048, 1, 0);
+    let runs = discard::TRIM_BATCH_RANGES + 1;
+    let mut blocks = alloc::vec::Vec::new();
+    for run in 0..runs as u64 {
+        let block = 100 + run * 2; // gaps keep every block its own run.
+        assert!(!fs.bit_used(block));
+        fs.enqueue_discard(block);
+        blocks.push(block);
+    }
+    let sink = RecordingSink::new();
+    let first = fs.trim(&GrantAll, &sink).expect("trim pass 1");
+    assert_eq!(
+        first.ranges_discarded,
+        u64::try_from(discard::TRIM_BATCH_RANGES).unwrap()
+    );
+    assert_eq!(first.blocks_deferred, 1, "one surplus run is requeued");
+    assert_eq!(fs.pending_discard_count(), 1);
+
+    let second = fs.trim(&GrantAll, &sink).expect("trim pass 2");
+    assert_eq!(second.ranges_discarded, 1, "the remainder drains next pass");
+    assert_eq!(fs.pending_discard_count(), 0);
+    assert_eq!(
+        fs.block.discarded.len(),
+        runs,
+        "every run is eventually discarded"
+    );
+}
+
+#[test]
+fn mkfs_discards_the_whole_volume_on_a_capable_device() {
+    // mkfs tells a discard-capable device the whole volume is free before the
+    // encrypted structures are laid down (§11 mkfs flow).
+    let block = MemBlock::new(512, 512).with_discard(1, 0);
+    let fs = RustFs::format(block, 32, &TEST_KEY).expect("format");
+    assert_eq!(
+        fs.into_block().discarded,
+        alloc::vec![(0, 512)],
+        "the full block range is discarded once at mkfs time"
+    );
+}
+
+#[test]
+fn mkfs_on_a_device_without_discard_still_formats() {
+    // A device without discard support is recorded, not failed: format still
+    // succeeds and the volume mounts (§11).
+    let fs = RustFs::format(MemBlock::new(512, 512), 32, &TEST_KEY).expect("format");
+    assert!(fs.into_block().discarded.is_empty());
+}
+
+#[test]
+fn trim_never_discards_a_block_still_shared_by_dedupe() {
+    // The §11 hard constraint, end-to-end: a data block shared by two files
+    // (dedupe refcount 2) is not freed when one sharer is removed — refcount
+    // falls to 1, the block stays reachable — so trim must never discard it and
+    // the surviving file must still read back (§11, §14).
+    let mut fs = fmt_discard(512, 1, 0);
+    let root = fs.root();
+    let payload = alloc::vec![0x33u8; 64];
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    fs.write_at(root, b"a", 0, &payload).expect("write a");
+    fs.write_at(root, b"b", 0, &payload).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(
+        shared,
+        data_block_phys(&mut fs, b"b", 0),
+        "identical content dedupes to one physical block"
+    );
+
+    fs.block.discarded.clear();
+    fs.remove(root, b"a").expect("remove a");
+    assert!(
+        fs.bit_used(shared),
+        "the block b still shares must stay allocated after a is removed"
+    );
+
+    let report = fs.trim(&GrantAll, &NullSink).expect("trim");
+    assert!(
+        !fs.block
+            .discarded
+            .iter()
+            .any(|&(lba, len)| { shared >= lba && shared < lba + len }),
+        "a still-shared block is never discarded ({report:?})"
+    );
+    let node = fs.lookup(root, b"b").expect("b survives");
+    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+}
+
+#[test]
+fn the_discard_queue_is_transient_across_a_remount() {
+    // The pending-discard queue is rebuildable, transient state (§4): a crash
+    // before trim runs simply drops it. The volume remounts cleanly, the queue
+    // is empty, and no live data is lost.
+    let mut fs = fmt_discard(512, 1, 0);
+    let root = fs.root();
+    let keep = alloc::vec![0x21u8; 80];
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    fs.write_at(root, b"keep", 0, &keep).expect("write keep");
+    fs.create(root, b"gone", NodeKind::RegularFile)
+        .expect("create gone");
+    fs.write_at(root, b"gone", 0, &[0x9au8; 80])
+        .expect("write gone");
+    fs.remove(root, b"gone").expect("remove gone");
+    assert!(
+        fs.pending_discard_count() > 0,
+        "removing a file queued its freed blocks"
+    );
+
+    // Simulate a crash before trim: the in-memory queue never reaches disk.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("remount");
+    assert_eq!(
+        fs.pending_discard_count(),
+        0,
+        "the queue is transient and is not rebuilt on mount"
+    );
+    let node = fs
+        .lookup(fs.root(), b"keep")
+        .expect("keep survives the crash");
+    assert_eq!(read_all(&mut fs, node, keep.len()), keep);
+    assert!(
+        fs.lookup(fs.root(), b"gone").is_err(),
+        "the removed file stays removed"
     );
 }

@@ -562,7 +562,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | ✓ |
 | 8 | Online scrub. | ✓ |
 | 9 | Offline check and rescue. | ✓ |
-| 10 | TRIM/discard queues and mkfs-time discard. | |
+| 10 | TRIM/discard queues and mkfs-time discard. | ✓ |
 | 11 | Device health baselines and health-triggered scrub. | |
 | 12 | Fuzz, proptest, crash-replay, and corruption-injection suites. | |
 
@@ -784,5 +784,40 @@ superblock ring (read-only and repeatable), and rescue never emitting a block
 that fails integrity — all pass, alongside the crash-replay sweep, the 1 GiB
 `fssoak`, the posix suite, the QEMU vertical, and the `fuzz_mount` harness
 extended to drive the offline `check` and the `rescue` root-scan / extraction
-decode paths. Stages 10–12 remain; each implementing session ticks this table
-and `PLAN.md`.
+decode paths.
+
+Stage 10 added **TRIM/discard** (§11, §15.10), returning freed space to the
+device **safely** and reusing the deferred-free machinery rather than a second
+free-tracking mechanism (`AGENTS.md` §2.2). The `Block` ABI gained a versioned
+discard surface (`discard_capability` / `discard`, an `abi-v1` extension, not a
+widening of the frozen read/write methods, §2.4 / §9); a device without discard
+support is *recorded, not failed*. Freed blocks enter a transient, in-memory
+**pending-discard queue** as a committed transaction reclaims them
+(`finish_txn`). `RustFs::trim`, **capability-gated** on `CAP_FS_MOUNT`
+(fail-closed and logged otherwise, §5.4), discards a queued block **only if it
+is still free** at trim time — the mount-time free-space rebuild marks every
+block reachable from the committed root (every reflink target and every deduped
+chunk at refcount ≥ 1 included) as used, so a freed-then-reallocated or
+still-shared block is skipped and never discarded; this is the §11 hard
+constraint that discard may never destroy data reachable from any retained root,
+snapshot, reflink, deduped extent, or recovery root. Still-free blocks are
+coalesced into contiguous runs, each aligned **inward** to the device's discard
+granularity (the unaligned edges requeued), and at most `TRIM_BATCH_RANGES` runs
+issue per call (the remainder stays queued). RustFS never assumes a discarded
+block reads back as zero, and there is **no** `nodiscard` / `trim=off` mode. The
+queue is rebuildable transient state (§4): never persisted, so a crash mid-trim
+drops it, the volume remounts cleanly, and no live data is lost. `trim` returns
+a structured `TrimReport` and logs its outcome with a stable event ID in the
+`rustfs` `12000..13000` range; `format` issues a full-range discard on a
+discard-capable device before laying down the encrypted structures, recorded-
+not-failed without support. The §16 acceptance tests for this stage — the
+capability gate, an unsupported device draining the queue recorded-not-failed,
+contiguous free blocks coalescing into one granularity-aligned range, inward
+alignment requeuing the edges, per-request-cap splitting, batch rate-limiting
+draining over passes, a reallocated and a still-dedupe-shared block never being
+discarded, the transient queue dropping across a crash with no live data lost,
+and mkfs full-range discard (recorded-not-failed without support) — all pass,
+alongside the crash-replay sweep, the 1 GiB `fssoak`, the posix suite, the QEMU
+vertical, and the `fuzz_mount` harness (the discard queue is pure in-memory
+transient state and adds no on-disk decode path). Stages 11–12 remain; each
+implementing session ticks this table and `PLAN.md`.

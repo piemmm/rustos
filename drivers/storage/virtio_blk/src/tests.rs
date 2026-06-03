@@ -241,6 +241,115 @@ fn multi_block_read_concatenates_sectors() {
     assert!(buf[SECTOR_SIZE..].iter().all(|b| *b == 0xBB));
 }
 
+/// Shared log of the `(sector, num_sectors)` pairs a discard shim records.
+type DiscardLog = Rc<RefCell<Vec<(u64, u32)>>>;
+
+/// Build a discard-capable virtio-blk `MockTransport`: it offers
+/// `VIRTIO_BLK_F_DISCARD`, advertises a discard granularity of
+/// `align` sectors and a `max` per-request limit in its config window,
+/// and its shim records every `VIRTIO_BLK_T_DISCARD` descriptor's
+/// `(sector, num_sectors)` into the returned log.
+fn build_discard_device(align: u32, max: u32) -> (MockTransport, DiscardLog) {
+    // Config window must be large enough to hold the discard fields
+    // (`discard_sector_alignment` ends at offset 48).
+    let mut t = MockTransport::new(1, 8, wire::VIRTIO_BLK_F_DISCARD, 64);
+    t.set_config(wire::CONFIG_CAPACITY_OFFSET, &SECTORS.to_le_bytes());
+    t.set_config(wire::CONFIG_MAX_DISCARD_SECTORS_OFFSET, &max.to_le_bytes());
+    t.set_config(
+        wire::CONFIG_DISCARD_SECTOR_ALIGNMENT_OFFSET,
+        &align.to_le_bytes(),
+    );
+    let log: DiscardLog = Rc::new(RefCell::new(Vec::new()));
+    let log_for_shim = Rc::clone(&log);
+    t.install_shim(
+        0,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let header = *chain.device_read.first().ok_or(VirtioError::DeviceFault)?;
+            if header.len() < wire::HEADER_LEN {
+                return Err(VirtioError::DeviceFault);
+            }
+            let req_type = u32::from_le_bytes(header[0..4].try_into().unwrap_or([0; 4]));
+            if req_type != wire::VIRTIO_BLK_T_DISCARD {
+                if let Some(last) = chain.device_write.last_mut() {
+                    last[0] = 2; // VIRTIO_BLK_S_UNSUPP.
+                }
+                return Ok(1);
+            }
+            if chain.device_read.len() < 2 {
+                return Err(VirtioError::DeviceFault);
+            }
+            let desc = chain.device_read[1];
+            if desc.len() < wire::DISCARD_DESCRIPTOR_LEN {
+                return Err(VirtioError::DeviceFault);
+            }
+            let sector = u64::from_le_bytes(desc[0..8].try_into().unwrap_or([0; 8]));
+            let num = u32::from_le_bytes(desc[8..12].try_into().unwrap_or([0; 4]));
+            log_for_shim.borrow_mut().push((sector, num));
+            if let Some(last) = chain.device_write.last_mut() {
+                last[0] = wire::STATUS_OK;
+            }
+            Ok(1)
+        }),
+    );
+    (t, log)
+}
+
+#[test]
+fn discard_capability_unsupported_without_feature() {
+    let (t, _backing) = build_device();
+    let blk = open_with_autodrain(t);
+    assert_eq!(
+        blk.discard_capability().unwrap(),
+        DiscardCapability::unsupported()
+    );
+}
+
+#[test]
+fn discard_unsupported_device_refuses() {
+    let (t, _backing) = build_device();
+    let mut blk = open_with_autodrain(t);
+    assert_eq!(blk.discard(0, 4), Err(DriverError::Unsupported));
+}
+
+#[test]
+fn discard_capable_device_reports_negotiated_limits() {
+    let (t, _log) = build_discard_device(8, 64);
+    let blk = open_with_autodrain(t);
+    assert_eq!(
+        blk.discard_capability().unwrap(),
+        DiscardCapability {
+            supported: true,
+            granularity_blocks: 8,
+            max_blocks_per_request: 64,
+        }
+    );
+    assert_eq!(
+        blk.transport().negotiated_driver_features(),
+        wire::VIRTIO_BLK_F_DISCARD
+    );
+}
+
+#[test]
+fn discard_capable_device_records_descriptor() {
+    let (t, log) = build_discard_device(1, 0);
+    let mut blk = open_with_autodrain(t);
+    blk.discard(4, 3).expect("discard");
+    assert_eq!(log.borrow().as_slice(), &[(4, 3)]);
+}
+
+#[test]
+fn discard_rejects_out_of_range_and_oversized() {
+    let (t, _log) = build_discard_device(1, 4);
+    let mut blk = open_with_autodrain(t);
+    assert_eq!(
+        blk.discard(SECTORS - 1, 4),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(blk.discard(0, 5), Err(DriverError::LengthOutOfRange));
+    // A zero-length discard is a no-op success.
+    assert!(blk.discard(0, 0).is_ok());
+}
+
 #[test]
 fn register_requires_drv_load() {
     struct H {

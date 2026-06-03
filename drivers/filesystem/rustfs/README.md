@@ -194,6 +194,28 @@ running every block through the Stage 5/6 integrity pipeline and emitting only
 blocks that pass to a caller-supplied `RescueSink` (a failing block is skipped,
 never handed back). It returns a structured `RescueReport`.
 
+## TRIM / discard (`rustfs-spec.md` §11, §15.10)
+
+`rustfs` returns freed space to the device **safely**: discard may never destroy
+data reachable from any retained root, snapshot, reflink, deduped extent, or
+recovery root (§11), and there is no `nodiscard` / `trim=off` mode. The `Block`
+ABI gains a versioned discard surface — `discard_capability()` (support,
+granularity, per-request cap) and `discard(lba, blocks)` — and a device without
+discard support is *recorded, not failed*. Freed blocks enter a transient,
+in-memory **pending-discard queue** as a committed transaction reclaims them
+(`finish_txn`), reusing the deferred-free machinery rather than a second
+free-tracking mechanism (`AGENTS.md` §2.2). `RustFs::trim`, **capability-gated**
+on `CAP_FS_MOUNT`, discards a queued block only if it is **still free** at trim
+time (a reallocated or still-shared block — refcount ≥ 1 — is marked used by the
+free-space rebuild and is skipped, never discarded), coalesces still-free blocks
+into contiguous runs aligned **inward** to the device granularity, and
+rate-limits to `TRIM_BATCH_RANGES` runs per call (the remainder stays queued).
+It never assumes a discarded block reads back as zero. The queue is rebuildable
+transient state (§4): a crash mid-trim drops it, the volume remounts cleanly,
+and no live data is lost. `trim` returns a structured `TrimReport` and logs its
+outcome with a stable event ID. `RustFs::format` issues a full-range discard on
+a discard-capable device before laying down the encrypted structures.
+
 ## Crash consistency (copy-on-write + superblock ring)
 
 Every operation is a transaction. A block reachable from the last
@@ -229,7 +251,10 @@ so a delete can copy-on-write itself even on a full volume. No
 > mounted-handle structural validator that rebuilds the derived state,
 > reconciles refcounts, validates directories, and reclaims orphaned inodes,
 > and `rescue` the read-only damaged-volume root scanner and integrity-gated
-> file extractor (Stage 9). The remaining stages stay in the
+> file extractor (Stage 9), and **safe TRIM/discard** — a block-device discard
+> capability, a rebuildable pending-discard queue that discards only
+> still-unreachable ranges (batched, granularity-aligned, rate-limited), and
+> mkfs-time full-range discard (Stage 10). The remaining stages stay in the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -243,9 +268,9 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 
 - `CAP_DRV_LOAD` at `register` time.
 - `CAP_FS_MOUNT` to run `RustFs::scrub` (online verify-and-repair),
-  `RustFs::check` (offline structural validation/rebuild), and `RustFs::rescue`
-  (damaged-volume extraction); without it each fails closed with
-  `PermissionDenied`.
+  `RustFs::check` (offline structural validation/rebuild), `RustFs::rescue`
+  (damaged-volume extraction), and `RustFs::trim` (TRIM/discard); without it
+  each fails closed with `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
   non-`READ_ONLY` mount. The driver runs in user space; it does not
@@ -296,7 +321,13 @@ volume staying mountable, check reclaiming an orphan and correcting a refcount
 divergence while reporting an unrepairable data fault, the check + rescue
 capability gates, rescue discovering a root and extracting files from a wounded
 superblock ring read-only/repeatably, and rescue never emitting a block that
-fails integrity), and a
+fails integrity), the Stage-10 TRIM/discard tests (the `CAP_FS_MOUNT` gate, an
+unsupported device draining the queue recorded-not-failed, contiguous free
+blocks coalescing into one granularity-aligned range, inward alignment
+requeuing the unaligned edges, per-request-cap splitting, batch rate-limiting
+that drains over passes, a reallocated and a still-dedupe-shared block never
+being discarded, the transient queue dropping across a crash with no live data
+lost, and mkfs full-range discard recorded-not-failed without support), and a
 **crash-replay sweep** that faults the device after every write count
 during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
