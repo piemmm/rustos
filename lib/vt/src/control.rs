@@ -1,0 +1,83 @@
+//! The raw control bytes and escape introducers of the ANSI / VT / xterm
+//! vocabulary, as typed constants.
+//!
+//! These are the single definition every other module builds on: the emitter
+//! writes them and the parser recognises them, so the wire format lives in one
+//! place (`AGENTS.md` §2.2). The names follow the ECMA-48 / ANSI X3.64
+//! mnemonics.
+
+/// Bell (`BEL`, `^G`).
+pub const BEL: u8 = 0x07;
+/// Backspace (`BS`, `^H`).
+pub const BS: u8 = 0x08;
+/// Horizontal tab (`HT`, `^I`).
+pub const HT: u8 = 0x09;
+/// Line feed (`LF`, `^J`).
+pub const LF: u8 = 0x0a;
+/// Carriage return (`CR`, `^M`).
+pub const CR: u8 = 0x0d;
+/// Escape (`ESC`, `^[`) — the introducer for every escape sequence.
+pub const ESC: u8 = 0x1b;
+
+/// The byte after `ESC` that opens a Control Sequence (`ESC [`).
+pub const CSI: u8 = b'[';
+/// The byte after `ESC` that opens an Operating System Command (`ESC ]`).
+pub const OSC: u8 = b']';
+/// The byte after `ESC` that opens a Device Control String (`ESC P`).
+pub const DCS: u8 = b'P';
+/// The byte after `ESC` that begins a String Terminator (`ESC \`) — closes an
+/// OSC or DCS string.
+pub const ST_FINAL: u8 = b'\\';
+
+/// The private-parameter marker that prefixes DEC private mode sequences
+/// (`CSI ? … h` / `CSI ? … l`).
+pub const PRIVATE: u8 = b'?';
+/// The CSI parameter separator (`;`).
+pub const SEPARATOR: u8 = b';';
+
+/// `ESC 7` — save cursor position and attributes (DECSC).
+pub const SAVE_CURSOR: u8 = b'7';
+/// `ESC 8` — restore cursor position and attributes (DECRC).
+pub const RESTORE_CURSOR: u8 = b'8';
+
+/// Final byte of Cursor Up (`CSI n A`, CUU).
+pub const CUU: u8 = b'A';
+/// Final byte of Cursor Down (`CSI n B`, CUD).
+pub const CUD: u8 = b'B';
+/// Final byte of Cursor Forward (`CSI n C`, CUF).
+pub const CUF: u8 = b'C';
+/// Final byte of Cursor Back (`CSI n D`, CUB).
+pub const CUB: u8 = b'D';
+/// Final byte of Cursor Next Line (`CSI n E`, CNL).
+pub const CNL: u8 = b'E';
+/// Final byte of Cursor Previous Line (`CSI n F`, CPL).
+pub const CPL: u8 = b'F';
+/// Final byte of Cursor Horizontal Absolute (`CSI n G`, CHA).
+pub const CHA: u8 = b'G';
+/// Final byte of Cursor Position (`CSI row ; col H`, CUP).
+pub const CUP: u8 = b'H';
+/// Final byte of Horizontal/Vertical Position (`CSI row ; col f`, HVP) — an
+/// alias of [`CUP`].
+pub const HVP: u8 = b'f';
+/// Final byte of Erase in Display (`CSI n J`, ED).
+pub const ED: u8 = b'J';
+/// Final byte of Erase in Line (`CSI n K`, EL).
+pub const EL: u8 = b'K';
+/// Final byte of Scroll Up (`CSI n S`, SU).
+pub const SU: u8 = b'S';
+/// Final byte of Scroll Down (`CSI n T`, SD).
+pub const SD: u8 = b'T';
+/// Final byte of Set Top and Bottom Margins (`CSI top ; bottom r`, DECSTBM).
+pub const DECSTBM: u8 = b'r';
+/// Final byte of Select Graphic Rendition (`CSI … m`, SGR).
+pub const SGR: u8 = b'm';
+/// Final byte of a DEC private Set Mode (`CSI ? n h`, DECSET).
+pub const SET_MODE: u8 = b'h';
+/// Final byte of a DEC private Reset Mode (`CSI ? n l`, DECRST).
+pub const RESET_MODE: u8 = b'l';
+
+/// DEC private mode number for "show / hide the cursor" (DECTCEM).
+pub const MODE_CURSOR_VISIBLE: u16 = 25;
+/// DEC private mode number for the xterm alternate screen buffer with
+/// save/restore (`CSI ? 1049 h` / `l`).
+pub const MODE_ALT_SCREEN: u16 = 1049;

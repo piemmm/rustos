@@ -50,6 +50,7 @@ members = [
     "lib/theme",
     "lib/util",
     "lib/virtio",
+    "lib/vt",
 
     # Drivers — display
     "drivers/display/vesa",

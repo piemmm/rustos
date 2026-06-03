@@ -89,6 +89,11 @@ pub const TARGETS: &[Target] = &[
         description:
             "split-virtqueue completion path (hostile device-written used ring / descriptors)",
     },
+    Target {
+        package: "rustos-vt",
+        test: "fuzz_vt",
+        description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -385,6 +390,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-virtio");
+    }
+
+    #[test]
+    fn vt_parser_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_vt"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-vt");
     }
 
     #[test]

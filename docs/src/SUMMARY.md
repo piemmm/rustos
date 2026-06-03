@@ -41,6 +41,7 @@
   - [`rustos-log`](./lib/log.md)
   - [`rustos-rng`](./lib/rng.md)
   - [`rustos-util`](./lib/util.md)
+  - [`rustos-vt`](./lib/vt.md)
 
 # Drivers
 

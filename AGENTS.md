@@ -188,8 +188,14 @@ rustos/
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── util/            # Strictly justified utilities.
-│   └── virtio/          # Bus-agnostic virtio split-virtqueue protocol
-│                        #   (Transport trait, queues, DMA slabs).
+│   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
+│   │                    #   (Transport trait, queues, DMA slabs).
+│   └── vt/              # Shared ANSI/VT/xterm escape + attribute vocabulary
+│                        #   (plans/CURSES.md C1): one control-set / SGR /
+│                        #   colour / screen-op definition with an emitter and
+│                        #   a streaming parser over the same tables, shared by
+│                        #   the terminal consumer and the curses emitter
+│                        #   (§2.2, §2.9, §17.3/§17.4).
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.

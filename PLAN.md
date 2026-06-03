@@ -6619,6 +6619,59 @@ validated-clocksource sections), `docs/src/platform/x86_64.md`
 
 ---
 
+## CURSES Stage C1 — `lib/vt` (shared escape/attribute vocabulary)
+
+**Status:** done.
+
+First stage of `plans/CURSES.md` (the text-mode / TUI stack). Note: for
+this work `abi-v1` is treated as **not** frozen — the task direction
+supersedes the charter's and this plan's "frozen" language — though C1
+adds no kernel/user ABI surface, only a new `lib/*` crate.
+
+1. **New `no_std` + `alloc` crate `lib/vt`** (`rustos-vt`) — the canonical
+   ANSI / VT / xterm vocabulary, the single source of truth shared by the
+   terminal emulator (consumer) and the future curses renderer (emitter),
+   so there is no second escape-sequence definition (§2.2). Modules:
+   `control` (C0/C1 bytes, CSI/OSC/DCS introducers, final bytes, DEC
+   private-mode numbers as typed constants), `color` (`BasicColor` 0–15 +
+   the `Color` 16/256/truecolour models), `attr` (the `Sgr` operation enum,
+   the one `write_params`/`decode_params` SGR table both sides use, and the
+   shared `Attributes` fold), `cell` (`Cell` = glyph + `Attributes`), `op`
+   (the `Op` operation vocabulary + `EraseMode`), `emit` (the
+   `encode`/`encode_into`/`encode_all` emitter), and `parse` (the streaming
+   `Parser`).
+2. **Emitter + streaming parser over the same tables** — each `Op`/`Sgr`
+   has exactly one canonical encoding, so emit→parse is the identity. The
+   parser is a byte-at-a-time state machine (ground / UTF-8 / escape / CSI /
+   OSC-DCS string) that is total: parameters saturate at `PARAM_MAX`, the
+   parameter and string buffers are bounded (`MAX_PARAMS`, `MAX_STRING`),
+   UTF-8 is decoded with overlong/continuation rejection, and an
+   unrecognised, oversized, or malformed sequence is consumed and dropped
+   rather than corrupting state or panicking (§2.9). No
+   `unwrap`/`expect`/`panic!`; nothing touches fd 3 (§20).
+3. **Tests** (§7) — `lib/vt/src/tests.rs`: 19 unit tests covering
+   round-trip identity for every SGR/colour/movement/erase/mode/cursor op,
+   multi-attribute SGR groups, default-parameter handling, oversize
+   saturation, fail-closed dropping of unknown sequences, split-feed
+   streaming, and the `Attributes` fold. `lib/vt/tests/proptest_bytes.rs`:
+   `proptest` that any byte stream parses without panic and chunk-invariant,
+   plus arbitrary-`Op` emit→parse identity. `lib/vt/tests/fuzz_vt.rs`: the
+   §19.5/§19.6 deterministic fuzz harness for the untrusted-input parser,
+   registered in `tools/xtask/src/commands/fuzz.rs` `TARGETS` (`fuzz_vt`)
+   with a `vt_parser_harness_is_registered` test.
+4. **Registration** (§6) — added to the workspace `Cargo.toml` members, to
+   `AGENTS.md` §3's `lib/` tree, and here; stability tier `experimental` in
+   `lib/vt/README.md`.
+5. **Docs** (§13) — `docs/src/lib/vt.md` + `docs/src/SUMMARY.md` entry;
+   rustdoc on every public item with a crate-level doctest.
+
+Layering (§17.4): `lib/vt` depends on `lib/*` only and lives outside
+`userland/gui/*`, so a headless image links it freely (§17.3). C2 (refactor
+`userland/apps/terminal` onto `lib/vt`) is the next stage and has not been
+started.
+
+---
+
 ## Assignment Notes for Task Dispatchers
 
 When handing a stage to an implementing agent, the task brief **must**:

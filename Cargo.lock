@@ -1484,6 +1484,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-vt"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "rustos-wm"
 version = "0.0.0"
 dependencies = [
