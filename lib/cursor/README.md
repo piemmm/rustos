@@ -24,6 +24,10 @@ so the same definition is
   disc).
 - `registry` — `CursorRegistry`: the available cursor sets and the active one,
   with fail-closed `register` / `set_active` (`AGENTS.md` §5.4 / §2.9).
+- `svg` — `VectorCursor::from_svg` and `decode_svg(bytes)`: build a cursor
+  (hotspot included) from a decoded `lib/svg` `SvgImage` (the SVG-first asset
+  rule, `AGENTS.md` §10). A malformed or out-of-subset asset fails closed, so
+  the caller keeps the built-in cursor rather than crashing (`AGENTS.md` §2.9).
 
 ## Where it sits
 

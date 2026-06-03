@@ -567,6 +567,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-geometry",
  "rustos-raster",
+ "rustos-svg",
  "rustos-theme",
 ]
 
@@ -723,6 +724,7 @@ name = "rustos-icon"
 version = "0.0.0"
 dependencies = [
  "rustos-raster",
+ "rustos-svg",
 ]
 
 [[package]]
@@ -995,6 +997,13 @@ name = "rustos-shell"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+]
+
+[[package]]
+name = "rustos-svg"
+version = "0.0.0"
+dependencies = [
+ "rustos-raster",
 ]
 
 [[package]]

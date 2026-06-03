@@ -45,10 +45,12 @@
 extern crate alloc;
 
 pub mod glyph;
+pub mod svg;
 pub mod vector;
 
 #[cfg(test)]
 mod tests;
 
 pub use glyph::{builtin_icon, IconKind};
+pub use svg::decode as decode_svg;
 pub use vector::{IconLayer, VectorIcon};

@@ -272,3 +272,39 @@ fn registry_lists_ids_builtin_first() {
     let ids: alloc::vec::Vec<CursorSetId> = registry.ids().collect();
     assert_eq!(ids, vec![CursorSetId::BUILTIN, id]);
 }
+
+#[test]
+fn decodes_an_svg_cursor_with_its_hotspot() {
+    let svg = br##"<svg viewBox="0 0 24 24" data-hotspot-x="1" data-hotspot-y="2">
+        <polygon points="1,1 1,17 5,13 9,21 12,19 8,12 14,12" fill="#000"/>
+        <polygon points="2,3 2,14 5,11 8,17 9,16 6,10 11,10" fill="#fff"/>
+    </svg>"##;
+    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    assert_eq!(cursor.design_size(), 24);
+    assert_eq!(cursor.hotspot_x(), 1);
+    assert_eq!(cursor.hotspot_y(), 2);
+    assert_eq!(cursor.shapes().len(), 2);
+    assert_eq!(cursor.shapes()[1].fill, Color::rgb(255, 255, 255));
+}
+
+#[test]
+fn decoded_svg_cursor_without_hotspot_pins_to_origin() {
+    let svg = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9 7,15 9,8" fill="#fff"/></svg>"##;
+    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    assert_eq!(cursor.hotspot_x(), 0);
+    assert_eq!(cursor.hotspot_y(), 0);
+}
+
+#[test]
+fn decoded_svg_cursor_rasterises() {
+    let svg = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9 7,15 9,8" fill="#fff"/></svg>"##;
+    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    let image = cursor.rasterise(100).expect("renderable");
+    assert!(image.surface().pixels().iter().any(|p| p.a > 0));
+}
+
+#[test]
+fn malformed_svg_cursor_fails_closed() {
+    // The caller substitutes a built-in cursor rather than crashing (§2.9).
+    assert!(crate::decode_svg(b"<svg></svg>").is_err());
+}

@@ -24,6 +24,10 @@ over a resolution-independent design grid, so the same glyph is
 - `glyph` — `IconKind` (the closed glyph set: network, volume, battery, bell,
   and a generic fallback), `IconKind::for_asset` (theme asset id → kind,
   falling back to `Generic`, `AGENTS.md` §2.9), and `builtin_icon`.
+- `svg` — `VectorIcon::from_svg` and `decode_svg(bytes)`: build an icon from a
+  decoded `lib/svg` `SvgImage` (the SVG-first asset rule, `AGENTS.md` §10). A
+  malformed or out-of-subset asset fails closed, so the caller substitutes a
+  `builtin_icon` glyph rather than crashing (`AGENTS.md` §2.9).
 
 ## Where it sits
 

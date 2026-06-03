@@ -172,6 +172,11 @@ rustos/
 │   │                    #   Color/Pixel + Surface (fill_rect, the single
 │   │                    #   supersampled fill_polygon, blit) for the WM,
 │   │                    #   taskbar, cursors, and icons (§2.2, §17.4).
+│   ├── svg/             # Shared SVG image decoding (§16.4): a fail-closed,
+│   │                    #   first-party no_std decoder for the WM/desktop
+│   │                    #   SVG-first asset subset, producing the shared
+│   │                    #   filled-polygon vector form the cursors and icons
+│   │                    #   rasterise through lib/raster (§2.2, §2.12, §10).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).

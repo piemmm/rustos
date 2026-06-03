@@ -47,6 +47,7 @@ extern crate alloc;
 
 pub mod raster;
 pub mod registry;
+pub mod svg;
 pub mod theme;
 pub mod vector;
 
@@ -55,5 +56,6 @@ mod tests;
 
 pub use raster::CursorImage;
 pub use registry::{CursorRegistry, CursorRegistryError, CursorSetId};
+pub use svg::decode as decode_svg;
 pub use theme::CursorTheme;
 pub use vector::{Shape, VectorCursor, Vertex};

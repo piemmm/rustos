@@ -53,11 +53,15 @@ window-manager change.
 
 On-disk cursor sets follow the desktop's **SVG-first** asset rule
 (`AGENTS.md` §10): a replaceable set under `/System/Graphics` is authored as
-SVG and decoded — through the curated §16.4 image-decoding library in a §19.5
-parser sandbox — into the in-memory `VectorCursor`/`CursorTheme` form shown
-here. The built-in set is constructed in code as the always-present fallback;
-decoding cursor sets from those SVG assets is the open Stage 7 increment
-(`PLAN.md`).
+SVG and decoded — through the curated §16.4 image-decoding library (`lib/svg`)
+in a §19.5 parser sandbox — into the in-memory `VectorCursor`/`CursorTheme`
+form shown here. `rustos_cursor::decode_svg(bytes)` (built on
+`rustos_svg::decode` and `VectorCursor::from_svg`) performs that conversion,
+preserving the asset's `data-hotspot-x`/`data-hotspot-y` hotspot; a malformed
+or out-of-subset asset fails closed, so the caller keeps the built-in cursor
+rather than crashing (`AGENTS.md` §2.9). See
+[SVG asset decoding](./svg-assets.md). The built-in set remains the
+always-present fallback.
 
 ## In the compositor
 

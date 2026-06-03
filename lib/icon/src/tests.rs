@@ -87,3 +87,31 @@ fn degenerate_layer_is_skipped() {
     let image = icon.rasterise(8).expect("renderable");
     assert!(image.pixels().iter().all(|p| p.a == 0));
 }
+
+#[test]
+fn decodes_an_svg_icon_to_its_layers() {
+    let svg = br##"<svg viewBox="0 0 24 24">
+        <rect width="24" height="24" fill="#102030"/>
+        <polygon points="4,4 20,4 12,20" fill="#ffaa00"/>
+    </svg>"##;
+    let icon = crate::decode_svg(svg).expect("valid svg icon");
+    assert_eq!(icon.design(), 24);
+    assert_eq!(icon.layers().len(), 2);
+    assert_eq!(icon.layers()[0].fill, Color::rgb(0x10, 0x20, 0x30));
+    assert_eq!(icon.layers()[1].polygon, vec![(4, 4), (20, 4), (12, 20)]);
+}
+
+#[test]
+fn decoded_svg_icon_rasterises() {
+    let svg =
+        br##"<svg viewBox="0 0 16 16"><polygon points="2,2 14,2 14,14 2,14" fill="#3cf"/></svg>"##;
+    let icon = crate::decode_svg(svg).expect("valid svg icon");
+    let image = icon.rasterise(16).expect("renderable");
+    assert!(image.pixels().iter().any(|p| p.a > 0));
+}
+
+#[test]
+fn malformed_svg_icon_fails_closed() {
+    // The caller substitutes a builtin glyph rather than crashing (§2.9).
+    assert!(crate::decode_svg(b"<not-svg/>").is_err());
+}

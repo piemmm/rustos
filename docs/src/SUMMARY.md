@@ -83,6 +83,7 @@
 - [Desktop theming](./desktop/theming.md)
 - [Pointer cursors](./desktop/cursors.md)
 - [Desktop icons](./desktop/icons.md)
+- [SVG asset decoding](./desktop/svg-assets.md)
 - [Variable DPI and UI scale](./desktop/dpi.md)
 - [Default desktop apps](./desktop/apps.md)
 

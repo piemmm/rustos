@@ -43,10 +43,13 @@ still draws a placeholder instead of nothing (`AGENTS.md` §2.9).
 
 On-disk icon sets follow the desktop's **SVG-first** asset rule (`AGENTS.md`
 §10), the same as cursors: a set under `/System/Graphics` is authored as SVG
-and decoded — through the curated §16.4 image-decoding library in a §19.5
-parser sandbox — into the in-memory `VectorIcon` form shown here. The built-in
-glyphs are constructed in code as the always-present fallback; decoding icon
-sets from those SVG assets is the open Stage 7 increment (`PLAN.md`).
+and decoded — through the curated §16.4 image-decoding library (`lib/svg`) in
+a §19.5 parser sandbox — into the in-memory `VectorIcon` form shown here.
+`rustos_icon::decode_svg(bytes)` (built on `rustos_svg::decode` and
+`VectorIcon::from_svg`) performs that conversion; a malformed or out-of-subset
+asset fails closed, so the caller substitutes a `builtin_icon` glyph rather
+than crashing (`AGENTS.md` §2.9). See [SVG asset decoding](./svg-assets.md).
+The built-in glyphs remain the always-present fallback.
 
 ## In the taskbar
 

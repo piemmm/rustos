@@ -5048,9 +5048,9 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   workspace manifest; docs `docs/src/desktop/icons.md` (+ SUMMARY),
   updates to `docs/src/desktop/{cursors,taskbar}.md`, and the `rustos-icon`
   / `rustos-raster` `README.md`s. No new `unsafe`, no
-  `unwrap`/`expect`/`panic!` in production paths. **Still open:** decoding
+  `unwrap`/`expect`/`panic!` in production paths. **Resolved:** decoding
   cursor *and* icon sets from on-disk SVG assets under `/System/Graphics`
-  (the SVG-first pipeline).
+  has now landed — see the SVG-first asset decoder increment below.
 - **Variable DPI / UI scale — DONE (increment).** Variable DPI is now a
   binding, **settable** desktop property (`AGENTS.md` §10): the same image is
   comfortable on a low- or high-DPI panel and the user picks the density.
@@ -5264,18 +5264,41 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `docs/src/desktop/apps.md` and the crate `README.md`. **Still open here:**
   wiring the pseudo-terminal `ShellSource` to a real shell process and
   presenting the window through the WM (deferred wiring).
+- **SVG-first asset decoder — DONE (increment).** The desktop's SVG-first
+  asset rule (§10) gains its decoder: a new `lib/svg` crate (`rustos-svg`,
+  `no_std`, `#![forbid(unsafe_code)]`, dep only `lib/raster`, `Layer::Lib`) is
+  the first-party (§2.12) §16.4 image-decoding library that turns an on-disk
+  SVG asset into an `SvgImage` — a square design grid plus an ordered stack of
+  filled polygon `SvgLayer`s and an optional hotspot, exactly the shape
+  `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already hold, so
+  the asset rasterises through `lib/raster`'s single polygon path with no
+  second rasteriser (§2.2). The supported subset is the flat, straight-line
+  one that maps to stacked filled polygons: a square `viewBox` (or equal
+  `width`/`height`); `<polygon>`/`<polyline>`/`<rect>`/`<path>` with the
+  straight-line commands `M`/`L`/`H`/`V`/`Z`; hex/named/`none` fills with
+  `fill-opacity`; integer coordinates. SVG is untrusted input (§19.5): `decode`
+  is **total** — it never panics for any byte string, returns a precise
+  `SvgError` for anything out of subset, and the caller fails closed to a
+  built-in cursor / `builtin_icon` glyph (§2.9). `lib/cursor` and `lib/icon`
+  gain `VectorCursor::from_svg`/`VectorIcon::from_svg` + `decode_svg`
+  wrappers (cursor preserving the `data-hotspot-*` hotspot). 33 `lib/svg` unit
+  tests + a doctest + a §19.6 fuzz harness (`tests/fuzz_svg.rs`, registered in
+  xtask — it caught and fixed a path-builder DoS), 3 new `rustos-icon` tests,
+  4 new `rustos-cursor` tests. `AGENTS.md` §3 lib list + workspace manifest;
+  docs `docs/src/desktop/svg-assets.md` (+ SUMMARY), updates to
+  `docs/src/desktop/{cursors,icons}.md`, the `rustos-svg`/`rustos-icon`/
+  `rustos-cursor` `README.md`s. No `unsafe`, no `unwrap`/`expect`/`panic!` in
+  production paths.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
   pointer/keyboard device events and the taskbar–WM event glue (presenting and
   placing the start-menu popup surface, presenting the file-browser window, and
   relaying the session's theme switch over live IPC), selecting a font face
-  from the theme's `FontSpec` roles once installed fonts exist, the
-  **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
-  through the §16.4 image-decoding library in a §19.5 sandbox and caching the
-  rasterised/converted forms — this is also how on-disk cursor **and icon**
-  sets are decoded; the in-memory vector forms (`lib/cursor`, `lib/icon`) and
-  the notification-icon artwork that consumes them have landed). The two
+  from the theme's `FontSpec` roles once installed fonts exist, and the
+  **caching layer** that converts each SVG asset once at the active scale and
+  re-renders only on a scale or theme change (the `lib/svg` decoder and the
+  `lib/cursor`/`lib/icon` conversions it feeds have landed). The two
   default apps — the filesystem browser and the
   terminal emulator — have both landed (model + renderer over an injected
   seam); what remains for them is the live VFS/shell channels and WM-presented

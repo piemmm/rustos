@@ -78,6 +78,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_compress",
         description: "first-party LZ decode (untrusted compressed-record bytes)",
     },
+    Target {
+        package: "rustos-svg",
+        test: "fuzz_svg",
+        description: "SVG asset decode (untrusted /System/Graphics image bytes)",
+    },
 ];
 
 /// How long to run each harness.
@@ -358,6 +363,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-compress");
+    }
+
+    #[test]
+    fn svg_decode_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_svg"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-svg");
     }
 
     #[test]

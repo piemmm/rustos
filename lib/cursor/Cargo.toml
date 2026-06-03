@@ -20,6 +20,12 @@ rustos-geometry = { path = "../geometry", version = "=0.0.0" }
 # The `CursorKind` vocabulary a theme names cursors by; a `CursorTheme`
 # binds one vector cursor per kind so the WM resolves a kind to a shape.
 rustos-theme = { path = "../theme", version = "=0.0.0" }
+# The shared SVG decoder (§16.4 image-decoding class). Cursor assets are
+# authored as SVG (the SVG-first asset rule, §10); a decoded `SvgImage` is the
+# same filled-polygon stack a `VectorCursor` holds, plus the hotspot, so the
+# cursor library converts one straight onto its vector form without a second
+# rasterisation path (§2.2).
+rustos-svg = { path = "../svg", version = "=0.0.0" }
 
 [lints]
 workspace = true
