@@ -13,10 +13,12 @@
 //! exactly the byte dance the riscv64 MMIO transport performs against its
 //! big-endian register, only over I/O ports here.
 //!
-//! The DMA target buffers and the staged control structure live in the
-//! kernel's identity-mapped low RAM (the x86_64 boot maps `0..4 GiB`), so
-//! a buffer's address is the physical address QEMU's DMA engine
-//! reads/writes.
+//! The DMA target buffers and the staged control structure are kernel
+//! pointers in a -2 GiB higher-half kernel: a stack buffer is identity-
+//! mapped low RAM (the x86_64 boot maps `0..4 GiB`), but a heap buffer is
+//! a higher-half virtual address (`KERNEL_VMA_BASE + phys`). The
+//! [`DmaAddressRegister::to_physical`] override below maps both back to
+//! the physical address QEMU's DMA engine reads/writes.
 
 use rustos_abi::PortIo;
 use rustos_arch_x86_64::pio::x86_port_io;
@@ -33,6 +35,20 @@ const DMA_ADDR_LOW_PORT: u16 = 0x518;
 pub struct IoPortDma;
 
 impl DmaAddressRegister for IoPortDma {
+    fn to_physical(&self, virt: u64) -> u64 {
+        // Higher-half kernel virtual-to-physical: pointers at or above
+        // KERNEL_VMA_BASE (statics, heap) are linked at `base + phys`, so
+        // subtract the base; low pointers (the boot stack) are identity-
+        // mapped and pass through unchanged (linker.ld / boot.s
+        // SAFETY-INVARIANT 9).
+        let base = rustos_arch_x86_64::paging::KERNEL_VMA_BASE;
+        if virt >= base {
+            virt - base
+        } else {
+            virt
+        }
+    }
+
     fn write_dma_address(&self, dma_phys: u64) {
         let io = x86_port_io();
         let high = u32::try_from(dma_phys >> 32).unwrap_or(0);

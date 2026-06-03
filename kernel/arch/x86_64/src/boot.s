@@ -14,9 +14,12 @@
 //  2. `_start` runs in 32-bit protected mode with CR0.PE=1, paging off,
 //     EAX=multiboot2 magic (0x36D76289), EBX=multiboot info pointer,
 //     and a flat 4 GiB code/data segmentation set up by GRUB.
-//  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pd` tables sit in
-//     `.bss` and are zero-initialised by the multiboot loader (BSS bytes
-//     are zero per the multiboot spec).
+//  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pdpt_high`/`boot_pds`
+//     tables sit in `.boot.bss` (linked 1:1 in low memory by `linker.ld`)
+//     and are zero-initialised by the multiboot loader (BSS bytes are zero
+//     per the multiboot spec). They live in `.boot.bss` rather than the
+//     high-half `.bss` so the 32-bit trampoline can name them with absolute
+//     32-bit operands before paging is enabled.
 //  4. We identity-map the full 0..4 GiB physical address window via four
 //     page directories chained from PDPT[0..4], each populated with the
 //     512 2 MiB huge-page entries that cover its 1 GiB slot. This is
@@ -41,6 +44,17 @@
 //     interrupts masked. The Rust contract (`-> !`) makes this branch
 //     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback
 //     `AGENTS.md` §2.9 requires.
+//  9. The kernel is a -2 GiB higher-half kernel (`linker.ld`): its Rust
+//     sections are linked at virtual `KERNEL_VMA_BASE (0xFFFFFFFF80000000)
+//     + phys` but loaded into low physical memory. Before the long-mode
+//     jump the trampoline maps that window (PML4[511] -> `boot_pdpt_high`,
+//     `boot_pdpt_high`[510] -> the first-GiB identity PD `boot_pds`), so
+//     virtual `0xFFFFFFFF80000000 + X` resolves to physical `X` for the
+//     whole kernel image. The 0..4 GiB identity map (invariant 4) is kept
+//     so the direct physical map (`kernel/mem` phys.rs: DMA/MMIO/ACPI/
+//     multiboot info) is unaffected. After entering long mode the
+//     trampoline transfers to the high half with an absolute
+//     `movabs`+`jmp *%rax` to `higher_half_entry`.
 
 .section .multiboot_header, "a"
 .align 8
@@ -104,6 +118,28 @@ _start:
     cmpl $2048, %ecx
     jl   2b
 
+    // Higher-half kernel window (SAFETY-INVARIANT 9). The kernel's Rust
+    // sections are linked at KERNEL_VMA_BASE = 0xFFFFFFFF80000000 + phys
+    // (linker.ld) but loaded into low physical memory. 0xFFFFFFFF80000000
+    // decodes to PML4[511] -> PDPT[510] -> PD[0]; pointing PDPT[510] at the
+    // already-populated first-GiB identity PD (`boot_pds`) maps virtual
+    // 0xFFFFFFFF80000000 + X to physical X for X in 0..1 GiB, which is
+    // exactly the kernel image's load window. The 0..4 GiB identity map
+    // above is kept intact so the direct physical map (DMA/MMIO, ACPI,
+    // multiboot info, LAPIC/IO-APIC MMIO) keeps working unchanged.
+    //
+    // PML4[511] -> boot_pdpt_high  (offset 511 * 8 = 0xFF8)
+    movl $boot_pdpt_high, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pml4 + 0xFF8
+    movl $0, boot_pml4 + 0xFFC
+
+    // boot_pdpt_high[510] -> boot_pds  (offset 510 * 8 = 0xFF0)
+    movl $boot_pds, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pdpt_high + 0xFF0
+    movl $0, boot_pdpt_high + 0xFF4
+
     // CR3 <- PML4
     movl $boot_pml4, %eax
     movl %eax, %cr3
@@ -141,9 +177,31 @@ long_mode_start:
     movw %ax, %gs
     movw %ax, %ss
 
-    // rdi/rsi already hold the multiboot magic / info pointer thanks to
-    // the 32-bit `movl %eax,%edi` and `movl %ebx,%esi` above zero-
-    // extending into the 64-bit registers.
+    // We are still executing at the low (identity-mapped) physical RIP of
+    // `.boot.text`. The higher-half window is now mapped, so transfer to
+    // the kernel's high virtual address space with an absolute jump: the
+    // `movabs` materialises the full 64-bit link address of the high-half
+    // landing pad (an R_X86_64_64 relocation the linker fills with its
+    // KERNEL_VMA_BASE-relative VA), and `jmp *%rax` loads RIP with it.
+    // rdi/rsi (multiboot magic / info pointer) are preserved — only %rax
+    // is clobbered.
+    movabs $higher_half_entry, %rax
+    jmp *%rax
+
+.size long_mode_start, . - long_mode_start
+
+// -- Higher-half landing pad. Linked into `.text` at KERNEL_VMA_BASE + phys
+//    (linker.ld), so reaching here means RIP is running in the higher-half
+//    kernel window. From here a normal RIP-relative `call` reaches the Rust
+//    entry point (both are high-half symbols). The boot stack stays valid
+//    because the 0..4 GiB identity map is preserved.
+.section .text, "ax"
+.code64
+.global higher_half_entry
+.type higher_half_entry, @function
+higher_half_entry:
+    // rdi/rsi still hold the multiboot magic / info pointer (untouched by
+    // the absolute jump above).
     call rustos_arch_x86_64_main
 
     // `rustos_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.
@@ -152,18 +210,27 @@ long_mode_start:
     hlt
     jmp .Lhang
 
-// -- BSS-allocated bootstrap page tables and stack. The multiboot1 spec
-//    guarantees BSS is zero-initialised before `_start` runs.
-.section .bss, "aw", @nobits
+.size higher_half_entry, . - higher_half_entry
+
+// -- BSS-allocated bootstrap page tables and stack. The multiboot2 spec
+//    guarantees BSS is zero-initialised before `_start` runs. These live in
+//    the low `.boot.bss` section (linker.ld) so the 32-bit trampoline can
+//    name them with absolute 32-bit operands before paging is enabled.
+.section .boot.bss, "aw", @nobits
 .align 4096
 .global boot_pml4
 boot_pml4:
     .skip 4096
 boot_pdpt:
     .skip 4096
+// PDPT for the higher-half kernel window (SAFETY-INVARIANT 9). Its entry
+// 510 points at `boot_pds` so 0xFFFFFFFF80000000 + X maps to physical X.
+boot_pdpt_high:
+    .skip 4096
 // Four contiguous PDs, one per GiB of the identity-mapped 0..4 GiB window.
 // See SAFETY-INVARIANT 4. Symbol exposed so the AP bring-up code in
-// `smp.rs` can pass the bootstrap PML4 to APs unchanged.
+// `smp.rs` can pass the bootstrap PML4 to APs unchanged. The first-GiB PD
+// is reused by `boot_pdpt_high` to back the higher-half kernel window.
 .global boot_pds
 boot_pds:
     .skip 4096 * 4
@@ -183,8 +250,9 @@ boot_stack_bottom:
     .skip 65536
 boot_stack_top:
 
-// -- Long-mode GDT.
-.section .rodata
+// -- Long-mode GDT. Lives in the low `.boot.rodata` section (linker.ld) so
+//    `lgdt` can load it (by its low linear address) before paging is on.
+.section .boot.rodata, "a"
 .align 8
 gdt64:
     .quad 0                                         // 0x00: null

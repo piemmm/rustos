@@ -20,12 +20,34 @@ Pixel encodings are `DisplayFormat::Rgba8888` and
 trait never panics: a frame shorter than `stride_bytes * height_px`
 maps to `DriverError::BufferTooSmall`.
 
+### Optional hardware acceleration
+
+A driver whose hardware can composite a stack of planes itself also
+implements `AcceleratedDisplay: Display` — the GPU-accelerated path
+(`AGENTS.md` §10):
+
+| Method           | Purpose                                            |
+|------------------|----------------------------------------------------|
+| `accel_caps`     | report `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity }` |
+| `present_layers` | composite a back-to-front `AccelLayer` stack and scan it out |
+
+Each `AccelLayer` carries premultiplied-alpha source pixels in the
+display's active format plus a destination origin and a per-layer
+opacity; the engine blends them and scans the result out, so the host
+never composites the whole screen in software. The software
+`Display::present` path is always the mandatory fallback: the
+compositor (`Compositor::present_accelerated`) drops back to it when the
+scene exceeds the reported `AccelCaps` (too many layers, or a layer
+larger than the engine can source), so a hardware frame is never
+partial (§2.9).
+
 ## Shipped drivers
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 `ramfb` QEMU vertical |
 | vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
+| rpi_hvs      | `rustos-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
@@ -129,3 +151,33 @@ after the reload.
 The `fw_cfg` DMA protocol lives once in the shared `rustos-itest-fwcfg`
 crate; this vertical supplies only the x86_64 IOport transport, the
 deliberate sibling of the riscv64 MMIO transport (`AGENTS.md` §2.2).
+
+### `rustos-drv-display-rpi-hvs`
+
+The Raspberry Pi driver is the first to implement `AcceleratedDisplay`.
+It exposes the VideoCore Hardware Video Scaler (HVS) — a fixed-function
+plane compositor — so the window manager hands it the visible windows
+as layers instead of a pre-composited frame.
+
+The HVS composites by walking a *display list* (DLIST) of plane entries
+held in a dedicated RAM. On each accelerated present the driver uploads
+each layer's premultiplied pixels into a per-plane, GPU-visible source
+buffer, builds one unity-scaled DLIST entry per layer (control word,
+packed position, size, source **bus** pointer, pitch, alpha — modelled
+on the VC4 HVS plane format, six 32-bit words plus an end marker),
+writes the list into the HVS DLIST RAM, and arms the display channel
+through its control register. Plane pointers are bus addresses: a
+physical address is translated through the configured VideoCore bus
+alias (default `0xC000_0000`) and bounds-checked against the 30-bit
+aperture, failing closed rather than driving the engine off a bad
+address.
+
+Every region (scan-out, DLIST RAM, control register, per-plane buffers)
+is discovered by the boot capability as an `HvsConfig` and mapped
+through the host's `MmioMapper` under `CAP_MMIO_MAP` (`AGENTS.md` §4 —
+no ambient authority). The driver also implements the plain `Display`
+trait, so the software full-frame path remains the mandatory fallback.
+Like the other display drivers it runs in user space and is exercised
+by host-side tests against a multi-region mock `MmioMapper` that reads
+back both the uploaded plane pixels and the encoded DLIST words; a QEMU
+vertical awaits an HVS-emulating board model.

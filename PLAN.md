@@ -508,6 +508,32 @@ Each sub-stage delivers one architecture. They share the same checklist:
           existing test still passes). 9 new host unit tests cover
           `smp` (ApBootSlot layout, frame install, INIT-SIPI-SIPI
           ordering against a `LapicMmio` mock).
+    - [x] **(b-hh)** Higher-half kernel. The QEMU boot test
+          (`rustos-test-kernel-arch-boot`) was failing
+          `cause=syscall_init_failed`: the syscall-entry `RSP0`
+          validator (`syscall_entry::validate_kernel_rsp0`, landed with
+          the §5 ret2usr/CVE-2019-1125 hardening) demands a canonical
+          *higher-half* kernel stack, but the kernel was linked and ran
+          identity-mapped in the *low* half, so every boot rejected the
+          BSP stack. Fixed by converting x86_64 to a -2 GiB higher-half
+          kernel (matching the pre-existing `-C code-model=kernel`):
+          `linker.ld` now links the Rust sections at
+          `KERNEL_VMA_BASE = 0xFFFFFFFF80000000 + phys` (loaded low via
+          `AT()`) while keeping the early trampoline (`.boot.*`) 1:1 in
+          low memory; `boot.s` maps the higher-half window
+          (`PML4[511] → PDPT[510] →` the reused first-GiB identity PD)
+          alongside the preserved 0..4 GiB identity map and jumps into
+          the high half (`higher_half_entry`). The kernel-pointer→phys
+          conversion (`v >= KERNEL_VMA_BASE ? v - base : v`) was threaded
+          through the page-table pool (`paging::phys_of`), the
+          memory-isolation test's `AddressSpace` (which now also mirrors
+          the higher-half window so a CR3 switch keeps high RIP mapped),
+          the vesa framebuffer base, and the fw_cfg DMA seam
+          (`DmaAddressRegister::to_physical`). The direct physical map
+          (`kernel/mem` `phys.rs`, DMA/MMIO) is unchanged because the
+          identity map is preserved. Full `cargo xtask test --qemu`
+          matrix (x86_64 incl. vesa/SMP/virtio/rustfs/net, riscv64,
+          aarch64) is green.
     - [~] **(c, partial)** Per-CPU GDT + TSS + IST primitives.
           `kernel/arch/x86_64::gdt` ships the canonical 7-slot GDT
           layout (`GdtEntry::{kernel_code, kernel_data, user_code,
@@ -5509,7 +5535,36 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
   `appmgr`/WM glue that opens a *launched* app's window through this bridge
   (deferred Stage 6 process wiring) — the model side is complete.
-- **Still to do this stage:** GPU-accelerated compositor path, backing the
+- **GPU-accelerated compositor path — DONE (increment).** The optional
+  hardware-accelerated present path landed, with the software path staying
+  the mandatory fallback (`AGENTS.md` §10). The display ABI gained an
+  `AcceleratedDisplay: Display` seam in `lib/abi`
+  (`accel_caps -> AccelCaps`, `present_layers(&[AccelLayer])`): a back-end
+  that can composite a back-to-front stack of premultiplied-alpha layers
+  itself exposes it; every `AcceleratedDisplay` is still a `Display`, so the
+  full-frame software path is always available. The compositor gained
+  `present_accelerated`: it encodes the scene as one background layer, one
+  layer per visible window (its surface baked with opacity and rounded-corner
+  coverage via the shared `Window::sample_local`/`CursorLayer::sample_local`),
+  and the cursor on top, hands them to the engine, and **falls back to the
+  software `present`** when the scene exceeds the reported `AccelCaps` (too
+  many layers, or a layer too large) — never a partial hardware frame (§2.9).
+  The first accelerated driver is **`drivers/display/rpi_hvs`**
+  (`rustos-drv-display-rpi-hvs`), the Raspberry Pi VideoCore HVS plane
+  compositor: it uploads each layer to a capability-mapped per-plane buffer,
+  builds a VC4-style display list (bus-address plane pointers, fail-closed
+  aperture bounds), writes it to the HVS DLIST RAM, and arms the display
+  channel — all over `CAP_MMIO_MAP`-gated `MmioMapper` windows, in user space
+  (no `CAP_DRV_KERNEL`). 6 new `rustos-abi` display tests, 12 new
+  `rustos-drv-display-rpi-hvs` tests, 4 new `rustos-wm` tests (62 total).
+  `AGENTS.md` §3 display tree + workspace manifest; docs
+  `docs/src/drivers/display.md` (accelerated seam + driver section) + the
+  driver `README.md`. No `unsafe` outside the mock mapper's reviewed block,
+  no `unwrap`/`expect`/`panic!` in production paths. **Still open here:** a
+  QEMU vertical awaiting an HVS-emulating board model, and DMA-visible plane
+  buffers from the compositor's own window allocations (today the driver
+  uploads into its plane buffers per present).
+- **Still to do this stage:** backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar
   `TaskbarInput`, re-presents through `TaskbarPresenter`, and keeps the

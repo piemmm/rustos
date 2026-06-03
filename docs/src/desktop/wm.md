@@ -5,8 +5,8 @@ RustOS desktop (`AGENTS.md` §10). All compositing happens in user space;
 the kernel only ships framebuffer access through a capability, and no
 non-GUI crate depends on it (`AGENTS.md` §17.3). This page documents the
 **compositor core** and the **input router** delivered in the first
-Stage 7 increments; GPU acceleration, theming, and the taskbar build on
-them in later increments.
+Stage 7 increments, plus the optional **GPU-accelerated present path**;
+theming and the taskbar build on them in later increments.
 
 ## Pipeline
 
@@ -25,6 +25,26 @@ The compositor turns a stack of windows into one scan-out frame:
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
 form on scan-out.
+
+## Hardware acceleration
+
+When the display driver exposes the optional
+`AcceleratedDisplay` seam (`AGENTS.md` §10),
+`Compositor::present_accelerated` lets the hardware composite the scene
+instead of the CPU. It encodes the scene back-to-front as one solid
+background layer, one `AccelLayer` per visible window (its surface baked
+with that window's opacity and rounded-corner coverage through the same
+`sample_local` path the software compositor uses, so the hardware result
+matches pixel-for-pixel), and the cursor on top, then hands the stack to
+`AcceleratedDisplay::present_layers`.
+
+The software path is always the fallback: if the scene exceeds the
+engine's reported `AccelCaps` — more layers than it has planes, or a
+layer larger than it can source — the compositor composites the whole
+frame in software and presents it instead, so a hardware frame is never
+partial (`AGENTS.md` §2.9). The first driver to implement the seam is the
+Raspberry Pi VideoCore HVS plane compositor (see
+[Display drivers](../drivers/display.md)).
 
 ## Premultiplied alpha
 
@@ -131,6 +151,9 @@ path.
 framebuffer: premultiplied-alpha correctness (fully-opaque and
 fully-transparent edge cases), per-region alpha blending, rounded-corner
 masking, z-order and raise, window move/hide/remove with damage repaint,
-channel-order encoding, the `Display` present seam, and input routing
-(hit-testing, click-to-activate focus and raise, desktop-clears-focus,
-move-grab drag, and the fail-closed grab edge cases).
+channel-order encoding, the `Display` present seam, the accelerated
+layer-encoding present path (background + window layers, hidden-window
+omission, and the over-budget / over-size software fallbacks), and input
+routing (hit-testing, click-to-activate focus and raise,
+desktop-clears-focus, move-grab drag, and the fail-closed grab edge
+cases).

@@ -18,7 +18,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
+use rustos_abi::driver::display::{
+    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayFormat, DisplayMode,
+};
 use rustos_abi::DriverError;
 
 use rustos_cursor::CursorImage;
@@ -363,6 +365,120 @@ impl Compositor {
         display.present(&self.frame)
     }
 
+    /// Present via the display's hardware layer engine when it can serve
+    /// the current scene, falling back to the software full-frame path
+    /// otherwise (`AGENTS.md` §10 — the software path is always the
+    /// fallback).
+    ///
+    /// The scene is encoded back-to-front as one solid background layer,
+    /// one layer per visible window (its surface baked with that window's
+    /// opacity and rounded-corner coverage), and the cursor on top, so the
+    /// hardware result matches the software compositor pixel-for-pixel. If
+    /// the engine's [`AccelCaps`] cannot hold that many layers, or a layer
+    /// is larger than the engine can source, the whole frame is composited
+    /// in software and presented instead — never a partial hardware frame
+    /// (§2.9).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`DriverError`] from the hardware
+    /// [`AcceleratedDisplay::present_layers`] or, on fallback, the
+    /// software [`Display::present`].
+    pub fn present_accelerated(
+        &mut self,
+        display: &mut dyn AcceleratedDisplay,
+    ) -> Result<(), DriverError> {
+        let caps = display.accel_caps()?;
+        if let Some(buffers) = self.encode_layers(&caps) {
+            let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
+            display.present_layers(&layers)
+        } else {
+            self.composite();
+            display.present(&self.frame)
+        }
+    }
+
+    /// Encode the current scene as hardware layers, or `None` if the
+    /// engine's [`AccelCaps`] cannot serve it (the caller falls back to
+    /// software).
+    fn encode_layers(&self, caps: &AccelCaps) -> Option<Vec<LayerBuf>> {
+        let max_layers = usize::try_from(caps.max_layers).unwrap_or(usize::MAX);
+        let mut layers = Vec::new();
+        layers.push(
+            self.encode_layer(self.mode.width_px, self.mode.height_px, 0, 0, |_, _| {
+                Some(self.background.premultiply())
+            })?,
+        );
+        for window in &self.windows {
+            if !window.is_visible() {
+                continue;
+            }
+            let bounds = window.bounds();
+            layers.push(self.encode_layer(
+                bounds.width,
+                bounds.height,
+                bounds.left(),
+                bounds.top(),
+                |lx, ly| window.sample_local(lx, ly),
+            )?);
+        }
+        if let Some(cursor) = &self.cursor {
+            let bounds = cursor.bounds();
+            layers.push(self.encode_layer(
+                bounds.width,
+                bounds.height,
+                bounds.left(),
+                bounds.top(),
+                |lx, ly| cursor.sample_local(lx, ly),
+            )?);
+        }
+        if layers.len() > max_layers {
+            return None;
+        }
+        for layer in &layers {
+            if layer.width > caps.max_width_px || layer.height > caps.max_height_px {
+                return None;
+            }
+        }
+        Some(layers)
+    }
+
+    /// Bake a `width`×`height` region into a premultiplied, display-format
+    /// layer buffer placed at `(dst_x, dst_y)`. `sample` yields each
+    /// surface-local pixel, or `None` for a transparent one. Returns
+    /// `None` only if the buffer size overflows `usize` (§2.9).
+    fn encode_layer(
+        &self,
+        width: u32,
+        height: u32,
+        dst_x: i32,
+        dst_y: i32,
+        mut sample: impl FnMut(u32, u32) -> Option<Pixel>,
+    ) -> Option<LayerBuf> {
+        let w = usize::try_from(width).ok()?;
+        let h = usize::try_from(height).ok()?;
+        let count = w.checked_mul(h)?.checked_mul(4)?;
+        let mut pixels = vec![0u8; count];
+        for ly in 0..height {
+            let row = usize::try_from(ly).ok()?;
+            for lx in 0..width {
+                let pixel = sample(lx, ly).unwrap_or(Pixel::TRANSPARENT);
+                let col = usize::try_from(lx).ok()?;
+                let offset = (row * w + col) * 4;
+                if let Some(slot) = pixels.get_mut(offset..offset + 4) {
+                    slot.copy_from_slice(&encode_pixel(self.order, pixel));
+                }
+            }
+        }
+        Some(LayerBuf {
+            pixels,
+            width,
+            height,
+            dst_x,
+            dst_y,
+        })
+    }
+
     /// Apply `change` to the window named by `id`, marking the union of
     /// its bounds before and after dirty. Returns `false` for an unknown
     /// id.
@@ -405,6 +521,33 @@ impl Compositor {
         let bytes = encode_pixel(self.order, pixel);
         if let Some(slot) = self.frame.get_mut(offset..offset + 4) {
             slot.copy_from_slice(&bytes);
+        }
+    }
+}
+
+/// A baked, display-format layer buffer and its on-screen placement,
+/// held alive while the borrowing [`AccelLayer`]s are handed to the
+/// hardware engine.
+struct LayerBuf {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    dst_x: i32,
+    dst_y: i32,
+}
+
+impl LayerBuf {
+    /// Borrow this buffer as an [`AccelLayer`]. The buffer is dense, so
+    /// the stride is exactly four bytes per pixel.
+    fn as_layer(&self) -> AccelLayer<'_> {
+        AccelLayer {
+            pixels: &self.pixels,
+            width_px: self.width,
+            height_px: self.height,
+            stride_bytes: self.width.saturating_mul(4),
+            dst_x: self.dst_x,
+            dst_y: self.dst_y,
+            opacity: 255,
         }
     }
 }

@@ -62,7 +62,16 @@ impl CursorLayer {
     pub fn sample(&self, x: i32, y: i32) -> Option<Pixel> {
         let local_x = u32::try_from(x.checked_sub(self.origin.x)?).ok()?;
         let local_y = u32::try_from(y.checked_sub(self.origin.y)?).ok()?;
-        let pixel = self.image.surface().get(local_x, local_y)?;
+        self.sample_local(local_x, local_y)
+    }
+
+    /// The premultiplied cursor pixel at *image-local* `(lx, ly)`, or
+    /// `None` outside the image or where it draws nothing. The
+    /// hardware-layer present path bakes the cursor into a layer through
+    /// this, addressed in the image's own coordinate space.
+    #[must_use]
+    pub fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
+        let pixel = self.image.surface().get(lx, ly)?;
         (pixel.a > 0).then_some(pixel)
     }
 }

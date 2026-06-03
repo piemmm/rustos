@@ -2,7 +2,9 @@
 
 extern crate alloc;
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode};
+use rustos_abi::driver::display::{
+    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayFormat, DisplayMode,
+};
 use rustos_abi::DriverError;
 
 use crate::color::Color;
@@ -900,4 +902,173 @@ fn window_scale_reports_the_output_scale_for_a_known_window() {
     );
 
     assert_eq!(c.window_scale(WindowId(9_999)), None, "unknown id is None");
+}
+
+// ---- hardware-accelerated present ------------------------------------
+
+/// One layer the mock engine was asked to composite, captured by value
+/// so the test can inspect it after the borrowed slice is gone.
+struct CapturedLayer {
+    pixels: alloc::vec::Vec<u8>,
+    width: u32,
+    height: u32,
+    dst_x: i32,
+    dst_y: i32,
+}
+
+/// A hardware-layer engine seam that records the layer stack handed to
+/// it, the software frame presented on fallback, and reports a
+/// configurable [`AccelCaps`].
+struct MockAccel {
+    mode: DisplayMode,
+    caps: AccelCaps,
+    layers: alloc::vec::Vec<CapturedLayer>,
+    software_frame: alloc::vec::Vec<u8>,
+}
+
+impl MockAccel {
+    fn new(mode: DisplayMode, caps: AccelCaps) -> Self {
+        Self {
+            mode,
+            caps,
+            layers: alloc::vec::Vec::new(),
+            software_frame: alloc::vec::Vec::new(),
+        }
+    }
+}
+
+impl Display for MockAccel {
+    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+        Ok(self.mode)
+    }
+    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        self.software_frame = frame.to_vec();
+        Ok(())
+    }
+}
+
+impl AcceleratedDisplay for MockAccel {
+    fn accel_caps(&self) -> Result<AccelCaps, DriverError> {
+        Ok(self.caps)
+    }
+    fn present_layers(&mut self, layers: &[AccelLayer<'_>]) -> Result<(), DriverError> {
+        self.layers = layers
+            .iter()
+            .map(|l| CapturedLayer {
+                pixels: l.pixels.to_vec(),
+                width: l.width_px,
+                height: l.height_px,
+                dst_x: l.dst_x,
+                dst_y: l.dst_y,
+            })
+            .collect();
+        Ok(())
+    }
+}
+
+fn generous_caps() -> AccelCaps {
+    AccelCaps {
+        max_layers: 8,
+        max_width_px: 1024,
+        max_height_px: 1024,
+        per_layer_opacity: true,
+    }
+}
+
+/// Read the RGBA bytes of pixel `(x, y)` in a captured layer.
+fn layer_pixel(layer: &CapturedLayer, x: u32, y: u32) -> [u8; 4] {
+    let off = usize::try_from((y * layer.width + x) * 4).expect("offset");
+    [
+        layer.pixels[off],
+        layer.pixels[off + 1],
+        layer.pixels[off + 2],
+        layer.pixels[off + 3],
+    ]
+}
+
+#[test]
+fn accelerated_present_encodes_background_and_window_layers() {
+    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+
+    c.present_accelerated(&mut display)
+        .expect("accelerated present");
+
+    // Background layer + one window layer, in back-to-front order.
+    assert_eq!(display.layers.len(), 2, "background + window");
+    let bg = &display.layers[0];
+    assert_eq!((bg.width, bg.height, bg.dst_x, bg.dst_y), (8, 8, 0, 0));
+    assert_eq!(
+        layer_pixel(bg, 4, 4),
+        [0, 0, 255, 255],
+        "background is blue"
+    );
+
+    let win = &display.layers[1];
+    assert_eq!((win.width, win.height, win.dst_x, win.dst_y), (2, 2, 1, 1));
+    assert_eq!(layer_pixel(win, 0, 0), [255, 0, 0, 255], "window is red");
+    assert_eq!(layer_pixel(win, 1, 1), [255, 0, 0, 255]);
+
+    // The software fallback was not taken.
+    assert!(display.software_frame.is_empty());
+}
+
+#[test]
+fn hidden_window_is_omitted_from_the_layer_stack() {
+    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    assert!(c.set_visible(win, false));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 1, "only the background remains");
+}
+
+#[test]
+fn accelerated_present_falls_back_when_over_layer_budget() {
+    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    // One plane only: background + window needs two, so the engine cannot
+    // serve the scene and the compositor uses the software path.
+    let caps = AccelCaps {
+        max_layers: 1,
+        ..generous_caps()
+    };
+    let mut display = MockAccel::new(mode(8, 8), caps);
+
+    c.present_accelerated(&mut display).expect("present");
+    assert!(display.layers.is_empty(), "no hardware layers used");
+    assert_eq!(
+        display.software_frame.len(),
+        8 * 8 * 4,
+        "software frame sent"
+    );
+    // The window's red is composited into the software frame at (1,1).
+    let off: usize = (8 + 1) * 4; // pixel (1,1) in an 8-wide RGBA frame
+    assert_eq!(
+        &display.software_frame[off..off + 4],
+        &[255, 0, 0, 255],
+        "software fallback composited the window"
+    );
+}
+
+#[test]
+fn accelerated_present_falls_back_when_a_layer_is_too_large() {
+    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    // The background layer is the full 8×8 screen; an engine that can
+    // only source 4-px-wide planes cannot take it.
+    let caps = AccelCaps {
+        max_width_px: 4,
+        ..generous_caps()
+    };
+    let mut display = MockAccel::new(mode(8, 8), caps);
+
+    c.present_accelerated(&mut display).expect("present");
+    assert!(display.layers.is_empty(), "no hardware layers used");
+    assert_eq!(
+        display.software_frame.len(),
+        8 * 8 * 4,
+        "software frame sent"
+    );
 }

@@ -34,6 +34,15 @@ pub const PAGE_SIZE: usize = 4096;
 /// Number of 64-bit entries in a page-table page (PML4 / PDPT / PD / PT).
 pub const ENTRIES_PER_TABLE: usize = 512;
 
+/// Base virtual address of the -2 GiB higher-half kernel window.
+///
+/// A kernel symbol linked at `KERNEL_VMA_BASE + p` is loaded at physical
+/// `p` (`kernel/arch/x86_64/linker.ld`; `boot.s` SAFETY-INVARIANT 9). Used
+/// to turn a higher-half kernel virtual address back into the physical
+/// address the MMU needs in a page-table entry or CR3. Must equal the
+/// `KERNEL_VMA_BASE` in `linker.ld` and the literal in `boot.s`.
+pub const KERNEL_VMA_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
 /// Page-table entry flags actually used here.
 pub mod flags {
     /// Entry is present.
@@ -55,10 +64,10 @@ impl Table {
 }
 
 /// Maximum number of page-table pages the Stage-2 tests need. Sized for
-/// two [`AddressSpace`]s, each with up to 4 levels deep on one extra
-/// mapping plus the initial 32 MiB identity map: 2 × (PML4 + PDPT + PD)
-/// + spares.
-const POOL_SIZE: usize = 16;
+/// two [`AddressSpace`]s, each carrying the low 32 MiB identity map
+/// (PML4 + PDPT + PD), the higher-half kernel window (PDPT + PD), and up
+/// to one extra fine-grained mapping (PDPT + PD + PT): 2 × 8 + spares.
+const POOL_SIZE: usize = 24;
 
 /// A statically-allocated pool of zero-initialised page-table pages.
 ///
@@ -135,11 +144,13 @@ impl PageTablePool {
 
 /// An address space built on a freshly-allocated PML4.
 ///
-/// The constructor identity-maps the first 32 MiB with 1 GiB / 2 MiB
-/// huge pages so the kernel's own code/stack/data remain reachable
-/// regardless of which `AddressSpace` is currently active. The
-/// [`Self::map_4k`] method adds finer-grained mappings used by the
-/// memory-isolation test.
+/// The constructor identity-maps the first 32 MiB with 2 MiB huge pages
+/// (so low physical memory, including the boot stack, stays reachable)
+/// **and** mirrors the boot trampoline's higher-half kernel window
+/// (`boot.s` SAFETY-INVARIANT 9) so the higher-half-linked kernel
+/// code/stack/data remain reachable regardless of which `AddressSpace`
+/// is currently active. The [`Self::map_4k`] method adds finer-grained
+/// mappings used by the memory-isolation test.
 pub struct AddressSpace {
     pml4_phys: u64,
     pml4: &'static mut [u64; ENTRIES_PER_TABLE],
@@ -164,6 +175,24 @@ impl AddressSpace {
         pdpt[0] = pd_phys | flags::PRESENT | flags::WRITABLE;
         // 16 × 2 MiB = 32 MiB identity-mapped.
         for (i, slot) in pd.iter_mut().take(16).enumerate() {
+            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        }
+
+        // Mirror the boot trampoline's higher-half kernel window so the
+        // higher-half-linked kernel code/stack/data stay reachable after a
+        // CR3 switch to this space (`boot.s` SAFETY-INVARIANT 9). Map the
+        // -2 GiB window at KERNEL_VMA_BASE onto physical [0, 1 GiB) with
+        // 2 MiB huge pages — the same first-GiB identity PD the trampoline
+        // reuses, covering the whole kernel image.
+        let pdpt_high = pool.alloc()?;
+        let pd_high = pool.alloc()?;
+        let pdpt_high_phys = phys_of(pdpt_high);
+        let pd_high_phys = phys_of(pd_high);
+        let hi_i4 = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
+        let hi_i3 = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
+        pml4[hi_i4] = pdpt_high_phys | flags::PRESENT | flags::WRITABLE;
+        pdpt_high[hi_i3] = pd_high_phys | flags::PRESENT | flags::WRITABLE;
+        for (i, slot) in pd_high.iter_mut().enumerate() {
             *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
         }
 
@@ -216,9 +245,10 @@ impl AddressSpace {
     ///
     /// Caller must guarantee that the new PML4 also maps the currently
     /// executing instruction's `rip` and the current stack — otherwise
-    /// the CPU will fault on the very next memory access. Both
-    /// constructors here uphold that by identity-mapping the kernel's
-    /// 0–32 MiB code/stack/data range.
+    /// the CPU will fault on the very next memory access.
+    /// [`Self::new_identity_first_32mib`] upholds that by mapping both the
+    /// low 32 MiB (boot stack / low physical) and the higher-half kernel
+    /// window (where the higher-half-linked code/stack/data live).
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn switch(&self) {
         // SAFETY: caller asserts the new mappings cover RIP and RSP; see
@@ -274,10 +304,13 @@ fn ensure_child(
 }
 
 fn phys_of(table: &[u64; ENTRIES_PER_TABLE]) -> u64 {
-    // Identity-mapped: virtual == physical for everything the kernel
-    // owns. The cast is justified because the boot trampoline established
-    // an identity map covering all kernel-allocated memory.
-    table.as_ptr() as u64
+    // The page-table pool is a higher-half kernel static (linked at
+    // KERNEL_VMA_BASE + phys; see linker.ld / boot.s SAFETY-INVARIANT 9).
+    // Convert its virtual address back to the physical address the MMU
+    // needs in a page-table entry or CR3. The subtraction cannot wrap: on
+    // the bare-metal target every kernel static lives at or above
+    // KERNEL_VMA_BASE.
+    (table.as_ptr() as u64) - KERNEL_VMA_BASE
 }
 
 #[cfg(test)]

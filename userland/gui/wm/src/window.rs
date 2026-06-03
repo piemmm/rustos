@@ -116,6 +116,22 @@ impl Window {
         }
         let lx = u32::try_from(i64::from(x) - i64::from(self.origin.x)).ok()?;
         let ly = u32::try_from(i64::from(y) - i64::from(self.origin.y)).ok()?;
+        self.sample_local(lx, ly)
+    }
+
+    /// The composited contribution of this window at *surface-local*
+    /// `(lx, ly)`: the source pixel scaled by the combined opacity and
+    /// rounded-corner coverage, or `None` outside the surface or when the
+    /// window is hidden.
+    ///
+    /// This is the same per-pixel result as [`Self::sample`] addressed in
+    /// the window's own coordinate space; the hardware-layer present path
+    /// (`Compositor::present_accelerated`) uses it to bake a window into a
+    /// premultiplied layer without re-deriving screen coordinates.
+    pub(crate) fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
+        if !self.visible {
+            return None;
+        }
         let pixel = self.surface.get(lx, ly)?;
         let coverage = self
             .corners

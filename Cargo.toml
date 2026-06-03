@@ -55,6 +55,7 @@ members = [
     "drivers/display/vesa",
     "drivers/display/framebuffer",
     "drivers/display/gpu_virtio",
+    "drivers/display/rpi_hvs",
 
     # Drivers — filesystem
     "drivers/filesystem/ext4",

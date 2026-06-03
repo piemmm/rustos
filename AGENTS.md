@@ -126,7 +126,9 @@ rustos/
 │   ├── display/
 │   │   ├── vesa/
 │   │   ├── framebuffer/
-│   │   └── gpu_virtio/
+│   │   ├── gpu_virtio/
+│   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS hardware-layer
+│   │                    #   compositor (the GPU-accelerated path).
 │   ├── filesystem/
 │   │   ├── ext4/
 │   │   ├── fat32/

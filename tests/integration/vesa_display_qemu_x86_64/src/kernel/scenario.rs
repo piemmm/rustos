@@ -126,9 +126,15 @@ struct Surface([u8; FB_BYTES]);
 /// the scenario — hence a `static` rather than a stack/heap buffer.
 static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 
-/// Physical (identity) base address of [`FRAMEBUFFER`].
+/// Physical base address of [`FRAMEBUFFER`].
+///
+/// `FRAMEBUFFER` is a higher-half kernel static (the kernel is linked at
+/// `KERNEL_VMA_BASE + phys`, see `kernel/arch/x86_64/linker.ld`), so its
+/// physical address — what the VBE `PhysBasePtr` must hold and what the
+/// MMIO mapper translates through the low-4-GiB identity map — is its
+/// virtual address minus the higher-half base.
 fn framebuffer_phys() -> u64 {
-    ptr::addr_of!(FRAMEBUFFER) as u64
+    (ptr::addr_of!(FRAMEBUFFER) as u64) - rustos_arch_x86_64::paging::KERNEL_VMA_BASE
 }
 
 // --- Logging / failure -----------------------------------------------

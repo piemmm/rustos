@@ -102,7 +102,11 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let _ = writeln!(com1, "[memory_isolation] idt installed");
 
     // ---- Build the victim address space and stash the secret byte. ----
-    let secret_paddr = core::ptr::addr_of!(SECRET_FRAME) as u64;
+    // `SECRET_FRAME` is a higher-half kernel static (the kernel is linked
+    // at `KERNEL_VMA_BASE + phys`, see `kernel/arch/x86_64/linker.ld`), so
+    // its physical frame address — what a page-table entry must hold — is
+    // its virtual address minus the higher-half base.
+    let secret_paddr = (core::ptr::addr_of!(SECRET_FRAME) as u64) - paging::KERNEL_VMA_BASE;
     SECRET_PHYS.store(secret_paddr, Ordering::SeqCst);
     // SAFETY: SECRET_FRAME is a static mut owned exclusively by this
     // boot-time setup code; no other CPU exists yet (Stage-2 is single-
@@ -141,8 +145,9 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     );
 
     // ---- Phase 1: confirm the victim mapping is genuine. ----
-    // SAFETY: we identity-map first 32 MiB in both address spaces, which
-    // covers RIP and RSP. Switching to the victim is sound.
+    // SAFETY: both address spaces map the low 32 MiB (boot stack / low
+    // physical) and the higher-half kernel window (RIP and the
+    // higher-half-linked code/data), so switching to the victim is sound.
     unsafe { victim.switch() };
     // SAFETY: SECRET_VADDR is mapped read/write in the victim space.
     let v_byte = unsafe { core::ptr::read_volatile(SECRET_VADDR as *const u8) };
@@ -157,7 +162,9 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
     // ---- Phase 2: switch to the attacker and read the same VA. ----
     ATTACKER_ACTIVE.store(true, Ordering::SeqCst);
-    // SAFETY: identity map still covers RIP/RSP under the attacker.
+    // SAFETY: the attacker space maps the same low 32 MiB and higher-half
+    // kernel window, so RIP/RSP stay mapped across the switch; only
+    // `SECRET_VADDR` is absent (the property under test).
     unsafe { attacker.switch() };
     let _ = writeln!(
         com1,

@@ -622,6 +622,13 @@ name = "rustos-drv-display-gpu-virtio"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-drv-display-rpi-hvs"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-drv-display-vesa"
 version = "0.0.0"
 dependencies = [

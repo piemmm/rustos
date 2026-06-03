@@ -75,12 +75,28 @@ pub trait DmaAddressRegister {
     /// Write the physical address of a staged `FWCfgDmaAccess` to the
     /// device register, triggering the operation.
     fn write_dma_address(&self, dma_phys: u64);
+
+    /// Translate a kernel virtual address (of a DMA control structure or
+    /// a data buffer) into the physical address QEMU's DMA engine
+    /// dereferences.
+    ///
+    /// Defaults to the identity map, which is correct for host tests and
+    /// for any platform whose kernel buffers are identity-mapped. A
+    /// higher-half kernel — whose statics and heap live at virtual
+    /// `KERNEL_VMA_BASE + phys` — overrides this to recover the physical
+    /// address (see the x86_64 `IoPortDma`). Without it a heap buffer's
+    /// high virtual address would be handed to the device verbatim and
+    /// the transfer would fault.
+    fn to_physical(&self, virt: u64) -> u64 {
+        virt
+    }
 }
 
 /// In-RAM DMA control structure (QEMU `FWCfgDmaAccess`). All fields are
 /// big-endian on the wire; staged through volatile stores in
-/// [`FwCfg::op`]. One lives on the stack per operation — ordinary RAM
-/// whose address is a valid DMA physical address under the identity map.
+/// [`FwCfg::op`]. One lives on the stack per operation; its address and
+/// the data-buffer address are mapped to physical through
+/// [`DmaAddressRegister::to_physical`] before they reach the device.
 #[repr(C, align(8))]
 struct FWCfgDmaAccess {
     control: u32,
@@ -138,13 +154,14 @@ impl<T: DmaAddressRegister> FwCfg<T> {
         // SAFETY: `&mut access` is a unique, 8-byte-aligned stack local
         // that lives across the synchronous DMA; the stores touch only
         // its own fields.
+        let buffer_phys = self.dma.to_physical(address);
         unsafe {
             ptr::write_volatile(ptr::addr_of_mut!(access.control), control.to_be());
             ptr::write_volatile(ptr::addr_of_mut!(access.length), length.to_be());
-            ptr::write_volatile(ptr::addr_of_mut!(access.address), address.to_be());
+            ptr::write_volatile(ptr::addr_of_mut!(access.address), buffer_phys.to_be());
         }
 
-        let dma_phys = ptr::addr_of!(access) as u64;
+        let dma_phys = self.dma.to_physical(ptr::addr_of!(access) as u64);
         compiler_fence(Ordering::SeqCst);
         self.dma.write_dma_address(dma_phys);
         compiler_fence(Ordering::SeqCst);
