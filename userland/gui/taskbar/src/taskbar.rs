@@ -87,10 +87,15 @@ impl TaskbarConfig {
 
 /// The taskbar: placement configuration plus the start menu, task list, and
 /// notification area, themed by a corner radius.
+///
+/// The bar does **not** own a UI scale: the desktop density belongs to the
+/// output, so the scale is supplied by the compositor at layout, hit-test,
+/// and render time (`AGENTS.md` §10 / §2.2). A runtime DPI change is therefore
+/// transparent to the taskbar model — the bar is simply laid out and
+/// re-presented at the new density, with no state to update here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Taskbar {
     config: TaskbarConfig,
-    scale: Scale,
     corner_radius: u32,
     popup_corner_radius: u32,
     start_menu: StartMenu,
@@ -106,7 +111,6 @@ impl Taskbar {
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
-            scale: Scale::ONE,
             corner_radius: theme.metrics().taskbar_corner_radius,
             popup_corner_radius: theme.metrics().popup_corner_radius,
             start_menu: StartMenu::with_session_controls(),
@@ -120,18 +124,6 @@ impl Taskbar {
     #[must_use]
     pub const fn config(&self) -> &TaskbarConfig {
         &self.config
-    }
-
-    /// The desktop UI scale the bar lays out at.
-    #[must_use]
-    pub const fn scale(&self) -> Scale {
-        self.scale
-    }
-
-    /// Set the desktop UI scale, so a runtime DPI change relays the bar at
-    /// the new density without rebuilding its model (`AGENTS.md` §10).
-    pub fn set_scale(&mut self, scale: Scale) {
-        self.scale = scale;
     }
 
     /// The corner radius the window manager applies to the bar (`AGENTS.md`
@@ -198,23 +190,24 @@ impl Taskbar {
         self.config = config;
     }
 
-    /// Compute the bar's geometry for its current task and icon counts.
+    /// Compute the bar's geometry for its current task and icon counts at the
+    /// desktop `scale` (the compositor's output density, `AGENTS.md` §10).
     #[must_use]
-    pub fn layout(&self) -> BarLayout {
+    pub fn layout(&self, scale: Scale) -> BarLayout {
         BarLayout::compute(
             &self.config,
             self.corner_radius,
-            self.scale,
+            scale,
             self.tasks.len(),
             self.notifications.len(),
         )
     }
 
-    /// The taskbar element under `point`, or `None` if the point misses
-    /// every region.
+    /// The taskbar element under `point` at the desktop `scale`, or `None` if
+    /// the point misses every region.
     #[must_use]
-    pub fn hit_test(&self, point: Point) -> Option<Hit> {
-        self.layout().hit_test(point)
+    pub fn hit_test(&self, point: Point, scale: Scale) -> Option<Hit> {
+        self.layout(scale).hit_test(point)
     }
 
     /// Compute the start-menu popup's geometry for the current state.
@@ -225,14 +218,14 @@ impl Taskbar {
     /// meaningful only while [`StartMenu::is_open`](crate::StartMenu::is_open)
     /// is `true`; the caller checks that.
     #[must_use]
-    pub fn menu_layout(&self) -> MenuLayout {
-        let bar = self.layout();
+    pub fn menu_layout(&self, scale: Scale) -> MenuLayout {
+        let bar = self.layout(scale);
         MenuLayout::compute(
             self.config.edge,
             bar.bar,
             bar.start_button,
             self.popup_corner_radius,
-            self.scale,
+            scale,
             self.start_menu.len(),
         )
     }

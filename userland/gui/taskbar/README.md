@@ -16,9 +16,11 @@ owns:
   *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
   takes a `rustos-geometry` `Scale` and converts the logical lengths to
   physical pixels through the one shared `Scale::scale_length` (`AGENTS.md`
-  §10, §2.2). A `Taskbar` carries a settable `scale()`/`set_scale()`, so a
-  runtime DPI change relays the bar at the new density without rebuilding its
-  model — exactly as a theme switch does.
+  §10, §2.2). The `Taskbar` stores **no** scale: the desktop density belongs
+  to the output and is owned by the compositor, so `layout`, `hit_test`, and
+  `menu_layout` take the `Scale` as a parameter and the presenter supplies
+  `Compositor::scale` at present time. A runtime DPI change is therefore just
+  a re-present at the new density — transparent to the bar, no model rebuild.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
   under it (start button, a task, a notification icon, or the clock) for
   input routing. A region slot that does not fit is `Rect::EMPTY` and is never

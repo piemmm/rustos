@@ -10,7 +10,7 @@ use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
-use crate::Compositor;
+use crate::{Compositor, WindowId};
 
 use rustos_theme::{ThemeId, ThemeRegistry};
 
@@ -731,7 +731,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new(Scale::ONE);
+    let mut ctrl = CursorController::new();
 
     // First refresh over the desktop installs the arrow.
     router.handle(moved(70, 70), &mut c);
@@ -754,7 +754,7 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new(Scale::ONE);
+    let mut ctrl = CursorController::new();
 
     // Arrow over the background, then Text over the window.
     router.handle(moved(70, 70), &mut c);
@@ -775,33 +775,36 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
 }
 
 #[test]
-fn set_scale_without_a_cursor_re_renders_nothing() {
+fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let router = InputRouter::new();
-    let mut ctrl = CursorController::new(Scale::ONE);
+    let mut ctrl = CursorController::new();
 
-    // No cursor shown yet: a scale change records the new scale but has
-    // nothing to re-render, so it draws nothing.
+    // No cursor shown yet and the policy has not run: raising the output
+    // scale damages the screen but there is nothing to install, and a
+    // refresh over the desktop installs the arrow at the new density.
     let bigger = Scale::from_percent(200).expect("valid scale");
-    assert!(!ctrl.set_scale(bigger, &router, &mut c));
-    assert_eq!(ctrl.scale(), bigger);
-    assert!(c.cursor_bounds().is_none());
+    assert!(c.set_scale(bigger));
+    assert!(ctrl.refresh(&router, &mut c));
+    assert!(c.cursor_bounds().is_some());
 }
 
 #[test]
 fn controller_re_renders_on_scale_change() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new(Scale::ONE);
+    let mut ctrl = CursorController::new();
 
-    // Show a cursor at 1:1, then raise the scale: its footprint enlarges.
+    // Show a cursor at 1:1, then raise the output scale: a refresh sees the
+    // new density and re-rasterises, so the footprint enlarges even though
+    // the chosen kind is unchanged.
     router.handle(moved(10, 10), &mut c);
     assert!(ctrl.refresh(&router, &mut c));
     let small = c.cursor_bounds().expect("cursor shown");
     let bigger = Scale::from_percent(200).expect("valid scale");
-    assert!(ctrl.set_scale(bigger, &router, &mut c));
+    assert!(c.set_scale(bigger));
+    assert!(ctrl.refresh(&router, &mut c));
     let large = c.cursor_bounds().expect("cursor shown");
-    assert_eq!(ctrl.scale(), bigger);
     assert!(large.width > small.width);
     assert!(large.height > small.height);
 }
@@ -810,7 +813,7 @@ fn controller_re_renders_on_scale_change() {
 fn controller_re_renders_on_registry_swap() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new(Scale::ONE);
+    let mut ctrl = CursorController::new();
 
     router.handle(moved(10, 10), &mut c);
     assert!(ctrl.refresh(&router, &mut c));
@@ -825,4 +828,48 @@ fn controller_re_renders_on_registry_swap() {
     assert!(ctrl.set_registry(registry, &router, &mut c));
     assert_eq!(ctrl.registry().active_id(), custom);
     assert!(c.cursor_bounds().is_some());
+}
+
+#[test]
+fn output_scale_starts_at_one_and_is_settable() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    assert_eq!(c.scale(), Scale::ONE);
+
+    let bigger = Scale::from_percent(200).expect("valid scale");
+    assert!(c.set_scale(bigger), "a new scale changes the output");
+    assert_eq!(c.scale(), bigger);
+
+    // Setting the scale already in effect is a no-op the embedder can skip.
+    assert!(!c.set_scale(bigger));
+}
+
+#[test]
+fn setting_the_output_scale_marks_the_whole_screen_dirty() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    c.composite();
+    assert!(!c.has_damage(), "a fresh composite clears the damage");
+
+    let bigger = Scale::from_percent(150).expect("valid scale");
+    assert!(c.set_scale(bigger));
+    assert!(
+        c.has_damage(),
+        "a scale change re-rasterises every window next composite"
+    );
+}
+
+#[test]
+fn window_scale_reports_the_output_scale_for_a_known_window() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
+    assert_eq!(c.window_scale(win), Some(Scale::ONE));
+
+    let bigger = Scale::from_percent(200).expect("valid scale");
+    c.set_scale(bigger);
+    assert_eq!(
+        c.window_scale(win),
+        Some(bigger),
+        "an app reads its window's output density here"
+    );
+
+    assert_eq!(c.window_scale(WindowId(9_999)), None, "unknown id is None");
 }

@@ -13,7 +13,8 @@ use rustos_taskbar::{
 };
 use rustos_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use rustos_wm::{
-    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Surface, WindowId,
+    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Scale, Surface,
+    WindowId,
 };
 
 use crate::{
@@ -181,7 +182,7 @@ fn present_adds_a_bar_window_placed_and_rounded() {
     assert_eq!(comp.window_count(), 1);
     assert!(presenter.popup_window().is_none(), "the menu is closed");
 
-    let layout = session.taskbar().layout();
+    let layout = session.taskbar().layout(Scale::ONE);
     let window = comp.window(id).expect("the bar window exists");
     assert_eq!(window.origin(), layout.bar.origin);
     assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
@@ -233,7 +234,7 @@ fn opening_the_menu_presents_a_popup_window() {
     let popup = presenter.popup_window().expect("the popup was presented");
     assert_eq!(comp.window_count(), 2, "bar and popup are both present");
 
-    let layout = session.taskbar().menu_layout();
+    let layout = session.taskbar().menu_layout(Scale::ONE);
     let window = comp.window(popup).expect("the popup window exists");
     assert_eq!(window.origin(), layout.panel.origin);
     assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
@@ -340,7 +341,7 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         session.active_theme(),
     );
     let id = presenter.bar_window().expect("the bar was presented");
-    let dark_corners = Corners::from_radius(session.taskbar().layout().corner_radius);
+    let dark_corners = Corners::from_radius(session.taskbar().layout(Scale::ONE).corner_radius);
     assert_eq!(
         comp.window(id).expect("the bar window").corners(),
         dark_corners
@@ -356,7 +357,7 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         session.active_theme(),
     );
 
-    let switched_corners = Corners::from_radius(session.taskbar().layout().corner_radius);
+    let switched_corners = Corners::from_radius(session.taskbar().layout(Scale::ONE).corner_radius);
     assert_eq!(switched_corners, Corners::from_radius(99));
     assert_eq!(
         comp.window(id).expect("the same bar window").corners(),
@@ -519,7 +520,7 @@ fn opaque_window(comp: &mut Compositor, origin: Point, width: u32, height: u32) 
 
 /// A point guaranteed to lie inside the taskbar's start button.
 fn start_button_point(session: &DesktopSession) -> Point {
-    let rect = session.taskbar().layout().start_button;
+    let rect = session.taskbar().layout(Scale::ONE).start_button;
     assert!(!rect.is_empty(), "the start button has a region");
     Point::new(rect.left() + 1, rect.top() + 1)
 }
@@ -821,7 +822,7 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
 
-    let slot = session.taskbar().layout().tasks.first().copied();
+    let slot = session.taskbar().layout(Scale::ONE).tasks.first().copied();
     let Some(slot) = slot else {
         panic!("the inserted task has a slot");
     };
@@ -972,7 +973,7 @@ fn selecting_the_appearance_toggle_switches_the_theme() {
     let toggle_row = *shell
         .session()
         .taskbar()
-        .menu_layout()
+        .menu_layout(Scale::ONE)
         .entries
         .last()
         .expect("the menu has an appearance-toggle row");
@@ -1065,6 +1066,39 @@ fn set_icons_installs_a_loaded_set_and_the_bar_still_presents() {
 
     assert!(shell.presenter().bar_window().is_some());
     assert_eq!(comp.window_count(), 1);
+}
+
+#[test]
+fn set_scale_rescales_the_bar_transparently_and_is_idempotent() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let bar = shell
+        .presenter()
+        .bar_window()
+        .expect("the bar is presented");
+    let unscaled = comp.window(bar).expect("bar window").surface().height();
+
+    // Switching the desktop density drives the compositor (the single source
+    // of truth) and re-lays the bar in place, transparent to the taskbar.
+    let doubled = Scale::from_percent(200).expect("200% is in range");
+    assert!(
+        shell.set_scale(doubled, &mut comp),
+        "a new output scale changes the desktop"
+    );
+    assert_eq!(comp.scale(), doubled, "the compositor owns the new density");
+    let scaled = comp
+        .window(bar)
+        .expect("the bar window is reused")
+        .surface()
+        .height();
+    assert_eq!(scaled, unscaled * 2, "the bar re-laid at the new density");
+
+    // An app reads its window's density here; it never sets it.
+    assert_eq!(comp.window_scale(bar), Some(doubled));
+
+    // Setting the scale already in effect re-presents nothing.
+    assert!(!shell.set_scale(doubled, &mut comp));
 }
 
 #[test]

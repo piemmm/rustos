@@ -27,7 +27,7 @@
 
 use rustos_taskbar::{Taskbar, TaskbarRenderer};
 use rustos_theme::Theme;
-use rustos_wm::{Compositor, Corners, Point, Surface, WindowId};
+use rustos_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
 /// Presents a taskbar and its start-menu popup as window-manager windows.
 ///
@@ -89,8 +89,13 @@ impl TaskbarPresenter {
         taskbar: &Taskbar,
         theme: &Theme,
     ) {
-        self.present_bar(compositor, renderer, taskbar, theme);
-        self.present_popup(compositor, renderer, taskbar, theme);
+        // The desktop density belongs to the output the bar is on, so it is
+        // read from the compositor here and laid out at present time — a
+        // runtime DPI change re-presents the bar at the new scale with no
+        // taskbar state to update (`AGENTS.md` §10 / §2.2).
+        let scale = compositor.scale();
+        self.present_bar(compositor, renderer, taskbar, theme, scale);
+        self.present_popup(compositor, renderer, taskbar, theme, scale);
     }
 
     /// Remove the bar and popup windows from `compositor` and forget them, so
@@ -113,11 +118,12 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         theme: &Theme,
+        scale: Scale,
     ) {
-        let Some(surface) = renderer.render(taskbar, theme) else {
+        let Some(surface) = renderer.render(taskbar, theme, scale) else {
             return;
         };
-        let layout = taskbar.layout();
+        let layout = taskbar.layout(scale);
         let corners = Corners::from_radius(layout.corner_radius);
         self.bar = Some(place(
             compositor,
@@ -135,6 +141,7 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         theme: &Theme,
+        scale: Scale,
     ) {
         if !taskbar.start_menu().is_open() {
             if let Some(id) = self.popup.take() {
@@ -142,10 +149,10 @@ impl TaskbarPresenter {
             }
             return;
         }
-        let Some(surface) = renderer.render_menu(taskbar, theme) else {
+        let Some(surface) = renderer.render_menu(taskbar, theme, scale) else {
             return;
         };
-        let layout = taskbar.menu_layout();
+        let layout = taskbar.menu_layout(scale);
         let corners = Corners::from_radius(layout.corner_radius);
         self.popup = Some(place(
             compositor,

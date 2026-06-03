@@ -21,7 +21,7 @@
 //! without also acting on what it landed on — one click does one thing
 //! (`AGENTS.md` §2.1).
 
-use rustos_geometry::Point;
+use rustos_geometry::{Point, Scale};
 use rustos_input::{InputEvent, PointerButton};
 
 use crate::layout::Hit;
@@ -93,11 +93,18 @@ impl TaskbarInput {
         self.pointer
     }
 
-    /// Process one input `event` against `taskbar`, returning what changed.
+    /// Process one input `event` against `taskbar`, hit-testing presses at the
+    /// desktop `scale` (the compositor's output density, `AGENTS.md` §10),
+    /// returning what changed.
     ///
     /// Only a primary-button press acts; pointer motion updates the tracked
     /// position, and every other event is [`TaskbarResponse::Ignored`].
-    pub fn handle(&mut self, event: InputEvent, taskbar: &mut Taskbar) -> TaskbarResponse {
+    pub fn handle(
+        &mut self,
+        event: InputEvent,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+    ) -> TaskbarResponse {
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
@@ -105,22 +112,23 @@ impl TaskbarInput {
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
-            } => self.press_primary(taskbar),
+            } => self.press_primary(taskbar, scale),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 TaskbarResponse::Ignored
             }
         }
     }
 
-    /// Handle a primary-button press at the current pointer position.
-    fn press_primary(&mut self, taskbar: &mut Taskbar) -> TaskbarResponse {
-        let hit = taskbar.hit_test(self.pointer);
+    /// Handle a primary-button press at the current pointer position,
+    /// hit-tested at the desktop `scale`.
+    fn press_primary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
+        let hit = taskbar.hit_test(self.pointer, scale);
 
         // While the menu is open it is modal: every press except one on the
         // start button (which toggles it shut, handled below) routes to the
         // popup or dismisses the menu.
         if taskbar.start_menu().is_open() && hit != Some(Hit::StartButton) {
-            return self.press_open_menu(taskbar);
+            return self.press_open_menu(taskbar, scale);
         }
 
         let Some(hit) = hit else {
@@ -155,8 +163,8 @@ impl TaskbarInput {
 
     /// Handle a primary press while the start menu is open: select the entry
     /// under the pointer, or dismiss the menu if the press misses the popup.
-    fn press_open_menu(&mut self, taskbar: &mut Taskbar) -> TaskbarResponse {
-        let layout = taskbar.menu_layout();
+    fn press_open_menu(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
+        let layout = taskbar.menu_layout(scale);
         let Some(index) = layout.hit_test(self.pointer) else {
             taskbar.start_menu_mut().close();
             return TaskbarResponse::StartMenuDismissed;

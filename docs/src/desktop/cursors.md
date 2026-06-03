@@ -88,11 +88,14 @@ coded per window action. The window manager's `select` module
   not pixels, so it marks no damage; the displayed pointer updates the next
   time the policy runs.
 - `CursorController` ties the policy to the artwork. It owns the active
-  `CursorRegistry` and the desktop `Scale` and remembers the kind on screen.
-  `refresh` runs the policy and, only when the chosen kind changes, rasterises
-  the matching cursor at the current scale and installs it. A runtime cursor-set
-  swap (`set_registry`) or DPI change (`set_scale`) re-renders the current kind
-  in place. Rasterisation can fail for a degenerate cursor or scale; the
+  `CursorRegistry` and remembers the kind on screen and the density it was
+  rasterised at, but it does **not** own the scale: the desktop density belongs
+  to the output, so the controller reads it from `Compositor::scale` when it
+  installs a cursor (`AGENTS.md` §10 / §2.2). `refresh` runs the policy and
+  re-renders only when the chosen kind, the active cursor set, **or** the output
+  scale changed, installing the result in place. A runtime cursor-set swap is
+  `set_registry`; a DPI change is `Compositor::set_scale` followed by one
+  `refresh`. Rasterisation can fail for a degenerate cursor or scale; the
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
 - The controller rasterises each kind at most once per scale and cursor set: a

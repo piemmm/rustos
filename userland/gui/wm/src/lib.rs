@@ -70,7 +70,7 @@ pub use compositor::Compositor;
 pub use corner::Corners;
 pub use cursor::CursorLayer;
 pub use damage::DamageRegion;
-pub use geometry::{Point, Rect};
+pub use geometry::{Point, Rect, Scale};
 pub use input::{InputEvent, InputResponse, InputRouter, PointerButton};
 pub use select::{desired_cursor, CursorController};
 pub use surface::Surface;

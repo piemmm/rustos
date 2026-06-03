@@ -35,7 +35,7 @@
 
 use rustos_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use rustos_wm::{
-    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, WindowId,
+    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, Scale, WindowId,
 };
 
 /// What the [`SessionInputRouter`] did with one [`InputEvent`].
@@ -122,18 +122,22 @@ impl SessionInputRouter {
         compositor: &mut Compositor,
         taskbar: &mut Taskbar,
     ) -> SessionInputResponse {
+        // The taskbar hit-tests at the output's density, which the compositor
+        // owns (`AGENTS.md` §10); the session reads it here rather than
+        // keeping its own copy (§2.2).
+        let scale = compositor.scale();
         match event {
             InputEvent::PointerMoved { .. } => {
                 // Keep both routers' tracked pointer in step; only the window
                 // manager acts on motion (dragging a grabbed window).
-                self.taskbar.handle(event, taskbar);
+                self.taskbar.handle(event, taskbar, scale);
                 wm_response(self.wm.handle(event, compositor))
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                if taskbar_claims(taskbar, self.taskbar.pointer()) {
-                    taskbar_response(self.taskbar.handle(event, taskbar))
+                if taskbar_claims(taskbar, self.taskbar.pointer(), scale) {
+                    taskbar_response(self.taskbar.handle(event, taskbar, scale))
                 } else {
                     wm_response(self.wm.handle(event, compositor))
                 }
@@ -149,9 +153,10 @@ impl SessionInputRouter {
 }
 
 /// `true` when the taskbar should receive a primary press at `pointer`: its
-/// start menu is open (modal), or the pointer is over the bar.
-fn taskbar_claims(taskbar: &Taskbar, pointer: Point) -> bool {
-    taskbar.start_menu().is_open() || taskbar.hit_test(pointer).is_some()
+/// start menu is open (modal), or the pointer is over the bar laid out at the
+/// output `scale`.
+fn taskbar_claims(taskbar: &Taskbar, pointer: Point, scale: Scale) -> bool {
+    taskbar.start_menu().is_open() || taskbar.hit_test(pointer, scale).is_some()
 }
 
 /// Wrap a taskbar router outcome, collapsing its no-op to

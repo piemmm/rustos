@@ -20,7 +20,7 @@
 //! composited through `lib/raster`'s single blit path (`AGENTS.md` §2.2).
 
 use rustos_font::BitmapFont;
-use rustos_geometry::{Point, Rect};
+use rustos_geometry::{Point, Rect, Scale};
 use rustos_icon::{IconKind, IconSet};
 use rustos_raster::{Color, RasterCache, Surface};
 use rustos_theme::{Palette, Theme};
@@ -113,8 +113,8 @@ impl TaskbarRenderer {
     /// than panicking (`AGENTS.md` §2.9). The window manager presents the
     /// returned surface and rounds it with [`BarLayout::corner_radius`].
     #[must_use]
-    pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
-        let layout = taskbar.layout();
+    pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
+        let layout = taskbar.layout(scale);
         let mut icons = IconContext {
             cache: &mut self.icons,
             set: &self.icon_set,
@@ -140,11 +140,11 @@ impl TaskbarRenderer {
     /// [`MenuLayout::corner_radius`], exactly as it rounds the bar (§2.2). The
     /// popup draws only text, so it needs no glyph cache.
     #[must_use]
-    pub fn render_menu(&self, taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
+    pub fn render_menu(&self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
         if !taskbar.start_menu().is_open() {
             return None;
         }
-        let layout = taskbar.menu_layout();
+        let layout = taskbar.menu_layout(scale);
         paint_menu(&layout, taskbar.start_menu(), theme.palette())
     }
 }

@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 use rustos_abi::Errno;
 use rustos_icon::IconSet;
 use rustos_taskbar::{TaskbarConfig, TaskbarRenderer};
-use rustos_wm::{Compositor, InputEvent, InputResponse};
+use rustos_wm::{Compositor, InputEvent, InputResponse, Scale};
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::presenter::TaskbarPresenter;
@@ -152,6 +152,29 @@ impl DesktopShell {
     /// notification glyphs from the new set (`AGENTS.md` §10/§2.2).
     pub fn set_icons(&mut self, set: IconSet) {
         self.renderer.set_icons(set);
+    }
+
+    /// Switch the desktop UI scale for the output this desktop is on and, if
+    /// it changed, re-present the taskbar at the new density, returning
+    /// whether it changed.
+    ///
+    /// The density belongs to the output, not the desktop session, so this
+    /// drives the compositor's [`set_scale`](Compositor::set_scale) — the
+    /// single source of truth — and re-lays the bar in place. No desktop
+    /// restart is needed and the taskbar holds no scale of its own, so the
+    /// rescale is transparent to it (`AGENTS.md` §10 / §2.2). On a `true`
+    /// return the embedder brings the other scale-dependent overlays it owns
+    /// up to date: the cursor (one
+    /// [`CursorController::refresh`](rustos_wm::CursorController::refresh)) and
+    /// any app that sizes in physical pixels (each reads its own window's
+    /// density through [`Compositor::window_scale`], never sets it). Setting
+    /// the scale already in effect re-presents nothing and returns `false`.
+    pub fn set_scale(&mut self, scale: Scale, compositor: &mut Compositor) -> bool {
+        if !compositor.set_scale(scale) {
+            return false;
+        }
+        self.present(compositor);
+        true
     }
 
     /// Bring the compositor up to date with the taskbar's current model and the

@@ -25,13 +25,17 @@
 //! # Applying the choice
 //!
 //! [`CursorController`] ties the policy to the artwork. It owns the active
-//! [`CursorRegistry`] and the desktop [`Scale`], and remembers which
-//! [`CursorKind`] is currently on screen. [`CursorController::refresh`] runs
-//! the policy and, only when the chosen kind actually changes, rasterises the
-//! active set's cursor for that kind at the current scale and installs it
-//! through [`Compositor::set_cursor`]. Pointer *motion* is not its job — the
-//! caller moves the existing overlay with [`Compositor::move_cursor`]; the
-//! controller switches the *shape*.
+//! [`CursorRegistry`] and remembers which [`CursorKind`] is on screen and at
+//! what density it was rasterised. It does **not** own the scale: the desktop
+//! density belongs to the output, so the controller reads it from the
+//! [`Compositor`] ([`Compositor::scale`]) every time it installs a cursor
+//! (`AGENTS.md` §10 / §2.2). [`CursorController::refresh`] runs the policy and
+//! re-rasterises only when something the cursor depends on actually changed —
+//! the chosen kind, the active cursor set, or the output scale — installing
+//! the result through [`Compositor::set_cursor`]. A runtime DPI change is
+//! therefore [`Compositor::set_scale`] followed by one `refresh`. Pointer
+//! *motion* is not its job — the caller moves the existing overlay with
+//! [`Compositor::move_cursor`]; the controller switches the *shape*.
 //!
 //! Rasterisation can fail (a degenerate cursor or scale yields no image,
 //! `AGENTS.md` §2.9). The controller fails closed: it leaves the current
@@ -39,7 +43,6 @@
 //! pointer or panicking.
 
 use rustos_cursor::{CursorImage, CursorRegistry, CursorSetId};
-use rustos_geometry::Scale;
 use rustos_raster::RasterCache;
 use rustos_theme::CursorKind;
 
@@ -75,10 +78,12 @@ type CursorEpoch = (u32, CursorSetId);
 
 /// Drives the on-screen pointer shape from interaction state.
 ///
-/// Holds the active [`CursorRegistry`] (the replaceable cursor sets), the
-/// desktop [`Scale`] cursors rasterise at, and the [`CursorKind`] currently
-/// shown. [`refresh`](Self::refresh) applies the [`desired_cursor`] policy
-/// to a compositor.
+/// Holds the active [`CursorRegistry`] (the replaceable cursor sets) and the
+/// [`CursorKind`] currently shown, paired with the cache epoch (scale and
+/// cursor-set id) it was rasterised for. The density is **not** stored here —
+/// it belongs to the output, so [`refresh`](Self::refresh) reads it from the
+/// [`Compositor`] (`AGENTS.md` §10 / §2.2) and applies the [`desired_cursor`]
+/// policy.
 ///
 /// Each shown [`CursorKind`] is rasterised at most once per scale and cursor
 /// set: a [`RasterCache`] keyed by kind keeps the converted [`CursorImage`]
@@ -88,28 +93,28 @@ type CursorEpoch = (u32, CursorSetId);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorController {
     registry: CursorRegistry,
-    scale: Scale,
     kind: CursorKind,
+    shown: Option<CursorEpoch>,
     cache: RasterCache<CursorKind, CursorImage, CursorEpoch>,
 }
 
 impl CursorController {
-    /// A controller for the built-in cursor set at `scale`, before any
-    /// cursor is shown. The remembered kind starts at [`CursorKind::Arrow`];
-    /// nothing is drawn until the first [`refresh`](Self::refresh) installs
-    /// an image.
+    /// A controller for the built-in cursor set, before any cursor is shown.
+    /// The remembered kind starts at [`CursorKind::Arrow`]; nothing is drawn
+    /// until the first [`refresh`](Self::refresh) installs an image at the
+    /// compositor's current scale.
     #[must_use]
-    pub fn new(scale: Scale) -> Self {
-        Self::with_registry(CursorRegistry::with_builtin(), scale)
+    pub fn new() -> Self {
+        Self::with_registry(CursorRegistry::with_builtin())
     }
 
-    /// A controller over a caller-provided `registry` at `scale`.
+    /// A controller over a caller-provided `registry`.
     #[must_use]
-    pub fn with_registry(registry: CursorRegistry, scale: Scale) -> Self {
+    pub fn with_registry(registry: CursorRegistry) -> Self {
         Self {
             registry,
-            scale,
             kind: CursorKind::Arrow,
+            shown: None,
             cache: RasterCache::new(),
         }
     }
@@ -118,12 +123,6 @@ impl CursorController {
     #[must_use]
     pub const fn registry(&self) -> &CursorRegistry {
         &self.registry
-    }
-
-    /// The scale cursors rasterise at.
-    #[must_use]
-    pub const fn scale(&self) -> Scale {
-        self.scale
     }
 
     /// The [`CursorKind`] currently shown (the last one
@@ -150,46 +149,38 @@ impl CursorController {
         self.install(self.kind, router.pointer(), compositor)
     }
 
-    /// Change the desktop scale and re-render the current kind at the
-    /// router's pointer at the new density. Returns whether a new image was
-    /// installed (no-op, returning `false`, when no cursor is currently
-    /// shown).
-    pub fn set_scale(
-        &mut self,
-        scale: Scale,
-        router: &InputRouter,
-        compositor: &mut Compositor,
-    ) -> bool {
-        self.scale = scale;
-        if compositor.cursor_bounds().is_none() {
-            return false;
-        }
-        self.install(self.kind, router.pointer(), compositor)
-    }
-
-    /// Apply the [`desired_cursor`] policy: if the chosen kind differs from
-    /// the one on screen, rasterise it and install it through
-    /// [`Compositor::set_cursor`] at the router's pointer. Returns whether
-    /// the displayed cursor changed.
+    /// Apply the [`desired_cursor`] policy and bring the on-screen cursor up
+    /// to date with the compositor's current scale and the active cursor set.
+    /// Returns whether the displayed cursor changed.
     ///
-    /// When the kind is unchanged and a cursor is already shown this does no
-    /// work and returns `false`; the pointer's *position* is updated
-    /// separately with [`Compositor::move_cursor`]. Fails closed: if the
-    /// chosen kind cannot be rasterised, the current cursor is left
-    /// untouched.
+    /// It re-rasterises and installs when the chosen kind, the output
+    /// [`scale`](Compositor::scale), or the active cursor set differs from
+    /// what is on screen; when nothing it depends on changed and a cursor is
+    /// already shown it does no work and returns `false`. The pointer's
+    /// *position* is updated separately with [`Compositor::move_cursor`].
+    /// Fails closed: if the chosen kind cannot be rasterised, the current
+    /// cursor is left untouched (`AGENTS.md` §2.9).
     pub fn refresh(&mut self, router: &InputRouter, compositor: &mut Compositor) -> bool {
         let kind = desired_cursor(router, compositor);
-        if kind == self.kind && compositor.cursor_bounds().is_some() {
+        let epoch = self.epoch(compositor);
+        if kind == self.kind && self.shown == Some(epoch) && compositor.cursor_bounds().is_some() {
             return false;
         }
         self.install(kind, router.pointer(), compositor)
     }
 
-    /// Rasterise `kind` at the current scale and install it so its hotspot
-    /// lands on `pointer`. Fails closed (leaving any current cursor
-    /// untouched) if the cursor cannot be rasterised (`AGENTS.md` §2.9).
+    /// The cache epoch for the compositor's current output scale and the
+    /// active cursor set.
+    fn epoch(&self, compositor: &Compositor) -> CursorEpoch {
+        (compositor.scale().percent(), self.registry.active_id())
+    }
+
+    /// Rasterise `kind` at the compositor's current scale and install it so
+    /// its hotspot lands on `pointer`. Fails closed (leaving any current
+    /// cursor untouched) if the cursor cannot be rasterised (`AGENTS.md`
+    /// §2.9).
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
-        let epoch: CursorEpoch = (self.scale.percent(), self.registry.active_id());
+        let epoch = self.epoch(compositor);
         let registry = &self.registry;
         let Some(image) = self
             .cache
@@ -202,6 +193,14 @@ impl CursorController {
         };
         compositor.set_cursor(image, pointer);
         self.kind = kind;
+        self.shown = Some(epoch);
         true
+    }
+}
+
+impl Default for CursorController {
+    /// A controller over the built-in cursor set ([`CursorController::new`]).
+    fn default() -> Self {
+        Self::new()
     }
 }

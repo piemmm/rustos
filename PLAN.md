@@ -5460,6 +5460,27 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** backing
   the `InputSource` with a live device channel and relaying the theme switch
   over IPC.
+- **Per-output (per-monitor) DPI ownership — DONE (increment).** The desktop
+  UI scale was tightened to the correct multi-monitor shape: display density
+  is a property of an **output**, owned by the **compositor**, not a
+  desktop-wide value and not stored by the taskbar, cursor controller, or
+  apps (§10/§2.2). `Compositor` now owns its output's `Scale` as the single
+  source of truth (`scale`/`set_scale` — a change marks the whole screen dirty
+  so every window re-rasterises — and `window_scale(id)`, the read-only query
+  an app uses for *its* window). The `Taskbar` dropped its stored scale: `layout`,
+  `hit_test`, and `menu_layout` (and the renderer's `render`/`render_menu` and
+  `TaskbarInput::handle`) take the `Scale` as a parameter, and the presenter
+  and session input router supply `Compositor::scale` at present/route time —
+  so a runtime DPI change is transparent to the bar. The `CursorController`
+  likewise dropped its scale field, reading `Compositor::scale` when it
+  rasterises; `refresh` now re-renders when the kind, the cursor set, **or**
+  the output scale changes (a DPI switch is `set_scale` + one `refresh`).
+  `DesktopShell::set_scale` drives the compositor and re-presents the bar.
+  This generalises to N monitors at different DPIs: each output carries its
+  own scale and a window's effective density is its output's. 4 new wm tests
+  (56 total), 1 new session test (38 total); taskbar (62) retained. Docs:
+  `docs/src/desktop/dpi.md` (+ cursors.md), the wm/taskbar `README.md`s. No
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
 - **Still to do this stage:** GPU-accelerated compositor path, backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar

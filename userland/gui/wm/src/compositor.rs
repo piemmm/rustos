@@ -28,7 +28,7 @@ use crate::color::{Color, Pixel};
 use crate::corner::Corners;
 use crate::cursor::CursorLayer;
 use crate::damage::DamageRegion;
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
 use crate::window::{Window, WindowId};
 
@@ -40,8 +40,18 @@ enum ChannelOrder {
 }
 
 /// A software compositing window manager surface.
+///
+/// The compositor owns its output's display density as a [`Scale`]: the
+/// monitor it scans out to is a single output with one DPI, and the desktop's
+/// logical lengths become physical pixels through that one factor (`AGENTS.md`
+/// §10). It is the single source of truth for this output's scale — the
+/// cursor controller, the taskbar presenter, and apps all *read* it rather
+/// than keeping a copy (§2.2). A multi-monitor desktop is a set of such
+/// outputs, each carrying its own scale; a window's effective density is the
+/// scale of the output it is on ([`window_scale`](Self::window_scale)).
 pub struct Compositor {
     mode: DisplayMode,
+    scale: Scale,
     background: Color,
     order: ChannelOrder,
     windows: Vec<Window>,
@@ -75,6 +85,7 @@ impl Compositor {
         let frame = scanout_frame(&mode)?;
         let mut compositor = Self {
             mode,
+            scale: Scale::ONE,
             background,
             order,
             windows: Vec::new(),
@@ -98,6 +109,49 @@ impl Compositor {
     #[must_use]
     pub fn screen_rect(&self) -> Rect {
         Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
+    }
+
+    /// This output's display density.
+    ///
+    /// The compositor owns the scale for the monitor it scans out to; the
+    /// cursor controller, the taskbar presenter, and apps read it here rather
+    /// than holding their own copy, so the desktop has exactly one place a
+    /// monitor's density lives (`AGENTS.md` §10 / §2.2).
+    #[must_use]
+    pub const fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// Set this output's display density, returning whether it changed.
+    ///
+    /// A runtime DPI change is one call here: the whole screen is marked dirty
+    /// so the next composite re-rasterises every window at the new density,
+    /// and the embedder refreshes the scale-dependent overlays it owns (the
+    /// cursor, via [`CursorController::refresh`](crate::CursorController::refresh),
+    /// and the taskbar, by re-presenting it). Setting the scale already in
+    /// effect changes nothing and returns `false`, so the caller can skip the
+    /// refresh (`AGENTS.md` §10 / §2.2).
+    pub fn set_scale(&mut self, scale: Scale) -> bool {
+        if scale == self.scale {
+            return false;
+        }
+        self.scale = scale;
+        self.damage.add(self.screen_rect());
+        true
+    }
+
+    /// The display density of the output the window named by `id` is on, or
+    /// `None` for an unknown id.
+    ///
+    /// This is the read-only query an app uses when it must size something in
+    /// physical pixels: picking the desktop density is the compositor's job,
+    /// not the app's, so an app observes its window's scale here but never sets
+    /// it (`AGENTS.md` §10). With a single output it is this compositor's
+    /// [`scale`](Self::scale); a multi-monitor compositor returns the scale of
+    /// the output the window currently sits on.
+    #[must_use]
+    pub fn window_scale(&self, id: WindowId) -> Option<Scale> {
+        self.window(id).map(|_| self.scale)
     }
 
     /// Add `surface` as the top-most window at `origin`, returning its

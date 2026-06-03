@@ -37,15 +37,23 @@ router**:
   move-grab shows the move cursor, otherwise the pointer takes the
   per-window `cursor_hint` of the window under it (set with
   `Compositor::set_window_cursor`), and the desktop background shows the
-  plain arrow. `CursorController` owns the active `CursorRegistry` and the
-  desktop `Scale`, applies that policy, and rasterises the chosen artwork
-  through `Compositor::set_cursor`, failing closed if a cursor cannot be
-  rasterised. It rasterises each `CursorKind` at most once per scale and
-  cursor set: a shared `rustos-raster` `RasterCache` keyed by kind keeps the
-  converted image so re-showing a kind reuses it and only a scale or set
-  change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md` §10) —
-  the same cache the taskbar uses for its notification glyphs (`AGENTS.md`
-  §2.2).
+  plain arrow. `CursorController` owns the active `CursorRegistry`, applies
+  that policy, and rasterises the chosen artwork through
+  `Compositor::set_cursor`, failing closed if a cursor cannot be rasterised.
+  It does **not** own the scale: the desktop density belongs to the output, so
+  it reads `Compositor::scale` when it rasterises, and `refresh` re-renders the
+  pointer when the kind, the cursor set, **or** the output scale changes
+  (`AGENTS.md` §10 / §2.2). It rasterises each `CursorKind` at most once per
+  scale and cursor set: a shared `rustos-raster` `RasterCache` keyed by kind
+  keeps the converted image so re-showing a kind reuses it and only a scale or
+  set change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md`
+  §10) — the same cache the taskbar uses for its notification glyphs
+  (`AGENTS.md` §2.2).
+
+  The compositor owns its output's density (`Compositor::scale` /
+  `set_scale`); a window's effective density is `Compositor::window_scale`,
+  the read-only query apps use. A multi-monitor desktop is a set of such
+  outputs, each carrying its own scale.
 
 GPU acceleration and the default apps build on this core in later
 Stage 7 increments.

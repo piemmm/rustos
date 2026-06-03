@@ -395,17 +395,19 @@ fn scale_one_is_identical_to_the_unscaled_layout() {
 }
 
 #[test]
-fn set_scale_relays_the_bar_at_the_new_density() {
+fn supplied_scale_relays_the_bar_at_the_new_density() {
+    // The bar stores no scale: the desktop density is supplied at layout time
+    // by the compositor (`AGENTS.md` §10), so laying the same bar out at a
+    // higher scale enlarges every region without any state change.
     let theme = Theme::dark();
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
-    assert_eq!(bar.scale(), Scale::ONE);
-    let unscaled = bar.layout().start_button.width;
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
+    let unscaled = bar.layout(Scale::ONE).start_button.width;
 
-    bar.set_scale(Scale::from_dpi(rustos_geometry::REFERENCE_DPI * 2).expect("192 DPI"));
-    assert_eq!(bar.scale().percent(), 200);
-    assert_eq!(bar.layout().start_button.width, unscaled * 2);
+    let doubled = Scale::from_dpi(rustos_geometry::REFERENCE_DPI * 2).expect("192 DPI");
+    assert_eq!(doubled.percent(), 200);
+    assert_eq!(bar.layout(doubled).start_button.width, unscaled * 2);
     assert_eq!(
-        bar.layout().corner_radius,
+        bar.layout(doubled).corner_radius,
         theme.metrics().taskbar_corner_radius * 2
     );
 }
@@ -418,7 +420,7 @@ fn taskbar_takes_corner_radius_from_theme() {
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
     assert_eq!(bar.corner_radius(), dark.metrics().taskbar_corner_radius);
     assert_eq!(
-        bar.layout().corner_radius,
+        bar.layout(Scale::ONE).corner_radius,
         dark.metrics().taskbar_corner_radius
     );
     assert_eq!(bar.start_menu().len(), 4);
@@ -428,12 +430,15 @@ fn taskbar_takes_corner_radius_from_theme() {
 fn taskbar_layout_tracks_live_counts() {
     let theme = Theme::dark();
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-    assert_eq!(bar.layout().tasks.len(), 0);
+    assert_eq!(bar.layout(Scale::ONE).tasks.len(), 0);
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.notifications_mut().add(IconId(1), "icon.network");
-    assert_eq!(bar.layout().tasks.len(), 1);
-    assert_eq!(bar.layout().notifications.len(), 1);
-    assert_eq!(bar.hit_test(Point::new(10, 770)), Some(Hit::StartButton));
+    assert_eq!(bar.layout(Scale::ONE).tasks.len(), 1);
+    assert_eq!(bar.layout(Scale::ONE).notifications.len(), 1);
+    assert_eq!(
+        bar.hit_test(Point::new(10, 770), Scale::ONE),
+        Some(Hit::StartButton)
+    );
 }
 
 #[test]
@@ -480,9 +485,9 @@ fn region_has_pixel(surface: &Surface, bar: Rect, region: Rect, want: Pixel) -> 
 fn rendered_surface_matches_bar_dimensions() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert_eq!(surface.width(), layout.bar.width);
     assert_eq!(surface.height(), layout.bar.height);
@@ -495,10 +500,10 @@ fn background_is_the_raised_surface_colour() {
     // No tasks: a point in the middle of the empty task region is bare bar.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert_eq!(
-        pixel_at(&surface, bar.layout().bar, 500, 780),
+        pixel_at(&surface, bar.layout(Scale::ONE).bar, 500, 780),
         role(palette.surface_raised)
     );
 }
@@ -508,10 +513,10 @@ fn start_button_is_painted_with_the_accent() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert_eq!(
-        pixel_at(&surface, bar.layout().bar, 24, 780),
+        pixel_at(&surface, bar.layout(Scale::ONE).bar, 24, 780),
         role(theme.palette().accent)
     );
 }
@@ -525,9 +530,9 @@ fn focused_task_is_accent_and_others_are_surface() {
     bar.tasks_mut().add(TaskId(2), "Browser");
     bar.tasks_mut().activate(TaskId(1));
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     // tasks[0] = (48,760,160,40); tasks[1] = (208,760,160,40).
     assert_eq!(
@@ -550,9 +555,9 @@ fn minimised_task_recedes_into_the_background() {
     bar.tasks_mut().activate(TaskId(1)); // click again -> minimise
     assert!(bar.tasks().is_minimised(TaskId(1)));
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert_eq!(
         pixel_at(&surface, layout.bar, 120, 780),
@@ -567,12 +572,12 @@ fn notification_icon_draws_a_glyph_in_the_muted_role() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.notifications_mut().add(IconId(1), "icon.network");
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     // With one icon: clock starts at 920, so the lone icon slot is
     // notifications[0] = (896,760,24,40).
     let slot = layout.notifications[0];
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     // The glyph paints muted pixels inside its slot ...
     assert!(
@@ -595,10 +600,10 @@ fn unknown_notification_asset_falls_back_to_a_glyph() {
     bar.notifications_mut()
         .add(IconId(7), "icon.totally-unknown");
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert!(
         region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
@@ -611,11 +616,15 @@ fn theme_switch_repaints_the_background() {
     let dark = Theme::dark();
     let light = Theme::light();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
 
     let mut renderer = TaskbarRenderer::new();
-    let dark_surface = renderer.render(&bar, &dark).expect("bar renders");
-    let light_surface = renderer.render(&bar, &light).expect("bar renders");
+    let dark_surface = renderer
+        .render(&bar, &dark, Scale::ONE)
+        .expect("bar renders");
+    let light_surface = renderer
+        .render(&bar, &light, Scale::ONE)
+        .expect("bar renders");
     assert_eq!(
         pixel_at(&dark_surface, layout.bar, 500, 780),
         role(dark.palette().surface_raised)
@@ -637,19 +646,25 @@ fn renderer_reuses_cached_glyphs_across_frames_and_retints_on_theme_switch() {
     let light = Theme::light();
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &dark);
     bar.notifications_mut().add(IconId(1), "icon.network");
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
     let mut renderer = TaskbarRenderer::new();
     // Two frames at the same theme and scale are pixel-identical: the cached
     // glyph is reused, not re-rasterised differently.
-    let first = renderer.render(&bar, &dark).expect("bar renders");
-    let second = renderer.render(&bar, &dark).expect("bar renders");
+    let first = renderer
+        .render(&bar, &dark, Scale::ONE)
+        .expect("bar renders");
+    let second = renderer
+        .render(&bar, &dark, Scale::ONE)
+        .expect("bar renders");
     assert_eq!(first.pixels(), second.pixels());
 
     // A theme switch re-tints the glyph: it now paints the light palette's
     // muted role and no longer the dark one inside its slot.
-    let switched = renderer.render(&bar, &light).expect("bar renders");
+    let switched = renderer
+        .render(&bar, &light, Scale::ONE)
+        .expect("bar renders");
     assert!(
         region_has_pixel(
             &switched,
@@ -696,7 +711,7 @@ fn loaded_icon_set_draws_its_authored_colours_not_the_theme_tint() {
     let palette = theme.palette();
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.notifications_mut().add(IconId(1), "icon.network");
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
     let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
@@ -709,7 +724,9 @@ fn loaded_icon_set_draws_its_authored_colours_not_the_theme_tint() {
 
     let mut renderer = TaskbarRenderer::new();
     renderer.set_icons(set);
-    let surface = renderer.render(&bar, &theme).expect("bar renders");
+    let surface = renderer
+        .render(&bar, &theme, Scale::ONE)
+        .expect("bar renders");
 
     let green = Color::rgb(0x10, 0xff, 0x20).premultiply();
     assert!(
@@ -730,7 +747,7 @@ fn icon_kind_absent_from_a_loaded_set_falls_back_to_the_built_in_glyph() {
     // The volume kind is not in the source, so it falls back to the tinted
     // built-in glyph even though the set loaded other kinds.
     bar.notifications_mut().add(IconId(1), "icon.volume");
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
     let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
@@ -743,7 +760,9 @@ fn icon_kind_absent_from_a_loaded_set_falls_back_to_the_built_in_glyph() {
 
     let mut renderer = TaskbarRenderer::new();
     renderer.set_icons(set);
-    let surface = renderer.render(&bar, &theme).expect("bar renders");
+    let surface = renderer
+        .render(&bar, &theme, Scale::ONE)
+        .expect("bar renders");
     assert!(
         region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
         "a kind absent from the loaded set keeps its tinted built-in glyph"
@@ -756,13 +775,15 @@ fn installing_a_set_invalidates_the_glyph_cache() {
     let palette = theme.palette();
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.notifications_mut().add(IconId(1), "icon.network");
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
     let mut renderer = TaskbarRenderer::new();
     // First frame uses the built-in glyph: the muted tint shows, the authored
     // green cannot.
-    let before = renderer.render(&bar, &theme).expect("bar renders");
+    let before = renderer
+        .render(&bar, &theme, Scale::ONE)
+        .expect("bar renders");
     let green = Color::rgb(0x10, 0xff, 0x20).premultiply();
     assert!(
         region_has_pixel(&before, layout.bar, slot, role(palette.on_surface_muted)),
@@ -778,7 +799,9 @@ fn installing_a_set_invalidates_the_glyph_cache() {
     renderer.set_icons(rustos_icon::IconSet::from_assets(&MemoryIcons {
         network: Some(GREEN_SVG),
     }));
-    let after = renderer.render(&bar, &theme).expect("bar renders");
+    let after = renderer
+        .render(&bar, &theme, Scale::ONE)
+        .expect("bar renders");
     assert!(
         region_has_pixel(&after, layout.bar, slot, green),
         "after install the cache is invalidated and the loaded glyph draws"
@@ -793,9 +816,9 @@ fn clock_label_paints_foreground_text() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.clock_mut().set_label("12:00");
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert!(
         region_has_pixel(
@@ -814,9 +837,9 @@ fn empty_clock_paints_no_text() {
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     assert_eq!(bar.clock().label(), "");
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert!(
         !region_has_pixel(
@@ -836,9 +859,9 @@ fn focused_task_title_is_drawn_in_the_on_accent_role() {
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.tasks_mut().activate(TaskId(1));
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     let slot = layout.tasks[0];
     assert!(
@@ -860,9 +883,9 @@ fn task_title_too_long_for_its_slot_is_truncated_not_overflowing() {
     bar.tasks_mut().add(TaskId(1), "A very long window title");
     bar.tasks_mut().add(TaskId(2), "Second");
 
-    let layout = bar.layout();
+    let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render(&bar, &theme)
+        .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     // The second slot is filled with the plain surface role; its title is
     // "Second" in on_surface. No on_surface text from task 1 may appear in
@@ -897,12 +920,14 @@ fn press_at(input: &mut TaskbarInput, bar: &mut Taskbar, x: i32, y: i32) -> Task
             to: Point::new(x, y),
         },
         bar,
+        Scale::ONE,
     );
     input.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
         },
         bar,
+        Scale::ONE,
     )
 }
 
@@ -1007,6 +1032,7 @@ fn non_primary_buttons_and_releases_are_ignored() {
             to: Point::new(10, 770),
         },
         &mut bar,
+        Scale::ONE,
     );
     // The secondary button over the start button does not toggle the menu.
     assert_eq!(
@@ -1014,7 +1040,8 @@ fn non_primary_buttons_and_releases_are_ignored() {
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary
             },
-            &mut bar
+            &mut bar,
+            Scale::ONE,
         ),
         TaskbarResponse::Ignored
     );
@@ -1023,7 +1050,8 @@ fn non_primary_buttons_and_releases_are_ignored() {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary
             },
-            &mut bar
+            &mut bar,
+            Scale::ONE,
         ),
         TaskbarResponse::Ignored
     );
@@ -1040,6 +1068,7 @@ fn pointer_motion_tracks_position_without_acting() {
                 to: Point::new(950, 770),
             },
             &mut bar,
+            Scale::ONE,
         ),
         TaskbarResponse::Ignored
     );
@@ -1050,7 +1079,8 @@ fn pointer_motion_tracks_position_without_acting() {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary
             },
-            &mut bar
+            &mut bar,
+            Scale::ONE,
         ),
         TaskbarResponse::ClockPressed
     );
@@ -1062,7 +1092,7 @@ fn pointer_motion_tracks_position_without_acting() {
 fn menu_popup_opens_above_a_bottom_bar() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
-    let menu = bar.menu_layout();
+    let menu = bar.menu_layout(Scale::ONE);
 
     // The bar sits at y 760..800 with a 48-wide start button at x 0; the
     // four-entry popup (200×32 rows) opens upward from the bar's top edge.
@@ -1088,7 +1118,10 @@ fn menu_popup_opens_outward_on_every_edge() {
         },
         &theme,
     );
-    assert_eq!(top.menu_layout().panel, Rect::new(0, 40, 200, 128));
+    assert_eq!(
+        top.menu_layout(Scale::ONE).panel,
+        Rect::new(0, 40, 200, 128)
+    );
 
     // Bottom bar: popup rises above the bar.
     let bottom = Taskbar::new(
@@ -1098,7 +1131,10 @@ fn menu_popup_opens_outward_on_every_edge() {
         },
         &theme,
     );
-    assert_eq!(bottom.menu_layout().panel, Rect::new(0, 632, 200, 128));
+    assert_eq!(
+        bottom.menu_layout(Scale::ONE).panel,
+        Rect::new(0, 632, 200, 128)
+    );
 
     // Left bar (width 40): popup opens to the right, aligned to the top
     // start button.
@@ -1109,7 +1145,10 @@ fn menu_popup_opens_outward_on_every_edge() {
         },
         &theme,
     );
-    assert_eq!(left.menu_layout().panel, Rect::new(40, 0, 200, 128));
+    assert_eq!(
+        left.menu_layout(Scale::ONE).panel,
+        Rect::new(40, 0, 200, 128)
+    );
 
     // Right bar (bar at x 960): popup opens to the left of the bar.
     let right = Taskbar::new(
@@ -1119,15 +1158,18 @@ fn menu_popup_opens_outward_on_every_edge() {
         },
         &theme,
     );
-    assert_eq!(right.menu_layout().panel, Rect::new(760, 0, 200, 128));
+    assert_eq!(
+        right.menu_layout(Scale::ONE).panel,
+        Rect::new(760, 0, 200, 128)
+    );
 }
 
 #[test]
 fn menu_popup_scales_with_dpi() {
     let theme = Theme::dark();
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
-    bar.set_scale(Scale::from_percent(200).expect("200% is in range"));
-    let menu = bar.menu_layout();
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
+    let doubled = Scale::from_percent(200).expect("200% is in range");
+    let menu = bar.menu_layout(doubled);
 
     // The logical 200×32 rows and the 6px popup radius all double at 200%.
     assert_eq!(menu.panel.width, 400);
@@ -1139,7 +1181,7 @@ fn menu_popup_scales_with_dpi() {
 #[test]
 fn menu_popup_hit_test_resolves_entries() {
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
-    let menu = bar.menu_layout();
+    let menu = bar.menu_layout(Scale::ONE);
     // Middle of the first and last rows.
     assert_eq!(menu.hit_test(Point::new(100, 648)), Some(0));
     assert_eq!(menu.hit_test(Point::new(100, 744)), Some(3));
@@ -1270,7 +1312,9 @@ fn render_menu_is_none_when_the_menu_is_closed() {
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     assert!(!bar.start_menu().is_open());
-    assert!(TaskbarRenderer::new().render_menu(&bar, &theme).is_none());
+    assert!(TaskbarRenderer::new()
+        .render_menu(&bar, &theme, Scale::ONE)
+        .is_none());
 }
 
 #[test]
@@ -1280,9 +1324,9 @@ fn render_menu_paints_the_panel_and_entry_labels() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.start_menu_mut().toggle();
 
-    let menu = bar.menu_layout();
+    let menu = bar.menu_layout(Scale::ONE);
     let surface = TaskbarRenderer::new()
-        .render_menu(&bar, &theme)
+        .render_menu(&bar, &theme, Scale::ONE)
         .expect("an open menu renders");
     assert_eq!(surface.width(), menu.panel.width);
     assert_eq!(surface.height(), menu.panel.height);
