@@ -87,6 +87,18 @@
 //! [`KeyInputChannel`] into the same [`InputEvent`](rustos_wm::InputEvent)
 //! stream, which the window manager delivers to the focused window.
 //!
+//! Both of those channels are, in turn, backed by a kernel IPC endpoint:
+//! [`IpcInputChannel`] (the [`ipc`] module) frames each fixed-length input
+//! record out of the payload of an `abi-v1` IPC message received through an
+//! injected [`MessagePort`] seam (the
+//! [`ipc_recv`](rustos_abi::SyscallNumber::IPC_RECV) syscall on a running
+//! system, an in-memory queue in tests). It implements both
+//! [`PointerInputChannel`] and [`KeyInputChannel`] through one shared,
+//! fail-closed validation path — the header must decode, the message must be
+//! destined for the bound endpoint, and the payload must be exactly the
+//! record's wire length — so a truncated, misrouted, or corrupt frame can
+//! never be decoded as a spurious event (`AGENTS.md` §2.2 / §5.4 / §19.5).
+//!
 //! # Running-task list ↔ window stack
 //!
 //! The taskbar models a running-task list but owns no window manager, and the
@@ -118,6 +130,7 @@ extern crate alloc;
 pub mod assets;
 pub mod device;
 pub mod input;
+pub mod ipc;
 pub mod keyboard;
 pub mod presenter;
 pub mod session;
@@ -130,6 +143,7 @@ mod tests;
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
+pub use ipc::{IpcInputChannel, MessagePort};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};

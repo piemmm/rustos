@@ -5619,12 +5619,43 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   QEMU vertical awaiting an HVS-emulating board model, and DMA-visible plane
   buffers from the compositor's own window allocations (today the driver
   uploads into its plane buffers per present).
+- **Kernel IPC-backed input channels — DONE (increment).** The
+  `PointerInputChannel` and `KeyInputChannel` seams that `DeviceInputSource` /
+  `KeyboardInputSource` decode were, until now, satisfied only by an in-memory
+  test queue; their *kernel* backing now exists. `userland/gui/session` gains an
+  `ipc` module: `IpcInputChannel` delivers each fixed-length input record as the
+  payload of an `abi-v1` IPC message received from a bound kernel endpoint. The
+  raw messages arrive through an injected `MessagePort` seam — the `ipc_recv`
+  syscall on a running system, an in-memory queue in tests (§7) — so the crate
+  still holds no endpoint capability of its own and the framing runs above the
+  kernel boundary (§17.4 / §19.5). `recv_record` validates every message before
+  its payload becomes a record and fails closed (§5.4 / §2.9): the
+  `IpcMessageHeader` must decode (magic, ABI version, reserved field, bounded
+  length), the message must be destined for the bound endpoint (`NotFound`
+  otherwise), and the payload must be exactly the record's `WIRE_LEN`
+  (`BufferTooSmall` / `MessageTooLarge` otherwise), so a truncated, misrouted,
+  or corrupt frame can never decode as a spurious pointer move or key press. A
+  pointer record and a key record are each a fixed-length payload behind one IPC
+  header, so the channel implements **both** seam traits through one shared
+  validation path rather than two (§2.2); which records flow is decided by the
+  endpoint a channel is bound to. This closes the long-open "give the
+  `PointerInputChannel` / `KeyInputChannel` a real kernel-endpoint backing"
+  thread, leaving only the live `ipc_recv` `MessagePort` wiring (which awaits the
+  kernel-side named-port registry). 13 new `rustos-desktop-session` tests
+  (69 total). Docs `docs/src/desktop/session.md` (new section) + the crate
+  `README.md` + crate-root module docs. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** wiring the
+  `MessagePort` to the live `ipc_recv` syscall once the kernel named-port
+  registry lands.
 - **Still to do this stage:** backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar
   `TaskbarInput`, re-presents through `TaskbarPresenter`, and keeps the
   running-task list in step with the window stack through `TaskBridge` now
-  exists) with **live** pointer/keyboard device events, and relaying the
+  exists) with **live** pointer/keyboard device events — the IPC-message
+  framing now exists (`IpcInputChannel`), so what remains is wiring its
+  `MessagePort` to the live `ipc_recv` syscall once the kernel named-port
+  registry lands — and relaying the
   session's theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and
