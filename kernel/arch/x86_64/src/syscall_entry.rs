@@ -267,6 +267,86 @@ const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu::InitError>
     Ok(())
 }
 
+/// Why a user-supplied `(ptr, len)` buffer failed the copy-from-user
+/// boundary check ([`validate_user_buffer`]).
+///
+/// Each variant names one fail-closed reason (`AGENTS.md` §5.4); the
+/// caller maps it to its public `Errno` and never proceeds with the
+/// access.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserBufferError {
+    /// The base pointer is null.
+    Null,
+    /// The base pointer is non-canonical — it lands in the 48-bit
+    /// address hole, so the CPU would `#GP` dereferencing it.
+    NonCanonical,
+    /// The base pointer, or any byte of the buffer, lies in the kernel
+    /// (canonical higher) half. A user buffer must live entirely in the
+    /// lower half (`AGENTS.md` §5 — ret2usr / `copy_from_user` class).
+    KernelRange,
+    /// `ptr + len` overflows the 64-bit address space (CWE-190): the
+    /// length wraps the buffer back over the start.
+    Overflows,
+}
+
+/// Validate a user-supplied `(ptr, len)` buffer before the kernel copies
+/// to or from it (the `copy_from_user` / `copy_to_user` boundary,
+/// `AGENTS.md` §5 / `tests/SECURITY.md` §5, CWE-367 / CWE-822).
+///
+/// A user task hands the kernel raw 64-bit register values. Before the
+/// kernel may touch the buffer it must prove the whole `[ptr, ptr + len)`
+/// range is a legitimate *user* address window. This rejects, fail-closed
+/// (§5.4):
+///
+/// * a **null** base ([`UserBufferError::Null`]);
+/// * a **non-canonical** base in the 48-bit hole, which would `#GP` on
+///   access ([`UserBufferError::NonCanonical`]);
+/// * a base — or a buffer end — in the **kernel half**, the classic
+///   ret2usr / kernel-pointer-confusion vector
+///   ([`UserBufferError::KernelRange`]);
+/// * a length that makes `ptr + len` **wrap** the address space
+///   ([`UserBufferError::Overflows`]).
+///
+/// `len == 0` is accepted for any in-range, canonical, non-null base: an
+/// empty copy touches no memory. The exclusive end `ptr + len` may equal
+/// the first non-user address (one past the last user byte) but not
+/// exceed it.
+///
+/// This is the host-testable validator the Stage-6 `copy_from_user` fault
+/// path gates on (per-access page-fault fix-up is Stage-6); landing it
+/// now pins the boundary semantics as a real conformance target
+/// (`tests/SECURITY.md` §5 — "land host validators now").
+///
+/// # Errors
+///
+/// A [`UserBufferError`] naming the first invariant the buffer breaks.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub const fn validate_user_buffer(ptr: u64, len: u64) -> Result<(), UserBufferError> {
+    if ptr == 0 {
+        return Err(UserBufferError::Null);
+    }
+    if ptr >= CANONICAL_HIGHER_BASE {
+        return Err(UserBufferError::KernelRange);
+    }
+    // Above the user half but below the kernel half is the non-canonical
+    // hole; `is_canonical` already covers it, but naming the case keeps
+    // the diagnostic precise.
+    if !is_canonical(ptr) || ptr >= CANONICAL_LOWER_LIMIT {
+        return Err(UserBufferError::NonCanonical);
+    }
+    let Some(end) = ptr.checked_add(len) else {
+        return Err(UserBufferError::Overflows);
+    };
+    // The exclusive end may sit exactly on the first non-user address
+    // (one past the last byte) but a buffer that reaches any further has
+    // crossed out of the user half.
+    if end > CANONICAL_LOWER_LIMIT {
+        return Err(UserBufferError::KernelRange);
+    }
+    Ok(())
+}
+
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static mut PER_CPU_TLS: [SyscallTls; MAX_CPUS] = {
     const Z: SyscallTls = SyscallTls::ZERO;
@@ -814,5 +894,77 @@ mod tests {
         assert!(!is_canonical(CANONICAL_HIGHER_BASE - 1));
         assert!(is_canonical(CANONICAL_HIGHER_BASE));
         assert!(is_canonical(u64::MAX));
+    }
+
+    // -- §5 copy_from_user user-buffer validation (CWE-367 / CWE-822) ----
+    //
+    // `validate_user_buffer` is the pure, host-testable boundary check the
+    // Stage-6 `copy_from_user` fault path gates on (per-access page-fault
+    // fix-up is Stage-6). These pin the fail-closed semantics.
+
+    #[test]
+    fn validate_user_buffer_accepts_an_in_range_user_window() {
+        // A page-aligned buffer well inside the user (lower) half.
+        assert_eq!(validate_user_buffer(0x1000, 0x4000), Ok(()));
+        // A zero-length buffer at a valid base touches nothing.
+        assert_eq!(validate_user_buffer(0x1000, 0), Ok(()));
+        // The exclusive end may sit exactly one past the last user byte.
+        assert_eq!(
+            validate_user_buffer(CANONICAL_LOWER_LIMIT - 0x1000, 0x1000),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_user_buffer_rejects_a_null_base() {
+        assert_eq!(validate_user_buffer(0, 0), Err(UserBufferError::Null));
+        assert_eq!(validate_user_buffer(0, 0x10), Err(UserBufferError::Null));
+    }
+
+    #[test]
+    fn validate_user_buffer_rejects_a_kernel_range_base() {
+        // A canonical higher-half (kernel) base: the ret2usr /
+        // kernel-pointer-confusion vector.
+        assert_eq!(
+            validate_user_buffer(CANONICAL_HIGHER_BASE, 0x10),
+            Err(UserBufferError::KernelRange)
+        );
+        assert_eq!(
+            validate_user_buffer(0xFFFF_FFFF_FFFF_FFF0, 0),
+            Err(UserBufferError::KernelRange)
+        );
+    }
+
+    #[test]
+    fn validate_user_buffer_rejects_a_non_canonical_base() {
+        // Inside the 48-bit hole (≥ user limit but < kernel base).
+        assert_eq!(
+            validate_user_buffer(CANONICAL_LOWER_LIMIT, 0x10),
+            Err(UserBufferError::NonCanonical)
+        );
+        assert_eq!(
+            validate_user_buffer(CANONICAL_HIGHER_BASE - 1, 0),
+            Err(UserBufferError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn validate_user_buffer_rejects_a_buffer_that_crosses_out_of_the_user_half() {
+        // A valid base whose length pushes the end past the user half:
+        // the buffer would straddle the non-canonical hole.
+        assert_eq!(
+            validate_user_buffer(CANONICAL_LOWER_LIMIT - 0x1000, 0x2000),
+            Err(UserBufferError::KernelRange)
+        );
+    }
+
+    #[test]
+    fn validate_user_buffer_rejects_a_length_that_wraps() {
+        // `ptr + len` overflows u64 (CWE-190) — the length wraps the
+        // buffer back over its own start.
+        assert_eq!(
+            validate_user_buffer(0x1000, u64::MAX),
+            Err(UserBufferError::Overflows)
+        );
     }
 }

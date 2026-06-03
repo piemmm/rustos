@@ -191,9 +191,14 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   bits land this is the **spec that gates the feature** — a real failing-until-
   implemented target, **not** `#[ignore]` (§2.5).
 - **`copy_from_user` TOCTOU & non-canonical user pointers (CWE-367 / CWE-822).**
-  Land host validators now (`ptr.rs`-style: reject non-canonical, reject
-  kernel-range, reject wrap) and extend `kernel/syscall/tests/fuzz_args.rs` with
-  pointer-shaped adversarial inputs. Full per-access fault handling is Stage-6.
+  *Host validator landed:* `syscall_entry.rs::validate_user_buffer` rejects a
+  null, non-canonical, kernel-range, or wrapping user `(ptr, len)` buffer
+  (`UserBufferError`), with host unit tests covering each case;
+  `kernel/syscall/tests/fuzz_args.rs::pointer_shaped_user_ptr_inputs_are_handled_deterministically`
+  drives every `UserPtr`-bearing syscall with pointer-shaped adversarial bases
+  (null / kernel-half / non-canonical hole / top-of-space) and pins the
+  null-rejection + no-panic invariant. Full per-access fault handling — wiring
+  `validate_user_buffer` into the live `copy_from_user` path — is Stage-6.
 - **Side-channel transition barriers (§19.1; Spectre/MDS/L1TF).** Conformance
   assertions the charter already mandates: syscall-entry barrier present
   (`lfence`), context-switch buffer flush present (`verw`), and

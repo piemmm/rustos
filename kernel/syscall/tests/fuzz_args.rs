@@ -344,3 +344,103 @@ fn fuzz_dispatcher_matches_mirror() {
     assert!(accepted > 0, "fuzz produced no accepted inputs");
     assert!(rejected > 0, "fuzz produced no rejected inputs");
 }
+
+/// A pointer-shaped value valid for any non-`UserPtr` argument slot.
+///
+/// Every non-pointer argument type the `UserPtr`-bearing syscalls take
+/// (`IpcEndpoint`, `Len`, `U32`, `U64`, `Handle`, `Unit`) accepts `0`:
+/// it is a well-typed, in-range value, so the dispatcher reaches the
+/// `UserPtr` check rather than rejecting on a sibling argument.
+fn benign_non_ptr_value() -> u64 {
+    0
+}
+
+/// `tests/SECURITY.md` §5 / CWE-367 / CWE-822: drive every `UserPtr`-
+/// bearing syscall with deliberately *pointer-shaped* adversarial bases
+/// — null, a kernel-half address, the 48-bit non-canonical hole, and the
+/// top of the address space — and assert the dispatcher's argument
+/// decoder is deterministic and never panics.
+///
+/// The architecture-neutral dispatcher cannot itself reject a kernel-
+/// range or non-canonical user pointer (canonicality is an x86_64
+/// property; that check is `rustos_arch_x86_64::syscall_entry::
+/// validate_user_buffer`, exercised at the `copy_from_user` boundary in
+/// Stage 6). What it *must* uphold today is the null rejection
+/// (`Errno::BadAlignment`) and the no-panic / no-spurious-success
+/// invariant for any bit pattern. This pins both so a Stage-6 change that
+/// wires in the per-access pointer validator cannot silently regress the
+/// boundary.
+#[test]
+fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
+    set_max_level(Level::Error);
+    let sink = NullSink;
+    let handlers = AcceptingHandlers::default();
+    let dispatcher = Dispatcher::new(&handlers, &sink);
+
+    let mut caps_set = CapabilitySet::empty();
+    for spec in SYSCALLS {
+        if let Some(c) = spec.required_capability {
+            caps_set.insert(c);
+        }
+    }
+    let caps = TaskCapabilities::derive(TaskId(0x7), UserId(7), caps_set, caps_set, &sink);
+    let ctx = CallerContext {
+        task_id: TaskId(0x7),
+        caps: &caps,
+    };
+
+    // Pointer-shaped bases: each row is `(value, is_null)`.
+    let adversarial: [(u64, bool); 6] = [
+        (0, true),                      // null
+        (0x1000, false),                // a plausible user page
+        (0x0000_8000_0000_0000, false), // first non-canonical address
+        (0xFFFF_8000_0010_0000, false), // canonical kernel-half address
+        (0x0001_0000_0000_0000, false), // inside the 48-bit hole
+        (u64::MAX, false),              // top of the address space
+    ];
+
+    let mut saw_ptr_slot = false;
+    for (spec_idx, spec) in SYSCALLS.iter().enumerate() {
+        let Some(ptr_slot) = spec.args[..spec.arg_count as usize]
+            .iter()
+            .position(|ty| *ty == AbiType::UserPtr)
+        else {
+            continue;
+        };
+        saw_ptr_slot = true;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let raw_number = spec_idx as u16;
+        for (base, is_null) in adversarial {
+            let mut args = [benign_non_ptr_value(); SYSCALL_MAX_ARGS];
+            // Trailing slots past arg_count must stay zero.
+            for slot in &mut args[spec.arg_count as usize..] {
+                *slot = 0;
+            }
+            args[ptr_slot] = base;
+
+            let result = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));
+            if is_null {
+                assert_eq!(
+                    result,
+                    Err(Errno::BadAlignment),
+                    "null user pointer must be rejected: no={raw_number} args={args:?}"
+                );
+            } else {
+                // Today the dispatcher accepts any non-null pointer (the
+                // per-access canonical/range check is Stage-6). The
+                // contract we pin is: it never panics and never returns a
+                // spurious error for an otherwise well-typed call.
+                assert!(
+                    result.is_ok(),
+                    "non-null pointer-shaped input must reach the handler today: \
+                     no={raw_number} base={base:#x} -> {result:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        saw_ptr_slot,
+        "no UserPtr-bearing syscall found — the abi-v1 table changed shape"
+    );
+}
