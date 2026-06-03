@@ -34,6 +34,7 @@ use rustos_kernel_sec::{CapTable, IdentityTable};
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
 use rustos_sync::RwLock;
 
+use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
@@ -378,6 +379,7 @@ fn run_phases<A: KernelArch>(
         scheduler,
         caps: RwLock::new(CapTable::new()),
         ipc: RwLock::new(PortRegistry::new()),
+        aspaces: RwLock::new(AddressSpaceRegistry::new()),
         arch,
         audit_sink,
         irq: irq_table,
@@ -460,6 +462,27 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// registries under one lock-ordering policy (`AGENTS.md` §2.1 —
     /// the registry itself owns no lock, mirroring `CapTable`).
     pub(crate) ipc: RwLock<PortRegistry>,
+    /// Per-task address-space registry backing the kernel's
+    /// `copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4).
+    /// Maps a task's [`rustos_kernel_sec::TaskId`] to its user
+    /// [`rustos_kernel_mem::AddressSpace`] and the [`PhysMap`] that
+    /// backs it, so a syscall handler can resolve the caller's task id
+    /// to the pair [`rustos_kernel_mem::uaccess`] walks. Wrapped in the
+    /// same reader-preferring `RwLock` as `caps` / `ipc` so the syscall
+    /// hot path takes only a shared lock and the kernel composes every
+    /// registry under one lock-ordering policy (`AGENTS.md` §2.1 — the
+    /// registry owns no lock of its own).
+    ///
+    /// [`PhysMap`]: rustos_kernel_mem::PhysMap
+    #[allow(dead_code)]
+    // Increment B (`PLAN.md` Stage 7) composes the empty registry into
+    // `KernelState`; increment C threads it into `KernelSyscallHandlers`
+    // (read for `resolve`) and increment D wires the deferred syscalls'
+    // copy path through it. Populated by the spawner / withdrawn on
+    // `exit` once those call sites reach it — neither has a live caller
+    // yet, so the field is composed-but-not-yet-read, mirroring the
+    // staged `frame_allocator` / `identity_table` fields above.
+    pub(crate) aspaces: RwLock<AddressSpaceRegistry>,
     pub(crate) arch: Arc<A>,
     /// Audit sink the dispatch hook emits security-relevant records
     /// through. Held here so the hook borrows it for the lifetime of

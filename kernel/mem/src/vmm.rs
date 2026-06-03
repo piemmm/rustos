@@ -309,6 +309,42 @@ impl<P: PageTableOps> AddressSpace<P> {
     }
 }
 
+/// Object-safe, read-only view of a task's user address space.
+///
+/// [`AddressSpace`] is generic over its [`PageTableOps`] backend, so the
+/// kernel cannot hold one address space per task — each potentially a
+/// different architecture's page table — behind a single concrete type.
+/// `UserAddressSpace` erases that backend down to the *one* operation the
+/// [`crate::uaccess`] page walk needs: translating a [`Page`] to its
+/// backing `(`[`Frame`]`, `[`MapFlags`]`)`. A per-task registry (the
+/// kernel orchestrator in `kernel/core`) keys `dyn UserAddressSpace`
+/// values by task id and hands the user-memory copy path a
+/// `&dyn UserAddressSpace` to walk (`AGENTS.md` §5.4 /
+/// `tests/SECURITY.md` §5).
+///
+/// The trait deliberately exposes **only** `translate`: the copy path
+/// must never be able to *mutate* a caller's mappings, and a read-only
+/// translation is all the fail-closed permission checks in
+/// [`crate::uaccess`] require. Mapping and unmapping stay behind
+/// [`AddressSpace`]'s own accounted [`AddressSpace::map`] /
+/// [`AddressSpace::unmap`] (`AGENTS.md` §2.4 — no widening of the
+/// interface to "make access easier").
+pub trait UserAddressSpace {
+    /// Translate `page` to its backing `(frame, flags)`, or `None` when
+    /// the page is not currently mapped.
+    ///
+    /// Mirrors [`AddressSpace::translate`] exactly; the blanket impl
+    /// forwards to it so there is one translation definition, not two
+    /// (`AGENTS.md` §2.2).
+    fn translate(&self, page: Page) -> Option<(Frame, MapFlags)>;
+}
+
+impl<P: PageTableOps> UserAddressSpace for AddressSpace<P> {
+    fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
+        AddressSpace::translate(self, page)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Host test double.
 // ---------------------------------------------------------------------------
@@ -484,5 +520,20 @@ mod tests {
         assert!(VirtAddr::new(0).is_page_aligned());
         assert!(VirtAddr::new(PAGE_SIZE as u64).is_page_aligned());
         assert!(!VirtAddr::new(1).is_page_aligned());
+    }
+
+    #[test]
+    fn user_address_space_trait_object_forwards_translate() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(4), Frame(9), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        // Erase the concrete `HostPageTable` backend: the registry that
+        // composes this increment stores `dyn UserAddressSpace`.
+        let erased: &dyn UserAddressSpace = &s;
+        let (f, fl) = erased.translate(p(4)).expect("mapped page resolves");
+        assert_eq!(f, Frame(9));
+        assert!(fl.contains(MapFlags::READ));
+        assert!(fl.contains(MapFlags::USER));
+        assert!(erased.translate(p(5)).is_none());
     }
 }

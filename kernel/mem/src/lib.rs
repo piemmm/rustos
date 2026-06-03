@@ -73,7 +73,9 @@ pub use swap::{
     EncryptedSwap, EntropySource, SwapBackend, SwapError, SwapKey, SwapPage, SWAP_RECORD_LEN,
 };
 pub use uaccess::{copy_in, copy_out, UaccessError};
-pub use vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
+pub use vmm::{
+    AddressSpace, MapFlags, Page, PageTableError, PageTableOps, UserAddressSpace, VirtAddr,
+};
 
 #[cfg(any(test, feature = "host-tests"))]
 pub use phys::SimPhysMap;

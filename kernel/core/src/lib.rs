@@ -11,6 +11,7 @@
 //!
 //! | Module          | Role                                                   |
 //! | --------------- | ------------------------------------------------------ |
+//! | [`aspace`]      | Per-task address-space registry for the copy path.     |
 //! | [`audit`]       | Stable audit-event IDs in the `4_000..5_000` range.    |
 //! | [`bootinfo`]    | [`BootInfo`] hand-off type + [`KernelArch`] trait.     |
 //! | [`init`]        | [`kernel_main`] and the documented init order.         |
@@ -69,6 +70,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod aspace;
 pub mod audit;
 pub mod bootinfo;
 pub mod dispatch_slot;
@@ -86,6 +88,7 @@ pub mod test_arch;
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_sink;
 
+pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use dispatch_slot::{

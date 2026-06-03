@@ -63,3 +63,10 @@ rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # normal `cargo test` run still gets `scheduler-eevdf` from the package's
 # own default feature set.
 rustos-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
+# The per-task address-space registry's host tests (`src/aspace.rs`)
+# exercise `AddressSpaceRegistry` end-to-end through `kernel/mem`'s
+# `HostPageTable` + `SimPhysMap` test doubles, gated behind the
+# `host-tests` feature so production builds never link them
+# (`AGENTS.md` §2.3). The normal `[dependencies]` entry above stays
+# feature-free; dev-dependency features apply only to test builds.
+rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

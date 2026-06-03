@@ -162,6 +162,42 @@ per-architecture page-fault fix-up all build on it (see `PLAN.md`).
 [`copy_in`]: ../../rustos_kernel_mem/uaccess/fn.copy_in.html
 [`copy_out`]: ../../rustos_kernel_mem/uaccess/fn.copy_out.html
 
+## 3b. Per-task address-space registry
+
+`copy_in` / `copy_out` take *an* `AddressSpace`, but a syscall handler
+only knows the caller's `TaskId`. The bridge is the **address-space
+registry** (`kernel/core`, `aspace` module): a
+`BTreeMap<TaskId, (address space, PhysMap)>` that the syscall path reads
+to resolve the calling task to the pair the copy walk consumes. It is
+composed into `KernelState` next to the capability and IPC registries,
+wrapped in the same reader-preferring `RwLock`, so the hot path takes
+only a shared lock (`AGENTS.md` §2.1).
+
+`AddressSpace<P>` is generic over its page-table backend `P`, so the
+kernel cannot key one map on a single concrete `AddressSpace<P>` —
+different tasks may run on different architecture page tables. The
+registry therefore stores each entry behind [`UserAddressSpace`], an
+object-safe, **read-only** view that exposes only `translate` (a blanket
+impl forwards it to `AddressSpace::translate`, so there is one
+translation definition, not two — `AGENTS.md` §2.2). Exposing only
+`translate` keeps the copy path from ever mutating a caller's mappings;
+map / unmap stay behind `AddressSpace`'s own accounted API (`AGENTS.md`
+§2.4). The physical map is erased the same way the rest of the kernel
+already erases it (`&dyn PhysMap`), so the registry is one concrete,
+non-generic type.
+
+Lifecycle is fail-closed: an entry is registered when a task's image is
+mapped and withdrawn when it exits. Registering an id that is already
+present is **refused** (`AspaceError::AlreadyPresent`) rather than
+silently replacing a live mapping, withdrawal is idempotent, and
+resolving an unknown id yields `None`. The registry is a pure data
+structure with no audit sink of its own — the spawner and the `exit`
+handler that drive the lifecycle own the security-relevant logging,
+exactly as the syscall dispatcher (not the IPC `PortRegistry`) audits
+endpoint lookups.
+
+[`UserAddressSpace`]: ../../rustos_kernel_mem/vmm/trait.UserAddressSpace.html
+
 ## 4. Sensitive-region API
 
 `alloc_sensitive(len) -> Result<SensitiveBuffer, AllocError>` hands

@@ -5787,11 +5787,28 @@ subsystem (§2.1). Each session lands one increment and updates
   every fail-closed branch). Docs `docs/src/architecture/memory.md` (new
   "## 3a. User-memory copy (`uaccess`)" section + testing strategy) and the
   module rustdoc. No `unwrap`/`expect`/`panic!` in production paths.
-- **B — Per-task address-space registry.** Associate a task's `sec::TaskId`
-  with its `AddressSpace<arch::PageTable>` and the active `PhysMap`. A
-  `RwLock`-wrapped registry composed into `KernelState` (mirroring `caps` /
-  `ipc`, §2.1), populated when a task's `rxe` image is mapped (`map_image`) and
-  withdrawn on `exit`. Host-tested with `HostPageTable`.
+- **B — Per-task address-space registry. DONE (increment).** `kernel/mem`
+  gains the object-safe, read-only `UserAddressSpace` trait (one method,
+  `translate`; a blanket impl over `AddressSpace<P>` forwards to
+  `AddressSpace::translate`, so there is one translation definition, §2.2) so
+  the kernel can hold one entry per task without naming a single concrete
+  page-table backend. `kernel/core` gains the `aspace` module:
+  `AddressSpaceRegistry` is a `BTreeMap<TaskId, (Box<dyn UserAddressSpace>,
+  Box<dyn PhysMap>)>` with `register` (fail-closed `AspaceError::AlreadyPresent`
+  — never silently replaces a live mapping, §5.4), idempotent `withdraw`,
+  `resolve` (→ the `(&dyn UserAddressSpace, &dyn PhysMap)` pair the `uaccess`
+  copy path consumes), `contains`, `len`, `is_empty`. It is composed into
+  `KernelState` empty next to `caps` / `ipc`, wrapped in the same
+  reader-preferring `RwLock` (§2.1), and exposes only `translate` so the copy
+  path can never mutate a caller's mappings (§2.4). The field is
+  composed-but-not-yet-read pending increments C/D (justified
+  `#[allow(dead_code)]`, mirroring the staged `frame_allocator` field). 6 host
+  tests over `HostPageTable` + `SimPhysMap` (empty, register→resolve, duplicate
+  rejected keeps first entry, selective withdraw, withdraw idempotence,
+  re-register after withdraw) behind a `host-tests` dev-dependency on
+  `kernel/mem`. Docs `docs/src/architecture/memory.md` (new "## 3b. Per-task
+  address-space registry" section) + module rustdoc. No
+  `unwrap`/`expect`/`panic!` in production paths.
 - **C — Reach the caller's address space from the syscall handler.** Thread the
   registry into `KernelSyscallHandlers` so a handler can resolve
   `caller.task_id` → `(&AddressSpace, &dyn PhysMap)` without coupling the
