@@ -86,9 +86,13 @@ into `kernel/core`'s `KernelState` as `ipc: RwLock<PortRegistry>`
 (mirroring `caps: RwLock<CapTable>`) and borrowed by the
 `KernelDispatchHook`, so the `ipc_send` / `ipc_recv` handlers resolve
 the syscall's endpoint against the live map: an unbound endpoint fails
-closed with `Errno::NotFound`, while a bound one resolves and then
-defers on the user-memory copy-in/out path (the same prerequisite
-`cap_delegate` is waiting on). See
+closed with `Errno::NotFound`. A bound `ipc_send` is fully wired — it
+copies the payload in through the kernel's `copy_from_user` boundary
+([`rustos_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess))
+and hands it to `Port::send`, returning `Errno::BadAddress` (the RustOS
+`EFAULT`) for a faulting buffer or a caller with no registered address
+space. A bound `ipc_recv` still defers on the user-memory copy-*out*
+path (which needs a peek/commit on `Port`). See
 [the syscall handler-wiring table](./syscalls.md#handler-wiring-stage-27-follow-up-f3).
 
 ### Well-known names

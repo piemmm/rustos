@@ -37,23 +37,36 @@
 //!   never gains a `kernel/mem` dependency (`AGENTS.md` §17.4).
 //!   Wrapped in the same reader-preferring lock as the other two.
 //!
-//! `ipc_send` / `ipc_recv` now resolve the destination endpoint
-//! against that live registry: an endpoint that is not currently
-//! bound fails closed with `NotFound` (a real lookup miss; the
-//! dispatcher's standard pipeline audits it). For a *bound* endpoint
-//! the message body still needs the user-memory copy-in/out path,
-//! which has not landed (Stage 5 / Stage 6); that one remaining branch
-//! returns a stable errno plus a [`AuditEvent::SyscallFeatureUnavailable`]
-//! record per `AGENTS.md` §15.1 — *announce the deferral, never stub*:
+//! `ipc_send` / `ipc_recv` resolve the destination endpoint against
+//! that live registry: an endpoint that is not currently bound fails
+//! closed with `NotFound` (a real lookup miss; the dispatcher's
+//! standard pipeline audits it).
+//!
+//! `ipc_send` is **fully wired** (increment D.1 of `PLAN.md` Stage 7's
+//! "User-memory copy path"): for a bound endpoint it stages the
+//! payload through the validated [`rustos_kernel_mem::copy_in`]
+//! boundary ([`KernelSyscallHandlers::with_caller_aspace`] →
+//! `copy_fault_errno`) and hands it to
+//! [`rustos_kernel_ipc::Port::send`]. A faulting user pointer — or a
+//! caller with no registered address space — fails closed with
+//! [`Errno::BadAddress`] (the RustOS `EFAULT`), never an oracle that
+//! distinguishes the cause (`AGENTS.md` §19.1).
+//!
+//! The remaining copy-path consumers still need their own increments;
+//! for a *bound* `ipc_recv` (and for `cap_delegate` / `random_get`)
+//! the body needs the matching copy-out / delegate / RNG-reserve work
+//! that has not landed, so those branches return a stable errno plus a
+//! [`AuditEvent::SyscallFeatureUnavailable`] record per `AGENTS.md`
+//! §15.1 — *announce the deferral, never stub*:
 //!
 //! | Syscall              | Condition            | Errno            | Reason |
 //! |----------------------|----------------------|------------------|--------|
 //! | `ipc_send`/`ipc_recv` | endpoint unbound     | `NotFound`       | No port is bound to the endpoint in the [`PortRegistry`]; a real lookup miss. |
-//! | `ipc_send`/`ipc_recv` | endpoint bound       | `NotImplemented` | The port resolves, but copying the payload to/from the caller's address space needs the user-memory copy-in path (Stage 5 / Stage 6). |
-//! | `cap_delegate`       | always               | `NotImplemented` | User-memory copy-in not landed (Stage 5 / Stage 6).    |
+//! | `ipc_recv`           | endpoint bound       | `NotImplemented` | The port resolves, but delivering a drained message needs the copy-out path with a peek/commit on [`rustos_kernel_ipc::Port`] (increment D.2). |
+//! | `cap_delegate`       | always               | `NotImplemented` | The capability-set copy-in + `CapTable` delegate path has not landed (increment D.3). |
 //!
 //! The deferred-feature branches still go through the dispatcher's
-//! standard audit pipeline (the `IPC_SEND` / `CAP_DELEGATE` entries are
+//! standard audit pipeline (the `IPC_RECV` / `CAP_DELEGATE` entries are
 //! `spec.audit = true`) and **additionally** emit the
 //! `SyscallFeatureUnavailable` record so a downstream consumer can
 //! tell apart "handler rejected because the call failed" from
@@ -73,7 +86,7 @@ use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_mem::{PhysMap, UserAddressSpace};
+use rustos_kernel_mem::{copy_in, PhysMap, UaccessError, UserAddressSpace, VirtAddr};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Field, Sink};
@@ -257,6 +270,20 @@ where
     }
 }
 
+/// Collapse every [`UaccessError`] onto the single stable
+/// [`Errno::BadAddress`] (the RustOS `EFAULT`, `AGENTS.md` §5.4).
+///
+/// A syscall that copies through the kernel's `copy_from_user` /
+/// `copy_to_user` boundary returns one code for *every* faulting-pointer
+/// reason — null, unmapped, kernel-only, wrong permission, off the direct
+/// map — so a malicious caller cannot use the distinction as an oracle to
+/// probe the kernel's memory layout (`AGENTS.md` §19.1). The handler maps
+/// the absence of any registered address space (a kernel task, or one
+/// withdrawn on `exit`) onto the same code at the call site.
+fn copy_fault_errno(_err: UaccessError) -> Errno {
+    Errno::BadAddress
+}
+
 impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
     A: KernelArch + 'static,
@@ -321,26 +348,53 @@ where
         &self,
         caller: &CallerContext<'_>,
         endpoint: u64,
-        _ptr: u64,
-        _len: usize,
+        ptr: u64,
+        len: usize,
     ) -> SyscallResult {
         // §5.4: resolve the destination endpoint against the live
-        // named-port registry before doing anything else. An endpoint
-        // that is not currently bound fails closed with `NotFound` — a
-        // real lookup miss now, not a blanket stub; the dispatcher's
-        // standard pipeline audits the rejection at this boundary
-        // (`PortRegistry::lookup` deliberately does not). For a *bound*
-        // endpoint the message body must still be copied in from the
-        // caller's address space (`ptr`/`len`); that user-memory
-        // copy-in path has not yet landed (`PLAN.md` Stage 5 / Stage
-        // 6), so the handler announces the deferral and refuses rather
-        // than fabricating a transfer (`AGENTS.md` §15.1 — announce,
-        // never stub).
-        if !self.ipc.read().contains(EndpointId(endpoint)) {
+        // named-port registry before touching the caller's buffer. An
+        // endpoint that is not currently bound fails closed with
+        // `NotFound` — a real lookup miss; the dispatcher's standard
+        // pipeline audits the rejection at this boundary
+        // (`PortRegistry::lookup` deliberately does not).
+        let ipc = self.ipc.read();
+        let Some(port) = ipc.lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
+        };
+
+        // Bound the copy *before* allocating: refuse a payload larger
+        // than the port advertises (itself capped at
+        // `IPC_MESSAGE_MAX_PAYLOAD_LEN` at `Port::create`). This makes a
+        // malicious `len` cheap to reject and keeps the kernel from
+        // staging an oversized buffer the port would reject anyway. The
+        // same `MessageTooLarge` code `Port::send` would return.
+        if len as u64 > u64::from(port.max_payload()) {
+            return Err(Errno::MessageTooLarge);
         }
-        self.audit_feature_unavailable(caller, "user_memory_copyin");
-        Err(Errno::NotImplemented)
+
+        // Copy the payload in from the caller's address space through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4). The
+        // bytes are staged in a kernel-owned buffer; `Port::send` then
+        // takes its own kernel copy, so the sender cannot mutate the
+        // message after it is accepted. `with_caller_aspace` yields
+        // `None` when the caller has no registered address space (a
+        // kernel task, or one already withdrawn on `exit`) — fail closed
+        // with the same `BadAddress` an actual fault produces, never
+        // leaking which case occurred (§19.1).
+        let mut payload = alloc::vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(ptr), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Enqueue. `Port::send` performs the per-send capability check
+        // against the caller's effective set (`AGENTS.md` §5.2) and
+        // re-checks the payload size, returning a stable `Errno` for
+        // every refusal.
+        port.send(caller.caps, &payload, self.audit).map(|()| 0)
     }
 
     fn ipc_recv(
@@ -920,12 +974,123 @@ mod tests {
         assert!(sink.event_ids().is_empty());
     }
 
-    /// `ipc_send` to a *bound* endpoint resolves the live port and then
-    /// announces the (unlanded) user-memory copy-in path, returning
-    /// `NotImplemented` and exactly one `SyscallFeatureUnavailable`
-    /// record (`AGENTS.md` §15.1 — announce, never stub).
+    /// Frame backing the user payload in the `ipc_send` copy-in tests,
+    /// chosen so its physical base falls inside a one-page
+    /// [`SimPhysMap`] window the test can seed.
+    const SEND_FRAME: usize = 16;
+
+    /// Build a caller address space mapping user page 1 (`0x1000`) to
+    /// [`SEND_FRAME`] with `flags`, plus a single-page physical map
+    /// covering that frame seeded with `payload` at offset 0. Returns
+    /// the boxed pair the registry stores.
+    fn send_aspace(
+        flags: MapFlags,
+        payload: &[u8],
+    ) -> (
+        Box<dyn UserAddressSpace + Send + Sync>,
+        Box<dyn PhysMap + Send + Sync>,
+    ) {
+        let base = PhysAddr::new(SEND_FRAME as u64 * PAGE_SIZE as u64);
+        let sim = SimPhysMap::new(base, PAGE_SIZE);
+        if !payload.is_empty() {
+            let ptr = sim.translate(base, payload.len()).expect("seed in window");
+            // SAFETY: the window owns these bytes for the simulator's
+            // lifetime and nothing else aliases them during the test.
+            unsafe {
+                core::ptr::copy_nonoverlapping(payload.as_ptr(), ptr.as_ptr(), payload.len());
+            }
+        }
+        let mut space = AddressSpace::new(HostPageTable::new());
+        space
+            .map(page(1), Frame(SEND_FRAME), flags)
+            .expect("mapped");
+        (Box::new(space), Box::new(sim))
+    }
+
+    /// `ipc_send` to a *bound* endpoint copies the payload in from the
+    /// caller's address space and delivers it to the port — the
+    /// increment-D.1 wiring of the user-memory copy-in path. The
+    /// receiver observes the exact bytes and the sender's task id, and
+    /// no `SyscallFeatureUnavailable` deferral is announced.
     #[test]
-    fn ipc_send_to_bound_endpoint_defers_copy_in() {
+    fn ipc_send_to_bound_endpoint_copies_payload_and_delivers() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        sink.clear();
+        assert_eq!(h.ipc_send(&ctx, 1, 0x1000, payload.len()), Ok(0));
+        // The deferral audit is gone now that the copy-in path is live.
+        assert!(!sink
+            .event_ids()
+            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
+        // The receiver drains exactly the bytes the caller sent.
+        let guard = ipc.read();
+        let port = guard.lookup(EndpointId(1)).expect("port stays bound");
+        let msg = port.recv().expect("a message was delivered");
+        assert_eq!(msg.sender, 2);
+        assert_eq!(msg.payload.as_slice(), &payload);
+    }
+
+    /// `ipc_send` to a bound endpoint with a faulting user pointer fails
+    /// closed with `BadAddress` (the RustOS `EFAULT`) and delivers
+    /// nothing: the page is not mapped in the caller's space.
+    #[test]
+    fn ipc_send_with_faulting_pointer_is_bad_address_and_delivers_nothing() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        // Page 2 (`0x2000`) is unmapped in the caller's space.
+        assert_eq!(h.ipc_send(&ctx, 1, 0x2000, 4), Err(Errno::BadAddress));
+        assert!(
+            ipc.read().lookup(EndpointId(1)).expect("bound").is_empty(),
+            "a faulting send must not enqueue a message"
+        );
+    }
+
+    /// `ipc_send` from a caller with no registered address space (a
+    /// kernel task, or one withdrawn on `exit`) fails closed with
+    /// `BadAddress` — the same code a fault produces, never an oracle.
+    #[test]
+    fn ipc_send_without_registered_aspace_is_bad_address() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -943,12 +1108,35 @@ mod tests {
 
         register_port(&ipc, 1, sink);
         let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
-        sink.clear();
-        assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotImplemented));
-        assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
-        );
+        assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::BadAddress));
+        assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
+    }
+
+    /// `ipc_send` of a payload larger than the port advertises is
+    /// rejected with `MessageTooLarge` before any copy is attempted —
+    /// the caller need not have a mapped buffer at all.
+    #[test]
+    fn ipc_send_oversize_payload_is_message_too_large() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // `register_port` binds a port with `max_payload == 64`.
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 65), Err(Errno::MessageTooLarge));
+        assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
     }
 
     /// `ipc_recv` from an unbound endpoint mirrors `ipc_send`: a real

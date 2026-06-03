@@ -138,8 +138,8 @@ re-validates arguments — the dispatcher does that first.
 | --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
-| `ipc_send`      | `PortRegistry::contains(endpoint)` in `KernelState.ipc`; payload copy-in deferred                            | Unbound endpoint → `NotFound` (no extra audit). Bound endpoint → `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
-| `ipc_recv`      | *same as `ipc_send`* — resolve the endpoint, defer the payload copy-out                                       | Same.                                                                     |
+| `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
+| `ipc_recv`      | `PortRegistry::lookup(endpoint)`; payload copy-out deferred (increment D.2)                                   | Unbound endpoint → `NotFound` (no extra audit). Bound endpoint → `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
@@ -172,24 +172,39 @@ contract the `irq_wait` timeout loop relies on. Tightening or relaxing
 the granularity changes only that one constant (`AGENTS.md` §5.7 —
 security by default).
 
-`ipc_send` / `ipc_recv` now resolve the destination endpoint against
-the live named-port registry composed into `KernelState`
+`ipc_send` / `ipc_recv` resolve the destination endpoint against the
+live named-port registry composed into `KernelState`
 (`ipc: RwLock<PortRegistry>`, mirroring `caps: RwLock<CapTable>`). An
 endpoint that is not currently bound fails closed with `NotFound` — a
 real lookup miss, not a blanket stub; only the dispatcher's standard
-pipeline audits it. For a *bound* endpoint the message body must still
-be copied to/from the caller's address space, and that user-memory
-copy-in path has not landed, so that one remaining branch returns
-`NotImplemented`.
+pipeline audits it.
+
+`ipc_send` is **fully wired** (increment D.1 of the staged user-memory
+copy path, `PLAN.md` Stage 7). For a bound endpoint it bounds `len`
+against the port's `max_payload`, stages the payload through the
+validated `copy_from_user` boundary
+([`rustos_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess),
+reached via `with_caller_aspace`), and hands it to `Port::send`, which
+applies the per-send capability check (`AGENTS.md` §5.2). A faulting
+user pointer — or a caller with no registered address space (a kernel
+task, or one withdrawn on `exit`) — fails closed with `BadAddress`, the
+RustOS `EFAULT`; the kernel returns that one code for every
+faulting-pointer reason so it cannot be used as a memory-layout oracle
+(`AGENTS.md` §19.1). A failed send enqueues nothing.
+
+`ipc_recv` still defers: delivering a drained `Port` message needs the
+copy-*out* path with a peek/commit on `Port` so a failed copy does not
+drop the message (increment D.2). For a *bound* endpoint it returns
+`NotImplemented` plus the deferral audit below.
 
 The deferred-feature branches return a stable `Errno` and emit exactly
 one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
 `kernel/core::audit`) — so an external consumer can tell apart
 "handler rejected because the call failed" from "handler rejected
 because the backing subsystem is intentionally inert" (`AGENTS.md`
-§15.1 — announce the deferral, never stub). That record is emitted by
-`ipc_send` / `ipc_recv` **only** on the bound-endpoint copy-in branch
-(`feature = user_memory_copyin`) and always by `cap_delegate`. The
+§15.1 — announce the deferral, never stub). That record is now emitted
+by `ipc_recv` (on its bound-endpoint copy-out branch) and by
+`cap_delegate` / `random_get`; `ipc_send` no longer emits it. The
 dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is *also*
 emitted for syscalls whose `SyscallSpec::audit == true` (`ipc_send`,
 `cap_delegate`); `ipc_recv` is unaudited so on its copy-out deferral
@@ -207,9 +222,10 @@ The Stage 2.7 follow-up tracker in `PLAN.md` records the remaining
 pieces required to lift these deferrals. The named-port registry that
 `ipc_send` / `ipc_recv` resolve an `EndpointId` through
 (`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry))
-is now composed into `KernelState` and borrowed by the handlers, so
-endpoint resolution is live; what remains for IPC is the user-memory
-copy-in path (which `cap_delegate` also waits on).
+is composed into `KernelState` and borrowed by the handlers, so
+endpoint resolution is live, and `ipc_send`'s copy-in is wired; what
+remains for IPC is `ipc_recv`'s copy-out path (which needs a peek/commit
+on `Port`).
 
 The first half of that copy path is now wired (increment C of the
 staged "User-memory copy path & per-task address spaces" effort,
@@ -225,8 +241,10 @@ failing closed to `None` for a caller with no registered space. The
 bridge lives in `kernel/core`, so the decoupled dispatcher
 (`kernel/syscall`) never gains a `kernel/mem` dependency (`AGENTS.md`
 §17.4). Increment D wires `ipc_send` / `ipc_recv` / `cap_delegate` /
-`random_get` through this accessor and retires the
-`user_memory_copyin` deferral audits.
+`random_get` through this accessor and retires their
+`user_memory_copyin` deferral audits; D.1 has landed `ipc_send` (a
+faulting copy maps to `BadAddress`, the RustOS `EFAULT`), leaving
+`ipc_recv` (D.2), `cap_delegate` (D.3), and `random_get` (D.4).
 
 ## Dispatcher contract
 

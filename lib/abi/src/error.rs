@@ -100,6 +100,21 @@ pub enum Errno {
     /// (`AGENTS.md` §5.4), and the caller's freshly-created port is
     /// handed back so it can be torn down.
     AlreadyExists = 17,
+    /// A user-space pointer handed to a syscall does not name memory the
+    /// caller may access in the direction the call requires.
+    ///
+    /// The RustOS equivalent of POSIX `EFAULT`. Emitted by any syscall
+    /// that copies through the kernel's `copy_from_user` / `copy_to_user`
+    /// boundary (`AGENTS.md` §5.4) when the user buffer is null, runs off
+    /// the end of the address space, is unmapped, is not a user page, or
+    /// lacks the read/write permission the copy direction needs (the
+    /// §19.2 W^X guard refuses writing an executable page). The kernel
+    /// returns this one code for every such failure rather than reporting
+    /// *which* invariant broke, so a faulting pointer cannot be used as an
+    /// oracle to probe the kernel's memory layout (`AGENTS.md` §5.4 — fail
+    /// closed; §19.1). It is also the fail-closed result when the caller
+    /// has no registered address space at all (e.g. a kernel task).
+    BadAddress = 18,
 }
 
 impl Errno {
@@ -130,6 +145,7 @@ impl fmt::Display for Errno {
             Self::NoSpace => "no space left on device",
             Self::EntropyNotReady => "entropy not ready",
             Self::AlreadyExists => "object already exists",
+            Self::BadAddress => "bad user-space address",
         };
         f.write_str(message)
     }
@@ -159,6 +175,7 @@ mod tests {
         assert_eq!(Errno::NoSpace.as_i32(), 15);
         assert_eq!(Errno::EntropyNotReady.as_i32(), 16);
         assert_eq!(Errno::AlreadyExists.as_i32(), 17);
+        assert_eq!(Errno::BadAddress.as_i32(), 18);
     }
 
     #[test]

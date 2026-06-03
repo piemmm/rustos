@@ -5845,10 +5845,29 @@ subsystem (§2.1). Each session lands one increment and updates
     `uaccess` test drives both directions through an explicit erased
     `&dyn UserAddressSpace` (16 `uaccess` host tests pass). Docs
     `docs/src/architecture/memory.md` (§3a/§3b) + module rustdoc. No
-    `unwrap`/`expect`/`panic!` in production paths. **Still open in D:** the
-    handler wiring itself (`ipc_send`/`ipc_recv`/`cap_delegate`/`random_get`)
-    and retiring the deferral audits — `ipc_recv` needs a peek/commit on `Port`
-    so a failed `copy_out` does not drop a drained message, and `random_get`
+    `unwrap`/`expect`/`panic!` in production paths.
+  - **D.1 — Wire `ipc_send` through the copy-in path. DONE (increment).**
+    `ipc_send` now `lookup`s the destination `Port` against the live
+    `PortRegistry`, bounds `len` against `port.max_payload()`
+    (→ `MessageTooLarge`), stages the payload through `copy_from_user`
+    (`with_caller_aspace` → `rustos_kernel_mem::copy_in`), and hands it to
+    `Port::send(caller.caps, …)`; the `feature = user_memory_copyin` deferral
+    audit is retired on the send side. Every `UaccessError`, and a caller with
+    no registered address space, collapse onto the new **`Errno::BadAddress`**
+    (the RustOS `EFAULT`, `lib/abi` discriminant 18, append-only — `abi-v1` is
+    not frozen): one code for every faulting-pointer reason, so it cannot be
+    used as a memory-layout oracle (§19.1, §5.4). A failed send enqueues
+    nothing. `copy_fault_errno` centralises the mapping. 4 reworked/added
+    `rustos-kernel-core` `syscalls` tests (bound endpoint copies + delivers the
+    exact bytes and sender id; faulting pointer → `BadAddress`, nothing
+    enqueued; no registered aspace → `BadAddress`; oversize → `MessageTooLarge`)
+    — 124 `rustos-kernel-core` tests pass; `lib/abi` gains the frozen-
+    discriminant + `Display` coverage for `BadAddress` (253 pass). Docs
+    `docs/src/architecture/{syscalls,ipc}.md` + module rustdoc. No `unsafe`, no
+    `unwrap`/`expect`/`panic!` in production paths. **Still open in D:**
+    **D.2** `ipc_recv` — needs a peek/commit on `Port` so a failed `copy_out`
+    does not drop a drained message; **D.3** `cap_delegate` — copy the
+    capability set in + the `CapTable` delegate path; **D.4** `random_get` —
     needs the RNG `OutputReserve` composed into `KernelState`.
 - **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
   ports.** The page-fault recovery path each arch port needs so a faulting user
