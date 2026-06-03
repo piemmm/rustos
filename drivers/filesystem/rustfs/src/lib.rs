@@ -46,7 +46,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -90,7 +89,10 @@ use integrity::{
 };
 pub use scrub::{ScrubBudget, ScrubReport};
 
-use dedupe::{chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeKey, REVERSE_REF_CAP};
+use dedupe::{
+    chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, DedupeIndex,
+    REVERSE_REF_CAP,
+};
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
@@ -419,7 +421,7 @@ pub struct RustFs<B: Block> {
     /// trees at [`RustFs::open`]; every candidate is liveness-checked and
     /// byte-verified before sharing, so a stale entry can never merge unequal
     /// data.
-    dedupe_index: BTreeMap<DedupeKey, DedupeCandidate>,
+    dedupe_index: DedupeIndex,
     root_phys: u64,
     free: Vec<u64>,
     free_count: u64,
@@ -452,17 +454,6 @@ pub struct RustFs<B: Block> {
     /// [`RustFs::rescue`] sets it: rescue is read-only on the damaged volume by
     /// default (`docs/src/filesystem/rustfs-spec.md` §12).
     read_only: bool,
-}
-
-/// A dedupe-index candidate: the physical block of a chunk plus the
-/// `(inode, logical block)` referrer that introduced it, so a foreground
-/// lookup can confirm the candidate is still live (its referrer's extent map
-/// still points at it) before byte-verifying and sharing (`dedupe` module).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct DedupeCandidate {
-    phys: u64,
-    inode: u32,
-    logical: u64,
 }
 
 /// Value width of one extent record: physical start block plus run length.
@@ -1067,7 +1058,7 @@ impl<B: Block> RustFs<B> {
             scrub_progress_root: 0,
             health_baseline_root: 0,
             dedupe_domain: 0,
-            dedupe_index: BTreeMap::new(),
+            dedupe_index: DedupeIndex::new(),
             root_phys: 0,
             free: vec![0u64; words],
             free_count: total_blocks,
@@ -1731,7 +1722,7 @@ impl<B: Block> RustFs<B> {
         content: &[u8],
     ) -> Result<Option<DedupeCandidate>, DriverError> {
         let key = dedupe_key(domain, as_u32(content.len()), logical_hash);
-        let Some(cand) = self.dedupe_index.get(&key).copied() else {
+        let Some(cand) = self.dedupe_index.get(&key) else {
             return Ok(None);
         };
         if !self.candidate_is_live(cand)? {

@@ -321,12 +321,31 @@ Rules:
 
 - key is `BLAKE3-256(plaintext logical record) + length`;
 - dedupe index is rebuildable and never authoritative;
+- the dedupe index is a **bounded in-memory cache**, not an unbounded map: its
+  resident RAM is capped (a missed duplicate is acceptable, so a full index
+  evicts rather than grows);
 - candidate matches are byte-verified before sharing;
 - cross-domain dedupe is forbidden;
 - shared chunks are immutable and refcounted;
 - overwriting shared data creates a new physical record.
 
 Missing a duplicate is acceptable. Merging unequal data is corruption.
+
+> **Bounded dedupe-index RAM (implementation).** Because *missing a duplicate
+> is acceptable*, the rebuildable dedupe index
+> (`drivers/filesystem/rustfs/src/dedupe.rs`, `DedupeIndex`) is a fixed-budget
+> cache rather than a map that grows with the volume. Its resident RAM is
+> capped at **100 MiB**, split into a **20 MiB "frequently used" hot tier**
+> (candidates promoted on a dedupe hit) and an **80 MiB general tier** (freshly
+> written candidates). Each tier is a least-recently-used cache: once full it
+> evicts its least-recently-used candidate (the hot tier demotes its eviction
+> back into the general tier) instead of growing, so the index never exceeds
+> its budget regardless of how much unique data the volume holds. Eviction only
+> forgoes a future dedupe opportunity — it never affects correctness, since the
+> chunk/refcount and reverse-reference trees remain authoritative and the index
+> is rebuilt from them at mount. The per-entry footprint is deliberately
+> over-estimated when deriving the per-tier entry caps, so the byte budgets are
+> a hard ceiling, not an approximation.
 
 ---
 
@@ -706,8 +725,10 @@ in-memory **dedupe index** (`(domain, length, logical hash) → candidate`)
 that is **rebuilt from the chunk + reverse-reference trees at mount and is
 never authoritative** (§9): every candidate is liveness-checked (its recorded
 referrer's extent map still points at it) and byte-verified before sharing,
-so a stale entry can never merge wrong data. Dedupe is **scoped to the
-encryption domain** (§7) — the domain is carried in every chunk record and
+so a stale entry can never merge wrong data. The index is a **bounded cache**
+(100 MiB, split 20 MiB frequently-used / 80 MiB general; see §9), evicting its
+least-recently-used candidates rather than growing with the volume. Dedupe is
+**scoped to the encryption domain** (§7) — the domain is carried in every chunk record and
 index key — and the pipeline order is **`dedupe → compress → encrypt`** so
 only unique records are compressed (§10). The §16 acceptance tests for this
 stage — identical content sharing one chunk (refcount 2) while distinct
