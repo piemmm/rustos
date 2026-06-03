@@ -51,6 +51,8 @@ pub mod cell;
 pub mod color;
 pub mod control;
 pub mod emit;
+pub mod key;
+pub mod mouse;
 pub mod op;
 pub mod parse;
 
@@ -61,5 +63,7 @@ pub use attr::{Attributes, Sgr};
 pub use cell::Cell;
 pub use color::{BasicColor, Color};
 pub use emit::{encode, encode_all, encode_into};
+pub use key::Key;
+pub use mouse::{MouseButton, MouseMode, MouseReport};
 pub use op::{EraseMode, Op};
 pub use parse::Parser;

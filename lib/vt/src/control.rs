@@ -25,6 +25,10 @@ pub const CSI: u8 = b'[';
 pub const OSC: u8 = b']';
 /// The byte after `ESC` that opens a Device Control String (`ESC P`).
 pub const DCS: u8 = b'P';
+/// The byte after `ESC` that opens a Single Shift Three (`ESC O`) — the
+/// introducer the function keys `F1`…`F4` and the application-mode editing
+/// keys send.
+pub const SS3: u8 = b'O';
 /// The byte after `ESC` that begins a String Terminator (`ESC \`) — closes an
 /// OSC or DCS string.
 pub const ST_FINAL: u8 = b'\\';
@@ -32,6 +36,10 @@ pub const ST_FINAL: u8 = b'\\';
 /// The private-parameter marker that prefixes DEC private mode sequences
 /// (`CSI ? … h` / `CSI ? … l`).
 pub const PRIVATE: u8 = b'?';
+/// The parameter-prefix byte that marks an xterm SGR mouse report
+/// (`CSI < Cb ; Cx ; Cy M` / `m`), distinguishing it from an ordinary
+/// `CSI … m` Select Graphic Rendition.
+pub const MOUSE_SGR: u8 = b'<';
 /// The CSI parameter separator (`;`).
 pub const SEPARATOR: u8 = b';';
 
@@ -76,8 +84,38 @@ pub const SET_MODE: u8 = b'h';
 /// Final byte of a DEC private Reset Mode (`CSI ? n l`, DECRST).
 pub const RESET_MODE: u8 = b'l';
 
+/// Final byte of an extended-key / paste sequence (`CSI <n> ~`, e.g.
+/// `CSI 3 ~` = Delete, `CSI 200 ~` = bracketed-paste start).
+pub const TILDE: u8 = b'~';
+/// Final byte of an xterm mouse *press* report in SGR encoding
+/// (`CSI < Cb ; Cx ; Cy M`).
+pub const MOUSE_PRESS: u8 = b'M';
+/// Final byte of an xterm mouse *release* report in SGR encoding
+/// (`CSI < Cb ; Cx ; Cy m`). Distinguished from [`SGR`] by the [`MOUSE_SGR`]
+/// prefix.
+pub const MOUSE_RELEASE: u8 = b'm';
+
 /// DEC private mode number for "show / hide the cursor" (DECTCEM).
 pub const MODE_CURSOR_VISIBLE: u16 = 25;
+/// DEC private mode number for xterm "normal" (button press/release) mouse
+/// tracking (`CSI ? 1000 h` / `l`).
+pub const MODE_MOUSE_BUTTON: u16 = 1000;
+/// DEC private mode number for xterm "button-event" (press/release/drag)
+/// mouse tracking (`CSI ? 1002 h` / `l`).
+pub const MODE_MOUSE_DRAG: u16 = 1002;
+/// DEC private mode number for xterm "any-event" (all motion) mouse tracking
+/// (`CSI ? 1003 h` / `l`).
+pub const MODE_MOUSE_ANY: u16 = 1003;
+/// DEC private mode number for the xterm SGR mouse encoding (`CSI ? 1006 h` /
+/// `l`), which lifts the 223-column limit of the legacy report.
+pub const MODE_MOUSE_SGR: u16 = 1006;
+/// DEC private mode number for bracketed paste (`CSI ? 2004 h` / `l`).
+pub const MODE_BRACKETED_PASTE: u16 = 2004;
 /// DEC private mode number for the xterm alternate screen buffer with
 /// save/restore (`CSI ? 1049 h` / `l`).
 pub const MODE_ALT_SCREEN: u16 = 1049;
+
+/// Extended-key parameter for bracketed-paste start (`CSI 200 ~`).
+pub const PASTE_START: u16 = 200;
+/// Extended-key parameter for bracketed-paste end (`CSI 201 ~`).
+pub const PASTE_END: u16 = 201;

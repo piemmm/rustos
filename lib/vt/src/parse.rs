@@ -17,6 +17,8 @@ use alloc::vec::Vec;
 
 use crate::attr::decode_params;
 use crate::control;
+use crate::key::Key;
+use crate::mouse::{MouseMode, MouseReport};
 use crate::op::{EraseMode, Op};
 
 /// The largest value a numeric CSI parameter accumulates to; further digits
@@ -51,6 +53,8 @@ enum State {
     Utf8,
     /// Just saw `ESC`; deciding what kind of sequence follows.
     Escape,
+    /// Just saw `ESC O` (`SS3`); the next byte names a function/editing key.
+    Ss3,
     /// Inside a CSI sequence, collecting parameters until the final byte.
     Csi,
     /// Inside an OSC or DCS string, collecting until the terminator.
@@ -64,6 +68,7 @@ pub struct Parser {
     params: Vec<u16>,
     accumulator: u32,
     private: bool,
+    mouse_sgr: bool,
     utf8_remaining: u8,
     utf8_acc: u32,
     utf8_min: u32,
@@ -86,6 +91,7 @@ impl Parser {
             params: Vec::new(),
             accumulator: 0,
             private: false,
+            mouse_sgr: false,
             utf8_remaining: 0,
             utf8_acc: 0,
             utf8_min: 0,
@@ -113,6 +119,7 @@ impl Parser {
             State::Ground => self.ground(byte, sink),
             State::Utf8 => self.utf8(byte, sink),
             State::Escape => self.escape(byte, sink),
+            State::Ss3 => self.ss3(byte, sink),
             State::Csi => self.csi(byte, sink),
             State::Str(kind) => self.string(kind, byte, sink),
         }
@@ -179,6 +186,7 @@ impl Parser {
     fn escape(&mut self, byte: u8, sink: &mut impl FnMut(Op)) {
         match byte {
             control::CSI => self.begin_csi(),
+            control::SS3 => self.state = State::Ss3,
             control::OSC => self.begin_string(StringKind::Osc),
             control::DCS => self.begin_string(StringKind::Dcs),
             control::SAVE_CURSOR => {
@@ -196,12 +204,23 @@ impl Parser {
         }
     }
 
+    /// Handle the byte after `ESC O` (`SS3`): a single final byte that names a
+    /// function or editing key. An unrecognised byte fails closed and is
+    /// dropped (`AGENTS.md` §2.9).
+    fn ss3(&mut self, byte: u8, sink: &mut impl FnMut(Op)) {
+        self.state = State::Ground;
+        if let Some(key) = Key::from_ss3_final(byte) {
+            sink(Op::Key(key));
+        }
+    }
+
     /// Enter the CSI state with cleared parameter accumulation.
     fn begin_csi(&mut self) {
         self.state = State::Csi;
         self.params.clear();
         self.accumulator = 0;
         self.private = false;
+        self.mouse_sgr = false;
     }
 
     /// Handle a byte inside a CSI sequence.
@@ -213,6 +232,7 @@ impl Parser {
             }
             control::SEPARATOR => self.push_param(),
             control::PRIVATE => self.private = true,
+            control::MOUSE_SGR => self.mouse_sgr = true,
             0x40..=0x7e => {
                 self.push_param();
                 self.dispatch(byte, sink);
@@ -266,11 +286,43 @@ impl Parser {
             control::SU => sink(Op::ScrollUp(self.count())),
             control::SD => sink(Op::ScrollDown(self.count())),
             control::DECSTBM => self.dispatch_scroll_region(sink),
+            // The SGR mouse arms must precede `SGR`, since `MOUSE_RELEASE`
+            // (`m`) is the same byte as the SGR final.
+            control::MOUSE_PRESS if self.mouse_sgr => self.dispatch_mouse(true, sink),
+            control::MOUSE_RELEASE if self.mouse_sgr => self.dispatch_mouse(false, sink),
             control::SGR => decode_params(&self.params, |sgr| sink(Op::Sgr(sgr))),
             control::SET_MODE => self.dispatch_mode(true, sink),
             control::RESET_MODE => self.dispatch_mode(false, sink),
+            control::TILDE => self.dispatch_tilde(sink),
             _ => {}
         }
+    }
+
+    /// Dispatch a `CSI <n> ~` sequence: a bracketed-paste marker or a named
+    /// function / editing key. An unrecognised parameter fails closed and is
+    /// dropped (`AGENTS.md` §2.9).
+    fn dispatch_tilde(&self, sink: &mut impl FnMut(Op)) {
+        match self.params.first().copied() {
+            Some(control::PASTE_START) => sink(Op::PasteStart),
+            Some(control::PASTE_END) => sink(Op::PasteEnd),
+            Some(param) => {
+                if let Some(key) = Key::from_tilde_param(param) {
+                    sink(Op::Key(key));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Dispatch a `CSI < Cb ; Cx ; Cy M` (press) or `… m` (release) SGR mouse
+    /// report. A report missing its coordinates is malformed and dropped.
+    fn dispatch_mouse(&self, pressed: bool, sink: &mut impl FnMut(Op)) {
+        let (Some(&cb), Some(&col), Some(&row)) =
+            (self.params.first(), self.params.get(1), self.params.get(2))
+        else {
+            return;
+        };
+        sink(Op::Mouse(MouseReport::decode(cb, col, row, pressed)));
     }
 
     /// Dispatch `DECSTBM`: two parameters set the region, fewer reset it.
@@ -305,7 +357,12 @@ impl Parser {
                     Op::LeaveAltScreen
                 }
             }
-            _ => return,
+            Some(control::MODE_BRACKETED_PASTE) => Op::SetBracketedPaste(set),
+            Some(number) => match MouseMode::from_mode_number(number) {
+                Some(mode) => Op::SetMouseMode { mode, enable: set },
+                None => return,
+            },
+            None => return,
         };
         sink(op);
     }

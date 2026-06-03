@@ -145,6 +145,8 @@ falls back safely" test; a test that no record emits a sequence absent from
 
 ### Stage C4 — `lib/curses`: the TUI/screen-model library (core)
 
+**Status: done** (see `PLAN.md`, "CURSES Stage C4").
+
 **Deliverables**
 - New `no_std` + `alloc` crate `lib/curses`, I/O-injected, building on
   `lib/vt` + `lib/termcap`:

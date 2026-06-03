@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 
 use crate::attr::Attributes;
 use crate::color::{BasicColor, Color};
+use crate::key::Key;
+use crate::mouse::{MouseButton, MouseMode, MouseReport};
 use crate::op::EraseMode;
 use crate::{encode, encode_all, Op, Parser, Sgr};
 
@@ -134,6 +136,119 @@ fn mode_and_cursor_state_ops_round_trip() {
     ] {
         assert_round_trip(op);
     }
+}
+
+#[test]
+fn every_named_key_round_trips() {
+    for key in Key::ALL {
+        assert_round_trip(Op::Key(key));
+    }
+}
+
+#[test]
+fn known_key_sequences_decode() {
+    // The two encodings xterm uses: `SS3` for `F1`..`F4`, `CSI <n> ~` for the
+    // rest and the editing keys.
+    assert_eq!(parse_all(b"\x1bOP"), vec![Op::Key(Key::F1)]);
+    assert_eq!(parse_all(b"\x1bOS"), vec![Op::Key(Key::F4)]);
+    assert_eq!(parse_all(b"\x1b[15~"), vec![Op::Key(Key::F5)]);
+    assert_eq!(parse_all(b"\x1b[3~"), vec![Op::Key(Key::Delete)]);
+    assert_eq!(parse_all(b"\x1b[6~"), vec![Op::Key(Key::PageDown)]);
+    // The application-mode Home/End alternates also decode.
+    assert_eq!(parse_all(b"\x1bOH"), vec![Op::Key(Key::Home)]);
+    assert_eq!(parse_all(b"\x1bOF"), vec![Op::Key(Key::End)]);
+    // An unknown `SS3` final and an unknown `~` parameter fail closed.
+    assert_eq!(parse_all(b"\x1bOZ"), vec![]);
+    assert_eq!(parse_all(b"\x1b[99~"), vec![]);
+}
+
+#[test]
+fn every_mouse_mode_toggle_round_trips() {
+    for mode in MouseMode::ALL {
+        assert_round_trip(Op::SetMouseMode { mode, enable: true });
+        assert_round_trip(Op::SetMouseMode {
+            mode,
+            enable: false,
+        });
+    }
+}
+
+#[test]
+fn mouse_reports_round_trip() {
+    let buttons = [
+        MouseButton::Left,
+        MouseButton::Middle,
+        MouseButton::Right,
+        MouseButton::None,
+        MouseButton::WheelUp,
+        MouseButton::WheelDown,
+    ];
+    for button in buttons {
+        for pressed in [true, false] {
+            for (motion, shift, meta, ctrl) in [
+                (false, false, false, false),
+                (true, true, true, true),
+                (true, false, true, false),
+            ] {
+                assert_round_trip(Op::Mouse(MouseReport {
+                    button,
+                    col: 12,
+                    row: 34,
+                    pressed,
+                    motion,
+                    shift,
+                    meta,
+                    ctrl,
+                }));
+            }
+        }
+    }
+}
+
+#[test]
+fn known_mouse_report_decodes() {
+    // `CSI < 0 ; 10 ; 5 M`: left button pressed at column 10, row 5.
+    assert_eq!(
+        parse_all(b"\x1b[<0;10;5M"),
+        vec![Op::Mouse(MouseReport {
+            button: MouseButton::Left,
+            col: 10,
+            row: 5,
+            pressed: true,
+            motion: false,
+            shift: false,
+            meta: false,
+            ctrl: false,
+        })]
+    );
+    // The release final `m` is *not* an SGR reset when the `<` prefix is present.
+    assert_eq!(
+        parse_all(b"\x1b[<2;1;1m"),
+        vec![Op::Mouse(MouseReport {
+            button: MouseButton::Right,
+            col: 1,
+            row: 1,
+            pressed: false,
+            motion: false,
+            shift: false,
+            meta: false,
+            ctrl: false,
+        })]
+    );
+    // ...while a bare `CSI m` is still an SGR reset.
+    assert_eq!(parse_all(b"\x1b[m"), vec![Op::Sgr(Sgr::Reset)]);
+    // A mouse report missing a coordinate is malformed and dropped.
+    assert_eq!(parse_all(b"\x1b[<0;5M"), vec![]);
+}
+
+#[test]
+fn bracketed_paste_ops_round_trip() {
+    assert_round_trip(Op::SetBracketedPaste(true));
+    assert_round_trip(Op::SetBracketedPaste(false));
+    assert_round_trip(Op::PasteStart);
+    assert_round_trip(Op::PasteEnd);
+    assert_eq!(parse_all(b"\x1b[200~"), vec![Op::PasteStart]);
+    assert_eq!(parse_all(b"\x1b[201~"), vec![Op::PasteEnd]);
 }
 
 #[test]

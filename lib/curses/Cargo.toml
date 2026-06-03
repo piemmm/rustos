@@ -1,0 +1,16 @@
+[package]
+name = "rustos-curses"
+description = "RustOS first-party curses / TUI screen-model library (CURSES.md Stage C4): a no_std + alloc, I/O-injected client screen model (windows, sub-windows, pads), a minimal-diff renderer that emits the smallest `lib/vt` sequence set the active `rustos_termcap::TermType` supports (degrading truecolour -> 256 -> 16 -> mono by colour depth), and an input decoder that turns `lib/vt`-parsed escape sequences into typed key/mouse/paste events. One shared vocabulary (AGENTS.md §2.2); statically linked by apps (§16.4); fail-closed, never panics (§2.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-vt = { path = "../vt", version = "=0.0.0" }
+rustos-termcap = { path = "../termcap", version = "=0.0.0" }
+
+[lints]
+workspace = true
