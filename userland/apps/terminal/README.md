@@ -13,27 +13,47 @@ file browser it is a graphical app, so it consumes the same `lib/*` building
 blocks the taskbar does — `lib/geometry`, `lib/theme`, `lib/raster`,
 `lib/font` — and never depends on the window manager (`AGENTS.md` §17.4).
 
+The emulator is a **consumer of the shared `lib/vt` ANSI/VT/xterm vocabulary**
+(`plans/CURSES.md` C2): its `Parser` is a thin adapter over `lib/vt`'s
+streaming parser and its cells store `lib/vt`'s `Cell`/`Attributes`, so there
+is exactly one escape-sequence definition in the tree — never a second,
+divergent parser in this app (`AGENTS.md` §2.2).
+
 ## Screen model (`Grid`)
 
-`Grid` is a fixed `cols`×`rows` rectangle of cells with a cursor. It exposes
-the cursor-relative operations a terminal needs — write a glyph (wrapping and
-scrolling at the edges), the C0 moves (backspace, tab, line feed, carriage
-return), absolute/relative cursor positioning, the ANSI erase operations, and
-clear. Every operation is total and saturating, so an out-of-range coordinate
-clamps and a full screen scrolls rather than growing: a hostile or buggy byte
-stream can never index out of bounds or panic (`AGENTS.md` §2.9).
+`Grid` is a fixed `cols`×`rows` rectangle of `lib/vt` `Cell`s (a glyph plus its
+folded `Attributes`) with a cursor and a current rendition pen. It exposes the
+cursor-relative operations a terminal needs — write a glyph with the pen
+(wrapping and scrolling at the edges), the C0 moves, absolute/relative cursor
+positioning, the ANSI erase operations, the scroll region and explicit
+scrolling, the alternate screen (which saves and restores the main screen),
+cursor visibility, the saved cursor, the window title, and clear. Every
+operation is total and saturating, so an out-of-range coordinate clamps and a
+full region scrolls rather than growing: a hostile or buggy byte stream can
+never index out of bounds or panic (`AGENTS.md` §2.9).
 
 ## Control parser (`Parser`)
 
-`Parser` is the streaming interpreter from shell output bytes to `Grid`
-operations. It recognises printable ASCII, the C0 controls, and a subset of
-ANSI CSI escape sequences (cursor movement `A`/`B`/`C`/`D`, positioning
-`H`/`f`, erase-in-line `K`, erase-in-display `J`). Anything else — a byte
-`>= 0x80`, an unrecognised escape, or an unsupported CSI final byte — is
-consumed without disturbing the screen, so a stream the terminal does not
-fully understand degrades to dropped control rather than a corrupted display
-(`AGENTS.md` §2.9). Holding the escape-sequence state in the parser keeps the
-screen model free of parsing concerns (`AGENTS.md` §2.3).
+`Parser` is a thin adapter over `lib/vt`'s streaming parser: it lets `lib/vt`
+turn shell output bytes into the shared `Op` vocabulary and applies each `Op`
+to the `Grid`. The emulator is therefore xterm-class — printable text and
+Unicode, the C0 controls, SGR rendition with the 16/256/truecolour colour
+models, cursor movement and absolute positioning, the erase operations, the
+scroll region (`DECSTBM`) and explicit scrolling, the alternate screen
+(`?1049`), cursor visibility (`?25`), the saved cursor (`ESC 7`/`ESC 8`), and
+the OSC window title. Because `lib/vt`'s parser is total, an unrecognised,
+oversized, or malformed sequence is consumed without disturbing the screen, so
+a stream the terminal does not understand degrades to dropped control rather
+than a corrupted display or a panic (`AGENTS.md` §2.9). Holding the
+escape-sequence state in the parser keeps the screen model free of parsing
+concerns (`AGENTS.md` §2.3).
+
+### The `TERM` it advertises
+
+Every capability `xterm-256color` implies is really parsed, so the emulator
+honestly advertises that name through the `TERM` constant (`AGENTS.md` §2.2 —
+no lying about capabilities). The compiled-in capability database that maps a
+`TERM` to its full record is the next `plans/CURSES.md` stage (`lib/termcap`).
 
 ## Terminal glue (`Terminal`)
 
@@ -52,12 +72,16 @@ unchanged (`AGENTS.md` §5.4).
 
 `render(terminal, theme, viewport)` paints the grid into a `lib/raster`
 `Surface` sized to the viewport, using the active theme's palette and the
-shared `lib/font` monospace face. Each grid cell maps to one glyph cell and
-the cursor cell is highlighted with the accent role. The surface is the
-compositor's to place and round — there is no rounding and no colour algebra
-here (`AGENTS.md` §2.2). Every length saturates and every blit clips, so a
-viewport smaller than the grid paints what fits rather than panicking
-(`AGENTS.md` §2.9).
+shared `lib/font` monospace face. Each cell is drawn with its own rendition:
+its `lib/vt` `Attributes` select the foreground and background, resolved one
+way (`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /
+`surface` roles, the 16 basic colours and the 256-colour palette map through
+the standard ANSI tables, truecolour is used directly, `reverse` swaps the
+pair, and `bold` brightens a basic colour. The visible cursor cell is
+highlighted with the accent role. The surface is the compositor's to place and
+round — there is no rounding here. Every length saturates and every blit
+clips, so a viewport smaller than the grid paints what fits rather than
+panicking (`AGENTS.md` §2.9).
 
 ## Seam
 
@@ -80,12 +104,17 @@ production paths (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-terminal` (23 unit tests): grid sizing fail-closed;
+`cargo test -p rustos-terminal` (34 unit tests): grid sizing fail-closed;
 text fill + cursor advance; right-edge wrap; last-row scroll on CRLF and
 line-feed-only down-move; carriage-return overwrite; backspace; tab stops;
 CSI cursor positioning (1-based and home default), relative moves defaulting
 to one, erase-in-line and erase-in-display; dropping unrecognised escapes and
-high bytes; `pump` applying output, the empty read, and read-error
-propagation; `send` forwarding without echo, the seam capturing bytes
-verbatim, and write-error propagation; and the renderer (viewport sizing,
-cursor highlight, and a degenerate zero-width viewport).
+high bytes; SGR folding (bold/colour, reset, 256-index and truecolour); the
+scroll region confining scrolling and the bottom-margin line feed; the
+alternate screen saving and restoring the main screen; cursor visibility and
+the hidden cursor not painting; the OSC window title; the saved cursor
+round-tripping position and pen; the §2.2 emitter↔consumer "one vocabulary"
+identity; `pump` applying output, the empty read, and read-error propagation;
+`send` forwarding without echo, the seam capturing bytes verbatim, and
+write-error propagation; and the renderer (viewport sizing, cursor highlight,
+and a degenerate zero-width viewport).

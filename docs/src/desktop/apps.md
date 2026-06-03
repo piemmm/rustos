@@ -82,17 +82,29 @@ job-control authority lives behind the seam, not in the app.
 
 ### The screen model
 
-`Grid` is a fixed `cols`×`rows` rectangle of cells with a cursor; it exposes
-the cursor-relative operations a terminal needs — writing a glyph (wrapping and
-scrolling at the edges), the C0 moves (backspace, tab, line feed, carriage
-return), absolute/relative cursor positioning, the ANSI erase operations, and
-clear. `Parser` is the streaming interpreter from shell output bytes to those
-operations: it handles printable ASCII, the C0 controls, and a subset of ANSI
-CSI escape sequences (cursor movement `A`/`B`/`C`/`D`, positioning `H`/`f`,
-erase-in-line `K`, erase-in-display `J`). Anything else — a byte `>= 0x80`, an
-unrecognised escape, or an unsupported CSI final byte — is consumed without
-disturbing the screen, so an unfamiliar stream degrades to dropped control
-rather than a corrupted display or a panic (`AGENTS.md` §2.9).
+`Grid` is a fixed `cols`×`rows` rectangle of `lib/vt` `Cell`s — a glyph plus
+its folded `Attributes` — with a cursor and a rendition pen. It exposes the
+cursor-relative operations a terminal needs: writing a glyph with the pen
+(wrapping and scrolling at the edges), the C0 moves, absolute/relative cursor
+positioning, the ANSI erase operations, the scroll region and explicit
+scrolling, the alternate screen, cursor visibility, the saved cursor, the
+window title, and clear.
+
+`Parser` is a thin **consumer** of the shared `lib/vt` ANSI/VT/xterm
+vocabulary (`plans/CURSES.md` C2): it lets `lib/vt`'s streaming parser turn
+shell output bytes into the shared `Op` vocabulary and applies each `Op` to
+the grid, so there is exactly one escape-sequence definition in the tree, not
+a second divergent one (`AGENTS.md` §2.2). The emulator is xterm-class —
+printable text and Unicode, the C0 controls, SGR rendition with the
+16/256/truecolour colour models, cursor addressing, the erase operations, the
+scroll region (`DECSTBM`), the alternate screen (`?1049`), cursor visibility
+(`?25`), the saved cursor (`ESC 7`/`ESC 8`), and the OSC window title — and it
+honestly advertises `xterm-256color` because every capability that name
+implies is really parsed (the compiled-in capability database is the next
+`plans/CURSES.md` stage, `lib/termcap`). Because `lib/vt`'s parser is total, an
+unrecognised, oversized, or malformed sequence is consumed without disturbing
+the screen, so an unfamiliar stream degrades to dropped control rather than a
+corrupted display or a panic (`AGENTS.md` §2.9).
 
 `Terminal` ties the grid, the parser, and the seam together: `pump` reads the
 shell's output and applies it to the screen, and `send` / `send_str` forward
@@ -104,14 +116,17 @@ unchanged (`AGENTS.md` §5.4).
 ### Rendering
 
 `render(terminal, theme, viewport)` paints the grid into a `rustos-raster`
-`Surface` sized to the viewport, using the theme's palette for every colour and
-the shared `rustos-font` monospace face for every glyph. Each grid cell maps to
-one glyph cell and the cursor cell is highlighted with the accent role. The
-surface is rectangular; the compositor places and rounds it through its single
-anti-aliased rounded-corner path, so there is no rounding — and no colour
-algebra — in the app (`AGENTS.md` §2.2). Every length saturates so a viewport
-smaller than the grid paints what fits rather than panicking (`AGENTS.md`
-§2.9).
+`Surface` sized to the viewport, using the theme's palette and the shared
+`rustos-font` monospace face. Each cell is drawn with its own rendition: its
+`lib/vt` `Attributes` select the foreground and background, resolved one way
+(`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /
+`surface` roles, the 16 basic colours and the 256-colour palette map through
+the standard ANSI tables, truecolour is used directly, `reverse` swaps the
+pair, and `bold` brightens a basic colour. The visible cursor cell is
+highlighted with the accent role. The surface is rectangular; the compositor
+places and rounds it through its single anti-aliased rounded-corner path, so
+there is no rounding in the app. Every length saturates so a viewport smaller
+than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
 
 ### Still to do
 

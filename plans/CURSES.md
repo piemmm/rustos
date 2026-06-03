@@ -73,6 +73,8 @@ its predecessor is green on the whole-project gate (§7).
 
 ### Stage C1 — `lib/vt`: the shared escape/attribute vocabulary
 
+**Status: done** (see `PLAN.md`, "CURSES Stage C1").
+
 **Deliverables**
 - New `no_std` crate `lib/vt` (the canonical ANSI/VT/xterm vocabulary):
   - CSI/OSC/DCS introducers and the C0/C1 control set as typed constants.
@@ -99,6 +101,8 @@ target for the parser (untrusted input, §19.5/§19.6) registered in
 `docs/src/SUMMARY.md`.
 
 ### Stage C2 — Refactor `userland/apps/terminal` onto `lib/vt`
+
+**Status: done** (see `PLAN.md`, "CURSES Stage C2").
 
 **Deliverables**
 - Replace the terminal's private `parser.rs` control set with `lib/vt`'s

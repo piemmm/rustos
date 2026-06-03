@@ -6697,9 +6697,55 @@ adds no kernel/user ABI surface, only a new `lib/*` crate.
    rustdoc on every public item with a crate-level doctest.
 
 Layering (§17.4): `lib/vt` depends on `lib/*` only and lives outside
-`userland/gui/*`, so a headless image links it freely (§17.3). C2 (refactor
-`userland/apps/terminal` onto `lib/vt`) is the next stage and has not been
-started.
+`userland/gui/*`, so a headless image links it freely (§17.3).
+
+---
+
+## CURSES Stage C2 — refactor `userland/apps/terminal` onto `lib/vt`
+
+**Status:** done.
+
+Second stage of `plans/CURSES.md`. The terminal emulator stops carrying a
+private escape-sequence parser and becomes a *consumer* of the one shared
+`lib/vt` vocabulary, so there is a single escape-sequence definition in the
+tree (§2.2). No kernel/user ABI surface changed.
+
+1. **`Parser` is now a thin adapter over `lib/vt`** (`userland/apps/terminal/
+   src/parser.rs`) — it feeds bytes to `rustos_vt::Parser` and applies each
+   `Op` to the `Grid`; the old hand-written CSI subset state machine is gone.
+2. **`Grid` consumes `lib/vt`'s `Cell`/`Attributes`** (`grid.rs`) — each cell
+   stores a glyph plus its folded `Attributes`, and the grid grew a rendition
+   pen, cursor visibility, a scroll region (with region-confined line-feed and
+   `SU`/`SD` scrolling), the alternate screen (saving/restoring the main
+   screen), the saved cursor (`ESC 7`/`ESC 8`), and the OSC window title. The
+   erase ops now take `lib/vt`'s `EraseMode`. Every op stays total and
+   clamping (§2.9).
+3. **The emulator is xterm-class and advertises honestly** — `lib.rs`
+   re-exports `rustos_vt::{Cell, Attributes, Color}` and adds the `TERM`
+   constant (`xterm-256color`); every capability that name implies (16/256/
+   truecolour SGR, cursor addressing, erase, scroll region, alt-screen, cursor
+   visibility) is really parsed, so the advertised `TERM` is not a lie (§2.2).
+4. **Rendering resolves colour one way** (`render.rs`) — each cell is painted
+   with its own rendition: a `Default` colour takes the theme's
+   `on_surface`/`surface` roles, the 16 basic colours and the 256-colour
+   palette map through the standard ANSI tables, truecolour is used directly,
+   `reverse` swaps the pair, and `bold` brightens a basic colour; the visible
+   cursor cell keeps the accent highlight.
+5. **Tests** (§7) — `userland/apps/terminal/src/tests.rs` grew from 23 to 34
+   unit tests: SGR folding (bold/colour, reset, 256-index, truecolour), the
+   scroll region confining scrolling and the bottom-margin line feed, the
+   alternate screen saving/restoring the main screen, cursor visibility and
+   the hidden cursor not painting, the OSC window title, the saved cursor
+   round-tripping position and pen, and the §2.2 emitter↔consumer "one
+   vocabulary" identity (feed `lib/vt`'s `encode_all` output, assert the
+   grid). The existing grid/cursor/erase/`pump`/`send`/render tests were
+   migrated to the shared `Cell`.
+6. **Docs** (§13) — `userland/apps/terminal/README.md` and the terminal
+   section of `docs/src/desktop/apps.md` describe the shared-vocabulary
+   consumer, the xterm-class capabilities, and the honest `TERM`.
+
+C3 (`lib/termcap`, the compiled-in capability database keyed by `TERM`) is the
+next stage and has not been started.
 
 ---
 

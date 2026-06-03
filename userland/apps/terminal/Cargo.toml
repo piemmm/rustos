@@ -13,6 +13,11 @@ publish.workspace = true
 # invents no parallel error set for the kernel boundary (§2.2) and never links
 # a kernel or driver crate (§17.4).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The single shared ANSI/VT/xterm escape + attribute vocabulary (`plans/CURSES.md`
+# C1/C2): the terminal is a *consumer* of `lib/vt`'s `Parser`/`Op`/`Cell`, so
+# there is exactly one escape-sequence definition in the tree — never a second,
+# divergent parser in this app (`AGENTS.md` §2.2).
+rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # Shared integer screen geometry (`Rect`) — the same vocabulary the window
 # manager and taskbar use, lifted to `lib/*` so the app reuses it without
 # depending on the window manager (§17.4, §2.2).
