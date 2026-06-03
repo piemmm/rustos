@@ -75,6 +75,13 @@
 //! [`ShellOutcome`] for the embedder (which holds the framebuffer, power, and
 //! spawn capabilities) to act on (`AGENTS.md` §10, §16.5).
 //!
+//! The live backing for that [`InputSource`] is [`DeviceInputSource`] (the
+//! [`device`] module): it reads framed
+//! [`PointerInput`](rustos_abi::input::PointerInput) records from an injected
+//! [`PointerInputChannel`] (the kernel input channel) and decodes each into
+//! the `lib/input` [`InputEvent`](rustos_wm::InputEvent) the shell routes,
+//! failing closed on a malformed record (`AGENTS.md` §5.4 / §19.5).
+//!
 //! # Running-task list ↔ window stack
 //!
 //! The taskbar models a running-task list but owns no window manager, and the
@@ -104,6 +111,7 @@
 extern crate alloc;
 
 pub mod assets;
+pub mod device;
 pub mod input;
 pub mod presenter;
 pub mod session;
@@ -114,6 +122,7 @@ pub mod tasks;
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};

@@ -20,6 +20,7 @@ pub mod appinfo;
 pub mod capability;
 pub mod driver;
 pub mod error;
+pub mod input;
 pub mod ipc;
 pub(crate) mod le;
 pub mod manifest;
@@ -46,6 +47,10 @@ pub use driver::{
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
 pub use error::Errno;
+pub use input::{
+    PointerButtonCode, PointerInput, BUTTON_NONE, KIND_MOVED, KIND_PRESSED, KIND_RELEASED,
+    POINTER_INPUT_MAGIC,
+};
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
@@ -87,6 +92,16 @@ pub const ABI_VERSION_V1: u32 = 1;
 /// constant will be re-pointed and `abi-v1` will move to a compatibility
 /// submodule rather than mutate in place.
 pub const ABI_VERSION_CURRENT: u32 = ABI_VERSION_V1;
+
+/// [`ABI_VERSION_CURRENT`] as the `u16` carried by the wire formats whose
+/// version field is two bytes wide (for example [`ipc::IpcMessageHeader`] and
+/// [`input::PointerInput`]). Defined once so an encoder never open-codes a
+/// truncating `as u16` cast at the call site (`AGENTS.md` §2.2).
+// `ABI_VERSION_V1` is 1 and every supported ABI version fits in a `u16`; the
+// narrowing is exact, and a future version that did not fit would be a
+// deliberate ABI decision made here, not a silent truncation.
+#[allow(clippy::cast_possible_truncation)]
+pub const ABI_VERSION_CURRENT_U16: u16 = ABI_VERSION_V1 as u16;
 
 /// Result alias used throughout the ABI surface.
 ///

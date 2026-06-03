@@ -135,6 +135,22 @@ passed in on each call. A loaded notification-icon set is installed with
 `set_icons`, a title-bar drag armed with `begin_move`, and the desktop torn
 down with `teardown`.
 
+## Live device input source
+
+`DeviceInputSource` (the `device` module) is the live backing for the shell's
+`InputSource` seam. It wraps an injected `PointerInputChannel` — a
+capability-checked kernel input channel on a running system, an in-memory queue
+in tests (`AGENTS.md` §7) — that hands the desktop one framed
+`rustos_abi::input::PointerInput` record at a time. Each `poll` decodes one
+record through `PointerInput::from_bytes` into the `lib/input` `InputEvent` the
+window manager and taskbar route: an absolute `PointerMoved`, or a
+`PointerPressed` / `PointerReleased` carrying the resolved `PointerButton`. The
+crate holds no input capability of its own — the channel delivers the bytes and
+the decode runs above the device (`AGENTS.md` §17.4 / §19.5) — and a malformed
+record fails closed with its `Errno` rather than being misinterpreted. The ABI
+record is the desktop-level pointer event, a distinct layer from the
+device-level driver input ABI, not a duplicate of it (`AGENTS.md` §2.2).
+
 ## Running-task list ↔ window stack
 
 `TaskBridge` keeps the taskbar's running-task list in step with the window
@@ -169,7 +185,8 @@ embedder's, passed in per call.
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
 `rustos-wm`, and the shared `rustos-theme` definition, plus `rustos-cursor` /
 `rustos-icon` (the SVG set builders) and `rustos-abi` (the `Errno` the read
-seam returns) (`AGENTS.md` §17.4). Composing GUI crates is the permitted
+seam returns and the `PointerInput` record the device source decodes)
+(`AGENTS.md` §17.4). Composing GUI crates is the permitted
 `userland/gui/*` edge; nothing outside `userland/gui/*` depends on it (§17.3),
 so a headless image omits it cleanly.
 
@@ -178,10 +195,12 @@ production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7)
 
-Backing the `DesktopShell`'s `InputSource` with a live pointer/keyboard device
-channel and relaying the active theme to the window manager and apps over live
-IPC (the event loop, routing policy, and surface glue now exist), resolving
-launcher / session-control actions once the process and window-manager
-capabilities are wired (deferred Stage 6 work), and the VFS-backed
-`GraphicsAssetReader` that reads `/System/Graphics` on a running system (the
-in-memory-tested loader and its fallbacks now exist).
+Relaying the active theme to the window manager and apps over live IPC (the
+event loop, routing policy, surface glue, and the `DeviceInputSource` that
+feeds it a live pointer stream now all exist), backing the
+`PointerInputChannel` with a real kernel input channel (the decode and its
+fail-closed fallbacks are done and tested in-memory), resolving launcher /
+session-control actions once the process and window-manager capabilities are
+wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
+reads `/System/Graphics` on a running system (the in-memory-tested loader and
+its fallbacks now exist).

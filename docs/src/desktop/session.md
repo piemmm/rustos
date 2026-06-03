@@ -170,10 +170,28 @@ performing a session control, launching an app — is surfaced as a
 `ShellOutcome` for the embedder, which holds those capabilities (`AGENTS.md`
 §16.5).
 
-Backing the `InputSource` with a live device channel and relaying the
-appearance switch to the WM and apps over IPC remain later increments; this
-increment is the in-process event loop that ties the routing policy and the
-surface glue together.
+## Live device input source
+
+The `InputSource` the shell `pump`s is now backed by a live device channel.
+`DeviceInputSource` (the `device` module) wraps an injected
+`PointerInputChannel` seam — a capability-checked kernel input channel on a
+running system, an in-memory queue in tests (`AGENTS.md` §7) — that hands the
+desktop one framed `rustos_abi::input::PointerInput` record at a time. Each
+`poll` reads one record and decodes it through `PointerInput::from_bytes` into
+the `lib/input` `InputEvent` the window manager and taskbar route: a `Moved`
+record becomes an absolute `PointerMoved`, a `Pressed` / `Released` record
+becomes a `PointerPressed` / `PointerReleased` carrying the resolved
+`PointerButton`. The crate holds no input capability of its own — the channel
+delivers the bytes and the decode runs above the device (`AGENTS.md` §17.4 /
+§19.5) — and a malformed record fails closed with its `Errno` rather than being
+misinterpreted, ending the shell's `pump` without disturbing the events already
+applied (`AGENTS.md` §5.4 / §2.9). The ABI record itself is the desktop-level
+pointer event documented in [Pointer input events](../abi/input.md); it is a
+distinct layer from the device-level driver input ABI, not a duplicate of it
+(`AGENTS.md` §2.2).
+
+Relaying the appearance switch to the WM and apps over IPC remains a later
+increment; the desktop now reads a live pointer-event stream end to end.
 
 ## Tests
 
@@ -208,4 +226,9 @@ click restoring and re-focusing it; clicking a window directly moving both the
 window-manager focus and the bar highlight; pressing the desktop clearing the
 highlight while the task stays listed; the window↔task mapping both ways;
 activating an unknown task changing nothing; and syncing focus to an untracked
-window leaving the highlight in place while clearing it on a desktop press.
+window leaving the highlight in place while clearing it on a desktop press. It
+also covers `DeviceInputSource`: decoding a `Moved` record to an absolute
+`PointerMoved`, each pointer button for press and release, a malformed
+(all-zero) record surfacing `BadMagic` rather than being misinterpreted, a
+channel fault propagating while a queued record still decodes afterwards, and
+`into_channel` returning the wrapped channel.

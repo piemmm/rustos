@@ -25,6 +25,7 @@
 //! bit-flip harness is an exhaustive boundary sweep, not a random one,
 //! so it runs once regardless of the budget.
 
+use rustos_abi::input::PointerInput;
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
     SysinfoRequestHeader, SystemIdentity, Uptime,
@@ -130,6 +131,11 @@ fn exercise(bytes: &[u8]) {
         let redecoded = Duration64::from_bytes(&duration.to_le_bytes())
             .expect("round-trip of an accepted duration must succeed");
         assert_eq!(duration, redecoded);
+    }
+    if let Ok(event) = PointerInput::from_bytes(bytes) {
+        let redecoded = PointerInput::from_bytes(&event.to_le_bytes())
+            .expect("round-trip of an accepted pointer event must succeed");
+        assert_eq!(event, redecoded);
     }
 }
 

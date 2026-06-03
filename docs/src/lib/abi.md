@@ -11,6 +11,10 @@ Defines the frozen `abi-v1` interface between the kernel and user space.
   this directly.
 * `IpcMessageHeader` — 32-byte little-endian header carried in front of
   every IPC message.
+* `PointerInput` — 20-byte little-endian desktop pointer event (absolute
+  move, or a resolved primary/secondary/middle press/release) the window
+  manager and taskbar route. Distinct from the device-level
+  `driver::input::InputEvent` (see [Pointer input events](../abi/input.md)).
 * `ManifestHeader` — fixed-size prefix of the signed `rxe` manifest section,
   including the SHA-256 syscall-table fingerprint, the Ed25519 public key,
   and the signature.

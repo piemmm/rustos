@@ -43,6 +43,16 @@ pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 #[inline]
+pub(crate) fn read_i32(bytes: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+#[inline]
 pub(crate) fn read_i64(bytes: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes([
         bytes[offset],
@@ -86,6 +96,15 @@ pub(crate) fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 }
 
 #[inline]
+pub(crate) fn put_i32(bytes: &mut [u8], offset: usize, value: i32) {
+    let v = value.to_le_bytes();
+    bytes[offset] = v[0];
+    bytes[offset + 1] = v[1];
+    bytes[offset + 2] = v[2];
+    bytes[offset + 3] = v[3];
+}
+
+#[inline]
 pub(crate) fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
     let v = value.to_le_bytes();
     bytes[offset] = v[0];
@@ -100,7 +119,18 @@ pub(crate) fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{put_i64, put_u16, put_u32, put_u64, read_i64, read_u16, read_u32, read_u64};
+    use super::{
+        put_i32, put_i64, put_u16, put_u32, put_u64, read_i32, read_i64, read_u16, read_u32,
+        read_u64,
+    };
+
+    #[test]
+    fn i32_round_trips_negative_at_offset() {
+        let mut buf = [0u8; 8];
+        put_i32(&mut buf, 2, -2);
+        assert_eq!(read_i32(&buf, 2), -2);
+        assert_eq!(&buf[2..6], &[0xFE, 0xFF, 0xFF, 0xFF]);
+    }
 
     #[test]
     fn u16_round_trips_at_offset() {

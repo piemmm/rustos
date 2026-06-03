@@ -5486,6 +5486,33 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** backing
   the `InputSource` with a live device channel and relaying the theme switch
   over IPC.
+- **Live pointer-input ABI + device input source — DONE (increment).** The
+  `DesktopShell` consumed an injected `InputSource` but had no live backing:
+  there was no ABI for a pointer event to cross the kernel boundary to the
+  desktop. Treating `abi-v1` as **not** frozen (the task direction supersedes
+  the charter's / this plan's "frozen" language), `lib/abi` gains an `input`
+  module: `PointerInput` — a typed 20-byte little-endian record (an absolute
+  `Moved`, or a `Pressed`/`Released` carrying a `PointerButtonCode` of
+  primary/secondary/middle) with `to_le_bytes` and a fail-closed `from_bytes`
+  that validates magic, version, the reserved field, the kind, and the
+  button/coordinate consistency (§5.4 / §19.5). It is the *desktop-level*
+  pointer event — deliberately **distinct** from the *device-level*
+  `driver::input::InputEvent` (relative deltas + keycodes), not a duplicate of
+  it (§2.2). The decoder is enrolled in the `lib/abi` fuzz harness (§19.6), and
+  `ABI_VERSION_CURRENT_U16` + `le::{read_i32,put_i32}` were added so no encoder
+  open-codes a truncating cast (§2.2). `userland/gui/session` gains a `device`
+  module: `DeviceInputSource` wraps an injected `PointerInputChannel` (the
+  kernel input channel; an in-memory queue in tests, §7), and each `poll`
+  decodes one `PointerInput` record into the `lib/input` `InputEvent` the WM
+  and taskbar route — a malformed record surfaces its `Errno` rather than being
+  misinterpreted (§2.9). This closes "backing the `InputSource` with a live
+  device channel" (only wiring the channel to a real kernel endpoint remains).
+  13 new `rustos-abi` `input` tests + 1 `le` test, 5 new
+  `rustos-desktop-session` tests (51 total). `docs/src/abi/input.md` (+
+  SUMMARY), `docs/src/lib/abi.md`, `docs/src/desktop/session.md`, and the
+  session `README.md`. No `unsafe`, no `unwrap`/`expect`/`panic!` in production
+  paths. **Still open here:** relaying the theme switch over IPC and giving the
+  `PointerInputChannel` a real kernel-endpoint backing.
 - **Per-output (per-monitor) DPI ownership — DONE (increment).** The desktop
   UI scale was tightened to the correct multi-monitor shape: display density
   is a property of an **output**, owned by the **compositor**, not a
