@@ -46,13 +46,16 @@ pub struct Scheduler<A: SchedulerArch> {
     tasks: RwLock<BTreeMap<TaskId, Arc<TaskInner>>>,
     next_id: AtomicU64,
     config: SchedulerConfig,
-    /// Fast, non-cryptographic generator for work-stealing victim
-    /// selection. This is a "scheduler decision" in the sense of
+    /// Per-CPU fast, non-cryptographic generators for work-stealing
+    /// victim selection. This is a "scheduler decision" in the sense of
     /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
     /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
-    /// one. `next_victim` takes `&self`, so the generator's `&mut self`
-    /// stepping lives behind a brief [`SpinLock`].
-    victim_rng: SpinLock<FastRng>,
+    /// one. `next_victim` takes `&self`, so each generator's `&mut self`
+    /// stepping lives behind a [`SpinLock`] — but the slot is indexed by
+    /// the *calling* CPU, so the lock is always uncontended on the
+    /// work-stealing path (every idle CPU draws from its own stream
+    /// rather than serialising on one global generator).
+    victim_rng: Box<[SpinLock<FastRng>]>,
     overflow: SpinLock<Vec<TaskId>>,
     preemptions: Box<[AtomicU64]>,
     current: Box<[AtomicU64]>,
@@ -90,9 +93,16 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
         let mut preemptions = Vec::with_capacity(config.cpus as usize);
         let mut current = Vec::with_capacity(config.cpus as usize);
-        for _ in 0..config.cpus {
+        let mut victim_rng = Vec::with_capacity(config.cpus as usize);
+        for cpu in 0..config.cpus {
             preemptions.push(AtomicU64::new(0));
             current.push(AtomicU64::new(0));
+            // One generator per CPU so the work-stealing draw never
+            // contends; the base constant is perturbed by the CPU id so
+            // the streams start independent.
+            victim_rng.push(SpinLock::new(FastRng::seed_from_u64(
+                0x9E37_79B9_7F4A_7C15 ^ u64::from(cpu),
+            )));
         }
         let mut core_classes = Vec::with_capacity(config.cpus as usize);
         let mut perf_cpus = Vec::new();
@@ -111,7 +121,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             tasks: RwLock::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             config,
-            victim_rng: SpinLock::new(FastRng::seed_from_u64(0x9E37_79B9_7F4A_7C15)),
+            victim_rng: victim_rng.into_boxed_slice(),
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
@@ -455,11 +465,11 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
-        let s = self.victim_rng.lock().next_u64();
+        let s = self.victim_rng[cpu as usize].lock().next_u64();
         #[allow(clippy::cast_possible_truncation)]
         {
             let n = self.cpus.len() as u64;
-            ((s.wrapping_add(u64::from(cpu))) % n) as u32
+            (s % n) as u32
         }
     }
 

@@ -98,15 +98,16 @@ pub struct Scheduler<A: SchedulerArch> {
     next_id: AtomicU64,
     config: SchedulerConfig,
     last_boost_tick: AtomicU64,
-    /// Fast, non-cryptographic generator for work-stealing victim
-    /// selection. This is a "scheduler decision" in the sense of
+    /// Per-CPU fast, non-cryptographic generators for work-stealing
+    /// victim selection. This is a "scheduler decision" in the sense of
     /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
     /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
-    /// one. It is per-scheduler, not per-CPU, because the cost of a
-    /// single brief [`SpinLock`] acquisition dwarfs any cache benefit on
-    /// this control-plane path; `next_victim` takes `&self`, so the
-    /// generator's `&mut self` stepping lives behind that lock.
-    victim_rng: SpinLock<FastRng>,
+    /// one. `next_victim` takes `&self`, so each generator's `&mut self`
+    /// stepping lives behind a [`SpinLock`] — but the slot is indexed by
+    /// the *calling* CPU, so the lock is always uncontended on the
+    /// work-stealing path (every idle CPU draws from its own stream
+    /// instead of serialising on one global generator).
+    victim_rng: Box<[SpinLock<FastRng>]>,
     /// Tasks that exceeded their home CPU's queue at spawn/unpark time.
     /// The scheduler drains this on every step before checking the local
     /// queues; this is the back-pressure path described in
@@ -184,6 +185,15 @@ impl<A: SchedulerArch> Scheduler<A> {
         for _ in 0..config.cpus {
             current.push(AtomicU64::new(0));
         }
+        let mut victim_rng = Vec::with_capacity(config.cpus as usize);
+        for cpu in 0..config.cpus {
+            // One generator per CPU so the work-stealing draw never
+            // contends; the base constant is perturbed by the CPU id so
+            // the streams start independent.
+            victim_rng.push(SpinLock::new(FastRng::seed_from_u64(
+                0x9E37_79B9_7F4A_7C15 ^ u64::from(cpu),
+            )));
+        }
         let mut core_classes = Vec::with_capacity(config.cpus as usize);
         let mut perf_cpus = Vec::new();
         let mut eff_cpus = Vec::new();
@@ -202,7 +212,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             next_id: AtomicU64::new(1),
             config,
             last_boost_tick: AtomicU64::new(0),
-            victim_rng: SpinLock::new(FastRng::seed_from_u64(0x9E37_79B9_7F4A_7C15)),
+            victim_rng: victim_rng.into_boxed_slice(),
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
@@ -605,15 +615,15 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
-        // Draw from the shared `FastRng`, bias-corrected with `+ cpu` so
-        // two CPUs do not lock-step their probe order.
-        let s = self.victim_rng.lock().next_u64();
+        // Draw from this CPU's own `FastRng` (uncontended; the per-CPU
+        // seeds already keep the streams independent).
+        let s = self.victim_rng[cpu as usize].lock().next_u64();
         // n > 0 by construction (config.cpus != 0); both casts are
         // narrow because cpus is `u32` and the modulus is < n <= u32::MAX.
         #[allow(clippy::cast_possible_truncation)]
         {
             let n = self.cpus.len() as u64;
-            ((s.wrapping_add(u64::from(cpu))) % n) as u32
+            (s % n) as u32
         }
     }
 
