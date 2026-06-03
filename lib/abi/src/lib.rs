@@ -48,7 +48,9 @@ pub use driver::{
 };
 pub use error::Errno;
 pub use input::{
-    PointerButtonCode, PointerInput, BUTTON_NONE, KIND_MOVED, KIND_PRESSED, KIND_RELEASED,
+    KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
     POINTER_INPUT_MAGIC,
 };
 pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};

@@ -34,7 +34,7 @@ use crate::tasks::{ActivateOutcome, TaskId};
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TaskbarResponse {
     /// The event changed no taskbar state (a non-primary button, a release,
-    /// pointer motion, or a press that missed every region).
+    /// pointer motion, a key event, or a press that missed every region).
     Ignored,
     /// The start button was pressed, toggling the start menu. `open` is the
     /// menu's new state.
@@ -113,9 +113,10 @@ impl TaskbarInput {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => self.press_primary(taskbar, scale),
-            InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
-                TaskbarResponse::Ignored
-            }
+            InputEvent::PointerPressed { .. }
+            | InputEvent::PointerReleased { .. }
+            | InputEvent::KeyPressed { .. }
+            | InputEvent::KeyReleased { .. } => TaskbarResponse::Ignored,
         }
     }
 

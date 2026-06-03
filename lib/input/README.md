@@ -1,15 +1,19 @@
 # rustos-input
 
-Shared pointer input-event vocabulary for the RustOS desktop (`lib/input`,
+Shared input-event vocabulary for the RustOS desktop (`lib/input`,
 `AGENTS.md` §6 / §17.4 — `PLAN.md` Stage 7).
 
-This crate owns the device-level pointer types the desktop routes:
+This crate owns the device-level input types the desktop routes:
 
 - `PointerButton` — the primary / secondary / middle buttons the desktop
   distinguishes.
-- `InputEvent` — what a pointing device reports: `PointerMoved`,
-  `PointerPressed`, `PointerReleased`. Button events act at the pointer's
-  current position; a router tracks that position from the motion events.
+- `Modifiers` / `NamedKey` / `Key` — the keyboard vocabulary: the held
+  modifier keys, the named non-character keys (Enter, the arrows, F1–F12, …),
+  and a `Key` that is either a produced `Char` or a `NamedKey`.
+- `InputEvent` — what a device reports: the pointer's `PointerMoved`,
+  `PointerPressed`, `PointerReleased` (button events act at the pointer's
+  current position, which a router tracks from the motion events) and the
+  keyboard's `KeyPressed` / `KeyReleased`, delivered to the focused surface.
 
 ## Where it sits
 
@@ -23,9 +27,10 @@ and depends only on `lib/geometry` (a motion event names a screen `Point`). It
 is depended on by the GUI crates, never the reverse — `Layer::Lib` in the
 §17.4 layering.
 
-Keyboard input is deliberately **not** modelled here: the desktop tracks
-*which* surface owns the keyboard, but the key encoding is a separate ABI
-concern that is not invented in this layer (`AGENTS.md` §2.4).
+Keyboard input is modelled alongside the pointer; this is the in-process
+routing vocabulary, while the bytes that cross the kernel boundary are
+`rustos_abi`'s `KeyInput` (the same producer/consumer split as `PointerButton`
+vs `rustos_abi`'s `PointerButtonCode`).
 
 ## Stability
 

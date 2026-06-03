@@ -24,6 +24,8 @@
 //!   window — so a motion's outcome is the window manager's.
 //! * **A primary release goes to the window manager**, which ends an
 //!   in-flight move-grab; the taskbar ignores releases.
+//! * **Key events go to the window manager**, which delivers them to the
+//!   focused window; the taskbar takes no keyboard input.
 //!
 //! The router holds no pixels and grants itself no authority: it owns the two
 //! inner routers and drives them against the embedder's [`Compositor`] and
@@ -162,6 +164,11 @@ impl SessionInputRouter {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => wm_response(self.wm.handle(event, compositor)),
+            // Keys go to the window manager, which delivers them to the
+            // focused window; the taskbar takes no keyboard input.
+            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. } => {
+                wm_response(self.wm.handle(event, compositor))
+            }
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 SessionInputResponse::Ignored
             }

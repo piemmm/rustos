@@ -71,7 +71,7 @@ pub use corner::Corners;
 pub use cursor::CursorLayer;
 pub use damage::DamageRegion;
 pub use geometry::{Point, Rect, Scale};
-pub use input::{InputEvent, InputResponse, InputRouter, PointerButton};
+pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};
 pub use select::{desired_cursor, CursorController};
 pub use surface::Surface;
 pub use window::{Window, WindowId};

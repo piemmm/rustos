@@ -80,7 +80,12 @@
 //! [`PointerInput`](rustos_abi::input::PointerInput) records from an injected
 //! [`PointerInputChannel`] (the kernel input channel) and decodes each into
 //! the `lib/input` [`InputEvent`](rustos_wm::InputEvent) the shell routes,
-//! failing closed on a malformed record (`AGENTS.md` §5.4 / §19.5).
+//! failing closed on a malformed record (`AGENTS.md` §5.4 / §19.5). The
+//! keyboard's live backing is its counterpart [`KeyboardInputSource`] (the
+//! [`keyboard`] module): it decodes framed
+//! [`KeyInput`](rustos_abi::input::KeyInput) records from an injected
+//! [`KeyInputChannel`] into the same [`InputEvent`](rustos_wm::InputEvent)
+//! stream, which the window manager delivers to the focused window.
 //!
 //! # Running-task list ↔ window stack
 //!
@@ -113,6 +118,7 @@ extern crate alloc;
 pub mod assets;
 pub mod device;
 pub mod input;
+pub mod keyboard;
 pub mod presenter;
 pub mod session;
 pub mod shell;
@@ -124,6 +130,7 @@ mod tests;
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
+pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};

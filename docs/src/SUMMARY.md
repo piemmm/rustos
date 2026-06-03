@@ -94,7 +94,7 @@
 - [System Information API (`sysinfo-v1`)](./abi/sysinfo.md)
 - [Application bundles (`AppInfo`, `abi-v1`)](./abi/appinfo.md)
 - [64-bit-native time (`abi-v1`)](./abi/time.md)
-- [Pointer input events (`abi-v1`)](./abi/input.md)
+- [Input events (`abi-v1`)](./abi/input.md)
 - [Standard Information Stream (`stdinfo`, fd 3)](./abi/stdinfo.md)
 
 # Platforms

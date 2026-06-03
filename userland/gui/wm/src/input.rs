@@ -18,10 +18,13 @@
 //! window dragging cleanly separated (`AGENTS.md` §2.1 — no "drag
 //! anywhere" hack).
 //!
-//! Keyboard input is not modelled here: the router owns *which* window
-//! has the keyboard ([`InputRouter::focused`]); the key encoding is a
-//! separate ABI concern and is not invented in the compositor
-//! (`AGENTS.md` §2.4 — no interface creep).
+//! Keyboard input is delivered to the focused window: the router owns
+//! *which* window has the keyboard ([`InputRouter::focused`]) and routes a
+//! [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] to it as an
+//! [`InputResponse::Key`], leaving the bytes-on-the-wire encoding to
+//! `rustos_abi`'s `KeyInput` (`AGENTS.md` §9). A key with no focused window
+//! (focus on the desktop, or the focused window since gone) is ignored
+//! rather than misdelivered (`AGENTS.md` §2.9).
 
 use crate::geometry::Point;
 use crate::window::{Window, WindowId};
@@ -32,7 +35,7 @@ use crate::Compositor;
 // manager (`AGENTS.md` §17.4). It therefore lives in `lib/input`; the
 // compositor re-exports it so callers keep referring to
 // `rustos_wm::{InputEvent, PointerButton}` (§2.2 — one definition).
-pub use rustos_input::{InputEvent, PointerButton};
+pub use rustos_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -63,6 +66,19 @@ pub enum InputResponse {
     MoveEnded {
         /// The window whose move-grab ended.
         window: WindowId,
+    },
+    /// A key event was delivered to the focused `window` for the client to
+    /// interpret. The router takes no action of its own on a key; it only
+    /// names the recipient.
+    Key {
+        /// The window that holds the keyboard and received the event.
+        window: WindowId,
+        /// The key that changed state.
+        key: Key,
+        /// The modifiers held while the key changed state.
+        modifiers: Modifiers,
+        /// `true` for a press, `false` for a release.
+        pressed: bool,
     },
 }
 
@@ -162,6 +178,40 @@ impl InputRouter {
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 InputResponse::Ignored
             }
+            InputEvent::KeyPressed { key, modifiers } => {
+                self.deliver_key(key, modifiers, true, compositor)
+            }
+            InputEvent::KeyReleased { key, modifiers } => {
+                self.deliver_key(key, modifiers, false, compositor)
+            }
+        }
+    }
+
+    /// Deliver a key event to the focused window, naming it as the recipient.
+    ///
+    /// Returns [`InputResponse::Ignored`] when focus rests on the desktop or
+    /// the focused window is no longer known to `compositor` — in the latter
+    /// case focus is dropped so a stale window never keeps the keyboard
+    /// (`AGENTS.md` §2.9 — fail closed).
+    fn deliver_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        pressed: bool,
+        compositor: &Compositor,
+    ) -> InputResponse {
+        let Some(window) = self.focused else {
+            return InputResponse::Ignored;
+        };
+        if compositor.window(window).is_none() {
+            self.focused = None;
+            return InputResponse::Ignored;
+        }
+        InputResponse::Key {
+            window,
+            key,
+            modifiers,
+            pressed,
         }
     }
 

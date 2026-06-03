@@ -17,10 +17,13 @@
 //! compositor's [`InputRouter`] and the taskbar's input router consume one
 //! definition.
 //!
-//! Keyboard input is deliberately **not** modelled here: the desktop tracks
-//! *which* surface owns the keyboard, but the key encoding is a separate ABI
-//! concern that is not invented in this layer (`AGENTS.md` §2.4 — no
-//! interface creep).
+//! Keyboard input is modelled alongside the pointer: a [`Key`] (a produced
+//! character or a [`NamedKey`]) and the [`Modifiers`] held with it travel as
+//! the [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] variants the
+//! window manager delivers to the focused surface. This is the in-process
+//! routing vocabulary; the bytes that cross the kernel boundary are
+//! `rustos_abi`'s `KeyInput`, the same producer/consumer split as the pointer
+//! ([`PointerButton`] vs `rustos_abi`'s `PointerButtonCode`).
 //!
 //! [`InputRouter`]: https://docs.rs/rustos-wm
 //! [`rustos_geometry`]: rustos_geometry
@@ -42,12 +45,83 @@ pub enum PointerButton {
     Middle,
 }
 
-/// A device-level pointer event delivered to a desktop input router.
+/// The keyboard modifiers held while a key event was produced.
+//
+// The four booleans are independent modifier-key states, not a state
+// machine: any combination is legal, so a flat record models them more
+// clearly than an enum.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Modifiers {
+    /// The shift key was held.
+    pub shift: bool,
+    /// The control key was held.
+    pub ctrl: bool,
+    /// The alt key was held.
+    pub alt: bool,
+    /// The meta (super / command) key was held.
+    pub meta: bool,
+}
+
+/// A named non-character key the desktop distinguishes.
 ///
-/// Button events act at the pointer's current position; that position is
-/// updated only by [`InputEvent::PointerMoved`], exactly as a real pointing
+/// Character-producing keys are not listed here: they arrive as a
+/// [`Key::Char`]. This is the closed set of keys that produce no character,
+/// matching `rustos_abi`'s wire `NamedKeyCode`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NamedKey {
+    /// The Enter / Return key.
+    Enter,
+    /// The Escape key.
+    Escape,
+    /// The Backspace key.
+    Backspace,
+    /// The Tab key.
+    Tab,
+    /// The forward-delete key.
+    Delete,
+    /// The Insert key.
+    Insert,
+    /// The Home key.
+    Home,
+    /// The End key.
+    End,
+    /// The Page Up key.
+    PageUp,
+    /// The Page Down key.
+    PageDown,
+    /// The left-arrow key.
+    Left,
+    /// The right-arrow key.
+    Right,
+    /// The up-arrow key.
+    Up,
+    /// The down-arrow key.
+    Down,
+    /// A function key, `F1` through `F12` (`number` in `1..=12`).
+    Function {
+        /// The function-key number, `1` through `12`.
+        number: u8,
+    },
+}
+
+/// A key the desktop routes: either a produced character or a [`NamedKey`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Key {
+    /// A character-producing key, carrying the produced Unicode scalar.
+    Char(char),
+    /// A named non-character key.
+    Named(NamedKey),
+}
+
+/// A device-level input event delivered to a desktop input router.
+///
+/// Pointer button events act at the pointer's current position; that position
+/// is updated only by [`InputEvent::PointerMoved`], exactly as a real pointing
 /// device reports motion separately from clicks. A router therefore tracks
-/// the latest position itself and applies presses and releases there.
+/// the latest position itself and applies presses and releases there. Key
+/// events are delivered to whichever surface currently holds the keyboard
+/// focus, which the router tracks independently of the pointer.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum InputEvent {
     /// The pointer moved to an absolute screen position.
@@ -64,6 +138,20 @@ pub enum InputEvent {
     PointerReleased {
         /// The button that came up.
         button: PointerButton,
+    },
+    /// A key was pressed; it is delivered to the focused surface.
+    KeyPressed {
+        /// The key that went down.
+        key: Key,
+        /// The modifiers held while it was pressed.
+        modifiers: Modifiers,
+    },
+    /// A key was released; it is delivered to the focused surface.
+    KeyReleased {
+        /// The key that came up.
+        key: Key,
+        /// The modifiers held while it was released.
+        modifiers: Modifiers,
     },
 }
 
@@ -113,5 +201,32 @@ mod tests {
         };
         let copy = event;
         assert_eq!(event, copy);
+    }
+
+    #[test]
+    fn key_events_carry_key_and_modifiers() {
+        let event = InputEvent::KeyPressed {
+            key: Key::Char('x'),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        };
+        match event {
+            InputEvent::KeyPressed { key, modifiers } => {
+                assert_eq!(key, Key::Char('x'));
+                assert!(modifiers.ctrl && !modifiers.shift);
+            }
+            other => panic!("expected a key press, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn named_keys_are_distinct_from_characters() {
+        assert_ne!(
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Function { number: 1 })
+        );
+        assert_ne!(Key::Char('\n'), Key::Named(NamedKey::Enter));
     }
 }

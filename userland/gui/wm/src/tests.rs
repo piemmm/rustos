@@ -390,11 +390,20 @@ fn theme_corner_radius_shapes_windows() {
 
 // ---- input routing ---------------------------------------------------
 
-use crate::input::{InputEvent, InputResponse, InputRouter, PointerButton};
+use crate::input::{
+    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton,
+};
 
 fn press_primary() -> InputEvent {
     InputEvent::PointerPressed {
         button: PointerButton::Primary,
+    }
+}
+
+fn key_pressed(key: Key) -> InputEvent {
+    InputEvent::KeyPressed {
+        key,
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -501,6 +510,77 @@ fn focus_fails_closed_for_an_unknown_window() {
         "focusing a window the compositor no longer knows fails closed"
     );
     assert_eq!(router.focused(), None);
+}
+
+#[test]
+fn key_is_delivered_to_the_focused_window() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+    assert!(router.focus(win, &c));
+
+    assert_eq!(
+        router.handle(key_pressed(Key::Char('k')), &mut c),
+        InputResponse::Key {
+            window: win,
+            key: Key::Char('k'),
+            modifiers: Modifiers::default(),
+            pressed: true,
+        }
+    );
+    assert_eq!(
+        router.handle(
+            InputEvent::KeyReleased {
+                key: Key::Named(NamedKey::Enter),
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
+            &mut c
+        ),
+        InputResponse::Key {
+            window: win,
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            pressed: false,
+        }
+    );
+}
+
+#[test]
+fn key_without_focus_is_ignored() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+
+    assert_eq!(router.focused(), None);
+    assert_eq!(
+        router.handle(key_pressed(Key::Char('a')), &mut c),
+        InputResponse::Ignored
+    );
+}
+
+#[test]
+fn key_to_a_vanished_focus_is_ignored_and_drops_focus() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+    assert!(router.focus(win, &c));
+
+    assert!(c.remove(win), "the focused window is removed");
+    assert_eq!(
+        router.handle(key_pressed(Key::Char('a')), &mut c),
+        InputResponse::Ignored
+    );
+    assert_eq!(
+        router.focused(),
+        None,
+        "a key to a vanished window drops stale focus"
+    );
 }
 
 #[test]

@@ -186,12 +186,31 @@ delivers the bytes and the decode runs above the device (`AGENTS.md` §17.4 /
 §19.5) — and a malformed record fails closed with its `Errno` rather than being
 misinterpreted, ending the shell's `pump` without disturbing the events already
 applied (`AGENTS.md` §5.4 / §2.9). The ABI record itself is the desktop-level
-pointer event documented in [Pointer input events](../abi/input.md); it is a
+pointer event documented in [Input events](../abi/input.md); it is a
 distinct layer from the device-level driver input ABI, not a duplicate of it
 (`AGENTS.md` §2.2).
 
+## Live keyboard input source
+
+The keyboard's live backing is `KeyboardInputSource` (the `keyboard` module),
+the counterpart of `DeviceInputSource`. It wraps an injected `KeyInputChannel`
+seam — a capability-checked kernel keyboard channel on a running system, an
+in-memory queue in tests (`AGENTS.md` §7) — that hands the desktop one framed
+`rustos_abi::input::KeyInput` record at a time. Each `poll` decodes one record
+through `KeyInput::from_bytes` into the same `lib/input` `InputEvent` stream the
+shell pumps: a `Pressed` / `Released` record becomes a `KeyPressed` /
+`KeyReleased` carrying the resolved `Key` (a produced `Char`, or a `NamedKey` —
+the wire ABI's twelve function-key codes fold into one `NamedKey::Function`)
+and the held `Modifiers`. The `SessionInputRouter` routes a key to the window
+manager, which delivers it to the focused window; the taskbar takes no keyboard
+input. As with the pointer the crate holds no input capability of its own, and
+a malformed record fails closed with its `Errno` rather than being
+misinterpreted (`AGENTS.md` §5.4 / §2.9). The ABI record is documented in
+[Input events](../abi/input.md).
+
 Relaying the appearance switch to the WM and apps over IPC remains a later
-increment; the desktop now reads a live pointer-event stream end to end.
+increment; the desktop now reads a live pointer **and** keyboard event stream
+end to end.
 
 ## Tests
 
@@ -231,4 +250,8 @@ also covers `DeviceInputSource`: decoding a `Moved` record to an absolute
 `PointerMoved`, each pointer button for press and release, a malformed
 (all-zero) record surfacing `BadMagic` rather than being misinterpreted, a
 channel fault propagating while a queued record still decodes afterwards, and
-`into_channel` returning the wrapped channel.
+`into_channel` returning the wrapped channel. It covers `KeyboardInputSource`
+likewise: decoding a character press with its modifiers, a named release that
+folds a function key into `NamedKey::Function`, a malformed record surfacing
+`BadMagic`, a channel fault propagating while a queued record still decodes,
+and `into_channel`.

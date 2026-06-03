@@ -5513,6 +5513,34 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   session `README.md`. No `unsafe`, no `unwrap`/`expect`/`panic!` in production
   paths. **Still open here:** relaying the theme switch over IPC and giving the
   `PointerInputChannel` a real kernel-endpoint backing.
+- **Live keyboard-input ABI + keyboard source — DONE (increment).** The pointer
+  vertical had a live backing but the keyboard did not — the pointer ABI and
+  `lib/input` both deliberately deferred "the key encoding" pending its
+  definition. Treating `abi-v1` as **not** frozen, `lib/abi`'s `input` module
+  gains `KeyInput` — a typed 20-byte little-endian record (a `Pressed` /
+  `Released` carrying a `KeyValue` — a Unicode `Char` or a `NamedKeyCode`
+  (Enter, the arrows, F1–F12, …) — plus a `Modifiers` shift/ctrl/alt/meta set)
+  with `to_le_bytes` and a fail-closed `from_bytes` that validates magic,
+  version, the reserved field, the kind, the modifier bits, the key class, the
+  named-key code, and that the codepoint is a real Unicode scalar (§5.4 /
+  §19.5); it is enrolled in the `lib/abi` fuzz harness (§19.6). It is the
+  *desktop-level* key event, distinct from the device-level driver keycodes,
+  not a duplicate (§2.2). `lib/input` gains the matching routing vocabulary
+  (`Modifiers`/`NamedKey`/`Key` + `InputEvent::KeyPressed`/`KeyReleased`), and
+  the WM `InputRouter` delivers a key to the focused window as
+  `InputResponse::Key` (a key with no focus, or a vanished focus, is ignored
+  and stale focus dropped, §2.9); the taskbar and session routers route keys to
+  the WM, never the bar. `userland/gui/session` gains a `keyboard` module:
+  `KeyboardInputSource` wraps an injected `KeyInputChannel` (an in-memory queue
+  in tests, §7) and decodes one `KeyInput` per `poll` into the same `lib/input`
+  `InputEvent` stream the shell pumps (the twelve wire function-key codes fold
+  into one `NamedKey::Function`). 14 new `rustos-abi` tests, 2 new
+  `rustos-input` tests, 3 new `rustos-wm` tests (65 total), 5 new
+  `rustos-desktop-session` tests. Docs `docs/src/abi/input.md` (retitled
+  "Input events") + SUMMARY + `docs/src/lib/abi.md` + `docs/src/desktop/session.md`
+  + the `lib/input` / `wm` / session `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** giving the
+  `KeyInputChannel` (and `PointerInputChannel`) a real kernel-endpoint backing.
 - **Per-output (per-monitor) DPI ownership — DONE (increment).** The desktop
   UI scale was tightened to the correct multi-monitor shape: display density
   is a property of an **output**, owned by the **compositor**, not a

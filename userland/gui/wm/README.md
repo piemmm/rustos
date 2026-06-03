@@ -28,11 +28,13 @@ router**:
   focus can also be moved programmatically with `focus(window, &Compositor)`
   (validated against the compositor, fail-closed) and dropped with `unfocus`,
   so the session glue's taskbar can activate a window by id without a pointer
-  press. The
-  device-level `PointerButton`/`InputEvent` vocabulary it consumes lives
-  in the shared `rustos-input` crate (re-exported here) so the taskbar
-  routes the same events without depending on the window manager
-  (`AGENTS.md` §17.4).
+  press. A `KeyPressed`/`KeyReleased` event is delivered to the focused window
+  as an `InputResponse::Key` (a key with no focused window, or one whose
+  window has since gone, is ignored and the stale focus dropped, `AGENTS.md`
+  §2.9). The device-level `PointerButton`/`InputEvent` vocabulary it consumes —
+  including the `Key`/`NamedKey`/`Modifiers` keyboard types — lives in the
+  shared `rustos-input` crate (re-exported here) so the taskbar routes the same
+  events without depending on the window manager (`AGENTS.md` §17.4).
 - Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
   `rustos_cursor::CursorImage` composited as the top-most layer so its
   hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4).

@@ -104,6 +104,8 @@ stream, so `SessionInputRouter` fans it to the right router through
 - **pointer motion** is fanned to both so their pointers stay in step; only the
   window manager acts on it, dragging a grabbed window;
 - a **primary release** ends a window move-grab in the window manager;
+- a **key event** goes to the window manager, which delivers it to the focused
+  window; the taskbar takes no keyboard input;
 - anything else is `SessionInputResponse::Ignored`.
 
 Decorations arm a title-bar drag through `begin_move`; the embedder reads the
@@ -151,6 +153,21 @@ record fails closed with its `Errno` rather than being misinterpreted. The ABI
 record is the desktop-level pointer event, a distinct layer from the
 device-level driver input ABI, not a duplicate of it (`AGENTS.md` §2.2).
 
+## Live keyboard input source
+
+`KeyboardInputSource` (the `keyboard` module) is the keyboard counterpart of
+`DeviceInputSource`. It wraps an injected `KeyInputChannel` — a
+capability-checked kernel keyboard channel on a running system, an in-memory
+queue in tests (`AGENTS.md` §7) — and each `poll` decodes one framed
+`rustos_abi::input::KeyInput` record through `KeyInput::from_bytes` into the
+same `lib/input` `InputEvent` stream the shell pumps: a `KeyPressed` /
+`KeyReleased` carrying the resolved `Key` (a produced `Char`, or a `NamedKey` —
+the twelve wire function-key codes fold into one `NamedKey::Function`) and the
+held `Modifiers`. The `SessionInputRouter` routes it to the window manager,
+which delivers it to the focused window. Like the pointer source it holds no
+input capability and fails closed on a malformed record (`AGENTS.md` §5.4 /
+§2.9).
+
 ## Running-task list ↔ window stack
 
 `TaskBridge` keeps the taskbar's running-task list in step with the window
@@ -185,7 +202,8 @@ embedder's, passed in per call.
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
 `rustos-wm`, and the shared `rustos-theme` definition, plus `rustos-cursor` /
 `rustos-icon` (the SVG set builders) and `rustos-abi` (the `Errno` the read
-seam returns and the `PointerInput` record the device source decodes)
+seam returns and the `PointerInput` / `KeyInput` records the device and
+keyboard sources decode)
 (`AGENTS.md` §17.4). Composing GUI crates is the permitted
 `userland/gui/*` edge; nothing outside `userland/gui/*` depends on it (§17.3),
 so a headless image omits it cleanly.
@@ -196,10 +214,11 @@ production paths (`AGENTS.md` §2.9).
 ## Still to come (Stage 7)
 
 Relaying the active theme to the window manager and apps over live IPC (the
-event loop, routing policy, surface glue, and the `DeviceInputSource` that
-feeds it a live pointer stream now all exist), backing the
-`PointerInputChannel` with a real kernel input channel (the decode and its
-fail-closed fallbacks are done and tested in-memory), resolving launcher /
+event loop, routing policy, surface glue, and the `DeviceInputSource` /
+`KeyboardInputSource` that feed it live pointer and keyboard streams now all
+exist), backing the `PointerInputChannel` / `KeyInputChannel` with real kernel
+input channels (the decode and its fail-closed fallbacks are done and tested
+in-memory), resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
 reads `/System/Graphics` on a running system (the in-memory-tested loader and
