@@ -1,0 +1,28 @@
+[package]
+name = "rustos-rng"
+description = "RustOS random number generation: a NIST SP 800-90A HMAC-SHA256 CSPRNG, a pluggable entropy/hardware-RNG seam, and a fast non-cryptographic generator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The cryptographic core is composed entirely from `lib/crypto`'s audited
+# HMAC-SHA256 primitive (`AGENTS.md` §1, §2.12 — never hand-roll a crypto
+# primitive). The DRBG itself is the standard NIST SP 800-90A construction
+# layered over that PRF, exactly as `lib/crypto`'s `kdf` layers single-block
+# HKDF-Expand over the same HMAC; no new external dependency is introduced.
+rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+
+# The CSPRNG working state (the DRBG `Key`/`V` and the seed scratch) is key
+# material: an attacker who reads it can predict every future output. Per
+# `AGENTS.md` §4 ("zero-on-free for any allocation that ever held credentials,
+# keys, or capability tokens") it is wiped on drop with the audited `zeroize`
+# crate (§1 — no hand-rolled crypto, and `zeroize`'s volatile writes are not
+# elided by the optimiser). `default-features = false` keeps this `no_std`.
+zeroize = { version = "1.8.1", default-features = false }

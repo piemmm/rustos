@@ -113,6 +113,10 @@ Do **not** begin a stage before all its listed dependencies are complete.
   (e.g. `ring`, `rustcrypto`). No hand-rolled primitives.
 - `lib/log`: structured, level-filtered, no-alloc-on-hot-path logging with
   stable event IDs.
+- `lib/rng`: random number generation — a NIST SP 800-90A HMAC-SHA256
+  CSPRNG composed over `lib/crypto`'s audited HMAC, a pluggable
+  entropy / hardware-RNG seam (the §19.2 platform RNG), and a fast
+  non-cryptographic xoshiro256++ generator.
 - `lib/util`: only items used by ≥ 2 crates.
 
 **Tests**
@@ -142,6 +146,16 @@ Do **not** begin a stage before all its listed dependencies are complete.
   verification only).
 - `lib/util` is intentionally empty per `AGENTS.md` §2.3; no item yet
   satisfies the ≥ 2-use rule.
+- `lib/rng` added (experimental): `CsRng`, a NIST SP 800-90Ar1 HMAC-SHA256
+  DRBG (`drbg::HmacDrbg`) composed over `lib/crypto`'s HMAC — validated
+  against the NIST CAVP known-answer vector — that reseeds from a pluggable
+  `EntropySource`; `CombinedSource` XOR-mixes several sources; a
+  `hardware::HardwareRng` seam supplies a motherboard RNG as both extra
+  entropy and (via `PlatformFast`) a fast source with software fallback;
+  and `FastRng` (xoshiro256++) is the fast non-cryptographic generator.
+  `lib/crypto` gained `hmac_sha256_parts` (a multi-part HMAC) to back the
+  DRBG without an allocator. This is the §19.2 platform-RNG seam the
+  `kernel/mem::swap` `EntropySource` was reserved for.
 - The syscall ABI lives in `lib/abi/src/syscall.rs` (singular); the
   cross-checked `lib/abi/src/syscalls.rs` and `kernel/syscall/src/table.rs`
   pair is reserved for Stage 2 so `cargo xtask abi-check` always sees both

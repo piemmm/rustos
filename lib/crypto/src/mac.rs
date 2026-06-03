@@ -40,11 +40,30 @@ type HmacSha256 = Hmac<Sha256>;
 /// traits; this keeps the surface area auditable.
 #[must_use]
 pub fn hmac_sha256(key: &MacKey, data: &[u8]) -> MacTag {
+    hmac_sha256_parts(key, &[data])
+}
+
+/// Compute the HMAC-SHA256 tag of the concatenation of `parts` under `key`.
+///
+/// Equivalent to [`hmac_sha256`] over `parts.concat()`, but feeds each part
+/// to the underlying streaming HMAC in turn so the caller never has to
+/// allocate or stack-copy a contiguous buffer. This is what lets the
+/// `rustos-rng` HMAC-DRBG compute `HMAC(K, V ‖ byte ‖ data)` (NIST SP
+/// 800-90A) over its working state without an allocator (`AGENTS.md` §4 —
+/// the kernel allocator must not be on the entropy path) or an arbitrary
+/// fixed-size scratch bound.
+///
+/// Wraps [`hmac::Hmac`] so callers never see the upstream `Mac` / `KeyInit`
+/// traits; this keeps the surface area auditable.
+#[must_use]
+pub fn hmac_sha256_parts(key: &MacKey, parts: &[&[u8]]) -> MacTag {
     // SAFETY-INVARIANT: HMAC accepts a key of any length, so constructing it
     // from a fixed 32-byte array can never return `InvalidLength`. The
     // `expect` documents that invariant; it is unreachable in practice.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(data);
+    for part in parts {
+        mac.update(part);
+    }
     let out = mac.finalize().into_bytes();
     let mut tag = [0u8; MAC_TAG_LEN];
     tag.copy_from_slice(out.as_slice());
@@ -103,6 +122,24 @@ mod tests {
         let b = hmac_sha256(&k, b"the quick brown fox");
         assert_eq!(a, b);
         assert_eq!(a.len(), MAC_TAG_LEN);
+    }
+
+    #[test]
+    fn parts_equal_the_concatenated_single_shot() {
+        // `hmac_sha256_parts` must equal `hmac_sha256` over the joined parts,
+        // for any split, so the DRBG's `V ‖ byte ‖ data` form is faithful.
+        let k = key(0x91);
+        let whole = [0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+        let expected = super::hmac_sha256(&k, &whole);
+        assert_eq!(super::hmac_sha256_parts(&k, &[&whole]), expected);
+        assert_eq!(
+            super::hmac_sha256_parts(&k, &[&whole[..3], &whole[3..]]),
+            expected
+        );
+        assert_eq!(
+            super::hmac_sha256_parts(&k, &[&whole[..1], &whole[1..4], &[], &whole[4..]]),
+            expected
+        );
     }
 
     #[test]

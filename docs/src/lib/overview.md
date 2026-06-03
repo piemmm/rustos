@@ -11,6 +11,7 @@ no allocation, and exposes a deliberately narrow public surface.
 | [`rustos-collections`](collections.md) | `no_std` collections (currently `BitSet256`).        | stable    |
 | [`rustos-crypto`](crypto.md) | Audited wrappers (SHA-256, Ed25519 verification).          | stable    |
 | [`rustos-log`](log.md) | Structured, level-filtered, alloc-free logging.                  | stable    |
+| [`rustos-rng`](rng.md) | CSPRNG (HMAC-DRBG) + entropy/hardware-RNG seam + fast PRNG.       | experimental |
 | [`rustos-util`](util.md) | Reserved destination for ≥ 2-use helpers — empty in Stage 1.   | experimental |
 
 These crates are the foundation Stage 2 (the kernel core) builds on. They

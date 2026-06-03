@@ -39,6 +39,7 @@
   - [`rustos-collections`](./lib/collections.md)
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-log`](./lib/log.md)
+  - [`rustos-rng`](./lib/rng.md)
   - [`rustos-util`](./lib/util.md)
 
 # Drivers

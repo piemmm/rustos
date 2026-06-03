@@ -172,6 +172,11 @@ rustos/
 │   │                    #   Color/Pixel + Surface (fill_rect, the single
 │   │                    #   supersampled fill_polygon, blit) for the WM,
 │   │                    #   taskbar, cursors, and icons (§2.2, §17.4).
+│   ├── rng/             # Random number generation: a NIST SP 800-90A
+│   │                    #   HMAC-SHA256 CSPRNG (composed over lib/crypto's
+│   │                    #   audited HMAC, §1/§2.12), a pluggable entropy /
+│   │                    #   hardware-RNG seam (§17.2, §19.2), and a fast
+│   │                    #   non-crypto xoshiro256++ generator.
 │   ├── svg/             # Shared SVG image decoding (§16.4): a fail-closed,
 │   │                    #   first-party no_std decoder for the WM/desktop
 │   │                    #   SVG-first asset subset, producing the shared
