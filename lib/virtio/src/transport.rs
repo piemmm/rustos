@@ -97,6 +97,12 @@ pub enum VirtioError {
     QueueFull,
     /// No used-ring entry available yet.
     NoCompletion,
+    /// A device-written used-ring completion named a descriptor head
+    /// outside the granted descriptor table (`AGENTS.md` §3.6 of the
+    /// security charter, CWE-1257 / Thunderclap-class). The driver
+    /// rejects it fail-closed (§5.4) rather than dereference a
+    /// descriptor index that escapes the region.
+    MalformedCompletion,
     /// The device reported a transport-level fault on the wire.
     DeviceFault,
 }
@@ -108,9 +114,10 @@ impl VirtioError {
     #[must_use]
     pub const fn as_driver_error(self) -> DriverError {
         match self {
-            Self::FeaturesRejected | Self::DeviceFault | Self::DescriptorTableOverflow => {
-                DriverError::DeviceFault
-            }
+            Self::FeaturesRejected
+            | Self::DeviceFault
+            | Self::DescriptorTableOverflow
+            | Self::MalformedCompletion => DriverError::DeviceFault,
             Self::QueueIndexOutOfRange | Self::QueueSizeTooLarge => DriverError::OutOfRange,
             Self::QueueFull | Self::NoCompletion => DriverError::Busy,
         }
@@ -313,6 +320,81 @@ impl MockTransport {
     /// replaced.
     pub fn install_shim(&mut self, queue: u16, shim: DeviceShim) {
         self.queues[queue as usize].shim = Some(shim);
+    }
+
+    /// Test/fuzz-only **hostile-device** seam: publish a used-ring
+    /// completion for `queue` naming descriptor head `head` and reporting
+    /// `written` bytes, then advance the device's `used.idx`.
+    ///
+    /// Unlike [`Self::drain_queue`], which only ever publishes a head it
+    /// genuinely collected from the avail ring, this plants an *arbitrary*
+    /// `head` — including one outside the granted descriptor table. That
+    /// is exactly the corruption a buggy or hostile device can write
+    /// (`AGENTS.md` §3.6, CWE-1257 / Thunderclap), and it is what the
+    /// §3.6 fuzz harness drives at [`crate::queue::SplitQueue::poll_used`].
+    ///
+    /// # Errors
+    ///
+    /// * [`VirtioError::QueueIndexOutOfRange`] if `queue` is unknown.
+    /// * [`VirtioError::DeviceFault`] if the queue has not been programmed.
+    pub fn publish_raw_used(
+        &mut self,
+        queue: u16,
+        head: u16,
+        written: u32,
+    ) -> Result<(), VirtioError> {
+        let q = self
+            .queues
+            .get(queue as usize)
+            .ok_or(VirtioError::QueueIndexOutOfRange)?;
+        if q.size == 0 || q.used_phys == 0 {
+            return Err(VirtioError::DeviceFault);
+        }
+        let view = RingView::from_phys(q.size, q.desc_phys, q.avail_phys, q.used_phys);
+        view.publish_used(head, written);
+        Ok(())
+    }
+
+    /// Test/fuzz-only **hostile-device** seam: overwrite one byte of
+    /// `queue`'s descriptor table at `byte_offset`, modelling a device DMA
+    /// write that scribbles a descriptor field — e.g. a chain `next` link
+    /// (`AGENTS.md` §3.6, CWE-1257 / Thunderclap). The §3.6 fuzz harness
+    /// uses it to make `poll_used`'s reclaim walk attempt to leave the
+    /// granted region, asserting the driver bails instead.
+    ///
+    /// `byte_offset` must lie inside the descriptor table
+    /// (`< desc_table_size(size)`); an out-of-range offset is a no-op, so
+    /// the harness itself never writes outside driver-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// * [`VirtioError::QueueIndexOutOfRange`] if `queue` is unknown.
+    /// * [`VirtioError::DeviceFault`] if the queue has not been programmed.
+    pub fn poke_descriptor(
+        &mut self,
+        queue: u16,
+        byte_offset: usize,
+        value: u8,
+    ) -> Result<(), VirtioError> {
+        let q = self
+            .queues
+            .get(queue as usize)
+            .ok_or(VirtioError::QueueIndexOutOfRange)?;
+        if q.size == 0 || q.desc_phys == 0 {
+            return Err(VirtioError::DeviceFault);
+        }
+        if byte_offset >= crate::queue::SplitQueue::desc_table_size(q.size) {
+            return Ok(());
+        }
+        // SAFETY: `desc_phys` is the identity-mapped pointer to the
+        // driver-owned descriptor table; `byte_offset` was bounded to
+        // `< desc_table_size(size)` above, so the write stays inside that
+        // table. The mock peer is the only other holder and we have
+        // `&mut self`. This is a mock-peer-only adversarial seam.
+        unsafe {
+            (q.desc_phys as *mut u8).add(byte_offset).write(value);
+        }
+        Ok(())
     }
 
     /// The driver-features bitmap the driver wrote during

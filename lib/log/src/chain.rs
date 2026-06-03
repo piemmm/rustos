@@ -414,6 +414,46 @@ mod tests {
         assert_eq!(root, chain.head_hash());
     }
 
+    #[test]
+    fn splicing_a_foreign_entry_with_a_matching_seq_breaks_the_link() {
+        // SECURITY.md §3.4 / §19.4: an attacker who replaces an entry with
+        // a *self-consistent* entry lifted from another chain (same CPU,
+        // same sequence number, so the cheap seq/self-consistency checks
+        // pass) is still caught — its `prev_hash` cannot match the real
+        // predecessor, so verification reports the broken link and names
+        // the offending index.
+        let (_, honest) = build(0, &[b"alpha", b"beta", b"gamma"]);
+        let (_, foreign) = build(0, &[b"x", b"y", b"z"]);
+        let spliced = [honest[0], foreign[1], honest[2]];
+        // The foreign entry is internally consistent and carries the
+        // expected sequence number, so only the back-link betrays it.
+        assert!(foreign[1].is_self_consistent());
+        assert_eq!(foreign[1].seq, 1);
+        assert_eq!(
+            verify_fresh_chain(&spliced, 0),
+            Err(ChainError::BrokenLink { index: 1 })
+        );
+    }
+
+    #[test]
+    fn truncating_the_tail_is_caught_against_the_signed_anchor() {
+        // SECURITY.md §3.4 / §19.4: dropping the tail of the log leaves a
+        // slice that still verifies *internally* — the attacker simply
+        // forgot the later entries existed. Truncation is caught because
+        // the chain head is anchored separately (the periodically signed
+        // root, §19.4): the root recomputed over the truncated slice no
+        // longer equals the anchored head.
+        let (chain, entries) = build(2, &[b"one", b"two", b"three"]);
+        let signed_anchor = chain.head_hash();
+
+        let truncated = &entries[..2];
+        let root = verify_fresh_chain(truncated, 2).expect("truncated slice is self-consistent");
+        // Self-consistent in isolation, yet detectably short: the root
+        // disagrees with the separately-signed anchor.
+        assert_ne!(root, signed_anchor);
+        assert_eq!(root, entries[1].entry_hash);
+    }
+
     extern crate alloc;
     use alloc::vec::Vec;
 }

@@ -63,6 +63,14 @@ pub enum SlabError {
     /// is dangling. On a hardware-tagged port (Arm MTE) the access would
     /// have faulted; this is the architecture-neutral software check.
     TagMismatch,
+    /// A slot about to be handed out was not clean: it still held
+    /// non-zero bytes (`AGENTS.md` §3.3 of the security charter,
+    /// CWE-908/CWE-200). [`Slab::free`] wipes every byte of a slot, and a
+    /// fresh slab starts zeroed, so a free slot is **always** all-zero.
+    /// A non-zero free slot means the zero-on-free invariant was skipped
+    /// or corrupted; rather than leak the previous occupant's contents to
+    /// the next caller, [`Slab::alloc`] fails closed with this error.
+    DirtySlot,
 }
 
 impl From<AllocError> for SlabError {
@@ -79,6 +87,7 @@ impl fmt::Display for SlabError {
             Self::DoubleFree => f.write_str("slab double free"),
             Self::GuardViolation => f.write_str("slab guard-page violation"),
             Self::TagMismatch => f.write_str("slab use-after-free: handle tag mismatch"),
+            Self::DirtySlot => f.write_str("slab reuse: freed slot was not zeroed"),
         }
     }
 }
@@ -264,8 +273,12 @@ impl Slab {
     ///
     /// # Errors
     ///
-    /// [`SlabError::Alloc`]`(`[`AllocError::OutOfMemory`]`)` when every
-    /// slot is taken.
+    /// - [`SlabError::Alloc`]`(`[`AllocError::OutOfMemory`]`)` when every
+    ///   slot is taken.
+    /// - [`SlabError::GuardViolation`] if a guard region was tampered with.
+    /// - [`SlabError::DirtySlot`] if the free slot it would hand out is not
+    ///   zeroed (the zero-on-free invariant was skipped or corrupted;
+    ///   `AGENTS.md` §3.3, CWE-908/200).
     pub fn alloc(&mut self) -> Result<SlabHandle, SlabError> {
         // Pre-flight: a slab is never expected to grow without a
         // detected over-run. If guards have been clobbered the alloc
@@ -273,6 +286,15 @@ impl Slab {
         self.verify_guards_internal()?;
         for i in 0..self.slot_count {
             if !self.in_use[i] {
+                // The zero-on-free invariant means a free slot must be
+                // all-zero (`free` wipes it; a fresh slab starts zeroed).
+                // Verify it before reuse so a slot whose zero-on-free was
+                // skipped or corrupted cannot leak its previous occupant's
+                // bytes to this caller (`AGENTS.md` §3.3, CWE-908/200).
+                // Fail closed (§5.4): leave the slot free and reject.
+                if !self.slot_is_clean(i) {
+                    return Err(SlabError::DirtySlot);
+                }
                 self.in_use[i] = true;
                 // Rotate the slot's tag so any handle still holding the
                 // previous tag (a dangling pointer into this slot) will
@@ -418,6 +440,47 @@ impl Slab {
         let p = offset_within(base, total, offset)?;
         unsafe { core::ptr::write(p, byte) };
         Some(())
+    }
+
+    /// Test-only override of slot `slot`'s stored memory tag.
+    ///
+    /// Models direct tampering with the slab's `tags[]` metadata — a
+    /// freelist/metadata-corruption primitive (`AGENTS.md` §19.10),
+    /// distinct from the natural rotation [`Slab::alloc`] performs. A
+    /// later [`Slab::slot_mut`]/[`Slab::free`] presented with the
+    /// *original* handle must then be rejected as a
+    /// [`SlabError::TagMismatch`]. Production code never writes `tags[]`
+    /// outside `alloc`. Returns `None` if `slot` is out of range.
+    #[cfg(test)]
+    pub(crate) fn poke_tag_for_test(&mut self, slot: usize, tag: MemTag) -> Option<()> {
+        *self.tags.get_mut(slot)? = tag;
+        Some(())
+    }
+
+    /// Test-only override of slot `slot`'s `in_use` bit.
+    ///
+    /// Models direct tampering with the slab's allocation bitmap — a
+    /// freelist-corruption primitive. Flipping a freed slot's bit to
+    /// `true` must never let the allocator hand the same live slot out
+    /// twice (no aliasing). Production code never writes `in_use[]`
+    /// outside `alloc`/`free`. Returns `None` if `slot` is out of range.
+    #[cfg(test)]
+    pub(crate) fn poke_in_use_for_test(&mut self, slot: usize, in_use: bool) -> Option<()> {
+        *self.in_use.get_mut(slot)? = in_use;
+        Some(())
+    }
+
+    /// `true` if slot `slot`'s data bytes are all zero.
+    ///
+    /// The zero-on-free invariant ([`Slab::free`] wipes the slot, a fresh
+    /// slab starts zeroed) means every *free* slot is all-zero, so this is
+    /// the check [`Slab::alloc`] runs before reuse to catch a slot whose
+    /// zero-on-free was skipped or corrupted (`AGENTS.md` §3.3).
+    fn slot_is_clean(&self, slot: usize) -> bool {
+        let off = GUARD_BYTES + slot * self.object_size;
+        self.storage[off..off + self.object_size]
+            .iter()
+            .all(|&b| b == 0)
     }
 
     fn verify_guards_internal(&self) -> Result<(), SlabError> {
@@ -704,5 +767,163 @@ mod tests {
         assert!(format!("{}", SlabError::TagMismatch).contains("use-after-free"));
         assert!(format!("{}", SlabError::GuardViolation).contains("guard"));
         assert!(format!("{}", SlabError::Alloc(AllocError::OutOfMemory)).contains("memory"));
+        assert!(format!("{}", SlabError::DirtySlot).contains("zeroed"));
+    }
+
+    // -- §3.2 deliberate metadata-corruption tests ------------------------
+    //
+    // These drive the *detector*: corrupt the slab's `tags[]` / `in_use[]`
+    // metadata through the sanctioned `#[cfg(test)]` trapdoors and assert
+    // the next operation fails closed (`AGENTS.md` §5.4) rather than
+    // handing back a live aliased object or a stale slot.
+
+    #[test]
+    fn tampering_with_a_slots_tag_is_a_tag_mismatch() {
+        let mut s = Slab::new(32, 2).unwrap();
+        let h = s.alloc().unwrap();
+        // Corrupt the slot's recorded tag directly — metadata tampering,
+        // not the natural rotation an alloc/free would perform.
+        let forged = next_free_tag(h.tag(), TAG_COUNT);
+        assert_ne!(forged, h.tag());
+        s.poke_tag_for_test(h.slot, forged).unwrap();
+        // The original handle now disagrees with the slot's tag: every
+        // access path must reject it (`AGENTS.md` §19.10).
+        assert!(matches!(s.slot_mut(h), Err(SlabError::TagMismatch)));
+        assert!(matches!(s.free(h), Err(SlabError::TagMismatch)));
+    }
+
+    #[test]
+    fn tampering_with_the_in_use_bitmap_never_aliases_a_live_slot() {
+        let mut s = Slab::new(32, 2).unwrap();
+        let live = s.alloc().unwrap();
+        // Forge the *free* slot's bitmap bit to "in use" behind the
+        // allocator's back (a freelist-corruption primitive). Now every
+        // slot looks busy, so the allocator must fail closed rather than
+        // alias a live slot.
+        s.poke_in_use_for_test(1, true).unwrap();
+        assert!(matches!(
+            s.alloc(),
+            Err(SlabError::Alloc(AllocError::OutOfMemory))
+        ));
+        // The genuinely-live handle is unaffected and still serviceable.
+        assert!(s.slot_mut(live).is_ok());
+    }
+
+    #[test]
+    fn clearing_a_live_slots_in_use_bit_is_caught_as_a_double_free() {
+        let mut s = Slab::new(32, 1).unwrap();
+        let live = s.alloc().unwrap();
+        // Forge the live slot's bit to "free": a subsequent free of the
+        // genuine handle must be rejected, never freeing twice.
+        s.poke_in_use_for_test(0, false).unwrap();
+        assert!(matches!(s.free(live), Err(SlabError::DoubleFree)));
+    }
+
+    #[test]
+    fn guard_violation_detected_at_the_data_guard_boundaries() {
+        // The exact off-by-one under-/over-run bytes: last byte of the
+        // leading guard, and the first byte of the trailing guard.
+        let mut head = Slab::new(16, 2).unwrap();
+        let _h = head.alloc().unwrap();
+        // SAFETY: test-only trapdoor; the byte is owned and we observe
+        // the resulting GuardViolation immediately. No alias is created.
+        unsafe { head.poke_for_test(GUARD_BYTES - 1, 0).unwrap() };
+        assert!(matches!(
+            head.check_guards(),
+            Err(SlabError::GuardViolation)
+        ));
+
+        let data_bytes = 16 * 2;
+        let mut tail = Slab::new(16, 2).unwrap();
+        let _h = tail.alloc().unwrap();
+        // SAFETY: as above.
+        unsafe { tail.poke_for_test(GUARD_BYTES + data_bytes, 0).unwrap() };
+        assert!(matches!(
+            tail.check_guards(),
+            Err(SlabError::GuardViolation)
+        ));
+    }
+
+    // -- §3.3 stale-data / dirty-slot reuse tests -------------------------
+    //
+    // These prove zero-on-free is an *enforced* invariant, not incidental
+    // (`AGENTS.md` §3.3 / §4 of the charter, CWE-908/200): if a freed
+    // slot's wipe is skipped or corrupted, the reuse path must refuse the
+    // slot rather than leak its previous occupant's bytes.
+
+    #[test]
+    fn reusing_a_slot_whose_zero_on_free_was_skipped_is_rejected() {
+        let mut s = Slab::new(32, 1).unwrap();
+        let h = s.alloc().unwrap();
+        // Write a recognisable "credential" into the slot, then free it —
+        // `free` is supposed to wipe every byte.
+        for b in s.slot_mut(h).unwrap().iter_mut() {
+            *b = 0xA5;
+        }
+        s.free(h).unwrap();
+        // Simulate the zero-on-free being skipped/corrupted: scribble a
+        // leftover credential byte back into the freed slot's storage.
+        // SAFETY: test-only trapdoor over owned storage; no alias, and we
+        // observe the resulting `DirtySlot` immediately.
+        unsafe { s.poke_for_test(GUARD_BYTES, 0xA5).unwrap() };
+        // Reuse must fail closed rather than hand back the dirty bytes.
+        assert!(matches!(s.alloc(), Err(SlabError::DirtySlot)));
+    }
+
+    #[test]
+    fn a_clean_freed_slot_reallocs_without_a_dirty_slot_error() {
+        // The honest negative: an untampered free/realloc round-trip never
+        // trips the dirty-slot detector, so the check does not regress the
+        // normal path.
+        let mut s = Slab::new(32, 1).unwrap();
+        let h = s.alloc().unwrap();
+        for b in s.slot_mut(h).unwrap().iter_mut() {
+            *b = 0xA5;
+        }
+        s.free(h).unwrap();
+        let h2 = s.alloc().expect("clean slot reallocs");
+        assert!(s.slot_mut(h2).unwrap().iter().all(|&b| b == 0));
+    }
+
+    use alloc::format;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        /// §3.7 / §4 (CWE-787): a single-byte corruption at *any* storage
+        /// offset is either detected (guard) or lands in legal slot bytes,
+        /// and the next operations stay **total** — they return `Ok` or a
+        /// typed `Err`, never UB, never a panic, and never a live aliased
+        /// object (the returned slice is always the requested slot's
+        /// length).
+        ///
+        /// This validates the *detector*, not the impossibility of
+        /// corruption (`AGENTS.md` §2.6, §6 of the charter).
+        #[test]
+        fn single_byte_storage_corruption_is_total_and_never_aliases(
+            object_size in 1usize..64,
+            slot_count in 1usize..8,
+            offset in 0usize..(GUARD_BYTES * 2 + 64 * 8),
+            byte in any::<u8>(),
+        ) {
+            let mut s = Slab::new(object_size, slot_count).unwrap();
+            let h = s.alloc().unwrap();
+            // Scribble one arbitrary byte anywhere; an out-of-range
+            // offset is a harmless `None`.
+            // SAFETY: test-only trapdoor over owned storage, no alias.
+            unsafe {
+                let _ = s.poke_for_test(offset, byte);
+            }
+            match s.check_guards() {
+                Ok(()) | Err(SlabError::GuardViolation) => {}
+                Err(other) => prop_assert!(false, "unexpected guard error {other:?}"),
+            }
+            match s.slot_mut(h) {
+                Ok(slice) => prop_assert_eq!(slice.len(), object_size),
+                Err(SlabError::GuardViolation) => {}
+                Err(other) => prop_assert!(false, "unexpected access error {other:?}"),
+            }
+        }
     }
 }

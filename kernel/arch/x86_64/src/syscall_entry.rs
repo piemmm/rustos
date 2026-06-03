@@ -39,7 +39,7 @@
 //! | [`IA32_EFER`] | `0xC000_0080` | Sets [`EFER_SCE`] (bit 0) to enable the `syscall`/`sysret` instructions. |
 //! | [`IA32_STAR`] | `0xC000_0081` | Encodes the kernel CS/SS pair (entry) and the user CS/SS triplet (sysret). |
 //! | [`IA32_LSTAR`] | `0xC000_0082` | Linear address of the syscall entry stub. |
-//! | [`IA32_FMASK`] | `0xC000_0084` | Bits to clear in `RFLAGS` on entry (`IF`/`TF`/`DF`/`AC`/`NT`/`RF`/`VM`). |
+//! | [`IA32_FMASK`] | `0xC000_0084` | Bits to clear in `RFLAGS` on entry (`IF`/`TF`/`DF`/`AC`/`NT`/`RF`/`VM`/`IOPL`). |
 //! | [`IA32_KERNEL_GS_BASE`] | `0xC000_0102` | Per-CPU [`SyscallTls`] address (swapped in by `swapgs`). |
 //!
 //! `STAR[47:32]` is loaded into `CS` on entry (and `STAR[47:32] + 8`
@@ -52,14 +52,18 @@
 //!
 //! # `RFLAGS` mask
 //!
-//! [`fmask_value`] clears `IF`, `TF`, `DF`, `AC`, `NT`, `RF`, and
-//! `VM`. The motivations are:
+//! [`fmask_value`] clears `IF`, `TF`, `DF`, `AC`, `NT`, `RF`,
+//! `VM`, and `IOPL`. The motivations are:
 //!
 //! * `IF` — entry must be non-preemptible until the kernel decides
 //!   otherwise (matches the `cli` semantics every other ISR uses).
 //! * `TF` — drop a stray single-step before kernel code runs.
 //! * `DF` — System V AMD64 ABI requires `DF=0` at function entry.
 //! * `AC` — defence against SMAP bypass / explicit alignment quirks.
+//! * `IOPL` — a user task must never carry I/O privilege into ring 0;
+//!   clearing `IOPL` on entry means kernel code always runs at
+//!   `IOPL=0` regardless of the caller's `RFLAGS` (matches Linux's
+//!   `MSR_SYSCALL_MASK`; `tests/SECURITY.md` §5, CWE-696).
 //! * `NT`, `RF`, `VM` — task-switching and virtual-8086 holdovers
 //!   that have no meaning in long mode and must not affect kernel
 //!   state.
@@ -110,12 +114,12 @@ pub const EFER_SCE: u64 = 1 << 0;
 /// `RFLAGS` mask written to `IA32_FMASK`.
 ///
 /// Bits cleared on syscall entry: `TF` (bit 8, `0x100`), `IF`
-/// (bit 9, `0x200`), `DF` (bit 10, `0x400`), `NT` (bit 14,
-/// `0x4000`), `RF` (bit 16, `0x1_0000`), `VM` (bit 17,
-/// `0x2_0000`), `AC` (bit 18, `0x4_0000`). See module-level docs
-/// for the rationale. The numeric value `0x7_4700` is the bitwise
-/// OR of those seven flags.
-pub const RFLAGS_MASK: u64 = 0x7_4700;
+/// (bit 9, `0x200`), `DF` (bit 10, `0x400`), `IOPL` (bits 12..13,
+/// `0x3000`), `NT` (bit 14, `0x4000`), `RF` (bit 16, `0x1_0000`),
+/// `VM` (bit 17, `0x2_0000`), `AC` (bit 18, `0x4_0000`). See
+/// module-level docs for the rationale. The numeric value
+/// `0x7_7700` is the bitwise OR of those flags.
+pub const RFLAGS_MASK: u64 = 0x7_7700;
 
 // --- MSR-value math (pure, host-testable) ---------------------------
 
@@ -211,6 +215,58 @@ pub const KERNEL_RSP0_OFFSET: usize = 0;
 /// `gs:8` to save/restore the user `%rsp`.
 pub const USER_RSP_SAVE_OFFSET: usize = 8;
 
+/// First non-canonical address above the lower (user) half of the
+/// x86_64 48-bit virtual address space.
+///
+/// Gated to the bare-metal target or host tests: only
+/// [`validate_kernel_rsp0`] consumes it, and that in turn is only wired
+/// into the freestanding [`install_kernel_rsp0`] (mirrors the
+/// `crate::percpu` stack-top helpers' gating).
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const CANONICAL_LOWER_LIMIT: u64 = 0x0000_8000_0000_0000;
+/// First address of the canonical higher half (kernel space); also the
+/// lowest valid kernel `RSP0`.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const CANONICAL_HIGHER_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// `true` if `addr` is a canonical 48-bit x86_64 virtual address — bits
+/// `63:47` are all equal (Intel SDM Vol 1 §3.3.7.1). The CPU `#GP`s (or,
+/// for some MSR loads, faults at the consuming instruction) on a
+/// non-canonical address.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn is_canonical(addr: u64) -> bool {
+    addr < CANONICAL_LOWER_LIMIT || addr >= CANONICAL_HIGHER_BASE
+}
+
+/// Validate a kernel `RSP0` before it is installed for `syscall` entry.
+///
+/// On a `syscall` from ring 3 the entry stub pivots onto this stack
+/// (loaded from the per-CPU TLS via `swapgs`). A hostile or buggy value
+/// is a stack-pivot / privilege-boundary vector (`AGENTS.md` §3.5 / §5,
+/// CVE-2019-1125 class): a **non-canonical** top faults inside kernel
+/// entry, and a **user-range** top would run kernel entry on
+/// attacker-controlled memory. The stack top must therefore be non-null,
+/// 16-byte aligned (System V AMD64), canonical, and in the kernel
+/// (higher) half. Anything else is rejected fail-closed (§5.4).
+///
+/// # Errors
+///
+/// [`crate::percpu::InitError::InvalidKernelStackPointer`] if `rsp0` is
+/// null, misaligned, non-canonical, or in the user half.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu::InitError> {
+    if rsp0 == 0 || rsp0 % 16 != 0 {
+        return Err(crate::percpu::InitError::InvalidKernelStackPointer);
+    }
+    // The kernel half is by definition canonical, but check canonicity
+    // explicitly so the intent is legible and a future split of the two
+    // constants cannot silently admit a non-canonical address.
+    if !is_canonical(rsp0) || rsp0 < CANONICAL_HIGHER_BASE {
+        return Err(crate::percpu::InitError::InvalidKernelStackPointer);
+    }
+    Ok(())
+}
+
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static mut PER_CPU_TLS: [SyscallTls; MAX_CPUS] = {
     const Z: SyscallTls = SyscallTls::ZERO;
@@ -225,8 +281,11 @@ static mut PER_CPU_TLS: [SyscallTls; MAX_CPUS] = {
 ///
 /// # Errors
 ///
-/// Returns [`crate::percpu::InitError::CpuIndexOutOfRange`] if
-/// `cpu_index >= MAX_CPUS`.
+/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if
+///   `cpu_index >= MAX_CPUS`.
+/// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
+///   `kernel_rsp0` is null, not 16-byte aligned, non-canonical, or in
+///   the user half (`AGENTS.md` §3.5 — stack-pivot / CVE-2019-1125).
 ///
 /// # Safety
 ///
@@ -247,6 +306,9 @@ pub unsafe fn install_kernel_rsp0(
     if cpu_index >= MAX_CPUS {
         return Err(crate::percpu::InitError::CpuIndexOutOfRange);
     }
+    // Reject a non-canonical / user-range / misaligned stack top before
+    // it can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
+    validate_kernel_rsp0(kernel_rsp0)?;
     // SAFETY: caller's contract pins `cpu_index` to this CPU; no
     // other CPU writes to the same slot.
     unsafe {
@@ -607,7 +669,7 @@ mod tests {
     #[test]
     fn fmask_clears_documented_rflags_bits() {
         let m = fmask_value();
-        // IF, TF, DF, AC, NT, RF, VM.
+        // IF, TF, DF, AC, NT, RF, VM, IOPL.
         assert_eq!(m & 0x0000_0200, 0x0000_0200, "IF");
         assert_eq!(m & 0x0000_0100, 0x0000_0100, "TF");
         assert_eq!(m & 0x0000_0400, 0x0000_0400, "DF");
@@ -615,6 +677,7 @@ mod tests {
         assert_eq!(m & 0x0000_4000, 0x0000_4000, "NT");
         assert_eq!(m & 0x0001_0000, 0x0001_0000, "RF");
         assert_eq!(m & 0x0002_0000, 0x0002_0000, "VM");
+        assert_eq!(m & 0x0000_3000, 0x0000_3000, "IOPL");
         // No other bits should be set — anything else would be an
         // undocumented effect the kernel must justify.
         let documented = 0x0000_0200
@@ -623,8 +686,28 @@ mod tests {
             | 0x0004_0000
             | 0x0000_4000
             | 0x0001_0000
-            | 0x0002_0000;
+            | 0x0002_0000
+            | 0x0000_3000;
         assert_eq!(m, documented);
+    }
+
+    #[test]
+    fn fmask_neutralises_an_adversarial_user_rflags() {
+        // `tests/SECURITY.md` §5 (CWE-696): the CPU computes the kernel
+        // entry `RFLAGS` as `user_rflags & !IA32_FMASK`. A malicious
+        // user must not be able to carry `AC=1` (SMAP bypass), `DF=1`
+        // (string-op direction), or a non-zero `IOPL` (ring-0 I/O
+        // privilege) past the boundary.
+        let malicious: u64 = 0x0004_0000 // AC
+            | 0x0000_0400 // DF
+            | 0x0000_3000 // IOPL = 3
+            | 0x0000_0100 // TF
+            | 0x0000_0002; // the always-set reserved bit 1
+        let kernel_rflags = malicious & !fmask_value();
+        assert_eq!(kernel_rflags & 0x0004_0000, 0, "AC must be masked off");
+        assert_eq!(kernel_rflags & 0x0000_0400, 0, "DF must be masked off");
+        assert_eq!(kernel_rflags & 0x0000_3000, 0, "IOPL must be masked off");
+        assert_eq!(kernel_rflags & 0x0000_0100, 0, "TF must be masked off");
     }
 
     #[test]
@@ -672,5 +755,64 @@ mod tests {
         // that quietly enables host-side storage is caught.
         set_dispatch_callback(host_dispatch_noop);
         assert!(dispatch_callback().is_none());
+    }
+
+    // -- §3.5 / §5 kernel-RSP0 stack-pivot validation (CVE-2019-1125) ----
+    //
+    // `install_kernel_rsp0` itself is freestanding-only (it writes the
+    // per-CPU TLS arena), but its input check is the pure, host-testable
+    // `validate_kernel_rsp0`. These pin the fail-closed behaviour the
+    // QEMU stack-pivot test (tests/SECURITY.md §5) gates on.
+
+    use crate::percpu::InitError;
+
+    #[test]
+    fn validate_kernel_rsp0_accepts_a_canonical_aligned_kernel_stack() {
+        // A 16-byte-aligned address in the canonical higher half.
+        assert_eq!(validate_kernel_rsp0(0xFFFF_8000_0010_0000), Ok(()));
+        assert_eq!(validate_kernel_rsp0(CANONICAL_HIGHER_BASE), Ok(()));
+    }
+
+    #[test]
+    fn validate_kernel_rsp0_rejects_null_and_misaligned() {
+        assert_eq!(
+            validate_kernel_rsp0(0),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+        // Higher-half but not 16-byte aligned.
+        assert_eq!(
+            validate_kernel_rsp0(0xFFFF_8000_0010_0008),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+    }
+
+    #[test]
+    fn validate_kernel_rsp0_rejects_a_user_range_stack() {
+        // A 16-byte-aligned, canonical *lower-half* (user) address: a
+        // stack-pivot vector — kernel entry must never run on it.
+        assert_eq!(
+            validate_kernel_rsp0(0x0000_7FFF_FFF0_0000),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+    }
+
+    #[test]
+    fn validate_kernel_rsp0_rejects_a_non_canonical_stack() {
+        // Inside the non-canonical hole (bits 63:47 not all equal),
+        // 16-byte aligned. The CPU would fault loading it.
+        assert_eq!(
+            validate_kernel_rsp0(0x0001_0000_0000_0000),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+    }
+
+    #[test]
+    fn is_canonical_matches_the_48_bit_rule() {
+        assert!(is_canonical(0));
+        assert!(is_canonical(CANONICAL_LOWER_LIMIT - 1));
+        assert!(!is_canonical(CANONICAL_LOWER_LIMIT));
+        assert!(!is_canonical(CANONICAL_HIGHER_BASE - 1));
+        assert!(is_canonical(CANONICAL_HIGHER_BASE));
+        assert!(is_canonical(u64::MAX));
     }
 }

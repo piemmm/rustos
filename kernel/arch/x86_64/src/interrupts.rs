@@ -240,6 +240,58 @@ pub struct Idt {
     pub entries: [IdtEntry; IDT_LEN],
 }
 
+/// Reasons [`Idt::validate`] rejects an in-memory IDT.
+///
+/// Each variant is an interrupt-gate invariant a corrupted (or
+/// mis-built) table would break (`AGENTS.md` §3.5 / §5 of the security
+/// charter — IDT / call-gate CVE classes). Validation runs against the
+/// bytes in memory *before* `lidt` installs them, so a scribbled table
+/// fails closed (§5.4) rather than routing an interrupt through an
+/// attacker-chosen address or a user-reachable gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdtError {
+    /// A vector's present (`P`) bit was clear after the table was built.
+    VectorNotPresent {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A gate's type nibble was neither an interrupt gate (`0xE`) nor a
+    /// trap gate (`0xF`).
+    BadGateType {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A gate's descriptor privilege level (DPL) was not 0 — a non-zero
+    /// DPL lets ring 3 invoke the vector with `int n`, the call-gate
+    /// escalation class.
+    GateNotDpl0 {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A gate's code selector did not match the expected kernel CS, so
+    /// the ISR would run under an unexpected segment.
+    WrongSelector {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A gate's `IST` index exceeded the architectural maximum of 7.
+    IstOutOfRange {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A present gate's handler offset was zero — it would vector to
+    /// address 0 rather than a real ISR.
+    NullHandler {
+        /// IDT vector index.
+        vector: u16,
+    },
+    /// A gate's reserved (`zero`) word was non-zero.
+    ReservedNotZero {
+        /// IDT vector index.
+        vector: u16,
+    },
+}
+
 impl Idt {
     /// All-empty IDT. Every vector is `P = 0`, which delivers `#NP` on
     /// access. Suitable as a `static` initialiser before
@@ -284,6 +336,55 @@ impl Idt {
             v += 1;
         }
         idt
+    }
+
+    /// Validate every gate against the invariants `load` relies on,
+    /// **before** `lidt` installs the table.
+    ///
+    /// A corrupted IDT is a classic privilege-escalation / hijack vector
+    /// (`AGENTS.md` §3.5 / §5 — IDT / call-gate CVE classes): a gate with
+    /// a cleared present bit, a non-zero DPL (letting ring 3 fire the
+    /// vector with `int n`), a foreign code selector, an out-of-range
+    /// `IST`, or a zeroed handler offset all route or fault control flow
+    /// where the kernel did not intend. Checking the in-memory table here
+    /// makes a scribbled IDT fail closed (§5.4) instead of being loaded.
+    ///
+    /// `expected_selector` is the kernel CS every gate must reference
+    /// (the selector passed to [`Self::with_default_handler`]).
+    ///
+    /// # Errors
+    ///
+    /// An [`IdtError`] naming the first vector that breaks an invariant.
+    pub fn validate(&self, expected_selector: u16) -> Result<(), IdtError> {
+        for (v, entry) in self.entries.iter().enumerate() {
+            // `IdtEntry` is `Copy`; read fields off the value so no
+            // reference into the packed struct is ever taken.
+            let e = *entry;
+            let vector = u16::try_from(v).unwrap_or(u16::MAX);
+            if e.type_attr & 0x80 == 0 {
+                return Err(IdtError::VectorNotPresent { vector });
+            }
+            let gate_type = e.type_attr & 0x0F;
+            if gate_type != 0xE && gate_type != 0xF {
+                return Err(IdtError::BadGateType { vector });
+            }
+            if (e.type_attr >> 5) & 0x3 != 0 {
+                return Err(IdtError::GateNotDpl0 { vector });
+            }
+            if e.selector != expected_selector {
+                return Err(IdtError::WrongSelector { vector });
+            }
+            if e.ist > 7 {
+                return Err(IdtError::IstOutOfRange { vector });
+            }
+            if e.handler() == 0 {
+                return Err(IdtError::NullHandler { vector });
+            }
+            if e.zero != 0 {
+                return Err(IdtError::ReservedNotZero { vector });
+            }
+        }
+        Ok(())
     }
 
     /// Install this IDT on the current CPU via `lidt`.
@@ -574,5 +675,117 @@ mod tests {
         assert_eq!(offset_of!(InterruptStackFrame, rflags), 16);
         assert_eq!(offset_of!(InterruptStackFrame, rsp), 24);
         assert_eq!(offset_of!(InterruptStackFrame, ss), 32);
+    }
+
+    // -- §3.5 IDT integrity / corruption tests ---------------------------
+    //
+    // `validate` is the detector for a scribbled IDT. Each test builds a
+    // well-formed table, corrupts one gate field via a copy-mutate-assign
+    // (so no reference is taken into the packed entry), and asserts
+    // validation fails closed (`AGENTS.md` §3.5 / §5.4) before any `lidt`.
+
+    const TEST_CS: u16 = 0x08;
+    const TEST_HANDLER: u64 = 0xFFFF_8000_0010_0000;
+
+    /// A well-formed IDT every gate of which `validate` accepts.
+    fn valid_idt() -> Idt {
+        Idt::with_default_handler(TEST_HANDLER, TEST_CS, |v| u8::from(v == 8))
+    }
+
+    /// Replace vector `v`'s entry with `e` without taking a reference
+    /// into the packed array element.
+    fn set_entry(idt: &mut Idt, v: usize, e: IdtEntry) {
+        idt.entries[v] = e;
+    }
+
+    #[test]
+    fn validate_accepts_a_populated_table() {
+        assert_eq!(valid_idt().validate(TEST_CS), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_a_cleared_present_bit() {
+        let mut idt = valid_idt();
+        let mut e = idt.entries[20];
+        e.type_attr &= !0x80;
+        set_entry(&mut idt, 20, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::VectorNotPresent { vector: 20 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_user_reachable_gate_dpl() {
+        let mut idt = valid_idt();
+        // Set DPL = 3 (bits 5..7) on vector 0x80 — a ring-3-callable gate.
+        let mut e = idt.entries[0x80];
+        e.type_attr |= 0x3 << 5;
+        set_entry(&mut idt, 0x80, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::GateNotDpl0 { vector: 0x80 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_foreign_selector() {
+        let mut idt = valid_idt();
+        let mut e = idt.entries[14];
+        e.selector = 0x10;
+        set_entry(&mut idt, 14, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::WrongSelector { vector: 14 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_bad_gate_type() {
+        let mut idt = valid_idt();
+        // Keep the present bit, replace the type nibble with a non-gate
+        // value (e.g. 0x5, a 32-bit task gate, illegal in long mode).
+        let mut e = idt.entries[13];
+        e.type_attr = 0x80 | 0x05;
+        set_entry(&mut idt, 13, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::BadGateType { vector: 13 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_out_of_range_ist() {
+        let mut idt = valid_idt();
+        let mut e = idt.entries[2];
+        e.ist = 8;
+        set_entry(&mut idt, 2, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::IstOutOfRange { vector: 2 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_null_handler() {
+        let mut idt = valid_idt();
+        // A present gate that vectors to address 0.
+        set_entry(&mut idt, 7, IdtEntry::interrupt_gate(0, TEST_CS, 0));
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::NullHandler { vector: 7 })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_nonzero_reserved_word() {
+        let mut idt = valid_idt();
+        let mut e = idt.entries[9];
+        e.zero = 1;
+        set_entry(&mut idt, 9, e);
+        assert_eq!(
+            idt.validate(TEST_CS),
+            Err(IdtError::ReservedNotZero { vector: 9 })
+        );
     }
 }

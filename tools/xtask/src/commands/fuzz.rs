@@ -83,6 +83,12 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",
     },
+    Target {
+        package: "rustos-virtio",
+        test: "fuzz_virtqueue",
+        description:
+            "split-virtqueue completion path (hostile device-written used ring / descriptors)",
+    },
 ];
 
 /// How long to run each harness.
@@ -371,6 +377,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-svg");
+    }
+
+    #[test]
+    fn virtqueue_fuzz_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_virtqueue"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-virtio");
     }
 
     #[test]

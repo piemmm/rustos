@@ -320,6 +320,21 @@ minted it.
 - Per-method capabilities for block / net are documented on the
   `Block` / `Net` traits in [Driver traits](../abi/driver_traits.md).
 
+## Untrusted device input
+
+The used ring and the descriptor table are **device-written**: under
+the `AGENTS.md` §4 / §3.6 threat model a buggy or hostile device (a
+DMA-capable, Thunderclap-class peer, CWE-1257) may write a completion
+naming a descriptor head outside the granted table, or DMA-scribble a
+chain `next` link so the reclaim walk would leave the region.
+`SplitQueue::poll_used` therefore validates every device-supplied head
+against `queue_size` and bounds the reclaim walk to the table: an
+out-of-range head is rejected with `VirtioError::MalformedCompletion`
+(mapped to `DriverError::DeviceFault`) and no chain is reclaimed, while
+a corrupted `next` link makes the walk bail at the boundary. The driver
+never dereferences a descriptor outside the granted region — it fails
+closed (§5.4) rather than trusting the device.
+
 ## Test surface
 
 The protocol and the kernel host are tested in the crates that own
@@ -338,7 +353,11 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   slot consumption, mock-peer round-trip, empty/too-long and
   free-pool-exhaustion rejection, ring-wrap-with-reclaim across the
   ring boundary (toggling both wrap counters), and the empty
-  no-completion / no-op-drain paths.
+  no-completion / no-op-drain paths. The §3.6 adversarial tests
+  (`poll_used_rejects_a_device_head_outside_the_descriptor_table`,
+  `poll_used_reclaim_bails_on_a_corrupted_next_link`) and the
+  `fuzz_virtqueue` harness drive a hostile device-written used ring /
+  descriptor table and assert the consumer fails closed.
 - `cargo test -p rustos-drv-bus-virtio` covers the concrete
   transports: the `transport_pci` tests (short-window rejection,
   `num_queues` read, status write/read + reset, driver-feature

@@ -316,6 +316,73 @@ pub enum IstError {
     NullPointer,
 }
 
+// --- GDT integrity validation ---------------------------------------
+
+/// Reasons [`PerCpuGdt::validate`] rejects an in-memory table.
+///
+/// Each variant is a privilege-boundary invariant a corrupted (or
+/// mis-built) descriptor table would break (`AGENTS.md` §3.5 / §5 of
+/// the security charter — call-gate / IST CVE classes). Validation runs
+/// against the bytes in memory *before* `lgdt`/`ltr` install them, so a
+/// scribbled table fails closed (§5.4) rather than being loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GdtError {
+    /// Slot 0 was not the all-zero null descriptor the CPU requires.
+    NullSlotNotZero,
+    /// A segment slot did not have its present (`P`) bit set.
+    SegmentNotPresent {
+        /// GDT slot index of the offending descriptor.
+        index: u16,
+    },
+    /// A segment slot had its system (`S=0`) bit, i.e. it is not a
+    /// code/data segment where one is required.
+    NotACodeOrDataSegment {
+        /// GDT slot index of the offending descriptor.
+        index: u16,
+    },
+    /// A kernel segment (kernel CS/DS) was not at DPL 0 — a privilege
+    /// downgrade that would let ring 3 reach a kernel selector.
+    KernelSegmentNotDpl0 {
+        /// GDT slot index of the offending descriptor.
+        index: u16,
+    },
+    /// A user segment (user CS/DS) was not at DPL 3.
+    UserSegmentNotDpl3 {
+        /// GDT slot index of the offending descriptor.
+        index: u16,
+    },
+    /// The TSS descriptor was not a present, available 64-bit TSS
+    /// (type `0x9`, `S=0`, `P=1`) — i.e. the table was never finalized
+    /// or its TSS slot was corrupted.
+    TssDescriptorMalformed,
+    /// The TSS descriptor's base address did not point at this
+    /// `PerCpuGdt`'s own [`Tss`].
+    TssBaseMismatch,
+    /// `RSP0` (the ring-0 stack the CPU loads on a ring 3 → ring 0
+    /// transition) was null or not 16-byte aligned — an interrupt taken
+    /// from user mode would pivot onto an unusable stack.
+    PrivilegeStackInvalid,
+    /// A registered (non-zero) IST stack top was not 16-byte aligned.
+    IstPointerMisaligned {
+        /// 1-based IST index (`IST1`..`IST7`).
+        index: u8,
+    },
+}
+
+/// Descriptor privilege level (`DPL`, bits 45..47) of a segment slot.
+const fn descriptor_dpl(d: u64) -> u64 {
+    (d >> 45) & 0x3
+}
+
+/// Reconstruct a 64-bit TSS base from its two descriptor slots — the
+/// inverse of [`tss_descriptor`]'s base split (SDM Vol 3A §8.2.3).
+const fn tss_base_from_descriptor(low: u64, high: u64) -> u64 {
+    let base_lo24 = (low >> 16) & 0x00FF_FFFF;
+    let base_mid8 = (low >> 56) & 0xFF;
+    let base_hi32 = high & 0xFFFF_FFFF;
+    base_lo24 | (base_mid8 << 24) | (base_hi32 << 32)
+}
+
 // --- Per-CPU GDT -----------------------------------------------------
 
 /// Per-CPU GDT + TSS bundle.
@@ -412,6 +479,91 @@ impl PerCpuGdt {
         let [low, high] = tss_descriptor(base, limit, 0);
         self.entries[TSS_INDEX as usize] = low;
         self.entries[TSS_INDEX as usize + 1] = high;
+    }
+
+    /// Validate the in-memory table against the privilege-boundary
+    /// invariants `install` relies on, **before** `lgdt`/`ltr` load it.
+    ///
+    /// A corrupted descriptor table is a classic privilege-escalation
+    /// vector (`AGENTS.md` §3.5 / §5 — call-gate / IST CVE classes): a
+    /// kernel CS demoted to DPL 3, a user CS promoted to DPL 0, a
+    /// cleared present bit, a TSS descriptor pointing at attacker memory,
+    /// or an `RSP0`/IST pivot onto an unmapped stack. Catching these here
+    /// makes a scribbled table fail closed (§5.4) instead of being
+    /// installed. The check must run after [`Self::finalize`] (it
+    /// requires the TSS descriptor to be populated) and after `RSP0` has
+    /// been registered via [`Self::set_privilege_stack`].
+    ///
+    /// # Errors
+    ///
+    /// A [`GdtError`] naming the first invariant the table breaks.
+    pub fn validate(&self) -> Result<(), GdtError> {
+        if self.entries[0] != 0 {
+            return Err(GdtError::NullSlotNotZero);
+        }
+
+        // Kernel code/data: present, code-or-data (S=1), DPL 0.
+        for index in [KERNEL_CS_INDEX, KERNEL_DS_INDEX] {
+            let d = self.entries[index as usize];
+            Self::check_present_user_segment(d, index)?;
+            if descriptor_dpl(d) != 0 {
+                return Err(GdtError::KernelSegmentNotDpl0 { index });
+            }
+        }
+
+        // User code/data: present, code-or-data (S=1), DPL 3.
+        for index in [USER_CS_INDEX, USER_DS_INDEX] {
+            let d = self.entries[index as usize];
+            Self::check_present_user_segment(d, index)?;
+            if descriptor_dpl(d) != 3 {
+                return Err(GdtError::UserSegmentNotDpl3 { index });
+            }
+        }
+
+        // TSS descriptor: present, system (S=0), available-64-bit-TSS
+        // type (0x9), and a base that points at our own TSS.
+        let low = self.entries[TSS_INDEX as usize];
+        let high = self.entries[TSS_INDEX as usize + 1];
+        let present = (low >> 47) & 1 == 1;
+        let s_bit = (low >> 44) & 1;
+        let ty = (low >> 40) & 0xF;
+        if !present || s_bit != 0 || ty != 0x9 {
+            return Err(GdtError::TssDescriptorMalformed);
+        }
+        if tss_base_from_descriptor(low, high) != core::ptr::addr_of!(self.tss) as u64 {
+            return Err(GdtError::TssBaseMismatch);
+        }
+
+        // `RSP0` is mandatory: a ring 3 → ring 0 transition loads it.
+        // Copy the packed array to a local before indexing (E0793).
+        let privilege_stack = self.tss.privilege_stack;
+        let rsp0 = privilege_stack[0];
+        if rsp0 == 0 || rsp0 % IST_STACK_ALIGN != 0 {
+            return Err(GdtError::PrivilegeStackInvalid);
+        }
+
+        // Every *registered* (non-zero) IST stack top must stay aligned.
+        let ist = self.tss.ist_stack;
+        for (i, &top) in ist.iter().enumerate() {
+            if top != 0 && top % IST_STACK_ALIGN != 0 {
+                let index = u8::try_from(i + 1).unwrap_or(u8::MAX);
+                return Err(GdtError::IstPointerMisaligned { index });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Shared check: a code/data segment slot must be present (`P=1`)
+    /// and a non-system descriptor (`S=1`).
+    fn check_present_user_segment(d: u64, index: u16) -> Result<(), GdtError> {
+        if (d >> 47) & 1 != 1 {
+            return Err(GdtError::SegmentNotPresent { index });
+        }
+        if (d >> 44) & 1 != 1 {
+            return Err(GdtError::NotACodeOrDataSegment { index });
+        }
+        Ok(())
     }
 
     /// 16-byte selector tuple for this GDT layout.
@@ -822,5 +974,119 @@ mod tests {
         assert_eq!(size_of::<GdtPointer>(), 10);
         assert_eq!(offset_of!(GdtPointer, limit), 0);
         assert_eq!(offset_of!(GdtPointer, base), 2);
+    }
+
+    // -- §3.5 descriptor-table integrity / corruption tests --------------
+    //
+    // `validate` is the detector for a scribbled GDT/TSS. Each test
+    // finalizes a table *in place* (the TSS descriptor embeds the live
+    // address of its own TSS, so the struct must not move between
+    // `finalize` and `validate`), corrupts one descriptor field through
+    // the public `entries` / `tss` storage, and asserts validation fails
+    // closed (`AGENTS.md` §3.5 / §5.4) — before any `lgdt`/`ltr`.
+
+    /// Finalize `g` in place and register a valid `RSP0`, leaving a table
+    /// that `validate` accepts.
+    fn make_valid(g: &mut PerCpuGdt) {
+        g.finalize();
+        g.set_privilege_stack(0, 0x0010_0000).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_a_finalized_table() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        assert_eq!(g.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_an_unfinalized_tss_descriptor() {
+        let mut g = PerCpuGdt::new();
+        g.set_privilege_stack(0, 0x0010_0000).unwrap();
+        // No `finalize`: the TSS slot is still zero.
+        assert_eq!(g.validate(), Err(GdtError::TssDescriptorMalformed));
+    }
+
+    #[test]
+    fn validate_requires_a_valid_rsp0() {
+        let mut g = PerCpuGdt::new();
+        g.finalize();
+        // No `RSP0` registered: a ring 3 → ring 0 trap would have no stack.
+        assert_eq!(g.validate(), Err(GdtError::PrivilegeStackInvalid));
+    }
+
+    #[test]
+    fn validate_rejects_a_corrupted_null_slot() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        g.entries[0] = 0xDEAD_BEEF;
+        assert_eq!(g.validate(), Err(GdtError::NullSlotNotZero));
+    }
+
+    #[test]
+    fn validate_rejects_a_demoted_kernel_cs() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        // Smear the DPL bits (45..47) of kernel CS to 3 — a privilege
+        // downgrade that would expose a kernel selector to ring 3.
+        g.entries[KERNEL_CS_INDEX as usize] |= 0x3 << 45;
+        assert_eq!(
+            g.validate(),
+            Err(GdtError::KernelSegmentNotDpl0 {
+                index: KERNEL_CS_INDEX
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_promoted_user_cs() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        // Clear the DPL bits of user CS to 0 — a privilege escalation.
+        g.entries[USER_CS_INDEX as usize] &= !(0x3 << 45);
+        assert_eq!(
+            g.validate(),
+            Err(GdtError::UserSegmentNotDpl3 {
+                index: USER_CS_INDEX
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_not_present_segment() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        // Clear the present (`P`) bit of kernel DS.
+        g.entries[KERNEL_DS_INDEX as usize] &= !(1 << 47);
+        assert_eq!(
+            g.validate(),
+            Err(GdtError::SegmentNotPresent {
+                index: KERNEL_DS_INDEX
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_relocated_tss_base() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        // Flip a base bit in the TSS descriptor's high word: TR would
+        // then point at memory that is not our TSS.
+        g.entries[TSS_INDEX as usize + 1] ^= 1;
+        assert_eq!(g.validate(), Err(GdtError::TssBaseMismatch));
+    }
+
+    #[test]
+    fn validate_rejects_a_misaligned_ist_pointer() {
+        let mut g = PerCpuGdt::new();
+        make_valid(&mut g);
+        g.set_ist(1, 0x0011_0000).unwrap();
+        // Corrupt the registered IST1 stack top to a misaligned address
+        // (direct TSS-metadata tampering, behind the setter's back).
+        g.tss.ist_stack[0] = 0x0011_0001;
+        assert_eq!(
+            g.validate(),
+            Err(GdtError::IstPointerMisaligned { index: 1 })
+        );
     }
 }

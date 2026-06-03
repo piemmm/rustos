@@ -302,6 +302,11 @@ impl SplitQueue {
     ///
     /// * [`VirtioError::NoCompletion`] if no new completion is
     ///   available.
+    /// * [`VirtioError::MalformedCompletion`] if the device-written
+    ///   completion names a descriptor head outside the granted
+    ///   descriptor table (`AGENTS.md` §3.6, CWE-1257 / Thunderclap).
+    ///   The bogus entry is skipped (the queue still makes progress) and
+    ///   no chain is reclaimed — fail closed (§5.4).
     pub fn poll_used(&mut self) -> Result<UsedToken, VirtioError> {
         let used_bytes = self.used.as_bytes();
         let used_idx = u16::from_le_bytes(used_bytes[2..4].try_into().unwrap_or_default());
@@ -321,6 +326,17 @@ impl SplitQueue {
                 .unwrap_or_default(),
         );
         let head = (id & 0xFFFF) as u16;
+        // The completion id is **device-written**, hence untrusted: a
+        // buggy or hostile device (CWE-1257 / Thunderclap) can name a
+        // head outside the descriptor table the driver granted it.
+        // Walking such a head would index `desc` storage outside the
+        // granted region, so reject it fail-closed (`AGENTS.md` §3.6 /
+        // §5.4). The bogus used entry is still consumed so the queue
+        // makes forward progress, but no chain is reclaimed on its word.
+        if head >= self.queue_size {
+            self.last_used_idx = self.last_used_idx.wrapping_add(1);
+            return Err(VirtioError::MalformedCompletion);
+        }
         // Reclaim chain into free list.
         self.reclaim_chain(head);
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -336,6 +352,14 @@ impl SplitQueue {
         let mut len = 1u16;
         let mut cur = head;
         loop {
+            // A chain `next` link is descriptor-table data and may have
+            // been corrupted (CWE-1257 / Thunderclap DMA write). Never
+            // read a descriptor outside the granted table: bail rather
+            // than index out of region (`AGENTS.md` §3.6 / §5.4). The
+            // caller validated `head`; this guards every followed `next`.
+            if cur >= self.queue_size {
+                return;
+            }
             let d = self.read_desc(cur);
             if (d.flags & VRING_DESC_F_NEXT) == 0 {
                 // Tail: stitch into free list.

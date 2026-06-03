@@ -79,6 +79,11 @@ pub enum InitError {
     /// completed `init`. The per-CPU IDT is not safe to mutate
     /// until the latch is set, so the call is rejected fail-closed.
     NotInitialised,
+    /// A kernel `RSP0` (the ring-0 stack the CPU loads on a `syscall`
+    /// from ring 3) was rejected: null, not 16-byte aligned,
+    /// non-canonical, or in the user half of the address space
+    /// (`AGENTS.md` §3.5 / §5 — stack-pivot / CVE-2019-1125 class).
+    InvalidKernelStackPointer,
 }
 
 impl From<gdt::IstError> for InitError {

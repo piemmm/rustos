@@ -77,6 +77,14 @@ from leaking into the next caller. This is a cheap defence-in-depth
 measure; for **credentials, keys, and capability tokens** the caller
 must use the sensitive-region API below.
 
+Zero-on-free is an *enforced* invariant, not an incidental one
+(`AGENTS.md` §3.3, CWE-908/200): because `free` wipes every byte and a
+fresh slab starts zeroed, a free slot is always all-zero. `Slab::alloc`
+verifies this before reusing a slot and refuses one whose contents are
+non-zero with `SlabError::DirtySlot`, so a skipped or corrupted wipe
+fails closed rather than leaking the previous occupant's bytes to the
+next caller.
+
 ## 3. Virtual memory & page-table operations
 
 [`AddressSpace<P: PageTableOps>`] is the per-process virtual address

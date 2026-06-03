@@ -205,6 +205,59 @@ fn poll_used_returns_no_completion_when_empty() {
 }
 
 #[test]
+fn poll_used_rejects_a_device_head_outside_the_descriptor_table() {
+    // §3.6 (CWE-1257 / Thunderclap): a hostile device publishes a used
+    // completion whose head escapes the granted descriptor table. The
+    // driver must reject it fail-closed (`AGENTS.md` §5.4), never walk a
+    // descriptor outside the region.
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = SplitQueue::new(&mut t, host, 0, 4).unwrap();
+    // head == queue_size is the first out-of-range index.
+    t.publish_raw_used(0, 4, 0).unwrap();
+    assert_eq!(q.poll_used(), Err(VirtioError::MalformedCompletion));
+    // The queue stays usable: a subsequent honest completion still works.
+    t.publish_raw_used(0, 0, 0).unwrap();
+    assert_eq!(q.poll_used().map(|tok| tok.head), Ok(0));
+}
+
+#[test]
+fn poll_used_reclaim_bails_on_a_corrupted_next_link() {
+    // §3.6: a device DMA-scribbles a descriptor's chain `next` link so it
+    // points outside the table. Reclaiming the chain the device names
+    // must bail at the boundary rather than dereference out of region.
+    let mut t = MockTransport::new(1, 4, 0, 0);
+    let host = static_host();
+    let mut q = SplitQueue::new(&mut t, host, 0, 4).unwrap();
+    let region = host.alloc_dma_zeroed(4).unwrap();
+    // A two-descriptor chain occupies descriptors 0 (head) and 1.
+    let head = q
+        .add_chain(&[
+            ChainSegment {
+                phys: region.phys(),
+                len: 4,
+                direction: Direction::DeviceRead,
+            },
+            ChainSegment {
+                phys: region.phys(),
+                len: 4,
+                direction: Direction::DeviceWrite,
+            },
+        ])
+        .unwrap();
+    // Corrupt descriptor 0's `next` field (bytes 14..16 of the entry) to
+    // an out-of-range index. `0xFF, 0xFF` => next == 0xFFFF.
+    t.poke_descriptor(0, 14, 0xFF).unwrap();
+    t.poke_descriptor(0, 15, 0xFF).unwrap();
+    // The device completes the (now corrupt) chain by its valid head.
+    t.publish_raw_used(0, head, 0).unwrap();
+    // poll_used must not panic / read out of region; it returns the head
+    // and the bounded reclaim walk simply bails on the bad link.
+    assert_eq!(q.poll_used().map(|tok| tok.head), Ok(head));
+    assert!(q.free_count() <= 4);
+}
+
+#[test]
 fn transport_setup_records_status_progression() {
     let mut t = MockTransport::new(1, 4, 0, 0);
     t.reset();
