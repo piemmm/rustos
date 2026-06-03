@@ -93,9 +93,10 @@ Each CPU owns three [`RunDeque`]s (one per band). A CPU's
 2. Drains the global overflow list (tasks that could not be enqueued on
    their home CPU's queue because it was full) into its local queues.
 3. Consumes the highest-priority band that is non-empty.
-4. If everything local is empty, **work-steals** from a
-   pseudo-randomly selected victim CPU, scanning every band, then
-   walks the CPU list circularly until either a task is found or
+4. If everything local is empty, **work-steals** from a victim CPU
+   chosen by the project's shared non-cryptographic `FastRng`
+   (`lib/rng`; `AGENTS.md` §2.2 — no second PRNG), scanning every band,
+   then walks the CPU list circularly until either a task is found or
    every other CPU has been probed.
 
 Both the local consume and the steal use the same `RunDeque::steal`
@@ -146,8 +147,9 @@ never called.
 ### Per-CPU queues + work-stealing
 
 Each CPU owns one virtual-time `RunQueue` with its own clock. An idle
-CPU steals the earliest-deadline task from a pseudo-randomly selected
-victim and **rebases** the migrated task's `ve`/`vd` onto the stealing
+CPU steals the earliest-deadline task from a victim chosen by the
+project's shared non-cryptographic `FastRng` (`lib/rng`; `AGENTS.md`
+§2.2 — no second PRNG) and **rebases** the migrated task's `ve`/`vd` onto the stealing
 CPU's clock (the EEVDF migration rule — a task carries no lag across
 CPUs). The earliest-eligible-deadline scan is `O(n)` in the per-CPU
 ready count; a future tree-backed index can replace it behind the

@@ -34,6 +34,12 @@ rustos-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 # (`AGENTS.md` §6 / §17.4), reachable by a `SchedImpl` crate.
 rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
+# The single project-wide source of randomness (`AGENTS.md` §1 / §2.2 —
+# no second PRNG). Work-stealing victim selection is a non-cryptographic
+# "scheduler decision", so it draws from `lib/rng`'s fast xoshiro256++
+# `FastRng` rather than a hand-rolled generator.
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+
 # `loom` is pulled in only when the consumer explicitly opts in with
 # `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors the convention
 # established in `lib/sync/Cargo.toml`.

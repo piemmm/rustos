@@ -9,9 +9,11 @@
 //! # Design summary
 //!
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns
-//!   one bounded `RunDeque` per [`Priority`] band; idle CPUs
-//!   steal from a pseudo-random victim. The deque is a bounded Chase–Lev
-//!   variant — see `runqueue` for the citation and ordering rationale.
+//!   one bounded `RunDeque` per [`Priority`] band; idle CPUs steal from a
+//!   victim chosen by the project's shared non-cryptographic `FastRng`
+//!   (`lib/rng`; `AGENTS.md` §2.2 — no second PRNG). The deque is a
+//!   bounded Chase–Lev variant — see `runqueue` for the citation and
+//!   ordering rationale.
 //! * **MLFQ priority + fairness.** Three bands (High / Normal / Low),
 //!   demotion after `yields_before_demotion` voluntary yields, periodic
 //!   global priority boost to guarantee starvation-freedom. The policy

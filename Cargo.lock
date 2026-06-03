@@ -853,6 +853,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-kernel-sched-api",
  "rustos-kernel-sched-eevdf",
+ "rustos-rng",
  "rustos-sync",
 ]
 
@@ -864,6 +865,7 @@ dependencies = [
  "rustos-arch-api",
  "rustos-kernel-sched-api",
  "rustos-kernel-sched-mlfq",
+ "rustos-rng",
  "rustos-sync",
 ]
 

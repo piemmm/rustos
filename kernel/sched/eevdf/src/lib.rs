@@ -27,9 +27,11 @@
 //!   task has a finite deadline).
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns
 //!   one virtual-time `RunQueue` with its own clock; idle
-//!   CPUs steal the earliest-deadline task from a pseudo-random victim
-//!   and rebase its virtual times onto the stealing CPU's clock (the
-//!   EEVDF migration rule — a task carries no lag across CPUs).
+//!   CPUs steal the earliest-deadline task from a victim chosen by the
+//!   project's shared non-cryptographic `FastRng` (`lib/rng`; `AGENTS.md`
+//!   §2.2 — no second PRNG) and rebase its virtual times onto the
+//!   stealing CPU's clock (the EEVDF migration rule — a task carries no
+//!   lag across CPUs).
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and
 //!   [`Scheduler::unpark`] notify the home CPU via
 //!   [`SchedulerArch::send_ipi`]; the arch port decides whether that is

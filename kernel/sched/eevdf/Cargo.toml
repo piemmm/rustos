@@ -34,6 +34,12 @@ rustos-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 # §17.4), reachable by a `SchedImpl` crate.
 rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
+# The single project-wide source of randomness (`AGENTS.md` §1 / §2.2 —
+# no second PRNG). Work-stealing victim selection is a non-cryptographic
+# "scheduler decision", so it draws from `lib/rng`'s fast xoshiro256++
+# `FastRng` rather than a hand-rolled generator.
+rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+
 # Integration tests and doctests get the `test-arch` feature for free, and
 # run the shared conformance suite from the API crate. The library itself
 # never links them under `cargo build` or `cargo doc` without the feature
