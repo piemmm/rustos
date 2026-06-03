@@ -14,6 +14,28 @@ use rustos_qemu::{Outcome, Runner, Spec};
 
 use crate::Context;
 
+/// Per-test wall-clock ceiling enforced on a developer machine (a
+/// `cargo xtask ci` / `test --qemu` run outside GitHub Actions). The
+/// enrolled budgets (up to 120 s) are sized for the CI runners that carry
+/// the flake-hunting budget; a developer running the matrix from the IDE
+/// instead gets a 30 s ceiling per test, so a hung guest fails fast rather
+/// than stalling the local run. The runners keep the full enrolled budget
+/// (the same developer-vs-runner split as the 20× test repeat, §7).
+const DEVELOPER_TIMEOUT_CAP: Duration = Duration::from_secs(30);
+
+/// The wall-clock budget to enforce for an enrolment on this host: the
+/// enrolment's own [`QemuTest::timeout`] on a CI runner, or that value
+/// clamped to [`DEVELOPER_TIMEOUT_CAP`] on a developer machine. Lowering a
+/// ceiling never extends a budget, so this can only make a local run fail
+/// faster, never hide a slow CI run.
+fn effective_timeout(timeout: Duration, in_github_actions: bool) -> Duration {
+    if in_github_actions {
+        timeout
+    } else {
+        timeout.min(DEVELOPER_TIMEOUT_CAP)
+    }
+}
+
 /// One enrolled QEMU integration test.
 struct QemuTest {
     /// Cargo package name (matches `[package].name`).
@@ -631,7 +653,8 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     } else {
         Spec::for_x86_64_kernel(&kernel)
     };
-    let mut spec = base.with_cpus(t.cpus).with_timeout(t.timeout);
+    let timeout = effective_timeout(t.timeout, super::in_github_actions());
+    let mut spec = base.with_cpus(t.cpus).with_timeout(timeout);
 
     // Attach a planted raw backing image for storage tests. Sector 0
     // carries the deterministic `byte[i] = i mod 256` pattern the
@@ -702,7 +725,7 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
         t.package,
         kernel.display(),
         t.cpus,
-        t.timeout
+        timeout
     );
 
     match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
@@ -715,5 +738,37 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
             "test --qemu ({}) TIMEOUT after {budget:?} (no retries per AGENTS.md §7)\n--- serial ---\n{serial}\n--- end ---",
             t.package
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_timeout, DEVELOPER_TIMEOUT_CAP};
+    use std::time::Duration;
+
+    #[test]
+    fn developer_machine_clamps_long_budgets_to_the_cap() {
+        for secs in [60, 120] {
+            assert_eq!(
+                effective_timeout(Duration::from_secs(secs), false),
+                DEVELOPER_TIMEOUT_CAP,
+            );
+        }
+    }
+
+    #[test]
+    fn developer_machine_leaves_short_budgets_untouched() {
+        let short = Duration::from_secs(10);
+        assert_eq!(effective_timeout(short, false), short);
+        assert_eq!(
+            effective_timeout(DEVELOPER_TIMEOUT_CAP, false),
+            DEVELOPER_TIMEOUT_CAP,
+        );
+    }
+
+    #[test]
+    fn ci_runner_keeps_the_full_enrolled_budget() {
+        let full = Duration::from_secs(120);
+        assert_eq!(effective_timeout(full, true), full);
     }
 }
