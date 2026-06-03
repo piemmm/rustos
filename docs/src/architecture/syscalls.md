@@ -138,7 +138,7 @@ re-validates arguments — the dispatcher does that first.
 | --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
-| `ipc_send`      | *deferred* — named-port registry not landed                                                                   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = ipc_named_ports`) + `NotFound`. |
+| `ipc_send`      | *deferred* — registry landed (`kernel/ipc::PortRegistry`), but not yet composed into `KernelState` and user-memory copy-in is pending | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = ipc_named_ports`) + `NotFound`. |
 | `ipc_recv`      | *deferred* — same as `ipc_send`                                                                               | Same.                                                                     |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
@@ -190,9 +190,12 @@ capability bit survives past the IRQ subsystem's binding release
 a freshly created task that wants the same line must re-issue
 `irq_bind`).
 
-The Stage 2.7 follow-up tracker in `PLAN.md` records the
-named-port registry and the user-memory copy-in path as the two
-remaining pieces required to lift these deferrals.
+The Stage 2.7 follow-up tracker in `PLAN.md` records the remaining
+pieces required to lift these deferrals. The named-port registry that
+`ipc_send` / `ipc_recv` resolve an `EndpointId` through has since landed
+(`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry));
+what remains for IPC is composing it into `KernelState` and the
+user-memory copy-in path (which `cap_delegate` also waits on).
 
 ## Dispatcher contract
 

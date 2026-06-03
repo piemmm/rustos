@@ -15,6 +15,9 @@
 //! | 3000 | Info  | `PORT_CREATED`                | A capability-checked port was created. |
 //! | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused (creator lacks bind authority). |
 //! | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed (any subsequent send fails closed). |
+//! | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry under its `EndpointId`. |
+//! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused because the `EndpointId` was already bound. |
+//! | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 //! | 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
 //! | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused because the sender lacked the port's required capabilities. |
 //! | 3012 | Error | `MESSAGE_TOO_LARGE`           | A send was refused because the payload exceeded the port's `max_payload`. |
@@ -47,6 +50,12 @@ pub enum AuditEvent {
     PortCreateDenied,
     /// A port was destroyed.
     PortDestroyed,
+    /// A port was bound into the named-port registry.
+    PortRegistered,
+    /// A registration was refused because the `EndpointId` was already bound.
+    PortRegisterDenied,
+    /// A port was removed from the registry and destroyed.
+    PortUnregistered,
     /// A message was enqueued for delivery.
     MessageDelivered,
     /// A send was refused for lack of the port's required capabilities.
@@ -81,6 +90,9 @@ impl AuditEvent {
             Self::PortCreated => 3000,
             Self::PortCreateDenied => 3001,
             Self::PortDestroyed => 3002,
+            Self::PortRegistered => 3003,
+            Self::PortRegisterDenied => 3004,
+            Self::PortUnregistered => 3005,
             Self::MessageDelivered => 3010,
             Self::MessageSendDenied => 3011,
             Self::MessageTooLarge => 3012,
@@ -106,6 +118,8 @@ impl AuditEvent {
         match self {
             Self::PortCreated
             | Self::PortDestroyed
+            | Self::PortRegistered
+            | Self::PortUnregistered
             | Self::MessageDelivered
             | Self::ShmemCreated
             | Self::ShmemMapped
@@ -113,6 +127,7 @@ impl AuditEvent {
             | Self::NotifyBound
             | Self::NotifySignalled => Level::Info,
             Self::PortCreateDenied
+            | Self::PortRegisterDenied
             | Self::MessageSendDenied
             | Self::MessageTooLarge
             | Self::MessageSendToClosedPort
@@ -132,6 +147,9 @@ impl AuditEvent {
             Self::PortCreated => "ipc port created",
             Self::PortCreateDenied => "ipc port creation denied",
             Self::PortDestroyed => "ipc port destroyed",
+            Self::PortRegistered => "ipc port registered",
+            Self::PortRegisterDenied => "ipc port registration denied",
+            Self::PortUnregistered => "ipc port unregistered",
             Self::MessageDelivered => "ipc message delivered",
             Self::MessageSendDenied => "ipc message send denied",
             Self::MessageTooLarge => "ipc message too large",
@@ -231,6 +249,9 @@ mod tests {
         assert_eq!(AuditEvent::PortCreated.id(), EventId(3000));
         assert_eq!(AuditEvent::PortCreateDenied.id(), EventId(3001));
         assert_eq!(AuditEvent::PortDestroyed.id(), EventId(3002));
+        assert_eq!(AuditEvent::PortRegistered.id(), EventId(3003));
+        assert_eq!(AuditEvent::PortRegisterDenied.id(), EventId(3004));
+        assert_eq!(AuditEvent::PortUnregistered.id(), EventId(3005));
         assert_eq!(AuditEvent::MessageDelivered.id(), EventId(3010));
         assert_eq!(AuditEvent::MessageSendDenied.id(), EventId(3011));
         assert_eq!(AuditEvent::MessageTooLarge.id(), EventId(3012));
@@ -251,6 +272,9 @@ mod tests {
             AuditEvent::PortCreated,
             AuditEvent::PortCreateDenied,
             AuditEvent::PortDestroyed,
+            AuditEvent::PortRegistered,
+            AuditEvent::PortRegisterDenied,
+            AuditEvent::PortUnregistered,
             AuditEvent::MessageDelivered,
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
@@ -295,6 +319,7 @@ mod tests {
     fn refused_events_log_at_error_level() {
         for ev in [
             AuditEvent::PortCreateDenied,
+            AuditEvent::PortRegisterDenied,
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
             AuditEvent::MessageSendToClosedPort,

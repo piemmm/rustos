@@ -90,6 +90,16 @@ pub enum Errno {
     /// closed with this errno rather than returning weak randomness. After
     /// initialisation the random API never returns it.
     EntropyNotReady = 16,
+    /// An object cannot be created because one with the same identity
+    /// already exists.
+    ///
+    /// Emitted by `kernel/ipc`'s named-port registry when a caller tries
+    /// to register a [`crate::ipc`] endpoint whose `EndpointId` is
+    /// already bound. It is the fail-closed result of a duplicate
+    /// registration: the existing live port is never overwritten
+    /// (`AGENTS.md` §5.4), and the caller's freshly-created port is
+    /// handed back so it can be torn down.
+    AlreadyExists = 17,
 }
 
 impl Errno {
@@ -119,6 +129,7 @@ impl fmt::Display for Errno {
             Self::TimestampOutOfRange => "timestamp out of range",
             Self::NoSpace => "no space left on device",
             Self::EntropyNotReady => "entropy not ready",
+            Self::AlreadyExists => "object already exists",
         };
         f.write_str(message)
     }
@@ -147,6 +158,7 @@ mod tests {
         assert_eq!(Errno::TimestampOutOfRange.as_i32(), 14);
         assert_eq!(Errno::NoSpace.as_i32(), 15);
         assert_eq!(Errno::EntropyNotReady.as_i32(), 16);
+        assert_eq!(Errno::AlreadyExists.as_i32(), 17);
     }
 
     #[test]

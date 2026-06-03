@@ -29,7 +29,7 @@
 //!
 //! | Syscall              | Errno              | Reason |
 //! |----------------------|--------------------|--------|
-//! | `ipc_send`/`ipc_recv` | `NotFound`         | Named-port registry not landed (Stage 5 prerequisite). |
+//! | `ipc_send`/`ipc_recv` | `NotFound`         | The named-port registry (`kernel/ipc::PortRegistry`) now exists, but it is not yet composed into `KernelState` and the user-memory copy-in path the handlers need is still deferred (Stage 5 / Stage 6). |
 //! | `cap_delegate`       | `NotImplemented`   | User-memory copy-in not landed (Stage 5 / Stage 6).    |
 //!
 //! Both branches still go through the dispatcher's standard audit

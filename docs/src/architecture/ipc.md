@@ -51,6 +51,40 @@ fast path:
 Every rejection emits exactly one audit event before returning.
 `Port::destroy` drains in-flight messages and is idempotent.
 
+## Named-port registry
+
+A `Port` on its own is anonymous: `Port::create` proves bind authority
+and returns an owned value, but a sender or receiver still needs to
+reach it by the `EndpointId` carried in an `IpcMessageHeader`.
+`PortRegistry` (`kernel/ipc/src/registry.rs`) is that map from
+`EndpointId` to the live kernel-owned `Port`.
+
+Like `kernel/sec`'s `CapTable`, the registry has **no interior
+mutability**: it exposes a plain `&self` / `&mut self` surface and owns
+no lock. `kernel/core`'s `KernelState` composes it with the scheduler
+and capability table under one lock-ordering policy (`AGENTS.md` §2.1 —
+no global mutable static). Lookups borrow `&self` so concurrent senders
+share a read guard while each `Port::send` re-checks the per-send
+capability.
+
+* `register(port)` binds the port under its own `id`, fail-closed: a
+  duplicate `EndpointId` is refused with `Errno::AlreadyExists`
+  (`PORT_REGISTER_DENIED`) and the supplied port is handed back boxed so
+  the caller can tear it down — a live binding is never overwritten.
+  Success emits `PORT_REGISTERED`.
+* `lookup(id)` / `contains(id)` resolve a binding; a miss is `None`
+  (mapped to `Errno::NotFound` at the syscall boundary) and is not a
+  security decision, so it is not audited.
+* `unregister(id)` removes and `Port::destroy`s the binding (draining
+  in-flight messages, emitting `PORT_DESTROYED`) and then emits
+  `PORT_UNREGISTERED`; an unknown endpoint is `Errno::NotFound`.
+
+The registry performs no capability check of its own — bind authority
+was proven at `Port::create` time and send authority is re-checked on
+every `Port::send` — so it is a pure ownership map. Wiring it into the
+`ipc_send` / `ipc_recv` syscall handlers awaits the user-memory copy-in
+path (the same prerequisite `cap_delegate` is waiting on).
+
 ## Shared memory
 
 `SharedMemory::create` allocates a kernel-tracked, zero-on-free
@@ -82,6 +116,9 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3000 | Info  | `PORT_CREATED`                | A capability-checked port was created. |
 | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused. |
 | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed. |
+| 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry. |
+| 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused (the `EndpointId` was already bound). |
+| 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 | 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
 | 3011 | Error | `MESSAGE_SEND_DENIED`         | Sender lacks the port's required capabilities. |
 | 3012 | Error | `MESSAGE_TOO_LARGE`           | Payload exceeded `max_payload`. |
@@ -105,7 +142,8 @@ Adding a new event requires assigning the next free identifier in
 | `PermissionDenied`     | Sender / binder / mapper lacks a required capability |
 | `MessageTooLarge`      | Payload exceeded the port's `max_payload` (EMSGSIZE) |
 | `LengthOutOfRange`     | Configuration out of range, mailbox full             |
-| `NotFound`             | Send to destroyed port, map of revoked shmem         |
+| `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint |
+| `AlreadyExists`        | Register of an already-bound `EndpointId`            |
 
 Every error path emits a matching audit event before returning, so
 "fail closed" is observable in the security trail (`AGENTS.md` §5.4).

@@ -1181,12 +1181,14 @@ one logical change per commit with the `Co-authored-by` trailer.
           recorded in the audit field, not stored on the task
           struct (no new field invented).
         - `ipc_send` / `ipc_recv` — out of scope **for this
-          follow-up**: the kernel has no named-port registry yet
-          (see `kernel/ipc/src/lib.rs` rustdoc). The handler
-          returns `Errno::NotFound` and emits an audit record
-          flagging "named-port registry not landed". The follow-up
-          to the follow-up (Stage 5 prerequisite) lands the
-          registry.
+          follow-up**: the handler returns `Errno::NotFound` and
+          emits an audit record flagging the deferral. The
+          named-port registry that resolves an `EndpointId` to a
+          live `Port` has since landed
+          (`kernel/ipc::PortRegistry`, see below and
+          `kernel/ipc/src/lib.rs` rustdoc); wiring it into these
+          handlers still awaits composing it into `KernelState`
+          and the user-memory copy-in path (Stage 5 / Stage 6).
         - `cap_query` → `caller.caps.contains(cap)` mapped to
           `0 | 1`.
         - `cap_delegate` / `cap_revoke` — call into existing
@@ -5645,17 +5647,48 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   (69 total). Docs `docs/src/desktop/session.md` (new section) + the crate
   `README.md` + crate-root module docs. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** wiring the
-  `MessagePort` to the live `ipc_recv` syscall once the kernel named-port
-  registry lands.
+  `MessagePort` to the live `ipc_recv` syscall (the kernel named-port registry
+  it depended on has now landed — see below; what remains is composing the
+  registry into `KernelState` and the user-memory copy-in path).
+- **Kernel named-port registry — DONE (increment).** The long-standing
+  prerequisite for a live `ipc_recv` — a kernel map from an `EndpointId` to the
+  live `Port` bound to it — now exists as `kernel/ipc::registry::PortRegistry`.
+  `Port::create` proves bind authority and returns an *anonymous* owned port;
+  the registry is what lets a sender/receiver reach it by the endpoint number
+  carried in an `IpcMessageHeader`. Like `kernel/sec`'s `CapTable` it has **no
+  interior mutability** (the synchronisation policy lives with `KernelState`,
+  §2.1 — no global mutable static): `lookup`/`contains` borrow `&self` so
+  concurrent senders share a read guard while each `Port::send` re-checks the
+  per-send capability, and `register`/`unregister` take `&mut self`. It is
+  fail-closed and audited (§5.4): `register` refuses to overwrite a live binding
+  (`Errno::AlreadyExists` + `PORT_REGISTER_DENIED`, handing the rejected port
+  back boxed so the caller can tear it down), and `unregister` destroys the
+  removed port (draining in-flight messages, `PORT_DESTROYED`) then emits
+  `PORT_UNREGISTERED`; an unknown endpoint is `NotFound`. It performs no
+  capability check of its own — a pure ownership map, mirroring how `CapTable`
+  stores the output of `TaskCapabilities::derive`. `lib/abi` gains
+  `Errno::AlreadyExists = 17` (abi-v1 treated as not frozen; appending only) and
+  `kernel/ipc::audit` gains `PORT_REGISTERED`/`PORT_REGISTER_DENIED`/
+  `PORT_UNREGISTERED` (ids 3003–3005). 8 new `rustos-kernel-ipc` tests (43
+  total) + 1 `rustos-abi` discriminant assertion. Docs
+  `docs/src/architecture/ipc.md` (new "Named-port registry" section + audit /
+  error tables) + `kernel/ipc` crate-root rustdoc + the `kernel/core::syscalls`
+  deferral note. No `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+  **Still open here:** composing the registry into `KernelState` and wiring it
+  into the `ipc_send` / `ipc_recv` handlers, which additionally await the
+  user-memory copy-in path (the same prerequisite `cap_delegate` waits on,
+  Stage 5 / Stage 6).
 - **Still to do this stage:** backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar
   `TaskbarInput`, re-presents through `TaskbarPresenter`, and keeps the
   running-task list in step with the window stack through `TaskBridge` now
   exists) with **live** pointer/keyboard device events — the IPC-message
-  framing now exists (`IpcInputChannel`), so what remains is wiring its
-  `MessagePort` to the live `ipc_recv` syscall once the kernel named-port
-  registry lands — and relaying the
+  framing now exists (`IpcInputChannel`) and the kernel named-port registry it
+  needs has now landed (`kernel/ipc::PortRegistry`, see above), so what remains
+  is composing that registry into `KernelState` and wiring the `MessagePort` to
+  the live `ipc_recv` syscall through the user-memory copy-in path — and
+  relaying the
   session's theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and
