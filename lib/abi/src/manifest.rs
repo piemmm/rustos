@@ -5,6 +5,7 @@
 //! length-prefixed list of [`crate::CapabilityId`] values requested by the
 //! binary; both halves are covered by [`ManifestHeader::signature`].
 
+use crate::le::{read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
 
@@ -82,20 +83,20 @@ impl ManifestHeader {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let magic = u32_le(bytes, 0);
+        let magic = read_u32(bytes, 0);
         if magic != MANIFEST_MAGIC {
             return Err(Errno::BadMagic);
         }
-        let abi_version = u32_le(bytes, 4);
+        let abi_version = read_u32(bytes, 4);
         if abi_version != crate::ABI_VERSION_CURRENT {
             return Err(Errno::AbiVersionUnsupported);
         }
-        let flags = u32_le(bytes, 8);
-        let capability_count = u16_le(bytes, 12);
+        let flags = read_u32(bytes, 8);
+        let capability_count = read_u16(bytes, 12);
         if capability_count > MANIFEST_MAX_CAPABILITIES {
             return Err(Errno::LengthOutOfRange);
         }
-        let reserved0 = u16_le(bytes, 14);
+        let reserved0 = read_u16(bytes, 14);
         if reserved0 != 0 {
             return Err(Errno::BadMagic);
         }
@@ -162,25 +163,10 @@ pub fn decode_capability_ids(
         return Err(Errno::BufferTooSmall);
     }
     for (i, slot) in out.iter_mut().enumerate().take(count) {
-        let raw = u16::from_le_bytes([body[i * 2], body[i * 2 + 1]]);
+        let raw = read_u16(body, i * 2);
         *slot = CapabilityId::from_raw(raw)?;
     }
     Ok(count)
-}
-
-#[inline]
-fn u16_le(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn u32_le(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
 }
 
 #[cfg(test)]

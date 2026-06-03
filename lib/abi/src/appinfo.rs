@@ -29,6 +29,7 @@
 //! fields, offsets, and [`BundleEntry`] names never change; new behaviour
 //! ships in `abi-v2`.
 
+use crate::le::{read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::Errno;
 
@@ -580,21 +581,6 @@ fn validate_identity(len: u8, max: usize, buf: &[u8]) -> Result<(), Errno> {
 fn inline_str(buf: &[u8], len: u8) -> &str {
     let len = core::cmp::min(usize::from(len), buf.len());
     core::str::from_utf8(&buf[..len]).unwrap_or("")
-}
-
-#[inline]
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
 }
 
 #[cfg(test)]

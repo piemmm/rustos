@@ -41,6 +41,7 @@
 //! [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL).
 //! Class traits document their own per-method capability gates.
 
+use crate::le::{read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
 
@@ -419,11 +420,11 @@ impl DriverManifest {
         if bytes.len() < Self::WIRE_LEN {
             return Err(DriverError::BufferTooSmall);
         }
-        let magic = u32_le(bytes, 0);
+        let magic = read_u32(bytes, 0);
         if magic != DRIVER_MANIFEST_MAGIC {
             return Err(DriverError::BadMagic);
         }
-        let abi_version = u32_le(bytes, 4);
+        let abi_version = read_u32(bytes, 4);
         if abi_version != crate::ABI_VERSION_CURRENT {
             return Err(DriverError::AbiVersionUnsupported);
         }
@@ -432,7 +433,7 @@ impl DriverManifest {
         if reserved0 != 0 {
             return Err(DriverError::BadMagic);
         }
-        let capability_count = u16_le(bytes, 10);
+        let capability_count = read_u16(bytes, 10);
         if capability_count > DRIVER_MANIFEST_MAX_CAPABILITIES {
             return Err(DriverError::LengthOutOfRange);
         }
@@ -584,21 +585,6 @@ pub trait DriverHost {
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         None
     }
-}
-
-#[inline]
-const fn u16_le(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-const fn u32_le(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@
 //! every segment up front and stores the result in a fixed-capacity array
 //! ([`LOAD_MAX_SEGMENTS`]).
 
+use crate::le::{read_u16, read_u32, read_u64};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::ABI_VERSION_CURRENT;
 
@@ -565,28 +566,6 @@ fn ct_ne(a: &[u8; SYSCALL_TABLE_HASH_LEN], b: &[u8; SYSCALL_TABLE_HASH_LEN]) -> 
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         != 0
-}
-
-#[inline]
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-#[inline]
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-#[inline]
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[offset..offset + 8]);
-    u64::from_le_bytes(buf)
 }
 
 #[cfg(test)]
