@@ -5437,11 +5437,34 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `README.md` + crate-root module docs. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** feeding
   this router from **live** pointer/keyboard device events.
-- **Still to do this stage:** GPU-accelerated compositor path, feeding the
-  session-level `SessionInputRouter` (which fans the shared `lib/input` stream
-  to the WM `InputRouter` and the taskbar `TaskbarInput`) from **live**
-  pointer/keyboard device events — the routing *policy* and the taskbar–WM
-  *surface* glue (`TaskbarPresenter`) now exist — and relaying the session's
+- **Desktop shell event loop — DONE (increment).** The session held the
+  desktop's pieces apart — the `DesktopSession` (theme registry + taskbar
+  model), the `SessionInputRouter` (fans one event stream to the WM and taskbar
+  routers), the `TaskbarPresenter` (presents the bar + popup), and the
+  `TaskbarRenderer` (the glyph cache) — but nothing tied them into one
+  event-driven frontend. `userland/gui/session` gains a `shell` module:
+  `DesktopShell` owns those four pieces and runs the desktop loop over an
+  injected `InputSource` seam (a real pointer/keyboard channel on a running
+  system, an in-memory queue in tests, §7). `pump(source, &mut Compositor)`
+  drains every pending event, routing each through the `SessionInputRouter` and
+  returning a `ShellOutcome` per event (`Ignored`, a `WindowManager` action, or
+  a `Session` event); a taskbar action is `resolve`d (the light/dark toggle
+  applied here, everything else forwarded) and the bar re-presented, while a
+  WM action needs no re-present so motion/drags stay cheap. A faulting source
+  ends the `pump` with its `Errno`, the drained events staying applied (§2.9 /
+  §19.5). `set_icons`/`begin_move`/`teardown`/`present` round it out; the shell
+  holds no framebuffer (the `Compositor` is the embedder's) and grants itself
+  no authority. 8 new `rustos-desktop-session` tests (37 total). Docs
+  `docs/src/desktop/session.md` (new live-input-stream section) + the crate
+  `README.md` + crate-root module docs. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** backing
+  the `InputSource` with a live device channel and relaying the theme switch
+  over IPC.
+- **Still to do this stage:** GPU-accelerated compositor path, backing the
+  desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
+  shared `lib/input` stream to the WM `InputRouter` and the taskbar
+  `TaskbarInput` and re-presents through `TaskbarPresenter` now exists) with
+  **live** pointer/keyboard device events, and relaying the session's
   theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and

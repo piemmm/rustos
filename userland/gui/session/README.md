@@ -109,6 +109,30 @@ keyboard owner through `focused`. The router holds no pixels and grants itself
 no authority; every routed sub-call is total and fails closed (`AGENTS.md`
 §2.9).
 
+## Driving the desktop from a live input stream
+
+`DesktopShell` composes all of the above — the `DesktopSession`, the
+`SessionInputRouter`, the `TaskbarPresenter`, and the `TaskbarRenderer` — into
+one event-driven frontend, the long-open "feed the router and presenter from
+live device events" thread:
+
+- It `pump`s the pending events from an injected `InputSource` seam (a real
+  pointer/keyboard channel on a running system, an in-memory queue in tests,
+  `AGENTS.md` §7), routing each through the `SessionInputRouter` and returning
+  a `ShellOutcome` per event.
+- A taskbar action is `resolve`d (the light/dark toggle is applied here, every
+  other response forwarded) and the bar is re-presented, so an opened/closed
+  menu or a re-themed bar reaches the screen; a window-manager action needs no
+  re-present, so motion and drags stay cheap.
+- A faulting `InputSource` ends the `pump` with its `Errno`; the events drained
+  before the fault stay applied and the embedder replaces or re-polls the
+  source (`AGENTS.md` §2.9 / §19.5).
+
+The shell holds no framebuffer: the `Compositor` is the embedder's and is
+passed in on each call. A loaded notification-icon set is installed with
+`set_icons`, a title-bar drag armed with `begin_move`, and the desktop torn
+down with `teardown`.
+
 ## Dependencies and layering
 
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
@@ -123,10 +147,10 @@ production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7)
 
-Relaying the active theme to the window manager and apps over live IPC, feeding
-the `SessionInputRouter` from live pointer/keyboard device events (the routing
-policy and the `TaskbarPresenter` surface glue now exist), resolving launcher /
-session-control actions once the process and window-manager capabilities are
-wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
-reads `/System/Graphics` on a running system (the in-memory-tested loader and
-its fallbacks now exist).
+Backing the `DesktopShell`'s `InputSource` with a live pointer/keyboard device
+channel and relaying the active theme to the window manager and apps over live
+IPC (the event loop, routing policy, and surface glue now exist), resolving
+launcher / session-control actions once the process and window-manager
+capabilities are wired (deferred Stage 6 work), and the VFS-backed
+`GraphicsAssetReader` that reads `/System/Graphics` on a running system (the
+in-memory-tested loader and its fallbacks now exist).

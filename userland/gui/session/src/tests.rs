@@ -17,8 +17,8 @@ use rustos_wm::{
 };
 
 use crate::{
-    load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent, SessionInputResponse,
-    SessionInputRouter, TaskbarPresenter,
+    load_icon_set, DesktopSession, DesktopShell, GraphicsAssetReader, InputSource, SessionEvent,
+    SessionInputResponse, SessionInputRouter, ShellOutcome, TaskbarPresenter,
 };
 
 const LABEL: &str = "Toggle Light/Dark";
@@ -845,4 +845,239 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
         panic!("a press on a task slot activates it, got {response:?}");
     };
     assert_eq!(outcome, ActivateOutcome::Activated);
+}
+
+// ---- desktop shell: driving the desktop from a live input stream ----
+
+/// An in-memory [`InputSource`]: a queue of events, optionally faulting once
+/// the queue is drained, standing in for the kernel's input channel (§7).
+struct MemoryInput {
+    events: Vec<InputEvent>,
+    next: usize,
+    fault: Option<Errno>,
+}
+
+impl MemoryInput {
+    fn new(events: &[InputEvent]) -> Self {
+        Self {
+            events: events.to_vec(),
+            next: 0,
+            fault: None,
+        }
+    }
+
+    fn faulting(events: &[InputEvent], fault: Errno) -> Self {
+        Self {
+            events: events.to_vec(),
+            next: 0,
+            fault: Some(fault),
+        }
+    }
+}
+
+impl InputSource for MemoryInput {
+    fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
+        if let Some(event) = self.events.get(self.next).copied() {
+            self.next += 1;
+            return Ok(Some(event));
+        }
+        match self.fault.take() {
+            Some(errno) => Err(errno),
+            None => Ok(None),
+        }
+    }
+}
+
+fn shell() -> DesktopShell {
+    DesktopShell::new(TaskbarConfig::bottom_bar(1920, 1080), LABEL)
+}
+
+fn moved(x: i32, y: i32) -> InputEvent {
+    InputEvent::PointerMoved {
+        to: Point::new(x, y),
+    }
+}
+
+const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Primary,
+};
+
+#[test]
+fn pump_opens_the_menu_and_presents_the_popup() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let at = start_button_point(shell.session());
+
+    let outcomes = shell
+        .pump(
+            &mut MemoryInput::new(&[moved(at.x, at.y), PRIMARY_PRESS]),
+            &mut comp,
+        )
+        .expect("an in-memory source does not fault");
+
+    assert_eq!(
+        outcomes,
+        [
+            ShellOutcome::Ignored,
+            ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::StartMenuToggled {
+                open: true,
+            })),
+        ]
+    );
+    assert!(shell.session().taskbar().start_menu().is_open());
+    assert!(
+        shell.presenter().popup_window().is_some(),
+        "opening the menu re-presents and adds the popup window"
+    );
+    assert_eq!(comp.window_count(), 2, "the bar and popup are both present");
+}
+
+#[test]
+fn handle_routes_a_window_press_to_the_window_manager() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+
+    assert_eq!(
+        outcome,
+        ShellOutcome::WindowManager(InputResponse::Activated {
+            window,
+            local: Point::new(50, 50),
+        })
+    );
+    assert_eq!(shell.router().focused(), Some(window));
+    assert!(
+        shell.presenter().bar_window().is_none(),
+        "a window-manager action does not present the bar"
+    );
+}
+
+#[test]
+fn selecting_the_appearance_toggle_switches_the_theme() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let start = start_button_point(shell.session());
+
+    // Open the menu, then press the appearance-toggle row (the last entry,
+    // appended after the session controls).
+    shell
+        .pump(
+            &mut MemoryInput::new(&[moved(start.x, start.y), PRIMARY_PRESS]),
+            &mut comp,
+        )
+        .expect("source does not fault");
+    let toggle_row = *shell
+        .session()
+        .taskbar()
+        .menu_layout()
+        .entries
+        .last()
+        .expect("the menu has an appearance-toggle row");
+    let at = Point::new(toggle_row.left() + 1, toggle_row.top() + 1);
+
+    let outcomes = shell
+        .pump(
+            &mut MemoryInput::new(&[moved(at.x, at.y), PRIMARY_PRESS]),
+            &mut comp,
+        )
+        .expect("source does not fault");
+
+    assert_eq!(
+        outcomes.last(),
+        Some(&ShellOutcome::Session(SessionEvent::AppearanceChanged(
+            ThemeId::LIGHT
+        )))
+    );
+    assert_eq!(
+        shell.session().active_theme().id(),
+        ThemeId::LIGHT,
+        "the shell applied the light/dark switch itself"
+    );
+    assert!(
+        !shell.session().taskbar().start_menu().is_open(),
+        "selecting the toggle closed the menu"
+    );
+    assert!(
+        shell.presenter().popup_window().is_none(),
+        "the closed menu's popup window was removed on re-present"
+    );
+}
+
+#[test]
+fn pump_propagates_a_source_fault_after_applying_prior_events() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let at = start_button_point(shell.session());
+
+    let result = shell.pump(
+        &mut MemoryInput::faulting(&[moved(at.x, at.y), PRIMARY_PRESS], Errno::NotFound),
+        &mut comp,
+    );
+
+    assert_eq!(result, Err(Errno::NotFound));
+    assert!(
+        shell.session().taskbar().start_menu().is_open(),
+        "the event drained before the fault was still applied"
+    );
+}
+
+#[test]
+fn motion_is_ignored_and_does_not_present_the_bar() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(&[moved(640, 480)]), &mut comp)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes, [ShellOutcome::Ignored]);
+    assert_eq!(shell.router().pointer(), Point::new(640, 480));
+    assert!(
+        shell.presenter().bar_window().is_none(),
+        "a pure motion event presents nothing"
+    );
+    assert_eq!(comp.window_count(), 0);
+}
+
+#[test]
+fn begin_move_through_the_shell_arms_a_grab_on_the_focused_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    assert!(shell.begin_move(&comp));
+    assert!(shell.router().is_moving());
+}
+
+#[test]
+fn set_icons_installs_a_loaded_set_and_the_bar_still_presents() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut reader = MemoryAssets::default().with("/System/Graphics/Icons/network.svg", VALID_SVG);
+    shell.set_icons(load_icon_set(&mut reader));
+
+    shell.present(&mut comp);
+
+    assert!(shell.presenter().bar_window().is_some());
+    assert_eq!(comp.window_count(), 1);
+}
+
+#[test]
+fn teardown_removes_the_presented_windows() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.session_mut().taskbar_mut().start_menu_mut().toggle();
+    shell.present(&mut comp);
+    assert_eq!(comp.window_count(), 2, "bar and popup present");
+
+    shell.teardown(&mut comp);
+
+    assert_eq!(comp.window_count(), 0);
+    assert!(shell.presenter().bar_window().is_none());
+    assert!(shell.presenter().popup_window().is_none());
 }

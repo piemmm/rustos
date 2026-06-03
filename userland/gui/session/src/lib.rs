@@ -63,6 +63,18 @@
 //! [`rustos_theme`] definition. Nothing outside `userland/gui/*` depends on
 //! it (§17.3) — the desktop is an optional, one-way-dependent frontend.
 //!
+//! # Driving the desktop from a live input stream
+//!
+//! [`DesktopShell`] (the [`shell`] module) composes all of the above — the
+//! session, the input router, the taskbar presenter, and the taskbar renderer
+//! — into one event-driven frontend. It [`pump`](DesktopShell::pump)s the
+//! pending pointer events from an injected [`InputSource`] seam (a real
+//! device channel on a running system, an in-memory queue in tests), routes
+//! each to the window manager or taskbar, applies the light/dark toggle
+//! itself, re-presents the bar, and surfaces every other effect as a
+//! [`ShellOutcome`] for the embedder (which holds the framebuffer, power, and
+//! spawn capabilities) to act on (`AGENTS.md` §10, §16.5).
+//!
 //! [`toggle_appearance`]: DesktopSession::toggle_appearance
 //! [`set_theme`]: DesktopSession::set_theme
 //! [`ThemeRegistry`]: rustos_theme::ThemeRegistry
@@ -80,6 +92,7 @@ pub mod assets;
 pub mod input;
 pub mod presenter;
 pub mod session;
+pub mod shell;
 
 #[cfg(test)]
 mod tests;
@@ -88,3 +101,4 @@ pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};
+pub use shell::{DesktopShell, InputSource, ShellOutcome};

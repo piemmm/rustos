@@ -1,0 +1,236 @@
+//! Driving the whole desktop from one live input stream.
+//!
+//! The session crate already holds the desktop's pieces apart: the
+//! [`DesktopSession`] (the theme registry + taskbar model), the
+//! [`SessionInputRouter`] (which fans one pointer-event stream to the window
+//! manager and taskbar routers), the [`TaskbarPresenter`] (which paints the
+//! bar and its start-menu popup into compositor windows), and the
+//! [`TaskbarRenderer`] (which holds the across-frame glyph cache). Composing
+//! them into one event-driven frontend was the long-open "feed the router and
+//! presenter from live device events" thread; [`DesktopShell`] is that
+//! composition.
+//!
+//! A real desktop runs a loop: read the pending pointer events, route each to
+//! the right part of the desktop, perform the session-level effect of a
+//! taskbar action (the light/dark toggle), and bring the on-screen bar back in
+//! step. [`DesktopShell`] owns the four pieces and runs exactly that loop over
+//! an injected [`InputSource`] seam — a real pointer/keyboard channel on a
+//! running system, an in-memory queue in tests (`AGENTS.md` §7), the same
+//! injected-seam shape the default apps use for their backing channels.
+//!
+//! The shell holds no framebuffer and grants itself no authority: the
+//! [`Compositor`] is the embedder's (it owns the framebuffer capability,
+//! `AGENTS.md` §10/§17.4) and is passed in on each call. Composing the taskbar
+//! and window-manager GUI crates this way is the permitted `userland/gui/*`
+//! edge (§17.4); nothing outside `userland/gui/*` depends on this glue (§17.3).
+//! It never panics: every routed sub-call and every present is itself total and
+//! fails closed (`AGENTS.md` §2.9). A session-level effect the shell cannot
+//! perform with its own state — relaying the switched theme to the window
+//! manager and apps, performing a session control, launching an app — is
+//! surfaced as a [`ShellOutcome`] for the embedder, which holds those
+//! capabilities, to act on (`AGENTS.md` §16.5).
+//!
+//! [`DesktopSession`]: crate::DesktopSession
+//! [`SessionInputRouter`]: crate::SessionInputRouter
+//! [`TaskbarPresenter`]: crate::TaskbarPresenter
+//! [`TaskbarRenderer`]: rustos_taskbar::TaskbarRenderer
+
+use alloc::vec::Vec;
+
+use rustos_abi::Errno;
+use rustos_icon::IconSet;
+use rustos_taskbar::{TaskbarConfig, TaskbarRenderer};
+use rustos_wm::{Compositor, InputEvent, InputResponse};
+
+use crate::input::{SessionInputResponse, SessionInputRouter};
+use crate::presenter::TaskbarPresenter;
+use crate::session::{DesktopSession, SessionEvent};
+
+/// A source of live pointer/keyboard events for the desktop.
+///
+/// On a running system this is backed by the kernel's input channel; tests
+/// back it with an in-memory queue (`AGENTS.md` §7). It is the only seam
+/// through which device events reach the desktop, so the `no_std` GUI crates
+/// hold no input capability of their own (§17.4 / §19.5).
+pub trait InputSource {
+    /// Take the next pending input event, or `None` when the stream is
+    /// momentarily drained.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel boundary's [`Errno`] when the source itself faults
+    /// (for example the channel was closed). A faulting source ends the
+    /// current [`pump`](DesktopShell::pump) without disturbing the desktop
+    /// state already applied; the embedder replaces or re-polls the source
+    /// (`AGENTS.md` §2.9 / §19.5).
+    fn poll(&mut self) -> Result<Option<InputEvent>, Errno>;
+}
+
+/// What the [`DesktopShell`] did with one input event.
+///
+/// Each event is routed to exactly one part of the desktop, so its outcome is
+/// either nothing, a window-manager action the embedder may observe (focus
+/// change, a window move), or a session-level [`SessionEvent`] the embedder
+/// must act on (relay the switched theme, perform a forwarded control).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShellOutcome {
+    /// The event changed no desktop state (a non-primary button, or a press or
+    /// motion that no router acted on).
+    Ignored,
+    /// The event drove the window manager (focus, click-to-activate, a window
+    /// move). The embedder may observe it; the compositor is already updated.
+    WindowManager(InputResponse),
+    /// The event drove the taskbar and produced a session-level event for the
+    /// embedder: an [`AppearanceChanged`](SessionEvent::AppearanceChanged) the
+    /// shell already applied (relay the new theme to the window manager and
+    /// apps), or a [`Forward`](SessionEvent::Forward)ed control the embedder
+    /// holds the capability to perform.
+    Session(SessionEvent),
+}
+
+/// The desktop session frontend: the session state, the input router, the
+/// taskbar presenter, and the taskbar renderer, driven by an [`InputSource`].
+///
+/// Build one with [`DesktopShell::new`], call [`present`](Self::present) once
+/// to place the bar, then call [`pump`](Self::pump) each frame to apply the
+/// pending input. A title-bar drag is armed with [`begin_move`](Self::begin_move);
+/// a loaded notification-icon set is installed with [`set_icons`](Self::set_icons);
+/// tearing the desktop down is [`teardown`](Self::teardown).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopShell {
+    session: DesktopSession,
+    router: SessionInputRouter,
+    presenter: TaskbarPresenter,
+    renderer: TaskbarRenderer,
+}
+
+impl DesktopShell {
+    /// Build a desktop shell for a taskbar placed by `config`, starting from
+    /// the built-in themes with the default dark theme active and the start
+    /// menu's light/dark entry labelled `appearance_label` (`AGENTS.md` §10).
+    ///
+    /// The router starts with the pointer at the screen origin and no focus,
+    /// the presenter has placed no window yet, and the renderer draws the
+    /// built-in icon set until [`set_icons`](Self::set_icons) installs a loaded
+    /// one.
+    #[must_use]
+    pub fn new(config: TaskbarConfig, appearance_label: &str) -> Self {
+        Self {
+            session: DesktopSession::new(config, appearance_label),
+            router: SessionInputRouter::new(),
+            presenter: TaskbarPresenter::new(),
+            renderer: TaskbarRenderer::new(),
+        }
+    }
+
+    /// The desktop session (theme registry + taskbar model).
+    #[must_use]
+    pub const fn session(&self) -> &DesktopSession {
+        &self.session
+    }
+
+    /// The desktop session, mutably — e.g. to update the task list or clock
+    /// before the next [`present`](Self::present).
+    pub fn session_mut(&mut self) -> &mut DesktopSession {
+        &mut self.session
+    }
+
+    /// The session input router (its tracked pointer and focused window).
+    #[must_use]
+    pub const fn router(&self) -> &SessionInputRouter {
+        &self.router
+    }
+
+    /// The taskbar presenter (its bar and popup window ids).
+    #[must_use]
+    pub const fn presenter(&self) -> &TaskbarPresenter {
+        &self.presenter
+    }
+
+    /// Install a loaded notification-icon set on the renderer, replacing the
+    /// one in use. The next [`present`](Self::present) re-rasterises the
+    /// notification glyphs from the new set (`AGENTS.md` §10/§2.2).
+    pub fn set_icons(&mut self, set: IconSet) {
+        self.renderer.set_icons(set);
+    }
+
+    /// Bring the compositor up to date with the taskbar's current model and the
+    /// active theme: repaint and place the bar and, while the start menu is
+    /// open, its popup.
+    ///
+    /// Fails closed (`AGENTS.md` §2.9): a render whose surface cannot be
+    /// allocated leaves the existing on-screen window untouched.
+    pub fn present(&mut self, compositor: &mut Compositor) {
+        self.presenter.present(
+            compositor,
+            &mut self.renderer,
+            self.session.taskbar(),
+            self.session.active_theme(),
+        );
+    }
+
+    /// Route one input `event` to the desktop and return what it did.
+    ///
+    /// The event is fanned to the window manager or taskbar by the
+    /// [`SessionInputRouter`]'s policy; a taskbar action is then
+    /// [`resolve`](DesktopSession::resolve)d (the light/dark toggle is applied
+    /// here, everything else is forwarded) and the bar is re-presented so the
+    /// screen reflects the change (an opened/closed menu, a re-themed bar). A
+    /// window-manager action needs no re-present — the compositor is already
+    /// updated — so motion and drags stay cheap.
+    pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> ShellOutcome {
+        match self
+            .router
+            .handle(event, compositor, self.session.taskbar_mut())
+        {
+            SessionInputResponse::Ignored => ShellOutcome::Ignored,
+            SessionInputResponse::WindowManager(response) => ShellOutcome::WindowManager(response),
+            SessionInputResponse::Taskbar(response) => {
+                let event = self.session.resolve(response);
+                self.present(compositor);
+                ShellOutcome::Session(event)
+            }
+        }
+    }
+
+    /// Drain every pending event from `source`, routing each through
+    /// [`handle`](Self::handle), and return their outcomes in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Errno`] from a faulting [`InputSource::poll`]. The events
+    /// drained before the fault have already been applied to the desktop state
+    /// and the compositor (the desktop never rolls back what it has shown); the
+    /// embedder replaces or re-polls the source (`AGENTS.md` §2.9 / §19.5).
+    pub fn pump<S>(
+        &mut self,
+        source: &mut S,
+        compositor: &mut Compositor,
+    ) -> Result<Vec<ShellOutcome>, Errno>
+    where
+        S: InputSource + ?Sized,
+    {
+        let mut outcomes = Vec::new();
+        while let Some(event) = source.poll()? {
+            outcomes.push(self.handle(event, compositor));
+        }
+        Ok(outcomes)
+    }
+
+    /// Arm an interactive move-grab on the focused window, anchored at the
+    /// current pointer position; the next pointer motion then drags it.
+    ///
+    /// Returns `false` (arming nothing) when there is no focused window or it
+    /// is no longer known to `compositor` (`AGENTS.md` §2.9). Window
+    /// decorations call this on a title-bar press.
+    pub fn begin_move(&mut self, compositor: &Compositor) -> bool {
+        self.router.begin_move(compositor)
+    }
+
+    /// Remove the bar and popup windows from `compositor` and forget them, so a
+    /// later [`present`](Self::present) starts fresh. Tearing the session down
+    /// leaves no orphaned windows behind.
+    pub fn teardown(&mut self, compositor: &mut Compositor) {
+        self.presenter.teardown(compositor);
+    }
+}
