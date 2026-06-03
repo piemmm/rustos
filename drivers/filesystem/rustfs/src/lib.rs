@@ -186,6 +186,15 @@ fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Cheap, bounded, first-party all-zero scan over a write buffer
+/// (`docs/src/filesystem/rustfs-spec.md` §19; `.junie/SPARSE.md` §16). It
+/// allocates nothing and never calls the compressor: an all-zero logical
+/// record becomes a metadata-only sparse hole rather than a physical data
+/// record.
+fn is_all_zero(buf: &[u8]) -> bool {
+    buf.iter().all(|&byte| byte == 0)
+}
+
 /// Encode an extent value: physical start block followed by run length.
 fn encode_extent(phys: u64, len: u64) -> [u8; EXTENT_VALUE_LEN] {
     let mut value = [0u8; EXTENT_VALUE_LEN];
@@ -1546,6 +1555,20 @@ impl<B: Block> RustFs<B> {
         blk: &mut [u8],
     ) -> Result<(), DriverError> {
         let capu = as_usize(self.data_capacity());
+        // Sparse storage pipeline (`.junie/SPARSE.md` §4, §6): an all-zero
+        // logical record is detected before compression, dedupe, encryption,
+        // or physical allocation and stored as a metadata-only hole. The old
+        // physical block (if any) is released through the normal COW/refcount
+        // path; the gap then reads back as zero (`read_file`). A zero range is
+        // never passed to the compressor or entered in the dedupe index (§8,
+        // §9).
+        if is_all_zero(&blk[..capu]) {
+            self.extent_remove(inode, ino, bi)?;
+            if old_ptr != 0 {
+                self.release_block_ref(old_ptr, ino, bi)?;
+            }
+            return Ok(());
+        }
         let hash = logical_hash(&blk[..capu]);
         let domain = self.dedupe_domain;
         if let Some(cand) = self.dedupe_lookup(domain, &hash, &blk[..capu])? {

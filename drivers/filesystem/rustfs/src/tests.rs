@@ -1192,7 +1192,11 @@ fn integrity_still_detected_on_a_compressed_block() {
     fs.create(root, b"c", NodeKind::RegularFile)
         .expect("create");
     let cap = as_usize(fs.data_capacity());
-    let payload = alloc::vec![0x00u8; cap];
+    // A *non-zero* constant block: it compresses through the normal zstd path
+    // and produces a physical record. An all-zero block is not used here
+    // because sparse handling stores it as a metadata-only hole, never a
+    // compressed data record (`.junie/SPARSE.md` §4, §9).
+    let payload = alloc::vec![0xFFu8; cap];
     assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
     assert!(
         stored_compression(&mut fs, b"c", 0).compressed,
@@ -3468,5 +3472,353 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
     assert!(
         matches!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault)),
         "the production read path fails closed on an unrepairable data fault"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sparse files: ZERO/Hole extents (`.junie/SPARSE.md`). RustFS represents a
+// hole implicitly as a gap between extent mappings (permitted by §2/§3); an
+// all-zero logical record is stored as such a hole rather than a physical
+// data record, and reads of a hole synthesise zero bytes.
+// ---------------------------------------------------------------------------
+
+/// The number of *physical data blocks* file `ino` maps: the sum of its
+/// extent-run lengths. A fully sparse range contributes nothing, so a hole
+/// costs zero data payload (`.junie/SPARSE.md` §14).
+fn mapped_block_count(fs: &mut RustFs<MemBlock>, ino: u32) -> u64 {
+    let inode = fs.read_inode(ino).expect("read inode");
+    let spec = extent_spec(ino);
+    fs.btree_collect_entries(inode.extent_root, spec)
+        .expect("walk extent tree")
+        .iter()
+        .map(|(_, value)| decode_extent(value).1)
+        .sum()
+}
+
+/// Assert file `ino`'s committed extent map is sorted by logical offset and
+/// holds no overlapping runs (`.junie/SPARSE.md` §7).
+fn assert_extents_ordered_and_disjoint(fs: &mut RustFs<MemBlock>, ino: u32) {
+    let inode = fs.read_inode(ino).expect("read inode");
+    let spec = extent_spec(ino);
+    let entries = fs
+        .btree_collect_entries(inode.extent_root, spec)
+        .expect("walk extent tree");
+    let mut prev_end = 0u64;
+    for (start, value) in entries {
+        assert!(start >= prev_end, "extent at {start} overlaps prior run");
+        let (_, len) = decode_extent(&value);
+        prev_end = start + len;
+    }
+}
+
+/// Read the whole of file `name` under the root and assert every byte is zero.
+fn assert_reads_all_zero(fs: &mut RustFs<MemBlock>, name: &[u8], len: usize) {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    let got = read_all(fs, node, len);
+    assert!(got.iter().all(|&b| b == 0), "sparse read must be all zero");
+}
+
+#[test]
+fn sparse_ten_mib_zero_file_allocates_no_data_payload() {
+    // §17.1: a 10 MiB all-zero file has a 10 MiB logical size, maps zero
+    // physical data blocks, and reads back as zeroes. The volume is encrypted
+    // (`TEST_KEY`), so this also covers §17.10: no plaintext data payload
+    // exists for the sparse range.
+    let mut fs = fmt(4096, 4096, 256);
+    let root = fs.root();
+    fs.create(root, b"zero", NodeKind::RegularFile)
+        .expect("create");
+    let size = 10 * 1024 * 1024usize;
+    let zeros = alloc::vec![0u8; size];
+    assert_eq!(fs.write_at(root, b"zero", 0, &zeros), Ok(size));
+
+    let ino = file_ino(&mut fs, b"zero");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        0,
+        "an all-zero file allocates no data blocks"
+    );
+    assert_eq!(
+        extent_tree_nodes(&mut fs, ino),
+        0,
+        "an all-zero file has an empty extent tree"
+    );
+    let node = fs.lookup(fs.root(), b"zero").expect("lookup");
+    assert_eq!(
+        fs.node_info(node).expect("info").size,
+        size as u64,
+        "the logical size is the full 10 MiB"
+    );
+    assert_reads_all_zero(&mut fs, b"zero", size);
+
+    // Survives a remount unchanged: still all-zero, still no data payload.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen");
+    let ino = file_ino(&mut fs, b"zero");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        0,
+        "still sparse after remount"
+    );
+    assert_reads_all_zero(&mut fs, b"zero", size);
+}
+
+#[test]
+fn sparse_write_nonzero_into_hole_splits_around_data() {
+    // §17.2: writing non-zero data into the middle of a sparse file leaves the
+    // surrounding ranges as holes, the written region reads back correctly, and
+    // the extent map stays ordered and non-overlapping.
+    let mut fs = fmt(512, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let capu = as_usize(cap);
+
+    // A 8-block hole, then a single non-zero block at logical block 4.
+    fs.truncate(root, b"f", cap * 8).expect("extend");
+    let patch = alloc::vec![0xABu8; capu];
+    assert_eq!(fs.write_at(root, b"f", cap * 4, &patch), Ok(capu));
+
+    let ino = file_ino(&mut fs, b"f");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        1,
+        "only the one written block is backed by data"
+    );
+    assert_extents_ordered_and_disjoint(&mut fs, ino);
+
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    let mut got = alloc::vec![0u8; capu];
+    fs.read_at(node, cap * 4, &mut got).expect("read data");
+    assert_eq!(got, patch, "the written region reads back correctly");
+    // Surrounding blocks are still holes reading zero.
+    let mut before = alloc::vec![0xFFu8; capu];
+    fs.read_at(node, cap * 3, &mut before).expect("read hole");
+    assert!(before.iter().all(|&b| b == 0), "block before stays a hole");
+    let mut after = alloc::vec![0xFFu8; capu];
+    fs.read_at(node, cap * 5, &mut after).expect("read hole");
+    assert!(after.iter().all(|&b| b == 0), "block after stays a hole");
+}
+
+#[test]
+fn sparse_overwrite_data_with_zeroes_frees_only_when_unshared() {
+    // §17.3: overwriting existing data with zeroes makes the range read as
+    // zero, but a block still referenced by a reflink (a snapshot view) is
+    // retained, so the reflink keeps seeing the old data.
+    let mut fs = fmt(512, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let capu = as_usize(cap);
+    let body = alloc::vec![0x33u8; capu];
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(capu));
+
+    fs.reflink(root, b"f", b"snap").expect("reflink");
+
+    // Overwrite the single data block with zeroes: it becomes a hole.
+    let zeros = alloc::vec![0u8; capu];
+    assert_eq!(fs.write_at(root, b"f", 0, &zeros), Ok(capu));
+
+    let f_ino = file_ino(&mut fs, b"f");
+    assert_eq!(
+        mapped_block_count(&mut fs, f_ino),
+        0,
+        "the zeroed block is now a hole"
+    );
+    assert_reads_all_zero(&mut fs, b"f", capu);
+
+    // The reflink still sees the original data: the old chunk was retained
+    // because it was still referenced.
+    let snap = fs.lookup(fs.root(), b"snap").expect("snap lookup");
+    assert_eq!(
+        read_all(&mut fs, snap, capu),
+        body,
+        "the snapshot keeps old data"
+    );
+}
+
+#[test]
+fn sparse_truncate_up_creates_a_hole() {
+    // §17.4: growing a file with no written data creates a hole; reads of the
+    // new range return zeroes and no data blocks are allocated.
+    let mut fs = fmt(512, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    fs.truncate(root, b"f", cap * 6).expect("truncate up");
+
+    let ino = file_ino(&mut fs, b"f");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        0,
+        "extending into a hole allocates no data"
+    );
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, cap * 6);
+    assert_reads_all_zero(&mut fs, b"f", as_usize(cap * 6));
+}
+
+#[test]
+fn sparse_truncate_down_frees_data_but_not_holes() {
+    // §17.5: shrinking frees data extents beyond the new EOF through the normal
+    // path, while removed holes need no physical free. A file that is data
+    // followed by a hole shrinks correctly either way.
+    let mut fs = fmt(512, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let capu = as_usize(cap);
+    // Two *distinct* data blocks (so dedupe does not collapse them to one
+    // shared chunk) then extend with a hole.
+    let mut body = alloc::vec![0x44u8; capu * 2];
+    for byte in &mut body[capu..] {
+        *byte = 0x45;
+    }
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(capu * 2));
+    fs.truncate(root, b"f", cap * 8).expect("extend with hole");
+
+    let ino = file_ino(&mut fs, b"f");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        2,
+        "two data blocks mapped"
+    );
+    let free_before = fs.free_count;
+
+    // Shrink to drop the hole only: data blocks remain, no free needed.
+    fs.truncate(root, b"f", cap * 2).expect("drop hole");
+    assert_eq!(
+        mapped_block_count(&mut fs, ino),
+        2,
+        "data survives the hole drop"
+    );
+
+    // Shrink into the data: the freed data block returns to the free pool.
+    fs.truncate(root, b"f", cap).expect("drop a data block");
+    assert_eq!(mapped_block_count(&mut fs, ino), 1, "one data block freed");
+    assert!(
+        fs.free_count > free_before,
+        "freeing a data block returns it to the free pool"
+    );
+}
+
+#[test]
+fn sparse_reflink_preserves_holes_without_dedupe_chunks() {
+    // §17.6: cloning a sparse file keeps its holes metadata-only and creates no
+    // dedupe chunk for any zero range (§8 — a zero range is never a chunk).
+    let mut fs = fmt(512, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let capu = as_usize(cap);
+    // Distinct data at block 0 and block 5 (so they are two separate chunks,
+    // not one deduped chunk), a hole between, then a trailing hole.
+    let patch0 = alloc::vec![0x6Cu8; capu];
+    let patch5 = alloc::vec![0x6Du8; capu];
+    assert_eq!(fs.write_at(root, b"f", 0, &patch0), Ok(capu));
+    assert_eq!(fs.write_at(root, b"f", cap * 5, &patch5), Ok(capu));
+    fs.truncate(root, b"f", cap * 8).expect("trailing hole");
+
+    let chunks_before = chunk_count(&mut fs);
+    fs.reflink(root, b"f", b"clone").expect("reflink");
+
+    let src = file_ino(&mut fs, b"f");
+    let clone = file_ino(&mut fs, b"clone");
+    assert_eq!(
+        mapped_block_count(&mut fs, src),
+        mapped_block_count(&mut fs, clone),
+        "the clone maps exactly the source's data blocks"
+    );
+    assert_eq!(
+        mapped_block_count(&mut fs, clone),
+        2,
+        "only the two written blocks are backed; holes stay metadata-only"
+    );
+    // Reflink shares the two real data blocks (so chunk_count grows by 2), but
+    // never invents a chunk for a zero range.
+    assert_eq!(
+        chunk_count(&mut fs) - chunks_before,
+        2,
+        "a reflink shares only the real data blocks, never a zero range"
+    );
+
+    // Both files read identically, holes included.
+    let node = fs.lookup(fs.root(), b"clone").expect("clone lookup");
+    let mut got = alloc::vec![0xFFu8; capu];
+    fs.read_at(node, cap, &mut got).expect("read hole");
+    assert!(got.iter().all(|&b| b == 0), "the clone's hole reads zero");
+}
+
+#[test]
+fn sparse_scrub_and_check_validate_metadata_only() {
+    // §17.7 / §17.8: scrub and check both pass on a sparse file. Because a hole
+    // has no extent record, no physical read is attempted for it and there is
+    // nothing for the integrity layers to fault on.
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    fs.create(root, b"sparse", NodeKind::RegularFile)
+        .expect("create");
+    let cap = fs.data_capacity();
+    let capu = as_usize(cap);
+    let patch = alloc::vec![0x77u8; capu];
+    assert_eq!(fs.write_at(root, b"sparse", cap * 3, &patch), Ok(capu));
+    fs.truncate(root, b"sparse", cap * 16)
+        .expect("trailing hole");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete, "scrub completes on a sparse file");
+    assert!(!report.found_faults(), "a sparse file is clean: {report:?}");
+
+    let check = fs.check(&GrantAll, &NullSink).expect("check");
+    assert!(
+        check.structure_sound,
+        "sparse metadata validates: {check:?}"
+    );
+
+    // The data still reads back correctly around its holes.
+    let node = fs.lookup(fs.root(), b"sparse").expect("lookup");
+    let mut got = alloc::vec![0u8; capu];
+    fs.read_at(node, cap * 3, &mut got).expect("read data");
+    assert_eq!(got, patch);
+}
+
+#[test]
+fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
+    // §17.9: an all-zero record produces no zstd payload (it is a hole with no
+    // physical block at all), whereas a repeated *non-zero* constant follows
+    // the normal compression path and is backed by a compressed data record.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+
+    fs.create(root, b"zero", NodeKind::RegularFile)
+        .expect("create zero");
+    let zeros = alloc::vec![0u8; cap];
+    assert_eq!(fs.write_at(root, b"zero", 0, &zeros), Ok(cap));
+    let zero_ino = file_ino(&mut fs, b"zero");
+    assert_eq!(
+        mapped_block_count(&mut fs, zero_ino),
+        0,
+        "an all-zero record creates no physical (zstd or raw) payload"
+    );
+
+    fs.create(root, b"ff", NodeKind::RegularFile)
+        .expect("create ff");
+    let ff = alloc::vec![0xFFu8; cap];
+    assert_eq!(fs.write_at(root, b"ff", 0, &ff), Ok(cap));
+    assert!(
+        stored_compression(&mut fs, b"ff", 0).compressed,
+        "a repeated non-zero constant compresses through the normal path"
+    );
+    let node = fs.lookup(fs.root(), b"ff").expect("lookup ff");
+    assert_eq!(
+        read_all(&mut fs, node, cap),
+        ff,
+        "the constant block round-trips"
     );
 }

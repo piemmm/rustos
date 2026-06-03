@@ -69,6 +69,7 @@ configuration.
 | Compression | First-party RustOS zstd-fast-style compression is always active. |
 | Deduplication | Exact verified dedupe is always active; it may miss duplicates but may never merge unequal bytes. |
 | Shared extents | Reflink/shared immutable chunks are core storage. |
+| Sparse files | Always active. All-zero logical ranges are stored as metadata-only ZERO/Hole extents, never a physical data record (§19). |
 | TRIM | mkfs discards the target range when supported; mounted RustFS trims safely in batches. |
 | SMART/NVMe health | Health snapshots are stored and used when exposed by the storage stack. |
 | Scrub | Online verification and repair from redundant copies. |
@@ -200,6 +201,8 @@ Write path:
 
 ```text
 plaintext logical record
+  -> all-zero detection (§19)
+  -> if all zero: store a metadata-only ZERO/Hole extent and stop
   -> logical hash
   -> same-encryption-domain dedupe lookup
   -> byte-verify duplicate candidate, or continue as unique
@@ -210,6 +213,10 @@ plaintext logical record
   -> write new physical record
   -> commit new COW root
 ```
+
+The zero-detection step runs before compression, dedupe, encryption, and
+physical allocation: an all-zero logical record never reaches those stages
+and never consumes a physical block (§19).
 
 Read path:
 
@@ -896,3 +903,50 @@ closed `DeviceFault`, never silently repaired. These reuse the existing
 `MemBlock` write-budget + fault-injection helpers, the `DataFault` classes, and
 the `verify_everything` scrub/check core (`AGENTS.md` §2.2). With Stage 12
 shipped, **RustFS v1 is complete** (§17).
+
+---
+
+## 19. Sparse files (ZERO/Hole extents)
+
+Sparse-file support is mandatory, always enabled, and not tunable (the
+authoritative appendix is `.junie/SPARSE.md`). RustFS stores a logical
+all-zero range as metadata only — never a physical data record, a zstd
+payload, a dedupe chunk, or an encrypted data blob.
+
+**Representation.** A hole is an *unmapped* logical range. RustFS represents
+holes **implicitly** as gaps between the per-file extent-tree mappings (§4,
+§6) — the form `.junie/SPARSE.md` §2/§3 permit alongside an explicit ZERO
+extent. An extent run always names physical data; a logical block with no
+covering run is a hole. The extent map stays sorted by logical offset with no
+overlapping runs (the B-tree invariant, normalised by `extent_assign` /
+`extent_remove`). No new on-disk field, extent kind, or format-version bump is
+introduced: a hole is the *absence* of an extent, so there is nothing extra to
+checksum, encrypt, compress, dedupe, scrub, relocate, or trim.
+
+**Write pipeline.** `store_block` scans the full logical record for all-zero
+content (`is_all_zero`, a cheap bounded first-party scan, §16/§17 of the
+appendix) **before** the logical hash, dedupe lookup, compression, encryption,
+or physical allocation. An all-zero record drops the `(inode, block)` mapping
+(making the block a hole) and releases any prior physical block through the
+normal COW/refcount/free path — a block still referenced by a reflink, a
+deduped owner, or a retained recovery root stays live (§9, §14). A zero range
+is never entered in the dedupe index and never passed to the compressor.
+Repeated *non-zero* data (e.g. `0xFF`) is not special-cased; it follows the
+normal zstd/RAW path (§10). No RLE/FILL storage mode exists.
+
+**Read, extension, truncation.** A read of a hole synthesises zero bytes with
+no physical I/O (`read_file`). Extending a file (a larger `truncate`, or a
+write past EOF) leaves the new range a hole. Shrinking frees the data extents
+beyond the new EOF through the normal path; removed holes need no physical
+free. A partial write that makes the whole resulting logical record zero
+becomes a hole (the read-modify-write reconstructs the full record, so
+`store_block` sees the zeros).
+
+**Interaction with the other layers.** Scrub, check, and rescue iterate the
+extent runs only, so a hole is never read, never faulted on, and needs no
+data-block recovery; check validates that the extent map is ordered and
+non-overlapping (§12). Space accounting separates logical size (includes
+holes) from allocated data (excludes holes, bar metadata overhead): a 10 MiB
+all-zero file reports a 10 MiB logical size and zero mapped data blocks. Because
+every volume is encrypted, a hole also leaves no plaintext data payload for the
+zero range; only the surrounding metadata is protected, as for any inode.

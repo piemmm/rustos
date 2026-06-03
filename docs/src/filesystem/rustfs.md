@@ -281,6 +281,36 @@ the index key, so dedupe can never cross a domain. With a single volume key
 today there is exactly one domain, but the keying already enforces the rule for
 when multiple domains arrive.
 
+## Sparse files (`rustfs-spec.md` §19)
+
+Sparse-file support is **always on and not tunable**: a logical all-zero range
+costs metadata only, never a physical data record, a zstd payload, a dedupe
+chunk, or an encrypted data blob. A 10 MiB all-zero file reports a 10 MiB
+logical size while allocating **zero** data blocks.
+
+A **hole** is an unmapped logical range. RustFS represents holes *implicitly*
+as the gaps between a file's extent-tree mappings (the form `.junie/SPARSE.md`
+§2/§3 permit alongside an explicit ZERO extent), so a hole adds no on-disk
+field and is simply the absence of an extent — there is nothing extra to
+checksum, encrypt, compress, dedupe, scrub, or trim.
+
+The write path detects zeros **first**: `store_block` runs a cheap bounded
+all-zero scan (`is_all_zero`) on the full logical record before the logical
+hash, dedupe lookup, compression, encryption, or physical allocation. An
+all-zero record drops the block's mapping (making it a hole) and releases any
+prior physical block through the normal COW/refcount/free path — a block still
+held by a reflink, a deduped owner, or a retained recovery root stays live. A
+zero range is never entered in the dedupe index and never compressed; repeated
+*non-zero* data (e.g. `0xFF`) is not special-cased and follows the normal
+zstd/RAW path. There is no RLE/FILL mode.
+
+Reads of a hole synthesise zero bytes with no disk I/O. Extending a file (a
+larger `truncate`, or a write past EOF) leaves the new range a hole; shrinking
+frees the data extents beyond the new EOF and removed holes need no free. Scrub,
+check, and rescue iterate only the mapped extent runs, so a hole is never read
+and needs no data-block recovery. Because every volume is encrypted, a hole also
+leaves no plaintext data payload for the zero range.
+
 ## Online scrub (`rustfs-spec.md` §12)
 
 `RustFs::scrub` is an **online** verify-and-repair pass: it walks the live
@@ -739,6 +769,19 @@ it unrepairable; the transient scrub-progress/health-baseline records recover
 gracefully (scrub restarts, health re-derives); and an unmirrored data block's
 fault is detected, classified by its `DataFault` layer, and surfaced as a
 fail-closed `DeviceFault`, never silently repaired.
+
+The **sparse-file acceptance tests** (`rustfs-spec.md` §19, `.junie/SPARSE.md`
+§17) cover all ten mandatory cases: a 10 MiB all-zero file reporting a 10 MiB
+logical size while mapping **zero** data blocks (and reading back zero across a
+remount — also the encrypted-volume case, no plaintext payload); a non-zero
+write into a hole splitting the extent map around the data while the
+surroundings stay zero (ordered, non-overlapping); overwriting data with zeroes
+turning the block into a hole while a reflink keeps seeing the old data;
+`truncate` up creating a hole and down freeing only the real data extents;
+a reflink preserving holes metadata-only and creating no chunk for a zero range;
+scrub and check validating a sparse file's metadata with no physical read for a
+hole; and an all-zero record bypassing compression while a repeated non-zero
+constant still compresses.
 
 The mount / metadata-decode path additionally has a `cargo xtask fuzz`
 harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a

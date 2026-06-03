@@ -4208,6 +4208,21 @@ tests, the 1 GiB `fssoak`, the posix suite, the rustfs-over-virtio-blk QEMU
 vertical, and the `fuzz_mount` / `fuzz_compress` harnesses. The per-stage
 status legend is `docs/src/filesystem/rustfs-spec.md` §18.
 
+**Sparse files (`.junie/SPARSE.md`, spec §19) — DONE.** Always-on,
+non-tunable sparse-file support: the write pipeline (`store_block`) detects an
+all-zero logical record with a cheap bounded first-party scan (`is_all_zero`)
+**before** the logical hash, dedupe, compression, encryption, or allocation,
+and stores it as a metadata-only hole — the implicit gap between extent-tree
+mappings (the form `.junie/SPARSE.md` §2/§3 permit; no new on-disk field, §2.2)
+— releasing any prior physical block through the normal COW/refcount/free path
+so reflinks, deduped owners, and recovery roots stay live. A zero range is
+never deduped, compressed, or given a physical block; repeated non-zero data
+follows the normal zstd/RAW path (no RLE/FILL mode). All ten mandatory §17
+tests pass (10 MiB zero file allocates zero data blocks, hole split, overwrite
+with zeroes vs reflink, truncate up/down, reflink preserving holes, scrub +
+check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§19,
+`docs/src/filesystem/rustfs.md`, and the crate `README.md`.
+
 ---
 
 ## Stage 6 — Userland Foundations

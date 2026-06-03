@@ -146,6 +146,25 @@ is **scoped to the encryption domain** (§7) — the domain is carried in every
 chunk record and index key. The write pipeline is `dedupe → compress →
 encrypt`, so only unique records are compressed (§10).
 
+## Sparse files (`rustfs-spec.md` §19)
+
+Sparse-file support is **always on and not tunable**: a logical all-zero range
+costs metadata only — never a physical data record, a zstd payload, a dedupe
+chunk, or an encrypted data blob — so a 10 MiB all-zero file reports a 10 MiB
+logical size while mapping **zero** data blocks. A **hole** is an unmapped
+logical range, represented *implicitly* as the gap between a file's extent-tree
+mappings (the form `.junie/SPARSE.md` §2/§3 permit), so it adds no on-disk field
+and is simply the absence of an extent (`AGENTS.md` §2.2). The write path
+detects zeros **first** (`store_block`/`is_all_zero`): an all-zero logical record
+is caught before the logical hash, dedupe, compression, encryption, or
+allocation, drops the block's mapping (making it a hole), and releases any prior
+physical block through the normal COW/refcount/free path — a block still held by
+a reflink, deduped owner, or recovery root stays live. A zero range is never
+deduped or compressed; repeated *non-zero* data follows the normal zstd/RAW path
+(no RLE/FILL mode). Reads of a hole synthesise zeroes with no disk I/O,
+extending a file leaves a hole, shrinking frees only the real data extents, and
+scrub/check/rescue iterate only mapped runs so a hole is never read.
+
 ## Online scrub (`rustfs-spec.md` §12)
 
 `RustFs::scrub` is an **online**, resumable verify-and-repair pass over the
@@ -390,6 +409,17 @@ directory still mounts but reads fail closed and scrub records it unrepairable,
 the transient records recover gracefully, and an unmirrored data block's fault
 is classified by its `DataFault` layer and surfaced fail-closed, never silently
 repaired.
+
+The **sparse-file tests** (`rustfs-spec.md` §19, `.junie/SPARSE.md` §17) cover
+all ten mandatory cases: a 10 MiB all-zero file with a 10 MiB logical size and
+zero mapped data blocks (also the encrypted-volume no-plaintext case, surviving
+a remount), a non-zero write splitting an extent map around a hole (ordered,
+non-overlapping), overwriting data with zeroes turning the block into a hole
+while a reflink keeps the old data, `truncate` up making a hole and down freeing
+only the real data, a reflink preserving holes with no zero-range chunk, scrub +
+check validating sparse metadata with no physical read for a hole, and an
+all-zero record bypassing compression while a non-zero constant still
+compresses.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
