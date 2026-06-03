@@ -19,7 +19,7 @@ use rustos_wm::{
 
 use crate::{
     load_icon_set, DesktopSession, DesktopShell, GraphicsAssetReader, InputSource, SessionEvent,
-    SessionInputResponse, SessionInputRouter, ShellOutcome, TaskbarPresenter,
+    SessionInputResponse, SessionInputRouter, ShellOutcome, TaskBridge, TaskbarPresenter,
 };
 
 const LABEL: &str = "Toggle Light/Dark";
@@ -1114,4 +1114,227 @@ fn teardown_removes_the_presented_windows() {
     assert_eq!(comp.window_count(), 0);
     assert!(shell.presenter().bar_window().is_none());
     assert!(shell.presenter().popup_window().is_none());
+}
+
+// ---- running-task list ↔ window stack ----
+
+/// A small opaque application content surface for an opened window.
+fn app_surface() -> Surface {
+    Surface::filled(320, 240, Color::rgb(40, 160, 90).premultiply()).expect("surface allocates")
+}
+
+/// The centre of the task slot at `index` on the bar laid out at 100%.
+fn task_slot_point(shell: &DesktopShell, index: usize) -> Point {
+    let slot = shell
+        .session()
+        .taskbar()
+        .layout(Scale::ONE)
+        .tasks
+        .get(index)
+        .copied()
+        .expect("the task has a slot");
+    assert!(!slot.is_empty(), "the task slot has a region");
+    Point::new(slot.left() + 1, slot.top() + 1)
+}
+
+#[test]
+fn open_window_lists_focuses_and_presents() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
+        .expect("a fresh task id is available");
+
+    // The window is on screen and focused; the bar lists it as the focused task.
+    assert!(comp.window(window).is_some());
+    assert_eq!(shell.router().focused(), Some(window));
+    let task = shell
+        .tasks()
+        .task_for(window)
+        .expect("the window is tracked");
+    assert_eq!(shell.session().taskbar().tasks().len(), 1);
+    assert_eq!(shell.session().taskbar().tasks().focused(), Some(task));
+    // Opening re-presents the bar, so both the app window and the bar exist.
+    assert!(shell.presenter().bar_window().is_some());
+    assert_eq!(comp.window_count(), 2);
+}
+
+#[test]
+fn close_window_removes_the_task_and_unfocuses() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
+        .expect("opens");
+
+    assert!(shell.close_window(&mut comp, window));
+
+    assert!(comp.window(window).is_none(), "the window is gone");
+    assert!(shell.tasks().is_empty(), "the bridge forgot it");
+    assert!(shell.session().taskbar().tasks().is_empty());
+    assert_eq!(shell.router().focused(), None, "focus was dropped");
+    // Closing an already-closed window changes nothing.
+    assert!(!shell.close_window(&mut comp, window));
+}
+
+#[test]
+fn clicking_a_task_minimises_then_restores_its_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
+        .expect("opens");
+    let task = shell.tasks().task_for(window).expect("tracked");
+    let at = task_slot_point(&shell, 0);
+
+    // First click on the focused, non-minimised task minimises it: the window
+    // is hidden and focus is dropped.
+    shell.handle(moved(at.x, at.y), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::TaskActivated {
+            id: task,
+            outcome: ActivateOutcome::Minimised,
+        }))
+    );
+    assert!(!comp.window(window).expect("still tracked").is_visible());
+    assert_eq!(shell.router().focused(), None);
+
+    // A second click restores and re-focuses it.
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::TaskActivated {
+            id: task,
+            outcome: ActivateOutcome::Activated,
+        }))
+    );
+    assert!(comp.window(window).expect("tracked").is_visible());
+    assert_eq!(shell.router().focused(), Some(window));
+}
+
+#[test]
+fn clicking_a_window_directly_moves_the_bar_highlight() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let first = shell
+        .open_window(&mut comp, Point::new(100, 100), app_surface(), "First")
+        .expect("opens");
+    let second = shell
+        .open_window(&mut comp, Point::new(900, 100), app_surface(), "Second")
+        .expect("opens");
+    let first_task = shell.tasks().task_for(first).expect("tracked");
+
+    // The second window is focused; clicking the first window directly moves
+    // both the window manager's focus and the bar's highlight to it.
+    shell.handle(moved(150, 150), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert!(matches!(
+        outcome,
+        ShellOutcome::WindowManager(InputResponse::Activated { window, .. }) if window == first
+    ));
+    assert_eq!(shell.router().focused(), Some(first));
+    assert_eq!(
+        shell.session().taskbar().tasks().focused(),
+        Some(first_task),
+        "the bar highlight followed the direct click"
+    );
+    let _ = second;
+}
+
+#[test]
+fn pressing_the_desktop_clears_the_bar_highlight() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
+        .expect("opens");
+    assert!(shell.session().taskbar().tasks().focused().is_some());
+
+    // A press on empty desktop drops window-manager focus and clears the
+    // highlight, leaving the task listed.
+    shell.handle(moved(700, 400), &mut comp);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(
+        outcome,
+        ShellOutcome::WindowManager(InputResponse::DesktopPressed)
+    );
+    assert_eq!(shell.session().taskbar().tasks().focused(), None);
+    assert!(
+        shell.tasks().task_for(window).is_some(),
+        "the task is still listed"
+    );
+}
+
+#[test]
+fn the_bridge_maps_windows_to_tasks_both_ways() {
+    let mut bridge = TaskBridge::new();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let mut session = session();
+
+    let window = bridge
+        .open(
+            &mut comp,
+            &mut router,
+            session.taskbar_mut(),
+            Point::new(10, 10),
+            app_surface(),
+            "App",
+        )
+        .expect("opens");
+    let task = bridge.task_for(window).expect("tracked");
+    assert_eq!(bridge.window_for(task), Some(window));
+    assert_eq!(bridge.len(), 1);
+}
+
+#[test]
+fn activating_an_unknown_task_changes_nothing() {
+    let bridge = TaskBridge::new();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    assert!(!bridge.activate(
+        &mut comp,
+        &mut router,
+        TaskId(999),
+        ActivateOutcome::Activated
+    ));
+    assert!(!bridge.activate(
+        &mut comp,
+        &mut router,
+        TaskId(999),
+        ActivateOutcome::Unknown
+    ));
+}
+
+#[test]
+fn syncing_focus_to_an_untracked_window_leaves_the_highlight() {
+    let mut bridge = TaskBridge::new();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let mut session = session();
+    let tracked = bridge
+        .open(
+            &mut comp,
+            &mut router,
+            session.taskbar_mut(),
+            Point::new(10, 10),
+            app_surface(),
+            "App",
+        )
+        .expect("opens");
+    let task = bridge.task_for(tracked).expect("tracked");
+    assert_eq!(session.taskbar().tasks().focused(), Some(task));
+
+    // A window the bridge never tracked (the bar's own surface, say) does not
+    // disturb the highlighted task.
+    let stranger = opaque_window(&mut comp, Point::new(500, 500), 100, 100);
+    bridge.sync_focus(session.taskbar_mut(), Some(stranger));
+    assert_eq!(session.taskbar().tasks().focused(), Some(task));
+
+    // Clearing focus (a desktop press) does drop it.
+    bridge.sync_focus(session.taskbar_mut(), None);
+    assert_eq!(session.taskbar().tasks().focused(), None);
 }

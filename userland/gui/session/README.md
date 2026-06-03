@@ -33,7 +33,9 @@ crate is that glue's first increment — the runtime **light/dark switch**.
   session-control selection, a task activation, a notification or clock press.
   Those need capabilities the session does not hold (a window-manager handle,
   the power/spawn capabilities), so the embedder performs them (`AGENTS.md`
-  §10, §16.5).
+  §10, §16.5). (`DesktopShell` applies a task activation's window effect to the
+  compositor itself — see *Running-task list ↔ window stack* — before
+  forwarding it.)
 
 `toggle_appearance`, `set_theme`, and `register_theme` expose the same theme
 control directly. `toggle_appearance` and `set_theme` re-theme the taskbar
@@ -132,6 +134,35 @@ The shell holds no framebuffer: the `Compositor` is the embedder's and is
 passed in on each call. A loaded notification-icon set is installed with
 `set_icons`, a title-bar drag armed with `begin_move`, and the desktop torn
 down with `teardown`.
+
+## Running-task list ↔ window stack
+
+`TaskBridge` keeps the taskbar's running-task list in step with the window
+manager's window stack. The taskbar models a list — one entry per top-level
+window, with the click-to-activate / minimise rule — but owns no window
+manager, and the window manager owns no task list (`AGENTS.md` §17.4). A task
+is named by a `TaskId` and a window by an opaque `WindowId`, so the bridge owns
+the correspondence: it mints a stable task id per tracked window and translates
+between the two. Every operation is total and fails closed (`AGENTS.md` §2.9):
+
+- `open` adds a window to the compositor, lists it as a running task, and
+  shows, raises, and focuses it; it opens nothing only if the task-id space is
+  exhausted.
+- `close` removes the window and its task and drops focus if it held it; an
+  untracked window is a no-op.
+- `activate` applies the bar's `ActivateOutcome` — an activated task is shown,
+  raised, and focused; a minimised one is hidden and unfocused — and is a no-op
+  for an unknown task.
+- `sync_focus` mirrors a window-manager focus change back into the bar's
+  highlight, leaving it untouched (and forcing no repaint) for a focused window
+  that owns no task.
+
+`DesktopShell` drives it: `open_window` / `close_window` manage the lifecycle,
+and `handle` applies a `TaskActivated` outcome to the compositor and mirrors a
+window-manager focus change into the bar, moving keyboard focus through the
+window manager's `InputRouter::focus` / `unfocus`. The bridge holds no pixels
+and grants itself no authority — the compositor, router, and taskbar are the
+embedder's, passed in per call.
 
 ## Dependencies and layering
 

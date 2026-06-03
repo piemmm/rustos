@@ -79,6 +79,33 @@ impl TaskList {
         self.focused
     }
 
+    /// Mirror the window manager's focus into the list.
+    ///
+    /// The window manager owns keyboard focus and changes it when the user
+    /// clicks a window directly (not through the bar), so the session glue
+    /// relays that focus here to keep the highlighted entry in step. Focusing a
+    /// task also restores it (a focused window is never minimised).
+    ///
+    /// Passing `None` clears the highlight (focus rests on the desktop).
+    /// Passing an unknown id changes nothing and returns `false` (fail closed,
+    /// `AGENTS.md` §2.9); the focus and minimised state are left untouched.
+    pub fn set_focused(&mut self, id: Option<TaskId>) -> bool {
+        match id {
+            None => {
+                self.focused = None;
+                true
+            }
+            Some(id) => {
+                let Some(index) = self.position(id) else {
+                    return false;
+                };
+                self.entries[index].minimised = false;
+                self.focused = Some(id);
+                true
+            }
+        }
+    }
+
     /// Add a new task for a freshly opened window.
     ///
     /// A duplicate id changes nothing and returns `false` (fail closed,

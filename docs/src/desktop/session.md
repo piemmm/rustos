@@ -34,7 +34,9 @@ edge (`AGENTS.md` §17.4). Nothing outside `userland/gui/*` depends on it
 - Every other response is `SessionEvent::Forward`ed unchanged: a launcher or
   session-control selection, a task activation, a notification or clock press.
   Those need capabilities the session does not hold, so the embedder performs
-  them (`AGENTS.md` §10, §16.5).
+  them (`AGENTS.md` §10, §16.5). (`DesktopShell` additionally applies a task
+  activation's window effect to the compositor itself — see *Running-task list
+  ↔ window stack* — before forwarding it.)
 
 The session owns both the registry and the `Taskbar`, so a switch is a single
 in-place operation rather than a rebuild.
@@ -102,6 +104,38 @@ the keyboard owner through `focused`. The router holds no pixels and grants
 itself no authority; every routed sub-call is itself total and fails closed
 (`AGENTS.md` §2.9).
 
+## Running-task list ↔ window stack
+
+The taskbar models a running-task list — one entry per top-level window, with
+the click-to-activate / minimise rule — but owns no window manager, and the
+window manager owns no task list (`AGENTS.md` §17.4). `TaskBridge` is the glue
+between them. A task is named by a `rustos_taskbar::TaskId` and a window by an
+opaque `rustos_wm::WindowId`, so the bridge owns the correspondence: it mints a
+stable task id per window it tracks and never reuses one, then translates
+between the two whenever the bar acts on a window or the window manager moves
+focus. Each operation is total and fails closed (`AGENTS.md` §2.9):
+
+- `open` adds a window to the compositor, lists it as a running task, and shows,
+  raises, and focuses it (a freshly opened window takes focus); it opens nothing
+  only if the task-id space is exhausted;
+- `close` removes the window from the compositor and its task from the bar,
+  dropping focus if the closed window held it; an untracked window is a no-op;
+- `activate` applies the bar's `ActivateOutcome` to the compositor — an
+  activated task is shown, raised, and focused; a minimised one is hidden and,
+  if it held focus, unfocused — and is a no-op for an unknown task;
+- `sync_focus` mirrors a window-manager focus change (the user clicked a window
+  directly, or pressed the desktop) back into the bar's highlight, returning
+  whether the highlight moved so a click on a window that owns no task neither
+  blanks the highlight nor forces a needless repaint.
+
+`DesktopShell` drives the bridge: `open_window` / `close_window` manage the
+lifecycle, `handle` applies a `TaskActivated` outcome to the compositor and
+mirrors a window-manager focus change into the bar, and the focus move uses the
+window manager's new `InputRouter::focus` / `unfocus` (validated against the
+compositor, fail-closed) so focusing a task by id keeps the keyboard owner in
+step. The bridge holds no pixels and grants itself no authority — the
+compositor, the router, and the taskbar are the embedder's, passed in per call.
+
 ## Driving the desktop from a live input stream
 
 `DesktopShell` composes the four pieces above — the `DesktopSession`, the
@@ -117,10 +151,12 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   through the `SessionInputRouter` and returning a `ShellOutcome` per event —
   `Ignored`, a `WindowManager` action the embedder may observe, or a
   `Session` event;
-- a taskbar action is `resolve`d (the light/dark toggle is applied here, every
-  other response forwarded) and the bar is re-presented, so an opened/closed
-  menu or a re-themed bar reaches the screen; a window-manager action needs no
-  re-present, so motion and drags stay cheap;
+- a taskbar action is `resolve`d (the light/dark toggle is applied here, a
+  task activate/minimise outcome is applied to the compositor, every other
+  response forwarded) and the bar is re-presented, so an opened/closed menu, a
+  re-themed bar, or a changed task highlight reaches the screen; a
+  window-manager action re-presents only when it moved focus between tasks,
+  so motion and drags stay cheap;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
   before the fault stay applied and the embedder replaces or re-polls the
   source (`AGENTS.md` §2.9 / §19.5).
@@ -157,11 +193,19 @@ routes to the window manager, the modal start menu claiming and dismissing an
 off-bar press, motion keeping the pointer in step, a window drag continuing
 while the pointer is over the bar, a release ending the grab, and a non-primary
 press being ignored. Finally it covers `DesktopShell`: `pump` opening the menu
-from a press over the start button and presenting the popup, a window press
-routing to the window manager without re-presenting the bar, selecting the
-appearance-toggle row switching the active theme to light and removing the
-closed menu's popup, a faulting `InputSource` returning its `Errno` while the
-event drained before it stays applied, a pure motion presenting nothing,
-`begin_move` arming a grab on the focused window, `set_icons` installing a
-loaded set while the bar still presents, and `teardown` clearing the presented
-windows.
+from a press over the start button and presenting the popup, a window press on a
+window that owns no task routing to the window manager without re-presenting the
+bar, selecting the appearance-toggle row switching the active theme to light and
+removing the closed menu's popup, a faulting `InputSource` returning its `Errno`
+while the event drained before it stays applied, a pure motion presenting
+nothing, `begin_move` arming a grab on the focused window, `set_icons`
+installing a loaded set while the bar still presents, and `teardown` clearing
+the presented windows. It covers `TaskBridge` end to end through the shell:
+`open_window` listing, focusing, and presenting a new task; `close_window`
+removing the task and dropping focus (and a second close being a no-op);
+clicking a task slot minimising the window and dropping focus, then a second
+click restoring and re-focusing it; clicking a window directly moving both the
+window-manager focus and the bar highlight; pressing the desktop clearing the
+highlight while the task stays listed; the window↔task mapping both ways;
+activating an unknown task changing nothing; and syncing focus to an untracked
+window leaving the highlight in place while clearing it on a desktop press.

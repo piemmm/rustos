@@ -35,16 +35,18 @@
 //! [`TaskbarPresenter`]: crate::TaskbarPresenter
 //! [`TaskbarRenderer`]: rustos_taskbar::TaskbarRenderer
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::Errno;
 use rustos_icon::IconSet;
-use rustos_taskbar::{TaskbarConfig, TaskbarRenderer};
-use rustos_wm::{Compositor, InputEvent, InputResponse, Scale};
+use rustos_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
+use rustos_wm::{Compositor, InputEvent, InputResponse, Point, Scale, Surface, WindowId};
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::presenter::TaskbarPresenter;
 use crate::session::{DesktopSession, SessionEvent};
+use crate::tasks::TaskBridge;
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -93,7 +95,9 @@ pub enum ShellOutcome {
 ///
 /// Build one with [`DesktopShell::new`], call [`present`](Self::present) once
 /// to place the bar, then call [`pump`](Self::pump) each frame to apply the
-/// pending input. A title-bar drag is armed with [`begin_move`](Self::begin_move);
+/// pending input. Application windows are opened and closed as running tasks
+/// with [`open_window`](Self::open_window) / [`close_window`](Self::close_window);
+/// a title-bar drag is armed with [`begin_move`](Self::begin_move);
 /// a loaded notification-icon set is installed with [`set_icons`](Self::set_icons);
 /// tearing the desktop down is [`teardown`](Self::teardown).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,6 +106,7 @@ pub struct DesktopShell {
     router: SessionInputRouter,
     presenter: TaskbarPresenter,
     renderer: TaskbarRenderer,
+    tasks: TaskBridge,
 }
 
 impl DesktopShell {
@@ -120,6 +125,7 @@ impl DesktopShell {
             router: SessionInputRouter::new(),
             presenter: TaskbarPresenter::new(),
             renderer: TaskbarRenderer::new(),
+            tasks: TaskBridge::new(),
         }
     }
 
@@ -145,6 +151,56 @@ impl DesktopShell {
     #[must_use]
     pub const fn presenter(&self) -> &TaskbarPresenter {
         &self.presenter
+    }
+
+    /// The task bridge (the window↔task correspondence).
+    #[must_use]
+    pub const fn tasks(&self) -> &TaskBridge {
+        &self.tasks
+    }
+
+    /// Open `surface` as a top-level application window at `origin`, list it on
+    /// the taskbar titled `title`, and focus it, re-presenting the bar so the
+    /// new task appears.
+    ///
+    /// Returns the new [`WindowId`]. Returns `None`, opening nothing, only if
+    /// the task-id space is exhausted (`AGENTS.md` §2.9). The compositor is the
+    /// embedder's, passed in here; the shell holds no framebuffer (§17.4).
+    pub fn open_window(
+        &mut self,
+        compositor: &mut Compositor,
+        origin: Point,
+        surface: Surface,
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let window = self.tasks.open(
+            compositor,
+            &mut self.router,
+            self.session.taskbar_mut(),
+            origin,
+            surface,
+            title,
+        )?;
+        self.present(compositor);
+        Some(window)
+    }
+
+    /// Close `window`: remove it from the compositor and the taskbar, dropping
+    /// focus if it held it, and re-present the bar so the task disappears.
+    ///
+    /// Returns `false`, changing nothing, when `window` is not a tracked task
+    /// (`AGENTS.md` §2.9).
+    pub fn close_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !self.tasks.close(
+            compositor,
+            &mut self.router,
+            self.session.taskbar_mut(),
+            window,
+        ) {
+            return false;
+        }
+        self.present(compositor);
+        true
     }
 
     /// Install a loaded notification-icon set on the renderer, replacing the
@@ -197,22 +253,53 @@ impl DesktopShell {
     /// The event is fanned to the window manager or taskbar by the
     /// [`SessionInputRouter`]'s policy; a taskbar action is then
     /// [`resolve`](DesktopSession::resolve)d (the light/dark toggle is applied
-    /// here, everything else is forwarded) and the bar is re-presented so the
-    /// screen reflects the change (an opened/closed menu, a re-themed bar). A
-    /// window-manager action needs no re-present — the compositor is already
-    /// updated — so motion and drags stay cheap.
+    /// here, the task activate/minimise outcome is applied to the compositor,
+    /// everything else is forwarded) and the bar is re-presented so the screen
+    /// reflects the change (an opened/closed menu, a re-themed bar, a changed
+    /// task highlight). A window-manager action re-presents only when it moved
+    /// focus (a press), keeping the highlight in step; motion and drags change
+    /// no highlight and stay cheap.
     pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> ShellOutcome {
         match self
             .router
             .handle(event, compositor, self.session.taskbar_mut())
         {
             SessionInputResponse::Ignored => ShellOutcome::Ignored,
-            SessionInputResponse::WindowManager(response) => ShellOutcome::WindowManager(response),
+            SessionInputResponse::WindowManager(response) => {
+                self.mirror_focus(&response, compositor);
+                ShellOutcome::WindowManager(response)
+            }
             SessionInputResponse::Taskbar(response) => {
+                if let TaskbarResponse::TaskActivated { id, outcome } = response {
+                    self.tasks
+                        .activate(compositor, &mut self.router, id, outcome);
+                }
                 let event = self.session.resolve(response);
                 self.present(compositor);
                 ShellOutcome::Session(event)
             }
+        }
+    }
+
+    /// Keep the bar's highlighted task in step when the window manager moves
+    /// focus by a direct click on a window or the desktop.
+    ///
+    /// A press that focused a window or the desktop relays the new focus into
+    /// the task list and, only when the highlighted task actually moved,
+    /// re-presents the bar; a drag ([`Moved`](InputResponse::Moved) /
+    /// [`MoveEnded`](InputResponse::MoveEnded)), a no-op, or a press on a window
+    /// that owns no task changes no highlight and is left cheap (`AGENTS.md`
+    /// §10).
+    fn mirror_focus(&mut self, response: &InputResponse, compositor: &mut Compositor) {
+        let focus = match *response {
+            InputResponse::Activated { window, .. } => Some(window),
+            InputResponse::DesktopPressed => None,
+            InputResponse::Moved { .. }
+            | InputResponse::MoveEnded { .. }
+            | InputResponse::Ignored => return,
+        };
+        if self.tasks.sync_focus(self.session.taskbar_mut(), focus) {
+            self.present(compositor);
         }
     }
 

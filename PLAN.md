@@ -5481,12 +5481,41 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   (56 total), 1 new session test (38 total); taskbar (62) retained. Docs:
   `docs/src/desktop/dpi.md` (+ cursors.md), the wm/taskbar `README.md`s. No
   `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
+- **Running-task list ↔ window stack — DONE (increment).** The taskbar
+  modelled a running-task list (one entry per top-level window, the
+  click-to-activate / minimise rule) and the WM a window stack, but nothing
+  joined them (§17.4: neither may depend on the other). `userland/gui/session`
+  gains a **`tasks`** module: **`TaskBridge`** owns the correspondence between
+  compositor windows and taskbar tasks — the WM mints `WindowId` as an *opaque*
+  token, so the bridge mints a stable `TaskId` per tracked window and never
+  reuses one, translating between the two. It is total and fail-closed (§2.9):
+  **`open`** adds a window to the compositor, lists it as a task, and shows /
+  raises / focuses it (only the id-space-exhausted case opens nothing);
+  **`close`** removes the window and its task and drops focus if held;
+  **`activate`** applies the bar's `ActivateOutcome` to the compositor (an
+  activated task is shown, raised, focused; a minimised one hidden and
+  unfocused); **`sync_focus`** mirrors a WM focus change back into the bar's
+  highlight, returning whether it moved so a click on a window owning no task
+  neither blanks the highlight nor forces a needless repaint. `DesktopShell`
+  drives it (`open_window` / `close_window`; `handle` applies a `TaskActivated`
+  outcome and mirrors WM focus). Two additive seams support it: WM
+  `InputRouter::focus`/`unfocus` (programmatic, compositor-validated,
+  fail-closed) and taskbar `TaskList::set_focused` (mirror + restore, rejecting
+  an unknown id). The bridge holds no pixels and grants itself no authority
+  (the compositor/router/taskbar are the embedder's). 11 new
+  `rustos-desktop-session` tests (46 total), 2 new `rustos-wm` (58), 2 new
+  `rustos-taskbar` (64). Docs `docs/src/desktop/session.md` (new section) +
+  the session/wm/taskbar `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
+  `appmgr`/WM glue that opens a *launched* app's window through this bridge
+  (deferred Stage 6 process wiring) — the model side is complete.
 - **Still to do this stage:** GPU-accelerated compositor path, backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar
-  `TaskbarInput` and re-presents through `TaskbarPresenter` now exists) with
-  **live** pointer/keyboard device events, and relaying the session's
-  theme switch over live IPC, selecting a font face
+  `TaskbarInput`, re-presents through `TaskbarPresenter`, and keeps the
+  running-task list in step with the window stack through `TaskBridge` now
+  exists) with **live** pointer/keyboard device events, and relaying the
+  session's theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and
   re-renders only on a scale or theme change has landed — the shared

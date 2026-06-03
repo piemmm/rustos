@@ -474,6 +474,34 @@ fn press_on_desktop_clears_focus() {
 }
 
 #[test]
+fn focus_gives_keyboard_focus_to_a_known_window() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
+    let mut router = InputRouter::new();
+
+    assert_eq!(router.focused(), None);
+    assert!(router.focus(win, &c), "a known window can be focused");
+    assert_eq!(router.focused(), Some(win));
+
+    router.unfocus();
+    assert_eq!(router.focused(), None, "unfocus drops keyboard focus");
+}
+
+#[test]
+fn focus_fails_closed_for_an_unknown_window() {
+    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
+    assert!(c.remove(win), "the window is removed");
+    let mut router = InputRouter::new();
+
+    assert!(
+        !router.focus(win, &c),
+        "focusing a window the compositor no longer knows fails closed"
+    );
+    assert_eq!(router.focused(), None);
+}
+
+#[test]
 fn non_primary_buttons_do_not_change_focus() {
     let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::new(0, 0), opaque(10, 10, RED));

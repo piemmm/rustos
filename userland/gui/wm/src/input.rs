@@ -117,6 +117,34 @@ impl InputRouter {
         self.grab.is_some()
     }
 
+    /// Give keyboard focus to `window`, validated against `compositor`.
+    ///
+    /// This is the programmatic counterpart of focusing by a pointer press:
+    /// the taskbar's running-task list activates a window by id rather than by
+    /// position, so the session glue moves focus here to keep the window
+    /// manager's focus in step with the bar. Unlike a press it does not raise
+    /// the window — the caller raises it (and shows it) so the policy stays in
+    /// one place.
+    ///
+    /// Returns `false`, changing nothing, when `compositor` does not know
+    /// `window` (`AGENTS.md` §2.9 — fail closed; the router never grants itself
+    /// focus over a window it was not handed).
+    pub fn focus(&mut self, window: WindowId, compositor: &Compositor) -> bool {
+        if compositor.window(window).is_none() {
+            return false;
+        }
+        self.focused = Some(window);
+        true
+    }
+
+    /// Drop keyboard focus, leaving it on the desktop.
+    ///
+    /// The session glue calls this when the focused window is minimised from
+    /// the taskbar: the window is hidden, so nothing should hold the keyboard.
+    pub fn unfocus(&mut self) {
+        self.focused = None;
+    }
+
     /// Process one input `event` against `compositor`, returning what
     /// changed.
     pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> InputResponse {

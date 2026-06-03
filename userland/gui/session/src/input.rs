@@ -98,6 +98,23 @@ impl SessionInputRouter {
         self.wm.is_moving()
     }
 
+    /// Give keyboard focus to `window`, validated against `compositor`.
+    ///
+    /// The session glue calls this when the taskbar activates a running task by
+    /// id, so the window manager's focus follows the bar. Returns `false`,
+    /// changing nothing, when `compositor` does not know `window` (`AGENTS.md`
+    /// §2.9). Delegates to the window manager's router, which owns focus.
+    pub fn focus(&mut self, window: WindowId, compositor: &Compositor) -> bool {
+        self.wm.focus(window, compositor)
+    }
+
+    /// Drop keyboard focus, leaving it on the desktop — the counterpart of
+    /// [`focus`](Self::focus), called when the focused window is minimised from
+    /// the taskbar.
+    pub fn unfocus(&mut self) {
+        self.wm.unfocus();
+    }
+
     /// Start an interactive move-grab on the focused window, anchored at the
     /// current pointer position. Returns `false` (starting no grab) when there
     /// is no focused window or it is no longer known to `compositor`

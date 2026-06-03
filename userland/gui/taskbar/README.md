@@ -54,7 +54,12 @@ owns:
   rectangular surface the window manager places and rounds through its single
   rounded-corner path (`MenuLayout::corner_radius`, §2.2).
 - **Task list** — `TaskList` tracks one entry per top-level window with the
-  familiar click-to-activate / minimise-restore rule.
+  familiar click-to-activate / minimise-restore rule. `set_focused` mirrors the
+  window manager's keyboard focus into the highlight (and restores the focused
+  task), so a window the user clicks directly stays in step with the bar; an
+  unknown id is rejected without disturbing the highlight (`AGENTS.md` §2.9).
+  The session glue (`rustos-desktop-session`'s `TaskBridge`) drives this from
+  the window stack.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).

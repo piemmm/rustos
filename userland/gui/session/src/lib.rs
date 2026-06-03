@@ -75,6 +75,21 @@
 //! [`ShellOutcome`] for the embedder (which holds the framebuffer, power, and
 //! spawn capabilities) to act on (`AGENTS.md` §10, §16.5).
 //!
+//! # Running-task list ↔ window stack
+//!
+//! The taskbar models a running-task list but owns no window manager, and the
+//! window manager owns no task list (`AGENTS.md` §17.4). [`TaskBridge`] (the
+//! [`tasks`] module) is the glue between them: it owns the correspondence
+//! between compositor windows and taskbar tasks, [`open`](TaskBridge::open)s
+//! and [`close`](TaskBridge::close)s top-level windows as running tasks,
+//! applies the bar's click-to-activate / minimise outcome to the compositor
+//! ([`activate`](TaskBridge::activate)), and mirrors a window-manager focus
+//! change back into the bar's highlight ([`sync_focus`](TaskBridge::sync_focus)).
+//! [`DesktopShell`] drives it: [`open_window`](DesktopShell::open_window) /
+//! [`close_window`](DesktopShell::close_window) manage the lifecycle, and
+//! [`pump`](DesktopShell::pump) keeps the bar and the window stack in step as
+//! input arrives.
+//!
 //! [`toggle_appearance`]: DesktopSession::toggle_appearance
 //! [`set_theme`]: DesktopSession::set_theme
 //! [`ThemeRegistry`]: rustos_theme::ThemeRegistry
@@ -93,6 +108,7 @@ pub mod input;
 pub mod presenter;
 pub mod session;
 pub mod shell;
+pub mod tasks;
 
 #[cfg(test)]
 mod tests;
@@ -102,3 +118,4 @@ pub use input::{SessionInputResponse, SessionInputRouter};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
+pub use tasks::TaskBridge;

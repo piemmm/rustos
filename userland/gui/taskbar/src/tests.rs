@@ -197,6 +197,43 @@ fn task_remove_clears_focus() {
     assert!(!tasks.remove(TaskId(1)));
 }
 
+#[test]
+fn set_focused_mirrors_and_restores() {
+    let mut tasks = TaskList::new();
+    tasks.add(TaskId(1), "Editor");
+    tasks.add(TaskId(2), "Browser");
+    // Minimise task 1 so set_focused can be seen to restore it.
+    tasks.activate(TaskId(1));
+    assert_eq!(tasks.activate(TaskId(1)), ActivateOutcome::Minimised);
+    assert!(tasks.is_minimised(TaskId(1)));
+
+    // Mirroring the window manager's focus onto task 1 highlights and restores it.
+    assert!(tasks.set_focused(Some(TaskId(1))));
+    assert_eq!(tasks.focused(), Some(TaskId(1)));
+    assert!(!tasks.is_minimised(TaskId(1)));
+
+    // Clearing focus (a desktop press) drops the highlight.
+    assert!(tasks.set_focused(None));
+    assert_eq!(tasks.focused(), None);
+}
+
+#[test]
+fn set_focused_fails_closed_on_unknown_id() {
+    let mut tasks = TaskList::new();
+    tasks.add(TaskId(1), "Editor");
+    tasks.set_focused(Some(TaskId(1)));
+
+    assert!(
+        !tasks.set_focused(Some(TaskId(99))),
+        "an unknown id is rejected"
+    );
+    assert_eq!(
+        tasks.focused(),
+        Some(TaskId(1)),
+        "the existing highlight is left untouched"
+    );
+}
+
 // ---- notification area ----------------------------------------------
 
 #[test]

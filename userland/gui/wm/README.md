@@ -24,7 +24,11 @@ router**:
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
-  move-grabs; `Compositor::window_at` is the top-most hit-test. The
+  move-grabs; `Compositor::window_at` is the top-most hit-test. Keyboard
+  focus can also be moved programmatically with `focus(window, &Compositor)`
+  (validated against the compositor, fail-closed) and dropped with `unfocus`,
+  so the session glue's taskbar can activate a window by id without a pointer
+  press. The
   device-level `PointerButton`/`InputEvent` vocabulary it consumes lives
   in the shared `rustos-input` crate (re-exported here) so the taskbar
   routes the same events without depending on the window manager
@@ -78,7 +82,8 @@ correctness (opaque and transparent edge cases), per-region alpha
 blending, rounded-corner masking, z-order, window move/hide/remove with
 damage repaint, channel-order encoding, the present seam, and input
 routing (hit-testing, click-to-activate focus and raise,
-desktop-clears-focus, move-grab drag, and the fail-closed grab edge
+desktop-clears-focus, programmatic `focus`/`unfocus` with the fail-closed
+unknown-window path, move-grab drag, and the fail-closed grab edge
 cases), the cursor overlay (compositing above windows, move/hide repaint
 with damage), and cursor selection (the move-grab/window-hint/desktop
 policy, controller shape switching, re-rendering on scale and
