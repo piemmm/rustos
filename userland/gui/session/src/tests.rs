@@ -8,12 +8,18 @@ use rustos_abi::Errno;
 use rustos_cursor::CursorTheme;
 use rustos_icon::{IconKind, IconSet};
 use rustos_taskbar::{
-    MenuAction, MenuEntryId, SessionControl, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    ActivateOutcome, MenuAction, MenuEntryId, SessionControl, TaskId, TaskbarConfig,
+    TaskbarRenderer, TaskbarResponse,
 };
 use rustos_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
-use rustos_wm::{Color, Compositor, Corners};
+use rustos_wm::{
+    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Surface, WindowId,
+};
 
-use crate::{load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent, TaskbarPresenter};
+use crate::{
+    load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent, SessionInputResponse,
+    SessionInputRouter, TaskbarPresenter,
+};
 
 const LABEL: &str = "Toggle Light/Dark";
 
@@ -502,4 +508,341 @@ fn register_theme_rejects_a_duplicate_id() {
         session.register_theme(custom_dark(ThemeId::DARK, 50)),
         Err(ThemeError::DuplicateId(ThemeId::DARK))
     );
+}
+
+/// A filled opaque test window the input router can hit-test against.
+fn opaque_window(comp: &mut Compositor, origin: Point, width: u32, height: u32) -> WindowId {
+    let surface =
+        Surface::filled(width, height, Color::rgb(0, 120, 255).premultiply()).expect("surface");
+    comp.add_window(origin, surface)
+}
+
+/// A point guaranteed to lie inside the taskbar's start button.
+fn start_button_point(session: &DesktopSession) -> Point {
+    let rect = session.taskbar().layout().start_button;
+    assert!(!rect.is_empty(), "the start button has a region");
+    Point::new(rect.left() + 1, rect.top() + 1)
+}
+
+#[test]
+fn primary_press_over_the_bar_routes_to_the_taskbar() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let at = start_button_point(&session);
+
+    router.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuToggled { open: true })
+    );
+    assert!(session.taskbar().start_menu().is_open());
+}
+
+#[test]
+fn the_bar_wins_over_a_window_beneath_it() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    // A window placed under the bottom bar must not steal a press on the bar.
+    opaque_window(&mut comp, Point::new(0, 1000), 400, 80);
+    let at = start_button_point(&session);
+
+    router.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuToggled { open: true })
+    );
+}
+
+#[test]
+fn primary_press_over_a_window_routes_to_the_window_manager() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(250, 250),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::Activated {
+            window,
+            local: Point::new(50, 50),
+        })
+    );
+    assert_eq!(router.focused(), Some(window));
+}
+
+#[test]
+fn primary_press_on_the_empty_desktop_routes_to_the_window_manager() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(900, 500),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::DesktopPressed)
+    );
+}
+
+#[test]
+fn an_open_menu_is_modal_and_a_press_off_it_dismisses_it() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let at = start_button_point(&session);
+
+    router.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert!(session.taskbar().start_menu().is_open());
+
+    // A press far from the bar and popup is still claimed by the modal menu
+    // and dismisses it, rather than reaching the window manager.
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(900, 500),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::StartMenuDismissed)
+    );
+    assert!(!session.taskbar().start_menu().is_open());
+}
+
+#[test]
+fn motion_updates_the_pointer_and_is_otherwise_ignored() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+
+    let response = router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(640, 480),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(response, SessionInputResponse::Ignored);
+    assert_eq!(router.pointer(), Point::new(640, 480));
+}
+
+#[test]
+fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(250, 250),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert!(
+        router.begin_move(&comp),
+        "a focused window starts a move-grab"
+    );
+
+    // Dragging the pointer down over the bar must keep moving the window, not
+    // hand the motion to the taskbar.
+    let response = router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(250, 1060),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::Moved {
+            window,
+            origin: Point::new(200, 1010),
+        })
+    );
+    assert!(router.is_moving());
+}
+
+#[test]
+fn a_primary_release_ends_a_move_grab() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    router.handle(
+        InputEvent::PointerMoved {
+            to: Point::new(250, 250),
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    assert!(router.begin_move(&comp));
+
+    let response = router.handle(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::MoveEnded { window })
+    );
+    assert!(!router.is_moving());
+}
+
+#[test]
+fn a_non_primary_press_is_ignored() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    let at = start_button_point(&session);
+
+    router.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    assert_eq!(response, SessionInputResponse::Ignored);
+    assert!(
+        !session.taskbar().start_menu().is_open(),
+        "a secondary press did nothing"
+    );
+}
+
+#[test]
+fn a_press_with_no_running_task_activates_a_fresh_one() {
+    // Guards the ActivateOutcome import and exercises the taskbar task path
+    // through the session router end to end.
+    let mut session = session();
+    session.taskbar_mut().tasks_mut().add(TaskId(1), "Editor");
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+
+    let slot = session.taskbar().layout().tasks.first().copied();
+    let Some(slot) = slot else {
+        panic!("the inserted task has a slot");
+    };
+    let at = Point::new(slot.left() + 1, slot.top() + 1);
+
+    router.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+    let response = router.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut comp,
+        session.taskbar_mut(),
+    );
+
+    let SessionInputResponse::Taskbar(TaskbarResponse::TaskActivated { outcome, .. }) = response
+    else {
+        panic!("a press on a task slot activates it, got {response:?}");
+    };
+    assert_eq!(outcome, ActivateOutcome::Activated);
 }

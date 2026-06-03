@@ -75,9 +75,36 @@ surface leaves the on-screen window untouched rather than blanking the bar, a
 window the compositor no longer knows is re-created on the next present, and
 `teardown` removes both windows so a session shutdown leaves nothing orphaned.
 
-Relaying live pointer/keyboard events into the taskbar's input router and the
-appearance switch to the WM and apps over IPC remain later increments; this
-increment is the surface-presentation glue.
+## Routing one input stream to both routers
+
+The desktop has two input routers — the window manager's `rustos_wm::InputRouter`
+(focus, click-to-activate, interactive move-grabs) and the taskbar's
+`rustos_taskbar::TaskbarInput` (start-menu toggle, task activate/minimise,
+notification/clock presses) — and both consume the **same** shared
+`rustos_input` event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source
+produces one event stream, so `SessionInputRouter` is the glue that fans it to
+the right router, driven through `handle(event, &mut Compositor, &mut Taskbar)`:
+
+- a **primary press** goes to the taskbar when its menu is open (the menu is
+  modal, so a press anywhere selects an entry or dismisses it) or when the
+  pointer is over the bar, and to the window manager otherwise — the two never
+  both act on one press, so a click on the bar never also activates a window
+  beneath it;
+- **pointer motion** is fanned to both so their tracked pointer positions stay
+  in step, and only the window manager acts on it, dragging a grabbed window;
+- a **primary release** goes to the window manager, ending an in-flight
+  move-grab (the taskbar ignores releases);
+- a non-primary button, or a press/motion neither router acted on, is
+  `SessionInputResponse::Ignored`.
+
+Decorations start a title-bar drag through `begin_move`, and the embedder reads
+the keyboard owner through `focused`. The router holds no pixels and grants
+itself no authority; every routed sub-call is itself total and fails closed
+(`AGENTS.md` §2.9).
+
+Relaying the appearance switch to the WM and apps over IPC, and feeding this
+router from live device events, remain later increments; this increment is the
+session-level input-routing policy.
 
 ## Tests
 
@@ -90,4 +117,10 @@ fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar untouched;
 and `TaskbarPresenter` placing and rounding the bar, reusing its window across
 presents, showing the popup while the menu is open and removing it when it
 closes, re-creating a window an embedder removed, relaying a switched theme's
-corner radius onto the presented bar, and `teardown` clearing every window.
+corner radius onto the presented bar, and `teardown` clearing every window. It
+also covers `SessionInputRouter`: a press over the bar routing to the taskbar
+(even over a window beneath it) while a press over a window or the empty desktop
+routes to the window manager, the modal start menu claiming and dismissing an
+off-bar press, motion keeping the pointer in step, a window drag continuing
+while the pointer is over the bar, a release ending the grab, and a non-primary
+press being ignored.

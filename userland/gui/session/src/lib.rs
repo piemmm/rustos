@@ -33,6 +33,18 @@
 //! rounded-corner path (`AGENTS.md` §2.2). Composing the taskbar and window
 //! manager is the permitted `userland/gui/*` edge (§17.4).
 //!
+//! # Routing live input to the taskbar and window manager
+//!
+//! A real input source produces one stream of pointer events, but the desktop
+//! has two routers — the window manager's
+//! [`InputRouter`](rustos_wm::InputRouter) and the taskbar's
+//! [`TaskbarInput`](rustos_taskbar::TaskbarInput). [`SessionInputRouter`] (the
+//! [`input`] module) is the glue that fans that one stream to the right one:
+//! the taskbar claims a press over the bar or while its menu is open, the
+//! window manager handles everything else, motion is fanned to both so their
+//! pointers stay in step, and a release ends a window move-grab. Composing the
+//! two GUI crates this way is the permitted `userland/gui/*` edge (§17.4).
+//!
 //! # On-disk graphics assets
 //!
 //! The session also loads the desktop's SVG graphics assets from
@@ -65,6 +77,7 @@
 extern crate alloc;
 
 pub mod assets;
+pub mod input;
 pub mod presenter;
 pub mod session;
 
@@ -72,5 +85,6 @@ pub mod session;
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
+pub use input::{SessionInputResponse, SessionInputRouter};
 pub use presenter::TaskbarPresenter;
 pub use session::{DesktopSession, SessionEvent};

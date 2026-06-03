@@ -5418,13 +5418,31 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** relaying
   **live** pointer/keyboard events into the routers and the theme switch over
   IPC; this increment is the surface-presentation glue.
-- **Still to do this stage:** GPU-accelerated compositor path, wiring the
-  now-shared input routers (the WM `InputRouter` and the taskbar
-  `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
-  pointer/keyboard device events (the taskbar–WM *surface* glue now exists:
-  `TaskbarPresenter` presents and places the bar and the start-menu popup
-  through the compositor) and relaying the session's theme switch over live
-  IPC, selecting a font face
+- **Session input routing — DONE (increment).** A real input source produces
+  one pointer-event stream, but the desktop has two routers — the WM
+  `InputRouter` and the taskbar `TaskbarInput`, both over the shared
+  `lib/input` vocabulary (§17.4, §2.2) — so deciding which one each event
+  belongs to is session glue. `userland/gui/session` gains an `input` module:
+  `SessionInputRouter` owns both routers and fans the stream through
+  `handle(event, &mut Compositor, &mut Taskbar) -> SessionInputResponse`. The
+  taskbar claims a **primary press** when its menu is open (modal) or the
+  pointer is over the bar, the WM gets it otherwise — never both, so a click on
+  the bar never also activates a window beneath it (§2.1); **motion** is fanned
+  to both so their pointers stay in step while only the WM acts on it (dragging
+  a grabbed window); a **release** ends a WM move-grab; everything else is
+  `Ignored`. `begin_move`/`focused` delegate to the WM router. It holds no
+  pixels and grants itself no authority; every routed sub-call is total and
+  fails closed (§2.9). 10 new `rustos-desktop-session` tests (29 total). Docs
+  `docs/src/desktop/session.md` (new input-routing section) + the crate
+  `README.md` + crate-root module docs. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** feeding
+  this router from **live** pointer/keyboard device events.
+- **Still to do this stage:** GPU-accelerated compositor path, feeding the
+  session-level `SessionInputRouter` (which fans the shared `lib/input` stream
+  to the WM `InputRouter` and the taskbar `TaskbarInput`) from **live**
+  pointer/keyboard device events — the routing *policy* and the taskbar–WM
+  *surface* glue (`TaskbarPresenter`) now exist — and relaying the session's
+  theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and
   re-renders only on a scale or theme change has landed — the shared

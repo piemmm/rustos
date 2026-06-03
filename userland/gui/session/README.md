@@ -88,6 +88,27 @@ is total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate
 leaves the on-screen window untouched, a window the compositor no longer knows
 is re-created on the next present, and `teardown` removes both windows.
 
+## Routing one input stream to both routers
+
+The desktop has two input routers — the window manager's `InputRouter` and the
+taskbar's `TaskbarInput` — and both consume the **same** shared `rustos_input`
+event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
+stream, so `SessionInputRouter` fans it to the right router through
+`handle(event, &mut Compositor, &mut Taskbar)`:
+
+- a **primary press** goes to the taskbar when its menu is open (modal) or the
+  pointer is over the bar, and to the window manager otherwise — never both, so
+  a click on the bar never also activates a window beneath it;
+- **pointer motion** is fanned to both so their pointers stay in step; only the
+  window manager acts on it, dragging a grabbed window;
+- a **primary release** ends a window move-grab in the window manager;
+- anything else is `SessionInputResponse::Ignored`.
+
+Decorations arm a title-bar drag through `begin_move`; the embedder reads the
+keyboard owner through `focused`. The router holds no pixels and grants itself
+no authority; every routed sub-call is total and fails closed (`AGENTS.md`
+§2.9).
+
 ## Dependencies and layering
 
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
@@ -102,9 +123,9 @@ production paths (`AGENTS.md` §2.9).
 
 ## Still to come (Stage 7)
 
-Relaying the active theme to the window manager and apps over live IPC,
-relaying live pointer/keyboard events into the taskbar's input router (the
-`TaskbarPresenter` surface glue now exists), resolving launcher /
+Relaying the active theme to the window manager and apps over live IPC, feeding
+the `SessionInputRouter` from live pointer/keyboard device events (the routing
+policy and the `TaskbarPresenter` surface glue now exist), resolving launcher /
 session-control actions once the process and window-manager capabilities are
 wired (deferred Stage 6 work), and the VFS-backed `GraphicsAssetReader` that
 reads `/System/Graphics` on a running system (the in-memory-tested loader and
