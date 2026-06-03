@@ -45,6 +45,7 @@
 extern crate alloc;
 
 pub mod glyph;
+pub mod load;
 pub mod svg;
 pub mod vector;
 
@@ -52,5 +53,6 @@ pub mod vector;
 mod tests;
 
 pub use glyph::{builtin_icon, IconKind};
+pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use svg::decode as decode_svg;
 pub use vector::{IconLayer, VectorIcon};

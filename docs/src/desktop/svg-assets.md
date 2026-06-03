@@ -33,6 +33,31 @@ supersampled polygon path — there is no second rasterisation path (`AGENTS.md`
 §2.2). The cursor and icon libraries expose the wrappers
 `rustos_cursor::decode_svg` and `rustos_icon::decode_svg`.
 
+## Loading a whole asset set
+
+A cursor or icon *set* is one SVG asset per kind. Reading the bytes from
+`/System/Graphics` needs a filesystem capability and is the userland desktop's
+job, so the `no_std` libraries take the bytes through an injected seam — the
+same pattern the default apps use for their VFS/shell channels — rather than
+opening any path of their own (`AGENTS.md` §17.4 / §19.5):
+
+- `lib/cursor`'s `load` module: a `CursorAssetSource` yields the SVG bytes for
+  each `CursorKind`, and `CursorTheme::from_assets(source)` builds a complete
+  set. The result is a `CursorTheme` registered through the existing
+  `CursorRegistry`, so the compositor is unchanged.
+- `lib/icon`'s `load` module: an `IconAssetSource` yields the SVG bytes for
+  each `IconKind`, and `IconSet::from_assets(source)` builds the set;
+  `IconSet::icon(kind, tint)` returns the loaded asset (keeping its own
+  authored colours) or, for any kind it lacks, the tinted `builtin_icon` glyph.
+
+Both loaders are **total and fail-closed per kind** (`AGENTS.md` §2.9): a kind
+whose asset is missing, malformed, or out of subset keeps its built-in artwork
+rather than leaving the set without a glyph for that kind. An empty source
+therefore yields the built-in set, and a partly-broken set mixes loaded assets
+with built-in fallbacks — a corrupt `/System/Graphics` can never blank the
+pointer or a status icon. `CURSOR_KINDS` / `ICON_KINDS` are the closed kind
+lists a loader iterates.
+
 ## Caching the rasterised form
 
 Rasterising the vector form is the expensive step, so it happens only when its

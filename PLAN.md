@@ -5325,6 +5325,32 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   caching section) + `{cursors,taskbar}.md` + the `rustos-raster`/
   `rustos-wm`/`rustos-taskbar` `README.md`s. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths.
+- **On-disk SVG asset-set loaders — DONE (increment).** The single-asset
+  `decode_svg`/`from_svg` wrappers grew into whole-*set* loaders that build a
+  complete cursor or icon set from the on-disk SVG assets under
+  `/System/Graphics` (one asset per kind). Reading the bytes needs a filesystem
+  capability and is the userland desktop's job, so each `no_std` library takes
+  the bytes through an injected seam — the same pattern the default apps use
+  for their VFS/shell channels — and opens no path of its own (§17.4 / §19.5).
+  `lib/cursor`'s `load` module adds `CursorAssetSource` and
+  `CursorTheme::from_assets(source)`; the result is a `CursorTheme` registered
+  through the existing `CursorRegistry`, so the compositor is unchanged.
+  `lib/icon`'s `load` module adds `IconAssetSource`, `IconSet`, and
+  `IconSet::from_assets(source)`; `IconSet::icon(kind, tint)` returns the loaded
+  asset (keeping its authored colours) or, for a kind it lacks, the tinted
+  `builtin_icon` glyph. Both are **total and fail-closed per kind** (§2.9): a
+  kind whose asset is missing, malformed, or out of subset keeps its built-in
+  artwork, so an empty source yields the built-in set and a partly-broken set
+  mixes loaded assets with built-in fallbacks — a corrupt `/System/Graphics`
+  can never blank the pointer or a status icon. `CURSOR_KINDS`/`ICON_KINDS`
+  are the closed kind lists a loader iterates. 5 new `rustos-cursor` tests
+  (22 total) + 5 new `rustos-icon` tests (13 total + a doctest); docs
+  `docs/src/desktop/svg-assets.md` (new asset-set section) and the
+  `rustos-cursor`/`rustos-icon` `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
+  userland `CursorAssetSource`/`IconAssetSource` implementations that read
+  `/System/Graphics` over the VFS (deferred wiring), and feeding a loaded set
+  into the WM/taskbar at runtime.
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
