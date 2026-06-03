@@ -292,6 +292,14 @@ pub enum DriverError {
     Busy = 11,
     /// The requested operation has no implementation in this build.
     NotImplemented = 12,
+    /// A storage backend cannot satisfy a request because it is full.
+    ///
+    /// Emitted by a filesystem driver when it exhausts its free data
+    /// space (no free block or cluster remains) or its inode /
+    /// directory-entry budget while servicing an allocating operation.
+    /// Distinct from [`DeviceFault`](Self::DeviceFault): the device is
+    /// healthy, the volume is simply full. Maps to [`Errno::NoSpace`].
+    NoSpace = 13,
 }
 
 impl DriverError {
@@ -317,6 +325,7 @@ impl DriverError {
             Self::PermissionDenied => Errno::PermissionDenied,
             Self::NotFound => Errno::NotFound,
             Self::SignatureInvalid => Errno::SignatureInvalid,
+            Self::NoSpace => Errno::NoSpace,
             Self::Unsupported | Self::DeviceFault | Self::Busy | Self::NotImplemented => {
                 Errno::NotImplemented
             }
@@ -623,6 +632,7 @@ mod tests {
         assert_eq!(DriverError::DeviceFault.as_i32(), 10);
         assert_eq!(DriverError::Busy.as_i32(), 11);
         assert_eq!(DriverError::NotImplemented.as_i32(), 12);
+        assert_eq!(DriverError::NoSpace.as_i32(), 13);
     }
 
     #[test]
@@ -633,6 +643,7 @@ mod tests {
         );
         assert_eq!(DriverError::NotFound.as_errno(), Errno::NotFound);
         assert_eq!(DriverError::Busy.as_errno(), Errno::NotImplemented);
+        assert_eq!(DriverError::NoSpace.as_errno(), Errno::NoSpace);
     }
 
     #[test]

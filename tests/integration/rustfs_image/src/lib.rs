@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::RustFs;
+use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
@@ -51,6 +51,12 @@ pub const TOTAL_SECTORS: u64 = 2048;
 /// 512-byte block size, comfortably more than the root plus the planted
 /// and written files need.
 const INODE_COUNT: u32 = 64;
+
+/// Volume key the fixture is formatted and mounted with. `RustFS` is
+/// encrypted-by-default with no plaintext layout
+/// (`docs/src/filesystem/rustfs-spec.md` §5), so the host builder and the
+/// guest tail mount the planted volume under this single shared key.
+pub const FIXTURE_VOLUME_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 /// File planted in the root directory before boot. The guest tail looks
 /// it up and verifies [`PLANTED_FILE_CONTENT`].
@@ -135,7 +141,7 @@ impl Block for VecBlock {
 /// `AGENTS.md` §2.9 in every path it links into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     let dev = VecBlock::new(TOTAL_SECTORS);
-    let mut fs = RustFs::format(dev, INODE_COUNT)?;
+    let mut fs = RustFs::format(dev, INODE_COUNT, &FIXTURE_VOLUME_KEY)?;
     let root = fs.root();
     fs.create(root, PLANTED_FILE_NAME, NodeKind::RegularFile)?;
     let written = fs.write_at(root, PLANTED_FILE_NAME, 0, PLANTED_FILE_CONTENT)?;
@@ -160,7 +166,7 @@ mod tests {
     fn mount() -> RustFs<VecBlock> {
         let bytes = build_image().expect("the fixture builds a valid rustfs volume");
         let dev = VecBlock { store: bytes };
-        RustFs::open(dev).expect("the built image is a valid rustfs volume")
+        RustFs::open(dev, &FIXTURE_VOLUME_KEY).expect("the built image is a valid rustfs volume")
     }
 
     #[test]

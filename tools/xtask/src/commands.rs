@@ -13,6 +13,7 @@ use crate::Context;
 mod abi_check;
 mod cfg_check;
 mod deps_check;
+mod fssoak;
 mod fuzz;
 mod linkcheck;
 mod model_check;
@@ -39,6 +40,7 @@ pub enum Command {
     SupplyChain,
     Fuzz,
     Proptest,
+    FsSoak,
     ModelCheck,
     SpecReview,
     Ci,
@@ -61,6 +63,7 @@ impl Command {
         Command::SupplyChain,
         Command::Fuzz,
         Command::Proptest,
+        Command::FsSoak,
         Command::ModelCheck,
         Command::SpecReview,
         Command::Ci,
@@ -82,6 +85,7 @@ impl Command {
             "supply-chain" => Command::SupplyChain,
             "fuzz" => Command::Fuzz,
             "proptest" => Command::Proptest,
+            "fssoak" => Command::FsSoak,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
             "ci" => Command::Ci,
@@ -105,6 +109,7 @@ impl Command {
             Command::SupplyChain => "supply-chain",
             Command::Fuzz => "fuzz",
             Command::Proptest => "proptest",
+            Command::FsSoak => "fssoak",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
             Command::Ci => "ci",
@@ -131,6 +136,9 @@ impl Command {
             Command::Proptest => {
                 "Drive the §19.7 stateful capability models for a wall-clock budget."
             }
+            Command::FsSoak => {
+                "Soak rustfs/ext4/fat32 on a ≥1 GiB RAM volume for a wall-clock budget."
+            }
             Command::ModelCheck => {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
@@ -155,6 +163,7 @@ impl Command {
             Command::SupplyChain => run_supply_chain(ctx, args),
             Command::Fuzz => run_fuzz(ctx, args),
             Command::Proptest => run_proptest(ctx, args),
+            Command::FsSoak => run_fssoak(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
             Command::Ci => run_ci(ctx),
@@ -643,6 +652,17 @@ fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = proptest::parse(args)?;
     eprintln!("xtask: [proptest] {}", ctx.workspace_root.display());
     proptest::run(ctx, &opts)
+}
+
+fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // `.junie/filesystems.md`: drive the in-RAM filesystem soak for a
+    // wall-clock budget. `--quick` runs each filesystem ≥ 5 s; `--soak`
+    // runs each ≥ 24 h for the nightly job. The target set and the budget
+    // live in `commands/fssoak.rs`; the parallel per-filesystem fan-out is
+    // `tools/ci/soak.sh`'s job, not `ci`'s.
+    let opts = fssoak::parse(args)?;
+    eprintln!("xtask: [fssoak] {}", ctx.workspace_root.display());
+    fssoak::run(ctx, &opts)
 }
 
 fn run_model_check(args: &[OsString]) -> Result<(), String> {

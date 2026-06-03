@@ -18,6 +18,8 @@
 pub mod aead;
 pub mod constant_time;
 pub mod hash;
+pub mod kdf;
+pub mod mac;
 pub mod sign;
 
 pub use aead::{
@@ -25,4 +27,6 @@ pub use aead::{
 };
 pub use constant_time::ct_eq;
 pub use hash::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+pub use kdf::{derive_key, DerivedKey, DERIVED_KEY_LEN};
+pub use mac::{hmac_sha256, hmac_sha256_verify, MacKey, MacTag, MAC_KEY_LEN, MAC_TAG_LEN};
 pub use sign::{Ed25519PublicKey, Ed25519Signature, SignatureError};

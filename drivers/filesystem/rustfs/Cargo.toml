@@ -10,6 +10,20 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The keyed metadata authenticator that seals every metadata block
+# (`docs/src/filesystem/rustfs-spec.md` §5, §8). Crypto is the standing
+# "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
+# `lib/crypto`, never a hand-rolled primitive.
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The first-party LZ codec every file-data record is compressed with before
+# encryption (`docs/src/filesystem/rustfs-spec.md` §6, §10). It is first-party,
+# not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the
+# crypto carve-out): RustFS must have no external compression dependency.
+rustos-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# Structured, stable-event-id logging for the security-relevant findings the
+# online scrub reports (`docs/src/filesystem/rustfs-spec.md` §12; `AGENTS.md`
+# §5.4 — log security decisions with a stable event ID; §19.4).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [lints]
 workspace = true

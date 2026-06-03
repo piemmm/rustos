@@ -16,15 +16,16 @@
 # (the matrix is one unit), launched alongside the fuzz/proptest fan-out.
 #
 # Usage:
-#   tools/ci/soak.sh [fuzz|proptest|test|both|all] [--sequential] \
+#   tools/ci/soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] \
 #                    [--secs N] [--dry-run]
 #
 #   (no kind)      same as `both`: the §19.6 fuzz and §19.7 proptest soaks
 #   fuzz           run only the §19.6 fuzz harnesses
 #   proptest       run only the §19.7 proptest models
+#   fssoak         run only the filesystems.md filesystem soak
 #   test           run only the §7 repeated-test soak
 #   both           run the fuzz and proptest soaks
-#   all            run fuzz, proptest, and the repeated-test soak
+#   all            run fuzz, proptest, the filesystem soak, and the test soak
 #   --sequential   run jobs one at a time (default is parallel)
 #   --secs N       override the per-job budget (for smoke runs; CI uses 24 h)
 #   --dry-run      print the planned jobs and exit without running anything
@@ -43,7 +44,7 @@ secs=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        fuzz | proptest | test) kind="$1" ;;
+        fuzz | proptest | fssoak | test) kind="$1" ;;
         both | all) kind="$1" ;;
         --sequential) sequential=1 ;;
         --dry-run) dry_run=1 ;;
@@ -54,7 +55,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             echo "soak: unexpected argument '$1'" >&2
-            echo "usage: soak.sh [fuzz|proptest|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
+            echo "usage: soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
             exit 2
             ;;
     esac
@@ -124,6 +125,15 @@ if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
     while IFS= read -r m; do
         [ -n "$m" ] && launch "proptest-$m" proptest "$m"
     done < <(enumerate proptest)
+fi
+# The filesystems.md filesystem soak: one job per filesystem (rustfs,
+# ext4, fat32), each formatting a ≥1 GiB RAM volume and exercising it for
+# the per-job budget. The registry (`cargo xtask fssoak --list`) is the
+# single source of truth, so this never hard-codes the filesystem list.
+if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
+    while IFS= read -r f; do
+        [ -n "$f" ] && launch "fssoak-$f" fssoak "$f"
+    done < <(enumerate fssoak)
 fi
 # The §7 repeated-test soak: one job that repeats the whole test matrix
 # (host + the bare-metal QEMU verticals) for the per-job budget. `cargo xtask

@@ -1,759 +1,2884 @@
-//! `rustfs` host unit tests against an in-memory [`MockBlock`] device.
+//! Unit tests for the copy-on-write rustfs driver (`AGENTS.md` §7, §16).
 //!
-//! The crate is `no_std`; the test harness links `std`, so the backing
-//! store is a heap `Vec` (a multi-kilobyte fixed array would trip the
-//! `large_stack_arrays` lint and the journal needs a non-trivial volume).
-//! Every test formats a fresh volume and drives the real
-//! `format`/`open`/`FilesystemRead`/`FilesystemWrite`/`security` paths.
-
-extern crate std;
+//! They exercise the Stage-1 foundation — format → open round-trip, the
+//! superblock-ring selection, and crash replay at every write count during a
+//! commit — plus the full read/write surface the VFS consumes, all over an
+//! in-memory [`MemBlock`] double.
 
 use super::*;
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::{DriverError, DriverKind};
-use std::vec::Vec;
+use rustos_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
+use rustos_abi::driver::filesystem::{
+    FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite, NodeKind,
+};
 
-const BS: usize = 512;
-const BS_U32: u32 = 512;
-const COUNT: u64 = 128;
-const STORE: usize = BS * 128;
-const INODES: u32 = 32;
-
-/// In-memory block device with optional write-fault injection.
-struct MockBlock {
-    store: Vec<u8>,
-    writes_left: Option<usize>,
+/// In-memory block device. Optionally drops writes once a budget is reached,
+/// modelling a power loss mid-commit: a dropped write simply never reaches the
+/// platter, and the driver's in-memory state is discarded by re-opening from
+/// the stored bytes.
+struct MemBlock {
+    store: alloc::vec::Vec<u8>,
+    block_size: u32,
+    block_count: u64,
+    writes: u32,
+    write_budget: Option<u32>,
+    discard: Option<DiscardCapability>,
+    discarded: alloc::vec::Vec<(u64, u64)>,
+    health: DeviceHealth,
 }
 
-impl MockBlock {
-    fn new() -> Self {
+impl MemBlock {
+    fn new(block_size: u32, block_count: u64) -> Self {
+        let len = block_size as usize * as_usize(block_count);
         Self {
-            store: std::vec![0u8; STORE],
-            writes_left: None,
+            store: alloc::vec![0u8; len],
+            block_size,
+            block_count,
+            writes: 0,
+            write_budget: None,
+            discard: None,
+            discarded: alloc::vec::Vec::new(),
+            health: DeviceHealth::Unavailable,
         }
+    }
+
+    fn from_bytes(bytes: alloc::vec::Vec<u8>, block_size: u32, block_count: u64) -> Self {
+        Self {
+            store: bytes,
+            block_size,
+            block_count,
+            writes: 0,
+            write_budget: None,
+            discard: None,
+            discarded: alloc::vec::Vec::new(),
+            health: DeviceHealth::Unavailable,
+        }
+    }
+
+    /// Set the health telemetry this device reports, so the health path can
+    /// be exercised with a known snapshot.
+    fn with_health(mut self, health: DeviceHealth) -> Self {
+        self.health = health;
+        self
+    }
+
+    fn bytes(&self) -> alloc::vec::Vec<u8> {
+        self.store.clone()
+    }
+
+    /// Enable discard support with the given granularity and per-request cap
+    /// (`0` means unlimited), so the trim path can be exercised.
+    fn with_discard(mut self, granularity_blocks: u64, max_blocks_per_request: u64) -> Self {
+        self.discard = Some(DiscardCapability {
+            supported: true,
+            granularity_blocks,
+            max_blocks_per_request,
+        });
+        self
     }
 }
 
-impl Block for MockBlock {
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        Ok(BlockGeometry {
-            block_size: BS_U32,
-            block_count: COUNT,
+impl Block for MemBlock {
+    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
+        Ok(rustos_abi::driver::block::BlockGeometry {
+            block_size: self.block_size,
+            block_count: self.block_count,
         })
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        if buf.is_empty() || buf.len() % BS != 0 {
+        let bs = self.block_size as usize;
+        if buf.is_empty() || buf.len() % bs != 0 {
             return Err(DriverError::BufferTooSmall);
         }
-        let blocks = (buf.len() / BS) as u64;
-        if lba.saturating_add(blocks) > COUNT {
+        let start = as_usize(lba) * bs;
+        let end = start + buf.len();
+        if end > self.store.len() {
             return Err(DriverError::LengthOutOfRange);
         }
-        let start = usize::try_from(lba).unwrap_or(usize::MAX) * BS;
-        buf.copy_from_slice(&self.store[start..start + buf.len()]);
+        buf.copy_from_slice(&self.store[start..end]);
         Ok(())
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        if buf.is_empty() || buf.len() % BS != 0 {
+        let bs = self.block_size as usize;
+        if buf.is_empty() || buf.len() % bs != 0 {
             return Err(DriverError::BufferTooSmall);
         }
-        let blocks = (buf.len() / BS) as u64;
-        if lba.saturating_add(blocks) > COUNT {
+        let start = as_usize(lba) * bs;
+        let end = start + buf.len();
+        if end > self.store.len() {
             return Err(DriverError::LengthOutOfRange);
         }
-        if let Some(n) = self.writes_left {
-            if n == 0 {
-                return Err(DriverError::DeviceFault);
-            }
-            self.writes_left = Some(n - 1);
+        // Model power loss: once the budget is spent, the write never lands.
+        let drop_write = matches!(self.write_budget, Some(b) if self.writes >= b);
+        self.writes += 1;
+        if !drop_write {
+            self.store[start..end].copy_from_slice(buf);
         }
-        let start = usize::try_from(lba).unwrap_or(usize::MAX) * BS;
-        self.store[start..start + buf.len()].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(self.discard.unwrap_or_else(DiscardCapability::unsupported))
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(self.health)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        let cap = self.discard.ok_or(DriverError::Unsupported)?;
+        let gran = cap.granularity_blocks.max(1);
+        assert_eq!(lba % gran, 0, "discard lba {lba} not aligned to {gran}");
+        assert_eq!(
+            blocks % gran,
+            0,
+            "discard len {blocks} not aligned to {gran}"
+        );
+        assert_ne!(blocks, 0, "discard of zero blocks");
+        if cap.max_blocks_per_request != 0 {
+            assert!(
+                blocks <= cap.max_blocks_per_request,
+                "discard len {blocks} exceeds per-request cap {}",
+                cap.max_blocks_per_request
+            );
+        }
+        if as_usize(lba) + as_usize(blocks) > as_usize(self.block_count) {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.discarded.push((lba, blocks));
         Ok(())
     }
 }
 
-fn fresh() -> RustFs<MockBlock> {
-    RustFs::format(MockBlock::new(), INODES).expect("format")
+fn fixed_clock() -> Time64 {
+    Time64::from_secs(1_700_000_000)
 }
 
-/// Minimal [`DriverHost`] granting (or withholding) a single capability.
-struct Host {
-    grant_load: bool,
-}
+/// The volume key every test formats and reopens with. `RustFS` has no
+/// plaintext mode (`docs/src/filesystem/rustfs-spec.md` §5), so every test
+/// volume is encrypted under this fixed key.
+const TEST_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
-impl DriverHost for Host {
-    fn has_capability(&self, cap: CapabilityId) -> bool {
-        self.grant_load && cap == CapabilityId::DRV_LOAD
-    }
-    fn kind(&self) -> DriverKind {
-        DriverKind::UserSpace
-    }
+fn fmt(block_size: u32, block_count: u64, inodes: u32) -> RustFs<MemBlock> {
+    RustFs::format(MemBlock::new(block_size, block_count), inodes, &TEST_KEY)
+        .expect("format a blank device")
+        .with_clock(fixed_clock)
 }
 
 #[test]
-fn register_requires_drv_load() {
-    assert!(register(&Host { grant_load: true }).is_ok());
-    assert_eq!(
-        register(&Host { grant_load: false }),
-        Err(DriverError::PermissionDenied)
-    );
+fn format_then_open_round_trips() {
+    let fs = fmt(512, 256, 32);
+    let bytes = fs.into_block().bytes();
+    let reopened = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(reopened.root(), NodeId::from_raw(1));
 }
 
 #[test]
-fn format_then_open_round_trips_the_root() {
-    let fs = fresh();
-    let dev = fs.into_block();
-    let mut fs = RustFs::open(dev).expect("open");
-    let root = fs.root();
-    let info = fs.node_info(root).expect("root info");
-    assert_eq!(info.kind, NodeKind::Directory);
-    // An empty root lists no children.
-    let mut name = [0u8; NAME_MAX];
-    assert_eq!(fs.read_dir(root, 0, &mut name), Ok(None));
-}
-
-#[test]
-fn open_rejects_unformatted_device() {
-    assert_eq!(
-        RustFs::open(MockBlock::new()).map(|_| ()),
+fn open_rejects_an_unformatted_device() {
+    let dev = MemBlock::new(512, 256);
+    assert!(matches!(
+        RustFs::open(dev, &TEST_KEY),
         Err(DriverError::BadMagic)
-    );
+    ));
 }
 
 #[test]
-fn create_write_read_file() {
-    let mut fs = fresh();
+fn create_write_read_back_and_survive_remount() {
+    let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    let file = fs
-        .create(root, b"hello.txt", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile)
         .expect("create");
-    assert_eq!(
-        fs.write_at(root, b"hello.txt", 0, b"Hello, rustfs!"),
-        Ok(14)
-    );
-    let info = fs.node_info(file).expect("info");
-    assert_eq!(info.kind, NodeKind::RegularFile);
-    assert_eq!(info.size, 14);
-    let mut buf = [0u8; 32];
-    let n = fs.read_at(file, 0, &mut buf).expect("read");
-    assert_eq!(&buf[..n], b"Hello, rustfs!");
-    // Reading at EOF yields zero bytes.
-    assert_eq!(fs.read_at(file, 14, &mut buf), Ok(0));
-    // Offset read.
-    let n = fs.read_at(file, 7, &mut buf).expect("read offset");
-    assert_eq!(&buf[..n], b"rustfs!");
+    let body = alloc::vec![0xABu8; 9000];
+    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(9000));
+    let node = fs.lookup(root, b"file").expect("lookup");
+    assert_eq!(fs.node_info(node).expect("info").size, 9000);
+
+    let mut back = alloc::vec![0u8; 9000];
+    let mut done = 0;
+    while done < 9000 {
+        let n = fs
+            .read_at(node, done as u64, &mut back[done..])
+            .expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    assert_eq!(back, body);
+
+    // Survive a remount.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    let node = fs.lookup(fs.root(), b"file").expect("lookup after remount");
+    let mut back2 = alloc::vec![0u8; 9000];
+    let mut done = 0;
+    while done < 9000 {
+        let n = fs
+            .read_at(node, done as u64, &mut back2[done..])
+            .expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    assert_eq!(back2, body);
 }
 
 #[test]
-fn create_rejects_duplicate() {
-    let mut fs = fresh();
+fn extent_tree_backs_large_files() {
+    // A file spanning many blocks exercises the per-file extent tree, which
+    // replaced Stage 1's 12-direct + single-indirect map (no fixed cap).
+    let mut fs = fmt(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"dup", NodeKind::RegularFile)
-        .expect("first");
-    assert_eq!(
-        fs.create(root, b"dup", NodeKind::RegularFile),
-        Err(DriverError::Busy)
-    );
-}
-
-#[test]
-fn lookup_and_kind_errors() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"big", NodeKind::RegularFile)
         .expect("create");
-    assert_eq!(fs.lookup(root, b"f"), Ok(file));
-    assert_eq!(fs.lookup(root, b"missing"), Err(DriverError::NotFound));
-    // lookup inside a regular file is unsupported.
-    assert_eq!(fs.lookup(file, b"x"), Err(DriverError::Unsupported));
-    // read_at on a directory is unsupported.
-    let mut buf = [0u8; 4];
-    assert_eq!(fs.read_at(root, 0, &mut buf), Err(DriverError::Unsupported));
+    let body = alloc::vec![0xCDu8; 512 * 200];
+    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    let node = fs.lookup(root, b"big").expect("lookup");
+    let mut back = alloc::vec![0u8; body.len()];
+    let mut done = 0;
+    while done < body.len() {
+        let n = fs
+            .read_at(node, done as u64, &mut back[done..])
+            .expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    assert_eq!(back, body);
 }
 
 #[test]
 fn nested_directories_and_listing() {
-    let mut fs = fresh();
+    let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    let dir = fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
-    let info = fs.node_info(dir).expect("dir info");
-    assert_eq!(info.kind, NodeKind::Directory);
-    fs.create(dir, b"a.bin", NodeKind::RegularFile)
-        .expect("nested file");
-    assert_eq!(fs.write_at(dir, b"a.bin", 0, b"data"), Ok(4));
-    let child = fs.lookup(dir, b"a.bin").expect("lookup nested");
-    let mut buf = [0u8; 8];
-    let n = fs.read_at(child, 0, &mut buf).expect("read nested");
-    assert_eq!(&buf[..n], b"data");
-    // The root lists exactly "sub" (skips "." / "..").
-    let mut name = [0u8; NAME_MAX];
-    let e = fs
-        .read_dir(root, 0, &mut name)
-        .expect("entry")
-        .expect("some");
-    assert_eq!(&name[..e.name_len], b"sub");
-    assert_eq!(e.kind, NodeKind::Directory);
-    assert_eq!(fs.read_dir(root, 1, &mut name), Ok(None));
-}
+    fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
+    let sub = fs.lookup(root, b"sub").expect("lookup sub");
+    fs.create(sub, b"inner", NodeKind::RegularFile)
+        .expect("create inner");
+    let inner = fs.lookup(sub, b"inner").unwrap();
+    assert_eq!(fs.node_info(inner).unwrap().size, 0);
 
-#[test]
-fn read_dir_lists_multiple_and_buffer_guard() {
-    let mut fs = fresh();
-    let root = fs.root();
-    fs.create(root, b"one", NodeKind::RegularFile).expect("one");
-    fs.create(root, b"two", NodeKind::RegularFile).expect("two");
-    fs.create(root, b"three", NodeKind::RegularFile)
-        .expect("three");
-    let mut count = 0;
-    let mut name = [0u8; NAME_MAX];
-    while fs
-        .read_dir(root, count, &mut name)
-        .expect("iterate")
-        .is_some()
-    {
-        count += 1;
+    let mut names = alloc::vec::Vec::new();
+    let mut buf = [0u8; 64];
+    let mut i = 0u64;
+    while let Some(e) = fs.read_dir(root, i, &mut buf).expect("read_dir") {
+        names.push(buf[..e.name_len].to_vec());
+        i += 1;
     }
-    assert_eq!(count, 3);
-    // A too-small name buffer is reported, not truncated.
-    let mut tiny = [0u8; 2];
-    assert_eq!(
-        fs.read_dir(root, 0, &mut tiny),
-        Err(DriverError::BufferTooSmall)
-    );
+    assert!(names.iter().any(|n| n == b"sub"));
 }
 
 #[test]
-fn write_extends_across_block_boundary_and_sparse() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"big", NodeKind::RegularFile)
-        .expect("create");
-    // Straddle the first block boundary (BS = 512).
-    let mut payload = [0u8; 600];
-    for (i, b) in payload.iter_mut().enumerate() {
-        *b = u8::try_from(i % 251).unwrap_or(0);
-    }
-    assert_eq!(fs.write_at(root, b"big", 0, &payload), Ok(600));
-    let mut back = [0u8; 600];
-    assert_eq!(fs.read_at(file, 0, &mut back), Ok(600));
-    assert_eq!(back, payload);
-    // A sparse write past EOF zero-fills the gap.
-    assert_eq!(fs.write_at(root, b"big", 1000, b"Z"), Ok(1));
-    assert_eq!(fs.node_info(file).expect("info").size, 1001);
-    let mut hole = [0xAAu8; 8];
-    let n = fs.read_at(file, 700, &mut hole).expect("hole");
-    assert_eq!(n, 8);
-    assert!(hole.iter().all(|&b| b == 0));
-}
-
-#[test]
-fn indirect_blocks_hold_large_files() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"l", NodeKind::RegularFile)
-        .expect("create");
-    // Larger than the 16 direct blocks (16 * 512 = 8192 bytes).
-    let mut payload = [0u8; 12000];
-    for (i, b) in payload.iter_mut().enumerate() {
-        *b = u8::try_from(i % 256).unwrap_or(0);
-    }
-    assert_eq!(fs.write_at(root, b"l", 0, &payload), Ok(12000));
-    let dev = fs.into_block();
-    let mut fs = RustFs::open(dev).expect("reopen");
-    let mut back = [0u8; 12000];
-    assert_eq!(fs.read_at(file, 0, &mut back), Ok(12000));
-    assert_eq!(back, payload);
-}
-
-#[test]
-fn truncate_shrink_and_grow() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"t", NodeKind::RegularFile)
-        .expect("create");
-    fs.write_at(root, b"t", 0, b"abcdefghij").expect("write");
-    fs.truncate(root, b"t", 4).expect("shrink");
-    assert_eq!(fs.node_info(file).expect("info").size, 4);
-    let mut buf = [0u8; 16];
-    let n = fs.read_at(file, 0, &mut buf).expect("read");
-    assert_eq!(&buf[..n], b"abcd");
-    // Grow back: the gap reads as zeros.
-    fs.truncate(root, b"t", 8).expect("grow");
-    let n = fs.read_at(file, 0, &mut buf).expect("read");
-    assert_eq!(&buf[..n], b"abcd\0\0\0\0");
-}
-
-#[test]
-fn remove_file_and_name_reuse() {
-    let mut fs = fresh();
+fn truncate_keeps_the_surviving_prefix() {
+    let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"bye").expect("write");
-    fs.remove(root, b"f").expect("remove");
-    assert_eq!(fs.lookup(root, b"f"), Err(DriverError::NotFound));
-    // The name (and freed storage) can be reused.
-    let f2 = fs
-        .create(root, b"f", NodeKind::RegularFile)
-        .expect("recreate");
-    let mut buf = [0u8; 4];
-    assert_eq!(fs.read_at(f2, 0, &mut buf), Ok(0));
+    let body = alloc::vec![7u8; 4096];
+    fs.write_at(root, b"f", 0, &body).expect("write");
+    fs.truncate(root, b"f", 2048).expect("truncate");
+    let node = fs.lookup(root, b"f").unwrap();
+    assert_eq!(fs.node_info(node).unwrap().size, 2048);
+    let mut back = alloc::vec![0u8; 2048];
+    fs.read_at(node, 0, &mut back).expect("read");
+    assert_eq!(back, alloc::vec![7u8; 2048]);
 }
 
 #[test]
-fn remove_non_empty_directory_is_busy() {
-    let mut fs = fresh();
+fn fail_closed_extremes() {
+    let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    let dir = fs.create(root, b"d", NodeKind::Directory).expect("mkdir");
-    fs.create(dir, b"child", NodeKind::RegularFile)
-        .expect("child");
-    assert_eq!(fs.remove(root, b"d"), Err(DriverError::Busy));
-    // Emptying it allows removal.
-    fs.remove(dir, b"child").expect("rm child");
-    fs.remove(root, b"d").expect("rmdir");
-    assert_eq!(fs.lookup(root, b"d"), Err(DriverError::NotFound));
-}
-
-#[test]
-fn security_record_round_trips_and_persists() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"s", NodeKind::RegularFile)
+    fs.create(root, b"dup", NodeKind::RegularFile)
         .expect("create");
-    let mut sec = Security::new(0o600, 7, 9);
-    sec.required_cap = Some(CapabilityId::AUDIT_READ);
-    sec.push_acl(AclEntry {
-        subject: AclSubject::User(3),
-        perms: 0b100,
-    })
-    .expect("acl 1");
-    sec.push_acl(AclEntry {
-        subject: AclSubject::Group(11),
-        perms: 0b110,
-    })
-    .expect("acl 2");
-    fs.set_security(file, sec).expect("set security");
-    assert_eq!(fs.security(file), Ok(sec));
-    // It survives a remount (it is on-disk inode state).
-    let dev = fs.into_block();
-    let mut fs = RustFs::open(dev).expect("reopen");
-    let reloaded = fs.security(file).expect("reload security");
-    assert_eq!(reloaded, sec);
-    assert_eq!(reloaded.required_cap, Some(CapabilityId::AUDIT_READ));
-    assert_eq!(reloaded.acl().len(), 2);
-}
-
-#[test]
-fn acl_overflow_is_rejected() {
-    let mut sec = Security::new(0o644, 0, 0);
-    for _ in 0..ACL_MAX {
-        sec.push_acl(AclEntry {
-            subject: AclSubject::User(1),
-            perms: 0b100,
-        })
-        .expect("within bound");
-    }
     assert_eq!(
-        sec.push_acl(AclEntry {
-            subject: AclSubject::User(2),
-            perms: 0b100,
-        }),
+        fs.create(root, b"dup", NodeKind::RegularFile),
+        Err(DriverError::Busy)
+    );
+    assert_eq!(
+        fs.create(root, b"", NodeKind::RegularFile),
         Err(DriverError::LengthOutOfRange)
     );
+    let oversize = alloc::vec![b'x'; NAME_MAX + 1];
+    assert_eq!(
+        fs.create(root, &oversize, NodeKind::RegularFile),
+        Err(DriverError::LengthOutOfRange)
+    );
+    fs.create(root, b"d", NodeKind::Directory).expect("mkdir");
+    let d = fs.lookup(root, b"d").unwrap();
+    fs.create(d, b"child", NodeKind::RegularFile)
+        .expect("child");
+    assert_eq!(fs.remove(root, b"d"), Err(DriverError::Busy));
+    assert_eq!(fs.remove(root, b"nope"), Err(DriverError::NotFound));
 }
 
 #[test]
-fn cow_overwrite_persists_across_remount() {
-    let mut fs = fresh();
+fn remove_reclaims_space_so_allocation_resumes() {
+    // Tiny device: fill until NoSpace, free one file, confirm a write succeeds.
+    let mut fs = fmt(512, 64, 16);
     let root = fs.root();
-    let file = fs
-        .create(root, b"c", NodeKind::RegularFile)
-        .expect("create");
-    fs.write_at(root, b"c", 0, b"AAAAA").expect("first");
-    // Copy-on-write overwrite of the same region.
-    fs.write_at(root, b"c", 0, b"BBBBB").expect("overwrite");
-    let dev = fs.into_block();
-    let mut fs = RustFs::open(dev).expect("reopen");
-    let mut buf = [0u8; 5];
-    assert_eq!(fs.read_at(file, 0, &mut buf), Ok(5));
-    assert_eq!(buf, *b"BBBBB");
-}
-
-/// Crash consistency: faulting the device after *every* possible write
-/// count during a journalled overwrite must leave the file either fully
-/// at its old contents (transaction rolled back) or fully at its new
-/// contents (transaction replayed) — never torn. The sweep also proves
-/// the journal genuinely exercises both outcomes.
-#[test]
-fn journal_is_crash_consistent_at_every_write_point() {
-    const OLD: [u8; 5] = *b"AAAAA";
-    const NEW: [u8; 5] = *b"BBBBB";
-    let mut saw_old = false;
-    let mut saw_new = false;
-    for k in 0..48 {
-        let mut fs = fresh();
-        let root = fs.root();
-        let file = fs
-            .create(root, b"f", NodeKind::RegularFile)
-            .expect("create");
-        fs.write_at(root, b"f", 0, &OLD).expect("seed");
-
-        // Re-open with a write budget, then attempt the overwrite. The
-        // pre-overwrite open touches no blocks (the journal is clean).
-        let mut dev = fs.into_block();
-        dev.writes_left = Some(k);
-        let mut fs = RustFs::open(dev).expect("budgeted open");
-        let _ = fs.write_at(root, b"f", 0, &NEW);
-
-        // Recover with an unbudgeted re-open and inspect the result.
-        let mut dev = fs.into_block();
-        dev.writes_left = None;
-        let mut fs = RustFs::open(dev).expect("recovery open");
-        let mut buf = [0u8; 5];
-        let n = fs.read_at(file, 0, &mut buf).expect("read");
-        assert_eq!(n, 5);
-        if buf == OLD {
-            saw_old = true;
-        } else if buf == NEW {
-            saw_new = true;
-        } else {
-            panic!("torn data after crash at write {k}: {buf:?}");
+    let body = alloc::vec![0x5Au8; 4096];
+    let mut last = alloc::string::String::new();
+    let mut idx = 0;
+    loop {
+        let name = alloc::format!("f{idx}");
+        if fs
+            .create(root, name.as_bytes(), NodeKind::RegularFile)
+            .is_err()
+        {
+            break;
         }
-        // The volume is still usable after recovery.
-        assert!(fs.lookup(root, b"f").is_ok());
-    }
-    assert!(saw_old, "no crash point rolled the overwrite back");
-    assert!(saw_new, "no crash point replayed the overwrite");
-}
-
-/// A deterministic, seeded multi-operation **journal soak**: a long
-/// randomised script of `create`/`write`/`truncate`/`remove` operations
-/// is driven against the volume, and *every* operation is independently
-/// crash-tested at *every* device-write count. After each simulated
-/// crash the recovered volume must equal the whole-tree snapshot either
-/// before the operation (transaction rolled back) or after it
-/// (transaction replayed) — never a torn intermediate — and must remain
-/// mountable and listable. The soak proves the per-operation atomicity
-/// of §16 / §5.3 metadata across the full mutation surface, not just a
-/// single overwrite.
-const SOAK_BUDGET: usize = 32;
-const SOAK_NAMES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
-
-/// One scripted mutation, addressed by a `(root, name)` pair.
-#[derive(Debug, Clone)]
-enum SoakOp {
-    CreateFile(&'static [u8]),
-    CreateDir(&'static [u8]),
-    Write(&'static [u8], u64, Vec<u8>),
-    Truncate(&'static [u8], u64),
-    Remove(&'static [u8]),
-}
-
-/// Small linear-congruential PRNG (no external dependency, §2.12) seeded
-/// for a fully reproducible script.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 32) as u32
-    }
-
-    fn below(&mut self, n: u32) -> u32 {
-        self.next_u32() % n
-    }
-}
-
-/// Build a store-backed device from a captured image.
-fn device_from(store: &[u8], writes_left: Option<usize>) -> MockBlock {
-    MockBlock {
-        store: store.to_vec(),
-        writes_left,
-    }
-}
-
-/// Read a regular file's full contents (bounded by its reported size).
-fn read_file(fs: &mut RustFs<MockBlock>, id: NodeId) -> Vec<u8> {
-    let size = usize::try_from(fs.node_info(id).map_or(0, |i| i.size)).unwrap_or(0);
-    let mut out: Vec<u8> = Vec::new();
-    let mut off = 0u64;
-    let mut buf = [0u8; BS];
-    while out.len() < size {
-        match fs.read_at(id, off, &mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let take = n.min(size - out.len());
-                out.extend_from_slice(&buf[..take]);
-                off = off.saturating_add(n as u64);
+        match fs.write_at(root, name.as_bytes(), 0, &body) {
+            Ok(_) => {
+                last = name;
+                idx += 1;
             }
+            Err(DriverError::NoSpace) => break,
+            Err(e) => panic!("unexpected {e:?}"),
         }
+        assert!(idx <= 10_000, "never ran out of space");
     }
-    out
-}
-
-/// Recursively snapshot a directory into sorted `(path, kind, content)`
-/// triples. `kind` is `0` for files, `1` for directories.
-fn collect(
-    fs: &mut RustFs<MockBlock>,
-    dir: NodeId,
-    prefix: &[u8],
-    out: &mut Vec<(Vec<u8>, u8, Vec<u8>)>,
-) {
-    let mut entries: Vec<(Vec<u8>, NodeKind)> = Vec::new();
-    let mut idx = 0u64;
-    let mut name = [0u8; NAME_MAX];
-    while let Ok(Some(e)) = fs.read_dir(dir, idx, &mut name) {
-        entries.push((name[..e.name_len].to_vec(), e.kind));
-        idx += 1;
-    }
-    for (nm, kind) in entries {
-        let mut path = prefix.to_vec();
-        path.push(b'/');
-        path.extend_from_slice(&nm);
-        if kind == NodeKind::Directory {
-            out.push((path.clone(), 1, Vec::new()));
-            if let Ok(id) = fs.lookup(dir, &nm) {
-                collect(fs, id, &path, out);
-            }
-        } else {
-            let content = fs
-                .lookup(dir, &nm)
-                .map(|id| read_file(fs, id))
-                .unwrap_or_default();
-            out.push((path, 0, content));
-        }
-    }
-}
-
-/// Open a clone of `store` (replaying the journal) and snapshot the whole
-/// tree. A failed mount is a recovery defect and fails the test here.
-fn snapshot(store: &[u8]) -> Vec<(Vec<u8>, u8, Vec<u8>)> {
-    let mut fs = RustFs::open(device_from(store, None)).expect("snapshot mount");
-    let root = fs.root();
-    let mut out = Vec::new();
-    collect(&mut fs, root, b"", &mut out);
-    out.sort();
-    out
-}
-
-/// Apply one scripted operation; errors (duplicate, missing, wrong kind)
-/// are legitimate no-ops for consistency and are ignored.
-fn apply_op(fs: &mut RustFs<MockBlock>, root: NodeId, op: &SoakOp) {
-    let _ = match op {
-        SoakOp::CreateFile(n) => fs.create(root, n, NodeKind::RegularFile).map(|_| ()),
-        SoakOp::CreateDir(n) => fs.create(root, n, NodeKind::Directory).map(|_| ()),
-        SoakOp::Write(n, off, data) => fs.write_at(root, n, *off, data).map(|_| ()),
-        SoakOp::Truncate(n, len) => fs.truncate(root, n, *len),
-        SoakOp::Remove(n) => fs.remove(root, n),
-    };
-}
-
-/// Produce the committed image that results from applying `op` to `store`.
-fn commit(store: &[u8], op: &SoakOp) -> Vec<u8> {
-    let mut fs = RustFs::open(device_from(store, None)).expect("commit mount");
-    let root = fs.root();
-    apply_op(&mut fs, root, op);
-    fs.into_block().store
-}
-
-#[test]
-fn journal_soak_is_crash_consistent_across_a_random_op_stream() {
-    let mut rng = Lcg(0x0BAD_F00D_DEAD_BEEF);
-    let mut script: Vec<SoakOp> = Vec::new();
-    for _ in 0..24 {
-        let name = SOAK_NAMES[(rng.next_u32() as usize) % SOAK_NAMES.len()];
-        script.push(match rng.below(5) {
-            0 => SoakOp::CreateFile(name),
-            1 => SoakOp::CreateDir(name),
-            2 => {
-                let off = u64::from(rng.below(2048));
-                let len = (rng.below(600) + 1) as usize;
-                let mut data = Vec::with_capacity(len);
-                for _ in 0..len {
-                    data.push((rng.next_u32() & 0xFF) as u8);
-                }
-                SoakOp::Write(name, off, data)
-            }
-            3 => SoakOp::Truncate(name, u64::from(rng.below(2048))),
-            _ => SoakOp::Remove(name),
-        });
-    }
-
-    let mut good = fresh().into_block().store;
-    let mut saw_change = false;
-    let mut saw_old = false;
-    let mut saw_new = false;
-
-    for op in &script {
-        let old_snap = snapshot(&good);
-        let new_store = commit(&good, op);
-        let new_snap = snapshot(&new_store);
-        if old_snap != new_snap {
-            saw_change = true;
-        }
-
-        for k in 0..SOAK_BUDGET {
-            let mut fs = RustFs::open(device_from(&good, Some(k))).expect("crash mount");
-            let root = fs.root();
-            apply_op(&mut fs, root, op);
-            let crashed = fs.into_block().store;
-            let recovered = snapshot(&crashed);
-            if recovered == old_snap {
-                saw_old = true;
-            } else if recovered == new_snap {
-                saw_new = true;
-            } else {
-                panic!("torn volume after crash at write {k} for op {op:?}");
-            }
-        }
-
-        good = new_store;
-    }
-
-    assert!(saw_change, "the script never mutated the volume");
-    assert!(saw_old, "no crash point ever rolled an operation back");
-    assert!(saw_new, "no crash point ever replayed an operation");
-}
-
-// The clock seam is a stateless `fn() -> Time64`, so each instant a test
-// needs is its own constant-returning clock, re-installed with
-// `RustFs::with_clock` between steps. This keeps the tests deterministic
-// and free of shared mutable state (`AGENTS.md` §2.1 — no global mutable
-// static; §7 — no flaky tests).
-fn clock_1000() -> Time64 {
-    Time64::from_secs(1_000)
-}
-fn clock_2000() -> Time64 {
-    Time64::from_secs(2_000)
-}
-fn clock_3000() -> Time64 {
-    Time64::from_secs(3_000)
-}
-fn clock_4000() -> Time64 {
-    Time64::from_secs(4_000)
-}
-/// ~1906: a pre-1970 instant whose seconds value is negative.
-fn clock_pre_1970() -> Time64 {
-    Time64::from_secs(-2_000_000_000)
-}
-/// ~2096: a post-2038 instant beyond the signed 32-bit seconds wall.
-fn clock_post_2038() -> Time64 {
-    Time64::from_secs(4_000_000_000)
-}
-fn clock_100() -> Time64 {
-    Time64::from_secs(100)
-}
-fn clock_200() -> Time64 {
-    Time64::from_secs(200)
-}
-
-#[test]
-fn timestamps_default_to_the_epoch_without_a_clock() {
-    let mut fs = fresh();
-    let root = fs.root();
-    let file = fs
-        .create(root, b"e", NodeKind::RegularFile)
-        .expect("create");
-    let t = fs.times(file).expect("times");
-    assert_eq!(t.created, Time64::UNIX_EPOCH);
-    assert_eq!(t.modified, Time64::UNIX_EPOCH);
-    assert_eq!(t.accessed, Time64::UNIX_EPOCH);
-    assert_eq!(t.changed, Time64::UNIX_EPOCH);
-}
-
-#[test]
-fn timestamps_are_stamped_persisted_and_span_the_64bit_range() {
-    let mut fs = RustFs::format(MockBlock::new(), INODES)
-        .expect("format")
-        .with_clock(clock_1000);
-    let root = fs.root();
-
-    // Create stamps all four timestamps to the creation instant.
-    let file = fs
-        .create(root, b"t", NodeKind::RegularFile)
-        .expect("create");
-    let t = fs.times(file).expect("times");
-    assert_eq!(t.created, Time64::from_secs(1_000));
-    assert_eq!(t.modified, Time64::from_secs(1_000));
-    assert_eq!(t.accessed, Time64::from_secs(1_000));
-    assert_eq!(t.changed, Time64::from_secs(1_000));
-
-    // A write advances mtime/atime/ctime but never the creation time.
-    fs = fs.with_clock(clock_2000);
-    fs.write_at(root, b"t", 0, b"hello").expect("write");
-    let t = fs.times(file).expect("times");
-    assert_eq!(t.created, Time64::from_secs(1_000));
-    assert_eq!(t.modified, Time64::from_secs(2_000));
-    assert_eq!(t.accessed, Time64::from_secs(2_000));
-    assert_eq!(t.changed, Time64::from_secs(2_000));
-
-    // A metadata change touches only ctime.
-    fs = fs.with_clock(clock_3000);
-    fs.set_security(file, Security::new(0o600, 1, 2))
-        .expect("set security");
-    let t = fs.times(file).expect("times");
-    assert_eq!(t.modified, Time64::from_secs(2_000));
-    assert_eq!(t.changed, Time64::from_secs(3_000));
-
-    // A truncate is a content change: mtime and ctime advance.
-    fs = fs.with_clock(clock_4000);
-    fs.truncate(root, b"t", 2).expect("truncate");
-    let t = fs.times(file).expect("times");
-    assert_eq!(t.modified, Time64::from_secs(4_000));
-    assert_eq!(t.changed, Time64::from_secs(4_000));
-
-    // A pre-1970 creation time and a post-2038 modification time (beyond
-    // the i32-seconds wall) round-trip without truncation (§21).
-    fs = fs.with_clock(clock_pre_1970);
-    let old = fs
-        .create(root, b"old", NodeKind::RegularFile)
-        .expect("create old");
-    fs = fs.with_clock(clock_post_2038);
-    fs.write_at(root, b"old", 0, b"x").expect("write old");
-
-    // Every timestamp is on-disk inode state and survives a remount.
-    let dev = fs.into_block();
-    let mut fs = RustFs::open(dev).expect("reopen");
-    let t = fs.times(file).expect("reload times");
-    assert_eq!(t.created, Time64::from_secs(1_000));
-    assert_eq!(t.modified, Time64::from_secs(4_000));
-    let told = fs.times(old).expect("reload old times");
-    assert_eq!(told.created, clock_pre_1970());
-    assert_eq!(told.modified, clock_post_2038());
-    assert!(told.created.secs() < 0, "pre-1970 time lost its sign");
-    assert!(
-        told.modified.secs() > i64::from(i32::MAX),
-        "post-2038 time was truncated to 32 bits"
+    assert!(!last.is_empty(), "at least one file should have landed");
+    fs.remove(root, last.as_bytes())
+        .expect("remove frees space");
+    fs.create(root, b"after", NodeKind::RegularFile)
+        .expect("create after free");
+    assert_eq!(
+        fs.write_at(root, b"after", 0, &alloc::vec![1u8; 512]),
+        Ok(512)
     );
 }
 
 #[test]
-fn directory_timestamps_track_create_and_remove() {
-    let mut fs = RustFs::format(MockBlock::new(), INODES)
+fn timestamps_round_trip_extreme_values() {
+    fn old() -> Time64 {
+        Time64::from_secs(-2_000_000_000)
+    }
+    fn future() -> Time64 {
+        Time64::from_secs(4_200_000_000)
+    }
+    let mut fs = RustFs::format(MemBlock::new(512, 256), 32, &TEST_KEY)
         .expect("format")
-        .with_clock(clock_100);
+        .with_clock(old);
     let root = fs.root();
+    fs.create(root, b"t", NodeKind::RegularFile)
+        .expect("create");
+    let node = fs.lookup(root, b"t").unwrap();
+    assert_eq!(fs.times(node).unwrap().created, old());
+
+    // A far-future value survives a remount.
+    let mut sec = Security::new(0o600, 1, 2);
+    sec.required_cap = Some(CapabilityId::AUDIT_READ);
+    fs = fs.with_clock(future);
+    fs.set_security(node, sec).expect("set_security");
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    let node = fs.lookup(fs.root(), b"t").unwrap();
+    assert_eq!(fs.security(node).unwrap(), sec);
+    assert_eq!(fs.times(node).unwrap().changed, future());
+}
+
+#[test]
+fn superblock_ring_selects_the_highest_committed_generation() {
+    // Several commits advance the generation; the latest must be selected.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    for i in 0..8 {
+        let name = alloc::format!("g{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+    }
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    for i in 0..8 {
+        let name = alloc::format!("g{i}");
+        assert!(fs.lookup(fs.root(), name.as_bytes()).is_ok());
+    }
+}
+
+#[test]
+fn crash_at_every_write_count_during_commit_never_tears() {
+    // Baseline: a formatted volume with a committed file and an empty target
+    // file. The crashed trial performs exactly one transaction (a single
+    // `write_at`), so the only valid post-crash outcomes are "the write
+    // committed in full" or "it did not commit at all" — never a torn middle.
+    let mut base = fmt(512, 256, 32);
+    let root = base.root();
+    base.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    base.write_at(root, b"keep", 0, b"baseline")
+        .expect("write keep");
+    base.create(root, b"new", NodeKind::RegularFile)
+        .expect("create new");
+    let baseline = base.into_block().bytes();
+
+    for budget in 0..64u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
+        let root = fs.root();
+        // The single transaction may be cut short at `budget` writes.
+        let _ = fs.write_at(root, b"new", 0, b"freshdata");
+        let bytes = fs.into_block().bytes();
+
+        // Re-open from the (possibly torn) image: it must mount, and the
+        // pre-existing files must always be intact.
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+            .expect("post-crash mount always succeeds");
+        let root = fs.root();
+        let keep = fs.lookup(root, b"keep").expect("keep always survives");
+        let mut buf = [0u8; 8];
+        let n = fs.read_at(keep, 0, &mut buf).expect("read keep");
+        assert_eq!(&buf[..n], b"baseline");
+
+        // "new" is always present (created in the baseline). Its contents are
+        // either the committed write (9 bytes) or the pre-write empty file —
+        // never a torn partial.
+        let node = fs.lookup(root, b"new").expect("new always survives");
+        let size = fs.node_info(node).expect("info").size;
+        assert!(size == 0 || size == 9, "torn size {size}");
+        if size == 9 {
+            let mut nb = [0u8; 9];
+            let n = fs.read_at(node, 0, &mut nb).expect("read new");
+            assert_eq!(&nb[..n], b"freshdata");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: copy-on-write inode tree + per-file extent trees.
+// ---------------------------------------------------------------------------
+
+/// Number of nodes in the inode B-tree (its block count on disk).
+fn inode_tree_nodes(fs: &mut RustFs<MemBlock>) -> usize {
+    let spec = inode_spec();
+    fs.btree_collect_nodes(fs.inode_tree_root, spec)
+        .expect("walk inode tree")
+        .len()
+}
+
+/// Number of nodes in `ino`'s per-file extent tree.
+fn extent_tree_nodes(fs: &mut RustFs<MemBlock>, ino: u32) -> usize {
+    let inode = fs.read_inode(ino).expect("read inode");
+    let spec = extent_spec(ino);
+    fs.btree_collect_nodes(inode.extent_root, spec)
+        .expect("walk extent tree")
+        .len()
+}
+
+#[test]
+fn inode_tree_grows_and_shrinks_across_many_inodes() {
+    // Far more inodes than fit one B-tree node, forcing the inode tree to
+    // split into internal nodes, then deleting half to force borrow/merge.
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    let count = 400u32;
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert!(
+        inode_tree_nodes(&mut fs) > 1,
+        "inode tree should have split past a single node"
+    );
+
+    // Survive a remount: every inode is reachable and the free-space rebuild
+    // matched (open would have failed otherwise).
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen");
+    let root = fs.root();
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        assert!(fs.lookup(root, name.as_bytes()).is_ok(), "missing {name}");
+    }
+
+    // Delete every other file: exercises leaf/internal borrow and merge.
+    for i in (0..count).step_by(2) {
+        let name = alloc::format!("f{i:04}");
+        fs.remove(root, name.as_bytes()).expect("remove");
+    }
+    for i in 0..count {
+        let name = alloc::format!("f{i:04}");
+        let present = fs.lookup(root, name.as_bytes()).is_ok();
+        assert_eq!(present, i % 2 == 1, "wrong presence for {name}");
+    }
+
+    // The survivors persist across another remount.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen2");
+    let root = fs.root();
+    for i in (1..count).step_by(2) {
+        let name = alloc::format!("f{i:04}");
+        assert!(fs.lookup(root, name.as_bytes()).is_ok(), "lost {name}");
+    }
+}
+
+#[test]
+fn file_with_many_noncontiguous_extents_round_trips() {
+    // Writing single blocks at every other logical block leaves holes between
+    // them, so the runs never merge and the per-file extent tree must hold
+    // many records — enough to split past one node.
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"sparse", NodeKind::RegularFile)
+        .expect("create");
+    // Each run fills exactly one data block, so the stride is the data-block
+    // *content* capacity (the block minus its crypto trailer), not the raw
+    // device block size — writing at every other logical block leaves holes.
+    let cap = fs.data_capacity();
+    let cap_bytes = as_usize(cap);
+    let runs = 80u8;
+    for i in 0..runs {
+        let val = i.wrapping_add(1);
+        let block = alloc::vec![val; cap_bytes];
+        let off = u64::from(i) * 2 * cap;
+        assert_eq!(fs.write_at(root, b"sparse", off, &block), Ok(cap_bytes));
+    }
+    let node = fs.lookup(root, b"sparse").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    assert!(
+        extent_tree_nodes(&mut fs, ino) > 1,
+        "extent tree should have split past a single node"
+    );
+
+    let check = |fs: &mut RustFs<MemBlock>| {
+        let node = fs.lookup(fs.root(), b"sparse").expect("lookup");
+        for i in 0..runs {
+            let val = i.wrapping_add(1);
+            let mut got = alloc::vec![0u8; cap_bytes];
+            fs.read_at(node, u64::from(i) * 2 * cap, &mut got)
+                .expect("read run");
+            assert_eq!(got, alloc::vec![val; cap_bytes], "run {i} wrong");
+            // The block between this run and the next is a hole reading zero.
+            if i + 1 < runs {
+                let mut hole = alloc::vec![0xFFu8; cap_bytes];
+                fs.read_at(node, u64::from(i) * 2 * cap + cap, &mut hole)
+                    .expect("read hole");
+                assert_eq!(hole, alloc::vec![0u8; cap_bytes], "hole {i} not zero");
+            }
+        }
+    };
+    check(&mut fs);
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 4096), &TEST_KEY).expect("reopen");
+    check(&mut fs);
+}
+
+#[test]
+fn large_contiguous_write_collapses_to_few_extents() {
+    // A single sequential write lands in contiguous physical blocks, so the
+    // run-merging extent map keeps it to one record, not one per block.
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0x7Eu8; 4096 * 64];
+    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    let node = fs.lookup(root, b"big").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("inode");
+    let extents = fs
+        .btree_collect_entries(inode.extent_root, extent_spec(ino))
+        .expect("walk extents");
+    assert_eq!(extents.len(), 1, "contiguous write should be one extent");
+}
+
+#[test]
+fn free_space_rebuild_matches_authoritative_extents() {
+    // Build a volume with files, a sparse file, and deletions, then assert the
+    // free-block set rebuilt by walking the trees at mount is byte-for-byte the
+    // set the live filesystem maintained (`docs/src/filesystem/rustfs-spec.md` §16).
+    let mut fs = fmt(4096, 2048, 64);
+    let root = fs.root();
+    for i in 0u8..40 {
+        let name = alloc::format!("d{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+        let body = alloc::vec![i; 4096 * 3];
+        fs.write_at(root, name.as_bytes(), 0, &body).expect("write");
+    }
+    fs.create(root, b"sparse", NodeKind::RegularFile)
+        .expect("create sparse");
+    for i in 0..30u64 {
+        fs.write_at(root, b"sparse", i * 4096 * 2, &alloc::vec![9u8; 4096])
+            .expect("sparse write");
+    }
+    for i in (0u8..40).step_by(3) {
+        let name = alloc::format!("d{i}");
+        fs.remove(root, name.as_bytes()).expect("remove");
+    }
+    let live = fs.free.clone();
+
+    let bytes = fs.into_block().bytes();
+    let rebuilt = RustFs::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
+    assert_eq!(
+        rebuilt.free, live,
+        "mount-time free-space rebuild must equal the authoritative live set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3: keyed metadata authenticator + duplicated critical metadata.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
+    // Corrupt the *primary* copy of a live metadata block (the inode-tree
+    // root). On remount the read must fail the keyed authenticator on the
+    // primary, fall back to the intact companion mirror, serve the data, and
+    // repair the primary on disk (`docs/src/filesystem/rustfs-spec.md` §8).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    let target = fs.inode_tree_root;
+    assert_ne!(target, 0, "the volume has an inode tree");
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    let off = as_usize(target) * bs + HEADER_LEN; // first payload byte
+    let original = bytes[off];
+    bytes[off] ^= 0xff; // wound only the primary copy
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("mounts by falling back to the companion mirror");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    let mut buf = [0u8; 5];
+    let n = fs.read_at(node, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"hello");
+
+    // The primary copy was repaired in place from the good companion.
+    let healed = fs.into_block().bytes();
+    let p = as_usize(target) * bs;
+    let c = as_usize(target + 1) * bs;
+    assert_eq!(
+        healed[p..p + bs],
+        healed[c..c + bs],
+        "primary repaired to match its companion mirror"
+    );
+    assert_eq!(healed[off], original, "the corrupted byte is restored");
+}
+
+#[test]
+fn both_metadata_copies_corrupted_fails_closed() {
+    // Wound *both* physical copies of the inode-tree root. Neither
+    // authenticates, so the mount fails closed with an error — never a panic
+    // and never trusting the corrupt bytes (`AGENTS.md` §5.4 / §2.9).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    let target = fs.inode_tree_root;
+    assert_ne!(target, 0);
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
+    bytes[as_usize(target + 1) * bs + HEADER_LEN] ^= 0xff;
+
+    assert!(
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).is_err(),
+        "both copies corrupt must fail closed, not panic or trust corruption"
+    );
+}
+
+#[test]
+fn corrupting_one_superblock_copy_still_mounts_via_the_mirror() {
+    // The superblock ring is mirrored too: wounding the primary block of the
+    // committed slot must not lose the volume — `open` falls back to the
+    // companion and repairs it.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create");
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    // Every ring primary lives at an even block in `0..RING_BLOCKS`; corrupt
+    // the keyed tag of every primary slot, leaving each companion intact.
+    for slot in 0..superblock::RING_SLOTS {
+        let primary = superblock::slot_block(slot);
+        bytes[as_usize(primary) * bs + 80] ^= 0xff; // inside the tag slot
+    }
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("mounts from the superblock mirrors");
+    assert!(fs.lookup(fs.root(), b"keep").is_ok());
+}
+
+#[test]
+fn crash_during_multiblock_extent_write_never_tears() {
+    // A larger transaction (a 24-block write that grows the extent tree) is
+    // faulted after every write count; the file is always either fully the new
+    // contents or fully the old, never a torn mix.
+    let mut base = fmt(512, 512, 32);
+    let root = base.root();
+    base.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let old = alloc::vec![0xAAu8; 512 * 24];
+    base.write_at(root, b"f", 0, &old).expect("seed write");
+    let baseline = base.into_block().bytes();
+    let new = alloc::vec![0x55u8; 512 * 24];
+
+    for budget in 0..160u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 512);
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
+        let root = fs.root();
+        let _ = fs.write_at(root, b"f", 0, &new);
+        let bytes = fs.into_block().bytes();
+
+        let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY)
+            .expect("post-crash mount always succeeds");
+        let node = fs.lookup(fs.root(), b"f").expect("file survives");
+        let mut got = alloc::vec![0u8; 512 * 24];
+        let mut done = 0usize;
+        while done < got.len() {
+            let off = u64::try_from(done).unwrap();
+            let n = fs.read_at(node, off, &mut got[done..]).expect("read");
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        assert!(
+            got == old || got == new,
+            "torn multi-block contents at budget {budget}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4: per-volume key hierarchy + filename/data encryption.
+// ---------------------------------------------------------------------------
+
+/// Whether `haystack` contains the byte run `needle` anywhere.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn wrong_volume_key_refuses_the_mount() {
+    // A volume formatted under one key never mounts under another: the wrapped
+    // master key fails to authenticate, so `open` fails closed with
+    // `PermissionDenied` (`AGENTS.md` §5.4) — never a panic, never a misread.
+    let mut fs = fmt(512, 256, 32);
+    fs.create(fs.root(), b"f", NodeKind::RegularFile)
+        .expect("create");
+    let bytes = fs.into_block().bytes();
+
+    let mut wrong = TEST_KEY;
+    wrong[0] ^= 0x01;
+    assert!(matches!(
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 512, 256), &wrong),
+        Err(DriverError::PermissionDenied)
+    ));
+    // The correct key still mounts the very same image.
+    RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("the right key still mounts");
+}
+
+#[test]
+fn no_plaintext_filename_or_data_at_rest() {
+    // RustFS has no plaintext mode: a distinctive filename and file content
+    // must be absent from the raw on-disk bytes (encrypted at rest).
+    let name: &[u8] = b"ZxQvBnMkLpSecret";
+    let payload = {
+        let mut v = alloc::vec::Vec::new();
+        for _ in 0..200 {
+            v.extend_from_slice(b"PLAINTEXT-MARKER");
+        }
+        v
+    };
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, name, NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    let bytes = fs.into_block().bytes();
+
+    assert!(
+        !contains(&bytes, name),
+        "the filename must not appear in cleartext on disk"
+    );
+    assert!(
+        !contains(&bytes, b"PLAINTEXT-MARKER"),
+        "the file content must not appear in cleartext on disk"
+    );
+}
+
+#[test]
+fn filename_and_data_round_trip_through_encryption_across_remount() {
+    // The encrypted name and a multi-block encrypted payload decrypt back to
+    // exactly what was written, across a remount.
+    let name: &[u8] = b"document.txt";
+    let payload = alloc::vec![0xC3u8; 512 * 5 + 17];
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, name, NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    // The name decrypts: lookup by the cleartext name succeeds.
+    let node = fs.lookup(fs.root(), name).expect("encrypted name decrypts");
+    let mut back = alloc::vec![0u8; payload.len()];
+    let mut done = 0usize;
+    while done < payload.len() {
+        let off = u64::try_from(done).unwrap();
+        let n = fs.read_at(node, off, &mut back[done..]).expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    assert_eq!(back, payload, "encrypted data round-trips across a remount");
+}
+
+#[test]
+fn bit_flip_in_encrypted_data_is_detected() {
+    // Flipping a byte of an encrypted data block's ciphertext must be caught by
+    // the AEAD authenticator on read — a failed decrypt fails closed
+    // (`AGENTS.md` §5.4), never returning mis-decrypted bytes.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let payload = alloc::vec![0x77u8; 300];
+    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    let node = fs.lookup(root, b"f").expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("read inode");
+    let phys = fs.block_ptr(&inode, 0).expect("data block pointer");
+    assert_ne!(phys, 0, "the file has a data block");
+
+    let bs = 512usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(phys) * bs] ^= 0xff; // wound the ciphertext
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    let mut buf = [0u8; 300];
+    assert!(
+        fs.read_at(node, 0, &mut buf).is_err(),
+        "a bit-flip in encrypted data must be detected, not mis-decrypted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5: per-data-record physical checksum + logical content hash.
+// ---------------------------------------------------------------------------
+
+/// The physical address of file `name`'s logical block `bi` on `fs`.
+fn data_block_phys(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> u64 {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    let ino = u32::try_from(node.raw()).unwrap();
+    let inode = fs.read_inode(ino).expect("read inode");
+    let phys = fs.block_ptr(&inode, bi).expect("block pointer");
+    assert_ne!(phys, 0, "the file has a mapped data block");
+    phys
+}
+
+/// Read the whole of file `node` into a fresh vector.
+fn read_all(fs: &mut RustFs<MemBlock>, node: NodeId, len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec![0u8; len];
+    let mut done = 0usize;
+    while done < len {
+        let off = u64::try_from(done).unwrap();
+        let n = fs.read_at(node, off, &mut out[done..]).expect("read");
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    out
+}
+
+#[test]
+fn data_block_integrity_layers_are_distinct_and_fail_closed() {
+    // Each of the two integrity layers — the fast physical checksum and the
+    // logical content hash — plus the Stage-4 AEAD detects its own class of
+    // corruption, and all three fail closed (`AGENTS.md` §5.4 / §2.9). The test
+    // isolates each layer by repairing the checks that sit in front of it.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let payload = alloc::vec![0x77u8; 300];
+    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let csum_off = fs.phys_checksum_offset();
+    let hash_off = fs.logical_hash_offset();
+    let bs = 512usize;
+    let base = as_usize(phys) * bs;
+    let baseline = fs.into_block().bytes();
+
+    let reopen = |bytes: alloc::vec::Vec<u8>| {
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
+    };
+    // Recompute the physical checksum over a block's at-rest bytes so a
+    // corruption can be slipped past the fast check to reach a deeper layer.
+    let repair_checksum = |bytes: &mut alloc::vec::Vec<u8>| {
+        let fixed = physical_checksum(&bytes[base..base + csum_off]);
+        bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
+    };
+
+    // 1. A flipped ciphertext byte is caught by the fast physical checksum
+    //    (it covers the at-rest ciphertext), before the AEAD even runs.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Physical)
+        );
+    }
+    // 2. The same flip, but with the physical checksum repaired, slips past the
+    //    fast check and is caught by the AEAD tag instead.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        repair_checksum(&mut bytes);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Aead)
+        );
+    }
+    // 3. Corrupting the stored logical hash (with the checksum repaired) leaves
+    //    the ciphertext intact, so the AEAD passes but the recomputed plaintext
+    //    hash mismatches — the logical layer catches it.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base + hash_off] ^= 0x01;
+        repair_checksum(&mut bytes);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Logical)
+        );
+    }
+    // The production read path surfaces every layer as a fail-closed
+    // `DeviceFault`, never a panic and never a misread.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let node = fs.lookup(fs.root(), b"f").expect("file survives");
+        let mut buf = [0u8; 300];
+        assert!(matches!(
+            fs.read_at(node, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ));
+    }
+}
+
+#[test]
+fn identical_content_shares_a_logical_hash_distinct_content_differs() {
+    // The logical content hash names the plaintext: two blocks with identical
+    // content carry the same stored hash (the seam Stage 7 dedupe keys on),
+    // while a single differing byte changes it. Stage 7 acts on that hash:
+    // identical content is stored once and shared (refcount 2), distinct
+    // content is not.
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    let full = as_usize(fs.data_capacity());
+    let block = alloc::vec![0xABu8; full];
+    let mut other = block.clone();
+    other[0] ^= 0x01;
+    for name in [b"a".as_slice(), b"b", b"c"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert_eq!(fs.write_at(root, b"a", 0, &block), Ok(full));
+    assert_eq!(fs.write_at(root, b"b", 0, &block), Ok(full));
+    assert_eq!(fs.write_at(root, b"c", 0, &other), Ok(full));
+
+    let stored_hash = |fs: &mut RustFs<MemBlock>, name: &[u8]| -> [u8; LOGICAL_HASH_LEN] {
+        let phys = data_block_phys(fs, name, 0);
+        let mut raw = [0u8; MAX_BLOCK_SIZE];
+        fs.read_block(phys, &mut raw).expect("raw read");
+        let off = fs.logical_hash_offset();
+        let mut hash = [0u8; LOGICAL_HASH_LEN];
+        hash.copy_from_slice(&raw[off..off + LOGICAL_HASH_LEN]);
+        hash
+    };
+    let ha = stored_hash(&mut fs, b"a");
+    let hb = stored_hash(&mut fs, b"b");
+    let hc = stored_hash(&mut fs, b"c");
+    assert_eq!(ha, hb, "identical plaintext shares one logical hash");
+    assert_ne!(ha, hc, "different plaintext hashes differently");
+    // The hash genuinely depends on content, not a zeroed placeholder.
+    assert_ne!(ha, [0u8; LOGICAL_HASH_LEN]);
+    // The two same-content files share one physical chunk (refcount 2), while
+    // the differing file is stored separately and keeps the implicit single
+    // reference (Stage 7 dedupe).
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    let pb = data_block_phys(&mut fs, b"b", 0);
+    let pc = data_block_phys(&mut fs, b"c", 0);
+    assert_eq!(pa, pb, "identical content shares one physical chunk");
+    assert_ne!(pa, pc, "different content is not shared");
+    assert_eq!(
+        fs.data_refcount(pa).expect("refcount"),
+        2,
+        "the shared chunk is referenced twice"
+    );
+    assert_eq!(
+        fs.data_refcount(pc).expect("refcount"),
+        1,
+        "the unique block keeps the implicit single reference"
+    );
+}
+
+#[test]
+fn integrity_survives_remount_and_a_cow_rewrite() {
+    // A multi-block file's data integrity verifies after a remount, and again
+    // after a copy-on-write overwrite of a middle region writes fresh blocks
+    // with freshly sealed integrity trailers.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let mut expected = alloc::vec![0x33u8; 1500];
+    assert_eq!(fs.write_at(root, b"f", 0, &expected), Ok(expected.len()));
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    assert_eq!(read_all(&mut fs, node, expected.len()), expected);
+
+    let patch = alloc::vec![0x99u8; 600];
+    assert_eq!(fs.write_at(fs.root(), b"f", 100, &patch), Ok(patch.len()));
+    expected[100..700].copy_from_slice(&patch);
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
+    let node = fs.lookup(fs.root(), b"f").expect("file still there");
+    assert_eq!(
+        read_all(&mut fs, node, expected.len()),
+        expected,
+        "integrity verifies after a COW rewrite"
+    );
+}
+
+#[test]
+fn data_block_capacity_reserves_the_integrity_trailer() {
+    // A file-data block stores the device block minus the crypto trailer, the
+    // compression descriptor, and the data-integrity trailer (logical hash +
+    // physical checksum).
+    let fs = fmt(512, 256, 32);
+    assert_eq!(
+        fs.data_capacity(),
+        (512 - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER) as u64
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6: first-party compression on the §6 data-record pipeline.
+// ---------------------------------------------------------------------------
+
+/// Read the on-disk compression descriptor of file `name`'s logical block
+/// `bi` (the §8 data-record compression-state field).
+fn stored_compression(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> Compression {
+    let phys = data_block_phys(fs, name, bi);
+    let mut raw = [0u8; MAX_BLOCK_SIZE];
+    fs.read_block(phys, &mut raw).expect("raw read");
+    let off = fs.compression_desc_offset();
+    read_compression(&raw[off..off + COMPRESSION_DESCRIPTOR_LEN]).expect("descriptor parses")
+}
+
+/// A pseudo-random, incompressible buffer of `len` bytes.
+fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    let mut state: u32 = 0x1234_5678;
+    for _ in 0..len {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.push(u8::try_from(state >> 24).unwrap_or(0));
+    }
+    out
+}
+
+#[test]
+fn incompressible_record_is_stored_raw_and_round_trips() {
+    // Pseudo-random data does not compress, so the §10 adaptive choice stores
+    // it raw — yet it must still read back byte-identically.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"r", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    let payload = incompressible(cap);
+    assert_eq!(fs.write_at(root, b"r", 0, &payload), Ok(payload.len()));
+
+    let desc = stored_compression(&mut fs, b"r", 0);
+    assert!(!desc.compressed, "incompressible data is stored raw");
+    assert_eq!(
+        as_usize(u64::from(desc.stored_len)),
+        cap,
+        "a raw record occupies the whole content slot"
+    );
+
+    let node = fs.lookup(fs.root(), b"r").expect("file survives");
+    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+}
+
+#[test]
+fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() {
+    // A compressible block stores fewer at-rest bytes (the §10 win), and reads
+    // back byte-identical across a remount and a copy-on-write rewrite, with
+    // the logical hash (Stage 7 dedupe seam) unchanged by compression.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    // Three full blocks of a short repeating pattern: highly compressible.
+    let mut payload = alloc::vec::Vec::new();
+    while payload.len() < cap * 3 {
+        payload.extend_from_slice(b"RustOS rustfs ");
+    }
+    payload.truncate(cap * 3);
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+
+    let desc = stored_compression(&mut fs, b"c", 0);
+    assert!(desc.compressed, "a repetitive block compresses");
+    assert!(
+        as_usize(u64::from(desc.stored_len)) < cap,
+        "a compressed record shrinks its at-rest footprint: {} >= {cap}",
+        desc.stored_len
+    );
+
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
+    let node = fs.lookup(fs.root(), b"c").expect("file survives");
+    assert_eq!(
+        read_all(&mut fs, node, payload.len()),
+        payload,
+        "compressed data reads back byte-identical after a remount"
+    );
+
+    // A copy-on-write rewrite of a middle region re-compresses fresh blocks.
+    let patch = alloc::vec![0x5Au8; cap];
+    let at = u64::try_from(cap).unwrap();
+    assert_eq!(fs.write_at(fs.root(), b"c", at, &patch), Ok(patch.len()));
+    let mut expected = payload.clone();
+    expected[cap..cap * 2].copy_from_slice(&patch);
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
+    let node = fs.lookup(fs.root(), b"c").expect("file still there");
+    assert_eq!(
+        read_all(&mut fs, node, expected.len()),
+        expected,
+        "compressed data verifies after a COW rewrite"
+    );
+}
+
+#[test]
+fn integrity_still_detected_on_a_compressed_block() {
+    // The Stage-5 integrity layers still guard a compressed record: a physical
+    // (media) corruption and a logical-hash mismatch are both caught and fail
+    // closed (`AGENTS.md` §5.4 / §2.9).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    let cap = as_usize(fs.data_capacity());
+    let payload = alloc::vec![0x00u8; cap];
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert!(
+        stored_compression(&mut fs, b"c", 0).compressed,
+        "a constant block compresses"
+    );
+
+    let phys = data_block_phys(&mut fs, b"c", 0);
+    let csum_off = fs.phys_checksum_offset();
+    let hash_off = fs.logical_hash_offset();
+    let bs = 512usize;
+    let base = as_usize(phys) * bs;
+    let baseline = fs.into_block().bytes();
+
+    let reopen = |bytes: alloc::vec::Vec<u8>| {
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
+    };
+
+    // Physical: a flipped at-rest byte is caught by the fast checksum.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base] ^= 0x01;
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Physical)
+        );
+    }
+    // Logical: corrupt the stored plaintext hash and repair the checksum, so
+    // the AEAD passes but the post-decompression hash mismatches.
+    {
+        let mut bytes = baseline.clone();
+        bytes[base + hash_off] ^= 0x01;
+        let fixed = physical_checksum(&bytes[base..base + csum_off]);
+        bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
+        let mut fs = reopen(bytes);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        assert_eq!(
+            fs.read_data_block_classified(phys, &mut buf),
+            Err(DataFault::Logical)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7: chunk table, refcounts, reverse refs, reflinks, dedupe index.
+// ---------------------------------------------------------------------------
+
+/// The inode number behind file `name` under the root.
+fn file_ino(fs: &mut RustFs<MemBlock>, name: &[u8]) -> u32 {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    u32::try_from(node.raw()).unwrap()
+}
+
+/// The number of records in the chunk/refcount tree (one per shared chunk).
+fn chunk_count(fs: &mut RustFs<MemBlock>) -> usize {
+    fs.btree_collect_entries(fs.chunk_tree_root, chunk_spec())
+        .expect("walk chunk tree")
+        .len()
+}
+
+#[test]
+fn byte_verify_before_share_refuses_to_merge_unequal_data() {
+    // A dedupe-index entry is only ever a *hint*: before sharing, the
+    // candidate's bytes are compared to the incoming record, so two blocks
+    // whose index keys collide but whose bytes differ are never merged (§9 —
+    // merging unequal data is corruption). A natural logical-hash collision is
+    // infeasible, so the colliding index entry is injected through the
+    // in-memory index seam.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+
+    let content_a = alloc::vec![0x11u8; cap];
+    let content_b = alloc::vec![0x22u8; cap];
+    assert_eq!(fs.write_at(root, b"b", 0, &content_b), Ok(cap));
+    let pb = data_block_phys(&mut fs, b"b", 0);
+    let b_ino = file_ino(&mut fs, b"b");
+
+    // Forge an index entry that maps content A's key to content B's block,
+    // simulating a hash collision. The pre-share byte check must reject it.
+    let mut block_a = alloc::vec![0u8; cap];
+    block_a.copy_from_slice(&content_a);
+    let hash_a = logical_hash(&block_a);
+    let key = dedupe_key(fs.dedupe_domain, u32::try_from(cap).unwrap(), &hash_a);
+    fs.dedupe_index.insert(
+        key,
+        DedupeCandidate {
+            phys: pb,
+            inode: b_ino,
+            logical: 0,
+        },
+    );
+
+    assert_eq!(fs.write_at(root, b"a", 0, &content_a), Ok(cap));
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    assert_ne!(
+        pa, pb,
+        "unequal data is never merged despite a colliding key"
+    );
+
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    assert_eq!(read_all(&mut fs, node_a, cap), content_a);
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_b, cap), content_b);
+}
+
+#[test]
+fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
+    // Two files with identical content share one immutable chunk (refcount 2).
+    // Overwriting one copies-on-write a fresh chunk for the writer and drops
+    // the shared chunk's refcount, leaving the other sharer's data intact (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let original = alloc::vec![0x5Au8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &original), Ok(cap));
+    assert_eq!(fs.write_at(root, b"b", 0, &original), Ok(cap));
+
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(data_block_phys(&mut fs, b"b", 0), shared, "they share");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    // Overwrite "a"; it must copy-on-write off the shared chunk.
+    let replacement = alloc::vec![0xA5u8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &replacement), Ok(cap));
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    assert_ne!(pa, shared, "the writer copied on write");
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        1,
+        "the surviving sharer holds the chunk's implicit single reference"
+    );
+
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    assert_eq!(read_all(&mut fs, node_a, cap), replacement);
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(
+        read_all(&mut fs, node_b, cap),
+        original,
+        "other side intact"
+    );
+}
+
+#[test]
+fn reflink_shares_chunks_until_one_side_is_written() {
+    // A reflink is a copy-on-write clone: it shares every data block with the
+    // source (refcount 2) until a side is written, when only the written
+    // blocks diverge (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create src");
+    let body = read_all_pattern(cap * 3);
+    assert_eq!(fs.write_at(root, b"src", 0, &body), Ok(body.len()));
+
+    let dst = fs.reflink(root, b"src", b"dst").expect("reflink");
+    assert_eq!(fs.node_info(dst).expect("info").size, body.len() as u64);
+    let dst_node = fs.lookup(root, b"dst").expect("lookup dst");
+    assert_eq!(
+        read_all(&mut fs, dst_node, body.len()),
+        body,
+        "clone matches"
+    );
+    for bi in 0..3u64 {
+        let ps = data_block_phys(&mut fs, b"src", bi);
+        let pd = data_block_phys(&mut fs, b"dst", bi);
+        assert_eq!(ps, pd, "reflink shares block {bi}");
+        assert_eq!(fs.data_refcount(ps).expect("refcount"), 2);
+    }
+
+    // Writing the middle block of the clone diverges only that block.
+    let patch = alloc::vec![0x7Eu8; cap];
+    let at = u64::try_from(cap).unwrap();
+    assert_eq!(fs.write_at(root, b"dst", at, &patch), Ok(cap));
+    assert_ne!(
+        data_block_phys(&mut fs, b"dst", 1),
+        data_block_phys(&mut fs, b"src", 1),
+        "the written block diverged"
+    );
+    assert_eq!(
+        data_block_phys(&mut fs, b"dst", 0),
+        data_block_phys(&mut fs, b"src", 0),
+        "untouched blocks still share"
+    );
+    let src_node = fs.lookup(root, b"src").expect("lookup src");
+    assert_eq!(read_all(&mut fs, src_node, body.len()), body, "src intact");
+    let mut expected = body.clone();
+    expected[cap..cap * 2].copy_from_slice(&patch);
+    assert_eq!(read_all(&mut fs, dst_node, body.len()), expected);
+}
+
+#[test]
+fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
+    // Sharing creates one chunk record (refcount 2). Removing one sharer drops
+    // it to the implicit single reference (the record disappears); removing the
+    // last frees the physical block. A remount's free-space rebuild agrees:
+    // the freed space is reusable and the chunk tree is empty (§9, §4).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x42u8; cap];
+    assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(root, b"b", 0, &body), Ok(cap));
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(chunk_count(&mut fs), 1, "one shared chunk recorded");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    fs.remove(root, b"a").expect("remove a");
+    assert_eq!(chunk_count(&mut fs), 0, "back to one implicit reference");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 1);
+    // "b" still reads its data from the surviving block.
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_b, cap), body);
+
+    fs.remove(root, b"b").expect("remove b");
+
+    // The remount rebuilds free space from the trees; the chunk tree is empty
+    // and the volume mounts cleanly, so the freed block is accounted for.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    assert_eq!(chunk_count(&mut fs), 0);
+    assert!(fs.dedupe_index.is_empty(), "index rebuilt empty");
+    // The reclaimed space is reusable.
+    fs.create(fs.root(), b"c", NodeKind::RegularFile)
+        .expect("create c");
+    assert_eq!(fs.write_at(fs.root(), b"c", 0, &body), Ok(cap));
+}
+
+#[test]
+fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
+    // The dedupe index is rebuildable, never authoritative: after a remount it
+    // is rebuilt from the chunk + reverse-reference trees and yields the same
+    // sharing — a third identical write joins the existing chunk (§9).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = alloc::vec![0x3Cu8; cap];
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    let root = fs.root();
+    assert_eq!(chunk_count(&mut fs), 1, "the shared chunk survives");
+
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create c");
+    assert_eq!(fs.write_at(root, b"c", 0, &body), Ok(cap));
+    assert_eq!(
+        data_block_phys(&mut fs, b"c", 0),
+        shared,
+        "the rebuilt index re-finds the shared chunk"
+    );
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        3,
+        "the third writer joined the shared chunk"
+    );
+}
+
+#[test]
+fn dedupe_is_scoped_to_the_encryption_domain() {
+    // Every chunk record carries the volume's encryption domain, and the
+    // dedupe-index key is domain-scoped, so dedupe never crosses a domain (§7).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = alloc::vec![0x6Du8; cap];
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("chunk get").expect("shared");
+    assert_eq!(
+        record.domain, fs.dedupe_domain,
+        "the chunk belongs to the volume's domain"
+    );
+
+    // The index key is domain-scoped: a key built with a different domain does
+    // not resolve to the chunk, so a foreign domain could never share it.
+    let mut block = alloc::vec![0u8; cap];
+    block.copy_from_slice(&body);
+    let hash = logical_hash(&block);
+    let len = u32::try_from(cap).unwrap();
+    assert!(
+        fs.dedupe_index
+            .contains_key(&dedupe_key(fs.dedupe_domain, len, &hash)),
+        "the chunk is indexed under its own domain"
+    );
+    assert!(
+        !fs.dedupe_index
+            .contains_key(&dedupe_key(fs.dedupe_domain ^ 0x1, len, &hash)),
+        "a different domain keys to a different slot"
+    );
+}
+
+#[test]
+fn integrity_and_compression_hold_on_a_shared_chunk() {
+    // A shared chunk is still a §6 data record: compressed at rest, integrity-
+    // protected, and byte-exact across a remount and a COW rewrite. Corrupting
+    // the shared physical block fails closed for *every* sharer (§5.4 / §6).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    // Compressible, identical content so the two files share one chunk.
+    let mut body = alloc::vec::Vec::new();
+    while body.len() < cap {
+        body.extend_from_slice(b"RustOS rustfs dedupe ");
+    }
+    body.truncate(cap);
+    for name in [b"a".as_slice(), b"b"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+    assert!(
+        stored_compression(&mut fs, b"a", 0).compressed,
+        "the shared chunk is stored compressed"
+    );
+
+    // Round-trips across a remount.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
+    let root = fs.root();
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_a, cap), body);
+    assert_eq!(read_all(&mut fs, node_b, cap), body);
+
+    // Corrupting the shared at-rest block is caught for both sharers (the fast
+    // physical checksum covers the at-rest bytes).
+    let base = as_usize(shared) * 4096;
+    let mut bytes = fs.into_block().bytes();
+    bytes[base] ^= 0x01;
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount2");
+    let root = fs.root();
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    let mut buf = alloc::vec![0u8; cap];
+    assert!(
+        matches!(
+            fs.read_at(node_a, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ),
+        "corruption of the shared chunk fails closed for sharer a"
+    );
+    assert!(
+        matches!(
+            fs.read_at(node_b, 0, &mut buf),
+            Err(DriverError::DeviceFault)
+        ),
+        "corruption of the shared chunk fails closed for sharer b"
+    );
+}
+
+/// A deterministic, high-entropy buffer of `len` bytes — distinct per block, so
+/// it is neither compressible nor deduplicable (used to exercise reflink block
+/// sharing without accidental cross-block dedupe).
+fn read_all_pattern(len: usize) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..len {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        out.push(state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes()[0]);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Stage 8: online scrub (verify + repair, resumable).
+// ---------------------------------------------------------------------------
+
+use rustos_abi::CapabilityQuery;
+use rustos_log::{Event, Sink};
+
+/// A capability set granting every capability (the scrub gate is satisfied).
+struct GrantAll;
+impl CapabilityQuery for GrantAll {
+    fn holds(&self, _cap: CapabilityId) -> bool {
+        true
+    }
+}
+
+/// A capability set granting nothing (the scrub gate fails closed).
+struct GrantNone;
+impl CapabilityQuery for GrantNone {
+    fn holds(&self, _cap: CapabilityId) -> bool {
+        false
+    }
+}
+
+/// A log sink that discards events.
+struct NullSink;
+impl Sink for NullSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+/// A log sink that records the event IDs it receives.
+struct RecordingSink {
+    ids: core::cell::RefCell<alloc::vec::Vec<u32>>,
+}
+impl RecordingSink {
+    fn new() -> Self {
+        Self {
+            ids: core::cell::RefCell::new(alloc::vec::Vec::new()),
+        }
+    }
+    fn saw(&self, id: rustos_log::EventId) -> bool {
+        self.ids.borrow().contains(&id.0)
+    }
+}
+impl Sink for RecordingSink {
+    fn write_event(&self, event: &Event<'_>) {
+        self.ids.borrow_mut().push(event.id.0);
+    }
+}
+
+/// Run a full scrub with all capabilities granted, asserting it succeeds.
+fn scrub_full(fs: &mut RustFs<MemBlock>) -> ScrubReport {
+    fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("scrub")
+}
+
+/// Populate a small volume with a directory tree, plain files, a pair of
+/// identical-content files that dedupe, and a reflink, so scrub has metadata,
+/// data, and shared chunks to verify.
+fn populated() -> RustFs<MemBlock> {
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"plain", NodeKind::RegularFile)
+        .expect("create plain");
+    let body = alloc::vec![0x24u8; cap + 100];
+    fs.write_at(root, b"plain", 0, &body).expect("write plain");
 
     fs.create(root, b"a", NodeKind::RegularFile)
-        .expect("create");
-    let rt = fs.times(root).expect("root times");
-    assert_eq!(rt.modified, Time64::from_secs(100));
-    assert_eq!(rt.changed, Time64::from_secs(100));
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let shared_body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &shared_body).expect("write a");
+    fs.write_at(root, b"b", 0, &shared_body).expect("write b");
 
-    fs = fs.with_clock(clock_200);
-    fs.remove(root, b"a").expect("remove");
-    let rt = fs.times(root).expect("root times");
-    assert_eq!(rt.modified, Time64::from_secs(200));
-    assert_eq!(rt.changed, Time64::from_secs(200));
+    fs.reflink(root, b"plain", b"clone").expect("reflink");
+
+    fs.create(root, b"dir", NodeKind::Directory)
+        .expect("create dir");
+    let dir = fs.lookup(root, b"dir").expect("lookup dir");
+    fs.create(dir, b"nested", NodeKind::RegularFile)
+        .expect("create nested");
+    fs.write_at(dir, b"nested", 0, b"nested file")
+        .expect("write nested");
+    fs
+}
+
+#[test]
+fn clean_scrub_finds_nothing_and_is_idempotent() {
+    // A scrub of a clean, populated volume reports zero faults, makes no
+    // repairs, and changes nothing on disk — running it again is identical
+    // (`docs/src/filesystem/rustfs-spec.md` §12; the report is the only output,
+    // never a silent mutation).
+    let before = populated().into_block().bytes();
+    let mut fs =
+        RustFs::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete);
+    assert!(!report.found_faults(), "{report:?}");
+    assert_eq!(report.metadata_repaired, 0);
+    assert_eq!(report.metadata_unrepairable, 0);
+    assert_eq!(report.divergences_corrected, 0);
+    assert!(report.metadata_blocks_checked > 0, "metadata was verified");
+    assert!(report.data_blocks_checked > 0, "data was verified");
+
+    // A clean scrub mutates nothing on disk.
+    let after = fs.into_block().bytes();
+    assert_eq!(after, before, "a clean scrub must change nothing");
+
+    // Idempotent: a second scrub agrees.
+    let mut fs = RustFs::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
+    let again = scrub_full(&mut fs);
+    assert_eq!(again, report, "scrub is idempotent on a clean volume");
+}
+
+#[test]
+fn scrub_requires_the_fs_mount_capability() {
+    // Scrub is capability-gated like any privileged FS operation (§13,
+    // `AGENTS.md` §5.4): without `CAP_FS_MOUNT` it fails closed and logs the
+    // refusal with its stable event ID.
+    let mut fs = populated();
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.scrub(&GrantNone, &sink, ScrubBudget::Unlimited),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(scrub::SCRUB_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn scrub_repairs_a_single_copy_metadata_corruption_from_the_companion() {
+    // Wound only the primary copy of a live metadata block (the inode-tree
+    // root). Scrub authenticates both copies, repairs the bad primary from its
+    // good companion (the Stage 3 seam), and reports exactly one repair
+    // (`docs/src/filesystem/rustfs-spec.md` §8, §12).
+    let mut fs = populated();
+    // Target a directory data block: `open`'s free-space walk reads (and would
+    // self-heal) every tree node, but it never reads directory *contents*, so
+    // a wounded directory-block primary survives the mount for scrub to repair.
+    let root_inode = fs.read_inode(ROOT_INO).expect("root inode");
+    let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
+    assert_ne!(target, 0);
+    let bs = 4096usize;
+    let mut bytes = fs.into_block().bytes();
+    let off = as_usize(target) * bs + HEADER_LEN;
+    let original = bytes[off];
+    bytes[off] ^= 0xff; // wound only the primary copy
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
+        .expect("mounts via the companion mirror");
+    let report = scrub_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.metadata_repaired, 1, "{report:?}");
+    assert_eq!(report.metadata_unrepairable, 0);
+
+    // The primary copy is healed back to match its companion.
+    let healed = fs.into_block().bytes();
+    let p = as_usize(target) * bs;
+    let c = as_usize(target + 1) * bs;
+    assert_eq!(healed[p..p + bs], healed[c..c + bs], "primary repaired");
+    assert_eq!(healed[off], original, "the corrupted byte is restored");
+}
+
+#[test]
+fn scrub_classifies_data_block_physical_and_logical_faults() {
+    // Scrub runs every data block through the Stage 5/6 integrity pipeline and
+    // classifies a failure by its layer without panicking
+    // (`docs/src/filesystem/rustfs-spec.md` §6, §12). Deep data repair is a
+    // later stage, so the fault is recorded, not fixed.
+    let bs = 4096usize;
+
+    // A flipped ciphertext byte is a physical-checksum fault.
+    {
+        let mut fs = fmt(4096, 256, 64);
+        let root = fs.root();
+        fs.create(root, b"f", NodeKind::RegularFile)
+            .expect("create");
+        let body = alloc::vec![0x33u8; 400];
+        fs.write_at(root, b"f", 0, &body).expect("write");
+        let phys = data_block_phys(&mut fs, b"f", 0);
+        let mut bytes = fs.into_block().bytes();
+        bytes[as_usize(phys) * bs] ^= 0x01;
+        let mut fs =
+            RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+        let report = scrub_full(&mut fs);
+        assert_eq!(report.data_physical_faults, 1, "{report:?}");
+        assert_eq!(report.data_aead_faults, 0);
+        assert_eq!(report.data_logical_faults, 0);
+    }
+
+    // Corrupting the stored logical hash (with the physical checksum repaired)
+    // is a logical fault: the AEAD passes but the plaintext hash mismatches.
+    {
+        let mut fs = fmt(4096, 256, 64);
+        let root = fs.root();
+        fs.create(root, b"f", NodeKind::RegularFile)
+            .expect("create");
+        let body = alloc::vec![0x44u8; 400];
+        fs.write_at(root, b"f", 0, &body).expect("write");
+        let phys = data_block_phys(&mut fs, b"f", 0);
+        let csum_off = fs.phys_checksum_offset();
+        let hash_off = fs.logical_hash_offset();
+        let base = as_usize(phys) * bs;
+        let mut bytes = fs.into_block().bytes();
+        bytes[base + hash_off] ^= 0x01;
+        let fixed = physical_checksum(&bytes[base..base + csum_off]);
+        bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
+        let mut fs =
+            RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+        let report = scrub_full(&mut fs);
+        assert_eq!(report.data_logical_faults, 1, "{report:?}");
+        assert_eq!(report.data_physical_faults, 0);
+    }
+}
+
+#[test]
+fn scrub_detects_and_corrects_a_refcount_divergence() {
+    // Two identical files share one chunk (refcount 2). Tamper the on-disk
+    // chunk record's refcount; scrub recomputes the truth from the live
+    // extents, flags the divergence, and corrects it without losing a referrer
+    // (`docs/src/filesystem/rustfs-spec.md` §9, §12).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    // Tamper: bump the stored refcount to a value the extents do not support.
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+    let bumped = ChunkRecord {
+        refcount: 5,
+        ..record
+    };
+    fs.begin();
+    fs.chunk_put(shared, &bumped).expect("put");
+    fs.commit().expect("commit");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 5);
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete);
+    assert!(report.refcount_divergences >= 1, "{report:?}");
+    assert!(report.divergences_corrected >= 1, "{report:?}");
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        2,
+        "scrub restored the refcount to the extent-derived truth"
+    );
+
+    // The correction holds across a remount and a re-scrub is clean.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+    let again = scrub_full(&mut fs);
+    assert_eq!(again.refcount_divergences, 0, "clean after correction");
+    assert_eq!(again.divergences_corrected, 0);
+}
+
+#[test]
+fn scrub_detects_and_corrects_a_reverse_reference_divergence() {
+    // A shared chunk's reverse-reference set must match its live referrers.
+    // Inject a bogus referrer; scrub recomputes the true set and corrects it.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+
+    let mut referrers = fs.reverse_refs(shared).expect("reverse refs");
+    referrers.push((9999, 7)); // a referrer no live extent supports
+    fs.begin();
+    fs.reverse_refs_put(shared, &referrers).expect("put");
+    fs.commit().expect("commit");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.reverse_ref_divergences >= 1, "{report:?}");
+    assert!(report.divergences_corrected >= 1);
+    let healed = fs.reverse_refs(shared).expect("reverse refs");
+    assert!(
+        !healed.contains(&(9999, 7)),
+        "the bogus referrer was struck out"
+    );
+    assert_eq!(healed.len(), 2, "exactly the two live referrers remain");
+}
+
+#[test]
+fn scrub_accounts_a_shared_chunk_once_and_respects_the_domain() {
+    // A chunk with refcount 2 is verified, and the recompute accounts both
+    // referrers (so no spurious divergence). The volume's single dedupe domain
+    // is honoured: the chunk record's domain matches and is left intact.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+    let before = fs.chunk_get(shared).expect("get").expect("shared");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.refcount_divergences, 0, "{report:?}");
+    assert_eq!(report.reverse_ref_divergences, 0);
+    assert_eq!(report.divergences_corrected, 0);
+    let after = fs.chunk_get(shared).expect("get").expect("still shared");
+    assert_eq!(after, before, "the shared chunk record is untouched");
+    assert_eq!(after.domain, fs.dedupe_domain, "domain preserved");
+}
+
+#[test]
+fn scrub_is_resumable_and_matches_an_uninterrupted_pass() {
+    // A budgeted scrub stops after each inode, persists a resumable cursor, and
+    // resumes; the accumulated report of the resumed scrub equals one
+    // uninterrupted pass, and the cursor is cleared on completion
+    // (`docs/src/filesystem/rustfs-spec.md` §12).
+    let base = populated().into_block().bytes();
+
+    // Uninterrupted reference pass.
+    let mut whole = RustFs::open(MemBlock::from_bytes(base.clone(), 4096, 512), &TEST_KEY)
+        .expect("reopen whole");
+    let reference = scrub_full(&mut whole);
+    assert!(reference.complete);
+
+    // Resumed pass: one inode per call until it completes.
+    let mut fs =
+        RustFs::open(MemBlock::from_bytes(base, 4096, 512), &TEST_KEY).expect("reopen stepwise");
+    let mut calls = 0;
+    let last = loop {
+        let report = fs
+            .scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1))
+            .expect("scrub step");
+        calls += 1;
+        if report.complete {
+            break report;
+        }
+        assert_ne!(
+            fs.scrub_progress_root, 0,
+            "a paused scrub persists a cursor"
+        );
+        assert!(calls < 1000, "scrub must terminate");
+    };
+    assert!(calls > 1, "the budget actually paused the pass");
+    assert_eq!(
+        fs.scrub_progress_root, 0,
+        "the cursor is cleared on completion"
+    );
+    assert_eq!(
+        last, reference,
+        "a resumed scrub reaches the same result as one pass"
+    );
+}
+
+#[test]
+fn a_crash_mid_scrub_leaves_a_mountable_volume() {
+    // Interrupting a scrub mid-pass (after it persisted a cursor) must leave a
+    // mountable volume: the progress record is rebuildable metadata and
+    // ordinary recovery never needs scrub (`docs/src/filesystem/rustfs-spec.md`
+    // §4, §14). The half-done scrub then resumes to completion.
+    let mut fs = populated();
+    let paused = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1))
+        .expect("first step");
+    assert!(!paused.complete);
+    assert_ne!(fs.scrub_progress_root, 0);
+
+    // Simulate a crash: drop the in-memory state and reopen from disk.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
+        .expect("a volume with a scrub in progress still mounts");
+    assert_ne!(fs.scrub_progress_root, 0, "the cursor survived the crash");
+
+    // The file system is fully usable, and the scrub resumes and completes.
+    let root = fs.root();
+    assert!(fs.lookup(root, b"plain").is_ok());
+    let report = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("resume");
+    assert!(report.complete);
+    assert_eq!(fs.scrub_progress_root, 0);
+}
+
+#[test]
+fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
+    // Integrity + compression + dedupe invariants survive a scrub, a remount,
+    // and a copy-on-write rewrite of one sharer.
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete && !report.found_faults(), "{report:?}");
+
+    // Remount, then rewrite one sharer (copy-on-write off the shared chunk).
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    let replacement = alloc::vec![0xA5u8; cap];
+    fs.write_at(root, b"a", 0, &replacement).expect("rewrite a");
+    let pa = data_block_phys(&mut fs, b"a", 0);
+    assert_ne!(pa, shared, "the writer copied on write");
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        1,
+        "the surviving sharer holds the implicit single reference"
+    );
+
+    // Scrub again: still clean, and the data reads back correctly.
+    let report = scrub_full(&mut fs);
+    assert!(report.complete && !report.found_faults(), "{report:?}");
+    let node_a = fs.lookup(root, b"a").expect("lookup a");
+    assert_eq!(read_all(&mut fs, node_a, cap), replacement);
+    let node_b = fs.lookup(root, b"b").expect("lookup b");
+    assert_eq!(read_all(&mut fs, node_b, cap), body);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 9: offline check and rescue.
+// ---------------------------------------------------------------------------
+
+use crate::check::{self, RescueSink};
+use crate::CheckReport;
+
+/// A rescue sink that collects every emitted block keyed by `(inode, logical)`.
+struct CollectSink {
+    blocks: alloc::collections::BTreeMap<(u32, u64), alloc::vec::Vec<u8>>,
+}
+impl CollectSink {
+    fn new() -> Self {
+        Self {
+            blocks: alloc::collections::BTreeMap::new(),
+        }
+    }
+}
+impl RescueSink for CollectSink {
+    fn emit_block(&mut self, inode: u32, logical_block: u64, _size: u64, data: &[u8]) {
+        self.blocks.insert((inode, logical_block), data.to_vec());
+    }
+}
+
+/// Run a full check with all capabilities granted, asserting it succeeds.
+fn check_full(fs: &mut RustFs<MemBlock>) -> CheckReport {
+    fs.check(&GrantAll, &NullSink).expect("check")
+}
+
+#[test]
+fn check_requires_the_fs_mount_capability() {
+    let mut fs = populated();
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.check(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(check::CHECK_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
+    // A check of a clean, populated volume reports a sound structure, rebuilds
+    // the derived state (always), repairs nothing, and changes nothing on disk
+    // — running it again is identical (`docs/src/filesystem/rustfs-spec.md`
+    // §12).
+    let before = populated().into_block().bytes();
+    let mut fs =
+        RustFs::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
+
+    let sink = RecordingSink::new();
+    let report = fs.check(&GrantAll, &sink).expect("check");
+    assert!(report.complete);
+    assert!(report.structure_sound, "{report:?}");
+    assert!(report.rebuilt_derived_state);
+    assert_eq!(report.unrecoverable_findings, 0);
+    assert!(!report.made_repairs(), "a clean check repairs nothing");
+    assert_eq!(report.orphaned_inodes, 0);
+    assert_eq!(report.dangling_entries, 0);
+    assert!(report.directories_checked > 0, "directories were walked");
+    assert!(
+        sink.saw(check::CHECK_CLEAN),
+        "a clean check logs CHECK_CLEAN"
+    );
+
+    // A clean check mutates nothing on disk.
+    let after = fs.into_block().bytes();
+    assert_eq!(after, before, "a clean check must change nothing");
+
+    // Idempotent: a second check agrees.
+    let mut fs = RustFs::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
+    let again = check_full(&mut fs);
+    assert_eq!(again, report, "check is idempotent on a clean volume");
+}
+
+#[test]
+fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
+    // The free-space bitmap and the dedupe index are rebuildable derived state
+    // (§4, §9), never authoritative. A corrupt derivation must never keep a
+    // sound volume unmountable: check rebuilds both from the authoritative
+    // trees, and the result matches a freshly mounted reference.
+    let bytes = populated().into_block().bytes();
+    let reference =
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
+    let good_free = reference.free.clone();
+    let good_count = reference.free_count;
+    assert!(
+        !reference.dedupe_index.is_empty(),
+        "the populated volume has shared chunks indexed"
+    );
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
+    // Wreck the in-memory derived state: flip the free bitmap and clear the
+    // dedupe index.
+    for word in &mut fs.free {
+        *word = !*word;
+    }
+    fs.free_count = 0;
+    fs.dedupe_index.clear();
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert!(report.rebuilt_derived_state);
+    assert_eq!(fs.free, good_free, "the free bitmap was rebuilt");
+    assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
+    assert!(
+        !fs.dedupe_index.is_empty(),
+        "the dedupe index was rebuilt from the chunk trees"
+    );
+    // The volume is mountable and the structure is sound.
+    assert!(report.structure_sound, "{report:?}");
+    let bytes = fs.into_block().bytes();
+    assert!(RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).is_ok());
+}
+
+#[test]
+fn check_reclaims_an_orphaned_inode() {
+    // An inode no directory reaches is an orphan. Check detects it, reclaims it
+    // (freeing its slot), and the volume stays sound
+    // (`docs/src/filesystem/rustfs-spec.md` §12).
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+
+    // Inject an orphan: allocate an inode and never link it into any directory.
+    fs.begin();
+    let sec = Security::new(0o644, 0, 0);
+    let orphan = fs
+        .alloc_inode(&Inode::empty(KIND_FILE, sec, fixed_clock()))
+        .expect("alloc orphan");
+    fs.commit().expect("commit orphan");
+    assert!(fs.read_inode(orphan).is_ok(), "the orphan exists pre-check");
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.orphaned_inodes, 1, "{report:?}");
+    assert_eq!(report.orphans_reclaimed, 1);
+    assert!(report.made_repairs());
+    assert!(report.structure_sound, "the orphan was safely reclaimed");
+
+    // The orphan is gone, and the named file is untouched.
+    assert_eq!(fs.read_inode(orphan), Err(DriverError::NotFound));
+    assert!(fs.lookup(fs.root(), b"keep").is_ok());
+
+    // A re-check finds nothing left to reclaim.
+    let again = check_full(&mut fs);
+    assert_eq!(again.orphans_reclaimed, 0);
+    assert!(again.structure_sound);
+}
+
+#[test]
+fn check_corrects_a_refcount_divergence_and_reports_what_it_cannot_fix() {
+    // Check reuses the scrub verification core: it corrects a refcount
+    // divergence it can fix, and reports a data integrity fault it cannot
+    // safely repair as an unrecoverable finding
+    // (`docs/src/filesystem/rustfs-spec.md` §9, §12).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    // Tamper the on-disk chunk refcount to a value the extents do not support.
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+    fs.begin();
+    fs.chunk_put(
+        shared,
+        &ChunkRecord {
+            refcount: 9,
+            ..record
+        },
+    )
+    .expect("put");
+    fs.commit().expect("commit");
+
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert!(report.verification.refcount_divergences >= 1, "{report:?}");
+    assert!(report.verification.divergences_corrected >= 1);
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        2,
+        "the refcount was corrected toward the extent-derived truth"
+    );
+    // The correctable divergence does not leave an unrecoverable finding.
+    assert_eq!(report.unrecoverable_findings, 0, "{report:?}");
+}
+
+#[test]
+fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
+    // A both-layers-corrupt data block (a deep fault check does not yet
+    // reconstruct) is recorded as an unrecoverable finding, not silently
+    // ignored or pretended fixed (`AGENTS.md` §2.1).
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, &alloc::vec![0x33u8; 400])
+        .expect("write");
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let bs = 4096usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(phys) * bs] ^= 0x01; // wound the ciphertext (physical fault)
+
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+    let report = check_full(&mut fs);
+    assert!(report.complete);
+    assert_eq!(report.verification.data_physical_faults, 1, "{report:?}");
+    assert!(
+        !report.structure_sound,
+        "an unrepaired data fault is reported, not hidden"
+    );
+    assert!(report.unrecoverable_findings >= 1);
+}
+
+/// Byte offset inside the keyed-tag slot of a metadata-block header; flipping
+/// it breaks that block's authenticator (mirrors the fuzz harness constant).
+const HEADER_TAG_BYTE: usize = HEADER_LEN - 48 + 8; // inside H_MAC..H_MAC_END
+
+/// Wound the keyed authenticator of every superblock-ring block (both copies
+/// of every slot) so the volume no longer mounts, while leaving the plaintext
+/// crypto discovery header and every other metadata block intact.
+fn damage_superblock_ring(bytes: &mut [u8], bs: usize) {
+    for block in 0..RING_BLOCKS {
+        bytes[as_usize(block) * bs + HEADER_TAG_BYTE] ^= 0xff;
+    }
+}
+
+#[test]
+fn rescue_requires_the_fs_mount_capability() {
+    let bytes = populated().into_block().bytes();
+    let sink = RecordingSink::new();
+    let mut out = CollectSink::new();
+    assert_eq!(
+        RustFs::rescue(
+            MemBlock::from_bytes(bytes, 4096, 512),
+            &TEST_KEY,
+            &GrantNone,
+            &sink,
+            &mut out,
+        ),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(check::RESCUE_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn rescue_discovers_a_root_and_extracts_files_from_a_damaged_ring() {
+    // With the superblock ring wounded the volume no longer mounts, but rescue
+    // recovers the keys from the surviving discovery header, scans for a valid
+    // transaction root, and extracts the readable file data
+    // (`docs/src/filesystem/rustfs-spec.md` §12).
+    let bs = 4096usize;
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = read_all_pattern(cap + cap / 2); // two logical blocks
+    fs.create(root, b"doc", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"doc", 0, &body).expect("write");
+    let doc_node = fs.lookup(root, b"doc").expect("lookup");
+    let doc_ino = u32::try_from(doc_node.raw()).unwrap();
+    let mut bytes = fs.into_block().bytes();
+
+    // The wounded ring makes an ordinary mount fail closed.
+    damage_superblock_ring(&mut bytes, bs);
+    assert!(
+        RustFs::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).is_err(),
+        "the damaged ring no longer mounts normally"
+    );
+
+    let sink = RecordingSink::new();
+    let mut out = CollectSink::new();
+    let report = RustFs::rescue(
+        MemBlock::from_bytes(bytes.clone(), 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &sink,
+        &mut out,
+    )
+    .expect("rescue");
+    assert!(report.found_root(), "rescue discovered a valid root");
+    assert!(report.files_mapped >= 1);
+    assert_eq!(report.blocks_extracted, 2, "{report:?}");
+    assert_eq!(report.blocks_skipped, 0);
+    assert!(sink.saw(check::RESCUE_COMPLETE));
+
+    // The recovered blocks reconstruct the file content.
+    let b0 = out.blocks.get(&(doc_ino, 0)).expect("block 0 recovered");
+    let b1 = out.blocks.get(&(doc_ino, 1)).expect("block 1 recovered");
+    assert_eq!(&b0[..cap], &body[..cap]);
+    assert_eq!(&b1[..body.len() - cap], &body[cap..]);
+
+    // Rescue is read-only on the damaged volume: the device is unchanged.
+    let after = RustFs::rescue(
+        MemBlock::from_bytes(bytes.clone(), 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut CollectSink::new(),
+    );
+    assert!(after.is_ok(), "rescue is repeatable and never mutates");
+}
+
+#[test]
+fn rescue_never_emits_a_block_that_fails_integrity() {
+    // A data block whose integrity check fails is skipped, never handed back
+    // (`docs/src/filesystem/rustfs-spec.md` §6, §12). The good block of the
+    // same file is still extracted.
+    let bs = 4096usize;
+    let mut fs = fmt(4096, 512, 128);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = read_all_pattern(2 * cap); // exactly two logical blocks
+    fs.create(root, b"doc", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"doc", 0, &body).expect("write");
+    let doc_node = fs.lookup(root, b"doc").expect("lookup");
+    let doc_ino = u32::try_from(doc_node.raw()).unwrap();
+    let bad_phys = data_block_phys(&mut fs, b"doc", 1);
+    let mut bytes = fs.into_block().bytes();
+
+    // Wound the second block's ciphertext (a physical-checksum fault) and the
+    // ring (so rescue is the recovery path).
+    bytes[as_usize(bad_phys) * bs] ^= 0x01;
+    damage_superblock_ring(&mut bytes, bs);
+
+    let mut out = CollectSink::new();
+    let report = RustFs::rescue(
+        MemBlock::from_bytes(bytes, 4096, 512),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut out,
+    )
+    .expect("rescue");
+    assert!(report.found_root());
+    assert_eq!(report.blocks_extracted, 1, "only the good block is emitted");
+    assert_eq!(report.blocks_skipped, 1, "the corrupt block is skipped");
+    assert!(
+        out.blocks.contains_key(&(doc_ino, 0)),
+        "the readable block is recovered"
+    );
+    assert!(
+        !out.blocks.contains_key(&(doc_ino, 1)),
+        "a block that fails integrity is never emitted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage: TRIM/discard (return freed space to the device, safely; §11).
+// ---------------------------------------------------------------------------
+
+/// Format a fresh volume on a discard-capable [`MemBlock`] and clear the
+/// record of the mkfs-time discard so a trim test starts from a clean slate.
+fn fmt_discard(
+    block_count: u64,
+    granularity_blocks: u64,
+    max_blocks_per_request: u64,
+) -> RustFs<MemBlock> {
+    let block =
+        MemBlock::new(512, block_count).with_discard(granularity_blocks, max_blocks_per_request);
+    let mut fs = RustFs::format(block, 32, &TEST_KEY)
+        .expect("format a discard-capable device")
+        .with_clock(fixed_clock);
+    fs.block.discarded.clear();
+    fs
+}
+
+/// Enqueue every block in `[start, end)` for discard, asserting each is
+/// currently free so the test models the real invariant (only free blocks are
+/// ever queued).
+fn enqueue_free_range(fs: &mut RustFs<MemBlock>, start: u64, end: u64) {
+    for block in start..end {
+        assert!(!fs.bit_used(block), "test block {block} must start free");
+        fs.enqueue_discard(block);
+    }
+}
+
+#[test]
+fn trim_requires_the_fs_mount_capability() {
+    // Fail closed: without CAP_FS_MOUNT trim refuses, logs the refusal, and
+    // leaves the queue untouched (`AGENTS.md` §5.4).
+    let mut fs = fmt_discard(512, 1, 0);
+    enqueue_free_range(&mut fs, 100, 110);
+    let before = fs.pending_discard_count();
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.trim(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(discard::TRIM_DENIED), "the refusal is logged");
+    assert_eq!(fs.pending_discard_count(), before, "the queue is untouched");
+    assert!(fs.block.discarded.is_empty(), "nothing was discarded");
+}
+
+#[test]
+fn trim_on_a_device_without_discard_drains_the_queue() {
+    // Recorded, not failed: a device without discard support drains the queue
+    // and reports `supported = false` (§11). There is no trim=off mode.
+    let mut fs = fmt(512, 512, 32);
+    enqueue_free_range(&mut fs, 100, 110);
+    assert!(fs.pending_discard_count() > 0);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim is never an error");
+    assert!(!report.supported);
+    assert_eq!(report.blocks_discarded, 0);
+    assert_eq!(fs.pending_discard_count(), 0, "the queue is drained");
+    assert!(sink.saw(discard::TRIM_UNSUPPORTED));
+}
+
+#[test]
+fn trim_with_an_empty_queue_is_clean() {
+    let mut fs = fmt_discard(512, 1, 0);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert!(report.supported);
+    assert_eq!(report.ranges_discarded, 0);
+    assert_eq!(report.blocks_discarded, 0);
+    assert!(sink.saw(discard::TRIM_CLEAN));
+    assert!(fs.block.discarded.is_empty());
+}
+
+#[test]
+fn trim_coalesces_contiguous_free_blocks_into_one_range() {
+    // Out-of-order, contiguous free blocks become a single discard range.
+    let mut fs = fmt_discard(512, 1, 0);
+    for block in [105u64, 100, 103, 101, 104, 102] {
+        assert!(!fs.bit_used(block));
+        fs.enqueue_discard(block);
+    }
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(report.ranges_discarded, 1);
+    assert_eq!(report.blocks_discarded, 6);
+    assert_eq!(report.blocks_deferred, 0);
+    assert_eq!(fs.block.discarded, alloc::vec![(100, 6)]);
+    assert_eq!(fs.pending_discard_count(), 0);
+    assert!(sink.saw(discard::TRIM_DISCARDED));
+}
+
+#[test]
+fn trim_aligns_inward_and_requeues_the_unaligned_edges() {
+    // A run is aligned inward to the device granularity; the head and tail that
+    // fall outside the aligned window are requeued for a later pass (§11).
+    let mut fs = fmt_discard(512, 8, 0);
+    enqueue_free_range(&mut fs, 100, 130);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    // align_up(100,8)=104, align_down(130,8)=128 -> discard [104,128).
+    assert_eq!(fs.block.discarded, alloc::vec![(104, 24)]);
+    assert_eq!(report.blocks_discarded, 24);
+    assert_eq!(report.ranges_discarded, 1);
+    // Edges [100,104) and [128,130) -> 4 + 2 = 6 deferred and requeued.
+    assert_eq!(report.blocks_deferred, 6);
+    assert_eq!(fs.pending_discard_count(), 6);
+}
+
+#[test]
+fn trim_run_shorter_than_one_granularity_window_is_requeued_whole() {
+    let mut fs = fmt_discard(512, 8, 0);
+    // [100,104): no multiple of 8 lies inside, so nothing can be discarded.
+    enqueue_free_range(&mut fs, 100, 104);
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert!(fs.block.discarded.is_empty());
+    assert_eq!(report.blocks_discarded, 0);
+    assert_eq!(report.blocks_deferred, 4);
+    assert_eq!(fs.pending_discard_count(), 4);
+    assert!(sink.saw(discard::TRIM_CLEAN));
+}
+
+#[test]
+fn trim_splits_a_run_to_the_per_request_cap() {
+    // A run longer than the device's per-request maximum is split into several
+    // aligned discards, each within the cap (the MemBlock double asserts it).
+    let mut fs = fmt_discard(512, 4, 8);
+    enqueue_free_range(&mut fs, 100, 124); // 24 blocks, all multiples-of-4 aligned.
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(
+        fs.block.discarded,
+        alloc::vec![(100, 8), (108, 8), (116, 8)]
+    );
+    assert_eq!(report.ranges_discarded, 3);
+    assert_eq!(report.blocks_discarded, 24);
+    assert_eq!(report.blocks_deferred, 0);
+}
+
+#[test]
+fn trim_skips_a_block_that_was_reallocated() {
+    // A queued block that is no longer free (reallocated since it was freed) is
+    // skipped, never discarded — discard can never touch live data (§11, §14).
+    let mut fs = fmt_discard(512, 1, 0);
+    assert!(!fs.bit_used(100));
+    fs.enqueue_discard(100);
+    fs.mark_used(100); // the block is handed back out before trim runs.
+    let sink = RecordingSink::new();
+    let report = fs.trim(&GrantAll, &sink).expect("trim");
+    assert_eq!(report.blocks_skipped_in_use, 1);
+    assert_eq!(report.blocks_discarded, 0);
+    assert!(
+        fs.block.discarded.is_empty(),
+        "the live block is never discarded"
+    );
+}
+
+#[test]
+fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
+    // More distinct runs than the per-call batch limit: the surplus runs stay
+    // queued and a second trim pass drains them (§11).
+    let mut fs = fmt_discard(2048, 1, 0);
+    let runs = discard::TRIM_BATCH_RANGES + 1;
+    let mut blocks = alloc::vec::Vec::new();
+    for run in 0..runs as u64 {
+        let block = 100 + run * 2; // gaps keep every block its own run.
+        assert!(!fs.bit_used(block));
+        fs.enqueue_discard(block);
+        blocks.push(block);
+    }
+    let sink = RecordingSink::new();
+    let first = fs.trim(&GrantAll, &sink).expect("trim pass 1");
+    assert_eq!(
+        first.ranges_discarded,
+        u64::try_from(discard::TRIM_BATCH_RANGES).unwrap()
+    );
+    assert_eq!(first.blocks_deferred, 1, "one surplus run is requeued");
+    assert_eq!(fs.pending_discard_count(), 1);
+
+    let second = fs.trim(&GrantAll, &sink).expect("trim pass 2");
+    assert_eq!(second.ranges_discarded, 1, "the remainder drains next pass");
+    assert_eq!(fs.pending_discard_count(), 0);
+    assert_eq!(
+        fs.block.discarded.len(),
+        runs,
+        "every run is eventually discarded"
+    );
+}
+
+#[test]
+fn mkfs_discards_the_whole_volume_on_a_capable_device() {
+    // mkfs tells a discard-capable device the whole volume is free before the
+    // encrypted structures are laid down (§11 mkfs flow).
+    let block = MemBlock::new(512, 512).with_discard(1, 0);
+    let fs = RustFs::format(block, 32, &TEST_KEY).expect("format");
+    assert_eq!(
+        fs.into_block().discarded,
+        alloc::vec![(0, 512)],
+        "the full block range is discarded once at mkfs time"
+    );
+}
+
+#[test]
+fn mkfs_on_a_device_without_discard_still_formats() {
+    // A device without discard support is recorded, not failed: format still
+    // succeeds and the volume mounts (§11).
+    let fs = RustFs::format(MemBlock::new(512, 512), 32, &TEST_KEY).expect("format");
+    assert!(fs.into_block().discarded.is_empty());
+}
+
+#[test]
+fn trim_never_discards_a_block_still_shared_by_dedupe() {
+    // The §11 hard constraint, end-to-end: a data block shared by two files
+    // (dedupe refcount 2) is not freed when one sharer is removed — refcount
+    // falls to 1, the block stays reachable — so trim must never discard it and
+    // the surviving file must still read back (§11, §14).
+    let mut fs = fmt_discard(512, 1, 0);
+    let root = fs.root();
+    let payload = alloc::vec![0x33u8; 64];
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    fs.write_at(root, b"a", 0, &payload).expect("write a");
+    fs.write_at(root, b"b", 0, &payload).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(
+        shared,
+        data_block_phys(&mut fs, b"b", 0),
+        "identical content dedupes to one physical block"
+    );
+
+    fs.block.discarded.clear();
+    fs.remove(root, b"a").expect("remove a");
+    assert!(
+        fs.bit_used(shared),
+        "the block b still shares must stay allocated after a is removed"
+    );
+
+    let report = fs.trim(&GrantAll, &NullSink).expect("trim");
+    assert!(
+        !fs.block
+            .discarded
+            .iter()
+            .any(|&(lba, len)| { shared >= lba && shared < lba + len }),
+        "a still-shared block is never discarded ({report:?})"
+    );
+    let node = fs.lookup(root, b"b").expect("b survives");
+    assert_eq!(read_all(&mut fs, node, payload.len()), payload);
+}
+
+#[test]
+fn the_discard_queue_is_transient_across_a_remount() {
+    // The pending-discard queue is rebuildable, transient state (§4): a crash
+    // before trim runs simply drops it. The volume remounts cleanly, the queue
+    // is empty, and no live data is lost.
+    let mut fs = fmt_discard(512, 1, 0);
+    let root = fs.root();
+    let keep = alloc::vec![0x21u8; 80];
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    fs.write_at(root, b"keep", 0, &keep).expect("write keep");
+    fs.create(root, b"gone", NodeKind::RegularFile)
+        .expect("create gone");
+    fs.write_at(root, b"gone", 0, &[0x9au8; 80])
+        .expect("write gone");
+    fs.remove(root, b"gone").expect("remove gone");
+    assert!(
+        fs.pending_discard_count() > 0,
+        "removing a file queued its freed blocks"
+    );
+
+    // Simulate a crash before trim: the in-memory queue never reaches disk.
+    let bytes = fs.into_block().bytes();
+    let mut fs = RustFs::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("remount");
+    assert_eq!(
+        fs.pending_discard_count(),
+        0,
+        "the queue is transient and is not rebuilt on mount"
+    );
+    let node = fs
+        .lookup(fs.root(), b"keep")
+        .expect("keep survives the crash");
+    assert_eq!(read_all(&mut fs, node, keep.len()), keep);
+    assert!(
+        fs.lookup(fs.root(), b"gone").is_err(),
+        "the removed file stays removed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 11: device-health baselines and health-triggered scrub.
+// ---------------------------------------------------------------------------
+
+/// A benign device-health snapshot: every failing/degraded counter is clear
+/// and spare/wear are healthy, so only the fields a test varies move the
+/// classification.
+fn healthy_snapshot(unsafe_shutdowns: u64, media_errors: u64) -> HealthSnapshot {
+    HealthSnapshot {
+        power_on_hours: 100,
+        unsafe_shutdowns,
+        media_errors,
+        reallocated_sectors: 0,
+        pending_sectors: 0,
+        uncorrectable_sectors: 0,
+        crc_errors: 0,
+        percentage_used: 0,
+        available_spare: 100,
+        temperature_kelvin: 300,
+        critical_warning: false,
+    }
+}
+
+/// Format a 4096-byte volume reporting `health`, then return it mounted.
+fn fmt_health(block_count: u64, health: DeviceHealth) -> RustFs<MemBlock> {
+    RustFs::format(
+        MemBlock::new(4096, block_count).with_health(health),
+        128,
+        &TEST_KEY,
+    )
+    .expect("format with health")
+    .with_clock(fixed_clock)
+}
+
+/// Reopen a 4096-byte volume from `bytes`, reporting `health`.
+fn open_health(
+    bytes: alloc::vec::Vec<u8>,
+    block_count: u64,
+    health: DeviceHealth,
+) -> RustFs<MemBlock> {
+    RustFs::open(
+        MemBlock::from_bytes(bytes, 4096, block_count).with_health(health),
+        &TEST_KEY,
+    )
+    .expect("reopen with health")
+}
+
+#[test]
+fn health_requires_the_fs_mount_capability() {
+    // Reading health (which may trigger a scrub) is capability-gated like the
+    // other privileged FS operations (§13, `AGENTS.md` §5.4): without
+    // `CAP_FS_MOUNT` it fails closed and logs the refusal.
+    let mut fs = fmt_health(256, DeviceHealth::Unavailable);
+    let sink = RecordingSink::new();
+    assert_eq!(
+        fs.health(&GrantNone, &sink),
+        Err(DriverError::PermissionDenied)
+    );
+    assert!(sink.saw(health::HEALTH_DENIED), "the refusal is logged");
+}
+
+#[test]
+fn health_on_a_device_without_telemetry_still_classifies_and_persists() {
+    // A device that exposes no telemetry still gets a working health
+    // subsystem: the pass classifies from the filesystem-observed counters
+    // alone, persists a baseline block, and never triggers a scrub it has no
+    // signal for (§11; `HealthUnavailable`).
+    let mut fs = fmt_health(256, DeviceHealth::Unavailable);
+    assert_ne!(
+        fs.health_baseline_root, 0,
+        "mkfs stored an initial baseline block"
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(report.state, HealthState::Healthy);
+    assert!(report.device.is_none(), "no telemetry");
+    assert!(report.scrub.is_none(), "no signal, no scrub");
+    assert!(!report.read_only_recommended);
+
+    // The baseline persists across a remount (it is reached from the root).
+    let bytes = fs.into_block().bytes();
+    let mut fs = open_health(bytes, 256, DeviceHealth::Unavailable);
+    assert_ne!(
+        fs.health_baseline_root, 0,
+        "the baseline survived the remount"
+    );
+    let again = fs.health(&GrantAll, &NullSink).expect("health again");
+    assert_eq!(again.state, HealthState::Healthy);
+}
+
+#[test]
+fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
+    // As the device's media-error count climbs across mounts, the volume's
+    // classification crosses the documented thresholds: healthy → degraded →
+    // failing (§11; no magic numbers — see `HealthThresholds::DEFAULT`).
+    let t = HealthThresholds::DEFAULT;
+
+    let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    let report = fs.health(&GrantAll, &NullSink).expect("health clean");
+    assert_eq!(report.state, HealthState::Healthy, "{report:?}");
+    let bytes = fs.into_block().bytes();
+
+    // Media errors at the degraded threshold but below failing.
+    let degraded_errors = t.degraded_media_errors;
+    let mut fs = open_health(
+        bytes,
+        256,
+        DeviceHealth::Available(healthy_snapshot(0, degraded_errors)),
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health degraded");
+    assert_eq!(report.state, HealthState::Degraded, "{report:?}");
+    assert!(
+        report.deep_scrub_recommended,
+        "a media-error delta is a deep scrub"
+    );
+    let bytes = fs.into_block().bytes();
+
+    // Media errors at the failing threshold.
+    let mut fs = open_health(
+        bytes,
+        256,
+        DeviceHealth::Available(healthy_snapshot(0, t.failing_media_errors)),
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health failing");
+    assert_eq!(report.state, HealthState::Failing, "{report:?}");
+    assert!(
+        report.read_only_recommended,
+        "critical device health recommends a read-only mount"
+    );
+}
+
+#[test]
+fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
+    // An unsafe-shutdown delta since the last clean baseline schedules a
+    // metadata scrub, run through the Stage-8 machinery (§11; `AGENTS.md`
+    // §2.2 — no parallel verifier). Once the baseline advances, a pass with no
+    // further delta does not re-scrub.
+    let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    fs.health(&GrantAll, &NullSink).expect("establish baseline");
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
+    let sink = RecordingSink::new();
+    let report = fs.health(&GrantAll, &sink).expect("health");
+    assert_eq!(report.unsafe_shutdown_delta, 3);
+    assert!(report.metadata_scrub_recommended);
+    assert!(report.scrub.is_some(), "the recommendation was acted on");
+    assert!(
+        sink.saw(health::HEALTH_SCRUB_TRIGGERED),
+        "the trigger is logged"
+    );
+    assert!(
+        sink.saw(scrub::SCRUB_CLEAN),
+        "the triggered scrub ran and logged its outcome"
+    );
+    assert_eq!(report.scrubs_triggered, 1);
+
+    // The baseline has advanced to the new snapshot, so a second pass with the
+    // same telemetry sees no delta and triggers no scrub.
+    let bytes = fs.into_block().bytes();
+    let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
+    let report = fs.health(&GrantAll, &NullSink).expect("health 2");
+    assert_eq!(report.unsafe_shutdown_delta, 0);
+    assert!(report.scrub.is_none(), "no new delta, no scrub");
+    assert_eq!(report.scrubs_triggered, 1, "the lifetime count persisted");
+}
+
+#[test]
+fn health_baseline_survives_a_crash_during_its_update() {
+    // The persisted baseline is updated inside a copy-on-write transaction, so
+    // a power loss at any write count during a health pass leaves a mountable
+    // volume with no live data lost (§4, §14): either the new baseline
+    // committed in full or the previous one remains selected.
+    let mut base = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    let root = base.root();
+    base.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    base.write_at(root, b"keep", 0, b"baseline")
+        .expect("write keep");
+    base.health(&GrantAll, &NullSink)
+        .expect("establish baseline");
+    let baseline = base.into_block().bytes();
+
+    for budget in 0..96u32 {
+        let mut dev = MemBlock::from_bytes(baseline.clone(), 4096, 256)
+            .with_health(DeviceHealth::Available(healthy_snapshot(5, 5)));
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("baseline opens");
+        // The health pass (a scrub plus a baseline commit) may be cut short.
+        let _ = fs.health(&GrantAll, &NullSink);
+        let bytes = fs.into_block().bytes();
+
+        // Re-open from the (possibly torn) image: it must mount, the file must
+        // be intact, and a fresh health pass must still succeed.
+        let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(5, 5)));
+        let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
+        let mut buf = [0u8; 8];
+        let n = fs.read_at(keep, 0, &mut buf).expect("read keep");
+        assert_eq!(
+            &buf[..n],
+            b"baseline",
+            "live data is never lost (budget {budget})"
+        );
+        assert_ne!(fs.health_baseline_root, 0, "a baseline is always selected");
+        fs.health(&GrantAll, &NullSink)
+            .expect("health works after the crash");
+    }
 }

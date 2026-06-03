@@ -1,0 +1,24 @@
+[package]
+name = "rustos-test-fs-soak"
+description = "In-RAM filesystem soak harness (filesystems.md). Formats a RAM-backed Block device with each first-party formatter (rustfs/ext4/fat32) and drives one generic, FS-agnostic exerciser over the frozen FilesystemRead/Write ABI: create/write/read-back/truncate/remove round-trips across nested directories with remount re-verification, and the fail-closed extremes (NoSpace on a full data region, Busy on duplicate create / non-empty rmdir, LengthOutOfRange on bad names). The nightly soak runs the three filesystems in parallel under a wall-clock budget; no mkfs shell-out and no parallel re-implementation of any FS semantics (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The harness binds the real first-party formatters and read/write paths
+# of each driver; it adds no parallel re-implementation of any FS
+# semantics (AGENTS.md §2.2).
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-ext4 = { path = "../../../drivers/filesystem/ext4", version = "=0.0.0" }
+rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }

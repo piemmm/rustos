@@ -157,6 +157,33 @@ refused rather than orphaning blocks or half-building a tree. Such
 volumes stay fully **readable**. This is a deliberate, documented
 boundary (`AGENTS.md` §2.1 / §5.4), not a silent best-effort.
 
+## Formatting (mkfs)
+
+`Ext4::format(block, inode_count)` lays a fresh, empty volume onto a
+blank `Block` device and returns it mounted — the write-side counterpart
+of `open()`, with no `mkfs` shell-out (`AGENTS.md` §12/§2.12). After
+`format()` the bytes are handed straight to `open()`, which remains the
+single source of truth for the on-disk layout.
+
+The formatter writes a deliberately conservative shape the read/write
+path fully supports: `filetype` + `extent` only (no `metadata_csum`,
+`gdt_csum`, or `64bit`, so no checksum maintenance is needed), 128-byte
+inodes, 32-byte group descriptors, block size 4096 bytes for volumes
+≥ 128 MiB and 1024 bytes otherwise, and `blocks_per_group = 8 *
+block_size`. Only whole groups are laid down — so the reader's group
+count is exact — and **every** group is fully materialised (no
+lazy/`UNINIT` groups), so the volume can be filled to exhaustion. The
+reserved inodes 1..=10 and an extent-mapped empty root directory
+(inode 2) are written; `inode_count` is the minimum total inode budget,
+rounded up to a whole number of inodes per group (≥ 16 per group).
+
+Allocation past the free data blocks or the inode budget fails with
+`DriverError::NoSpace` (POSIX `ENOSPC`), distinct from `DeviceFault`
+(`AGENTS.md` §5.4 / §2.9); a device too small for one group plus a data
+region, or a zero `inode_count`, is refused with `OutOfRange`. Files
+created on a formatted volume use the classic block map, so a single
+file reaches at most 12 direct + one single-indirect block.
+
 ## Capabilities
 
 Loading requires `CAP_DRV_LOAD`; the `FilesystemRead` methods are reached

@@ -60,8 +60,10 @@
 - [Permissions](./filesystem/permissions.md)
 - [FAT32 driver](./filesystem/fat32.md)
 - [rustfs driver](./filesystem/rustfs.md)
+- [rustfs specification](./filesystem/rustfs-spec.md)
 - [ext4 driver](./filesystem/ext4.md)
 - [POSIX conformance suite](./filesystem/posix_suite.md)
+- [Filesystem soak](./filesystem/soak.md)
 
 # Userland
 

@@ -71,6 +71,16 @@ pub enum Errno {
     /// (`AGENTS.md` §21). The conversion is always checked; this errno is the
     /// fail-closed result, never a silent truncation, wrap, or saturation.
     TimestampOutOfRange = 14,
+    /// A storage backend cannot satisfy a request because it is full.
+    ///
+    /// Semantically equivalent to POSIX `ENOSPC`. Emitted by a filesystem
+    /// driver when it exhausts its on-disk free space (no free data block or
+    /// cluster remains) or its inode/directory-entry budget while servicing
+    /// an allocating operation such as `create`, `write_at`, or `truncate`.
+    /// It is the fail-closed result of a genuinely full volume, distinct from
+    /// [`DeviceFault`](crate::DriverError::DeviceFault)'s unrecoverable
+    /// hardware error.
+    NoSpace = 15,
 }
 
 impl Errno {
@@ -98,6 +108,7 @@ impl fmt::Display for Errno {
             Self::NotImplemented => "operation not implemented",
             Self::TimedOut => "operation timed out",
             Self::TimestampOutOfRange => "timestamp out of range",
+            Self::NoSpace => "no space left on device",
         };
         f.write_str(message)
     }
@@ -124,6 +135,7 @@ mod tests {
         assert_eq!(Errno::NotImplemented.as_i32(), 12);
         assert_eq!(Errno::TimedOut.as_i32(), 13);
         assert_eq!(Errno::TimestampOutOfRange.as_i32(), 14);
+        assert_eq!(Errno::NoSpace.as_i32(), 15);
     }
 
     #[test]

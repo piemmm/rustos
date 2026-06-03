@@ -1,0 +1,36 @@
+//! In-RAM filesystem soak harness (`.junie/filesystems.md`).
+//!
+//! Formats a RAM-backed [`RamBlock`] device with each first-party
+//! formatter (`rustfs`/`ext4`/`fat32`) and drives one generic,
+//! filesystem-agnostic [`exercise()`] body over the frozen
+//! `FilesystemRead`/`FilesystemWrite` ABI: create/write/read-back/
+//! truncate/remove round-trips across nested directories with a remount
+//! re-verification, plus the fail-closed extremes — `NoSpace`
+//! on a full data region, `Busy` on a duplicate create or a
+//! non-empty `rmdir`, and `LengthOutOfRange` on an empty or
+//! oversize name. There is no `mkfs` shell-out and no parallel
+//! re-implementation of any filesystem semantics (`AGENTS.md` §2.2): the
+//! harness consumes the OS's own formatters and read/write paths and
+//! asserts the OS reports the extremes cleanly (§5.4 / §2.9).
+//!
+//! The exerciser is deterministic: a per-iteration seed drives a small
+//! LCG so any failure reproduces from its seed.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+mod exercise;
+mod ramblock;
+mod registry;
+
+pub use exercise::exercise;
+pub use ramblock::RamBlock;
+pub use registry::{run_target, SoakFs, TARGETS};
+
+/// Minimum soak device size, in bytes: 1 GiB (`.junie/filesystems.md`).
+pub const MIN_DEVICE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Logical-block (sector) size of the RAM device, in bytes. 4096 keeps
+/// the three filesystems on their large-block paths, so a 1 GiB fill is
+/// a tractable number of blocks.
+pub const SECTOR_BYTES: u32 = 4096;

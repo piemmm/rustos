@@ -335,8 +335,9 @@ pub trait FilesystemWrite {
     /// * [`DriverError::Busy`] if a child named `name` already exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer
     ///   than the filesystem's maximum component length.
-    /// * [`DriverError::DeviceFault`] if the volume is full or a block
-    ///   write fails.
+    /// * [`DriverError::NoSpace`] if the volume cannot allocate the inode
+    ///   (or a directory's initial data block) because it is full.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError>;
 
     /// Write `data` into the regular file `name` in directory `dir`
@@ -351,8 +352,9 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
     /// * [`DriverError::NotFound`] if no child named `name` exists.
-    /// * [`DriverError::DeviceFault`] if the volume is full or a block
-    ///   write fails.
+    /// * [`DriverError::NoSpace`] if the volume cannot allocate a data
+    ///   block to back the write because it is full.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
     fn write_at(
         &mut self,
         dir: NodeId,
@@ -368,8 +370,9 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
     /// * [`DriverError::NotFound`] if no child named `name` exists.
-    /// * [`DriverError::DeviceFault`] if the volume is full or a block
-    ///   write fails.
+    /// * [`DriverError::NoSpace`] if zero-extending the file cannot
+    ///   allocate a data block because the volume is full.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError>;
 
     /// Unlink the child `name` from directory `dir`, freeing its backing

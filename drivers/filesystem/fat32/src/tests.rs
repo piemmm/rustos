@@ -11,6 +11,8 @@
 //!     └── DEEP.BIN      (two clusters — exercises chain following)
 //! ```
 
+extern crate std;
+
 use super::*;
 use rustos_abi::driver::block::BlockGeometry;
 use rustos_abi::DriverKind;
@@ -837,4 +839,155 @@ fn writing_a_missing_file_is_not_found() {
 fn flush_is_a_synchronous_no_op() {
     let mut fs = mount();
     assert!(fs.flush().is_ok());
+}
+
+/// Tests for [`Fat32::format`]: laying down a genuine, mountable FAT32
+/// volume on a fresh device, sized large enough to be a real FAT32
+/// filesystem, and the data-exhaustion (`NoSpace`) extreme. These use a
+/// heap-backed device, so they live behind `std` like the round-trip
+/// fixtures above.
+mod format {
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
+
+    /// A heap-backed [`Block`] device of `block_count` 512-byte sectors,
+    /// starting all-zero like a freshly attached disk.
+    struct VecBlock {
+        store: Vec<u8>,
+    }
+
+    impl VecBlock {
+        fn new(block_count: u64) -> Self {
+            let len = usize::try_from(block_count * SECTOR_SIZE as u64).expect("fits usize");
+            Self {
+                store: vec![0u8; len],
+            }
+        }
+
+        fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
+            if len == 0 || len % SECTOR_SIZE != 0 {
+                return Err(DriverError::BufferTooSmall);
+            }
+            let start = usize::try_from(lba)
+                .ok()
+                .and_then(|l| l.checked_mul(SECTOR_SIZE))
+                .ok_or(DriverError::LengthOutOfRange)?;
+            let end = start
+                .checked_add(len)
+                .ok_or(DriverError::LengthOutOfRange)?;
+            if end > self.store.len() {
+                return Err(DriverError::LengthOutOfRange);
+            }
+            Ok((start, end))
+        }
+    }
+
+    impl Block for VecBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(BlockGeometry {
+                block_size: u32::try_from(SECTOR_SIZE).expect("512 fits u32"),
+                block_count: (self.store.len() / SECTOR_SIZE) as u64,
+            })
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            let (start, end) = self.span(lba, buf.len())?;
+            buf.copy_from_slice(&self.store[start..end]);
+            Ok(())
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            let (start, end) = self.span(lba, buf.len())?;
+            self.store[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    /// 64 MiB in 512-byte sectors — large enough to be a genuine FAT32
+    /// volume (more than `MIN_FAT32_CLUSTERS` clusters) yet cheap to fill.
+    const SECTORS_64MIB: u64 = (64 << 20) / 512;
+
+    #[test]
+    fn format_produces_a_mountable_empty_volume() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let root = fs.root();
+        assert_eq!(
+            fs.node_info(root).expect("root info").kind,
+            NodeKind::Directory
+        );
+        // A freshly formatted root directory is empty.
+        let mut name = [0u8; MAX_NAME_BYTES];
+        assert_eq!(fs.read_dir(root, 0, &mut name), Ok(None));
+    }
+
+    #[test]
+    fn format_then_reopen_round_trips_files_and_directories() {
+        let dev = {
+            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+            let root = fs.root();
+            fs.create(root, b"Notes.txt", NodeKind::RegularFile)
+                .expect("create file");
+            fs.write_at(root, b"Notes.txt", 0, b"formatted on RustOS")
+                .expect("write file");
+            let dir = fs
+                .create(root, b"Folder", NodeKind::Directory)
+                .expect("mkdir");
+            fs.create(dir, b"inner.bin", NodeKind::RegularFile)
+                .expect("create nested");
+            fs.write_at(dir, b"inner.bin", 0, b"nested body")
+                .expect("write nested");
+            fs.into_block()
+        };
+
+        // Re-mount the very bytes the formatter and writes produced.
+        let mut fs = Fat32::open(dev).expect("reopen formatted volume");
+        let root = fs.root();
+        let file = fs.lookup(root, b"Notes.txt").expect("file present");
+        let mut buf = [0u8; 32];
+        let n = fs.read_at(file, 0, &mut buf).expect("read file");
+        assert_eq!(&buf[..n], b"formatted on RustOS");
+
+        let dir = fs.lookup(root, b"Folder").expect("dir present");
+        let nested = fs.lookup(dir, b"inner.bin").expect("nested present");
+        let n = fs.read_at(nested, 0, &mut buf).expect("read nested");
+        assert_eq!(&buf[..n], b"nested body");
+    }
+
+    #[test]
+    fn filling_a_formatted_volume_reports_no_space() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB)).expect("format");
+        let root = fs.root();
+        fs.create(root, b"BIG.DAT", NodeKind::RegularFile)
+            .expect("create");
+        // Append 1 MiB at a time until the data region is exhausted. The
+        // first failure must be NoSpace (the volume is full), never a
+        // DeviceFault, and the volume must fill well before any absurd size.
+        let chunk = vec![0xCDu8; 1 << 20];
+        let mut offset = 0u64;
+        let mut result = Ok(0usize);
+        while offset < (128 << 20) {
+            result = fs.write_at(root, b"BIG.DAT", offset, &chunk);
+            match result {
+                Ok(n) => offset += n as u64,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(result, Err(DriverError::NoSpace));
+        // Something substantial was stored before the volume filled.
+        assert!(
+            offset >= (32 << 20),
+            "only {offset} bytes written before full"
+        );
+    }
+
+    #[test]
+    fn format_rejects_a_device_too_small_for_fat32() {
+        // 8 MiB is far below the FAT32 minimum cluster count.
+        let too_small = (8 << 20) / 512;
+        assert_eq!(
+            Fat32::format(VecBlock::new(too_small)).map(|_| ()),
+            Err(DriverError::OutOfRange)
+        );
+    }
 }

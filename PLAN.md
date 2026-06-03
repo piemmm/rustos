@@ -3913,7 +3913,270 @@ device list.
     companion to the QEMU virtio-blk verticals, run on the host against
     the identical driver and VFS code. Docs:
     `docs/src/filesystem/posix_suite.md` and the crate `README.md`.
+  - **First-party formatters + `NoSpace` + in-RAM filesystem soak —
+    DONE.** A new `DriverError::NoSpace` / `Errno::NoSpace` (POSIX
+    `ENOSPC`) distinguishes a healthy-but-full volume from a
+    `DeviceFault` (§5.4); every driver's allocator now returns it on
+    exhaustion. Each driver owns a real, parameterised first-party
+    formatter (no `mkfs` shell-out, §12/§2.12): `RustFs::format`,
+    `Fat32::format`, and a new reader-compatible multi-group
+    `Ext4::format` (`drivers/filesystem/ext4/src/format.rs`:
+    `filetype`+`extent`, no checksum/`64bit`, fully-materialised groups).
+    `tests/integration/fs_soak` (`rustos-test-fs-soak`) formats a
+    ≥ 1 GiB `RamBlock` with each formatter and drives one
+    filesystem-agnostic exerciser over the frozen `FilesystemRead`/`Write`
+    ABI — integrity round-trip + remount re-verify + the fail-closed
+    extremes (`NoSpace`/`Busy`/`LengthOutOfRange`). `cargo xtask fssoak`
+    (`--quick`/`--soak`/`--target`/`--secs`/`--list`, mirroring
+    `proptest`) runs one filesystem at a time; `tools/ci/soak.sh`'s new
+    `fssoak` kind (and `all`) fans the three out into parallel jobs, and
+    `soak.yml` runs them nightly. Docs:
+    `docs/src/filesystem/{soak,ext4}.md` + the three driver READMEs.
     **Stage 5 is now complete.**
+
+---
+
+## Stage 5 follow-up — RustFS (native on-disk format evolution)
+
+**Dependencies:** Stage 5 (the VFS policy layer and the frozen
+`Filesystem*` traits) and `lib/crypto`.
+
+**Goal.** Build the native filesystem up to the full RustFS design:
+copy-on-write, **always encrypted**, checksummed, compressed,
+deduplicating, SSD-aware, and recoverable (scrub / check / rescue). There
+is exactly **one** on-disk version — `rustfs` is grown in stages, but the
+driver and its format are a single shipping thing, not a `v1`/`v2` pair
+(the old journaled driver was fully replaced by this copy-on-write design).
+The authoritative implementation spec is `docs/src/filesystem/rustfs-spec.md`; the
+user-facing documentation is `docs/src/filesystem/rustfs.md`. RustFS has
+**one mandatory profile** — every feature is on and not tunable — and **no
+external zstd/compression dependency** (the codec is first-party,
+`AGENTS.md` §2.12); crypto goes through `lib/crypto` only.
+
+**Staged delivery.** Delivered **one stage per session, bottom-up**, in the
+`docs/src/filesystem/rustfs-spec.md` §15 order, behind the existing frozen `FilesystemRead` /
+`FilesystemWrite` / `FilesystemSecurity` / `FilesystemTimestamps` traits so
+the VFS and the shipping `rustfs` driver are never regressed (parallel
+implementations, not a `cfg` collapse — `AGENTS.md` §2.2 carve-out). The
+live next-session prompt is `.junie/next-rustfs-prompt.md`; the status
+legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
+
+1. On-disk headers, superblock ring, transaction roots. ✓ (the
+   copy-on-write `rustfs` driver — self-identifying block headers,
+   four-slot superblock ring, transaction root + inline commit record,
+   COW inode map + file/dir/data blocks — fully replaced the old
+   journaled driver; complete, mountable, and exercised by the unit
+   tests, the 1 GiB soak, the posix suite, the QEMU vertical, and the
+   `fuzz_mount` harness).
+2. COW metadata trees (inode, extent) and free-space rebuild. ✓ (one
+   generic copy-on-write B-tree backs both the inode tree, keyed by inode
+   number — superseding the fixed-cap inode map — and a per-file extent
+   tree, logical block → physical run — superseding the 12-direct +
+   single-indirect map; the transaction root names the inode-tree root and
+   next inode number, the mount-time free-space rebuild walks the trees, and
+   a two-cursor allocator keeps sequential data contiguous; tested for
+   splits/merges across many inodes, many-extent files, contiguous-write
+   collapse, free-space-rebuild equality, crash replay, and the extended
+   `fuzz_mount`).
+3. Metadata authentication/checksums and duplicated critical metadata. ✓
+   (the fast physical checksum became a keyed authenticator — HMAC-SHA256
+   through `lib/crypto` — over identity + payload, and every metadata block
+   is stored in two physical copies, a primary and a companion mirror at
+   `primary + 1`; one read path reads the primary, falls back to the
+   companion, and repairs the bad copy from the good one, while both copies
+   bad fails closed and never panics; tested for bit-flip repair, wrong-key
+   rejection, both-copies-bad fail-closed, crash replay, and the extended
+   `fuzz_mount` authenticated-header / duplicated-copy sweeps).
+4. Encrypted volume creation, key hierarchy, filename/data encryption. ✓
+   (`format`/`open` take a caller-supplied volume key; a per-volume master
+   key is wrapped (AEAD) under a KDF of the volume key through `lib/crypto`
+   — `lib/crypto/src/kdf.rs` — and stored only in wrapped form in the
+   superblock's plaintext discovery region, deriving the
+   metadata-authentication, filename, and content keys; a wrong key refuses
+   the mount with `PermissionDenied`, fail-closed. File data and
+   directory-entry names are encrypted at rest with ChaCha20-Poly1305
+   (28-byte nonce+tag trailer per data/directory block; directory blocks
+   are encrypt-then-MAC), so an encrypted-data/name bit-flip is detected on
+   read. No plaintext layout exists; tested for wrong-key refusal,
+   no-plaintext-at-rest, filename+data remount round-trip, encrypted-data
+   bit-flip detection, crash replay, and the extended `fuzz_mount`
+   encrypted-open sweep.)
+5. Data records with physical checksum and logical hash. ✓ (every
+   file-data block gains a 40-byte data-integrity trailer after the
+   crypto trailer — a logical content hash, SHA-256 of the plaintext
+   through `lib/crypto` (the spec's BLAKE3-256 constant yields to
+   `AGENTS.md` §2.12: use the audited `lib/crypto` hash, no `blake3`
+   crate that does not build cleanly on the bare-metal targets), and a
+   fast first-party FNV-1a physical checksum over the at-rest block; the
+   read path verifies the checksum first (media corruption caught before
+   the AEAD), decrypts, then verifies the logical hash, each layer
+   failing closed and kept internally distinct (`integrity::DataFault`);
+   tested for the three corruption classes each detected distinctly,
+   identical-vs-different logical hash (the Stage 7 dedupe seam), and
+   integrity surviving a remount and a copy-on-write rewrite).
+6. First-party RustOS zstd codec and RustFS compression integration. ✓
+   (a first-party LZ "zstd-fast-style" codec landed as the new `lib/compress`
+   crate — `no_std`, allocation-free, no external zstd/compression dependency
+   per `AGENTS.md` §2.12 / §16.4; `compress`/`decompress` are `Result`-based
+   and panic-free, malformed input returns an error. RustFS wires it into the
+   §6 data-record pipeline: on write `compress → encrypt` with an
+   incompressible record stored **raw** (the §10 adaptive choice), on read
+   `physical checksum → decrypt → decompress → verify logical hash`. A per-
+   block compression descriptor (state + at-rest stored length) sits between
+   the crypto trailer and the logical hash, so the physical checksum covers it;
+   the full content slot is always encrypted so the Stage-4 crypto and Stage-5
+   integrity layers are identical for compressed and raw records and the
+   logical hash still names the plaintext (the Stage 7 dedupe seam is
+   unchanged). Tested: codec round-trip / corpus / known-answer / malformed /
+   incompressible; rustfs incompressible-raw, compressible-shrinks across a
+   remount and COW rewrite, integrity still catching physical + logical
+   corruption on a compressed block; a new `fuzz_compress` decode harness wired
+   into `cargo xtask ci` and the soak.)
+7. Chunk table, refcounts, reverse refs, reflinks, dedupe index. ✓
+   (deduplication is mandatory and exact, keyed on the Stage-5 logical hash:
+   a physical data record — a chunk — may be shared by more than one
+   `(file, logical block)`, but only after a byte-verify confirms the
+   candidate equals the incoming record (a missed duplicate is fine,
+   merging unequal data is corruption). Two copy-on-write trees reuse the
+   one generic `src/btree.rs` and are named by the transaction root: a
+   chunk/refcount tree (physical block → refcount, domain, logical hash,
+   length) and a reverse-reference tree (physical block → `(inode, logical
+   block)` referrers). An unshared block keeps an implicit refcount of one
+   with no tree record; the first share promotes it to refcount 2 and the
+   last drop frees it; shared chunks are immutable so overwriting one
+   sharer copies-on-write and leaves the others intact. `RustFs::reflink`
+   is a COW clone sharing chunks until written. An in-memory dedupe index
+   (`(domain, length, logical hash) → candidate`) is rebuilt from the trees
+   at mount and is never authoritative — every candidate is liveness- and
+   byte-checked before sharing. Dedupe is scoped to the encryption domain
+   (§7), and the pipeline is `dedupe → compress → encrypt`. Tested: identical
+   content sharing one chunk while distinct does not, byte-verify-before-share
+   refusing an injected collision, COW-on-overwrite, reflink, refcount-to-zero
+   freeing with the free-space rebuild agreeing, the index rebuilding at mount,
+   the domain rule, and integrity + compression on a shared chunk; the soak
+   fill switched to distinct per-file content and `fuzz_mount` extended to the
+   chunk/reverse-ref decode.)
+8. Online scrub. ✓ (`RustFs::scrub` is a resumable, interrupt-safe,
+   capability-gated (`CAP_FS_MOUNT`) online verify-and-repair pass —
+   `src/scrub.rs`. It authenticates **both** physical copies of every live
+   metadata block (superblock slot, transaction root, the inode/extent
+   B-trees, the chunk/reverse-reference trees), repairing a bad copy from its
+   good companion (Stage 3 seam) and recording a both-copies-bad block as
+   unrepairable; runs every live data block through the Stage 5/6 pipeline and
+   classifies any fault by its `DataFault` (`Physical`/`Aead`/`Logical`),
+   recording it (deep data repair is later); and recomputes the chunk
+   refcounts + reverse-reference sets from the live extents, correcting a
+   divergence toward that truth without dropping a referrer. A
+   `ScrubBudget::Inodes(n)` call persists a rebuildable scrub-progress record
+   (`BlockType::ScrubProgress`, reached from the transaction root, holding the
+   resume cursor + accumulated counts) and resumes to the identical
+   `ScrubReport`; a crash mid-scrub still mounts (ordinary recovery never needs
+   scrub) and a corrupt progress record restarts the scrub. Scrub reports a
+   structured `ScrubReport` and logs its outcome through `lib/log` with a
+   stable event ID (`12000` range); a clean scrub changes nothing and is
+   idempotent. Tested: clean/idempotent, single-copy metadata repair, data
+   `Physical`/`Logical` classification, refcount + reverse-ref divergence
+   detect-and-correct, resumability matching one pass + crash-mid-scrub
+   remount, shared-chunk-once within the domain, the capability gate, and
+   integrity + compression + dedupe surviving a scrub/remount/COW rewrite;
+   `fuzz_mount` extended to drive the scrub-progress decode.)
+9. Offline check and rescue. ✓ (`RustFs::check` and `RustFs::rescue` —
+   `src/check.rs`. Both reuse the earlier stages' seams rather than
+   re-implementing them (`AGENTS.md` §2.2). `check` is the offline superset of
+   the online scrub, run on a mounted handle and capability-gated
+   (`CAP_FS_MOUNT`): it rebuilds the rebuildable derived state first — the
+   free-space bitmap (§4) and the dedupe index (§9) — from the authoritative
+   trees (the one shared `rebuild_free_space` walk `open` uses), reuses the
+   scrub verification core (`verify_everything`) to verify/repair metadata
+   copies, classify data faults, and reconcile refcounts, validates the
+   directory tree from the root (an entry to a missing inode is a *dangling*
+   finding, reported not auto-deleted), and detects and reclaims orphaned
+   inodes; it returns a structured `CheckReport`, is idempotent, and commits
+   only when it repaired something. `rescue` extracts files from a volume too
+   damaged to mount: read-only on the device (the repair-on-read writes are
+   suppressed) and capability-gated, it recovers the keys from a surviving
+   superblock discovery header, scans every block for a self-identifying
+   transaction root whose commit record validates (`TxnRoot::decode_any`),
+   picks the highest-generation root, maps its inode/extent metadata to files,
+   and extracts the readable data through the Stage 5/6 integrity pipeline,
+   emitting only blocks that pass to a caller-supplied `RescueSink`; it returns
+   a structured `RescueReport`. New `12000`-range event IDs in `src/check.rs`.
+   Tested: clean check sound/idempotent, check rebuilding a corrupt
+   free-space/dedupe derivation with the volume staying mountable, orphan
+   reclaim + refcount-divergence correction while reporting an unrepairable
+   data fault, the check + rescue capability gates, rescue discovering a root
+   and extracting from a wounded superblock ring (read-only/repeatable), and
+   rescue never emitting a block that fails integrity; `fuzz_mount` extended to
+   drive the offline `check` and the `rescue` root-scan / extraction paths.)
+10. TRIM/discard queues and mkfs-time discard. (**DONE** this session: the
+   `Block` ABI gained a versioned discard surface (`discard_capability` /
+   `discard`, an `abi-v1` extension, not a widening of the frozen read/write
+   methods); a device without support is *recorded, not failed*. Freed blocks
+   enter a transient, in-memory **pending-discard queue** as a committed
+   transaction reclaims them (`finish_txn`), reusing the deferred-free
+   machinery (no second free-tracker, §2.2). `RustFs::trim`,
+   capability-gated on `CAP_FS_MOUNT`, discards a queued block only if it is
+   **still free** at trim time (a reallocated or still-dedupe-shared block —
+   refcount ≥ 1 — is marked used by the free-space rebuild and skipped,
+   never discarded: the §11 hard constraint), coalesces still-free blocks
+   into contiguous runs aligned **inward** to the device granularity (edges
+   requeued), and rate-limits to `TRIM_BATCH_RANGES` runs per call. It never
+   assumes a discarded block reads back as zero; there is no `nodiscard` /
+   `trim=off` mode. The queue is rebuildable transient state (§4): a crash
+   mid-trim drops it, the volume remounts cleanly, no live data lost.
+   `trim` returns a structured `TrimReport` and logs its outcome with a
+   stable `12000`-range event ID (`src/discard.rs`); `format` issues a
+   full-range discard on a discard-capable device before laying down the
+   encrypted structures. The mock/virtio-blk block devices implement the
+   surface. Tested: the capability gate, unsupported-device queue drain
+   (recorded-not-failed), contiguous-run coalescing, inward alignment with
+   edge requeue, per-request-cap splitting, batch rate-limiting draining
+   over passes, a reallocated and a still-dedupe-shared block never
+   discarded, the transient queue dropping across a crash with no live data
+   lost, and mkfs full-range discard (recorded-not-failed without support).)
+11. Device-health baselines and health-triggered scrub. (**DONE** this
+   session: the `Block` ABI gained a versioned `device_health()` surface
+   (`DeviceHealth::Available(HealthSnapshot)` of SMART/NVMe-style counters, or
+   `Unavailable` — *recorded, not failed*, default `Unavailable`), an `abi-v1`
+   extension alongside the discard surface. A self-identifying
+   `BlockType::HealthBaseline` block reached from the transaction root (like the
+   Stage-8 scrub-progress record) **persists** the last clean device snapshot
+   plus the volume's accumulated filesystem-observed fault counters — metadata
+   copy-repairs/unrepairable (Stage-3 seam) and per-class `DataFault`s (Stage-5
+   seam); both are persisted, not rebuildable, because a repaired transient
+   fault leaves no trace in the live trees (§4). `format` stores the initial
+   baseline; a crash mid-update leaves the previous committed baseline selected
+   (§14). `RustFs::health` (`src/health.rs`), capability-gated on
+   `CAP_FS_MOUNT`, reads the current telemetry, classifies the volume against
+   the documented `HealthThresholds::DEFAULT` (`Healthy`/`Degraded`/`Failing`,
+   worse of device + filesystem signals, no magic numbers, §2.1), and — when
+   the device's unsafe-shutdown (metadata scrub) or media-error (deep scrub)
+   counter has risen since the baseline — **triggers a scrub** through the
+   Stage-8 machinery (no parallel verifier, §2.2), folding its findings into the
+   counters; it stores the new baseline, returns a structured `HealthReport`,
+   and logs with `12000`-range event IDs (`src/health.rs`). Tested: the
+   capability gate, a no-telemetry device still classifying and persisting a
+   baseline surviving a remount, healthy → degraded → failing as media errors
+   climb, an unsafe-shutdown delta triggering a scrub (advanced baseline
+   triggers no further scrub), and the persisted baseline surviving a crash at
+   every write count with no live data lost; `fuzz_mount` extended to report
+   telemetry and drive the health-baseline decode path.)
+12. Fuzz, proptest, crash-replay, and corruption-injection suites.
+
+**Docs**
+- `docs/src/filesystem/rustfs.md` (the single native-filesystem page; the
+  separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
+  stage expands it with what actually landed.
+
+**Status: Stages 1–11 complete; Stage 12 planned.** The copy-on-write
+`rustfs` driver replaced the old journaled implementation outright (no
+`v1` folder, no parallel version): self-identifying block headers, the
+four-slot superblock ring, transaction root + inline commit record, and a
+copy-on-write inode map backing the full POSIX read/write/security/
+timestamp surface. It passes its unit tests, the 1 GiB `fssoak`, the
+posix suite, the rustfs-over-virtio-blk QEMU vertical, and the
+`fuzz_mount` metadata-decode harness. Each subsequent session ticks its
+stage here and in `docs/src/filesystem/rustfs-spec.md` §18.
 
 ---
 

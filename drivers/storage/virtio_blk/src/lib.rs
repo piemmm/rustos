@@ -34,7 +34,7 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
-use rustos_abi::driver::block::{Block, BlockGeometry};
+use rustos_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use rustos_virtio::{
@@ -65,6 +65,9 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 mod wire {
     pub const VIRTIO_BLK_T_IN: u32 = 0;
     pub const VIRTIO_BLK_T_OUT: u32 = 1;
+    /// Discard request type (virtio 1.1 §5.2.6, requires
+    /// [`VIRTIO_BLK_F_DISCARD`]).
+    pub const VIRTIO_BLK_T_DISCARD: u32 = 11;
     /// `struct virtio_blk_req` header size: type(4) + reserved(4) + sector(8).
     pub const HEADER_LEN: usize = 16;
     pub const STATUS_LEN: usize = 1;
@@ -75,6 +78,23 @@ mod wire {
     /// Sector size, fixed in `abi-v1` Stage 4. `VIRTIO_BLK_F_BLK_SIZE`
     /// extended-feature negotiation is deferred to Stage 5.
     pub const SECTOR_SIZE: u32 = 512;
+
+    /// `VIRTIO_BLK_F_DISCARD` feature bit (virtio 1.1 §5.2.3): the
+    /// device supports the discard command.
+    pub const VIRTIO_BLK_F_DISCARD: u64 = 1 << 13;
+    /// Device-config byte offset of `max_discard_sectors` (le32): the
+    /// most 512-byte sectors a single discard command may cover.
+    /// (`struct virtio_blk_config`: `capacity(8) size_max(4) seg_max(4)
+    /// geometry(4) blk_size(4) topology(8) writeback(1) unused(1)
+    /// num_queues(2)` = 36.)
+    pub const CONFIG_MAX_DISCARD_SECTORS_OFFSET: usize = 36;
+    /// Device-config byte offset of `discard_sector_alignment` (le32):
+    /// the discard alignment/granularity in 512-byte sectors
+    /// (`max_discard_sectors`(4) + `max_discard_seg`(4) after offset 36).
+    pub const CONFIG_DISCARD_SECTOR_ALIGNMENT_OFFSET: usize = 44;
+    /// Size of one `struct virtio_blk_discard_write_zeroes`:
+    /// `sector(8) + num_sectors(4) + flags(4)`.
+    pub const DISCARD_DESCRIPTOR_LEN: usize = 16;
 }
 
 /// Block device backed by a cross-arch virtio transport.
@@ -91,6 +111,18 @@ pub struct VirtioBlk<'h, T: Transport> {
     host: &'h dyn VirtioHost,
     block_size: u32,
     block_count: u64,
+    /// Whether `VIRTIO_BLK_F_DISCARD` was negotiated at `open` and the
+    /// device's discard limits read from its config window.
+    discard: DiscardLimits,
+}
+
+/// Negotiated discard limits, or `unsupported` when the device did not
+/// offer `VIRTIO_BLK_F_DISCARD`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct DiscardLimits {
+    supported: bool,
+    granularity_blocks: u64,
+    max_blocks_per_request: u64,
 }
 
 impl<'h, T: Transport> VirtioBlk<'h, T> {
@@ -114,8 +146,18 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         transport.set_status(status);
         status = status.with(Status::DRIVER);
         transport.set_status(status);
-        let _device_features = transport.device_features();
-        transport.set_driver_features(0);
+        // Accept only the features we implement. `VIRTIO_BLK_F_DISCARD`
+        // is the sole extended feature negotiated; everything else is
+        // declined so the driver never claims behaviour it does not
+        // honour (`AGENTS.md` §2.1).
+        let device_features = transport.device_features();
+        let discard_offered = device_features & wire::VIRTIO_BLK_F_DISCARD != 0;
+        let driver_features = if discard_offered {
+            wire::VIRTIO_BLK_F_DISCARD
+        } else {
+            0
+        };
+        transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
         if !transport.status().contains(Status::FEATURES_OK) {
@@ -128,12 +170,34 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         let mut cap = [0u8; 8];
         transport.read_config(wire::CONFIG_CAPACITY_OFFSET, &mut cap);
         let capacity_sectors = u64::from_le_bytes(cap);
+        let discard = if discard_offered {
+            let mut max = [0u8; 4];
+            transport.read_config(wire::CONFIG_MAX_DISCARD_SECTORS_OFFSET, &mut max);
+            let mut align = [0u8; 4];
+            transport.read_config(wire::CONFIG_DISCARD_SECTOR_ALIGNMENT_OFFSET, &mut align);
+            // A sector is one logical block here (block_size == 512). An
+            // alignment of zero means "no alignment requirement"; the
+            // capability granularity is always at least one block.
+            let granularity_blocks = u64::from(u32::from_le_bytes(align)).max(1);
+            DiscardLimits {
+                supported: true,
+                granularity_blocks,
+                max_blocks_per_request: u64::from(u32::from_le_bytes(max)),
+            }
+        } else {
+            DiscardLimits {
+                supported: false,
+                granularity_blocks: 0,
+                max_blocks_per_request: 0,
+            }
+        };
         Ok(Self {
             transport,
             queue,
             host,
             block_size: wire::SECTOR_SIZE,
             block_count: capacity_sectors,
+            discard,
         })
     }
 
@@ -303,6 +367,50 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
             payload.fill(0);
         }
         result
+    }
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(if self.discard.supported {
+            DiscardCapability {
+                supported: true,
+                granularity_blocks: self.discard.granularity_blocks,
+                max_blocks_per_request: self.discard.max_blocks_per_request,
+            }
+        } else {
+            DiscardCapability::unsupported()
+        })
+    }
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        if !self.discard.supported {
+            return Err(DriverError::Unsupported);
+        }
+        if blocks == 0 {
+            return Ok(());
+        }
+        let end = lba
+            .checked_add(blocks)
+            .ok_or(DriverError::LengthOutOfRange)?;
+        if end > self.block_count {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        if self.discard.max_blocks_per_request != 0 && blocks > self.discard.max_blocks_per_request
+        {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        // One `struct virtio_blk_discard_write_zeroes`: sector(8) +
+        // num_sectors(4) + flags(4). The device reads it; the request
+        // carries no caller data, so it is never sensitive.
+        let num_sectors = u32::try_from(blocks).map_err(|_| DriverError::LengthOutOfRange)?;
+        let mut descriptor = [0u8; wire::DISCARD_DESCRIPTOR_LEN];
+        descriptor[0..8].copy_from_slice(&lba.to_le_bytes());
+        descriptor[8..12].copy_from_slice(&num_sectors.to_le_bytes());
+        // flags [12..16] stay zero: no UNMAP flag in `abi-v1`.
+        self.run_request(
+            wire::VIRTIO_BLK_T_DISCARD,
+            0,
+            &mut descriptor,
+            true,
+            BufferClass::NonSensitive,
+        )
     }
 }
 

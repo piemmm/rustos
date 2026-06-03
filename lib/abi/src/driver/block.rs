@@ -18,6 +18,109 @@ pub struct BlockGeometry {
     pub block_count: u64,
 }
 
+/// Discard (TRIM/unmap) capability a block device reports through
+/// [`Block::discard_capability`].
+///
+/// Discard tells the device a range of logical blocks no longer holds
+/// useful data, letting flash/thin-provisioned backends reclaim it.
+/// It is an *advisory* hint: a caller must never assume a discarded
+/// block reads back as zero (`docs/src/filesystem/rustfs-spec.md`
+/// §11). A device that does not support discard reports
+/// [`DiscardCapability::unsupported`]; such a device is *recorded, not
+/// failed* by the caller (§11).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DiscardCapability {
+    /// Whether the device implements discard at all.
+    pub supported: bool,
+    /// Discard alignment/granularity, in logical blocks. A discard
+    /// request's start LBA and block count must each be a multiple of
+    /// this value; the caller aligns its ranges inward to satisfy it.
+    /// Always `>= 1` when [`supported`](Self::supported) is `true`.
+    pub granularity_blocks: u64,
+    /// Largest number of logical blocks a single
+    /// [`Block::discard`] call may cover. `0` means the device imposes
+    /// no per-request limit (the caller still bounds requests by
+    /// [`BlockGeometry::block_count`]).
+    pub max_blocks_per_request: u64,
+}
+
+impl DiscardCapability {
+    /// The capability a device that does **not** support discard
+    /// reports. The default [`Block::discard_capability`]
+    /// implementation returns this.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self {
+            supported: false,
+            granularity_blocks: 0,
+            max_blocks_per_request: 0,
+        }
+    }
+}
+
+/// A point-in-time device-health snapshot, modelled on the `SMART` / `NVMe`
+/// telemetry a storage device exposes
+/// (`docs/src/filesystem/rustfs-spec.md` §11).
+///
+/// A filesystem uses it to decide *when* maintenance (a scrub) is worth
+/// running and whether a device is degrading, by comparing successive
+/// snapshots against a stored baseline. Every counter is monotonic over a
+/// device's lifetime, so a later snapshot minus an earlier one is the
+/// activity in between.
+///
+/// A device that exposes no health telemetry reports
+/// [`DeviceHealth::Unavailable`] rather than a zeroed snapshot, so an
+/// absence of data is never mistaken for a perfectly-healthy device
+/// (§11 — *recorded, not failed*).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HealthSnapshot {
+    /// Cumulative powered-on time, in hours. Informational.
+    pub power_on_hours: u64,
+    /// Cumulative count of unsafe / unexpected shutdowns. A rise since the
+    /// last clean baseline is what schedules a metadata scrub (§11).
+    pub unsafe_shutdowns: u64,
+    /// Cumulative media / data-integrity errors the device itself detected.
+    /// A rise since the baseline is what schedules a deep scrub (§11).
+    pub media_errors: u64,
+    /// Cumulative reallocated sectors (ATA) / relocated blocks.
+    pub reallocated_sectors: u64,
+    /// Cumulative sectors pending reallocation.
+    pub pending_sectors: u64,
+    /// Cumulative uncorrectable sectors / blocks.
+    pub uncorrectable_sectors: u64,
+    /// Cumulative interface CRC errors.
+    pub crc_errors: u64,
+    /// Wear indicator: estimated percentage of rated endurance used. `NVMe`
+    /// may report values above `100`, so this is not clamped.
+    pub percentage_used: u16,
+    /// Remaining spare capacity, as a percentage (`0..=100`). A low value
+    /// is a strong failing signal.
+    pub available_spare: u16,
+    /// Composite device temperature, in kelvin. Informational.
+    pub temperature_kelvin: u16,
+    /// `true` when the device itself asserts a critical-health warning
+    /// (e.g. an `NVMe` critical-warning bit). The strongest failing signal.
+    pub critical_warning: bool,
+}
+
+/// The health a block device reports through [`Block::device_health`].
+///
+/// Either the device exposes telemetry ([`DeviceHealth::Available`]) or it
+/// does not ([`DeviceHealth::Unavailable`]). The two states are kept
+/// distinct so a caller never confuses "no data" with "all counters zero"
+/// (`docs/src/filesystem/rustfs-spec.md` §11). A device without telemetry
+/// is *recorded, not failed*: the filesystem's health subsystem stays
+/// enabled regardless.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeviceHealth {
+    /// The device exposes no health telemetry.
+    Unavailable,
+    /// A health snapshot read from the device's telemetry.
+    Available(HealthSnapshot),
+}
+
 /// Trait every block driver implements.
 ///
 /// # Capabilities
@@ -148,6 +251,86 @@ pub trait Block {
     ) -> Result<(), DriverError> {
         let _ = class;
         self.write_blocks(lba, buf)
+    }
+
+    /// Report the device's discard (TRIM/unmap) capability.
+    ///
+    /// Reporting capability is non-destructive and never fails on a
+    /// healthy device. The default implementation reports
+    /// [`DiscardCapability::unsupported`]; a driver whose backend
+    /// supports discard overrides it. A device without discard support
+    /// is *recorded, not failed* by the caller
+    /// (`docs/src/filesystem/rustfs-spec.md` §11), so this method does
+    /// not error merely because discard is unavailable.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the underlying hardware could
+    ///   not be queried.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(DiscardCapability::unsupported())
+    }
+
+    /// Discard `blocks` logical blocks starting at `lba`, telling the
+    /// device the range no longer holds useful data.
+    ///
+    /// Discard is advisory: it neither reads nor writes caller data and
+    /// the caller must never assume the range reads back as zero
+    /// afterwards (`docs/src/filesystem/rustfs-spec.md` §11). The caller
+    /// is responsible for aligning `lba` and `blocks` to the
+    /// granularity reported by [`Self::discard_capability`] and for
+    /// keeping `blocks` within
+    /// [`DiscardCapability::max_blocks_per_request`].
+    ///
+    /// The default implementation returns [`DriverError::Unsupported`];
+    /// a driver whose backend supports discard overrides it.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the device does not support
+    ///   discard.
+    /// * [`DriverError::LengthOutOfRange`] if `lba` or the implied
+    ///   end-LBA exceeds [`BlockGeometry::block_count`].
+    /// * [`DriverError::DeviceFault`] on hardware I/O failure.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        let _ = (lba, blocks);
+        Err(DriverError::Unsupported)
+    }
+
+    /// Report the device's current health telemetry
+    /// (`docs/src/filesystem/rustfs-spec.md` §11).
+    ///
+    /// Reading health is non-destructive and never fails on a healthy
+    /// device. The default implementation reports
+    /// [`DeviceHealth::Unavailable`]; a driver whose backend exposes
+    /// `SMART` / `NVMe`-style telemetry overrides it. A device without
+    /// telemetry is *recorded, not failed* by the caller (§11), so this
+    /// method does not error merely because health data is unavailable.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the underlying hardware could
+    ///   not be queried.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(DeviceHealth::Unavailable)
     }
 }
 
@@ -369,6 +552,148 @@ mod tests {
             .is_ok());
         assert!(!dev.scrubbed_after_last_call);
         assert!(dev.staging.contains(&0xAA));
+    }
+
+    #[test]
+    fn default_discard_surface_reports_unsupported() {
+        let mut dev = MockBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            store: [0u8; 1024],
+        };
+        assert_eq!(
+            dev.discard_capability(),
+            Ok(DiscardCapability::unsupported())
+        );
+        assert_eq!(dev.discard(0, 4), Err(DriverError::Unsupported));
+    }
+
+    /// A `Block` device that supports discard and records the ranges it
+    /// was asked to discard into a fixed-size log (`lib/abi` performs no
+    /// allocation). Mirrors the contract a real flash/thin backend would
+    /// honour and is the shape the `RustFS` trim tests assert against.
+    struct RecordingDiscardBlock {
+        geo: BlockGeometry,
+        granularity: u64,
+        discarded: [(u64, u64); 4],
+        recorded: usize,
+    }
+
+    impl Block for RecordingDiscardBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(self.geo)
+        }
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+            Ok(DiscardCapability {
+                supported: true,
+                granularity_blocks: self.granularity,
+                max_blocks_per_request: 0,
+            })
+        }
+        fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+            let end = lba.saturating_add(blocks);
+            if end > self.geo.block_count {
+                return Err(DriverError::LengthOutOfRange);
+            }
+            if self.recorded < self.discarded.len() {
+                self.discarded[self.recorded] = (lba, blocks);
+                self.recorded += 1;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recording_discard_block_reports_and_records() {
+        let mut dev = RecordingDiscardBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            granularity: 2,
+            discarded: [(0, 0); 4],
+            recorded: 0,
+        };
+        assert_eq!(
+            dev.discard_capability(),
+            Ok(DiscardCapability {
+                supported: true,
+                granularity_blocks: 2,
+                max_blocks_per_request: 0,
+            })
+        );
+        assert!(dev.discard(4, 4).is_ok());
+        assert_eq!(dev.discard(14, 4), Err(DriverError::LengthOutOfRange));
+        assert_eq!(dev.recorded, 1);
+        assert_eq!(dev.discarded[0], (4, 4));
+    }
+
+    /// A `Block` device that exposes a fixed health snapshot, mirroring the
+    /// shape a real `SMART` / `NVMe` backend would report and the form the
+    /// `RustFS` health tests assert against.
+    struct HealthyBlock {
+        geo: BlockGeometry,
+        snapshot: HealthSnapshot,
+    }
+
+    impl Block for HealthyBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(self.geo)
+        }
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+            Ok(DeviceHealth::Available(self.snapshot))
+        }
+    }
+
+    #[test]
+    fn default_health_surface_reports_unavailable() {
+        let dev = MockBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            store: [0u8; 1024],
+        };
+        assert_eq!(dev.device_health(), Ok(DeviceHealth::Unavailable));
+    }
+
+    #[test]
+    fn health_block_reports_its_snapshot() {
+        let snapshot = HealthSnapshot {
+            power_on_hours: 1234,
+            unsafe_shutdowns: 3,
+            media_errors: 7,
+            reallocated_sectors: 1,
+            pending_sectors: 0,
+            uncorrectable_sectors: 2,
+            crc_errors: 0,
+            percentage_used: 42,
+            available_spare: 88,
+            temperature_kelvin: 310,
+            critical_warning: false,
+        };
+        let dev = HealthyBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            snapshot,
+        };
+        assert_eq!(dev.device_health(), Ok(DeviceHealth::Available(snapshot)));
     }
 
     #[test]

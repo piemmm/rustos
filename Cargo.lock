@@ -147,6 +147,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -217,6 +218,15 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -531,6 +541,10 @@ name = "rustos-collections"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-compress"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-cp"
 version = "0.0.0"
 dependencies = [
@@ -543,6 +557,7 @@ version = "0.0.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
+ "hmac",
  "sha2",
 ]
 
@@ -627,6 +642,9 @@ name = "rustos-drv-fs-rustfs"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-compress",
+ "rustos-crypto",
+ "rustos-log",
 ]
 
 [[package]]
@@ -1073,6 +1091,16 @@ dependencies = [
  "rustos-log",
  "rustos-test-riscv64-boot",
  "rustos-util",
+]
+
+[[package]]
+name = "rustos-test-fs-soak"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-fs-ext4",
+ "rustos-drv-fs-fat32",
+ "rustos-drv-fs-rustfs",
 ]
 
 [[package]]

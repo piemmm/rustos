@@ -125,6 +125,11 @@ version = "0.2.17"
 sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 
 [[source-pin]]
+name = "hmac"
+version = "0.12.1"
+sha256 = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+
+[[source-pin]]
 name = "inout"
 version = "0.1.4"
 sha256 = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"

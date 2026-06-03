@@ -993,7 +993,7 @@ fn create_exhausts_the_free_inodes() {
         .expect("second");
     assert_eq!(
         fs.create(root, b"three", NodeKind::RegularFile),
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     );
 }
 
@@ -1267,4 +1267,223 @@ fn security_decodes_an_inline_posix_acl_from_the_inode_body() {
             },
         ]
     );
+}
+
+// --- First-party formatter (`Ext4::format`). ---
+
+/// Logical-block (sector) size of the configurable in-memory device the
+/// formatter tests run against.
+const FMT_SECTOR: usize = 512;
+
+/// 8 MiB in 512-byte sectors: a single block group at the 1024-byte
+/// filesystem block size the formatter picks for sub-64-MiB volumes.
+const ONE_GROUP_SECTORS: u64 = (8 * 1024 * 1024 / FMT_SECTOR) as u64;
+
+/// 16 MiB in 512-byte sectors: two block groups at the 1024-byte block
+/// size (`blocks_per_group = 8 * 1024 = 8192` blocks = 8 MiB each).
+const TWO_GROUP_SECTORS: u64 = (16 * 1024 * 1024 / FMT_SECTOR) as u64;
+
+/// A zero-initialised, `Vec`-backed [`Block`] device of a configurable
+/// size, for exercising [`Ext4::format`] on volumes larger than the
+/// fixed read fixture.
+struct SizedBlock {
+    data: Vec<u8>,
+}
+
+impl SizedBlock {
+    fn new(sectors: u64) -> Self {
+        let len = usize::try_from(sectors).expect("fits") * FMT_SECTOR;
+        Self {
+            data: vec![0u8; len],
+        }
+    }
+
+    fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
+        if len == 0 || len % FMT_SECTOR != 0 {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let start = usize::try_from(lba)
+            .map_err(|_| DriverError::LengthOutOfRange)?
+            .saturating_mul(FMT_SECTOR);
+        let end = start
+            .checked_add(len)
+            .ok_or(DriverError::LengthOutOfRange)?;
+        if end > self.data.len() {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        Ok((start, end))
+    }
+}
+
+impl Block for SizedBlock {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(BlockGeometry {
+            block_size: u32c(FMT_SECTOR),
+            block_count: (self.data.len() / FMT_SECTOR) as u64,
+        })
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let (start, end) = self.span(lba, buf.len())?;
+        buf.copy_from_slice(&self.data[start..end]);
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let (start, end) = self.span(lba, buf.len())?;
+        self.data[start..end].copy_from_slice(buf);
+        Ok(())
+    }
+}
+
+/// A three-byte file name `f<NN>` for the inode-exhaustion test.
+fn nth_name(i: usize) -> [u8; 3] {
+    [b'f', b'0' + u8c(i / 10), b'0' + u8c(i % 10)]
+}
+
+/// Per-file size cap when filling the data region, in bytes. Kept well
+/// below the classic block-map reach (12 direct + one single-indirect
+/// block, i.e. ~268 KiB at the 1024-byte block size), since
+/// [`FilesystemWrite::create`] lays files down with the classic map.
+const FILL_FILE_CAP: u64 = 256 * 1024;
+
+/// Fill the volume's data region by creating bounded-size files until an
+/// allocation reports [`DriverError::NoSpace`], returning the total
+/// number of data bytes successfully written. Any other error is a
+/// driver defect and panics the test.
+fn fill_to_no_space(fs: &mut Ext4<SizedBlock>, root: NodeId) -> u64 {
+    let chunk = [0xABu8; 4096];
+    let mut total = 0u64;
+    let mut idx = 0usize;
+    'outer: loop {
+        let name = nth_name(idx);
+        match fs.create(root, &name, NodeKind::RegularFile) {
+            Ok(_) => {}
+            Err(DriverError::NoSpace) => break,
+            Err(e) => panic!("unexpected create error: {e:?}"),
+        }
+        idx += 1;
+        assert!(idx < 100, "exhausted test file names before filling");
+        let mut size = 0u64;
+        while size < FILL_FILE_CAP {
+            match fs.write_at(root, &name, size, &chunk) {
+                Ok(n) => {
+                    size += n as u64;
+                    total += n as u64;
+                }
+                Err(DriverError::NoSpace) => break 'outer,
+                Err(e) => panic!("unexpected write error: {e:?}"),
+            }
+        }
+    }
+    total
+}
+
+#[test]
+fn format_rejects_a_device_too_small_for_one_group() {
+    // 1 MiB cannot host even a single 8-MiB (1024-byte block) group.
+    let sectors = 1024 * 1024 / FMT_SECTOR as u64;
+    assert_eq!(
+        Ext4::format(SizedBlock::new(sectors), 64).err(),
+        Some(DriverError::OutOfRange)
+    );
+}
+
+#[test]
+fn format_rejects_a_zero_inode_budget() {
+    assert_eq!(
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 0).err(),
+        Some(DriverError::OutOfRange)
+    );
+}
+
+#[test]
+fn format_produces_a_mountable_empty_volume() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    assert_eq!(fs.node_info(root).expect("info").kind, NodeKind::Directory);
+    // A freshly formatted root has no children (only `.`/`..`, which the
+    // reader does not surface).
+    let mut name = [0u8; 64];
+    assert_eq!(fs.read_dir(root, 0, &mut name), Ok(None));
+}
+
+#[test]
+fn format_create_write_read_roundtrips_across_a_remount() {
+    let body = b"a fresh ext4 volume, formatted in RustOS\n";
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"hello.txt", 0, body), Ok(body.len()));
+
+    // Remount from the same device and read the file back.
+    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    assert_eq!(fs.node_info(file).expect("info").size, body.len() as u64);
+    let mut buf = [0u8; 64];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], body);
+}
+
+#[test]
+fn format_data_region_fills_to_no_space_then_recovers() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256).expect("format");
+    let root = fs.root();
+    let written = fill_to_no_space(&mut fs, root);
+    assert!(written > 0, "expected to write at least one block");
+
+    // The full volume is still consistent: an early file reads back its
+    // first block intact.
+    let file = fs.lookup(root, &nth_name(0)).expect("found");
+    let mut buf = [0u8; 4096];
+    assert_eq!(fs.read_at(file, 0, &mut buf), Ok(4096));
+    assert!(buf.iter().all(|&b| b == 0xAB));
+
+    // Freeing space lets allocation resume (NoSpace is not terminal):
+    // removing a file frees its blocks, after which a write succeeds.
+    fs.remove(root, &nth_name(0)).expect("remove");
+    fs.create(root, b"after", NodeKind::RegularFile)
+        .expect("create after free");
+    let chunk = [0x11u8; 4096];
+    assert_eq!(fs.write_at(root, b"after", 0, &chunk), Ok(chunk.len()));
+}
+
+#[test]
+fn format_inode_table_fills_to_no_space() {
+    // 16 inodes per group, 10 reserved (1..=10) → exactly 6 usable.
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 16).expect("format");
+    let root = fs.root();
+    let mut created = 0usize;
+    loop {
+        let name = nth_name(created);
+        match fs.create(root, &name, NodeKind::RegularFile) {
+            Ok(_) => created += 1,
+            Err(DriverError::NoSpace) => break,
+            Err(e) => panic!("unexpected error exhausting inodes: {e:?}"),
+        }
+        assert!(created <= 64, "inode table never reported full");
+    }
+    assert_eq!(created, 6);
+}
+
+#[test]
+fn format_spans_multiple_block_groups() {
+    let mut fs = Ext4::format(SizedBlock::new(TWO_GROUP_SECTORS), 1024).expect("format");
+    let root = fs.root();
+    let written = fill_to_no_space(&mut fs, root);
+    // One block group holds 8 MiB of data blocks; writing past that
+    // proves the allocator crossed into the second block group.
+    assert!(
+        written > 8 * 1024 * 1024,
+        "expected a multi-group fill, only wrote {written} bytes"
+    );
+
+    // Remount and confirm an early file survives, including a block in
+    // the second group's address range.
+    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let file = fs.lookup(fs.root(), &nth_name(0)).expect("found");
+    let mut buf = [0u8; 4096];
+    assert_eq!(fs.read_at(file, 0, &mut buf), Ok(4096));
+    assert!(buf.iter().all(|&b| b == 0xAB));
 }
