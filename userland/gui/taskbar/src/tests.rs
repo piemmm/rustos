@@ -666,6 +666,125 @@ fn renderer_reuses_cached_glyphs_across_frames_and_retints_on_theme_switch() {
     );
 }
 
+// ---- notification icon sets -----------------------------------------
+
+/// An in-memory [`IconAssetSource`] mapping a kind to authored SVG bytes,
+/// standing in for the on-disk `/System/Graphics` set in tests (`AGENTS.md`
+/// §7).
+struct MemoryIcons {
+    network: Option<&'static [u8]>,
+}
+
+impl rustos_icon::IconAssetSource for MemoryIcons {
+    fn asset(&self, kind: rustos_icon::IconKind) -> Option<&[u8]> {
+        match kind {
+            rustos_icon::IconKind::Network => self.network,
+            _ => None,
+        }
+    }
+}
+
+/// A square SVG glyph filled with a vivid green that matches no theme role,
+/// so a loaded asset is distinguishable from any built-in tint.
+const GREEN_SVG: &[u8] = br##"<svg viewBox="0 0 10 10">
+  <polygon points="0,0 10,0 10,10 0,10" fill="#10ff20"/>
+</svg>"##;
+
+#[test]
+fn loaded_icon_set_draws_its_authored_colours_not_the_theme_tint() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.notifications_mut().add(IconId(1), "icon.network");
+    let layout = bar.layout();
+    let slot = layout.notifications[0];
+
+    let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
+        network: Some(GREEN_SVG),
+    });
+    assert!(
+        set.is_loaded(rustos_icon::IconKind::Network),
+        "the network asset decoded"
+    );
+
+    let mut renderer = TaskbarRenderer::new();
+    renderer.set_icons(set);
+    let surface = renderer.render(&bar, &theme).expect("bar renders");
+
+    let green = Color::rgb(0x10, 0xff, 0x20).premultiply();
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, green),
+        "the loaded SVG glyph keeps its authored colour"
+    );
+    assert!(
+        !region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
+        "an authored asset is not re-tinted to the theme's muted role"
+    );
+}
+
+#[test]
+fn icon_kind_absent_from_a_loaded_set_falls_back_to_the_built_in_glyph() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    // The volume kind is not in the source, so it falls back to the tinted
+    // built-in glyph even though the set loaded other kinds.
+    bar.notifications_mut().add(IconId(1), "icon.volume");
+    let layout = bar.layout();
+    let slot = layout.notifications[0];
+
+    let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
+        network: Some(GREEN_SVG),
+    });
+    assert!(
+        !set.is_loaded(rustos_icon::IconKind::Volume),
+        "the volume kind has no asset"
+    );
+
+    let mut renderer = TaskbarRenderer::new();
+    renderer.set_icons(set);
+    let surface = renderer.render(&bar, &theme).expect("bar renders");
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
+        "a kind absent from the loaded set keeps its tinted built-in glyph"
+    );
+}
+
+#[test]
+fn installing_a_set_invalidates_the_glyph_cache() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.notifications_mut().add(IconId(1), "icon.network");
+    let layout = bar.layout();
+    let slot = layout.notifications[0];
+
+    let mut renderer = TaskbarRenderer::new();
+    // First frame uses the built-in glyph: the muted tint shows, the authored
+    // green cannot.
+    let before = renderer.render(&bar, &theme).expect("bar renders");
+    let green = Color::rgb(0x10, 0xff, 0x20).premultiply();
+    assert!(
+        region_has_pixel(&before, layout.bar, slot, role(palette.on_surface_muted)),
+        "the built-in glyph paints the muted role first"
+    );
+    assert!(
+        !region_has_pixel(&before, layout.bar, slot, green),
+        "no authored colour before a set is installed"
+    );
+
+    // Installing a loaded set bumps the cache generation, so the next frame
+    // re-rasterises from the new set rather than reusing the cached built-in.
+    renderer.set_icons(rustos_icon::IconSet::from_assets(&MemoryIcons {
+        network: Some(GREEN_SVG),
+    }));
+    let after = renderer.render(&bar, &theme).expect("bar renders");
+    assert!(
+        region_has_pixel(&after, layout.bar, slot, green),
+        "after install the cache is invalidated and the loaded glyph draws"
+    );
+}
+
 // ---- text rendering -------------------------------------------------
 
 #[test]

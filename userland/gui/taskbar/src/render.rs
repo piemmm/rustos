@@ -21,7 +21,7 @@
 
 use rustos_font::BitmapFont;
 use rustos_geometry::{Point, Rect};
-use rustos_icon::{builtin_icon, IconKind};
+use rustos_icon::{IconKind, IconSet};
 use rustos_raster::{Color, RasterCache, Surface};
 use rustos_theme::{Palette, Theme};
 
@@ -38,10 +38,22 @@ const LABEL_PADDING: u32 = 4;
 const ICON_PADDING: u32 = 4;
 
 /// The epoch a cached notification glyph is valid for: the tint it is drawn
-/// in paired with the pixel side it is rasterised to. A theme change moves
-/// the tint on and a scale change moves the side on, and either invalidates
-/// every cached glyph (`AGENTS.md` §10).
-type IconEpoch = (Color, u32);
+/// in, the pixel side it is rasterised to, and the generation of the active
+/// [`IconSet`]. A theme change moves the tint on, a scale change moves the
+/// side on, and installing a different icon set moves the generation on — any
+/// of the three invalidates every cached glyph (`AGENTS.md` §10).
+type IconEpoch = (Color, u32, u64);
+
+/// Everything [`draw_icon`] needs to resolve and cache a notification glyph:
+/// the across-frame glyph cache, the active icon set, and the set's
+/// generation (part of the cache epoch, so installing a new set invalidates
+/// the cached glyphs). Bundled so the painters take one parameter rather than
+/// three (`AGENTS.md` §2.3).
+struct IconContext<'a> {
+    cache: &'a mut RasterCache<IconKind, Surface, IconEpoch>,
+    set: &'a IconSet,
+    generation: u64,
+}
 
 /// Paints a taskbar into a [`Surface`], caching the rasterised notification
 /// glyphs so each is converted only once per tint and size (`AGENTS.md` §10).
@@ -55,15 +67,43 @@ type IconEpoch = (Color, u32);
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarRenderer {
     icons: RasterCache<IconKind, Surface, IconEpoch>,
+    icon_set: IconSet,
+    icon_generation: u64,
 }
 
 impl TaskbarRenderer {
-    /// A renderer with an empty glyph cache.
+    /// A renderer with an empty glyph cache drawing the built-in icon set.
+    ///
+    /// The desktop has a complete icon set before any on-disk SVG asset loads;
+    /// [`set_icons`](Self::set_icons) swaps a loaded set in at runtime.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             icons: RasterCache::new(),
+            icon_set: IconSet::builtin(),
+            icon_generation: 0,
         }
+    }
+
+    /// Install a loaded notification-icon set, replacing the one in use.
+    ///
+    /// The set is the decoded on-disk SVG assets (`IconSet::from_assets`),
+    /// each kind keeping its authored colours, with a built-in fallback for
+    /// any kind the assets omit (`AGENTS.md` §10/§2.9). Installing a set bumps
+    /// an internal generation that is part of the glyph-cache epoch, so the
+    /// next render discards the previously rasterised glyphs and re-rasterises
+    /// from the new set (`AGENTS.md` §2.2). The generation saturates rather
+    /// than wrapping (`AGENTS.md` §2.9).
+    pub fn set_icons(&mut self, set: IconSet) {
+        self.icon_set = set;
+        self.icon_generation = self.icon_generation.saturating_add(1);
+    }
+
+    /// The notification-icon set currently in use (built-in until
+    /// [`set_icons`](Self::set_icons) installs a loaded one).
+    #[must_use]
+    pub const fn icons(&self) -> &IconSet {
+        &self.icon_set
     }
 
     /// Paint `taskbar` into a [`Surface`] using `theme`'s palette.
@@ -75,13 +115,18 @@ impl TaskbarRenderer {
     #[must_use]
     pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
         let layout = taskbar.layout();
+        let mut icons = IconContext {
+            cache: &mut self.icons,
+            set: &self.icon_set,
+            generation: self.icon_generation,
+        };
         paint(
             &layout,
             taskbar.tasks(),
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
-            &mut self.icons,
+            &mut icons,
         )
     }
 
@@ -112,7 +157,7 @@ fn paint(
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
-    icons: &mut RasterCache<IconKind, Surface, IconEpoch>,
+    icons: &mut IconContext<'_>,
 ) -> Option<Surface> {
     let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
     let origin = layout.bar.origin;
@@ -287,7 +332,7 @@ fn draw_icon(
     rect: Rect,
     asset: &str,
     color: Color,
-    icons: &mut RasterCache<IconKind, Surface, IconEpoch>,
+    icons: &mut IconContext<'_>,
 ) {
     if rect.is_empty() {
         return;
@@ -297,9 +342,13 @@ fn draw_icon(
         .min(rect.height)
         .saturating_sub(ICON_PADDING.saturating_mul(2));
     let kind = IconKind::for_asset(asset_key(asset));
-    let Some(image) = icons.get_or_render(&(color, side), kind, || {
-        builtin_icon(kind, color).rasterise(side)
-    }) else {
+    let set = icons.set;
+    let Some(image) = icons
+        .cache
+        .get_or_render(&(color, side, icons.generation), kind, || {
+            set.icon(kind, color).rasterise(side)
+        })
+    else {
         return;
     };
     let x_offset = rect.width.saturating_sub(side) / 2;

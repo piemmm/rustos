@@ -70,6 +70,15 @@ owns:
   cursors (`AGENTS.md` §2.2). The `Taskbar` model stays pure data.
   `render_menu` (a `&self` method, no cache — the popup is text only) paints
   the open start-menu popup the same way, returning `None` when closed.
+- **Notification icon set** — the renderer draws each notification glyph from
+  a `rustos-icon` `IconSet`: the built-in glyph set until `set_icons` installs
+  one decoded from the on-disk `/System/Graphics` SVG assets
+  (`IconSet::from_assets`). A loaded asset keeps its authored colours; a kind
+  the assets omit keeps its tinted built-in glyph, so a corrupt asset set can
+  never blank a status icon (`AGENTS.md` §10/§2.9). Installing a set bumps the
+  glyph cache's generation, so the next frame re-rasterises from the new set
+  (`AGENTS.md` §2.2). Reading the asset bytes needs a filesystem capability and
+  is the desktop's job, so the set is built outside this crate and handed in.
 
 ## Rounded edges
 

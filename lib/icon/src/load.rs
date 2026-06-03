@@ -60,6 +60,21 @@ pub struct IconSet {
 }
 
 impl IconSet {
+    /// The all-built-in set: every kind falls back to its [`builtin_icon`]
+    /// glyph, so the desktop has a complete icon set before any on-disk asset
+    /// is loaded (`AGENTS.md` §2.9). Swapping a loaded set in later is
+    /// [`from_assets`](Self::from_assets).
+    #[must_use]
+    pub const fn builtin() -> Self {
+        Self {
+            network: None,
+            volume: None,
+            battery: None,
+            bell: None,
+            generic: None,
+        }
+    }
+
     /// Build an icon set from an [`IconAssetSource`], decoding each kind's SVG
     /// asset once. A kind whose asset is missing, malformed, or outside the
     /// supported subset is left unset and falls back to its built-in glyph in
@@ -104,6 +119,13 @@ impl IconSet {
             IconKind::Bell => self.bell.as_ref(),
             IconKind::Generic => self.generic.as_ref(),
         }
+    }
+}
+
+impl Default for IconSet {
+    /// The all-built-in set (see [`builtin`](Self::builtin)).
+    fn default() -> Self {
+        Self::builtin()
     }
 }
 

@@ -35,7 +35,9 @@ over a resolution-independent design grid, so the same glyph is
   a kind that loaded an authored SVG asset keeps its own colours, and a kind
   whose asset is missing, malformed, or out of subset falls back to the
   `builtin_icon` glyph tinted with `tint` (`AGENTS.md` §2.9). `ICON_KINDS` is
-  the closed kind list a loader iterates.
+  the closed kind list a loader iterates. `IconSet::builtin()` (also
+  `Default`) is the all-fallback set the desktop draws before any asset
+  loads, so a complete icon set always exists.
 
 ## Where it sits
 
@@ -44,9 +46,12 @@ this crate lives in `lib/*` so the taskbar consumes it without the taskbar and
 the window manager depending on one another (`AGENTS.md` §17.4). It is
 `no_std`, `#![forbid(unsafe_code)]`, and owns no colour arithmetic of its own.
 
-The taskbar resolves a notification icon's asset id to an `IconKind`, builds a
-`VectorIcon` in the theme's foreground colour, rasterises it to the
-notification slot's pixel size, and composites it onto the bar.
+The taskbar's renderer holds an `IconSet` — the built-in set until
+`set_icons` installs one decoded from the on-disk `/System/Graphics` assets —
+resolves a notification icon's asset id to an `IconKind`, takes that kind's
+`VectorIcon` from the set (a loaded asset's own colours, or the built-in glyph
+in the theme's foreground colour), rasterises it to the notification slot's
+pixel size, and composites it onto the bar.
 
 ## Stability
 

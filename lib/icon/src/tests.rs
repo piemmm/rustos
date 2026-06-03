@@ -153,9 +153,8 @@ fn icon_set_loads_every_kind_when_all_present() {
     let set = crate::IconSet::from_assets(&TestSource::for_kinds(&ALL_KINDS));
     for kind in ALL_KINDS {
         assert!(set.is_loaded(kind), "{kind:?} should be loaded");
-        let icon = set.icon(kind, FG);
         assert_eq!(
-            icon.layers()[0].fill,
+            set.icon(kind, FG).layers()[0].fill,
             LOADED_FILL,
             "{kind:?} kept its colours"
         );
@@ -207,4 +206,18 @@ fn icon_set_ignores_tint_for_loaded_asset() {
         set.icon(IconKind::Volume, red).layers()[0].fill,
         LOADED_FILL
     );
+}
+
+#[test]
+fn builtin_set_matches_an_empty_source_and_is_the_default() {
+    // The const built-in set loads nothing, so every kind falls back to its
+    // tinted built-in glyph — identical to building from an empty source.
+    let builtin = crate::IconSet::builtin();
+    let empty = crate::IconSet::from_assets(&TestSource::for_kinds(&[]));
+    assert_eq!(builtin, empty);
+    assert_eq!(builtin, crate::IconSet::default());
+    for kind in ALL_KINDS {
+        assert!(!builtin.is_loaded(kind));
+        assert_eq!(builtin.icon(kind, FG), builtin_icon(kind, FG));
+    }
 }

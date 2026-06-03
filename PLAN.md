@@ -5349,8 +5349,26 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `rustos-cursor`/`rustos-icon` `README.md`s. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
   userland `CursorAssetSource`/`IconAssetSource` implementations that read
-  `/System/Graphics` over the VFS (deferred wiring), and feeding a loaded set
-  into the WM/taskbar at runtime.
+  `/System/Graphics` over the VFS (deferred wiring).
+- **Feeding a loaded icon set into the taskbar — DONE (increment).** A loaded
+  `IconSet` (from the on-disk `/System/Graphics` SVG assets) can now be
+  installed at runtime. `lib/icon` gains `IconSet::builtin()` (a `const`
+  all-fallback set) and a `Default` impl, so a complete icon set always exists
+  before any asset loads (§2.9). The taskbar's `TaskbarRenderer` holds an
+  `IconSet` (built-in until `set_icons` swaps a loaded one in) and resolves
+  each notification glyph through `IconSet::icon(kind, tint)` instead of always
+  calling `builtin_icon`: a loaded asset keeps its authored colours, an omitted
+  kind keeps its tinted built-in glyph. Installing a set bumps a generation
+  that is part of the glyph-cache epoch, so the next frame re-rasterises from
+  the new set rather than reusing the cached built-in (§2.2/§10). The cursor
+  side already feeds a loaded `CursorTheme` through `CursorRegistry`, so this
+  closes "feeding a loaded set into the WM/taskbar at runtime". 3 new
+  `rustos-taskbar` tests (62 total) + 1 new `rustos-icon` test (14 total +
+  doctest); docs `docs/src/desktop/svg-assets.md` (runtime-feeding section) and
+  the `rustos-taskbar`/`rustos-icon` `README.md`s. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
+  userland `CursorAssetSource`/`IconAssetSource` implementations that read
+  `/System/Graphics` over the VFS (deferred wiring).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**

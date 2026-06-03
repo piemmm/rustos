@@ -58,6 +58,21 @@ with built-in fallbacks — a corrupt `/System/Graphics` can never blank the
 pointer or a status icon. `CURSOR_KINDS` / `ICON_KINDS` are the closed kind
 lists a loader iterates.
 
+## Feeding a loaded set into the desktop at runtime
+
+A built-in set always exists, so the desktop is usable before any asset loads;
+a loaded set is swapped in at runtime without rebuilding the consumer:
+
+- the window manager registers a `CursorTheme::from_assets` result through the
+  existing `CursorRegistry`, so the `CursorController` picks it up unchanged;
+- the taskbar's `TaskbarRenderer::set_icons` installs an
+  `IconSet::from_assets` result (the built-in `IconSet` is in use until then).
+  Installing a set bumps an internal generation that is part of the glyph
+  cache's epoch, so the next frame discards the previously rasterised glyphs
+  and re-rasterises from the new set (`AGENTS.md` §2.2). A loaded glyph keeps
+  its authored colours; a kind the assets omit keeps its tinted built-in
+  glyph.
+
 ## Caching the rasterised form
 
 Rasterising the vector form is the expensive step, so it happens only when its
