@@ -620,12 +620,7 @@ fn build_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
 }
 
 fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
-    let kernel: PathBuf = ctx
-        .workspace_root
-        .join("target")
-        .join(t.target)
-        .join("debug")
-        .join(t.binary);
+    let kernel: PathBuf = ctx.target_dir().join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
     // `virt` board through OpenSBI; everything else uses the x86_64
     // `isa-debug-exit` convention.

@@ -135,6 +135,19 @@ impl Context {
         cmd
     }
 
+    /// Absolute path to the directory cargo writes build artifacts into.
+    ///
+    /// This is **not** unconditionally `workspace_root/target`: cargo honours
+    /// `$CARGO_TARGET_DIR` (CI points it at a runner-local cache outside the
+    /// checkout so a multi-GB `target/` survives `actions/checkout` wiping the
+    /// workspace). Resolving artifact paths against the same directory cargo
+    /// actually built into is the only way a post-build step (`test --qemu`,
+    /// `test --wasm`) can find the binary it just asked cargo to produce.
+    #[must_use]
+    pub fn target_dir(&self) -> PathBuf {
+        resolve_target_dir(&self.workspace_root, env::var_os("CARGO_TARGET_DIR"))
+    }
+
     /// Runs `cmd` inheriting stdio. Returns an error describing the failure
     /// if the child exits with a non-zero status.
     pub fn run(&self, label: &str, mut cmd: Command) -> Result<(), String> {
@@ -189,4 +202,59 @@ fn is_workspace_root(dir: &Path) -> bool {
         return false;
     };
     text.contains("[workspace]")
+}
+
+/// Resolve cargo's target directory from the workspace root and the value of
+/// `$CARGO_TARGET_DIR` (passed in so this stays a pure, testable function).
+///
+/// Mirrors cargo's own precedence for this workspace: an absolute
+/// `CARGO_TARGET_DIR` is used verbatim; a relative one is resolved against the
+/// workspace root (where every `cargo xtask` subprocess sets its current
+/// directory); when it is unset, the default is `workspace_root/target`. The
+/// workspace pins no `build.target-dir` in `.cargo/config.toml`, so the
+/// environment variable is the only override in play.
+fn resolve_target_dir(workspace_root: &Path, cargo_target_dir: Option<OsString>) -> PathBuf {
+    match cargo_target_dir {
+        Some(dir) if !dir.is_empty() => workspace_root.join(dir),
+        _ => workspace_root.join("target"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_dir_defaults_to_workspace_target_when_unset() {
+        let root = Path::new("/ws");
+        assert_eq!(resolve_target_dir(root, None), root.join("target"));
+    }
+
+    #[test]
+    fn target_dir_defaults_when_env_is_empty() {
+        let root = Path::new("/ws");
+        assert_eq!(
+            resolve_target_dir(root, Some(OsString::from(""))),
+            root.join("target")
+        );
+    }
+
+    #[test]
+    fn target_dir_honours_absolute_override() {
+        let root = Path::new("/ws");
+        let abs = OsString::from("/var/lib/actions-runner/rustos-cache/target");
+        assert_eq!(
+            resolve_target_dir(root, Some(abs)),
+            Path::new("/var/lib/actions-runner/rustos-cache/target")
+        );
+    }
+
+    #[test]
+    fn target_dir_resolves_relative_override_against_workspace_root() {
+        let root = Path::new("/ws");
+        assert_eq!(
+            resolve_target_dir(root, Some(OsString::from("build/out"))),
+            root.join("build/out")
+        );
+    }
 }

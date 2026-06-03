@@ -61,8 +61,7 @@ fn build(ctx: &Context) -> Result<(), String> {
 
 fn run_harness(ctx: &Context) -> Result<(), String> {
     let wasm: PathBuf = ctx
-        .workspace_root
-        .join("target")
+        .target_dir()
         .join(WASM_TARGET)
         .join("debug")
         .join(WASM_ARTIFACT);
