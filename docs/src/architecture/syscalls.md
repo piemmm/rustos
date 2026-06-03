@@ -211,6 +211,23 @@ is now composed into `KernelState` and borrowed by the handlers, so
 endpoint resolution is live; what remains for IPC is the user-memory
 copy-in path (which `cap_delegate` also waits on).
 
+The first half of that copy path is now wired (increment C of the
+staged "User-memory copy path & per-task address spaces" effort,
+`PLAN.md` Stage 7). The per-task `AddressSpaceRegistry`
+(`aspaces: RwLock<AddressSpaceRegistry>`, mirroring `caps` / `ipc`) is
+threaded into `KernelDispatchHook` / `KernelSyscallHandlers`, and the
+new `KernelSyscallHandlers::with_caller_aspace(caller, f)` accessor
+resolves `caller.task_id` to the borrowed
+`(&dyn UserAddressSpace, &dyn PhysMap)` pair the
+[`rustos_kernel_mem::uaccess`](./memory.md#3a-user-memory-copy-uaccess)
+copy path walks, running `f` under the registry's read guard and
+failing closed to `None` for a caller with no registered space. The
+bridge lives in `kernel/core`, so the decoupled dispatcher
+(`kernel/syscall`) never gains a `kernel/mem` dependency (`AGENTS.md`
+§17.4). Increment D wires `ipc_send` / `ipc_recv` / `cap_delegate` /
+`random_get` through this accessor and retires the
+`user_memory_copyin` deferral audits.
+
 ## Dispatcher contract
 
 `Dispatcher::dispatch` is the *only* entry point. Calling it runs the

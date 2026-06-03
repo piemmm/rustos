@@ -74,7 +74,7 @@ callback the arch-port installed before `syscall` was enabled
   sched ready                                       static DISPATCH_SLOT:
    │                                                DispatchCallbackSlot = new();
    ▼                                                   ▲
-  KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc)  │ (from BootInfo)
+  KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc,&aspaces) │ (from BootInfo)
   Box::leak(hook)                                       │
   slot.install_dispatcher(hook)  ──publishes──────────┘ ───> production_dispatch (f5)
    │                                                   reads slot.get(),
@@ -85,14 +85,19 @@ callback the arch-port installed before `syscall` was enabled
 The `Phase::Syscall` step:
 
 1. Builds a `KernelDispatchHook<A>` around `KernelState`'s scheduler,
-   capability table, arch port, audit sink, IRQ table/controller, and
-   named-port registry (`ipc`).
+   capability table, arch port, audit sink, IRQ table/controller,
+   named-port registry (`ipc`), and per-task address-space registry
+   (`aspaces`). The last lets a handler resolve `caller.task_id` to the
+   user address space + `PhysMap` the user-memory copy path walks
+   (`KernelSyscallHandlers::with_caller_aspace`, `AGENTS.md` §5.4)
+   without the decoupled dispatcher gaining a `kernel/mem` dependency
+   (§17.4).
 2. Lifts both the `KernelState` and the hook to `'static` lifetimes
    via `Box::leak` (one-shot publish; the kernel never returns from
    `kernel_main`'s halt). The leak is immutable after publish — not
    a global mutable static; every interior field carries its own
    synchronisation primitive (`Scheduler::tasks`, `RwLock<CapTable>`,
-   `RwLock<PortRegistry>`).
+   `RwLock<PortRegistry>`, `RwLock<AddressSpaceRegistry>`).
 3. Calls `boot.dispatcher_callback_slot.install_dispatcher(&hook)`.
 4. On `Err(AlreadyInstalledError)` (slot already published; programmer
    error), surfaces `InitError::DispatcherAlreadyInstalled`, which the

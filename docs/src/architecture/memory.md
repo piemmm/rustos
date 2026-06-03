@@ -196,6 +196,20 @@ handler that drive the lifecycle own the security-relevant logging,
 exactly as the syscall dispatcher (not the IPC `PortRegistry`) audits
 endpoint lookups.
 
+The registry is reached from a syscall handler through
+`KernelSyscallHandlers::with_caller_aspace(caller, f)` (increment C of
+the staged copy path): it is threaded into the
+`KernelDispatchHook` / `KernelSyscallHandlers` borrows next to `caps`
+and `ipc`, takes a read guard, resolves `caller.task_id`, and runs `f`
+with the borrowed `(&dyn UserAddressSpace, &dyn PhysMap)` pair — the
+guard living exactly as long as the borrowed references — failing
+closed to `None` when the caller has no registered space. Keeping the
+accessor in `kernel/core` is deliberate: the decoupled dispatcher
+(`kernel/syscall`) reaches user memory without ever depending on
+`kernel/mem` (`AGENTS.md` §17.4). The handler-side copies that consume
+it (`ipc_send` / `ipc_recv` / `cap_delegate` / `random_get` through
+`copy_in` / `copy_out`) are increment D (see `PLAN.md`).
+
 [`UserAddressSpace`]: ../../rustos_kernel_mem/vmm/trait.UserAddressSpace.html
 
 ## 4. Sensitive-region API
@@ -284,11 +298,7 @@ The user-space virtio driver crates carry an owned
 `DmaSlab { phys, ptr: NonNull<u8>, len, pool_id, slot, /* erased
 free shim */ }` rather than borrowing the pool on every accessor
 (Stage 4.D Item 0a). The pool exposes a single companion accessor,
-
-```rust,ignore
-pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError>;
-```
-
+`slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError>`,
 that hands out the base pointer of `buf`'s data slots. The
 disjointness witness is the pool's slot bitmap (one slot ↔ one
 allocation); the slab carries `(pool_id, slot, len)` so its drop

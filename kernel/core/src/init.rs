@@ -409,6 +409,7 @@ fn run_phases<A: KernelArch>(
             &state.irq,
             state.irq_controller,
             &state.ipc,
+            &state.aspaces,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
@@ -474,14 +475,14 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// registry owns no lock of its own).
     ///
     /// [`PhysMap`]: rustos_kernel_mem::PhysMap
-    #[allow(dead_code)]
-    // Increment B (`PLAN.md` Stage 7) composes the empty registry into
-    // `KernelState`; increment C threads it into `KernelSyscallHandlers`
-    // (read for `resolve`) and increment D wires the deferred syscalls'
-    // copy path through it. Populated by the spawner / withdrawn on
-    // `exit` once those call sites reach it — neither has a live caller
-    // yet, so the field is composed-but-not-yet-read, mirroring the
-    // staged `frame_allocator` / `identity_table` fields above.
+    //
+    // Increment C (`PLAN.md` Stage 7) threads this registry into the
+    // `KernelDispatchHook` / `KernelSyscallHandlers` below, where
+    // `with_caller_aspace` reads it to resolve the caller's task id to
+    // its address space. Increment D wires the deferred syscalls' copy
+    // path through that accessor. The registry boots empty: entries are
+    // populated by the spawner and withdrawn on `exit` once those call
+    // sites reach it.
     pub(crate) aspaces: RwLock<AddressSpaceRegistry>,
     pub(crate) arch: Arc<A>,
     /// Audit sink the dispatch hook emits security-relevant records

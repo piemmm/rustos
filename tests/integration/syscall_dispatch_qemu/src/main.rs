@@ -103,7 +103,7 @@ mod kernel {
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_kernel_core::{IrqRouting, KernelSyscallHandlers};
+    use rustos_kernel_core::{AddressSpaceRegistry, IrqRouting, KernelSyscallHandlers};
     use rustos_kernel_ipc::PortRegistry;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig, TaskAction};
@@ -320,6 +320,11 @@ mod kernel {
         // `exit`, neither of which touches IPC, so the registry boots
         // empty and is never published into.
         let port_registry = RwLock::new(PortRegistry::new());
+        // Per-task address-space registry, composed exactly as
+        // production does. This test exercises `cap_query` and `exit`,
+        // neither of which reaches the user-memory copy path, so the
+        // registry boots empty and is never resolved against.
+        let aspace_registry = RwLock::new(AddressSpaceRegistry::new());
 
         let handlers: KernelSyscallHandlers<'_, BinArch> = KernelSyscallHandlers::new(
             &sched,
@@ -329,6 +334,7 @@ mod kernel {
             &irq_table,
             &irq_controller,
             &port_registry,
+            &aspace_registry,
         );
         let dispatcher = Dispatcher::new(&handlers, &INNER_SINK);
         let caller = CallerContext {

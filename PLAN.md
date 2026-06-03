@@ -5809,10 +5809,25 @@ subsystem (§2.1). Each session lands one increment and updates
   `kernel/mem`. Docs `docs/src/architecture/memory.md` (new "## 3b. Per-task
   address-space registry" section) + module rustdoc. No
   `unwrap`/`expect`/`panic!` in production paths.
-- **C — Reach the caller's address space from the syscall handler.** Thread the
-  registry into `KernelSyscallHandlers` so a handler can resolve
-  `caller.task_id` → `(&AddressSpace, &dyn PhysMap)` without coupling the
-  decoupled dispatcher (`kernel/syscall`) to `kernel/mem` (§17.4).
+- **C — Reach the caller's address space from the syscall handler. DONE
+  (increment).** The per-task `AddressSpaceRegistry` is threaded into
+  `KernelDispatchHook` / `KernelSyscallHandlers` as an
+  `aspaces: &RwLock<AddressSpaceRegistry>` borrow next to `caps` / `ipc`
+  (composed from `KernelState` in `kernel/core::init`, the dead-code allow
+  retired). The new `KernelSyscallHandlers::with_caller_aspace(caller, f)`
+  accessor takes a read guard, resolves `caller.task_id` →
+  `(&dyn UserAddressSpace, &dyn PhysMap)`, and runs `f` with the borrowed pair
+  while the guard is held — failing closed to `None` for a caller with no
+  registered space (§5.4). The bridge lives in `kernel/core`, so the decoupled
+  dispatcher (`kernel/syscall`) never gains a `kernel/mem` dependency (§17.4);
+  the registry still exposes only `translate`, so the copy path can never mutate
+  a caller's mappings (§2.4). 3 new `rustos-kernel-core` `syscalls` tests
+  (registered caller runs the closure against its own space, unregistered →
+  `None` without running it, per-task isolation); the 21 existing handler tests
+  and the QEMU syscall-dispatch integration test compose the registry exactly
+  as production does (121 `rustos-kernel-core` tests pass). Docs
+  `docs/src/architecture/{kernel,syscalls,memory}.md` + module/field rustdoc. No
+  `unsafe`, no `unwrap`/`expect`/`panic!` in production paths.
 - **D — Wire the deferred syscalls through `uaccess`.** `ipc_send` copies the
   payload in → `Port::send`; `ipc_recv` `Port::recv` → copies out;
   `cap_delegate` copies the capability set in; `random_get` copies reserve
