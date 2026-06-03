@@ -1308,5 +1308,52 @@ may store absolute time as 32-bit seconds.
 
 ---
 
+## 22. Kernel Randomness and Random Output Reserve
+
+RustOS has one kernel cryptographic random subsystem. Randomness is
+security-critical and lives behind `lib/crypto`; no component may invent
+its own entropy collector, PRNG, UUID generator, nonce generator, or
+random seeding path.
+
+- The kernel maintains an entropy input pool, a cryptographic RNG state,
+  and a bounded random output reserve. Do not call the output reserve an
+  "entropy ring buffer": generated random bytes are not raw entropy.
+- The canonical ABI lives in `lib/abi/src/random.rs`. Userland obtains
+  random bytes through the versioned random syscall/API only.
+- Before the kernel RNG is initialized, cryptographic random requests
+  block or return `EntropyNotReady` when explicitly requested as
+  non-blocking. After initialization, normal generation must not block:
+  if the output reserve is empty the kernel generates more synchronously
+  from the CSPRNG rather than waiting on external entropy.
+- The random API provides both a fallible and a blocking draw. The
+  fallible draw never waits: when a reseed is required but fresh entropy
+  is momentarily unavailable it returns a typed, transient entropy error
+  (distinct from a hard, no-source failure) and leaves the generator
+  intact, so the caller fails closed or retries. The blocking draw, by
+  contrast, blocks through a required reseed — parking the task until the
+  entropy source can supply it (never busy-spinning, §2.1) — and then
+  returns the bytes; it fails only when the source is genuinely dead.
+- Entropy sources include platform RNGs, bootloader seed material,
+  interrupt timing, device noise, and other approved sources. No single
+  source is trusted alone; all sources are mixed before use.
+- Hardware RNG output is input material only. It is never passed directly
+  to callers as final random output.
+- The output reserve is CSPRNG output, refilled in the background and on
+  demand. A default reserve size of 2 KiB is permitted, preferably
+  per-CPU to avoid lock contention.
+- Output reserve memory is kernel-only, non-swappable, zeroed on
+  consumption/reuse, and discarded on suspend, hibernate, fork-like task
+  cloning, crash dump, and reseed boundary where required.
+- If the reserve is empty after initialization, the kernel generates more
+  bytes synchronously from the CSPRNG rather than failing or weakening
+  randomness.
+- Tests must cover early boot uninitialized behaviour, non-blocking
+  failure, post-initialization non-blocking generation, reserve refill,
+  reseed, suspend/resume, fork/clone separation, zeroization, the
+  fallible draw surfacing the transient reseed error, and the blocking
+  draw waiting through a required reseed until it can return.
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.

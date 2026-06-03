@@ -8,19 +8,43 @@
 //! one-time state compromise cannot predict output indefinitely (forward
 //! secrecy / prediction resistance).
 //!
-//! # Why the API is fallible
+//! # Two draw styles: fallible and blocking
 //!
 //! Every draw can trigger a reseed, and a reseed needs fresh entropy that may
-//! be momentarily unavailable. Rather than block, spin, or panic (`AGENTS.md`
-//! §2.1, §2.9), [`CsRng`] surfaces that as [`EntropyError`] and the caller
-//! fails closed (§5.4). Reaching for randomness is therefore an explicit,
-//! checked operation, never a silent one.
+//! be momentarily unavailable. [`CsRng`] offers the caller both ways to cope,
+//! and neither spins or panics (`AGENTS.md` §2.1, §2.9):
+//!
+//! * **Fallible** ([`CsRng::try_fill_bytes`], [`CsRng::try_next_u64`], …):
+//!   when a required reseed has no entropy *right now*, the draw returns the
+//!   typed, transient [`EntropyError::Reseeding`] without disturbing the
+//!   generator. The caller fails closed (§5.4) or retries. A *hard* failure
+//!   (no source at all, e.g. at instantiation) is the distinct
+//!   [`EntropyError::Unavailable`].
+//! * **Blocking** ([`CsRng::fill_bytes_blocking`],
+//!   [`CsRng::try_next_u64_blocking`], …): when a required reseed has no
+//!   entropy, the draw **waits** for it through the entropy source's
+//!   [`EntropySource::fill_blocking`] seam (the platform source parks the
+//!   task; it never busy-spins) and then returns the bytes. It only fails
+//!   with [`EntropyError::Unavailable`] when the source is genuinely dead.
+//!
+//! Reaching for randomness is therefore always an explicit, checked
+//! operation, never a silent one.
 
 use zeroize::Zeroize;
 
 use crate::drbg::{DrbgError, HmacDrbg};
 use crate::entropy::{EntropyError, EntropySource};
 use crate::fast::FastRng;
+
+/// How a reseed draws its fresh entropy from the source.
+#[derive(Clone, Copy)]
+enum ReseedMode {
+    /// Non-blocking: a momentary shortage surfaces as [`EntropyError::Reseeding`].
+    Fallible,
+    /// Blocking: wait through a momentary shortage via
+    /// [`EntropySource::fill_blocking`].
+    Blocking,
+}
 
 /// Bytes of fresh entropy drawn to instantiate the DRBG (256-bit security
 /// strength).
@@ -105,14 +129,49 @@ impl<E: EntropySource> CsRng<E> {
     /// Draw fresh entropy and reseed the DRBG, restoring prediction
     /// resistance and resetting the reseed clock.
     ///
+    /// This is the **fallible** reseed: a momentary entropy shortage is not
+    /// waited out. Use [`CsRng::reseed_blocking`] to wait instead.
+    ///
     /// # Errors
     ///
-    /// Returns [`EntropyError::Unavailable`] if the source cannot supply the
-    /// reseed entropy. The existing DRBG state is left intact, so the caller
-    /// may retry, but no new output is produced from a failed reseed.
+    /// Returns [`EntropyError::Reseeding`] if the source cannot supply the
+    /// reseed entropy *right now*. The existing DRBG state is left intact, so
+    /// the caller may retry, but no new output is produced from a failed
+    /// reseed.
     pub fn reseed(&mut self) -> Result<(), EntropyError> {
+        self.reseed_with(ReseedMode::Fallible)
+    }
+
+    /// Draw fresh entropy and reseed the DRBG, **blocking** through a
+    /// momentary entropy shortage until the source can supply it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EntropyError::Unavailable`] only if the source is genuinely
+    /// dead (it can never supply entropy, so waiting would not help); the
+    /// DRBG state is left intact.
+    pub fn reseed_blocking(&mut self) -> Result<(), EntropyError> {
+        self.reseed_with(ReseedMode::Blocking)
+    }
+
+    /// Draw fresh reseed entropy through `mode` and fold it into the DRBG.
+    ///
+    /// Shared by the fallible and blocking reseeds so the seed handling,
+    /// zeroisation, and clock reset live in one place (`AGENTS.md` §2.2).
+    fn reseed_with(&mut self, mode: ReseedMode) -> Result<(), EntropyError> {
         let mut fresh = [0u8; RESEED_ENTROPY_LEN];
-        self.entropy.fill(&mut fresh)?;
+        let drawn = match mode {
+            ReseedMode::Fallible => self.entropy.fill(&mut fresh).map_err(|_| {
+                // A reseed shortage is transient: the generator is intact, so
+                // surface the typed retryable signal rather than a hard error.
+                EntropyError::Reseeding
+            }),
+            ReseedMode::Blocking => self.entropy.fill_blocking(&mut fresh),
+        };
+        if let Err(e) = drawn {
+            fresh.zeroize();
+            return Err(e);
+        }
         self.drbg.reseed(&fresh, &[]);
         fresh.zeroize();
         self.calls_since_reseed = 0;
@@ -122,14 +181,42 @@ impl<E: EntropySource> CsRng<E> {
     /// Fill `out` with cryptographically secure random bytes, reseeding first
     /// if the reseed interval has elapsed.
     ///
+    /// This is the **fallible** draw: a required reseed that cannot draw fresh
+    /// entropy fails with [`EntropyError::Reseeding`] rather than waiting. Use
+    /// [`CsRng::fill_bytes_blocking`] to wait through the reseed instead.
+    ///
     /// # Errors
     ///
-    /// Returns [`EntropyError::Unavailable`] only when a required reseed
-    /// cannot draw fresh entropy. The buffer is not partially filled on
-    /// error.
+    /// Returns [`EntropyError::Reseeding`] when a required reseed cannot draw
+    /// fresh entropy right now. The buffer is not partially filled on error.
     pub fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        self.fill_bytes_with(out, ReseedMode::Fallible)
+    }
+
+    /// Fill `out` with cryptographically secure random bytes, **blocking**
+    /// through a reseed if one is required and its entropy is momentarily
+    /// unavailable.
+    ///
+    /// The wait happens in the entropy source's
+    /// [`EntropySource::fill_blocking`] (the platform source parks the calling
+    /// task; it never busy-spins, `AGENTS.md` §2.1). When no reseed is needed
+    /// — the common case — this does exactly as much work as
+    /// [`CsRng::try_fill_bytes`] and returns without ever blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EntropyError::Unavailable`] only when a required reseed's
+    /// source is genuinely dead. The buffer is not partially filled on error.
+    pub fn fill_bytes_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        self.fill_bytes_with(out, ReseedMode::Blocking)
+    }
+
+    /// Reseed (per `mode`) when due, then generate. Shared by the fallible and
+    /// blocking fills so the reseed-clock and DRBG-limit handling is written
+    /// once (`AGENTS.md` §2.2).
+    fn fill_bytes_with(&mut self, out: &mut [u8], mode: ReseedMode) -> Result<(), EntropyError> {
         if self.calls_since_reseed >= self.reseed_interval || self.drbg.needs_reseed() {
-            self.reseed()?;
+            self.reseed_with(mode)?;
         }
         match self.drbg.generate(out, &[]) {
             Ok(()) => {
@@ -140,12 +227,14 @@ impl<E: EntropySource> CsRng<E> {
                 // The interval/needs_reseed check above already reseeds before
                 // the hard limit, so this branch is only reachable if the
                 // reseed clock and hard limit disagree; reseed and retry once.
-                self.reseed()?;
+                self.reseed_with(mode)?;
                 match self.drbg.generate(out, &[]) {
                     Ok(()) => {
                         self.calls_since_reseed += 1;
                         Ok(())
                     }
+                    // A reseed just succeeded, so a still-required reseed means
+                    // the DRBG is in an impossible state, not a mere shortage.
                     Err(DrbgError::ReseedRequired) => Err(EntropyError::Unavailable),
                 }
             }
@@ -163,6 +252,18 @@ impl<E: EntropySource> CsRng<E> {
         Ok(u64::from_le_bytes(bytes))
     }
 
+    /// Return a cryptographically secure `u64`, blocking through a reseed if
+    /// required.
+    ///
+    /// # Errors
+    ///
+    /// As [`CsRng::fill_bytes_blocking`].
+    pub fn try_next_u64_blocking(&mut self) -> Result<u64, EntropyError> {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes_blocking(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
     /// Return a cryptographically secure `u32`.
     ///
     /// # Errors
@@ -171,6 +272,18 @@ impl<E: EntropySource> CsRng<E> {
     pub fn try_next_u32(&mut self) -> Result<u32, EntropyError> {
         let mut bytes = [0u8; 4];
         self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Return a cryptographically secure `u32`, blocking through a reseed if
+    /// required.
+    ///
+    /// # Errors
+    ///
+    /// As [`CsRng::fill_bytes_blocking`].
+    pub fn try_next_u32_blocking(&mut self) -> Result<u32, EntropyError> {
+        let mut bytes = [0u8; 4];
+        self.fill_bytes_blocking(&mut bytes)?;
         Ok(u32::from_le_bytes(bytes))
     }
 
@@ -308,16 +421,103 @@ mod tests {
     }
 
     #[test]
-    fn reseed_failure_is_surfaced_not_hidden() {
+    fn reseed_failure_is_surfaced_as_transient_reseeding() {
         // Budget 1: only the instantiation seed succeeds. With interval 1 the
         // first draw still succeeds (the clock check is `calls >= interval`,
         // and `calls` starts at 0), but the second draw triggers a reseed
-        // that has no entropy left — and that must surface, never be hidden.
+        // that has no entropy left. That surfaces as the typed, transient
+        // `Reseeding` (the generator is intact), never as a hard error and
+        // never hidden behind weak output.
         let mut rng =
             CsRng::with_reseed_interval(CountingSource::with_budget(3, 1), 1, &[]).unwrap();
         let mut out = [0u8; 8];
         rng.try_fill_bytes(&mut out).expect("first draw succeeds");
-        assert_eq!(rng.try_fill_bytes(&mut out), Err(EntropyError::Unavailable));
+        assert_eq!(rng.try_fill_bytes(&mut out), Err(EntropyError::Reseeding));
+        // The DRBG is intact: an explicit fallible reseed reports the same
+        // transient signal rather than corrupting state.
+        assert_eq!(rng.reseed(), Err(EntropyError::Reseeding));
+    }
+
+    /// A source whose non-blocking `fill` is exhausted after `budget` draws,
+    /// but whose blocking `fill_blocking` always delivers — a stand-in for a
+    /// pool a parking platform source would wait on.
+    struct ParkingSource {
+        counter: u64,
+        budget: u32,
+    }
+
+    impl ParkingSource {
+        fn new(seed: u64, budget: u32) -> Self {
+            Self {
+                counter: seed,
+                budget,
+            }
+        }
+
+        fn produce(&mut self, out: &mut [u8]) {
+            for byte in out.iter_mut() {
+                self.counter = self
+                    .counter
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                *byte = self.counter.to_le_bytes()[4];
+            }
+        }
+    }
+
+    impl EntropySource for ParkingSource {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            if self.budget == 0 {
+                return Err(EntropyError::Unavailable);
+            }
+            self.budget -= 1;
+            self.produce(out);
+            Ok(())
+        }
+
+        fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            if self.budget == 0 {
+                // Model a wait that replenishes the pool, then deliver.
+                self.budget = 1;
+            }
+            self.fill(out)
+        }
+    }
+
+    #[test]
+    fn blocking_draw_waits_through_a_reseed_shortage() {
+        // Budget 1: only instantiation succeeds; the interval-1 reseed on the
+        // second draw would fail the fallible path…
+        let mut rng = CsRng::with_reseed_interval(ParkingSource::new(11, 1), 1, &[]).unwrap();
+        let mut out = [0u8; 8];
+        rng.fill_bytes_blocking(&mut out)
+            .expect("first blocking draw");
+        // …but the blocking draw waits for entropy and still succeeds.
+        rng.fill_bytes_blocking(&mut out)
+            .expect("blocking draw waits through the reseed");
+        assert_ne!(out, [0u8; 8]);
+    }
+
+    #[test]
+    fn blocking_and_fallible_share_the_no_reseed_fast_path() {
+        // With a generous interval no reseed is due, so both styles produce
+        // the same stream from the same seed and neither waits.
+        let mut a = CsRng::new(ParkingSource::new(7, 4)).unwrap();
+        let mut b = CsRng::new(ParkingSource::new(7, 4)).unwrap();
+        let (mut oa, mut ob) = ([0u8; 32], [0u8; 32]);
+        a.try_fill_bytes(&mut oa).unwrap();
+        b.fill_bytes_blocking(&mut ob).unwrap();
+        assert_eq!(oa, ob, "no reseed due ⇒ identical, neither blocks");
+    }
+
+    #[test]
+    fn reseed_blocking_recovers_where_fallible_reseed_fails() {
+        // Budget 1: instantiation consumes it, so a fallible reseed is a
+        // transient miss while a blocking reseed waits and succeeds.
+        let mut rng = CsRng::new(ParkingSource::new(21, 1)).unwrap();
+        assert_eq!(rng.reseed(), Err(EntropyError::Reseeding));
+        rng.reseed_blocking()
+            .expect("blocking reseed waits, succeeds");
     }
 
     #[test]

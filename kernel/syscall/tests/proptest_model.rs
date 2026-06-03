@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 use rustos_abi::{
-    AbiType, CapabilityId, Errno, IrqHandle, SyscallNumber, SyscallSpec, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, SyscallSpec, SYSCALLS,
+    SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -101,6 +102,16 @@ impl SyscallHandlers for CountingHandlers {
         Ok(0)
     }
     fn irq_wait(&self, _c: &CallerContext<'_>, _h: IrqHandle, _timeout_ns: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn random_get(
+        &self,
+        _c: &CallerContext<'_>,
+        _buf: u64,
+        _len: usize,
+        _flags: RandomFlags,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }

@@ -26,6 +26,15 @@ pub enum EntropyError {
     /// fail closed: no key, nonce, or seed is derived from a failed draw
     /// (`AGENTS.md` §5.4).
     Unavailable,
+    /// A reseed was required to complete the draw but fresh entropy was only
+    /// *momentarily* unavailable. This is the **transient** signal a
+    /// non-blocking cryptographic draw returns instead of
+    /// [`EntropyError::Unavailable`]: the existing generator state is intact,
+    /// so the right response is to retry — or to reach for the blocking draw
+    /// ([`crate::CsRng::fill_bytes_blocking`]), which waits through the
+    /// reseed rather than failing. It is never produced by instantiation
+    /// (a generator that cannot be seeded at all reports `Unavailable`).
+    Reseeding,
 }
 
 /// A source of cryptographically usable raw entropy.
@@ -35,19 +44,45 @@ pub enum EntropyError {
 /// tolerates some shortfall, but a source that returns predictable bytes
 /// violates the contract and must instead return [`EntropyError::Unavailable`].
 pub trait EntropySource {
-    /// Fill the whole of `out` with raw entropy.
+    /// Fill the whole of `out` with raw entropy, **without blocking**.
     ///
     /// # Errors
     ///
     /// Returns [`EntropyError::Unavailable`] if randomness cannot be
-    /// produced. On error the contents of `out` are unspecified and must not
-    /// be used.
+    /// produced right now. On error the contents of `out` are unspecified and
+    /// must not be used.
     fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError>;
+
+    /// Fill the whole of `out` with raw entropy, **blocking** until enough is
+    /// available.
+    ///
+    /// This is the seam through which a *blocking* cryptographic draw
+    /// ([`crate::CsRng::fill_bytes_blocking`]) waits through a reseed. The
+    /// default implementation simply delegates to [`EntropySource::fill`],
+    /// which is correct for an always-ready source (e.g. a deterministic test
+    /// source). A platform source whose entropy can be momentarily exhausted
+    /// overrides this to **park the calling task** until its pool refills —
+    /// it must wait, never busy-spin or retry-until-it-works (`AGENTS.md`
+    /// §2.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EntropyError::Unavailable`] only for a *hard* failure — a
+    /// source that is genuinely absent or broken, and so can never satisfy
+    /// the request no matter how long the caller waits. A merely transient
+    /// shortage is waited out, not reported.
+    fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        self.fill(out)
+    }
 }
 
 impl<T: EntropySource + ?Sized> EntropySource for &mut T {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
         (**self).fill(out)
+    }
+
+    fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        (**self).fill_blocking(out)
     }
 }
 
@@ -75,8 +110,19 @@ impl<'a, 'b> CombinedSource<'a, 'b> {
     }
 }
 
-impl EntropySource for CombinedSource<'_, '_> {
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+impl CombinedSource<'_, '_> {
+    /// Shared XOR-combine loop, parameterised by how each source is drawn so
+    /// the non-blocking [`EntropySource::fill`] and blocking
+    /// [`EntropySource::fill_blocking`] paths reuse one implementation
+    /// (`AGENTS.md` §2.2 — no duplicated mixing algebra). `draw_one` returns
+    /// `true` if a source fully satisfied its chunked draw; a source that
+    /// fails is skipped (it contributes the XOR identity rather than
+    /// corrupting the pool).
+    fn combine(
+        &mut self,
+        out: &mut [u8],
+        mut draw_one: impl FnMut(&mut dyn EntropySource, &mut [u8]) -> bool,
+    ) -> Result<(), EntropyError> {
         for byte in out.iter_mut() {
             *byte = 0;
         }
@@ -89,7 +135,7 @@ impl EntropySource for CombinedSource<'_, '_> {
             let mut complete = true;
             while offset < out.len() {
                 let take = core::cmp::min(chunk.len(), out.len() - offset);
-                if source.fill(&mut chunk[..take]).is_err() {
+                if !draw_one(&mut **source, &mut chunk[..take]) {
                     complete = false;
                     break;
                 }
@@ -106,6 +152,23 @@ impl EntropySource for CombinedSource<'_, '_> {
         } else {
             Err(EntropyError::Unavailable)
         }
+    }
+}
+
+impl EntropySource for CombinedSource<'_, '_> {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        self.combine(out, |source, chunk| source.fill(chunk).is_ok())
+    }
+
+    /// Blocks until at least one source can contribute.
+    ///
+    /// Each source is drawn through its own [`EntropySource::fill_blocking`],
+    /// so a source whose pool is momentarily exhausted is waited out (parked)
+    /// rather than skipped, while a genuinely dead source still returns
+    /// `Unavailable` and is skipped. The combination only reports
+    /// [`EntropyError::Unavailable`] when *every* source is hard-dead.
+    fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+        self.combine(out, |source, chunk| source.fill_blocking(chunk).is_ok())
     }
 }
 
@@ -135,6 +198,39 @@ mod tests {
     impl EntropySource for Dead {
         fn fill(&mut self, _out: &mut [u8]) -> Result<(), EntropyError> {
             Err(EntropyError::Unavailable)
+        }
+    }
+
+    /// A source whose non-blocking `fill` is exhausted for the first
+    /// `blocked_draws` calls but whose `fill_blocking` always succeeds — a
+    /// stand-in for a pool that a parking source would wait on. It records how
+    /// many times the blocking path actually had to wait.
+    struct Parking {
+        blocked_draws: u32,
+        waits: u32,
+    }
+
+    impl EntropySource for Parking {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            if self.blocked_draws > 0 {
+                self.blocked_draws -= 1;
+                return Err(EntropyError::Unavailable);
+            }
+            for byte in out.iter_mut() {
+                *byte = 0x3C;
+            }
+            Ok(())
+        }
+
+        fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            if self.blocked_draws > 0 {
+                self.waits += 1;
+                self.blocked_draws = 0;
+            }
+            for byte in out.iter_mut() {
+                *byte = 0x3C;
+            }
+            Ok(())
         }
     }
 
@@ -200,5 +296,83 @@ mod tests {
         let mut combined = CombinedSource::new(&mut srcs);
         let mut out = [0u8; 16];
         assert_eq!(combined.fill(&mut out), Err(EntropyError::Unavailable));
+    }
+
+    #[test]
+    fn default_fill_blocking_delegates_to_fill() {
+        // `Counter` does not override `fill_blocking`, so the default must
+        // produce exactly what `fill` produces.
+        let mut got = Counter {
+            state: 0x10,
+            step: 5,
+        };
+        let mut want = Counter {
+            state: 0x10,
+            step: 5,
+        };
+        let (mut a, mut b) = ([0u8; 24], [0u8; 24]);
+        got.fill_blocking(&mut a).unwrap();
+        want.fill(&mut b).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn blocking_waits_through_a_transient_shortage() {
+        // `fill` is exhausted once, so the non-blocking path fails closed…
+        let mut p = Parking {
+            blocked_draws: 1,
+            waits: 0,
+        };
+        let mut out = [0u8; 16];
+        assert_eq!(p.fill(&mut out), Err(EntropyError::Unavailable));
+        // …but `fill_blocking` waits the shortage out and then succeeds.
+        let mut p = Parking {
+            blocked_draws: 1,
+            waits: 0,
+        };
+        p.fill_blocking(&mut out)
+            .expect("blocking draw waits, succeeds");
+        assert_eq!(p.waits, 1, "the blocking path had to wait exactly once");
+        assert_eq!(out, [0x3C; 16]);
+    }
+
+    #[test]
+    fn combined_blocking_waits_out_a_transient_source() {
+        // One transient source (exhausted once) plus a dead one: the
+        // non-blocking combine fails, the blocking combine waits and succeeds.
+        let mut transient = Parking {
+            blocked_draws: 1,
+            waits: 0,
+        };
+        let mut dead = Dead;
+        let mut srcs: [&mut dyn EntropySource; 2] = [&mut transient, &mut dead];
+        let mut combined = CombinedSource::new(&mut srcs);
+        let mut out = [0u8; 16];
+        assert_eq!(combined.fill(&mut out), Err(EntropyError::Unavailable));
+
+        let mut transient = Parking {
+            blocked_draws: 1,
+            waits: 0,
+        };
+        let mut dead = Dead;
+        let mut srcs: [&mut dyn EntropySource; 2] = [&mut transient, &mut dead];
+        let mut combined = CombinedSource::new(&mut srcs);
+        combined
+            .fill_blocking(&mut out)
+            .expect("blocking combine waits out the transient source");
+        assert_eq!(out, [0x3C; 16], "only the transient source contributed");
+    }
+
+    #[test]
+    fn combined_blocking_fails_only_when_every_source_is_hard_dead() {
+        let mut d1 = Dead;
+        let mut d2 = Dead;
+        let mut srcs: [&mut dyn EntropySource; 2] = [&mut d1, &mut d2];
+        let mut combined = CombinedSource::new(&mut srcs);
+        let mut out = [0u8; 16];
+        assert_eq!(
+            combined.fill_blocking(&mut out),
+            Err(EntropyError::Unavailable)
+        );
     }
 }

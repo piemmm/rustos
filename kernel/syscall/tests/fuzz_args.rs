@@ -26,8 +26,8 @@
 
 use core::cell::RefCell;
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, SyscallNumber, ENCODED_TABLE_LEN, SYSCALLS,
-    SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber,
+    ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
@@ -126,6 +126,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn random_get(
+        &self,
+        _c: &CallerContext<'_>,
+        _buf: u64,
+        _len: usize,
+        _flags: RandomFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity
@@ -153,6 +163,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     }
     for (i, &slot) in args.iter().enumerate().take(spec.arg_count as usize) {
         if !arg_is_well_typed(spec.args[i], slot) {
+            return false;
+        }
+    }
+    // `random_get`'s flags argument carries an extra semantic check the
+    // per-`AbiType` validator cannot express: the dispatcher runs the raw
+    // `U32` through `RandomFlags::from_bits`, which rejects any reserved
+    // bit. Mirror that here (the only defined bit today is `NON_BLOCKING`).
+    if spec.number == SyscallNumber::RANDOM_GET {
+        let allowed = u64::from(RandomFlags::NON_BLOCKING.bits());
+        if args[2] & !allowed != 0 {
             return false;
         }
     }

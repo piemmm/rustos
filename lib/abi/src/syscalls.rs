@@ -283,11 +283,35 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::IRQ_BIND),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::RANDOM_GET,
+        name: "random_get",
+        arg_count: 3,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Drawing randomness needs no capability (AGENTS.md §22: a
+        // normal request must not block and is available to every
+        // task); it is a pure observer, so — like `clock_get` — it is
+        // not audited, to avoid drowning the audit log.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
 /// [`ENCODED_TABLE`].
-pub const ENCODED_TABLE_LEN: usize = SYSCALL_ENCODED_RECORD_LEN * 10;
+///
+/// Derived from [`SYSCALLS`]'s length so that appending a syscall row keeps
+/// the encoding buffer in step automatically (`abi-v1` grows by appending —
+/// existing rows never change).
+pub const ENCODED_TABLE_LEN: usize = SYSCALL_ENCODED_RECORD_LEN * SYSCALLS.len();
 
 /// Canonical byte representation of [`SYSCALLS`].
 ///

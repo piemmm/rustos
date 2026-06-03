@@ -26,14 +26,34 @@ form of the existing HMAC wrapper that lets the DRBG hash
 state that produced a block cannot be recovered from the post-call state
 (backtracking resistance); *prediction* resistance comes from reseeding.
 
-## Fallible by construction
+## Two draw styles: fallible and blocking
 
 A draw may trigger a reseed, and a reseed needs fresh entropy that can be
-momentarily unavailable. Rather than block, spin, or panic (§2.1, §2.9),
-`CsRng`'s draws return `Result<_, EntropyError>` and the caller fails
-closed (§5.4). `CsRng` reseeds automatically every
-`DEFAULT_RESEED_INTERVAL` draws — far below the DRBG's hard `2^48`
-reseed limit — buying forward secrecy cheaply.
+momentarily unavailable. `CsRng` lets the caller choose how to cope, and
+neither style spins or panics (§2.1, §2.9):
+
+* **Fallible** (`try_fill_bytes`, `try_next_u64`/`try_next_u32`, `reseed`):
+  a required reseed with no entropy *right now* returns the typed, transient
+  `EntropyError::Reseeding` without disturbing the generator, so the caller
+  fails closed (§5.4) or retries. A *hard* failure — no source at all, e.g.
+  at instantiation — is the distinct `EntropyError::Unavailable`.
+* **Blocking** (`fill_bytes_blocking`, `try_next_u64_blocking`/
+  `try_next_u32_blocking`, `reseed_blocking`): a required reseed instead
+  **waits** for entropy through the source's `EntropySource::fill_blocking`
+  seam — the platform source parks the calling task, it never busy-spins —
+  and then returns the bytes. It fails with `EntropyError::Unavailable` only
+  when the source is genuinely dead. When no reseed is due (the common case)
+  a blocking draw does exactly the same work as a fallible one and never
+  blocks.
+
+`fill_blocking` is a defaulted trait method (it delegates to `fill`), so an
+always-ready source needs no extra code; only a source whose pool can be
+momentarily exhausted overrides it to park. `CombinedSource` threads the
+choice through its single XOR-combine loop (§2.2), waiting out a transient
+source under `fill_blocking` while still skipping a hard-dead one.
+
+`CsRng` reseeds automatically every `DEFAULT_RESEED_INTERVAL` draws — far
+below the DRBG's hard `2^48` reseed limit — buying forward secrecy cheaply.
 
 ## Entropy seam and the hardware RNG
 
@@ -54,6 +74,44 @@ issue calls for:
    hardware directly when present, and falls back to the software
    `FastRng` when it is absent or momentarily fails — there is no
    busy-retry-until-it-works loop (§2.1).
+
+## Kernel output reserve and the random syscall (§22)
+
+`AGENTS.md` §22 mandates exactly one kernel cryptographic random
+subsystem, reached from userland only through a single versioned random
+syscall. The contract lives in `lib/abi`
+(`rustos_abi::random` — `RandomFlags`, `RANDOM_RESERVE_DEFAULT_BYTES` =
+2 KiB, `RANDOM_REQUEST_MAX_BYTES`) and the syscall is
+`SyscallNumber::RANDOM_GET` (`abi-v1`, appended to the table). Drawing
+randomness needs no capability; an over-large request is refused with
+`LengthOutOfRange`, and a non-blocking request issued before the RNG is
+seeded fails closed with `Errno::EntropyNotReady` rather than returning
+weak bytes.
+
+`OutputReserve<E, const N>` is the bounded reserve of CSPRNG **output**
+(not raw entropy) the kernel keeps — preferably one per CPU in
+kernel-only, non-swappable memory — so it serves requests without
+running the DRBG on every call:
+
+* **Unseeded before the RNG initialises.** `fill` returns
+  `ReserveError::NotReady` until `seed` succeeds; the kernel maps that to
+  a block (normal request) or to `EntropyNotReady` (non-blocking).
+* **No weak fallback once ready.** If the buffer is exhausted, the
+  reserve regenerates synchronously from `CsRng`; a request larger than
+  the buffer is generated directly. It never returns short or blocks for
+  fresh entropy after initialisation.
+* **Zeroised on consumption and reuse.** Consumed bytes are wiped
+  immediately and the whole buffer is wiped before each refill, so a
+  paged-out or cloned copy cannot replay them.
+* **Discarded across boundaries.** `discard` wipes buffered output for
+  the suspend/hibernate/fork-clone/crash-dump/reseed boundaries §22
+  enumerates; the generator state is wiped on drop via `zeroize`.
+
+The reserve does not hand bytes to userland by itself: the production
+`kernel/core` `random_get` handler enforces the request cap today and
+announces the deferral of the per-CPU reserve + user-memory copy-out
+(the same Stage 6 user-memory prerequisite `cap_delegate` waits on),
+rather than stubbing randomness (§15.1).
 
 ## Fast, non-cryptographic generator
 
@@ -76,8 +134,19 @@ unbiased bounded integers — once, so no consumer re-derives it (§2.2).
 * `RandU64::next_below`: range and rejection-zone checks for Lemire's
   method, plus a deterministic uniformity histogram.
 * Entropy combination: XOR equivalence, dead-source skipping, and the
-  all-sources-failed fail-closed result.
+  all-sources-failed fail-closed result, plus the blocking combine waiting
+  out a transient source while still skipping a hard-dead one.
+* Draw styles: the default `fill_blocking` matching `fill`; a fallible draw
+  surfacing transient `Reseeding`; a blocking draw and `reseed_blocking`
+  waiting through a reseed shortage; and the no-reseed fast path producing
+  identical output for both styles without blocking.
 * Hardware paths: hardware-backed entropy seeding, hardware-preferring
   fast draws, and the software fallback on absence or transient failure.
 * Statistical balance: deterministic mean and per-bit-position checks
   over 1 MiB of `FastRng` and `CsRng` output (fixed seed — never flaky).
+* Output reserve (§22): unseeded fail-closed, seed-failure handling,
+  post-seed non-blocking generation, multi-request refill, large-request
+  direct generation, zeroise-on-consume, `discard` (suspend/clone) and
+  `reseed` boundary wipes, reseed-failure surfacing as transient
+  `Reseeding`, and the blocking `fill_blocking`/`reseed_blocking` waiting
+  through a reseed shortage.

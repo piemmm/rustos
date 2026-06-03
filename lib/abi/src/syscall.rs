@@ -72,6 +72,18 @@ impl SyscallNumber {
     /// re-checked against the calling task's binding to defend
     /// against handle forgery (`AGENTS.md` §5.4).
     pub const IRQ_WAIT: Self = Self(9);
+    /// Fill a user buffer with cryptographically secure random bytes.
+    ///
+    /// Arguments: `buf: *mut u8` (user pointer), `len: usize`,
+    /// `flags: u32` ([`crate::RandomFlags`]). Returns the number of
+    /// bytes written. The kernel draws from its CSPRNG-backed output
+    /// reserve (`AGENTS.md` §22); the call is unprivileged (drawing
+    /// randomness needs no capability), but a `len` above
+    /// [`crate::RANDOM_REQUEST_MAX_BYTES`] is refused. With
+    /// [`crate::RandomFlags::NON_BLOCKING`] set and the kernel RNG not
+    /// yet seeded it returns [`crate::Errno::EntropyNotReady`] rather
+    /// than blocking.
+    pub const RANDOM_GET: Self = Self(10);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -149,6 +161,7 @@ mod tests {
         assert_eq!(SyscallNumber::CLOCK_GET.as_u16(), 7);
         assert_eq!(SyscallNumber::IRQ_BIND.as_u16(), 8);
         assert_eq!(SyscallNumber::IRQ_WAIT.as_u16(), 9);
+        assert_eq!(SyscallNumber::RANDOM_GET.as_u16(), 10);
     }
 
     #[test]

@@ -88,6 +88,7 @@ pub mod entropy;
 pub mod fast;
 pub mod hardware;
 pub mod rand;
+pub mod reserve;
 
 pub use csprng::{CsRng, DEFAULT_RESEED_INTERVAL};
 pub use drbg::{DrbgError, HmacDrbg, DRBG_OUTLEN, RESEED_INTERVAL};
@@ -95,3 +96,4 @@ pub use entropy::{CombinedSource, EntropyError, EntropySource};
 pub use fast::FastRng;
 pub use hardware::{HardwareEntropy, HardwareRng, PlatformFast};
 pub use rand::RandU64;
+pub use reserve::{OutputReserve, ReserveError, DEFAULT_RESERVE_BYTES};

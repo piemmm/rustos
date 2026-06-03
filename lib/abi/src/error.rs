@@ -81,6 +81,15 @@ pub enum Errno {
     /// [`DeviceFault`](crate::DriverError::DeviceFault)'s unrecoverable
     /// hardware error.
     NoSpace = 15,
+    /// The kernel cryptographic RNG has not yet been initialised.
+    ///
+    /// Emitted only by the random API (`AGENTS.md` §22) and only when the
+    /// caller explicitly requested non-blocking behaviour
+    /// ([`crate::random::RandomFlags::NON_BLOCKING`]). Before the kernel RNG
+    /// is seeded a blocking request waits; a non-blocking request fails
+    /// closed with this errno rather than returning weak randomness. After
+    /// initialisation the random API never returns it.
+    EntropyNotReady = 16,
 }
 
 impl Errno {
@@ -109,6 +118,7 @@ impl fmt::Display for Errno {
             Self::TimedOut => "operation timed out",
             Self::TimestampOutOfRange => "timestamp out of range",
             Self::NoSpace => "no space left on device",
+            Self::EntropyNotReady => "entropy not ready",
         };
         f.write_str(message)
     }
@@ -136,6 +146,7 @@ mod tests {
         assert_eq!(Errno::TimedOut.as_i32(), 13);
         assert_eq!(Errno::TimestampOutOfRange.as_i32(), 14);
         assert_eq!(Errno::NoSpace.as_i32(), 15);
+        assert_eq!(Errno::EntropyNotReady.as_i32(), 16);
     }
 
     #[test]

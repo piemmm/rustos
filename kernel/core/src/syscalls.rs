@@ -48,7 +48,7 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::{CapabilityId, Errno, IrqHandle};
+use rustos_abi::{CapabilityId, Errno, IrqHandle, RandomFlags, RANDOM_REQUEST_MAX_BYTES};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
@@ -383,6 +383,30 @@ where
             // `Errno::OutOfRange`.
             WaitOutcome::Aborted(IrqWaitAbort::SchedulerError) => Err(Errno::OutOfRange),
         }
+    }
+
+    fn random_get(
+        &self,
+        caller: &CallerContext<'_>,
+        _buf: u64,
+        len: usize,
+        _flags: RandomFlags,
+    ) -> SyscallResult {
+        // Bound the work one call may request (AGENTS.md §22 — a caller
+        // needing more issues further requests). This part of the
+        // contract is enforceable today, before the reserve is wired.
+        if len > RANDOM_REQUEST_MAX_BYTES {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // The kernel output reserve (`rustos_rng::OutputReserve`, §22) and
+        // the user-memory copy-out path it would write through are not yet
+        // wired into `KernelState` (the per-CPU reserve and its entropy
+        // seam land alongside the Stage 6 user-memory work, the same
+        // prerequisite `cap_delegate` defers on). Announce the deferral
+        // rather than stub randomness (AGENTS.md §15.1) — never return
+        // weak or zero bytes (§5.4 fail closed).
+        self.audit_feature_unavailable(caller, "random_output_reserve");
+        Err(Errno::NotImplemented)
     }
 }
 
@@ -1127,5 +1151,68 @@ mod tests {
         assert_eq!(raw, 7_001);
         assert_eq!(coarse, 7_000);
         assert!(raw > coarse, "hires caller resolves the sub-µs detail");
+    }
+
+    /// `random_get` refuses an over-large request up front with
+    /// `LengthOutOfRange`, before any deferral audit is emitted.
+    #[test]
+    fn random_get_rejects_request_above_cap() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(11, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(11),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        sink.clear();
+        assert_eq!(
+            h.random_get(
+                &ctx,
+                0x4000,
+                rustos_abi::RANDOM_REQUEST_MAX_BYTES + 1,
+                RandomFlags::empty()
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        // Refused before reaching the deferred-feature branch.
+        assert!(sink.event_ids().is_empty());
+    }
+
+    /// An in-range `random_get` defers the (unlanded) output-reserve /
+    /// user-memory copy-out, announcing the deferral exactly like
+    /// `cap_delegate` rather than returning weak or zero bytes
+    /// (`AGENTS.md` §15.1, §22).
+    #[test]
+    fn random_get_defers_reserve_and_audits_feature_unavailable() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(12, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(12),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        sink.clear();
+        assert_eq!(
+            h.random_get(&ctx, 0x4000, 32, RandomFlags::NON_BLOCKING),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            sink.event_ids(),
+            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+        );
     }
 }

@@ -23,6 +23,7 @@ pub mod error;
 pub mod ipc;
 pub(crate) mod le;
 pub mod manifest;
+pub mod random;
 pub mod rxe;
 pub mod stdinfo;
 pub mod syscall;
@@ -49,6 +50,7 @@ pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
+pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rxe::{
     kaslr_bias, LoadHeader, LoadImage, RxeError, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC,
     LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,

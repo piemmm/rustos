@@ -9,8 +9,8 @@
 //! (`AGENTS.md` §2.3 — no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, SyscallNumber, SyscallSpec, ENCODED_TABLE,
-    SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, SyscallSpec,
+    ENCODED_TABLE, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x6b, 0x6d, 0xbd, 0x9c, 0x30, 0xb6, 0xaa, 0x87, 0xd4, 0x1a, 0xc8, 0x40, 0xa5, 0xbd, 0xef, 0x1c,
-    0xc6, 0xfc, 0x6a, 0x71, 0xae, 0x03, 0xfe, 0x4d, 0xb7, 0x74, 0x6d, 0x96, 0x4c, 0x09, 0x81, 0x4b,
+    0x10, 0x68, 0xba, 0x0f, 0xe8, 0x42, 0xf5, 0xe3, 0xe8, 0x3c, 0xf9, 0xc3, 0xa3, 0x76, 0xdb, 0xda,
+    0x2d, 0x67, 0x4f, 0x77, 0xc6, 0xea, 0x9d, 0x4f, 0xf7, 0x22, 0xd0, 0x30, 0x34, 0x06, 0xc2, 0x07,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -180,6 +180,24 @@ pub trait SyscallHandlers {
         handle: IrqHandle,
         timeout_ns: u64,
     ) -> SyscallResult;
+    /// Fill the user buffer at `buf` with up to `len` cryptographically
+    /// secure random bytes drawn from the kernel output reserve
+    /// (`AGENTS.md` §22), returning the number of bytes written.
+    ///
+    /// The dispatcher has already validated that `buf` is non-null, that
+    /// `len` fits in `usize`, and that `flags` carries no reserved bit.
+    /// The implementation must refuse a `len` above
+    /// [`rustos_abi::RANDOM_REQUEST_MAX_BYTES`] with
+    /// [`Errno::LengthOutOfRange`], and — when `flags` requests
+    /// non-blocking behaviour and the RNG is not yet seeded — return
+    /// [`Errno::EntropyNotReady`] rather than blocking.
+    fn random_get(
+        &self,
+        caller: &CallerContext<'_>,
+        buf: u64,
+        len: usize,
+        flags: RandomFlags,
+    ) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -316,6 +334,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::IRQ_WAIT => {
                 let handle = IrqHandle::from_raw(args.0[0]);
                 self.handlers.irq_wait(caller, handle, args.0[1])
+            }
+            SyscallNumber::RANDOM_GET => {
+                let len = decode_len(args.0[1])?;
+                // `validate_arg` already constrained args[2] to fit in u32
+                // (upper bits zero); `from_bits` rejects any reserved bit.
+                #[allow(clippy::cast_possible_truncation)]
+                let flags = RandomFlags::from_bits((args.0[2] & 0xFFFF_FFFF) as u32)?;
+                self.handlers.random_get(caller, args.0[0], len, flags)
             }
             _ => Err(Errno::NotFound),
         }
@@ -602,6 +628,19 @@ mod tests {
         ) -> SyscallResult {
             self.record("irq_wait");
             Ok(0)
+        }
+        fn random_get(
+            &self,
+            _c: &CallerContext<'_>,
+            _buf: u64,
+            len: usize,
+            _flags: RandomFlags,
+        ) -> SyscallResult {
+            self.record("random_get");
+            // Echo the requested length back as the byte count so the
+            // reachability test can assert the dispatcher decoded the
+            // arguments without inventing a real reserve here.
+            Ok(len as u64)
         }
     }
 
