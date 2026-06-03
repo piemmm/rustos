@@ -17,6 +17,14 @@
 //! * `open` never panics for any device contents — it returns `Ok` for a
 //!   genuinely valid volume and `Err` (fail closed) for everything else.
 //!
+//! A mounted volume is then driven through the remaining decode paths the §16
+//! "fuzz targets" list enumerates: the **directory-block decode** path
+//! (`read_dir`/`lookup` decrypt and parse the encrypted dirent payload that
+//! the mount-time free-space walk never reads), the scrub-progress and
+//! health-baseline record decoders (`scrub`/`health`), the offline `check`
+//! re-walk, and the read-only `rescue` root scan. Each shares the same
+//! invariant: it returns a `Result`, never panics, and fails closed.
+//!
 //! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a fixed-seed
 //! LCG draws pseudo-random images, and a structured sweep flips every byte of
 //! a real formatted image to hammer the §8 block-identity checks (magic, type,
@@ -172,6 +180,36 @@ fn index(x: u64, len: usize) -> usize {
     usize::try_from(x % len as u64).unwrap_or(0)
 }
 
+/// Drive the directory-block decode path on a mounted volume: walk every
+/// reachable directory (bounded), decoding each block's encrypted dirent
+/// payload through `read_dir` and resolving each decoded name through
+/// `lookup`. Every call must return a `Result`, never panic, for any device
+/// contents (`AGENTS.md` §2.9 / §19.6). The traversal is bounded by a hard
+/// visit budget and a depth cap so a fuzzed image cannot drive it forever.
+fn walk_directories(fs: &mut RustFs<MemBlock>) {
+    let mut name = [0u8; 256];
+    let mut stack = vec![(fs.root(), 0u32)];
+    let mut visits = 0u32;
+    while let Some((dir, depth)) = stack.pop() {
+        visits += 1;
+        if visits > 4096 {
+            break;
+        }
+        let mut index = 0u64;
+        while let Ok(Some(entry)) = fs.read_dir(dir, index, &mut name) {
+            let len = entry.name_len.min(name.len());
+            let _ = fs.lookup(dir, &name[..len]);
+            if matches!(entry.kind, NodeKind::Directory) && depth < 8 {
+                stack.push((entry.node, depth + 1));
+            }
+            index += 1;
+            if index > 65_536 {
+                break;
+            }
+        }
+    }
+}
+
 /// The single invariant: opening an arbitrary image must return a `Result`,
 /// never panic. A successful mount must additionally survive being reopened.
 fn exercise(image: &[u8]) {
@@ -179,6 +217,13 @@ fn exercise(image: &[u8]) {
     store.resize(IMAGE_LEN, 0);
     let dev = MemBlock { store };
     if let Ok(mut fs) = RustFs::open(dev, &FUZZ_KEY) {
+        // Drive the directory-block decode path (§16's "directory decode"
+        // target): list the root directory and resolve every decoded name.
+        // `read_dir`/`lookup` decrypt and parse the directory block's dirent
+        // payload (the §4 encrypted directory record), which `open`'s
+        // free-space walk never reads. Like `open` it must return a `Result`,
+        // never panic, for any device contents (`AGENTS.md` §2.9 / §19.6).
+        walk_directories(&mut fs);
         // Drive the Stage-8 scrub-progress decode path: a bounded scrub reads
         // and decodes any persisted scrub-progress record (`load_scrub_progress`)
         // before resuming. Like `open` it must return a `Result`, never panic,

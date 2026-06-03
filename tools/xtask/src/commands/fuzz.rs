@@ -70,7 +70,8 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "rustos-drv-fs-rustfs",
         test: "fuzz_mount",
-        description: "rustfs mount / metadata decode (superblock ring, root, inode map)",
+        description:
+            "rustfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
     },
     Target {
         package: "rustos-compress",

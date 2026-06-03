@@ -284,8 +284,9 @@ so a delete can copy-on-write itself even on a full volume. No
 > self-identifying baseline of the last clean device snapshot plus accumulated
 > filesystem-observed fault counters, a structured `HealthReport` classified
 > against documented thresholds, and a scrub triggered through the Stage-8
-> machinery when a device-health delta crosses a threshold (Stage 11). The
-> remaining stages stay in the
+> machinery when a device-health delta crosses a threshold (Stage 11), and the
+> **fuzz / crash-replay / corruption-injection suites** that harden every
+> earlier stage (Stage 12). **RustFS v1 is complete** — see the
 > [specification](../../../docs/src/filesystem/rustfs-spec.md).
 
 ## Security
@@ -372,6 +373,24 @@ during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
 never torn.
 
+The Stage-12 suites are the adversarial superset of all the above, reusing the
+same seams (`AGENTS.md` §2.2): the crash-replay sweep is **generalised to every
+commit step across every representative transaction** (create, write, truncate,
+remove, reflink, scrub, check, trim, health) — each faulted at every
+write-budget cut-off, the re-opened volume always mounting on a whole
+transaction boundary with the effect fully present or fully absent and the
+witness file never lost; and a **corruption-injection suite** that wounds each
+on-disk structure class (superblock slot, transaction root, the inode / extent
+/ chunk / reverse-reference B-trees, a directory block, the scrub-progress and
+health-baseline records, and each data-integrity layer) in **one** and in
+**both** copies, asserting a single bad copy is always repaired from the
+companion mirror, both copies of mount-critical metadata never tear (fail
+closed or recover an earlier consistent root via the ring), a both-copies-bad
+directory still mounts but reads fail closed and scrub records it unrepairable,
+the transient records recover gracefully, and an unmirrored data block's fault
+is classified by its `DataFault` layer and surfaced fail-closed, never silently
+repaired.
+
 The 1 GiB filesystem soak (`cargo xtask fssoak --target rustfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
 mount / metadata-decode path (`fuzz_mount`, which since Stage 7 also decodes
@@ -381,7 +400,9 @@ bounded scrub on every successful mount, and since Stage 9 also runs the
 offline `check` on every successful mount and feeds every image to
 `RustFs::rescue`, driving the transaction-root scan and extraction decode
 paths, and since Stage 11 reports SMART-style telemetry and runs `health` on
-every successful mount, driving the health-baseline record decode path)
+every successful mount, driving the health-baseline record decode path, and
+since Stage 12 also walking every reachable directory on every successful
+mount, driving the encrypted directory-block decode path)
 and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
 (`AGENTS.md` §19.6).
 

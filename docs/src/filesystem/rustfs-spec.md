@@ -564,7 +564,10 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 9 | Offline check and rescue. | ✓ |
 | 10 | TRIM/discard queues and mkfs-time discard. | ✓ |
 | 11 | Device health baselines and health-triggered scrub. | ✓ |
-| 12 | Fuzz, proptest, crash-replay, and corruption-injection suites. | |
+| 12 | Fuzz, proptest, crash-replay, and corruption-injection suites. | ✓ |
+
+**RustFS v1 is complete: every stage above is shipped (§17 definition of
+done).**
 
 Stage 1 landed as the copy-on-write `rustfs` driver: self-identifying
 block headers (§8), the four-slot superblock ring and transaction root +
@@ -857,4 +860,39 @@ triggering no further scrub), and the persisted baseline surviving a crash at
 every write count during its update with no live data lost — all pass, alongside
 the crash-replay sweep, the 1 GiB `fssoak`, the posix suite, the QEMU vertical,
 and the `fuzz_mount` harness extended to drive the health-baseline decode path.
-Stage 12 remains; each implementing session ticks this table and `PLAN.md`.
+
+Stage 12 added the **fuzz, crash-replay, and corruption-injection suites**
+(§15.12, §16), the adversarial superset that hardens everything the earlier
+stages built without adding a new on-disk feature and without a second
+integrity, scrub, or decode path (`AGENTS.md` §2.2). The §16 "fuzz targets for
+mount, metadata decode, directory decode, compression decode, check, and
+rescue" are all present: the `fuzz_mount` harness (`tests/fuzz_mount.rs`) drives
+the mount / metadata / scrub-progress / health-baseline / check / rescue decode
+paths and now also the **directory-block decode** path (`read_dir`/`lookup`
+decrypt and parse the encrypted dirent payload that the mount-time free-space
+walk never reads), while the `rustos-compress` `fuzz_compress` harness covers
+compression decode; every harness keeps the single invariant "returns a
+`Result`, never panics, fails closed" and is wired into `cargo xtask fuzz` /
+`--quick` / `ci` / the nightly `--soak`. The crash-replay sweep is generalised
+to **every commit step across every representative transaction** — create,
+write, truncate, remove, reflink, scrub, check, trim, and health — asserting
+that for each write-budget cut-off the re-opened volume always mounts on a whole
+transaction boundary, the committed state is fully present or fully absent
+(never torn), and the witness file is never lost (§14). The
+**corruption-injection suite** systematically wounds each on-disk structure
+class — superblock-ring slot, transaction root, the inode / extent / chunk /
+reverse-reference B-trees, directory block, the scrub-progress and
+health-baseline records, and each data-integrity layer — in **one** copy and in
+**both** copies, asserting the documented seam behaviour: a single bad copy is
+always repaired from the §8 companion mirror (volume mounts, scrub reports
+nothing unrepairable, check is sound, data intact); both copies of mount-
+critical metadata never tear (the mount fails closed or recovers an earlier
+whole, consistent committed root via the superblock ring, §14); a both-copies-
+bad directory still mounts but reads fail closed and scrub records it
+unrepairable; the transient scrub-progress/health-baseline records recover
+gracefully (scrub restarts, health re-derives); and an unmirrored data block's
+fault is detected, classified by its `DataFault` layer, and surfaced as a fail-
+closed `DeviceFault`, never silently repaired. These reuse the existing
+`MemBlock` write-budget + fault-injection helpers, the `DataFault` classes, and
+the `verify_everything` scrub/check core (`AGENTS.md` §2.2). With Stage 12
+shipped, **RustFS v1 is complete** (§17).

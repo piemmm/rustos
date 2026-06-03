@@ -4161,22 +4161,52 @@ legend is `docs/src/filesystem/rustfs-spec.md` §18. The 12 stages:
    triggers no further scrub), and the persisted baseline surviving a crash at
    every write count with no live data lost; `fuzz_mount` extended to report
    telemetry and drive the health-baseline decode path.)
-12. Fuzz, proptest, crash-replay, and corruption-injection suites.
+12. Fuzz, proptest, crash-replay, and corruption-injection suites. ✓
+   (The adversarial superset that hardens every earlier stage with no new
+   on-disk feature and no second integrity/scrub/decode path, §2.2. The §16
+   "fuzz targets for mount, metadata decode, directory decode, compression
+   decode, check, and rescue" are all present: `tests/fuzz_mount.rs` drives
+   mount / metadata / scrub-progress / health-baseline / check / rescue and now
+   the **directory-block decode** path too (`read_dir`/`lookup` over the
+   encrypted dirent payload the mount-time walk never reads), and
+   `lib/compress` `fuzz_compress` covers compression decode — all wired into
+   `cargo xtask fuzz`/`--quick`/`ci`/`--soak`, single invariant "returns a
+   `Result`, never panics, fails closed". The crash-replay sweep is
+   **generalised to every commit step across every representative transaction**
+   — create/write/truncate/remove/reflink/scrub/check/trim/health — asserting a
+   whole-transaction-boundary mount, fully-present-or-fully-absent effect, and
+   no live-data loss at every write-budget cut-off (§14). A
+   **corruption-injection suite** wounds each on-disk structure class
+   (superblock slot, transaction root, the inode/extent/chunk/reverse-reference
+   B-trees, a directory block, the scrub-progress and health-baseline records,
+   and each data-integrity layer) in **one** and **both** copies, asserting:
+   single-copy repair from the §8 companion mirror; both-copies mount-critical
+   metadata never tears (fail closed or recovers an earlier consistent root via
+   the ring, §14); a both-copies-bad directory mounts but reads fail closed and
+   scrub records it unrepairable; transient records recover gracefully; and an
+   unmirrored data block's fault is classified by `DataFault` and surfaced
+   fail-closed, never silently repaired. Reuses the existing `MemBlock`
+   write-budget fault-injection, the `DataFault` classes, and
+   `verify_everything`, §2.2.)
 
 **Docs**
 - `docs/src/filesystem/rustfs.md` (the single native-filesystem page; the
   separate `rustfs_v1.md` mirror was removed — there is no `v1`). Each
   stage expands it with what actually landed.
 
-**Status: Stages 1–11 complete; Stage 12 planned.** The copy-on-write
+**Status: all stages complete — RustFS v1 is done (§17).** The copy-on-write
 `rustfs` driver replaced the old journaled implementation outright (no
 `v1` folder, no parallel version): self-identifying block headers, the
 four-slot superblock ring, transaction root + inline commit record, and a
 copy-on-write inode map backing the full POSIX read/write/security/
-timestamp surface. It passes its unit tests, the 1 GiB `fssoak`, the
-posix suite, the rustfs-over-virtio-blk QEMU vertical, and the
-`fuzz_mount` metadata-decode harness. Each subsequent session ticks its
-stage here and in `docs/src/filesystem/rustfs-spec.md` §18.
+timestamp surface, grown through Stages 2–12 into the full RustFS design
+(COW B-trees, keyed-MAC + mirrored metadata, at-rest encryption, per-record
+integrity, mandatory compression and dedupe, online scrub, offline
+check/rescue, safe TRIM/discard, device-health-triggered scrub, and the
+Stage-12 fuzz/crash-replay/corruption-injection suites). It passes its unit
+tests, the 1 GiB `fssoak`, the posix suite, the rustfs-over-virtio-blk QEMU
+vertical, and the `fuzz_mount` / `fuzz_compress` harnesses. The per-stage
+status legend is `docs/src/filesystem/rustfs-spec.md` §18.
 
 ---
 

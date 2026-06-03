@@ -2882,3 +2882,591 @@ fn health_baseline_survives_a_crash_during_its_update() {
             .expect("health works after the crash");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stage 12: the fuzz / crash-replay / corruption-injection suites
+// (`docs/src/filesystem/rustfs-spec.md` §15.12, §16; `AGENTS.md` §7 / §19.6).
+//
+// These are the adversarial superset of the per-stage tests, built on the
+// same seams the earlier stages already provide (`AGENTS.md` §2.2): the §8
+// block identity + companion mirror, the `DataFault` classes, the
+// `verify_everything` scrub/check core, and the `MemBlock` write-budget
+// fault-injection. They add no second verifier and no second on-disk decode
+// path. (The fuzz harness for every decode path — mount, metadata, directory,
+// compression, check, rescue — lives in `tests/fuzz_mount.rs` and the
+// `rustos-compress` `fuzz_compress` harness, wired into `cargo xtask fuzz`.)
+// ---------------------------------------------------------------------------
+
+/// The crash-replay block geometry: a 4096-byte volume with room for several
+/// files, a multi-block file, shared chunks, a reflink, and a subdirectory.
+const CRASH_BS: u32 = 4096;
+const CRASH_BC: u64 = 256;
+
+/// Immutable witness file content. Every crash-replay trial asserts this file
+/// reads back byte-for-byte after the (possibly torn) re-mount: live data is
+/// never lost, whatever write count the power loss cut the transaction at
+/// (`docs/src/filesystem/rustfs-spec.md` §14).
+const CRASH_KEEP: &[u8] = b"keep-content-that-must-never-be-torn-or-lost";
+
+/// Build a committed crash-replay baseline: a witness file (`keep`), a victim
+/// to remove, a two-block file to truncate, a reflink source, an empty write
+/// target, and a subdirectory — every operation the §16 sweep replays already
+/// has its precondition committed.
+fn crash_baseline() -> alloc::vec::Vec<u8> {
+    let mut fs = RustFs::format(
+        MemBlock::new(CRASH_BS, CRASH_BC)
+            .with_discard(1, 0)
+            .with_health(DeviceHealth::Available(healthy_snapshot(0, 0))),
+        64,
+        &TEST_KEY,
+    )
+    .expect("format crash baseline")
+    .with_clock(fixed_clock);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    fs.write_at(root, b"keep", 0, CRASH_KEEP)
+        .expect("write keep");
+    fs.create(root, b"victim", NodeKind::RegularFile)
+        .expect("create victim");
+    fs.write_at(root, b"victim", 0, b"victim-data-block")
+        .expect("write victim");
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create big");
+    let big = alloc::vec![0x07u8; CRASH_BS as usize * 2];
+    fs.write_at(root, b"big", 0, &big).expect("write big");
+    fs.create(root, b"src", NodeKind::RegularFile)
+        .expect("create src");
+    fs.write_at(root, b"src", 0, b"reflink-source-content")
+        .expect("write src");
+    fs.create(root, b"target", NodeKind::RegularFile)
+        .expect("create target");
+    fs.create(root, b"dir", NodeKind::Directory)
+        .expect("create dir");
+    fs.into_block().bytes()
+}
+
+/// Replay one representative transaction at every commit step: cut the device
+/// off after each write count, then assert the re-opened volume always mounts
+/// on a whole-transaction boundary and never loses the witness file.
+///
+/// `op` performs the transaction under the write budget; `check` asserts the
+/// all-or-nothing post-condition on the re-mounted volume. The shared witness
+/// assertion (`keep` reads back intact) runs for every budget before `check`.
+fn crash_replay_each_step<Op, Check>(baseline: &[u8], max_budget: u32, mut op: Op, mut check: Check)
+where
+    Op: FnMut(&mut RustFs<MemBlock>),
+    Check: FnMut(&mut RustFs<MemBlock>, u32),
+{
+    let device = |bytes: alloc::vec::Vec<u8>| {
+        MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC)
+            .with_discard(1, 0)
+            .with_health(DeviceHealth::Available(healthy_snapshot(0, 0)))
+    };
+    for budget in 0..max_budget {
+        let mut dev = device(baseline.to_vec());
+        dev.write_budget = Some(budget);
+        let mut fs = RustFs::open(dev, &TEST_KEY)
+            .expect("baseline opens")
+            .with_clock(fixed_clock);
+        op(&mut fs);
+        let bytes = fs.into_block().bytes();
+
+        let mut fs = RustFs::open(device(bytes), &TEST_KEY)
+            .expect("post-crash mount always succeeds on a whole-txn boundary")
+            .with_clock(fixed_clock);
+        let keep = fs.lookup(fs.root(), b"keep").expect("keep always survives");
+        assert_eq!(
+            read_all(&mut fs, keep, CRASH_KEEP.len()),
+            CRASH_KEEP,
+            "live data lost at budget {budget}"
+        );
+        check(&mut fs, budget);
+    }
+}
+
+/// The size of file `name`, or `None` if it no longer exists.
+fn file_size(fs: &mut RustFs<MemBlock>, name: &[u8]) -> Option<u64> {
+    let node = fs.lookup(fs.root(), name).ok()?;
+    Some(fs.node_info(node).expect("node info").size)
+}
+
+/// The crash-replay write-budget ceiling: larger than the write count of any
+/// single transaction the sweeps replay, so every commit step is covered.
+const CRASH_BUDGET: u32 = 200;
+
+#[test]
+fn crash_replay_at_every_commit_step_for_create_write_truncate() {
+    // §16 "crash replay at every commit step" for the namespace/data
+    // transactions: a power loss at every write count must leave a volume that
+    // mounts on a whole-transaction boundary, with the operation's effect fully
+    // present or fully absent (never torn) and no live data lost (§14).
+    let baseline = crash_baseline();
+
+    // create: the new file is either present (empty) or absent — never half-made.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.create(root, b"fresh", NodeKind::RegularFile);
+        },
+        |fs, b| match file_size(fs, b"fresh") {
+            None | Some(0) => {}
+            Some(other) => panic!("torn create at budget {b}: size {other}"),
+        },
+    );
+
+    // write: the target file is either empty or holds the whole new payload.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.write_at(root, b"target", 0, b"freshdata");
+        },
+        |fs, b| match file_size(fs, b"target") {
+            Some(0) => {}
+            Some(9) => {
+                let node = fs.lookup(fs.root(), b"target").expect("target");
+                assert_eq!(read_all(fs, node, 9), b"freshdata", "torn write at {b}");
+            }
+            other => panic!("torn write at budget {b}: {other:?}"),
+        },
+    );
+
+    // truncate: the file keeps either its full length or the truncated length,
+    // and the surviving prefix is always intact.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.truncate(root, b"big", u64::from(CRASH_BS));
+        },
+        |fs, b| {
+            let size = file_size(fs, b"big").expect("big always survives");
+            let full = u64::from(CRASH_BS) * 2;
+            assert!(
+                size == full || size == u64::from(CRASH_BS),
+                "torn truncate at budget {b}: size {size}"
+            );
+            let node = fs.lookup(fs.root(), b"big").expect("big");
+            let prefix = read_all(fs, node, CRASH_BS as usize);
+            assert_eq!(
+                prefix,
+                alloc::vec![0x07u8; CRASH_BS as usize],
+                "surviving prefix corrupt at budget {b}"
+            );
+        },
+    );
+}
+
+#[test]
+fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
+    // Crash replay for the unlink / clone / discard transactions (§14, §16).
+    let baseline = crash_baseline();
+
+    // remove: the victim is either fully present (with its content) or gone.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.remove(root, b"victim");
+        },
+        assert_victim_whole_or_gone,
+    );
+
+    // reflink: the clone is either absent or a full, identical copy; the
+    // source is always intact.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.reflink(root, b"src", b"clone");
+        },
+        |fs, b| {
+            let src = fs.lookup(fs.root(), b"src").expect("src always survives");
+            assert_eq!(
+                read_all(fs, src, b"reflink-source-content".len()),
+                b"reflink-source-content",
+                "reflink damaged the source at budget {b}"
+            );
+            if let Ok(clone) = fs.lookup(fs.root(), b"clone") {
+                assert_eq!(
+                    read_all(fs, clone, b"reflink-source-content".len()),
+                    b"reflink-source-content",
+                    "torn reflink at budget {b}"
+                );
+            }
+        },
+    );
+
+    // trim: free a file then trim within the cut-off budget. The pending-discard
+    // queue is transient (§4) and discard never zeroes live data, so the
+    // re-mount is always clean and the witness file survives.
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let root = fs.root();
+            let _ = fs.remove(root, b"victim");
+            let _ = fs.trim(&GrantAll, &NullSink);
+        },
+        assert_victim_whole_or_gone,
+    );
+}
+
+#[test]
+fn crash_replay_at_every_commit_step_for_maintenance_passes() {
+    // Crash replay for the maintenance passes (scrub, check, health): a power
+    // loss mid-pass leaves a mountable volume (ordinary recovery never needs
+    // them, §14) with no live data lost. The shared witness assertion in
+    // `crash_replay_each_step` already covers "no live data lost".
+    let baseline = crash_baseline();
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let _ = fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited);
+        },
+        |_, _| {},
+    );
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let _ = fs.check(&GrantAll, &NullSink);
+        },
+        |_, _| {},
+    );
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        |fs| {
+            let _ = fs.health(&GrantAll, &NullSink);
+        },
+        |_, _| {},
+    );
+}
+
+/// Assert the `victim` file is either fully present with its committed content
+/// or wholly absent — never a torn unlink (`docs/src/filesystem/rustfs-spec.md`
+/// §14).
+fn assert_victim_whole_or_gone(fs: &mut RustFs<MemBlock>, budget: u32) {
+    match fs.lookup(fs.root(), b"victim") {
+        Ok(node) => assert_eq!(
+            read_all(fs, node, b"victim-data-block".len()),
+            b"victim-data-block",
+            "torn remove at budget {budget}"
+        ),
+        Err(DriverError::NotFound) => {}
+        Err(e) => panic!("unexpected at budget {budget}: {e:?}"),
+    }
+}
+
+/// Every on-disk metadata structure class, located by its primary block so the
+/// corruption-injection suite can wound one or both physical copies of each.
+struct CorruptionTargets {
+    txn_root: u64,
+    inode_tree: u64,
+    extent_tree: u64,
+    chunk_tree: u64,
+    reverse_ref_tree: u64,
+    directory: u64,
+    scrub_progress: u64,
+    health_baseline: u64,
+}
+
+/// Build a richly-populated corruption baseline and capture the primary block
+/// of every on-disk structure class, returning the committed image, the
+/// targets, and the witness file's content. The baseline carries shared chunks
+/// (chunk + reverse-reference trees), a reflink, a subdirectory, a paused scrub
+/// (a scrub-progress record), and a health pass (a health-baseline record), so
+/// every structure class is live and reachable.
+fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec::Vec<u8>) {
+    let mut fs = RustFs::format(
+        MemBlock::new(4096, 512).with_health(DeviceHealth::Available(healthy_snapshot(0, 0))),
+        128,
+        &TEST_KEY,
+    )
+    .expect("format corruption baseline")
+    .with_clock(fixed_clock);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+
+    let keep_body = alloc::vec![0x6Bu8; cap + 50];
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    fs.write_at(root, b"keep", 0, &keep_body)
+        .expect("write keep");
+
+    let shared = alloc::vec![0x5Au8; cap];
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    fs.write_at(root, b"a", 0, &shared).expect("write a");
+    fs.write_at(root, b"b", 0, &shared).expect("write b");
+    fs.reflink(root, b"a", b"aclone").expect("reflink");
+
+    fs.create(root, b"dir", NodeKind::Directory)
+        .expect("create dir");
+    let dir = fs.lookup(root, b"dir").expect("lookup dir");
+    fs.create(dir, b"nested", NodeKind::RegularFile)
+        .expect("create nested");
+    fs.write_at(dir, b"nested", 0, b"nested file")
+        .expect("write nested");
+
+    // A bounded scrub pauses mid-pass, persisting a scrub-progress record.
+    let _ = fs.scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1));
+    // A health pass persists a health-baseline record.
+    fs.health(&GrantAll, &NullSink).expect("health baseline");
+
+    let a_ino = u32::try_from(fs.lookup(root, b"a").expect("lookup a").raw()).expect("ino");
+    let extent_tree = fs.read_inode(a_ino).expect("read a inode").extent_root;
+    let root_inode = fs.read_inode(ROOT_INO).expect("root inode");
+    let directory = fs.block_ptr(&root_inode, 0).expect("root dir block");
+
+    let targets = CorruptionTargets {
+        txn_root: fs.root_phys,
+        inode_tree: fs.inode_tree_root,
+        extent_tree,
+        chunk_tree: fs.chunk_tree_root,
+        reverse_ref_tree: fs.reverse_ref_tree_root,
+        directory,
+        scrub_progress: fs.scrub_progress_root,
+        health_baseline: fs.health_baseline_root,
+    };
+    assert_ne!(targets.extent_tree, 0, "the shared file has an extent tree");
+    assert_ne!(targets.chunk_tree, 0, "shared content built a chunk tree");
+    assert_ne!(
+        targets.reverse_ref_tree, 0,
+        "shared content built a reverse-reference tree"
+    );
+    assert_ne!(targets.scrub_progress, 0, "a scrub-progress record exists");
+    assert_ne!(
+        targets.health_baseline, 0,
+        "a health-baseline record exists"
+    );
+
+    (fs.into_block().bytes(), targets, keep_body)
+}
+
+/// Flip the first payload byte of the block at `block`, breaking its keyed
+/// authenticator. `block + 1` is the companion mirror (`AGENTS.md` §2.2).
+fn wound_copy(bytes: &mut [u8], block: u64) {
+    let off = as_usize(block) * 4096 + HEADER_LEN;
+    bytes[off] ^= 0xff;
+}
+
+fn open_corruption(bytes: alloc::vec::Vec<u8>) -> Result<RustFs<MemBlock>, DriverError> {
+    RustFs::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
+        .map(|fs| fs.with_clock(fixed_clock))
+}
+
+#[test]
+fn corruption_injection_single_metadata_copy_is_recovered_from_the_companion() {
+    // Wound exactly one physical copy of every on-disk metadata structure
+    // class. The §8 companion-mirror seam must recover each: the volume mounts,
+    // scrub reports nothing unrepairable, check finds the structure sound, and
+    // the witness file reads back intact (`docs/src/filesystem/rustfs-spec.md`
+    // §8, §12). This is the adversarial superset of the per-stage repair tests.
+    let (baseline, t, keep_body) = corruption_baseline();
+    let classes: [(&str, u64); 8] = [
+        ("txn_root", t.txn_root),
+        ("inode_tree", t.inode_tree),
+        ("extent_tree", t.extent_tree),
+        ("chunk_tree", t.chunk_tree),
+        ("reverse_ref_tree", t.reverse_ref_tree),
+        ("directory", t.directory),
+        ("scrub_progress", t.scrub_progress),
+        ("health_baseline", t.health_baseline),
+    ];
+    for (label, block) in classes {
+        let mut bytes = baseline.clone();
+        wound_copy(&mut bytes, block); // wound only the primary copy
+        let mut fs = open_corruption(bytes)
+            .unwrap_or_else(|e| panic!("{label}: single-copy damage must still mount: {e:?}"));
+
+        let scrub = fs
+            .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+            .unwrap_or_else(|e| panic!("{label}: scrub: {e:?}"));
+        assert_eq!(
+            scrub.metadata_unrepairable, 0,
+            "{label}: a single bad copy is always repairable ({scrub:?})"
+        );
+        let check = fs
+            .check(&GrantAll, &NullSink)
+            .unwrap_or_else(|e| panic!("{label}: check: {e:?}"));
+        assert!(check.structure_sound, "{label}: {check:?}");
+        fs.health(&GrantAll, &NullSink)
+            .unwrap_or_else(|e| panic!("{label}: health: {e:?}"));
+
+        let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
+        assert_eq!(
+            read_all(&mut fs, keep, keep_body.len()),
+            keep_body,
+            "{label}: live data must survive single-copy damage"
+        );
+    }
+}
+
+#[test]
+fn corruption_injection_both_copies_of_mount_critical_metadata_never_tears() {
+    // Wound *both* physical copies of a structure the mount must read. With
+    // neither copy authenticating, the §8 mirror cannot repair the block, so
+    // RustFS never trusts the corruption: it either fails the mount closed
+    // (`AGENTS.md` §5.4 / §2.9) or, because the superblock ring retains earlier
+    // whole transactions, selects an older committed root that does not
+    // reference the wounded block and is fully consistent (§14 — a partial or
+    // unreadable transaction is ignored, never torn). The minimal-volume strict
+    // fail-closed case is `both_metadata_copies_corrupted_fails_closed`; this is
+    // its adversarial, multi-generation superset.
+    let (baseline, t, keep_body) = corruption_baseline();
+    let classes: [(&str, u64); 5] = [
+        ("txn_root", t.txn_root),
+        ("inode_tree", t.inode_tree),
+        ("extent_tree", t.extent_tree),
+        ("chunk_tree", t.chunk_tree),
+        ("reverse_ref_tree", t.reverse_ref_tree),
+    ];
+    for (label, block) in classes {
+        let mut bytes = baseline.clone();
+        wound_copy(&mut bytes, block);
+        wound_copy(&mut bytes, block + 1);
+        match open_corruption(bytes) {
+            // Fail closed: neither this nor any earlier root is usable.
+            Err(_) => {}
+            // Recovered an earlier whole transaction: it must be sound and
+            // still carry the witness file — never torn, never corrupt.
+            Ok(mut fs) => {
+                let report = fs
+                    .check(&GrantAll, &NullSink)
+                    .unwrap_or_else(|e| panic!("{label}: check: {e:?}"));
+                assert!(
+                    report.structure_sound,
+                    "{label}: an earlier root must be consistent, not torn ({report:?})"
+                );
+                let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
+                assert_eq!(
+                    read_all(&mut fs, keep, keep_body.len()),
+                    keep_body,
+                    "{label}: the recovered root still carries the witness file"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn corruption_injection_both_copies_of_a_directory_block_are_reported_not_torn() {
+    // A directory block is metadata the mount-time free-space walk never reads,
+    // so a both-copies-bad directory still mounts — but reading the directory
+    // fails closed and scrub records it as unrepairable, never silently
+    // dropping or fabricating entries (`docs/src/filesystem/rustfs-spec.md`
+    // §8, §12; `AGENTS.md` §2.9).
+    let (baseline, t, _keep) = corruption_baseline();
+    let mut bytes = baseline;
+    wound_copy(&mut bytes, t.directory);
+    wound_copy(&mut bytes, t.directory + 1);
+    let mut fs = open_corruption(bytes).expect("a damaged directory block still mounts");
+
+    let root = fs.root();
+    let mut name = [0u8; 256];
+    assert!(
+        fs.read_dir(root, 0, &mut name).is_err(),
+        "reading a both-copies-bad directory fails closed"
+    );
+    // The baseline left a paused scrub whose cursor is already past the root
+    // inode, so the first (resuming) pass would skip the wounded root
+    // directory; let it drain and clear the progress record, then run a fresh
+    // full pass that re-verifies every inode and records the unrepairable
+    // directory block.
+    fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("resuming scrub drains and completes");
+    let report = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("a fresh scrub records the fault");
+    assert!(
+        report.metadata_unrepairable >= 1,
+        "the both-copies-bad directory is reported unrepairable ({report:?})"
+    );
+}
+
+#[test]
+fn corruption_injection_both_copies_of_a_transient_record_recover_gracefully() {
+    // The scrub-progress and health-baseline records are rebuildable, transient
+    // metadata (§4): even with both copies bad the volume mounts, a fresh scrub
+    // simply restarts, a health pass re-derives from a default baseline, and no
+    // live data is lost (`docs/src/filesystem/rustfs-spec.md` §11, §12).
+    let (baseline, t, keep_body) = corruption_baseline();
+    for (label, block) in [
+        ("scrub_progress", t.scrub_progress),
+        ("health_baseline", t.health_baseline),
+    ] {
+        let mut bytes = baseline.clone();
+        wound_copy(&mut bytes, block);
+        wound_copy(&mut bytes, block + 1);
+        let mut fs = open_corruption(bytes)
+            .unwrap_or_else(|e| panic!("{label}: a transient record both-bad still mounts: {e:?}"));
+
+        fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+            .unwrap_or_else(|e| panic!("{label}: scrub restarts cleanly: {e:?}"));
+        fs.health(&GrantAll, &NullSink)
+            .unwrap_or_else(|e| panic!("{label}: health re-derives: {e:?}"));
+
+        let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
+        assert_eq!(
+            read_all(&mut fs, keep, keep_body.len()),
+            keep_body,
+            "{label}: live data must survive a corrupt transient record"
+        );
+    }
+}
+
+#[test]
+fn corruption_injection_data_block_faults_are_classified_not_repaired() {
+    // Data blocks are not mirrored (only metadata is, §8). A wounded data block
+    // is therefore detected and classified by its `DataFault` layer, and scrub
+    // records the fault rather than repairing it (deep data repair is out of
+    // scope, §12); the production read path fails closed
+    // (`docs/src/filesystem/rustfs-spec.md` §12; `AGENTS.md` §2.9).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"f", 0, &alloc::vec![0x42u8; 300])
+        .expect("write");
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let bs = 512usize;
+    let base = as_usize(phys) * bs;
+    let mut bytes = fs.into_block().bytes();
+    bytes[base] ^= 0x01; // wound the at-rest ciphertext
+
+    let mut fs =
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("still mounts");
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    assert_eq!(
+        fs.read_data_block_classified(phys, &mut buf),
+        Err(DataFault::Physical),
+        "an at-rest data flip is classified as a physical fault"
+    );
+    let report = scrub_full(&mut fs);
+    assert!(
+        report.data_physical_faults >= 1,
+        "scrub records the data fault ({report:?})"
+    );
+    assert_eq!(
+        report.metadata_repaired, 0,
+        "a data fault is never a metadata repair"
+    );
+    let node = fs.lookup(fs.root(), b"f").expect("file survives");
+    let mut out = [0u8; 300];
+    assert!(
+        matches!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault)),
+        "the production read path fails closed on an unrepairable data fault"
+    );
+}

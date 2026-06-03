@@ -717,6 +717,29 @@ transaction and asserts the re-opened volume always mounts, the
 pre-existing file is always intact, and the in-flight write is either
 fully applied or fully absent — never torn.
 
+The Stage-12 suites are the adversarial superset of all of the above
+(`rustfs-spec.md` §15.12, §16; `AGENTS.md` §7 / §19.6), reusing the same seams
+rather than adding a second integrity, scrub, or decode path (`AGENTS.md`
+§2.2). The crash-replay sweep is **generalised to every commit step across
+every representative transaction** — create, write, truncate, remove, reflink,
+scrub, check, trim, and health: each is faulted at every write-budget cut-off
+and the re-opened volume must always mount on a whole transaction boundary,
+with the operation's effect fully present or fully absent (never torn) and the
+witness file never lost. The **corruption-injection suite** systematically
+wounds each on-disk structure class — superblock-ring slot, transaction root,
+the inode / extent / chunk / reverse-reference B-trees, a directory block, the
+scrub-progress and health-baseline records, and each data-integrity layer — in
+**one** copy and in **both** copies, asserting the documented seam behaviour: a
+single bad copy is always repaired from the companion mirror (mounts, scrub
+reports nothing unrepairable, check is sound, data intact); both copies of
+mount-critical metadata never tear (the mount fails closed or recovers an
+earlier whole, consistent committed root through the superblock ring); a
+both-copies-bad directory still mounts but reads fail closed and scrub records
+it unrepairable; the transient scrub-progress/health-baseline records recover
+gracefully (scrub restarts, health re-derives); and an unmirrored data block's
+fault is detected, classified by its `DataFault` layer, and surfaced as a
+fail-closed `DeviceFault`, never silently repaired.
+
 The mount / metadata-decode path additionally has a `cargo xtask fuzz`
 harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
@@ -735,7 +758,11 @@ the **transaction-root scan** (`TxnRoot::decode_any`) and the rescue extraction
 pipeline over arbitrary bytes, asserting both never panic and fail closed. Since
 Stage 11 the fuzz device reports SMART-style telemetry and each successful mount
 additionally runs `health`, so the sweep drives the **health-baseline** record
-decode path too, asserting it never panics and fails closed. The
+decode path too, asserting it never panics and fails closed. Since Stage 12
+each successful mount additionally **walks every reachable directory**
+(`read_dir`/`lookup`, bounded), driving the spec's required "directory decode"
+target — the encrypted dirent payload the mount-time free-space walk never
+reads — and asserting it never panics and fails closed. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`rustfs-spec.md` §10,
