@@ -30,15 +30,17 @@ emitter's output reproduces the original operation. This is the §2.2 "one
 vocabulary" guarantee made testable:
 
 ```rust
-use rustos_vt::{encode, Op, Parser, Sgr, Color, BasicColor};
+use rustos_vt::{encode, BasicColor, Color, Op, Parser, Sgr};
 
-let op = Op::Sgr(Sgr::Foreground(Color::Basic(BasicColor::Green)));
-let bytes = encode(&op);
+fn main() {
+    let op = Op::Sgr(Sgr::Foreground(Color::Basic(BasicColor::Green)));
+    let bytes = encode(&op);
 
-let mut parser = Parser::new();
-let mut seen = Vec::new();
-parser.feed(&bytes, |parsed| seen.push(parsed));
-assert_eq!(seen, vec![op]);
+    let mut parser = Parser::new();
+    let mut seen = Vec::new();
+    parser.feed(&bytes, |parsed| seen.push(parsed));
+    assert_eq!(seen, vec![op]);
+}
 ```
 
 A single SGR sequence can carry several attributes, which the parser unfolds
