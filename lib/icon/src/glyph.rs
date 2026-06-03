@@ -49,6 +49,24 @@ impl IconKind {
             _ => Self::Generic,
         }
     }
+
+    /// The canonical asset identifier for this kind — the inverse of
+    /// [`for_asset`](Self::for_asset).
+    ///
+    /// A desktop loader names a kind's on-disk SVG asset by this id, so the
+    /// id↔kind mapping lives in one place rather than being restated at the
+    /// load site (`AGENTS.md` §2.2). The round trip holds for every kind:
+    /// `IconKind::for_asset(kind.asset_id()) == kind`.
+    #[must_use]
+    pub fn asset_id(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Volume => "volume",
+            Self::Battery => "battery",
+            Self::Bell => "bell",
+            Self::Generic => "generic",
+        }
+    }
 }
 
 /// Build the built-in glyph for `kind`, tinted with `color`.

@@ -32,6 +32,13 @@ fn for_asset_falls_back_to_generic() {
 }
 
 #[test]
+fn asset_id_round_trips_through_for_asset() {
+    for kind in ALL_KINDS {
+        assert_eq!(IconKind::for_asset(kind.asset_id()), kind, "{kind:?}");
+    }
+}
+
+#[test]
 fn every_builtin_glyph_draws_some_pixels() {
     for kind in ALL_KINDS {
         let icon = builtin_icon(kind, FG);

@@ -58,6 +58,27 @@ with built-in fallbacks — a corrupt `/System/Graphics` can never blank the
 pointer or a status icon. `CURSOR_KINDS` / `ICON_KINDS` are the closed kind
 lists a loader iterates.
 
+## Reading the bytes from `/System/Graphics`
+
+The seam above takes asset *bytes*; reading them off disk needs a filesystem
+capability, so it is the desktop session's job, not the `no_std` libraries'
+(`AGENTS.md` §17.4 / §19.5). `userland/gui/session`'s `assets` module supplies
+the userland side: a `GraphicsAssetReader` (VFS-backed on a running system, an
+in-memory table in tests) reads one asset per kind and the module assembles the
+set:
+
+- `DesktopSession::load_cursors` reads the asset named by the active theme's
+  `CursorSet` for each cursor kind from
+  `/System/Graphics/Cursors/<asset-id>.svg` and returns a `CursorTheme`.
+- `DesktopSession::load_icons` reads the asset named by each `IconKind`'s
+  `asset_id()` (the inverse of `IconKind::for_asset`) from
+  `/System/Graphics/Icons/<asset-id>.svg` and returns an `IconSet`.
+
+The reader's only contract is "give me the bytes at this path, or an `Errno`".
+A read error is treated exactly like a missing asset: that kind falls back to
+its built-in artwork, so neither loader can fail. The bytes never reach the
+compositing path raw — they are decoded into the cached vector form below.
+
 ## Feeding a loaded set into the desktop at runtime
 
 A built-in set always exists, so the desktop is usable before any asset loads;

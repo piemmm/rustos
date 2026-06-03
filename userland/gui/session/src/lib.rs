@@ -22,6 +22,17 @@
 //! unknown theme fails closed without disturbing the active theme
 //! (`AGENTS.md` §5.4 / §2.9).
 //!
+//! # On-disk graphics assets
+//!
+//! The session also loads the desktop's SVG graphics assets from
+//! `/System/Graphics` (`AGENTS.md` §10 / §16.2): the [`assets`] module's
+//! [`GraphicsAssetReader`] seam reads the bytes (a filesystem capability the
+//! `no_std` `lib/cursor` / `lib/icon` crates must not hold, §17.4 / §19.5),
+//! and [`DesktopSession::load_cursors`] / [`DesktopSession::load_icons`]
+//! assemble a [`CursorTheme`](rustos_cursor::CursorTheme) /
+//! [`IconSet`](rustos_icon::IconSet), failing closed per kind to the built-in
+//! artwork (§2.9).
+//!
 //! # Where it sits
 //!
 //! As a `userland/gui/*` crate it composes the other GUI crates and `lib/*`
@@ -40,9 +51,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
+pub mod assets;
 pub mod session;
 
 #[cfg(test)]
 mod tests;
 
+pub use assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader, GRAPHICS_DIR};
 pub use session::{DesktopSession, SessionEvent};

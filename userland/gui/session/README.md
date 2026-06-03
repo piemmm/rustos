@@ -42,12 +42,38 @@ through one private apply path, so the relay logic is never duplicated
 `register_theme` on a duplicate id, leaving the active theme and the taskbar
 untouched (`AGENTS.md` §5.4 / §2.9).
 
+## Loading the on-disk graphics assets
+
+The desktop's cursors and notification icons are authored as SVG under
+`/System/Graphics` (the SVG-first asset rule, `AGENTS.md` §10 / §16.2).
+`lib/cursor` and `lib/icon` own the decode-and-fall-back logic but stay
+`no_std` with no path of their own; reading the bytes needs a filesystem
+capability, so it is the session's job (`AGENTS.md` §17.4 / §19.5). The
+`assets` module is that job:
+
+- A caller supplies a `GraphicsAssetReader` (VFS-backed on a running system,
+  an in-memory table in tests).
+- `DesktopSession::load_cursors` reads one asset per cursor kind named by the
+  active theme's `CursorSet`, from
+  `/System/Graphics/Cursors/<asset-id>.svg`, and returns a `CursorTheme` the
+  window manager registers through its `CursorRegistry`.
+- `DesktopSession::load_icons` reads one asset per icon kind, from
+  `/System/Graphics/Icons/<asset-id>.svg`, and returns an `IconSet` the
+  taskbar installs through `TaskbarRenderer::set_icons`.
+
+Both are **total and fail-closed per kind** (`AGENTS.md` §2.9): a kind whose
+asset is missing, unreadable, malformed, or out of subset keeps its built-in
+artwork, so a corrupt or absent `/System/Graphics` can never blank the
+pointer or a status icon — it simply yields the built-in set.
+
 ## Dependencies and layering
 
 The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`
-and the shared `rustos-theme` definition (`AGENTS.md` §17.4). Composing GUI
-crates is the permitted `userland/gui/*` edge; nothing outside
-`userland/gui/*` depends on it (§17.3), so a headless image omits it cleanly.
+and the shared `rustos-theme` definition, plus `rustos-cursor` / `rustos-icon`
+(the SVG set builders) and `rustos-abi` (the `Errno` the read seam returns)
+(`AGENTS.md` §17.4). Composing GUI crates is the permitted `userland/gui/*`
+edge; nothing outside `userland/gui/*` depends on it (§17.3), so a headless
+image omits it cleanly.
 
 It is `no_std`. `#![forbid(unsafe_code)]`; no `unwrap`/`expect`/`panic!` in
 production paths (`AGENTS.md` §2.9).
@@ -56,5 +82,7 @@ production paths (`AGENTS.md` §2.9).
 
 Relaying the active theme to the window manager and apps over live IPC,
 presenting and placing the start-menu popup surface through the window
-manager, and resolving launcher / session-control actions once the process
-and window-manager capabilities are wired (deferred Stage 6 work).
+manager, resolving launcher / session-control actions once the process
+and window-manager capabilities are wired (deferred Stage 6 work), and the
+VFS-backed `GraphicsAssetReader` that reads `/System/Graphics` on a running
+system (the in-memory-tested loader and its fallbacks now exist).

@@ -5347,9 +5347,9 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   (22 total) + 5 new `rustos-icon` tests (13 total + a doctest); docs
   `docs/src/desktop/svg-assets.md` (new asset-set section) and the
   `rustos-cursor`/`rustos-icon` `README.md`s. No `unsafe`, no
-  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
-  userland `CursorAssetSource`/`IconAssetSource` implementations that read
-  `/System/Graphics` over the VFS (deferred wiring).
+  `unwrap`/`expect`/`panic!` in production paths. **Resolved:** the userland
+  `/System/Graphics` reader that drives `from_assets` now exists — see the
+  desktop-session asset-loader increment below.
 - **Feeding a loaded icon set into the taskbar — DONE (increment).** A loaded
   `IconSet` (from the on-disk `/System/Graphics` SVG assets) can now be
   installed at runtime. `lib/icon` gains `IconSet::builtin()` (a `const`
@@ -5366,9 +5366,36 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `rustos-taskbar` tests (62 total) + 1 new `rustos-icon` test (14 total +
   doctest); docs `docs/src/desktop/svg-assets.md` (runtime-feeding section) and
   the `rustos-taskbar`/`rustos-icon` `README.md`s. No `unsafe`, no
-  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
-  userland `CursorAssetSource`/`IconAssetSource` implementations that read
-  `/System/Graphics` over the VFS (deferred wiring).
+  `unwrap`/`expect`/`panic!` in production paths. **Resolved:** the userland
+  `/System/Graphics` reader now exists — see the desktop-session asset-loader
+  increment below.
+- **Desktop-session `/System/Graphics` asset loader — DONE (increment).** The
+  on-disk SVG set loaders (`CursorTheme::from_assets` / `IconSet::from_assets`)
+  take asset *bytes* through a seam; reading those bytes off disk needs a
+  filesystem capability, so it is the userland desktop's job, not the `no_std`
+  `lib/cursor` / `lib/icon` crates' (§17.4 / §19.5). `userland/gui/session`'s
+  new `assets` module is that job: a `GraphicsAssetReader` seam
+  (`read(path) -> Result<Vec<u8>, Errno>`, VFS-backed on a running system, an
+  in-memory table in tests) plus owned-byte `CursorAssetSource` /
+  `IconAssetSource` implementations. `DesktopSession::load_cursors` reads the
+  asset named by the active theme's `CursorSet` for each cursor kind from
+  `/System/Graphics/Cursors/<asset-id>.svg` and returns a `CursorTheme` (the
+  WM registers it through `CursorRegistry`); `load_icons` reads each
+  `IconKind`'s asset from `/System/Graphics/Icons/<asset-id>.svg` and returns
+  an `IconSet` (the taskbar installs it through `TaskbarRenderer::set_icons`).
+  `lib/icon` gains `IconKind::asset_id` — the inverse of `for_asset`, so the
+  id↔kind mapping lives in one place (§2.2). Both loaders are **total and
+  fail-closed per kind** (§2.9): a read error is treated exactly like a missing
+  asset, so a kind whose asset is absent, unreadable, malformed, or out of
+  subset keeps its built-in artwork and a corrupt `/System/Graphics` can never
+  blank the pointer or a status icon. 6 new `rustos-desktop-session` tests
+  (12 total) + 1 new `rustos-icon` test (15 total + doctest); deps add
+  `rustos-cursor`/`rustos-icon`/`rustos-abi`. Docs
+  `docs/src/desktop/svg-assets.md` (new reader section), the
+  `rustos-desktop-session` `README.md` + crate-root module docs. No `unsafe`,
+  no `unwrap`/`expect`/`panic!` in production paths. **Still open here:** the
+  VFS-backed `GraphicsAssetReader` for a running system (the in-memory-tested
+  loader and its fallbacks now exist).
 - **Still to do this stage:** GPU-accelerated compositor path, wiring the
   now-shared input routers (the WM `InputRouter` and the taskbar
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**

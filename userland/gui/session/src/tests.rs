@@ -1,11 +1,133 @@
 //! Headless unit tests for the desktop session glue.
 
-use rustos_taskbar::{MenuAction, MenuEntryId, SessionControl, TaskbarConfig, TaskbarResponse};
-use rustos_theme::{Appearance, Metrics, Theme, ThemeError, ThemeId};
+use alloc::string::String;
+use alloc::vec::Vec;
 
-use crate::{DesktopSession, SessionEvent};
+use rustos_abi::Errno;
+use rustos_cursor::CursorTheme;
+use rustos_icon::{IconKind, IconSet};
+use rustos_taskbar::{MenuAction, MenuEntryId, SessionControl, TaskbarConfig, TaskbarResponse};
+use rustos_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
+
+use crate::{load_icon_set, DesktopSession, GraphicsAssetReader, SessionEvent};
 
 const LABEL: &str = "Toggle Light/Dark";
+
+/// A valid SVG asset (a single filled triangle on a square grid) that decodes
+/// to a non-empty vector form, so loading it is observably different from the
+/// built-in fallback.
+const VALID_SVG: &[u8] = br##"<svg viewBox="0 0 24 24">
+    <polygon points="2,2 22,2 12,22" fill="#ffaa00"/>
+</svg>"##;
+
+/// Bytes that are not a decodable SVG document at all, so the per-kind decode
+/// returns an error and the loader falls back to the built-in artwork.
+const MALFORMED_SVG: &[u8] = b"this is not an SVG document";
+
+/// An in-memory [`GraphicsAssetReader`]: a path→bytes table standing in for
+/// the VFS, returning [`Errno::NotFound`] for any path it does not hold.
+#[derive(Default)]
+struct MemoryAssets {
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl MemoryAssets {
+    fn with(mut self, path: &str, bytes: &[u8]) -> Self {
+        self.files.push((String::from(path), bytes.to_vec()));
+        self
+    }
+}
+
+impl GraphicsAssetReader for MemoryAssets {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.files
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or(Errno::NotFound)
+    }
+}
+
+#[test]
+fn loads_icon_assets_and_falls_back_per_kind() {
+    let mut reader = MemoryAssets::default()
+        .with("/System/Graphics/Icons/network.svg", VALID_SVG)
+        .with("/System/Graphics/Icons/volume.svg", VALID_SVG);
+    let icons = load_icon_set(&mut reader);
+
+    assert!(icons.is_loaded(IconKind::Network));
+    assert!(icons.is_loaded(IconKind::Volume));
+    // The kinds whose assets were absent keep their built-in glyph.
+    assert!(!icons.is_loaded(IconKind::Battery));
+    assert!(!icons.is_loaded(IconKind::Bell));
+    assert!(!icons.is_loaded(IconKind::Generic));
+}
+
+#[test]
+fn empty_icon_source_is_the_builtin_set() {
+    let icons = load_icon_set(&mut MemoryAssets::default());
+    assert_eq!(icons, IconSet::builtin());
+}
+
+#[test]
+fn malformed_icon_asset_falls_back_to_builtin() {
+    let mut reader = MemoryAssets::default().with("/System/Graphics/Icons/bell.svg", MALFORMED_SVG);
+    let icons = load_icon_set(&mut reader);
+    assert!(!icons.is_loaded(IconKind::Bell));
+}
+
+#[test]
+fn loads_cursor_assets_for_the_active_theme_and_falls_back_per_kind() {
+    let session = session();
+    let mut reader =
+        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", VALID_SVG);
+    let cursors = session.load_cursors(&mut reader);
+
+    let builtin = CursorTheme::builtin();
+    // The arrow asset loaded, so its cursor differs from the built-in arrow.
+    assert_ne!(
+        cursors.cursor(CursorKind::Arrow),
+        builtin.cursor(CursorKind::Arrow)
+    );
+    // Every other kind had no asset, so it kept the built-in cursor.
+    for kind in [
+        CursorKind::Text,
+        CursorKind::Pointer,
+        CursorKind::Move,
+        CursorKind::Busy,
+    ] {
+        assert_eq!(cursors.cursor(kind), builtin.cursor(kind), "{kind:?}");
+    }
+}
+
+#[test]
+fn empty_cursor_source_is_the_builtin_set() {
+    let session = session();
+    let cursors = session.load_cursors(&mut MemoryAssets::default());
+
+    let builtin = CursorTheme::builtin();
+    for kind in [
+        CursorKind::Arrow,
+        CursorKind::Text,
+        CursorKind::Pointer,
+        CursorKind::Move,
+        CursorKind::Busy,
+    ] {
+        assert_eq!(cursors.cursor(kind), builtin.cursor(kind), "{kind:?}");
+    }
+}
+
+#[test]
+fn malformed_cursor_asset_falls_back_to_builtin() {
+    let session = session();
+    let mut reader =
+        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", MALFORMED_SVG);
+    let cursors = session.load_cursors(&mut reader);
+    assert_eq!(
+        cursors.cursor(CursorKind::Arrow),
+        CursorTheme::builtin().cursor(CursorKind::Arrow)
+    );
+}
 
 fn session() -> DesktopSession {
     DesktopSession::new(TaskbarConfig::bottom_bar(1920, 1080), LABEL)

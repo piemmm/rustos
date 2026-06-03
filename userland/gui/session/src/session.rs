@@ -1,8 +1,12 @@
 //! The desktop session: the theme registry, the taskbar, and the glue that
 //! resolves taskbar responses into session-level events.
 
+use rustos_cursor::CursorTheme;
+use rustos_icon::IconSet;
 use rustos_taskbar::{MenuAction, Taskbar, TaskbarConfig, TaskbarResponse};
 use rustos_theme::{Theme, ThemeError, ThemeId, ThemeRegistry};
+
+use crate::assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader};
 
 /// What a resolved [`TaskbarResponse`] means to the rest of the desktop.
 ///
@@ -117,6 +121,35 @@ impl DesktopSession {
         self.themes.set_active(id)?;
         self.reapply_theme();
         Ok(())
+    }
+
+    /// Load the active theme's cursor set from the on-disk SVG assets under
+    /// `/System/Graphics`, ready to register with the window manager's cursor
+    /// registry.
+    ///
+    /// Reads the asset named by the active theme's
+    /// [`CursorSet`](rustos_theme::CursorSet) for each cursor kind through
+    /// `reader`. It cannot fail: a kind whose asset is missing, unreadable, or
+    /// malformed keeps its built-in cursor (`AGENTS.md` §2.9), so a corrupt or
+    /// absent `/System/Graphics` simply yields the built-in cursor set.
+    pub fn load_cursors<R>(&self, reader: &mut R) -> CursorTheme
+    where
+        R: GraphicsAssetReader + ?Sized,
+    {
+        load_cursor_theme(reader, self.themes.active().cursors())
+    }
+
+    /// Load the notification-icon set from the on-disk SVG assets under
+    /// `/System/Graphics`, ready to install with the taskbar renderer's
+    /// `set_icons`.
+    ///
+    /// It cannot fail: a kind whose asset is missing, unreadable, or malformed
+    /// falls back to its built-in glyph (`AGENTS.md` §2.9).
+    pub fn load_icons<R>(&self, reader: &mut R) -> IconSet
+    where
+        R: GraphicsAssetReader + ?Sized,
+    {
+        load_icon_set(reader)
     }
 
     /// Register a custom theme so it can later be made active.

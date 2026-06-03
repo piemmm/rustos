@@ -19,6 +19,15 @@ rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # (e.g. the appearance toggle) against the theme registry the taskbar cannot
 # see. Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
 rustos-taskbar = { path = "../taskbar", version = "=0.0.0" }
+# The cursor and icon set builders (§10): the session reads the desktop's
+# on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
+# `IconSet` for the window manager and taskbar. The decode/fallback logic
+# lives in these `lib/*` crates; the session only owns the filesystem
+# capability to read the bytes (§17.4 / §19.5).
+rustos-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
+rustos-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The kernel-boundary `Errno` returned by the filesystem-read seam (§5.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 [lints]
 workspace = true

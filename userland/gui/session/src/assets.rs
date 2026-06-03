@@ -1,0 +1,140 @@
+//! Loading the desktop's on-disk SVG graphics assets from `/System/Graphics`.
+//!
+//! The desktop's cursors and notification icons are authored as SVG under
+//! `/System/Graphics` (the SVG-first asset rule, `AGENTS.md` §10 / §16.2).
+//! `lib/cursor` and `lib/icon` own the decode-and-fall-back logic but stay
+//! `no_std` and hold no path of their own: they take the asset bytes through
+//! the [`CursorAssetSource`] / [`IconAssetSource`] seams. Reading those bytes
+//! needs a filesystem capability, so it is the desktop session's job
+//! (`AGENTS.md` §17.4 / §19.5). This module is that job.
+//!
+//! A caller supplies a [`GraphicsAssetReader`] — VFS-backed on a running
+//! system, an in-memory table in tests — and [`load_cursor_theme`] /
+//! [`load_icon_set`] read one asset per kind, decode it, and assemble a
+//! complete [`CursorTheme`] / [`IconSet`]. Both are **total and fail-closed
+//! per kind** (`AGENTS.md` §2.9): a kind whose asset is absent, unreadable,
+//! malformed, or outside the supported SVG subset keeps its built-in artwork,
+//! so a missing or corrupt `/System/Graphics` can never blank the pointer or a
+//! status icon — it simply yields the built-in set.
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use rustos_abi::Errno;
+use rustos_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
+use rustos_icon::{IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use rustos_theme::{CursorKind, CursorSet};
+
+/// The directory the desktop's SVG graphics assets live under
+/// (`AGENTS.md` §16.2).
+pub const GRAPHICS_DIR: &str = "/System/Graphics";
+
+/// A reader for the desktop's on-disk SVG graphics assets.
+///
+/// Reading a file under [`GRAPHICS_DIR`] needs a filesystem capability, so it
+/// is the desktop session's job rather than the `no_std` `lib/cursor` /
+/// `lib/icon` crates' (`AGENTS.md` §17.4 / §19.5). On a running system this is
+/// backed by the VFS; tests back it with an in-memory table.
+pub trait GraphicsAssetReader {
+    /// Read the bytes of the asset at absolute `path` (under [`GRAPHICS_DIR`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel boundary's [`Errno`] when the asset cannot be read —
+    /// for example [`Errno::NotFound`] when it is absent or
+    /// [`Errno::PermissionDenied`] when the caller lacks the capability to read
+    /// it (`AGENTS.md` §5.3). A read failure is not fatal: the loader falls
+    /// back to the built-in artwork for that kind (`AGENTS.md` §2.9).
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
+}
+
+/// The cursor SVG bytes read from disk, one optional blob per [`CursorKind`],
+/// exposed to `lib/cursor`'s decoder through [`CursorAssetSource`].
+///
+/// A kind absent here was unreadable, so the decoder uses its built-in cursor.
+struct LoadedCursorAssets {
+    assets: Vec<(CursorKind, Vec<u8>)>,
+}
+
+impl CursorAssetSource for LoadedCursorAssets {
+    fn asset(&self, kind: CursorKind) -> Option<&[u8]> {
+        self.assets
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, bytes)| bytes.as_slice())
+    }
+}
+
+/// The icon SVG bytes read from disk, one optional blob per [`IconKind`],
+/// exposed to `lib/icon`'s decoder through [`IconAssetSource`].
+struct LoadedIconAssets {
+    assets: Vec<(IconKind, Vec<u8>)>,
+}
+
+impl IconAssetSource for LoadedIconAssets {
+    fn asset(&self, kind: IconKind) -> Option<&[u8]> {
+        self.assets
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, bytes)| bytes.as_slice())
+    }
+}
+
+/// The on-disk path of the cursor asset named `asset_id`.
+///
+/// The asset id comes from the theme's [`CursorSet`]; cursors live in the
+/// `Cursors` subdirectory of [`GRAPHICS_DIR`].
+fn cursor_path(asset_id: &str) -> String {
+    format!("{GRAPHICS_DIR}/Cursors/{asset_id}.svg")
+}
+
+/// The on-disk path of the icon asset named `asset_id`.
+///
+/// The asset id is [`IconKind::asset_id`]; icons live in the `Icons`
+/// subdirectory of [`GRAPHICS_DIR`].
+fn icon_path(asset_id: &str) -> String {
+    format!("{GRAPHICS_DIR}/Icons/{asset_id}.svg")
+}
+
+/// Build a cursor set from the on-disk SVG assets named by `cursors`.
+///
+/// Reads one asset per [`CursorKind`] through `reader` and lets `lib/cursor`
+/// decode it. A kind whose asset cannot be read, or whose bytes do not decode,
+/// keeps the built-in cursor (`AGENTS.md` §2.9), so this never fails: a missing
+/// `/System/Graphics` simply yields the built-in set. The result is a plain
+/// [`CursorTheme`] the window manager registers through its existing
+/// `CursorRegistry`.
+pub fn load_cursor_theme<R>(reader: &mut R, cursors: &CursorSet) -> CursorTheme
+where
+    R: GraphicsAssetReader + ?Sized,
+{
+    let mut assets = Vec::new();
+    for kind in CURSOR_KINDS {
+        if let Ok(bytes) = reader.read(&cursor_path(cursors.asset(kind))) {
+            assets.push((kind, bytes));
+        }
+    }
+    CursorTheme::from_assets(&LoadedCursorAssets { assets })
+}
+
+/// Build a notification-icon set from the on-disk SVG assets under
+/// `/System/Graphics/Icons`.
+///
+/// Reads one asset per [`IconKind`] (named by [`IconKind::asset_id`]) through
+/// `reader` and lets `lib/icon` decode it. A kind whose asset cannot be read,
+/// or whose bytes do not decode, falls back to its built-in glyph at draw time
+/// (`AGENTS.md` §2.9), so this never fails. The result is an [`IconSet`] the
+/// taskbar installs through `TaskbarRenderer::set_icons`.
+pub fn load_icon_set<R>(reader: &mut R) -> IconSet
+where
+    R: GraphicsAssetReader + ?Sized,
+{
+    let mut assets = Vec::new();
+    for kind in ICON_KINDS {
+        if let Ok(bytes) = reader.read(&icon_path(kind.asset_id())) {
+            assets.push((kind, bytes));
+        }
+    }
+    IconSet::from_assets(&LoadedIconAssets { assets })
+}

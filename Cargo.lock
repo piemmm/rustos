@@ -575,6 +575,9 @@ dependencies = [
 name = "rustos-desktop-session"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
+ "rustos-cursor",
+ "rustos-icon",
  "rustos-taskbar",
  "rustos-theme",
 ]
