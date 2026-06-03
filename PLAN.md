@@ -5678,6 +5678,35 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   into the `ipc_send` / `ipc_recv` handlers, which additionally await the
   user-memory copy-in path (the same prerequisite `cap_delegate` waits on,
   Stage 5 / Stage 6).
+- **Well-known port names — DONE (increment).** A numeric `EndpointId` is an
+  opaque handle a binder must already know; for the desktop to *discover* its
+  pointer/keyboard input endpoint (and a process to reach any well-known
+  service) by a stable name, `kernel/ipc::PortRegistry` gains a second index
+  from a validated name to an `EndpointId`. `lib/abi::ipc` gains `PortName`
+  (abi-v1 treated as not frozen, appending only): a non-empty ≤ 31-byte ASCII
+  name — lowercase-letter first, then lowercase/digit/`'.'`/`'_'`, no trailing
+  `'.'`, no `".."` — with a 32-byte length-prefixed wire form
+  (`to_le_bytes`/`from_bytes`), validated fail-closed (`LengthOutOfRange` /
+  `OutOfRange` / `BufferTooSmall` / `BadMagic`) and enrolled in the `lib/abi`
+  fuzz harness (§19.6). The registry's `publish_name(name, id)` binds a name to
+  a **currently-registered** endpoint (fail-closed: `AlreadyExists` for a name
+  already in use, `NotFound` for an unregistered endpoint — both
+  `PORT_NAME_PUBLISH_DENIED`, so a name never resolves to a non-existent port
+  and a live name is never silently re-pointed); `resolve`/`resolve_port` map a
+  name back to its endpoint/`Port`; `withdraw_name` removes one binding
+  (`PORT_NAME_WITHDRAWN`). The index only ever points at a live binding —
+  `unregister` withdraws every name resolving to the torn-down endpoint first —
+  so a resolution can never dangle, and a name grants no authority of its own
+  (the per-send capability check is unchanged, §5.2). `kernel/ipc::audit` gains
+  `PORT_NAME_PUBLISHED`/`PORT_NAME_PUBLISH_DENIED`/`PORT_NAME_WITHDRAWN` (ids
+  3006–3008). 18 new `rustos-abi` `PortName` tests + 9 new `rustos-kernel-ipc`
+  registry tests. Docs `docs/src/architecture/ipc.md` (new "Well-known names"
+  subsection + audit/error tables) + `docs/src/lib/abi.md` + the `lib/abi::ipc`
+  and `kernel/ipc::registry` rustdoc. No `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open here:** wiring the
+  desktop's `MessagePort` to a live `ipc_recv` over a published input-port name,
+  which still awaits composing the registry into `KernelState` and the
+  user-memory copy-in path.
 - **Still to do this stage:** backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar

@@ -85,6 +85,39 @@ every `Port::send` — so it is a pure ownership map. Wiring it into the
 `ipc_send` / `ipc_recv` syscall handlers awaits the user-memory copy-in
 path (the same prerequisite `cap_delegate` is waiting on).
 
+### Well-known names
+
+A numeric `EndpointId` is an opaque handle a binder must already know.
+So that a process can reach a *well-known* endpoint — the desktop's
+pointer- and keyboard-input ports, a long-running system service — by a
+stable name instead, the registry keeps a second index from `PortName`
+(`lib/abi`, §9) to `EndpointId`:
+
+* `publish_name(name, id)` binds a validated `PortName` to a
+  currently-registered endpoint. It fails closed: a name already in use
+  is `Errno::AlreadyExists` and an endpoint that is not registered is
+  `Errno::NotFound` (both `PORT_NAME_PUBLISH_DENIED`), so a name can
+  never resolve to a non-existent port and a live name is never silently
+  re-pointed. Success emits `PORT_NAME_PUBLISHED`.
+* `resolve(name)` / `resolve_port(name)` map a name back to its
+  `EndpointId` (or directly to the live `Port`); a miss is `None` and is
+  not audited, mirroring `lookup`.
+* `withdraw_name(name)` removes a single name binding, leaving the
+  endpoint registered, and emits `PORT_NAME_WITHDRAWN`; an unbound name
+  is `Errno::NotFound`.
+
+The index only ever points at a live binding: `unregister(id)` withdraws
+every name that resolved to `id` (one `PORT_NAME_WITHDRAWN` each) before
+destroying the port, so a resolution can never dangle. A name grants no
+authority of its own; the per-send capability check is unchanged.
+
+A `PortName` is a non-empty, ≤ 31-byte ASCII string that starts with a
+lowercase letter and continues with lowercase letters, digits, `'.'`, or
+`'_'`, with no trailing `'.'` and no `".."`. The constrained alphabet
+keeps a name canonical, log-printable, and free of separators a routing
+layer might re-interpret; its `from_ascii` / `from_bytes` decoders reject
+anything else and are exercised by the `lib/abi` fuzz harness (§19.6).
+
 ## Shared memory
 
 `SharedMemory::create` allocates a kernel-tracked, zero-on-free
@@ -119,6 +152,9 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry. |
 | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused (the `EndpointId` was already bound). |
 | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
+| 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint. |
+| 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
+| 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
 | 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
 | 3011 | Error | `MESSAGE_SEND_DENIED`         | Sender lacks the port's required capabilities. |
 | 3012 | Error | `MESSAGE_TOO_LARGE`           | Payload exceeded `max_payload`. |
@@ -142,8 +178,8 @@ Adding a new event requires assigning the next free identifier in
 | `PermissionDenied`     | Sender / binder / mapper lacks a required capability |
 | `MessageTooLarge`      | Payload exceeded the port's `max_payload` (EMSGSIZE) |
 | `LengthOutOfRange`     | Configuration out of range, mailbox full             |
-| `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint |
-| `AlreadyExists`        | Register of an already-bound `EndpointId`            |
+| `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint, publish naming an unregistered endpoint, withdraw of an unbound name |
+| `AlreadyExists`        | Register of an already-bound `EndpointId`, publish of an already-bound `PortName` |
 
 Every error path emits a matching audit event before returning, so
 "fail closed" is observable in the security trail (`AGENTS.md` §5.4).

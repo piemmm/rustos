@@ -53,7 +53,7 @@ pub use input::{
     KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
     POINTER_INPUT_MAGIC,
 };
-pub use ipc::{IpcMessageHeader, IPC_MESSAGE_HEADER_MAGIC};
+pub use ipc::{IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN};
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };

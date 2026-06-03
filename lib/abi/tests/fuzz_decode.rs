@@ -31,7 +31,7 @@ use rustos_abi::sysinfo::{
     SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{AppInfoHeader, IpcMessageHeader, ManifestHeader};
+use rustos_abi::{AppInfoHeader, IpcMessageHeader, ManifestHeader, PortName};
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -141,6 +141,11 @@ fn exercise(bytes: &[u8]) {
         let redecoded = KeyInput::from_bytes(&event.to_le_bytes())
             .expect("round-trip of an accepted key event must succeed");
         assert_eq!(event, redecoded);
+    }
+    if let Ok(name) = PortName::from_bytes(bytes) {
+        let redecoded = PortName::from_bytes(&name.to_le_bytes())
+            .expect("round-trip of an accepted port name must succeed");
+        assert_eq!(name, redecoded);
     }
 }
 

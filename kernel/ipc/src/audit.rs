@@ -18,6 +18,9 @@
 //! | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry under its `EndpointId`. |
 //! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused because the `EndpointId` was already bound. |
 //! | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
+//! | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint in the registry. |
+//! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
+//! | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
 //! | 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
 //! | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused because the sender lacked the port's required capabilities. |
 //! | 3012 | Error | `MESSAGE_TOO_LARGE`           | A send was refused because the payload exceeded the port's `max_payload`. |
@@ -56,6 +59,14 @@ pub enum AuditEvent {
     PortRegisterDenied,
     /// A port was removed from the registry and destroyed.
     PortUnregistered,
+    /// A well-known name was bound to an endpoint in the registry.
+    PortNamePublished,
+    /// A name binding was refused: the name was already bound, or the
+    /// endpoint it would resolve to is not registered.
+    PortNamePublishDenied,
+    /// A well-known name binding was removed (explicitly, or because the
+    /// endpoint it resolved to was unregistered).
+    PortNameWithdrawn,
     /// A message was enqueued for delivery.
     MessageDelivered,
     /// A send was refused for lack of the port's required capabilities.
@@ -93,6 +104,9 @@ impl AuditEvent {
             Self::PortRegistered => 3003,
             Self::PortRegisterDenied => 3004,
             Self::PortUnregistered => 3005,
+            Self::PortNamePublished => 3006,
+            Self::PortNamePublishDenied => 3007,
+            Self::PortNameWithdrawn => 3008,
             Self::MessageDelivered => 3010,
             Self::MessageSendDenied => 3011,
             Self::MessageTooLarge => 3012,
@@ -120,6 +134,8 @@ impl AuditEvent {
             | Self::PortDestroyed
             | Self::PortRegistered
             | Self::PortUnregistered
+            | Self::PortNamePublished
+            | Self::PortNameWithdrawn
             | Self::MessageDelivered
             | Self::ShmemCreated
             | Self::ShmemMapped
@@ -128,6 +144,7 @@ impl AuditEvent {
             | Self::NotifySignalled => Level::Info,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
+            | Self::PortNamePublishDenied
             | Self::MessageSendDenied
             | Self::MessageTooLarge
             | Self::MessageSendToClosedPort
@@ -150,6 +167,9 @@ impl AuditEvent {
             Self::PortRegistered => "ipc port registered",
             Self::PortRegisterDenied => "ipc port registration denied",
             Self::PortUnregistered => "ipc port unregistered",
+            Self::PortNamePublished => "ipc port name published",
+            Self::PortNamePublishDenied => "ipc port name publish denied",
+            Self::PortNameWithdrawn => "ipc port name withdrawn",
             Self::MessageDelivered => "ipc message delivered",
             Self::MessageSendDenied => "ipc message send denied",
             Self::MessageTooLarge => "ipc message too large",
@@ -252,6 +272,9 @@ mod tests {
         assert_eq!(AuditEvent::PortRegistered.id(), EventId(3003));
         assert_eq!(AuditEvent::PortRegisterDenied.id(), EventId(3004));
         assert_eq!(AuditEvent::PortUnregistered.id(), EventId(3005));
+        assert_eq!(AuditEvent::PortNamePublished.id(), EventId(3006));
+        assert_eq!(AuditEvent::PortNamePublishDenied.id(), EventId(3007));
+        assert_eq!(AuditEvent::PortNameWithdrawn.id(), EventId(3008));
         assert_eq!(AuditEvent::MessageDelivered.id(), EventId(3010));
         assert_eq!(AuditEvent::MessageSendDenied.id(), EventId(3011));
         assert_eq!(AuditEvent::MessageTooLarge.id(), EventId(3012));
@@ -275,6 +298,9 @@ mod tests {
             AuditEvent::PortRegistered,
             AuditEvent::PortRegisterDenied,
             AuditEvent::PortUnregistered,
+            AuditEvent::PortNamePublished,
+            AuditEvent::PortNamePublishDenied,
+            AuditEvent::PortNameWithdrawn,
             AuditEvent::MessageDelivered,
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
@@ -320,6 +346,7 @@ mod tests {
         for ev in [
             AuditEvent::PortCreateDenied,
             AuditEvent::PortRegisterDenied,
+            AuditEvent::PortNamePublishDenied,
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
             AuditEvent::MessageSendToClosedPort,

@@ -11,6 +11,11 @@ Defines the frozen `abi-v1` interface between the kernel and user space.
   this directly.
 * `IpcMessageHeader` — 32-byte little-endian header carried in front of
   every IPC message.
+* `PortName` — a validated, well-known endpoint name (≤ `PORT_NAME_MAX_LEN`
+  ASCII bytes) used to resolve a kernel IPC port by a stable name instead
+  of its numeric `endpoint`. Encodes to a 32-byte length-prefixed wire form
+  and resolves through the kernel port registry; see
+  [Kernel IPC subsystem](../architecture/ipc.md).
 * `PointerInput` — 20-byte little-endian desktop pointer event (absolute
   move, or a resolved primary/secondary/middle press/release) the window
   manager and taskbar route. Distinct from the device-level
