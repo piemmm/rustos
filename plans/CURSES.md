@@ -53,15 +53,19 @@ lib/vt        → lib/* only (no kernel/driver/userland deps)   [vocabulary]
 lib/termcap   → lib/vt, lib/* only                            [capability DB]
 lib/curses    → lib/termcap, lib/vt, lib/* only               [TUI/screen model]
 userland/apps/terminal → lib/vt (+ existing geometry/theme/raster/font)
-userland (shells/apps) → lib/curses (statically linked, §16.4)
+userland (shells/apps) → lib/curses (dynamically-linked OS library, §16.4)
 ```
 
-`lib/curses` is **statically linked** by apps (`AGENTS.md` §16.4 prefers
-static linking; the curated `/System/Libraries/` shared-library classes do
-**not** include a TUI library and "convenience" shared libs are forbidden).
-All three crates are `no_std` + `alloc`, I/O-injected (an abstract byte
-source/sink, mirroring the terminal's existing `ShellSource` seam) so the
-screen model and renderer are fully host-testable without a kernel (§7).
+`lib/curses` (with `lib/termcap` + `lib/vt`) is **part of the OS**: it is the
+curated `/System/Libraries/` "Terminal / TUI client" shared-library class
+(`AGENTS.md` §16.4), so OS apps and third-party apps **dynamically link** it
+rather than compiling it in — one security update to the library then covers
+every consumer. (At the in-tree build level the crate is an ordinary cargo
+path dependency; dynamic-vs-static is the OS-image / runtime linking model the
+charter governs, not a cargo setting.) All three crates are `no_std` +
+`alloc`, I/O-injected (an abstract byte source/sink, mirroring the terminal's
+existing `ShellSource` seam) so the screen model and renderer are fully
+host-testable without a kernel (§7).
 
 ## 3. Work breakdown (stages)
 
@@ -173,12 +177,19 @@ SUMMARY.md entry.
 
 ### Stage C5 — Curses completeness + a demo/port
 
+**Status: done** (see `PLAN.md`, "CURSES Stage C5"). The consumer is the
+`top` process-overview viewer (`userland/apps/top`). Panels-equivalent
+stacking is deferred until a consumer needs it (§2.3); overlays compose
+through ordered `wnoutrefresh`.
+
 **Deliverables**
 - Complete the curses surface to "full" (the API a ported curses program
   expects): wide/UTF-8 cell handling, colour-pair allocation, `getch`/timeout/
   non-blocking input, panels-equivalent stacking if needed by C6 consumers.
 - A first in-tree consumer that proves the API (e.g. a TUI front-end for an
-  existing userland tool, or porting one), statically linking `lib/curses`.
+  existing userland tool, or porting one), dynamically linking `lib/curses`
+  as the OS-provided Terminal/TUI library (§16.4; an ordinary cargo path
+  dependency in-tree).
 
 **Tests** — the consumer's behaviour tests; coverage ≥ 75% (userland) and the
 §7 lib bar for the three new `lib/*` crates.
@@ -226,5 +237,6 @@ stages advance, and refresh `.junie/next-curses-prompt.md` for the next chunk.
 closed), §2.12 (roll your own; crypto is the only exception), §3 / §6 (lib
 layout + registration), §7 (whole-project gate), §13 (docs in same commit),
 §15 (AI-agent rules), §16.1 (no `/etc`,`/usr`,`/proc`), §16.4 (curated shared
-libs; static link), §17.3/§17.4 (headless one-way edge), §19.5/§19.6 (parser
-sandbox + fuzzing), §20 (fd-3 reserved).
+libs; curses is the dynamically-linked Terminal/TUI class), §17.3/§17.4
+(headless one-way edge), §19.5/§19.6 (parser sandbox + fuzzing), §20 (fd-3
+reserved).

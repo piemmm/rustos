@@ -24,7 +24,9 @@
 //!
 //! Every byte this crate emits or parses is a [`rustos_vt::Op`] — there is no
 //! second escape-sequence table here (`AGENTS.md` §2.2). It is `no_std` +
-//! `alloc`, statically linked by applications (`AGENTS.md` §16.4), and contains
+//! `alloc` and is part of the OS — the curated `/System/Libraries/`
+//! Terminal/TUI class that applications dynamically link (`AGENTS.md` §16.4) —
+//! and contains
 //! no `unwrap` / `expect` / `panic!`: an out-of-range draw is a
 //! [`CursesError`], an unknown input sequence produces no event, and a
 //! colour the terminal cannot show is degraded, never emitted raw
@@ -63,6 +65,7 @@ pub mod geom;
 pub mod input;
 pub mod render;
 pub mod screen;
+pub mod width;
 pub mod window;
 
 #[cfg(test)]
@@ -74,5 +77,6 @@ pub use error::{CursesError, Result};
 pub use geom::{Pos, Size};
 pub use input::{Event, Input};
 pub use render::{render, CursorState};
-pub use screen::{Screen, Tty, DEFAULT_COLOR_PAIR};
+pub use screen::{InputMode, Screen, Tty, DEFAULT_COLOR_PAIR};
+pub use width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use window::{BorderChars, Window};

@@ -56,11 +56,16 @@ impl ColorPair {
 /// The curses colour-pair table.
 ///
 /// Pair `0` ([`DEFAULT_PAIR`]) is fixed to the terminal default and cannot be
-/// redefined. Pairs `1..=MAX_COLOR_PAIRS` are allocated with
-/// [`ColorPairs::init_pair`] and looked up with [`ColorPairs::get`].
+/// redefined. Pairs `1..=MAX_COLOR_PAIRS` are defined explicitly with
+/// [`ColorPairs::init_pair`], handed out automatically with
+/// [`ColorPairs::alloc_pair`], and looked up with [`ColorPairs::get`]. A slot
+/// that has never been defined is [`None`], which lets [`alloc_pair`] find
+/// the next free id.
+///
+/// [`alloc_pair`]: ColorPairs::alloc_pair
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColorPairs {
-    pairs: Vec<ColorPair>,
+    pairs: Vec<Option<ColorPair>>,
 }
 
 impl Default for ColorPairs {
@@ -74,7 +79,7 @@ impl ColorPairs {
     #[must_use]
     pub fn new() -> ColorPairs {
         ColorPairs {
-            pairs: vec![ColorPair::DEFAULT],
+            pairs: vec![Some(ColorPair::DEFAULT)],
         }
     }
 
@@ -90,10 +95,32 @@ impl ColorPairs {
         }
         let index = usize::from(id);
         if index >= self.pairs.len() {
-            self.pairs.resize(index + 1, ColorPair::DEFAULT);
+            self.pairs.resize(index + 1, None);
         }
-        self.pairs[index] = ColorPair::new(fg, bg);
+        self.pairs[index] = Some(ColorPair::new(fg, bg));
         Ok(())
+    }
+
+    /// Define the next free pair as `fg` on `bg` and return its id (curses
+    /// `alloc_pair`).
+    ///
+    /// The lowest id in `1..=MAX_COLOR_PAIRS` that has not been defined is
+    /// chosen, so an application can request pairs without tracking ids
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursesError::BadColorPair`] if every allocatable id is
+    /// already defined.
+    pub fn alloc_pair(&mut self, fg: Color, bg: Color) -> Result<u16> {
+        for id in 1..=MAX_COLOR_PAIRS {
+            let index = usize::from(id);
+            if index >= self.pairs.len() || self.pairs[index].is_none() {
+                self.init_pair(id, fg, bg)?;
+                return Ok(id);
+            }
+        }
+        Err(CursesError::BadColorPair)
     }
 
     /// The pair defined for `id`.
@@ -105,6 +132,7 @@ impl ColorPairs {
         self.pairs
             .get(usize::from(id))
             .copied()
+            .flatten()
             .unwrap_or(ColorPair::DEFAULT)
     }
 }

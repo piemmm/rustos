@@ -14,7 +14,9 @@
 //!
 //! [renderer]: mod@crate::render
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use rustos_termcap::{Capabilities, TermType};
 use rustos_vt::{encode_all, MouseMode, Op};
@@ -48,6 +50,46 @@ pub trait Tty {
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the channel cannot be read.
     fn read(&mut self) -> Result<Vec<u8>>;
+
+    /// Block until at least one input byte is available, then return the bytes
+    /// read (an empty vector signals end-of-input — the far end has closed).
+    ///
+    /// This backs the blocking [`getch`](Screen::getch). The kernel-backed
+    /// channel parks the task until the tty is readable (never busy-spins,
+    /// `AGENTS.md` §2.1); the default delegates to [`Tty::read`] for channels
+    /// (such as a fixed test queue) that cannot truly block.
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the channel cannot be read.
+    fn read_blocking(&mut self) -> Result<Vec<u8>> {
+        self.read()
+    }
+
+    /// Wait up to `timeout` for input, then return whatever bytes arrived
+    /// (possibly an empty vector when the timeout elapsed first).
+    ///
+    /// This backs [`InputMode::Timeout`]. The default delegates to
+    /// [`Tty::read`] for channels that cannot honour a deadline.
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the channel cannot be read.
+    fn read_timeout(&mut self, _timeout: Duration) -> Result<Vec<u8>> {
+        self.read()
+    }
+}
+
+/// How [`Screen::getch`] waits for input (curses `nodelay` / `timeout`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum InputMode {
+    /// Block until an event is available (curses default).
+    Blocking,
+    /// Return immediately, yielding [`None`] when nothing is pending (curses
+    /// `nodelay(true)`).
+    NonBlocking,
+    /// Wait up to the given duration, then give up (curses `timeout(ms)`).
+    Timeout(Duration),
 }
 
 /// The curses screen driver, generic over its [`Tty`] channel.
@@ -55,6 +97,8 @@ pub struct Screen<T: Tty> {
     caps: Capabilities,
     tty: T,
     input: Input,
+    pending: VecDeque<Event>,
+    input_mode: InputMode,
     pairs: ColorPairs,
     staged: Buffer,
     physical: Buffer,
@@ -72,6 +116,8 @@ impl<T: Tty> Screen<T> {
             caps: term.capabilities(),
             tty,
             input: Input::new(),
+            pending: VecDeque::new(),
+            input_mode: InputMode::Blocking,
             pairs: ColorPairs::new(),
             staged: Buffer::new(size),
             physical: Buffer::new(size),
@@ -86,6 +132,15 @@ impl<T: Tty> Screen<T> {
     #[must_use]
     pub const fn capabilities(&self) -> &Capabilities {
         &self.caps
+    }
+
+    /// Consume the driver and return its [`Tty`] channel.
+    ///
+    /// Used at shutdown to reclaim the underlying channel (and, in tests, to
+    /// inspect what was written).
+    #[must_use]
+    pub fn into_tty(self) -> T {
+        self.tty
     }
 
     /// The screen dimensions.
@@ -107,6 +162,28 @@ impl<T: Tty> Screen<T> {
     /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) for a reserved or out-of-range id.
     pub fn init_pair(&mut self, id: u16, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<()> {
         self.pairs.init_pair(id, fg, bg)
+    }
+
+    /// Define the next free colour pair as `fg` on `bg` and return its id
+    /// (curses `alloc_pair`).
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) if the table is full.
+    pub fn alloc_pair(&mut self, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<u16> {
+        self.pairs.alloc_pair(fg, bg)
+    }
+
+    /// Select how [`Screen::getch`] waits for input (curses `nodelay` /
+    /// `timeout`). The default is [`InputMode::Blocking`].
+    pub fn set_input_mode(&mut self, mode: InputMode) {
+        self.input_mode = mode;
+    }
+
+    /// The current input-wait mode.
+    #[must_use]
+    pub const fn input_mode(&self) -> InputMode {
+        self.input_mode
     }
 
     /// Set whether the cursor is shown after the next [`Screen::doupdate`]
@@ -226,17 +303,54 @@ impl<T: Tty> Screen<T> {
         self.write_ops(&[Op::SetBracketedPaste(enable)])
     }
 
-    /// Read whatever input is pending and decode it into [`Event`]s (curses
-    /// `getch`, batched).
+    /// Read the next input [`Event`] (curses `getch`), waiting according to
+    /// the current [`InputMode`].
+    ///
+    /// A buffered event from an earlier decode is returned first. Otherwise
+    /// input is read once — blocking, polling, or waiting up to a timeout per
+    /// the mode — and decoded; the first decoded event is returned and any
+    /// further events are buffered for the next call. [`None`] means no event
+    /// was available within the mode's wait (or the channel has closed).
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the tty read fails.
+    pub fn getch(&mut self) -> Result<Option<Event>> {
+        if let Some(event) = self.pending.pop_front() {
+            return Ok(Some(event));
+        }
+        let bytes = match self.input_mode {
+            InputMode::Blocking => self.tty.read_blocking()?,
+            InputMode::NonBlocking => self.tty.read()?,
+            InputMode::Timeout(timeout) => self.tty.read_timeout(timeout)?,
+        };
+        let pending = &mut self.pending;
+        self.input.feed(&bytes, |event| pending.push_back(event));
+        Ok(self.pending.pop_front())
+    }
+
+    /// Read all currently pending input and decode it into [`Event`]s (a
+    /// batched, non-blocking `getch`).
+    ///
+    /// Any events buffered by an earlier [`Screen::getch`] are returned ahead
+    /// of freshly read ones, so the two readers share one stream.
     ///
     /// # Errors
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the tty read fails.
     pub fn read_events(&mut self) -> Result<Vec<Event>> {
         let bytes = self.tty.read()?;
-        let mut events = Vec::new();
+        let mut events: Vec<Event> = self.pending.drain(..).collect();
         self.input.feed(&bytes, |event| events.push(event));
         Ok(events)
+    }
+
+    /// Test-only borrow of the underlying channel, so a test can prove
+    /// [`Screen::getch`] dispatches to the right [`Tty`] read method per
+    /// [`InputMode`].
+    #[cfg(test)]
+    pub(crate) fn tty_ref(&self) -> &T {
+        &self.tty
     }
 
     /// Encode `ops` and write them to the tty, writing nothing when `ops` is

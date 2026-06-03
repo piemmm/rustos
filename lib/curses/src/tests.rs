@@ -21,8 +21,10 @@ use crate::error::CursesError;
 use crate::geom::{Pos, Size};
 use crate::input::{Event, Input};
 use crate::render::{render, CursorState};
-use crate::screen::{Screen, Tty};
+use crate::screen::{InputMode, Screen, Tty};
+use crate::width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 use crate::window::{BorderChars, Window};
+use core::time::Duration;
 
 /// Decode every event from one byte slice.
 fn decode(bytes: &[u8]) -> Vec<Event> {
@@ -440,4 +442,237 @@ fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
     // `vt100` has no mouse reporting, so enabling it writes nothing.
     let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Vt100, Size::new(2, 2));
     assert_eq!(screen.enable_mouse(rustos_vt::MouseMode::Button), Ok(()));
+}
+
+// ---- Character width / wide cells ------------------------------------------
+
+#[test]
+fn ascii_is_one_column_and_cjk_is_two() {
+    assert_eq!(char_width('A'), 1);
+    assert_eq!(char_width('1'), 1);
+    assert!(!is_wide('A'));
+    // CJK ideograph and a fullwidth digit are double-width.
+    assert_eq!(char_width('世'), 2);
+    assert!(is_wide('界'));
+    assert_eq!(char_width('！'), 2);
+}
+
+#[test]
+fn str_width_sums_glyph_widths_and_truncation_keeps_glyphs_whole() {
+    assert_eq!(str_width("ab"), 2);
+    assert_eq!(str_width("世界"), 4);
+    assert_eq!(str_width("a世"), 3);
+    // A budget of 2 fits "a" (1) but not the following wide glyph (would be 3).
+    assert_eq!(truncate_to_width("a世b", 2), "a");
+    assert_eq!(truncate_to_width("a世b", 3), "a世");
+    assert_eq!(truncate_to_width("abc", 10), "abc");
+}
+
+#[test]
+fn a_wide_glyph_writes_a_lead_and_a_continuation_cell() {
+    let mut win = Window::new(Pos::ORIGIN, Size::new(1, 6));
+    win.add_str("世a");
+    assert_eq!(glyph_at(&win, 0, 0), '世');
+    assert_eq!(glyph_at(&win, 0, 1), CONTINUATION);
+    assert_eq!(glyph_at(&win, 0, 2), 'a');
+    // The cursor advanced two columns for the wide glyph, one for the narrow.
+    assert_eq!(win.cursor(), Pos::new(0, 3));
+}
+
+#[test]
+fn a_wide_glyph_wraps_whole_when_one_column_remains() {
+    let mut win = Window::new(Pos::ORIGIN, Size::new(2, 3));
+    win.add_str("ab");
+    // Cursor at (0,2); a wide glyph cannot fit one column, so it wraps.
+    win.add_char('世');
+    assert_eq!(glyph_at(&win, 0, 0), 'a');
+    assert_eq!(glyph_at(&win, 0, 1), 'b');
+    // Column 2 was blanked rather than half-filled.
+    assert_eq!(glyph_at(&win, 0, 2), ' ');
+    assert_eq!(glyph_at(&win, 1, 0), '世');
+    assert_eq!(glyph_at(&win, 1, 1), CONTINUATION);
+}
+
+#[test]
+fn the_renderer_prints_a_wide_glyph_once_and_skips_its_continuation() {
+    let size = Size::new(1, 6);
+    let caps = TermType::Xterm256Color.capabilities();
+    let blank = Buffer::new(size);
+    let mut win = Window::new(Pos::ORIGIN, size);
+    win.add_str("世a");
+    let mut desired = blank.clone();
+    desired.blit(win.buffer(), Pos::ORIGIN);
+    let cursor = CursorState {
+        visible: true,
+        pos: Pos::new(0, 3),
+    };
+    let ops = render(&caps, &blank, &desired, cursor);
+    // Exactly two glyphs are printed: the wide lead and the narrow 'a'; the
+    // continuation cell never becomes a `Print`.
+    let prints: Vec<char> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Print(ch) => Some(*ch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prints, vec!['世', 'a']);
+    // The 'a' follows the wide glyph with no fresh cursor move (the wide glyph
+    // advanced the terminal cursor two columns).
+    let moves = ops
+        .iter()
+        .filter(|op| matches!(op, Op::CursorPosition { .. }))
+        .count();
+    // One initial move to the lead, one final move for the cursor rest.
+    assert_eq!(moves, 2);
+}
+
+// ---- Colour-pair allocation ------------------------------------------------
+
+#[test]
+fn alloc_pair_hands_out_ascending_free_ids() {
+    let mut pairs = ColorPairs::new();
+    let first = pairs
+        .alloc_pair(Color::Basic(BasicColor::Red), Color::Default)
+        .expect("free id");
+    let second = pairs
+        .alloc_pair(Color::Basic(BasicColor::Green), Color::Default)
+        .expect("free id");
+    assert_eq!(first, 1);
+    assert_eq!(second, 2);
+    assert_eq!(pairs.get(first).fg, Color::Basic(BasicColor::Red));
+    assert_eq!(pairs.get(second).fg, Color::Basic(BasicColor::Green));
+}
+
+#[test]
+fn alloc_pair_skips_explicitly_defined_ids() {
+    let mut pairs = ColorPairs::new();
+    pairs
+        .init_pair(1, Color::Basic(BasicColor::Blue), Color::Default)
+        .expect("define id 1");
+    // Id 1 is taken, so the next free id is 2.
+    let next = pairs
+        .alloc_pair(Color::Basic(BasicColor::Cyan), Color::Default)
+        .expect("free id");
+    assert_eq!(next, 2);
+    // The explicit definition is untouched.
+    assert_eq!(pairs.get(1).fg, Color::Basic(BasicColor::Blue));
+}
+
+#[test]
+fn screen_alloc_pair_delegates_to_the_table() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    let id = screen
+        .alloc_pair(Color::Basic(BasicColor::Yellow), Color::Default)
+        .expect("free id");
+    assert_eq!(id, 1);
+    assert_eq!(
+        screen.color_pairs().get(id).fg,
+        Color::Basic(BasicColor::Yellow)
+    );
+}
+
+// ---- getch / input modes ---------------------------------------------------
+
+#[test]
+fn getch_returns_buffered_events_one_at_a_time() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b"ab"),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+    // The second character was buffered by the first read.
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('b'))));
+    assert_eq!(screen.getch(), Ok(None));
+}
+
+#[test]
+fn non_blocking_getch_yields_none_without_input() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b""),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    screen.set_input_mode(InputMode::NonBlocking);
+    assert_eq!(screen.input_mode(), InputMode::NonBlocking);
+    assert_eq!(screen.getch(), Ok(None));
+}
+
+#[test]
+fn read_events_drains_events_buffered_by_getch() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b"ab"),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    // The first getch reads "ab", returns 'a', and buffers 'b'.
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+    // read_events delivers the buffered 'b' ahead of (now empty) fresh input.
+    assert_eq!(screen.read_events(), Ok(vec![Event::Char('b')]));
+}
+
+#[test]
+fn input_mode_selects_the_tty_read_method() {
+    let mut screen = Screen::new(ModeTty::default(), TermType::Xterm256Color, Size::new(2, 2));
+
+    screen.set_input_mode(InputMode::Blocking);
+    let _ = screen.getch();
+    assert_eq!(screen.tty_last_read(), Some(ReadKind::Blocking));
+
+    screen.set_input_mode(InputMode::NonBlocking);
+    let _ = screen.getch();
+    assert_eq!(screen.tty_last_read(), Some(ReadKind::NonBlocking));
+
+    screen.set_input_mode(InputMode::Timeout(Duration::from_millis(5)));
+    let _ = screen.getch();
+    assert_eq!(screen.tty_last_read(), Some(ReadKind::Timeout));
+}
+
+/// Which read method a [`ModeTty`] last serviced, so a test can prove
+/// [`Screen::getch`] dispatches on the [`InputMode`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ReadKind {
+    NonBlocking,
+    Blocking,
+    Timeout,
+}
+
+/// A [`Tty`] that records which read method was last called and returns no
+/// bytes, so `getch` yields `None` regardless of mode.
+#[derive(Default)]
+struct ModeTty {
+    last: Option<ReadKind>,
+}
+
+impl Tty for ModeTty {
+    fn write(&mut self, _bytes: &[u8]) -> crate::Result<()> {
+        Ok(())
+    }
+
+    fn read(&mut self) -> crate::Result<Vec<u8>> {
+        self.last = Some(ReadKind::NonBlocking);
+        Ok(Vec::new())
+    }
+
+    fn read_blocking(&mut self) -> crate::Result<Vec<u8>> {
+        self.last = Some(ReadKind::Blocking);
+        Ok(Vec::new())
+    }
+
+    fn read_timeout(&mut self, _timeout: Duration) -> crate::Result<Vec<u8>> {
+        self.last = Some(ReadKind::Timeout);
+        Ok(Vec::new())
+    }
+}
+
+impl Screen<ModeTty> {
+    /// The read method the [`ModeTty`] channel last serviced.
+    fn tty_last_read(&self) -> Option<ReadKind> {
+        self.tty_ref().last
+    }
 }

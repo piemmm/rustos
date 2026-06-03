@@ -6932,9 +6932,55 @@ no kernel/user ABI surface, only `lib/vt` vocabulary and a new `lib/*` crate.
 6. **Docs** (§13) — `docs/src/lib/curses.md` + `docs/src/SUMMARY.md` entry;
    rustdoc on every public item with a crate-level doctest.
 
-C5 (curses completeness — wide/UTF-8 cells, `getch`/timeout/non-blocking input,
-panels-equivalent stacking — plus a first in-tree consumer) is the next stage
-and has not been started.
+---
+
+## CURSES Stage C5 — curses completeness + the `top` consumer
+
+**Status:** done.
+
+Fifth stage of `plans/CURSES.md`. The curses surface is completed to the level
+a ported curses program expects, and the first in-tree consumer proves it. For
+this work `abi-v1` is treated as **not** frozen (the task direction supersedes
+the charter's and this plan's "frozen" language); C5 adds no kernel/user ABI
+surface — only `lib/curses` API and a new `userland/apps/` crate.
+
+1. **`lib/curses` completeness** — wide/UTF-8 cell handling (a new `width`
+   module: `char_width`/`is_wide`/`str_width`/`truncate_to_width` + the
+   `CONTINUATION` marker; `Window::add_char` writes a double-width glyph as a
+   lead + continuation cell and the renderer prints it once and steps the
+   terminal cursor two columns), colour-pair allocation (`ColorPairs::alloc_pair`
+   / `Screen::alloc_pair`), and `getch`/timeout/non-blocking input
+   (`Screen::getch` + `InputMode` over the `Tty` seam's new defaulted
+   `read_blocking`/`read_timeout`, with a pending-event queue). Panels-equivalent
+   stacking is **deferred** until a consumer needs it (§2.3); overlays compose
+   through ordered `wnoutrefresh`. 12 new unit tests (38 total) all green.
+2. **The `top` consumer** (`userland/apps/top`, `rustos-top`) — a live
+   process-overview TUI in the spirit of Linux `top`: a scrolling, selectable
+   process list with an all/own scope toggle, on-demand refresh, and a `?`
+   help overlay. It reads the `sysinfo-v1` process list through the shared
+   `lib/procinfo` helpers (no duplicated paging/column rendering, §2.2) and
+   draws it through `lib/curses` (no hand-written escape sequences). An I/O-free
+   `Model` plus a pure `render` and a thin `run` loop, over the object-safe
+   `Transport`/`Tty` seams, make it host-testable without a kernel; 18 unit
+   tests cover the model, rendering, and the loop (incl. a wide-name render and
+   the capability-denied global view).
+3. **Linking policy** (`AGENTS.md` §16.4, per the task's linking-policy
+   updates) — `lib/curses` (with `lib/termcap` + `lib/vt`) is **part of the
+   OS** and is now a curated `/System/Libraries/` shared-library class
+   ("Terminal / TUI client"); OS apps and third-party apps **dynamically
+   link** it rather than compiling it in. §16.4, §3's `lib/curses` note,
+   `plans/CURSES.md` §2, and the crate docs were updated to match.
+4. **Registration** (§6) — `userland/apps/top` added to the workspace
+   `Cargo.toml` members; the new shared-library class recorded in `AGENTS.md`
+   §16.4 and here (§16.4 requires both).
+5. **Docs** (§13) — `docs/src/userland/curses-porting.md` (a porting guide for
+   building a curses app against `lib/curses`, with capability/fail-closed and
+   linking notes) + `docs/src/SUMMARY.md` entry; `userland/apps/top/README.md`;
+   refreshed `lib/curses` README + `docs/src/lib/curses.md`; rustdoc on every
+   new public item.
+
+C6 (remote terminals — serial / SSH to Linux hosts) is the next stage and has
+not been started.
 
 ---
 

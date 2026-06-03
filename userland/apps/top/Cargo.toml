@@ -1,0 +1,34 @@
+[package]
+name = "rustos-top"
+description = "RustOS `top`: a live process-overview TUI over the System Information API, drawn with the OS curses library (§3 `userland/apps/` — `plans/CURSES.md` Stage C5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `Errno` plus the `sysinfo-v1` `ProcessRecord` the viewer renders;
+# `top` invents no parallel error set (§2.2) and never links a kernel or
+# driver crate (§17.4).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared System Information API client helpers: the request/response
+# seams, the capability-aware call mapping, and the process-list paging +
+# columnar row rendering shared with the `sysinfo` and `ps` tools. `top`
+# consumes these rather than duplicating them (§2.2, §16.6).
+rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The OS-provided Terminal/TUI library (§16.4): the curses screen model,
+# minimal-diff renderer, and typed input. `top` draws through it instead of
+# emitting escape sequences by hand (§2.2).
+rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+# The closed `TermType` set the screen driver is configured with (the honest
+# terminal the session advertises).
+rustos-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+# The shared escape/attribute vocabulary: `top` styles cells with
+# `rustos_vt::Attributes`/`Color`, the one vocabulary the renderer emits
+# (§2.2).
+rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }

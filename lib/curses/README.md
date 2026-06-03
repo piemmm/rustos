@@ -22,21 +22,30 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
   so a sequence the terminal could not honour is never emitted. A terminal
   without cursor addressing (`dumb`) takes a safe full-rewrite path.
 - **`ColorPairs`** — the curses colour-pair table (pair `0` is the reserved
-  default), plus the standalone `downgrade` colour reducer.
+  default), with explicit `init_pair` and auto-`alloc_pair`, plus the standalone
+  `downgrade` colour reducer.
+- **Character width** (`char_width`/`is_wide`/`str_width`/`truncate_to_width`) —
+  the one place that knows a CJK/fullwidth/emoji glyph occupies two columns.
+  `Window::add_char` writes a double-width glyph as a lead cell plus a
+  `CONTINUATION` cell and the renderer prints it once and steps the cursor two
+  columns, so wide text never shifts the rest of the row.
 - **`Input` / `Event`** — decodes terminal bytes (through `lib/vt`'s one parser)
   into typed events: characters, arrow / function / editing keys, mouse reports,
   and bracketed-paste runs.
 - **`Screen<T: Tty>`** — the I/O-injected driver tying it together
   (`wnoutrefresh`/`pnoutrefresh`/`doupdate`/`refresh`, mouse + bracketed-paste
-  enabling, `resize`, `read_events`). The `Tty` seam mirrors the terminal app's
+  enabling, `resize`, `alloc_pair`). Input is read with `getch` (one event) or
+  `read_events` (batched), and `set_input_mode` selects blocking, non-blocking
+  (`nodelay`), or timeout waiting. The `Tty` seam mirrors the terminal app's
   `ShellSource`, so the whole pipeline is host-testable without a kernel.
 
 ## One vocabulary, fail closed
 
 Every byte emitted or parsed is a `rustos_vt::Op`. The crate is `no_std` +
-`alloc` and is **statically linked** by applications (`AGENTS.md` §16.4 — the
-curated `/System/Libraries/` shared-library classes do not include a TUI
-library). It contains no `unwrap` / `expect` / `panic!`: an out-of-range draw is
+`alloc` and is **part of the OS**: it is the curated `/System/Libraries/`
+Terminal/TUI shared-library class, so applications — OS-bundled and third-party
+alike — **dynamically link** it rather than compiling it in (`AGENTS.md`
+§16.4). It contains no `unwrap` / `expect` / `panic!`: an out-of-range draw is
 a `CursesError`, an unknown input sequence yields no event, and an unrenderable
 colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3 (`stdinfo`,
 §20).
@@ -50,6 +59,9 @@ freely (§17.3).
 
 ## Stability
 
-**experimental.** The surface is the C4 core; C5 completes it (wide/UTF-8 cell
-handling, `getch`/timeout/non-blocking input, panels-equivalent stacking) and a
-first in-tree consumer, so the API may still change until C5 pins it.
+**experimental.** C5 completed the surface — wide/UTF-8 cell handling,
+colour-pair allocation, and `getch`/timeout/non-blocking input — and added the
+first in-tree consumer (`userland/apps/top`). Panels-equivalent stacking is
+deferred until a consumer needs it (§2.3); overlays compose today through
+ordered `wnoutrefresh` calls. The API may still change while the crate is
+experimental.

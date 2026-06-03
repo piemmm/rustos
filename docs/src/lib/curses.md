@@ -1,7 +1,7 @@
 # `rustos-curses`
 
-The first-party curses / TUI screen-model library for RustOS's text stack, and
-the fourth stage (C4) of the `plans/CURSES.md` build plan. A curses application
+The first-party curses / TUI screen-model library for RustOS's text stack,
+built over stages C4–C5 of the `plans/CURSES.md` build plan. A curses application
 does not write escape sequences by hand — it draws into windows, and the
 library makes the terminal match by emitting the smallest sequence set the
 terminal supports.
@@ -11,8 +11,9 @@ It builds on the two earlier stages: output and input both flow through
 from `lib/termcap`. There is no second escape-sequence table anywhere in this
 crate.
 
-Stability tier: **experimental** (the C4 core; C5 completes the surface and
-pins the API).
+Stability tier: **experimental**. C5 completed the surface — wide/UTF-8 cell
+handling, colour-pair allocation, and `getch`/timeout/non-blocking input — and
+added the first in-tree consumer (`userland/apps/top`).
 
 ## The model
 
@@ -32,6 +33,15 @@ pins the API).
 - **`Input` / `Event`** decode the terminal's bytes (through `lib/vt`'s one
   parser) into typed events: characters, the arrow / function / editing keys,
   mouse reports, and bracketed-paste runs delivered as a single `Event::Paste`.
+  The driver reads them with `getch` (one event) or `read_events` (batched);
+  `set_input_mode` selects `Blocking`, `NonBlocking` (`nodelay`), or
+  `Timeout(..)` waiting.
+- **Character width** (`char_width` / `is_wide` / `str_width` /
+  `truncate_to_width`) is the one place that knows a CJK / fullwidth / emoji
+  glyph occupies two columns. `Window::add_char` stores a double-width glyph as
+  a lead cell plus a `CONTINUATION` cell; the renderer prints it once and steps
+  the terminal cursor two columns, so wide text never shifts the rest of a row,
+  and a glyph that would straddle the right edge wraps whole.
 
 ## Minimal-diff rendering and colour downgrade
 
@@ -49,14 +59,17 @@ the fallback degrades safely rather than emitting sequences it would not honour
 (`AGENTS.md` §2.9).
 
 `ColorPairs` is the curses colour-pair table; pair `0` is the reserved terminal
-default and cannot be redefined.
+default and cannot be redefined. `init_pair` defines a specific id and
+`alloc_pair` hands out the next free id, so an application can request colours
+without tracking ids itself.
 
 ## One vocabulary, fail closed
 
 Every byte this crate emits or parses is a `rustos_vt::Op`. It is `no_std` +
-`alloc` and is **statically linked** by applications (`AGENTS.md` §16.4 — the
-curated `/System/Libraries/` shared-library classes do not include a TUI
-library). It contains no `unwrap` / `expect` / `panic!`: an out-of-range draw
+`alloc` and is **part of the OS**: the curated `/System/Libraries/`
+Terminal/TUI shared-library class, so applications — OS-bundled and third-party
+alike — **dynamically link** it rather than compiling it in (`AGENTS.md`
+§16.4). It contains no `unwrap` / `expect` / `panic!`: an out-of-range draw
 is a `CursesError`, an unknown input sequence yields no event, and an
 unrenderable colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3
 (`stdinfo`, §20).

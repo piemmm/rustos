@@ -1483,6 +1483,17 @@ name = "rustos-theme"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-top"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-curses",
+ "rustos-procinfo",
+ "rustos-termcap",
+ "rustos-vt",
+]
+
+[[package]]
 name = "rustos-useradd"
 version = "0.0.0"
 dependencies = [

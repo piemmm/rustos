@@ -20,6 +20,7 @@ use rustos_vt::{Attributes, Cell, Color};
 use crate::buffer::Buffer;
 use crate::error::{CursesError, Result};
 use crate::geom::{Pos, Size};
+use crate::width::{char_width, CONTINUATION};
 
 /// The Unicode box-drawing glyphs a default [`Window::draw_box`] uses.
 ///
@@ -178,10 +179,37 @@ impl Window {
 
     /// Write `ch` at the cursor with the current attributes and advance the
     /// cursor, wrapping and scrolling as configured.
+    ///
+    /// A double-width glyph (see [`char_width`]) occupies two cells: it is
+    /// written into the cursor cell and the cell to its right is set to the
+    /// [`CONTINUATION`] marker. If only one column remains on the line the
+    /// glyph wraps to the next line whole rather than being split.
     pub fn add_char(&mut self, ch: char) {
-        let cell = Cell::styled(ch, self.attrs);
-        let cursor = self.cursor;
-        let _ = self.buf.set(cursor, cell);
+        if char_width(ch) == 2 {
+            self.add_wide_char(ch);
+        } else {
+            let cursor = self.cursor;
+            let _ = self.buf.set(cursor, Cell::styled(ch, self.attrs));
+            self.advance_cursor();
+        }
+    }
+
+    /// Write a double-width glyph and its continuation cell, wrapping first if
+    /// the glyph would not fit in the columns left on the current line.
+    fn add_wide_char(&mut self, ch: char) {
+        let cols = self.buf.size().cols;
+        if self.cursor.col + 1 >= cols {
+            let cursor = self.cursor;
+            let _ = self.buf.set(cursor, self.blank());
+            self.wrap_line();
+        }
+        let lead = self.cursor;
+        let _ = self.buf.set(lead, Cell::styled(ch, self.attrs));
+        let _ = self.buf.set(
+            Pos::new(lead.row, lead.col.saturating_add(1)),
+            Cell::styled(CONTINUATION, self.attrs),
+        );
+        self.advance_cursor();
         self.advance_cursor();
     }
 
@@ -328,15 +356,20 @@ impl Window {
         Cell::styled(' ', attrs)
     }
 
-    /// Advance the cursor after writing a glyph: step right, wrap to the next
-    /// line at the right edge, and scroll at the bottom of the region when
-    /// scrolling is enabled.
+    /// Advance the cursor after writing a glyph: step right, or wrap to the
+    /// next line at the right edge.
     fn advance_cursor(&mut self) {
         let cols = self.buf.size().cols;
         if self.cursor.col + 1 < cols {
             self.cursor.col += 1;
-            return;
+        } else {
+            self.wrap_line();
         }
+    }
+
+    /// Move the cursor to the start of the next line, scrolling at the bottom
+    /// of the region when scrolling is enabled.
+    fn wrap_line(&mut self) {
         self.cursor.col = 0;
         if self.cursor.row < self.scroll_bottom {
             self.cursor.row += 1;

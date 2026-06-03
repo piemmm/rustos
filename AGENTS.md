@@ -155,8 +155,10 @@ rustos/
 │   │                    #   lib/vt op set the TermType supports (colour
 │   │                    #   downgrade truecolour->256->16->mono), and an input
 │   │                    #   decoder to typed key/mouse/paste events. One
-│   │                    #   vocabulary (§2.2), static-linked (§16.4), fail
-│   │                    #   closed (§2.9), outside userland/gui (§17.3/§17.4).
+│   │                    #   vocabulary (§2.2); part of the OS, so apps
+│   │                    #   dynamically link it as a curated /System/Libraries/
+│   │                    #   class (§16.4); fail closed (§2.9), outside
+│   │                    #   userland/gui (§17.3/§17.4).
 │   ├── cursor/          # Shared pointer cursors: scalable, colourful,
 │   │                    #   vectorised cursor shapes rasterised onto a raster
 │   │                    #   Surface + replaceable cursor sets keyed by the
@@ -712,21 +714,41 @@ The permitted classes are:
 - Printing
 - TLS / cryptography (via `lib/crypto`)
 - Networking (sockets, DNS, HTTP client)
+- Terminal / TUI client: the curses screen-model library
+  (`lib/curses`) and the terminal-capability database and
+  escape-sequence vocabulary it builds on (`lib/termcap`, `lib/vt`).
+  It is part of the OS, so apps dynamically link it like any other
+  `/System/Libraries/` library (§10 — text-mode infrastructure).
 
 Adding a new class of OS-provided shared library requires an update to
 this list **and** to `PLAN.md`. "Convenience" libraries are forbidden.
 
-Applications **must be self-contained**. They may not install shared
-libraries outside their own bundle, and they may not depend on shared
-libraries other than the curated `/System/Libraries/` set. An
-application that needs additional code links it statically or vendors
-it privately into `Libraries/` inside its own bundle (§16.5);
-statically-linked code is preferred because it leaves responsibility
-for security updates squarely with the application developer.
+Applications link against the curated `/System/Libraries/` set
+**dynamically**. This is explicitly allowed and is the expected
+mechanism for both OS-bundled apps and third-party apps: a single
+security update to a `/System/Libraries/` library then covers every
+app that uses it. OS-bundled apps **must not** statically compile-in
+(vendor) the OS-provided libraries — they always dynamically link
+them.
+
+Third-party apps are expected to bring any *additional* (non-OS)
+libraries they need with them. Such bundled libraries may be linked
+statically, or shipped inside the app's own bundle `Libraries/` and
+dynamically linked **from there** (§16.5); either way they live in the
+app's bundle, never installed system-wide. A third-party app is still
+expected to dynamically link the OS libraries rather than re-implement
+or vendor them. Code that is neither an OS-provided `/System/Libraries/`
+library nor shipped inside the app's own bundle does not exist on the
+system to link against.
 
 The dynamic loader refuses to resolve a shared-library reference that
 points anywhere other than the requesting app's own `Libraries/` or
-`/System/Libraries/`.
+`/System/Libraries/`. (Internal `lib/*` building blocks that are *not*
+in any curated `/System/Libraries/` class above — kernel/runtime
+plumbing never exposed to apps — are not OS-provided shared libraries;
+code that needs one links it statically. A `lib/*` crate that *is*
+part of a curated class, such as the curses/terminal client, is an
+OS-provided library and is dynamically linked.)
 
 ### 16.5 Application bundles (`.app`)
 

@@ -21,6 +21,7 @@ use rustos_vt::{Attributes, Op, Sgr};
 use crate::buffer::Buffer;
 use crate::color::downgrade;
 use crate::geom::Pos;
+use crate::width::{char_width, CONTINUATION};
 
 /// The terminal cursor's desired end state after an update.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -68,6 +69,12 @@ fn render_addressable(
         for col in 0..size.cols {
             let pos = Pos::new(row, col);
             let want = desired.get(pos);
+            // A continuation cell carries no glyph of its own; the wide glyph
+            // to its left already advances the terminal cursor across it, so
+            // it is never positioned to or printed.
+            if matches!(want, Some(cell) if cell.ch == CONTINUATION) {
+                continue;
+            }
             if want == previous.get(pos) {
                 continue;
             }
@@ -83,10 +90,12 @@ fn render_addressable(
             let want_attrs = resolve(cell.attrs, caps);
             pen.transition_into(&mut out, want_attrs);
             out.push(Op::Print(cell.ch));
-            // The terminal's cursor steps right after printing; track it so an
-            // adjacent change needs no fresh `CursorPosition`.
-            at = if col + 1 < size.cols {
-                Some(Pos::new(row, col + 1))
+            // The terminal's cursor steps right by the glyph's column width
+            // after printing; track it so an adjacent change needs no fresh
+            // `CursorPosition`.
+            let next_col = col + char_width(cell.ch);
+            at = if next_col < size.cols {
+                Some(Pos::new(row, next_col))
             } else {
                 None
             };
@@ -110,6 +119,11 @@ fn render_dumb(caps: &Capabilities, previous: &Buffer, desired: &Buffer) -> Vec<
     for row in 0..size.rows {
         if let Some(cells) = desired.row(row) {
             for cell in cells {
+                // The wide glyph to its left already covers a continuation
+                // cell; printing it would shift the rest of the row.
+                if cell.ch == CONTINUATION {
+                    continue;
+                }
                 let want_attrs = resolve(cell.attrs, caps);
                 pen.transition_into(&mut out, want_attrs);
                 out.push(Op::Print(cell.ch));
