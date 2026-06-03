@@ -6276,6 +6276,55 @@ their ABI surfaces, so a compliance pass was run before continuing Stage
 
 ---
 
+## TSC hardening & untrusted-timer resolution (§19.1)
+
+**Status:** done.
+
+Two TSC/timer risks flagged in a side-channel review were closed. Note:
+for this work `abi-v1` is treated as **not** frozen — the charter's and
+this plan's "frozen" language is superseded by the task direction — so a
+new capability could be added and `clock_get`'s observable resolution
+changed. No `clock_get` *signature* changed regardless (the coarsening
+is value-only), so the `ENCODED_TABLE` syscall hash is untouched.
+
+1. **Validate the TSC before trusting it (x86_64).** `RDTSC` is only a
+   sound cross-CPU monotonic base on an Invariant-TSC part. New
+   `kernel/arch/x86_64/src/tsc.rs` adds the pure, host-tested decoder
+   `invariant_tsc_supported(edx)` (CPUID leaf `0x8000_0007` EDX bit 8)
+   and the bare-metal `detect_invariant_tsc` probe (kept in the arch
+   crate per §17.2; host build returns the conservative default). The
+   boot pipeline (`kernel/rustos-kernel/src/boot.rs`) logs the decision
+   on every boot (`KERNEL_BOOT_TSC_INVARIANCE`, id 4098) and fails
+   closed (`BootError::TscNotInvariant`) before bringing up a second CPU
+   on a part lacking it. A single-CPU boot proceeds (one TSC is
+   self-monotonic), so the QEMU default CPU (no `invtsc`) still boots;
+   the SMP guard is live, reachable code that triggers the day AP
+   bring-up populates a second `cpu_to_lapic` slot. Frequency is still
+   measured empirically against the PIT, never read from CPUID/firmware.
+2. **Don't hand full-resolution time to untrusted code.** New
+   `CapabilityId::TIME_HIRES = 16` (named `CAP_TIME_HIRES`, frozen by
+   the `well_known_ids_are_frozen` / name round-trip tests). `lib/abi`
+   gains `COARSE_CLOCK_GRANULARITY_NS` (1 µs) and the pure
+   `coarsen_clock_ns` flooring helper (the single coarsening site,
+   §2.2). The `clock_get` handler (`kernel/core`) now returns the raw
+   nanosecond reading only to callers holding `CAP_TIME_HIRES`; every
+   other caller — §19.5 parser sandboxes, untrusted apps, the wasm
+   userland (which shares this architecture-neutral handler) — gets the
+   floored value. Coarsening preserves the per-CPU monotonic contract
+   `irq_wait` depends on. `setcap`/`getcap` accept the new name with no
+   code change (data-driven `from_name`).
+
+**Tests.** `rustos-abi` +3 (`coarsen_*` floor/monotonic, `TIME_HIRES`
+frozen-id/name/index), `rustos-arch-x86_64` +2 (`tsc` decoder),
+`rustos-kernel-core` +2 net (the `clock_get` test split into hires /
+coarsened / comparison, plus a `TestArch::set_monotonic_ns` helper).
+**Docs.** `docs/src/architecture/syscalls.md` (clock-resolution
+section), `docs/src/security/side_channels.md` (untrusted-timer +
+validated-clocksource sections), `docs/src/platform/x86_64.md`
+(`ticks_now` note + boot pipeline step 6b).
+
+---
+
 ## Assignment Notes for Task Dispatchers
 
 When handing a stage to an implementing agent, the task brief **must**:

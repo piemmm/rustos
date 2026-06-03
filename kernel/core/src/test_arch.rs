@@ -93,6 +93,17 @@ impl TestArch {
     pub fn ipi_count(&self) -> u64 {
         self.ipis.load(Ordering::Relaxed)
     }
+
+    /// Stage the value the *next* [`KernelArch::monotonic_ns`] call
+    /// returns.
+    ///
+    /// `monotonic_ns` increments before returning, so it yields
+    /// `value + 1` on the next call. Tests use this to drive
+    /// `clock_get` with a known raw reading (e.g. to assert the
+    /// coarsening boundary).
+    pub fn set_monotonic_ns(&self, value: u64) {
+        self.monotonic_ns.store(value, Ordering::Relaxed);
+    }
 }
 
 impl SchedulerArch for TestArch {

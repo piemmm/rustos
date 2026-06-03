@@ -29,6 +29,34 @@ use crate::Errno;
 /// kept in `0..NANOS_PER_SEC`.
 pub const NANOS_PER_SEC: u32 = 1_000_000_000;
 
+/// Resolution, in nanoseconds, that the monotonic clock is coarsened to
+/// for callers that do not hold
+/// [`CapabilityId::TIME_HIRES`](crate::CapabilityId::TIME_HIRES).
+///
+/// `clock_get` (`abi-v1` syscall 7) is unprivileged, so every task —
+/// including the §19.5 parser sandboxes and untrusted `userland/apps` —
+/// can read it. A sub-microsecond timer is a primitive for the
+/// cache- and execution-timing side channels `AGENTS.md` §19.1 hardens
+/// against, so the default value handed to an untrusted caller is
+/// floored to this granularity (one microsecond). A principal that is
+/// explicitly trusted with precise timing holds `CAP_TIME_HIRES` and
+/// reads the clock at full nanosecond resolution. The value is data:
+/// tightening or relaxing it changes only this constant, not the
+/// `clock_get` ABI signature (`AGENTS.md` §5.7 — security by default).
+pub const COARSE_CLOCK_GRANULARITY_NS: u64 = 1_000;
+
+/// Floor `ns` to [`COARSE_CLOCK_GRANULARITY_NS`].
+///
+/// Returns the largest multiple of [`COARSE_CLOCK_GRANULARITY_NS`] that
+/// is `<= ns`, so the coarsened reading never exceeds the true reading
+/// and the sequence stays monotonically non-decreasing. This is the one
+/// place the coarsening arithmetic lives, so the kernel `clock_get`
+/// handler and any future fast-path reader agree (`AGENTS.md` §2.2).
+#[must_use]
+pub const fn coarsen_clock_ns(ns: u64) -> u64 {
+    ns - (ns % COARSE_CLOCK_GRANULARITY_NS)
+}
+
 /// An absolute instant: signed seconds since the Unix epoch plus a
 /// nanosecond field in `0..NANOS_PER_SEC`.
 ///
@@ -206,8 +234,34 @@ impl Duration64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Duration64, Time64, NANOS_PER_SEC};
+    use super::{coarsen_clock_ns, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC};
     use crate::Errno;
+
+    #[test]
+    fn coarsen_floors_to_granularity_and_never_exceeds_input() {
+        let g = COARSE_CLOCK_GRANULARITY_NS;
+        assert_eq!(coarsen_clock_ns(0), 0);
+        assert_eq!(coarsen_clock_ns(g - 1), 0);
+        assert_eq!(coarsen_clock_ns(g), g);
+        assert_eq!(coarsen_clock_ns(g + 1), g);
+        assert_eq!(coarsen_clock_ns(2 * g - 1), g);
+        for ns in [0u64, 1, 999, 1_000, 1_001, 123_456, u64::MAX] {
+            let c = coarsen_clock_ns(ns);
+            assert!(c <= ns, "coarsened {c} must not exceed raw {ns}");
+            assert_eq!(c % g, 0, "coarsened {c} must be a multiple of {g}");
+            assert!(ns - c < g, "coarsening must drop strictly less than {g}");
+        }
+    }
+
+    #[test]
+    fn coarsen_is_monotonic_non_decreasing() {
+        let mut prev = 0;
+        for ns in 0u64..5_000 {
+            let c = coarsen_clock_ns(ns);
+            assert!(c >= prev, "coarsened sequence must not decrease");
+            prev = c;
+        }
+    }
 
     #[test]
     fn time64_round_trips_at_the_epoch() {

@@ -108,6 +108,18 @@ impl CapabilityId {
     /// System Information API, and there is no path that bypasses this
     /// capability check.
     pub const SYSINFO_HW: Self = Self(15);
+    /// Read the monotonic clock at full nanosecond resolution.
+    ///
+    /// `clock_get` (`abi-v1` syscall 7) is callable by every task, but
+    /// a high-resolution timer is a building block for cache- and
+    /// execution-timing side-channel attacks (`AGENTS.md` §19.1).
+    /// Callers that do not hold this capability — in particular the
+    /// §19.5 parser sandboxes and untrusted `userland/apps` — receive
+    /// a value coarsened to
+    /// [`COARSE_CLOCK_GRANULARITY_NS`](crate::COARSE_CLOCK_GRANULARITY_NS),
+    /// so the precise timer is available only to principals explicitly
+    /// trusted with it (`AGENTS.md` §5.7 — security by default).
+    pub const TIME_HIRES: Self = Self(16);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -135,6 +147,7 @@ impl CapabilityId {
         (Self::SYSINFO_GLOBAL, "CAP_SYSINFO_GLOBAL"),
         (Self::SYSINFO_KERNEL, "CAP_SYSINFO_KERNEL"),
         (Self::SYSINFO_HW, "CAP_SYSINFO_HW"),
+        (Self::TIME_HIRES, "CAP_TIME_HIRES"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -245,6 +258,7 @@ mod tests {
         assert_eq!(CapabilityId::SYSINFO_GLOBAL.as_u16(), 13);
         assert_eq!(CapabilityId::SYSINFO_KERNEL.as_u16(), 14);
         assert_eq!(CapabilityId::SYSINFO_HW.as_u16(), 15);
+        assert_eq!(CapabilityId::TIME_HIRES.as_u16(), 16);
     }
 
     #[test]
@@ -254,6 +268,7 @@ mod tests {
         assert_eq!(CapabilityId::FS_MOUNT.name(), Some("CAP_FS_MOUNT"));
         assert_eq!(CapabilityId::AUDIT_READ.name(), Some("CAP_AUDIT_READ"));
         assert_eq!(CapabilityId::SYSINFO_HW.name(), Some("CAP_SYSINFO_HW"));
+        assert_eq!(CapabilityId::TIME_HIRES.name(), Some("CAP_TIME_HIRES"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -264,9 +279,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=15 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=16 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=15 {
+        for raw in 1..=16 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
@@ -310,5 +325,6 @@ mod tests {
         assert!(CapabilityId::SYSINFO_GLOBAL.index() < 256);
         assert!(CapabilityId::SYSINFO_KERNEL.index() < 256);
         assert!(CapabilityId::SYSINFO_HW.index() < 256);
+        assert!(CapabilityId::TIME_HIRES.index() < 256);
     }
 }

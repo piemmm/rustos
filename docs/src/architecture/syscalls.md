@@ -143,7 +143,7 @@ re-validates arguments — the dispatcher does that first.
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
-| `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`                                                                | —                                                                         |
+| `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 
@@ -155,6 +155,22 @@ port wires it through `apic_timer::Calibration`'s `tsc_per_second`
 field, sampled across the same PIT calibration window the LAPIC is
 measured over; the conversion goes through
 `Calibration::tsc_ticks_to_ns` (saturating).
+
+### Clock resolution and side channels
+
+`clock_get` is unprivileged (no `required_capability`, not audited), so
+every task — including the §19.5 parser sandboxes and untrusted
+`userland/apps` — can read it. A full-resolution timer is a building
+block for cache- and execution-timing side channels (`AGENTS.md`
+§19.1), so the value is **gated, not the syscall**: a caller holding
+`CAP_TIME_HIRES` receives the raw nanosecond reading, while every other
+caller receives the reading floored to `COARSE_CLOCK_GRANULARITY_NS`
+(one microsecond, `lib/abi::time`). The flooring is value-only — the
+`abi-v1` `clock_get` signature (no args, `u64` return) is unchanged —
+and `coarsen_clock_ns` preserves the per-CPU monotonic-non-decreasing
+contract the `irq_wait` timeout loop relies on. Tightening or relaxing
+the granularity changes only that one constant (`AGENTS.md` §5.7 —
+security by default).
 
 The two deferred-feature branches return a stable `Errno` and emit
 exactly one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE`

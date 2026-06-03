@@ -195,6 +195,15 @@ pub enum BootError {
     IrqRoutingPublish,
     /// `IoApicController::program_pin` rejected the binding.
     IrqProgramPin,
+    /// More than one CPU was about to be brought up on a part whose
+    /// CPUID does not advertise an Invariant TSC. `RDTSC` is the
+    /// x86_64 monotonic clock source, and without the invariant
+    /// guarantee it may run at a P-state-dependent rate or drift
+    /// between cores, so a migrated task could observe time going
+    /// backwards. Rather than silently trust the contract the boot
+    /// path fails closed (`AGENTS.md` §5.4.5, §19.1). A single-CPU
+    /// boot is unaffected: one TSC is self-monotonic.
+    TscNotInvariant,
 }
 
 impl BootError {
@@ -220,6 +229,7 @@ impl BootError {
             Self::IrqIdtInstall => "irq_idt_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
+            Self::TscNotInvariant => "tsc_not_invariant",
         }
     }
 }
@@ -235,6 +245,14 @@ impl BootError {
 /// the audit contract with external consumers and may not be renumbered
 /// (`AGENTS.md` §5.4.4).
 const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
+
+/// Security-relevant boot decision: whether the BSP's CPUID advertises
+/// an Invariant TSC (`AGENTS.md` §19.1). Logged on every boot so the
+/// TSC contract is recorded rather than silently assumed. Sits in the
+/// `kernel/core`-owned `4000..5000` range, just below
+/// [`KERNEL_BOOT_INIT_FAILED`]; the id is part of the audit contract
+/// and may not be renumbered (`AGENTS.md` §5.4.4).
+const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
 // --- The boot entry -------------------------------------------------
 
@@ -271,6 +289,33 @@ pub fn boot(
             arch_halt()
         }
     }
+}
+
+fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
+    // Record the decision on every boot so the TSC contract is audited,
+    // not silently trusted (`AGENTS.md` §19.1). A part that advertises
+    // the invariant flag logs at Info; one that does not logs at Warn,
+    // because a later SMP bring-up on it is refused (`try_boot`).
+    let (level, message) = if invariant {
+        (Level::Info, "tsc invariance validated")
+    } else {
+        (
+            Level::Warn,
+            "tsc not invariant; single-cpu boot proceeds, smp gated",
+        )
+    };
+    rustos_log::log(
+        sink,
+        &Event {
+            level,
+            id: KERNEL_BOOT_TSC_INVARIANCE,
+            message,
+            fields: &[Field {
+                key: "invariant_tsc",
+                value: if invariant { "true" } else { "false" },
+            }],
+        },
+    );
 }
 
 fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
@@ -342,6 +387,22 @@ fn try_boot(
     //    matches that.
     let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
     cpu_to_lapic[0] = Some(bsp_lapic_id);
+
+    // 6b. Validate the TSC before trusting `RDTSC` as the cross-CPU
+    //     monotonic clock source. The contract is recorded on every
+    //     boot rather than silently assumed (`AGENTS.md` §19.1). A
+    //     single-CPU boot proceeds regardless — one TSC is inherently
+    //     self-monotonic — but the day this pipeline brings up a
+    //     second CPU on a part without an Invariant TSC, it fails
+    //     closed instead of risking a non-monotonic `clock_get`
+    //     (`AGENTS.md` §5.4.5). The CPUID probe lives in the arch crate
+    //     per §17.2.
+    let invariant_tsc = rustos_arch_x86_64::tsc::detect_invariant_tsc();
+    log_tsc_invariance(log_sink, invariant_tsc);
+    let active_cpu_count = cpu_to_lapic.iter().filter(|slot| slot.is_some()).count();
+    if !invariant_tsc && active_cpu_count > 1 {
+        return Err(BootError::TscNotInvariant);
+    }
 
     let arch = X86_64Arch::new(0, bsp_lapic_id, cpu_to_lapic).map_err(|_| BootError::ArchInit)?;
 

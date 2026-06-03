@@ -301,7 +301,7 @@ where
         }
     }
 
-    fn clock_get(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+    fn clock_get(&self, caller: &CallerContext<'_>) -> SyscallResult {
         // `monotonic_ns` is documented as monotonically non-decreasing
         // per CPU; the dispatcher invokes us on the issuing CPU's
         // process context (`AGENTS.md` §5.4 step 1), so reading from
@@ -310,7 +310,22 @@ where
         // argument for one, and a kernel-trusted lookup is the only
         // sanctioned source.
         let cpu = crate::sched::SchedulerArch::current_cpu(self.arch);
-        Ok(self.arch.monotonic_ns(cpu))
+        let ns = self.arch.monotonic_ns(cpu);
+        // A full-resolution timer is a side-channel primitive
+        // (`AGENTS.md` §19.1). Only a principal explicitly trusted with
+        // `CAP_TIME_HIRES` reads the raw nanosecond value; every other
+        // caller — including the §19.5 parser sandboxes and untrusted
+        // apps — sees the reading floored to
+        // `COARSE_CLOCK_GRANULARITY_NS` (security by default,
+        // `AGENTS.md` §5.7). Coarsening is value-only: the `clock_get`
+        // ABI signature is unchanged, and `coarsen_clock_ns` preserves
+        // the per-CPU monotonic-non-decreasing contract the `irq_wait`
+        // timeout loop relies on.
+        if caller.caps.has(CapabilityId::TIME_HIRES) {
+            Ok(ns)
+        } else {
+            Ok(rustos_abi::coarsen_clock_ns(ns))
+        }
     }
 
     fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult {
@@ -1015,11 +1030,37 @@ mod tests {
         assert!(irq.is_empty(), "exit must drop every binding the task held");
     }
 
-    /// `clock_get` reads `KernelArch::monotonic_ns` and returns
-    /// strictly-increasing values across consecutive calls (the
-    /// `TestArch` impl is strictly monotonic).
+    /// A caller holding `CAP_TIME_HIRES` reads `KernelArch::monotonic_ns`
+    /// at full resolution and observes strictly-increasing values across
+    /// consecutive calls (the `TestArch` impl is strictly monotonic).
     #[test]
-    fn clock_get_returns_monotonic_ns_from_arch() {
+    fn clock_get_hires_returns_raw_monotonic_ns_from_arch() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(6),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let a = h.clock_get(&ctx).expect("first read");
+        let b = h.clock_get(&ctx).expect("second read");
+        // Full resolution: consecutive single-tick reads are distinct.
+        assert!(b > a, "expected b > a, got a={a} b={b}");
+    }
+
+    /// A caller *without* `CAP_TIME_HIRES` reads the monotonic clock
+    /// floored to `COARSE_CLOCK_GRANULARITY_NS`, so sub-granularity
+    /// detail is hidden (`AGENTS.md` §19.1) while the reading stays
+    /// monotonically non-decreasing.
+    #[test]
+    fn clock_get_without_hires_is_coarsened() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -1034,8 +1075,57 @@ mod tests {
         };
 
         let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
-        let a = h.clock_get(&ctx).expect("first read");
-        let b = h.clock_get(&ctx).expect("second read");
-        assert!(b > a, "expected b > a, got a={a} b={b}");
+        let g = rustos_abi::COARSE_CLOCK_GRANULARITY_NS;
+
+        // Stage a known raw reading; the next `monotonic_ns` returns
+        // `value + 1`, so a raw of `12_345` must floor to `12_000`.
+        arch.set_monotonic_ns(12_344);
+        let coarse = h.clock_get(&ctx).expect("coarsened read");
+        assert_eq!(coarse, 12_000, "raw 12_345 must floor to 12_000");
+
+        // Across many sub-granularity ticks the value never decreases
+        // and is always a multiple of the granularity.
+        arch.set_monotonic_ns(0);
+        let mut last = 0;
+        for _ in 0..(3 * g) {
+            let v = h.clock_get(&ctx).expect("coarsened read");
+            assert_eq!(v % g, 0, "coarsened reading must be a multiple of {g}");
+            assert!(v >= last, "coarsened reading must not decrease");
+            last = v;
+        }
+        assert!(last >= g, "after >{g} ticks at least one boundary crossed");
+    }
+
+    /// The same underlying instant is hidden from an untrusted caller
+    /// but visible to a `CAP_TIME_HIRES` holder.
+    #[test]
+    fn clock_get_hires_sees_more_than_coarsened_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let hires = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
+        let plain = make_caps_record(7, &[], sink);
+        let hires_ctx = CallerContext {
+            task_id: SecTaskId(6),
+            caps: &hires,
+        };
+        let plain_ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &plain,
+        };
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+
+        arch.set_monotonic_ns(7_000);
+        let raw = h.clock_get(&hires_ctx).expect("hires read"); // 7_001
+        arch.set_monotonic_ns(7_000);
+        let coarse = h.clock_get(&plain_ctx).expect("coarse read"); // 7_000
+        assert_eq!(raw, 7_001);
+        assert_eq!(coarse, 7_000);
+        assert!(raw > coarse, "hires caller resolves the sub-µs detail");
     }
 }

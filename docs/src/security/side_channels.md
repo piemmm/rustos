@@ -82,6 +82,39 @@ build checks the instructions.
   isolates memory with one linear memory per worker. Every control is a
   justified host-owned no-op; the port is release-ready.
 
+## Untrusted timer resolution
+
+A high-resolution clock is the *measurement* half of every timing side
+channel, so §19.1 coverage is not only about speculation barriers — it
+also bounds how precisely untrusted code can tell the time. The
+`clock_get` syscall is unprivileged by design (any task may read the
+monotonic clock), so the precision is gated on a capability rather than
+the call: a caller holding `CAP_TIME_HIRES` reads the raw nanosecond
+value, and every other caller — including the §19.5 parser sandboxes
+and untrusted `userland/apps` — reads it floored to
+`COARSE_CLOCK_GRANULARITY_NS` (one microsecond), the single coarsening
+constant in `lib/abi::time`. The flooring is value-only, so the frozen
+`clock_get` ABI signature is untouched, and `coarsen_clock_ns` keeps the
+reading monotonically non-decreasing. See
+[the syscall reference](../architecture/syscalls.md#clock-resolution-and-side-channels).
+
+## TSC as a validated clocksource (x86_64)
+
+The x86_64 monotonic clock is the Time-Stamp Counter. `RDTSC` is only a
+sound *cross-CPU* time base on a part that advertises an **Invariant
+TSC** (constant rate across P-/C-/T-states, synchronised across cores);
+without it a scheduler-migrated task could observe time moving
+backwards. The boot path therefore does not silently trust the contract:
+`rustos_arch_x86_64::tsc::detect_invariant_tsc` reads the CPUID
+Invariant-TSC flag (leaf `0x8000_0007` EDX bit 8) inside the arch crate
+(§17.2), the result is logged on every boot
+(`KERNEL_BOOT_TSC_INVARIANCE`), and the kernel **fails closed**
+(`BootError::TscNotInvariant`) before bringing up a second CPU on a part
+that lacks it. A single-CPU boot proceeds regardless, because one TSC is
+inherently self-monotonic. The frequency itself is never taken from
+CPUID or firmware: it is measured empirically against the PIT
+calibration window (`apic_timer::calibrate`).
+
 ## Remaining §19.1 work
 
 The KPTI and indirect-branch-predictor `Pending` gaps close with the
