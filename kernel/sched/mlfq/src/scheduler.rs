@@ -9,6 +9,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use rustos_rng::{FastRng, RandU64};
 use rustos_sync::{RwLock, SpinLock};
 
 use crate::loom_compat::{AtomicU64, Ordering};
@@ -97,10 +98,15 @@ pub struct Scheduler<A: SchedulerArch> {
     next_id: AtomicU64,
     config: SchedulerConfig,
     last_boost_tick: AtomicU64,
-    /// xorshift state for victim selection — per-scheduler, not per-CPU,
-    /// because the cost of a single atomic exchange dwarfs the
-    /// hypothetical cache benefit on this control-plane path.
-    victim_rng: AtomicU64,
+    /// Fast, non-cryptographic generator for work-stealing victim
+    /// selection. This is a "scheduler decision" in the sense of
+    /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
+    /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
+    /// one. It is per-scheduler, not per-CPU, because the cost of a
+    /// single brief [`SpinLock`] acquisition dwarfs any cache benefit on
+    /// this control-plane path; `next_victim` takes `&self`, so the
+    /// generator's `&mut self` stepping lives behind that lock.
+    victim_rng: SpinLock<FastRng>,
     /// Tasks that exceeded their home CPU's queue at spawn/unpark time.
     /// The scheduler drains this on every step before checking the local
     /// queues; this is the back-pressure path described in
@@ -196,7 +202,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             next_id: AtomicU64::new(1),
             config,
             last_boost_tick: AtomicU64::new(0),
-            victim_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            victim_rng: SpinLock::new(FastRng::seed_from_u64(0x9E37_79B9_7F4A_7C15)),
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
@@ -599,16 +605,9 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
-        // xorshift64* — Marsaglia 2003. Bias-corrected with `+ cpu`
-        // so two CPUs do not lock-step their probe order.
-        let mut s = self.victim_rng.load(Ordering::Relaxed);
-        if s == 0 {
-            s = 0x9E37_79B9_7F4A_7C15;
-        }
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        self.victim_rng.store(s, Ordering::Relaxed);
+        // Draw from the shared `FastRng`, bias-corrected with `+ cpu` so
+        // two CPUs do not lock-step their probe order.
+        let s = self.victim_rng.lock().next_u64();
         // n > 0 by construction (config.cpus != 0); both casts are
         // narrow because cpus is `u32` and the modulus is < n <= u32::MAX.
         #[allow(clippy::cast_possible_truncation)]

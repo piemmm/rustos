@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use rustos_rng::{FastRng, RandU64};
 use rustos_sync::{RwLock, SpinLock};
 
 use crate::runqueue::{Entry, RunQueue, SCALE, SERVICE_PER_DISPATCH};
@@ -45,7 +46,13 @@ pub struct Scheduler<A: SchedulerArch> {
     tasks: RwLock<BTreeMap<TaskId, Arc<TaskInner>>>,
     next_id: AtomicU64,
     config: SchedulerConfig,
-    victim_rng: AtomicU64,
+    /// Fast, non-cryptographic generator for work-stealing victim
+    /// selection. This is a "scheduler decision" in the sense of
+    /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
+    /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
+    /// one. `next_victim` takes `&self`, so the generator's `&mut self`
+    /// stepping lives behind a brief [`SpinLock`].
+    victim_rng: SpinLock<FastRng>,
     overflow: SpinLock<Vec<TaskId>>,
     preemptions: Box<[AtomicU64]>,
     current: Box<[AtomicU64]>,
@@ -104,7 +111,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             tasks: RwLock::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             config,
-            victim_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+            victim_rng: SpinLock::new(FastRng::seed_from_u64(0x9E37_79B9_7F4A_7C15)),
             overflow: SpinLock::new(Vec::new()),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
@@ -448,14 +455,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
-        let mut s = self.victim_rng.load(Ordering::Relaxed);
-        if s == 0 {
-            s = 0x9E37_79B9_7F4A_7C15;
-        }
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        self.victim_rng.store(s, Ordering::Relaxed);
+        let s = self.victim_rng.lock().next_u64();
         #[allow(clippy::cast_possible_truncation)]
         {
             let n = self.cpus.len() as u64;
