@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
@@ -57,6 +57,23 @@ const INODE_COUNT: u32 = 64;
 /// (`docs/src/filesystem/rustfs-spec.md` §5), so the host builder and the
 /// guest tail mount the planted volume under this single shared key.
 pub const FIXTURE_VOLUME_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
+/// Deterministic stand-in for the platform RNG seam used to provision the
+/// fixture volume. A fixed sequence keeps the built image **reproducible**
+/// (`AGENTS.md` §19.3); it is fixture scaffolding, never a production source.
+struct FixtureEntropy {
+    next: u8,
+}
+
+impl EntropySource for FixtureEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
 
 /// File planted in the root directory before boot. The guest tail looks
 /// it up and verifies [`PLANTED_FILE_CONTENT`].
@@ -141,7 +158,12 @@ impl Block for VecBlock {
 /// `AGENTS.md` §2.9 in every path it links into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     let dev = VecBlock::new(TOTAL_SECTORS);
-    let mut fs = RustFs::format(dev, INODE_COUNT, &FIXTURE_VOLUME_KEY)?;
+    let mut fs = RustFs::format(
+        dev,
+        INODE_COUNT,
+        &FIXTURE_VOLUME_KEY,
+        &mut FixtureEntropy { next: 1 },
+    )?;
     let root = fs.root();
     fs.create(root, PLANTED_FILE_NAME, NodeKind::RegularFile)?;
     let written = fs.write_at(root, PLANTED_FILE_NAME, 0, PLANTED_FILE_CONTENT)?;

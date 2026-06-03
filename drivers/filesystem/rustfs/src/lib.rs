@@ -80,7 +80,7 @@ pub use check::{CheckReport, RescueReport, RescueSink};
 use crypto::{
     decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
 };
-pub use crypto::{VolumeKey, VOLUME_KEY_LEN};
+pub use crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
 pub use discard::{TrimReport, TRIM_BATCH_RANGES};
 pub use health::{HealthReport, HealthState, HealthThresholds};
 use integrity::{
@@ -1085,9 +1085,9 @@ impl<B: Block> RustFs<B> {
 
     /// Lay a fresh, empty rustfs volume onto `block` and return it mounted.
     /// `inode_hint` sizes nothing on disk any more — the inode tree grows on
-    /// demand — but it is retained in the frozen `format` signature and stored
-    /// in the superblock for tools, and a value below two is still rejected so
-    /// at least the root directory fits.
+    /// demand — but it is retained in the `format` signature and stored in the
+    /// superblock for tools, and a value below two is still rejected so at
+    /// least the root directory fits.
     ///
     /// The volume is encrypted at rest under `volume_key` (the installer's /
     /// recovery flow's key material): `format` provisions the per-volume key
@@ -1098,25 +1098,35 @@ impl<B: Block> RustFs<B> {
     /// shared chunks, so the chunk/refcount and reverse-reference trees and the
     /// dedupe index start empty and grow on demand (§9).
     ///
+    /// The random per-volume UUID and the master key, wrapping salt, and wrap
+    /// nonce are drawn from `entropy`, the [`EntropySource`] seam onto the
+    /// platform RNG (`lib/rng`'s `CsRng`, `AGENTS.md` §1/§4). A failed draw
+    /// fails closed: no volume is laid out with predictable key material (§5.4).
+    ///
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if the device block size is unsupported.
     /// * [`DriverError::NoSpace`] if the device is too small or `inode_hint`
     ///   is below two.
+    /// * [`DriverError`] from `entropy` if a random draw is unavailable.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
-    pub fn format(block: B, inode_hint: u32, volume_key: &VolumeKey) -> Result<Self, DriverError> {
+    pub fn format(
+        block: B,
+        inode_hint: u32,
+        volume_key: &VolumeKey,
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
         if inode_hint < 2 {
             return Err(DriverError::NoSpace);
         }
         fs.inode_hint = inode_hint;
-        fs.fs_uuid = derive_uuid(fs.total_blocks, inode_hint, fs.block_size);
-        // Provision the per-volume key hierarchy: a master key wrapped under
-        // the caller's volume key, deriving the metadata-authentication,
+        fs.fs_uuid = random_uuid(entropy)?;
+        // Provision the per-volume key hierarchy: a random master key wrapped
+        // under the caller's volume key, deriving the metadata-authentication,
         // filename, and content keys. There is no plaintext path
         // (`docs/src/filesystem/rustfs-spec.md` §5, §7).
-        let (crypto_header, keys) =
-            crypto::provision(volume_key, fs.fs_uuid).map_err(|_| DriverError::DeviceFault)?;
+        let (crypto_header, keys) = crypto::provision(volume_key, entropy)?;
         fs.apply_keys(&keys);
         crypto_header.encode(&mut fs.crypto_header);
 
@@ -2552,18 +2562,21 @@ impl<B: Block> RustFs<B> {
     }
 }
 
-/// Derive a non-zero filesystem UUID from the volume geometry. Stage 1 has no
-/// platform RNG dependency (`docs/src/filesystem/rustfs-spec.md` §3 — no external crates); a
-/// random per-volume UUID arrives with the installer's RNG in a later stage.
-/// The value only needs to be stable and non-zero to anchor the §8 block
-/// identity checks within one volume.
-fn derive_uuid(total_blocks: u64, inode_count: u32, block_size: usize) -> u128 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for word in [total_blocks, u64::from(inode_count), block_size as u64] {
-        hash ^= word;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (u128::from(hash) << 64) | u128::from(hash ^ 0x5255_5354_4653_5631)
+/// Draw a random, non-zero per-volume filesystem UUID from the platform RNG
+/// seam. The value only needs to be unique and non-zero to anchor the §8
+/// block-identity checks within one volume; an all-zero draw (which the §8
+/// checks reserve as "no UUID") is nudged to a non-zero value rather than
+/// retried, since any non-zero anchor satisfies the invariant.
+///
+/// # Errors
+///
+/// Propagates the [`EntropySource`] error if the random draw is unavailable,
+/// so a volume is never anchored on predictable identity material (§5.4).
+fn random_uuid(entropy: &mut dyn EntropySource) -> Result<u128, DriverError> {
+    let mut bytes = [0u8; 16];
+    entropy.fill(&mut bytes)?;
+    let uuid = u128::from_le_bytes(bytes);
+    Ok(if uuid == 0 { 1 } else { uuid })
 }
 
 impl<B: Block> FilesystemRead for RustFs<B> {

@@ -25,20 +25,27 @@
 //! ([`rustos_crypto::derive_key`]), the metadata MAC (HMAC-SHA256), and the
 //! AEAD (ChaCha20-Poly1305). Nothing here hand-rolls a primitive.
 //!
-//! # No platform RNG (yet)
+//! # The key material is drawn from the platform RNG
 //!
-//! This driver has no entropy source of its own, so the per-volume master key
-//! and its wrapping salt are derived deterministically from the supplied
-//! volume key and the volume UUID at format time and wrapped on disk. The
-//! security property the spec requires — that the volume cannot be read
-//! without the volume key — holds regardless: the master key is recovered only
-//! by unsealing the on-disk wrapped blob with a wrapping key derived from the
-//! correct volume key. Sourcing the master key from the platform RNG (so it is
-//! independent of the volume key and re-wrappable on key change) is a later
-//! refinement, exactly as the random per-volume UUID is (`crate::derive_uuid`).
+//! The per-volume master key, its wrapping salt, and the wrap nonce are drawn
+//! at format time from an injected [`EntropySource`] — the seam onto the §19.2
+//! platform RNG (`lib/rng`'s `CsRng`, the cryptographically secure generator
+//! `AGENTS.md` §1/§4 mandates for `RustFS` keys). The master key is therefore
+//! independent of the caller's volume key (and re-wrappable on a future key
+//! change) rather than derived from it. Only the wrapping key stays a
+//! deterministic KDF of the volume key and the random salt, because [`unwrap`]
+//! must recompute it from the supplied volume key to unseal the master key on
+//! mount. A failed entropy draw never yields a volume with predictable key
+//! material: provisioning fails closed (`AGENTS.md` §5.4).
+//!
+//! The driver itself never reaches for a global RNG; the concrete generator is
+//! injected at the composition root, mirroring the seam `kernel/mem`'s
+//! encrypted swap, `init`'s `Spawner`, and `login`'s `Authenticator` use. That
+//! keeps the driver architecture-neutral (§17.2).
 
+use rustos_abi::driver::DriverError;
 use rustos_crypto::{
-    derive_key, open, seal, sha256, AeadError, AeadKey, AeadNonce, AeadTag, MacKey, AEAD_NONCE_LEN,
+    derive_key, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, MacKey, AEAD_NONCE_LEN,
 };
 
 /// Length, in bytes, of a volume key — the caller-supplied key that unwraps a
@@ -50,6 +57,28 @@ pub const VOLUME_KEY_LEN: usize = 32;
 /// never persists it; only the master key it unwraps is stored, and that only
 /// in AEAD-sealed form.
 pub type VolumeKey = [u8; VOLUME_KEY_LEN];
+
+/// Source of cryptographic randomness for a fresh volume's key material (the
+/// master key, the wrapping salt, and the wrap nonce) and its UUID.
+///
+/// This is `RustFS`'s seam onto the §19.2 platform RNG: the composition root
+/// injects the cryptographically secure generator (`lib/rng`'s `CsRng`, the
+/// generator `AGENTS.md` §1/§4 mandates for `RustFS` keys), so the driver
+/// itself never names or reaches for a global RNG and stays
+/// architecture-neutral (§17.2). It mirrors the injection seam `kernel/mem`'s
+/// encrypted swap, `init`'s `Spawner`, and `login`'s `Authenticator` use.
+pub trait EntropySource {
+    /// Fill the whole of `out` with cryptographically secure random bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DriverError`] (the implementation's fail-closed code) if
+    /// randomness is unavailable. `RustFS` fails closed (`AGENTS.md` §5.4): no
+    /// key, salt, nonce, or UUID is derived from a failed draw, so a volume is
+    /// never provisioned with predictable key material. On error the contents
+    /// of `out` are unspecified and must not be used.
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError>;
+}
 
 /// Bytes of per-block crypto trailer appended to every encrypted data and
 /// directory block: a [`rustos_crypto::AEAD_NONCE_LEN`]-byte nonce followed by
@@ -68,8 +97,6 @@ const SALT_LEN: usize = 16;
 // Domain-separating KDF context labels. Each derived key gets its own stable
 // label so no two uses of a parent key ever collide (`rustos_crypto::kdf`).
 const CTX_WRAP: &[u8] = b"rustfs/wrap-key";
-const CTX_MASTER: &[u8] = b"rustfs/master-key";
-const CTX_WRAP_NONCE: &[u8] = b"rustfs/wrap-nonce";
 const CTX_META: &[u8] = b"rustfs/meta-mac";
 const CTX_FILENAME: &[u8] = b"rustfs/filename";
 const CTX_CONTENT: &[u8] = b"rustfs/content";
@@ -107,19 +134,6 @@ pub struct CryptoHeader {
     wrap_tag: AeadTag,
 }
 
-/// Derive the per-volume wrapping salt from the volume UUID. The salt is
-/// public (it is stored in the clear) and only needs to be stable and unique
-/// per volume, so it is hashed from the UUID through `lib/crypto`.
-fn derive_salt(uuid: u128) -> [u8; SALT_LEN] {
-    let mut input = [0u8; 16 + 16];
-    input[..16].copy_from_slice(b"rustfs/salt\0\0\0\0\0");
-    input[16..].copy_from_slice(&uuid.to_le_bytes());
-    let digest = sha256(&input);
-    let mut salt = [0u8; SALT_LEN];
-    salt.copy_from_slice(&digest[..SALT_LEN]);
-    salt
-}
-
 /// Derive a 256-bit subkey from `secret`, a domain-separating `label`, and the
 /// per-volume `salt`, all through the `lib/crypto` KDF.
 fn derive_with_salt(secret: &[u8; 32], label: &[u8], salt: &[u8; SALT_LEN]) -> [u8; 32] {
@@ -131,18 +145,11 @@ fn derive_with_salt(secret: &[u8; 32], label: &[u8], salt: &[u8; SALT_LEN]) -> [
 }
 
 /// The wrapping key that seals the master key on disk, derived from the
-/// caller's volume key and the per-volume salt.
+/// caller's volume key and the per-volume salt. It is a deterministic KDF of
+/// the volume key so [`unwrap`] can recompute it on mount; the random salt
+/// (stored in the clear) makes it unique per volume.
 fn wrapping_key(volume_key: &VolumeKey, salt: &[u8; SALT_LEN]) -> [u8; 32] {
     derive_with_salt(volume_key, CTX_WRAP, salt)
-}
-
-/// The deterministic wrap nonce: unique per volume because the salt is, so the
-/// `(wrapping key, nonce)` pair never repeats across volumes.
-fn wrap_nonce(volume_key: &VolumeKey, salt: &[u8; SALT_LEN]) -> AeadNonce {
-    let full = derive_with_salt(volume_key, CTX_WRAP_NONCE, salt);
-    let mut nonce = [0u8; AEAD_NONCE_LEN];
-    nonce.copy_from_slice(&full[..AEAD_NONCE_LEN]);
-    nonce
 }
 
 /// Grow the working key set from the master key.
@@ -209,26 +216,37 @@ impl CryptoHeader {
 
 /// Provision a fresh key hierarchy for a new volume at format time.
 ///
-/// Derives the per-volume salt, wrapping key, and master key from the
-/// caller-supplied `volume_key` and the volume `uuid`, AEAD-seals the master
-/// key, and returns the on-disk [`CryptoHeader`] plus the working
-/// [`VolumeKeys`]. No plaintext key is ever returned for storage; the header
-/// carries only the wrapped master key (§7).
+/// Draws the per-volume wrapping salt, the master key, and the wrap nonce from
+/// `entropy` (the platform RNG seam), derives the wrapping key from the
+/// caller-supplied `volume_key` and the random salt, AEAD-seals the master key
+/// under it, and returns the on-disk [`CryptoHeader`] plus the working
+/// [`VolumeKeys`]. The master key is independent of `volume_key`, so the
+/// volume can be re-wrapped on a key change without rewriting its data. No
+/// plaintext key is ever returned for storage; the header carries only the
+/// wrapped master key (§7).
 ///
 /// # Errors
 ///
-/// [`AeadError`] if sealing the master key fails (unreachable for the
-/// fixed-size buffer, but surfaced rather than panicked, `AGENTS.md` §2.9).
+/// * [`DriverError`] (the entropy source's fail-closed code) if any random
+///   draw is unavailable: provisioning aborts before sealing, so a volume is
+///   never created with predictable key material (`AGENTS.md` §5.4).
+/// * [`DriverError::DeviceFault`] if sealing the master key fails (unreachable
+///   for the fixed-size buffer, but surfaced rather than panicked, §2.9).
 pub fn provision(
     volume_key: &VolumeKey,
-    uuid: u128,
-) -> Result<(CryptoHeader, VolumeKeys), AeadError> {
-    let salt = derive_salt(uuid);
+    entropy: &mut dyn EntropySource,
+) -> Result<(CryptoHeader, VolumeKeys), DriverError> {
+    let mut salt = [0u8; SALT_LEN];
+    entropy.fill(&mut salt)?;
+    let mut master = [0u8; 32];
+    entropy.fill(&mut master)?;
+    let mut nonce = [0u8; AEAD_NONCE_LEN];
+    entropy.fill(&mut nonce)?;
+
     let wrapping = wrapping_key(volume_key, &salt);
-    let nonce = wrap_nonce(volume_key, &salt);
-    let master = derive_with_salt(volume_key, CTX_MASTER, &salt);
     let mut wrapped_master = master;
-    let wrap_tag = seal(&wrapping, &nonce, &salt, &mut wrapped_master)?;
+    let wrap_tag = seal(&wrapping, &nonce, &salt, &mut wrapped_master)
+        .map_err(|_| DriverError::DeviceFault)?;
     let keys = derive_volume_keys(&master);
     Ok((
         CryptoHeader {
@@ -326,11 +344,43 @@ mod tests {
     use super::*;
 
     const VK: VolumeKey = [0x11; VOLUME_KEY_LEN];
-    const UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+
+    /// A deterministic stand-in for the platform RNG: a byte counter starting
+    /// at `seed`, so each fill is distinct and reproducible and different seeds
+    /// produce different streams. It is test scaffolding, never a production
+    /// entropy source.
+    struct CountingEntropy {
+        next: u8,
+    }
+
+    impl CountingEntropy {
+        fn new(seed: u8) -> Self {
+            Self { next: seed }
+        }
+    }
+
+    impl EntropySource for CountingEntropy {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+            for byte in out.iter_mut() {
+                *byte = self.next;
+                self.next = self.next.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    /// An entropy source that always fails, to drive the fail-closed path.
+    struct DeadEntropy;
+
+    impl EntropySource for DeadEntropy {
+        fn fill(&mut self, _out: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::DeviceFault)
+        }
+    }
 
     #[test]
     fn provision_then_unwrap_round_trips_keys() {
-        let (header, keys) = provision(&VK, UUID).expect("provision");
+        let (header, keys) = provision(&VK, &mut CountingEntropy::new(1)).expect("provision");
         let recovered = unwrap(&VK, &header).expect("unwrap");
         assert_eq!(keys.mac_key, recovered.mac_key);
         assert_eq!(keys.filename_key, recovered.filename_key);
@@ -339,7 +389,7 @@ mod tests {
 
     #[test]
     fn wrong_volume_key_fails_to_unwrap() {
-        let (header, _) = provision(&VK, UUID).expect("provision");
+        let (header, _) = provision(&VK, &mut CountingEntropy::new(2)).expect("provision");
         let mut wrong = VK;
         wrong[0] ^= 0x01;
         assert!(unwrap(&wrong, &header).is_err());
@@ -347,15 +397,35 @@ mod tests {
 
     #[test]
     fn derived_keys_are_independent() {
-        let (_, keys) = provision(&VK, UUID).expect("provision");
+        let (_, keys) = provision(&VK, &mut CountingEntropy::new(3)).expect("provision");
         assert_ne!(keys.mac_key, keys.filename_key);
         assert_ne!(keys.mac_key, keys.content_key);
         assert_ne!(keys.filename_key, keys.content_key);
     }
 
     #[test]
+    fn distinct_entropy_yields_distinct_master_keys() {
+        // Two volumes formatted with the same volume key but independent RNG
+        // streams get independent key hierarchies: the master key is drawn
+        // from the RNG, not derived from the volume key.
+        let (_, a) = provision(&VK, &mut CountingEntropy::new(10)).expect("provision a");
+        let (_, b) = provision(&VK, &mut CountingEntropy::new(20)).expect("provision b");
+        assert_ne!(a.content_key, b.content_key);
+        assert_ne!(a.mac_key, b.mac_key);
+        assert_ne!(a.dedupe_domain, b.dedupe_domain);
+    }
+
+    #[test]
+    fn provision_fails_closed_when_entropy_is_unavailable() {
+        assert_eq!(
+            provision(&VK, &mut DeadEntropy).err(),
+            Some(DriverError::DeviceFault)
+        );
+    }
+
+    #[test]
     fn header_encode_decode_round_trips() {
-        let (header, _) = provision(&VK, UUID).expect("provision");
+        let (header, _) = provision(&VK, &mut CountingEntropy::new(4)).expect("provision");
         let mut bytes = [0u8; CRYPTO_HEADER_LEN];
         header.encode(&mut bytes);
         let decoded = CryptoHeader::decode(&bytes).expect("decode");
@@ -366,7 +436,7 @@ mod tests {
 
     #[test]
     fn region_round_trips_and_detects_tampering() {
-        let (_, keys) = provision(&VK, UUID).expect("provision");
+        let (_, keys) = provision(&VK, &mut CountingEntropy::new(5)).expect("provision");
         let plain = *b"a directory entry name or file data block content!!";
         let mut region = plain;
         let mut trailer = [0u8; CRYPTO_TRAILER];

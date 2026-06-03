@@ -160,10 +160,38 @@ fn fixed_clock() -> Time64 {
 /// volume is encrypted under this fixed key.
 const TEST_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
+/// A deterministic stand-in for the platform RNG seam (`EntropySource`): a
+/// byte counter so each `format` draws distinct, reproducible "random" key
+/// material and UUID. Test scaffolding only, never a production source.
+struct TestEntropy {
+    next: u8,
+}
+
+impl TestEntropy {
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl EntropySource for TestEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
 fn fmt(block_size: u32, block_count: u64, inodes: u32) -> RustFs<MemBlock> {
-    RustFs::format(MemBlock::new(block_size, block_count), inodes, &TEST_KEY)
-        .expect("format a blank device")
-        .with_clock(fixed_clock)
+    RustFs::format(
+        MemBlock::new(block_size, block_count),
+        inodes,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format a blank device")
+    .with_clock(fixed_clock)
 }
 
 #[test]
@@ -359,9 +387,14 @@ fn timestamps_round_trip_extreme_values() {
     fn future() -> Time64 {
         Time64::from_secs(4_200_000_000)
     }
-    let mut fs = RustFs::format(MemBlock::new(512, 256), 32, &TEST_KEY)
-        .expect("format")
-        .with_clock(old);
+    let mut fs = RustFs::format(
+        MemBlock::new(512, 256),
+        32,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format")
+    .with_clock(old);
     let root = fs.root();
     fs.create(root, b"t", NodeKind::RegularFile)
         .expect("create");
@@ -2401,7 +2434,7 @@ fn fmt_discard(
 ) -> RustFs<MemBlock> {
     let block =
         MemBlock::new(512, block_count).with_discard(granularity_blocks, max_blocks_per_request);
-    let mut fs = RustFs::format(block, 32, &TEST_KEY)
+    let mut fs = RustFs::format(block, 32, &TEST_KEY, &mut TestEntropy::new())
         .expect("format a discard-capable device")
         .with_clock(fixed_clock);
     fs.block.discarded.clear();
@@ -2583,7 +2616,7 @@ fn mkfs_discards_the_whole_volume_on_a_capable_device() {
     // mkfs tells a discard-capable device the whole volume is free before the
     // encrypted structures are laid down (§11 mkfs flow).
     let block = MemBlock::new(512, 512).with_discard(1, 0);
-    let fs = RustFs::format(block, 32, &TEST_KEY).expect("format");
+    let fs = RustFs::format(block, 32, &TEST_KEY, &mut TestEntropy::new()).expect("format");
     assert_eq!(
         fs.into_block().discarded,
         alloc::vec![(0, 512)],
@@ -2595,7 +2628,13 @@ fn mkfs_discards_the_whole_volume_on_a_capable_device() {
 fn mkfs_on_a_device_without_discard_still_formats() {
     // A device without discard support is recorded, not failed: format still
     // succeeds and the volume mounts (§11).
-    let fs = RustFs::format(MemBlock::new(512, 512), 32, &TEST_KEY).expect("format");
+    let fs = RustFs::format(
+        MemBlock::new(512, 512),
+        32,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format");
     assert!(fs.into_block().discarded.is_empty());
 }
 
@@ -2708,6 +2747,7 @@ fn fmt_health(block_count: u64, health: DeviceHealth) -> RustFs<MemBlock> {
         MemBlock::new(4096, block_count).with_health(health),
         128,
         &TEST_KEY,
+        &mut TestEntropy::new(),
     )
     .expect("format with health")
     .with_clock(fixed_clock)
@@ -2923,6 +2963,7 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
             .with_health(DeviceHealth::Available(healthy_snapshot(0, 0))),
         64,
         &TEST_KEY,
+        &mut TestEntropy::new(),
     )
     .expect("format crash baseline")
     .with_clock(fixed_clock);
@@ -3195,6 +3236,7 @@ fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec:
         MemBlock::new(4096, 512).with_health(DeviceHealth::Available(healthy_snapshot(0, 0))),
         128,
         &TEST_KEY,
+        &mut TestEntropy::new(),
     )
     .expect("format corruption baseline")
     .with_clock(fixed_clock);

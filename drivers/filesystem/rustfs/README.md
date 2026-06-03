@@ -61,11 +61,14 @@ recovers it.
 
 RustFS is **encrypted by default and has no plaintext mode**: there is no
 code path that lays out an unencrypted volume.
-`RustFs::format(block, inode_hint, &volume_key)` provisions a per-volume key
-hierarchy through `lib/crypto` (`AGENTS.md` §2.12) — a master key wrapped
-(AEAD) under a KDF of the caller-supplied volume key and stored only in
-wrapped form in every superblock slot's plaintext discovery region, deriving
-the metadata-authentication (HMAC), filename (AEAD), and content (AEAD) keys.
+`RustFs::format(block, inode_hint, &volume_key, &mut entropy)` provisions a
+per-volume key hierarchy through `lib/crypto` (`AGENTS.md` §2.12) — a master
+key wrapped (AEAD) under a KDF of the caller-supplied volume key and stored
+only in wrapped form in every superblock slot's plaintext discovery region,
+deriving the metadata-authentication (HMAC), filename (AEAD), and content
+(AEAD) keys. The `entropy` argument is the `EntropySource` seam onto the
+platform RNG (`lib/rng`'s `CsRng`, `AGENTS.md` §1/§4), injected at the
+composition root so the driver never reaches for a global RNG.
 `RustFs::open(block, &volume_key)` unwraps the master key; a wrong key never
 authenticates the wrapped blob, so the mount is refused with
 `PermissionDenied`, fail-closed (`AGENTS.md` §5.4), never a panic (§2.9).
@@ -73,10 +76,13 @@ File data and directory-entry names are encrypted at rest with
 ChaCha20-Poly1305 (`lib/crypto/src/aead.rs`): each data and directory block
 carries a 28-byte nonce+tag trailer, so a bit-flip in encrypted data or a
 name is detected on read rather than mis-decrypted (directory blocks are
-encrypt-then-MAC; the read path authenticates then decrypts). The master key
-and salt are derived deterministically from the volume key and UUID this
-stage (no platform RNG in the driver yet); a random RNG-sourced master key is
-a later refinement.
+encrypt-then-MAC; the read path authenticates then decrypts). The master key,
+wrapping salt, and wrap nonce are drawn from the injected platform RNG, so the
+master key is **independent of the volume key** (and re-wrappable on a key
+change) rather than derived from it; only the wrapping key stays a
+deterministic KDF of the volume key and the random salt so `open` can
+recompute it. The per-volume UUID is likewise random. A failed entropy draw
+fails closed (`AGENTS.md` §5.4).
 
 ## Data integrity (`rustfs-spec.md` §6, §8)
 

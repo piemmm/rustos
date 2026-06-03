@@ -6,7 +6,7 @@ use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use rustos_abi::DriverError;
 use rustos_drv_fs_ext4::Ext4;
 use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
 use crate::{exercise, RamBlock};
 
@@ -14,6 +14,23 @@ use crate::{exercise, RamBlock};
 /// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5), so the
 /// soak exercises the encrypted-volume path under this fixed key.
 const RUSTFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
+
+/// Deterministic stand-in for the platform RNG seam: a byte counter that gives
+/// `RustFs::format` distinct, reproducible key material and UUID. Soak
+/// scaffolding only, never a production entropy source.
+struct SoakEntropy {
+    next: u8,
+}
+
+impl EntropySource for SoakEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
 
 /// The three filesystems the soak exercises, in registry order. The
 /// single source of truth for `cargo xtask fssoak --list` and the
@@ -51,7 +68,12 @@ fn inode_budget(bytes: u64) -> u32 {
 impl SoakFs for RustFs<RamBlock> {
     fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
         let inodes = inode_budget(block.len_bytes());
-        RustFs::format(block, inodes, &RUSTFS_SOAK_KEY)
+        RustFs::format(
+            block,
+            inodes,
+            &RUSTFS_SOAK_KEY,
+            &mut SoakEntropy { next: 1 },
+        )
     }
 
     fn remount(self) -> Result<Self, DriverError> {

@@ -31,11 +31,28 @@ use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::MountFlags;
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
 /// Volume key the suite formats its rustfs test volume with. `RustFS` is
 /// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5).
 const SUITE_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
+/// Deterministic stand-in for the platform RNG seam: a byte counter that gives
+/// `RustFs::format` distinct, reproducible key material and UUID. Test
+/// scaffolding only, never a production entropy source.
+struct SuiteEntropy {
+    next: u8,
+}
+
+impl EntropySource for SuiteEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
 
 pub use rustos_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
@@ -200,8 +217,13 @@ pub fn cred_with_groups<'a>(
 /// runtime condition.
 #[must_use]
 pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
-    let fs = RustFs::format(VecBlock::new(TOTAL_SECTORS), INODE_COUNT, &SUITE_KEY)
-        .expect("format the fixed-geometry rustfs test volume");
+    let fs = RustFs::format(
+        VecBlock::new(TOTAL_SECTORS),
+        INODE_COUNT,
+        &SUITE_KEY,
+        &mut SuiteEntropy { next: 1 },
+    )
+    .expect("format the fixed-geometry rustfs test volume");
 
     let mut vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));
     let caps = CapabilitySet::empty();

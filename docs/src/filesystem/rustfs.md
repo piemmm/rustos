@@ -110,8 +110,11 @@ RustFS is **encrypted by default and has no plaintext mode**
 (`rustfs-spec.md` §5, §7): there is no code path that lays out an unencrypted
 volume. Every volume is created with a caller-supplied **volume key** (the
 installer's, recovery flow's, or storage policy service's key material):
-`RustFs::format(block, inode_hint, &volume_key)` provisions the per-volume
-key hierarchy and `RustFs::open(block, &volume_key)` recovers it.
+`RustFs::format(block, inode_hint, &volume_key, &mut entropy)` provisions the
+per-volume key hierarchy and `RustFs::open(block, &volume_key)` recovers it.
+The `entropy` argument is the `EntropySource` seam onto the platform RNG
+(`lib/rng`'s `CsRng`, `AGENTS.md` §1/§4); `RustFS` never reaches for a global
+RNG itself, the concrete generator is injected at the composition root.
 
 The key hierarchy is grown through `lib/crypto` only (`AGENTS.md` §2.12 —
 crypto is the standing "don't roll your own" exception):
@@ -146,11 +149,14 @@ refused with `PermissionDenied`, fail-closed (`AGENTS.md` §5.4), never a panic
 The KDF is HMAC-SHA256 used as a single-block HKDF-Expand
 (`lib/crypto/src/kdf.rs`), and the AEAD nonce for a data or directory block
 is derived from its `(physical address, generation)` and stored in the
-trailer, so copy-on-write never reuses a `(key, nonce)` pair. This driver has
-no entropy source of its own, so the master key and its salt are derived
-deterministically from the volume key and UUID and wrapped on disk; sourcing
-the master key from the platform RNG is a later refinement (as the random
-per-volume UUID is).
+trailer, so copy-on-write never reuses a `(key, nonce)` pair. The master key,
+the wrapping salt, and the wrap nonce are drawn at format time from the
+injected platform RNG, so the master key is **independent of the volume key**
+(and re-wrappable on a future key change) rather than derived from it; only
+the wrapping key stays a deterministic KDF of the volume key and the random
+salt so `open` can recompute it. The per-volume UUID is likewise a random
+draw. A failed entropy draw fails closed — no volume is laid out with
+predictable key material (`AGENTS.md` §5.4).
 
 ## Data integrity
 

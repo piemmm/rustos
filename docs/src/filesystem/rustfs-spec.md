@@ -252,7 +252,13 @@ Rules:
   AES is unsuitable;
 - encryption mode selection is automatic and not user-tunable;
 - dedupe is allowed only within the same encryption domain;
-- keys are never stored unwrapped on disk.
+- keys are never stored unwrapped on disk;
+- fresh per-volume key material (the master key, the wrapping salt, and the
+  wrap nonce) and the per-volume UUID are drawn from the platform RNG
+  (`lib/rng`'s cryptographically secure `CsRng`, `AGENTS.md` §1/§4), not
+  derived from the volume key, so the master key is independent of — and
+  re-wrappable without — the volume key; a failed entropy draw fails closed
+  (§5.4) and no volume is laid out with predictable key material.
 
 Key hierarchy:
 
@@ -266,6 +272,15 @@ volume wrapping key
 ```
 
 Secret-holding allocations inherit RustOS zero-on-free requirements.
+
+> **Implementation.** `RustFs::format` takes an `EntropySource` seam onto the
+> platform RNG and draws the master key, wrapping salt, wrap nonce, and UUID
+> from it (`drivers/filesystem/rustfs/src/crypto.rs`). The driver never reaches
+> for a global RNG; the concrete `CsRng` is injected at the composition root,
+> mirroring the seam `kernel/mem`'s encrypted swap uses, so the driver stays
+> architecture-neutral (§17.2). Only the wrapping key remains a deterministic
+> KDF of the volume key and the random salt, because `open` must recompute it
+> to unseal the master key on mount.
 
 ---
 
@@ -651,7 +666,13 @@ this stage — wrong key refuses mount, plaintext cannot be created (the
 filename and content are absent from the raw bytes), filename + data round
 trip across a remount, an encrypted-data bit-flip is detected, crash replay
 at every commit step, and the extended `fuzz_mount` encrypted-open sweep —
-all pass.
+all pass. Stage 4 first derived the master key, wrapping salt, and UUID
+deterministically from the volume key and geometry because the platform RNG
+had not yet landed; once `lib/rng` shipped, `format` was given an
+`EntropySource` seam and now **draws** the master key, salt, wrap nonce, and
+UUID from the injected `CsRng` (§7) — the master key is independent of the
+volume key and a failed draw fails closed, with the wrapping key the only
+value still a deterministic KDF of the volume key so `open` can recompute it.
 
 Stage 5 added the §6/§8 **data-integrity layer** to every file-data block: a
 40-byte trailer after the Stage-4 crypto trailer holding a **logical content

@@ -40,7 +40,9 @@
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
-use rustos_drv_fs_rustfs::{RescueSink, RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_rustfs::{
+    EntropySource, RescueSink, RustFs, ScrubBudget, VolumeKey, VOLUME_KEY_LEN,
+};
 use rustos_log::{Event, Sink};
 
 /// Capability set granting the scrub gate (`CAP_FS_MOUNT`).
@@ -69,6 +71,22 @@ impl RescueSink for NullRescueSink {
 /// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5); the fuzz
 /// sweep exercises the encrypted-volume open path under this fixed key.
 const FUZZ_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
+/// Deterministic stand-in for the platform RNG seam used to format the fuzz
+/// baseline image. Test scaffolding only, never a production entropy source.
+struct FuzzEntropy {
+    next: u8,
+}
+
+impl EntropySource for FuzzEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
 
 const BLOCK_SIZE: u32 = 512;
 const BLOCK_COUNT: u64 = 64;
@@ -272,6 +290,7 @@ fn formatted_image() -> Vec<u8> {
         },
         16,
         &FUZZ_KEY,
+        &mut FuzzEntropy { next: 1 },
     )
     .expect("format a blank fuzz device");
     let root = fs.root();
