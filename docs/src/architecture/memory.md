@@ -111,6 +111,57 @@ default is exercised in tests.
 `READ | WRITE | EXEC | USER | NO_CACHE`. Architecture code translates
 these into native page-table bits during Stage 3.
 
+## 3a. User-memory copy (`uaccess`)
+
+A syscall handler is handed a raw user pointer (`ptr`, `len`) and must
+move bytes to or from that buffer without ever trusting it — the
+`copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4,
+`tests/SECURITY.md` §5). The [`uaccess`] module is the
+architecture-neutral half of that boundary: [`copy_in`] reads from the
+caller's address space into a kernel slice, [`copy_out`] writes a kernel
+slice into it. Both compose the two layers above — `AddressSpace`'s
+`translate` and the `PhysMap` direct map — so there is one validated
+traversal, never a second pointer-walk implementation (`AGENTS.md` §2.2).
+
+The copy walks the user range **one page at a time** (user memory is
+contiguous in the virtual address space but its frames need not be
+contiguous in physical RAM): for each `[page_start, page_start +
+PAGE_SIZE)` window the range touches it `translate`s the page to its
+`(Frame, MapFlags)`, turns the in-page physical span into a CPU pointer
+through the `PhysMap`, and moves only the bytes of the caller's buffer
+that fall inside that page. The first page may begin at a non-zero
+offset and the last may end before the page boundary.
+
+Every page is checked, fail-closed, before a byte moves:
+
+| Reason | `UaccessError` |
+| --- | --- |
+| Null base on a non-empty copy | `Null` |
+| `ptr + len` overflows the address space | `LengthOverflow` |
+| A page in range is unmapped | `NotMapped` |
+| A page in range is not user-accessible (kernel-pointer confusion) | `NotUser` |
+| `copy_in` page lacks `READ` | `NotReadable` |
+| `copy_out` page lacks `WRITE` (read-only / executable — the §19.2 W^X guard) | `NotWritable` |
+| Backing frame outside the direct map | `PhysUnmapped` |
+
+A page missing `USER` is rejected **before** a missing data permission,
+so a kernel-pointer-confusion attempt is never downgraded to a mere "not
+readable". A zero-length copy touches no memory and succeeds for any
+base. The two entry points carry one encapsulated `unsafe` block each
+(the in-page `core::ptr::copy`), with a `// SAFETY:` rationale and full
+host-test coverage (`AGENTS.md` §2.10): cross-page, mid-page-offset,
+round-trip, and every fail-closed branch are exercised with
+`HostPageTable` + `SimPhysMap`.
+
+This module is the foundational primitive of the staged user-memory
+work: the per-task address-space registry, the syscall wiring of
+`ipc_send` / `ipc_recv` / `cap_delegate` / `random_get`, and the
+per-architecture page-fault fix-up all build on it (see `PLAN.md`).
+
+[`uaccess`]: ../../rustos_kernel_mem/uaccess/index.html
+[`copy_in`]: ../../rustos_kernel_mem/uaccess/fn.copy_in.html
+[`copy_out`]: ../../rustos_kernel_mem/uaccess/fn.copy_out.html
+
 ## 4. Sensitive-region API
 
 `alloc_sensitive(len) -> Result<SensitiveBuffer, AllocError>` hands
@@ -198,7 +249,7 @@ The user-space virtio driver crates carry an owned
 free shim */ }` rather than borrowing the pool on every accessor
 (Stage 4.D Item 0a). The pool exposes a single companion accessor,
 
-```rust
+```rust,ignore
 pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError>;
 ```
 
@@ -336,8 +387,10 @@ cryptographic layer they are required to route through.
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:
   buddy split/merge, bitmap correctness, slab guard-page detection,
-  zero-on-free, OOM paths, and the encrypted-swap round-trip /
-  tamper-rejection / fail-closed cases.
+  zero-on-free, OOM paths, the encrypted-swap round-trip /
+  tamper-rejection / fail-closed cases, and the `uaccess` user-memory
+  copy (cross-page, mid-page-offset, round-trip, and every fail-closed
+  branch over `HostPageTable` + `SimPhysMap`).
 - **Property tests** — `kernel/mem/tests/proptest_frame.rs` runs
   randomised alloc/free sequences and asserts the no-double-allocation
   and no-leak invariants, plus the reserved-frame untouchability

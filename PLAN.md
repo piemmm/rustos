@@ -3349,7 +3349,7 @@ follow-up is its own thread and is now also complete.
   carve point reachable from kernel binary) parts of which
   required additional follow-up sessions to land at AGENTS.md's
   no-hacks bar. **Docs.** New
-  [`docs/src/security/irq.md`](src/security/irq.md) locks down the
+  [`docs/src/security/irq.md`](docs/src/security/irq.md) locks down the
   user-visible contract (per-architecture line-id namespaces,
   `CAP_IRQ_BIND` rationale, wake-up sequencing, failure-mode
   table, mask-before-wake invariant); cross-linked from
@@ -5759,6 +5759,54 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   terminal emulator — have both landed (model + renderer over an injected
   seam); what remains for them is the live VFS/shell channels and WM-presented
   windows (deferred wiring).
+
+### User-memory copy path & per-task address spaces (staged)
+
+The recurring blocker behind every "still open: the user-memory copy-in/out
+path" note above — `ipc_send` / `ipc_recv` transferring a real payload, and
+`cap_delegate` / `random_get` copying their buffers — is the kernel's
+`copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4,
+`tests/SECURITY.md` §5). It is decomposed into staged, independently-landable
+increments so each is a complete, tested change rather than a half-wired
+subsystem (§2.1). Each session lands one increment and updates
+`.junie/next-session-prompt.md`.
+
+- **A — Architecture-neutral user-memory copy facility (`kernel/mem::uaccess`).
+  DONE (increment).** `copy_in` / `copy_out` move bytes between a kernel slice
+  and a task's [`AddressSpace`], walking the user range one page at a time:
+  each page is `translate`d to its `(Frame, MapFlags)`, checked fail-closed for
+  `USER` + the direction's data permission (`READ` for in, `WRITE` for out —
+  the §19.2 W^X guard rejects writing an executable page), turned into a CPU
+  pointer through the kernel `PhysMap` direct map, and only the in-page byte
+  span is moved. `UaccessError` names every refusal (`Null`, `LengthOverflow`,
+  `NotMapped`, `NotUser`, `NotReadable`, `NotWritable`, `PhysUnmapped`); a
+  page missing `USER` is rejected before a missing data permission so
+  kernel-pointer confusion is never downgraded. One encapsulated `unsafe`
+  (`core::ptr::copy`) per direction with a `// SAFETY:` rationale; 15 host tests
+  over `HostPageTable` + `SimPhysMap` (cross-page, mid-page-offset, round-trip,
+  every fail-closed branch). Docs `docs/src/architecture/memory.md` (new
+  "## 3a. User-memory copy (`uaccess`)" section + testing strategy) and the
+  module rustdoc. No `unwrap`/`expect`/`panic!` in production paths.
+- **B — Per-task address-space registry.** Associate a task's `sec::TaskId`
+  with its `AddressSpace<arch::PageTable>` and the active `PhysMap`. A
+  `RwLock`-wrapped registry composed into `KernelState` (mirroring `caps` /
+  `ipc`, §2.1), populated when a task's `rxe` image is mapped (`map_image`) and
+  withdrawn on `exit`. Host-tested with `HostPageTable`.
+- **C — Reach the caller's address space from the syscall handler.** Thread the
+  registry into `KernelSyscallHandlers` so a handler can resolve
+  `caller.task_id` → `(&AddressSpace, &dyn PhysMap)` without coupling the
+  decoupled dispatcher (`kernel/syscall`) to `kernel/mem` (§17.4).
+- **D — Wire the deferred syscalls through `uaccess`.** `ipc_send` copies the
+  payload in → `Port::send`; `ipc_recv` `Port::recv` → copies out;
+  `cap_delegate` copies the capability set in; `random_get` copies reserve
+  bytes out. Map `UaccessError` → `Errno` (fail closed), and retire the
+  `feature = user_memory_copyin` / `random_output_reserve` deferral audits.
+- **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
+  ports.** The page-fault recovery path each arch port needs so a faulting user
+  access returns an error instead of trapping (the Stage-6 item
+  `tests/SECURITY.md` §5 tracks), plus publishing the desktop's pointer /
+  keyboard ports under their well-known `PortName`s so `IpcInputChannel`'s
+  `MessagePort` resolves to a live `ipc_recv`.
 
 ---
 
