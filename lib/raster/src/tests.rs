@@ -135,3 +135,87 @@ fn fill_sets_every_pixel() {
     s.fill(BLUE);
     assert!(s.pixels().iter().all(|p| *p == BLUE.premultiply()));
 }
+
+// ---- anti-aliased polygon fill --------------------------------------
+
+#[test]
+fn fill_polygon_covering_whole_grid_is_opaque() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    let square = [(0, 0), (4, 0), (4, 4), (0, 4)];
+    s.fill_polygon(&square, 4, RED);
+    assert!(s.pixels().iter().all(|p| *p == RED.premultiply()));
+}
+
+#[test]
+fn fill_polygon_degenerate_ring_is_a_no_op() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.fill_polygon(&[(0, 0), (4, 4)], 4, RED);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+#[test]
+fn fill_polygon_zero_design_does_not_panic() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    // A zero design grid is treated as 1 rather than dividing by zero.
+    s.fill_polygon(&[(0, 0), (1, 0), (1, 1), (0, 1)], 0, RED);
+    assert!(s.pixels().iter().all(|p| *p == RED.premultiply()));
+}
+
+#[test]
+fn fill_polygon_triangle_is_anti_aliased() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    // Upper-left half: the diagonal edge crosses interior pixels.
+    s.fill_polygon(&[(0, 0), (4, 0), (0, 4)], 4, RED);
+
+    // A pixel straddling the diagonal has fractional coverage.
+    let edge = s.get(1, 2).expect("in bounds");
+    assert!(
+        edge.a > 0 && edge.a < 255,
+        "expected partial coverage: {edge:?}"
+    );
+
+    // The far corner is wholly outside the triangle.
+    assert_eq!(s.get(3, 3), Some(Pixel::TRANSPARENT));
+
+    // The opposite corner is wholly inside and opaque.
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+}
+
+// ---- blit ------------------------------------------------------------
+
+#[test]
+fn blit_composites_only_opaque_source_pixels() {
+    let mut dst = Surface::new(4, 4).expect("allocates");
+    dst.fill(BLUE);
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.set(0, 0, RED.premultiply()); // one opaque pixel; the rest transparent
+    dst.blit(1, 1, &src);
+    assert_eq!(dst.get(1, 1), Some(RED.premultiply()));
+    // A transparent source pixel left the blue background untouched.
+    assert_eq!(dst.get(2, 2), Some(BLUE.premultiply()));
+    // Outside the blit footprint is also untouched.
+    assert_eq!(dst.get(0, 0), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn blit_clips_negative_origin_and_overflow() {
+    let mut dst = Surface::new(2, 2).expect("allocates");
+    let mut src = Surface::new(4, 4).expect("allocates");
+    src.fill(RED);
+    // Top-left corner placed off-surface: only the overlapping part lands.
+    dst.blit(-1, -1, &src);
+    assert!(dst.pixels().iter().all(|p| *p == RED.premultiply()));
+}
+
+#[test]
+fn fill_polygon_composites_over_existing_pixels() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.fill(BLUE);
+    // A half-transparent red square over an opaque blue background.
+    let square = [(0, 0), (2, 0), (2, 2), (0, 2)];
+    s.fill_polygon(&square, 2, Color::rgba(255, 0, 0, 128));
+    let blended = Color::rgba(255, 0, 0, 128)
+        .premultiply()
+        .over(BLUE.premultiply());
+    assert!(s.pixels().iter().all(|p| *p == blended));
+}

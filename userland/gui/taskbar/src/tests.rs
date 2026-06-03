@@ -551,19 +551,44 @@ fn minimised_task_recedes_into_the_background() {
 }
 
 #[test]
-fn notification_icon_is_painted_with_the_muted_role() {
+fn notification_icon_draws_a_glyph_in_the_muted_role() {
     let theme = Theme::dark();
     let palette = theme.palette();
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
     bar.notifications_mut().add(IconId(1), "icon.network");
 
     let layout = bar.layout();
-    let surface = render(&bar, &theme).expect("bar renders");
     // With one icon: clock starts at 920, so the lone icon slot is
     // notifications[0] = (896,760,24,40).
-    assert_eq!(
-        pixel_at(&surface, layout.bar, 900, 780),
-        role(palette.on_surface_muted)
+    let slot = layout.notifications[0];
+    let surface = render(&bar, &theme).expect("bar renders");
+    // The glyph paints muted pixels inside its slot ...
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
+        "the notification glyph draws on_surface_muted artwork in its slot"
+    );
+    // ... but is artwork, not a flood fill: the raised bar background still
+    // shows through around the glyph.
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, role(palette.surface_raised)),
+        "the glyph does not fill the whole slot; the bar background shows through"
+    );
+}
+
+#[test]
+fn unknown_notification_asset_falls_back_to_a_glyph() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+    bar.notifications_mut()
+        .add(IconId(7), "icon.totally-unknown");
+
+    let layout = bar.layout();
+    let slot = layout.notifications[0];
+    let surface = render(&bar, &theme).expect("bar renders");
+    assert!(
+        region_has_pixel(&surface, layout.bar, slot, role(palette.on_surface_muted)),
+        "an unknown asset draws the generic fallback glyph rather than nothing"
     );
 }
 

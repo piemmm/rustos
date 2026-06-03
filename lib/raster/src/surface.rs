@@ -94,6 +94,93 @@ impl Surface {
         }
     }
 
+    /// Fill an anti-aliased polygon onto this surface, compositing `color`
+    /// over the existing pixels through the premultiplied-alpha
+    /// [`Pixel::over`] path.
+    ///
+    /// The polygon's vertices are authored on a square `design`×`design`
+    /// grid and mapped across the whole surface, so one piece of vector
+    /// artwork fills a surface of any size crisply. This is the single
+    /// supersampled polygon-fill path the desktop's vector assets share —
+    /// pointer cursors (`lib/cursor`) and desktop icons (`lib/icon`)
+    /// rasterise through here rather than each carrying its own scan
+    /// converter (`AGENTS.md` §2.2 / §10).
+    ///
+    /// Each output pixel is probed on a fixed [`SUPERSAMPLE`]×[`SUPERSAMPLE`]
+    /// sub-pixel grid and the fraction of samples inside the polygon becomes
+    /// its coverage, applied to `color` before compositing. The single ring
+    /// is filled with the even-odd rule. A polygon with fewer than three
+    /// vertices covers no area and leaves the surface untouched; a
+    /// degenerate `design` of zero is treated as `1`, so the call is total
+    /// and never panics (`AGENTS.md` §2.9).
+    ///
+    /// [`Pixel::over`]: crate::color::Pixel::over
+    pub fn fill_polygon(&mut self, polygon: &[(i32, i32)], design: u32, color: Color) {
+        if polygon.len() < 3 {
+            return;
+        }
+        let (Some(denom_x), Some(denom_y)) = (sample_span(self.width), sample_span(self.height))
+        else {
+            return;
+        };
+        let design = i64::from(design.max(1));
+        let scaled: Vec<(i64, i64)> = polygon
+            .iter()
+            .map(|&(x, y)| {
+                (
+                    i64::from(x) * denom_x / design,
+                    i64::from(y) * denom_y / design,
+                )
+            })
+            .collect();
+
+        let source = color.premultiply();
+        let samples = SUPERSAMPLE * SUPERSAMPLE;
+        for py in 0..self.height {
+            for px in 0..self.width {
+                let coverage = coverage_at(&scaled, px, py);
+                if coverage == 0 {
+                    continue;
+                }
+                let factor = coverage_to_alpha(coverage, samples);
+                let src = source.scale_alpha(factor);
+                if let Some(dst) = self.get(px, py) {
+                    self.set(px, py, src.over(dst));
+                }
+            }
+        }
+    }
+
+    /// Composite `src` over this surface with its top-left corner at
+    /// `(x, y)`, clipped to the bounds.
+    ///
+    /// Every non-transparent source pixel is blended through the
+    /// premultiplied-alpha [`Pixel::over`] path, so a transparent-background
+    /// sprite (a rasterised cursor or icon) lays onto the destination
+    /// without a rectangular halo. A negative origin or an over-large source
+    /// simply clips the off-surface part rather than panicking (`AGENTS.md`
+    /// §2.9).
+    ///
+    /// [`Pixel::over`]: crate::color::Pixel::over
+    pub fn blit(&mut self, x: i32, y: i32, src: &Surface) {
+        for sy in 0..src.height {
+            for sx in 0..src.width {
+                let Some(pixel) = src.get(sx, sy) else {
+                    continue;
+                };
+                if pixel.a == 0 {
+                    continue;
+                }
+                let (Some(dx), Some(dy)) = (add_offset(x, sx), add_offset(y, sy)) else {
+                    continue;
+                };
+                if let Some(dst) = self.get(dx, dy) {
+                    self.set(dx, dy, pixel.over(dst));
+                }
+            }
+        }
+    }
+
     /// Row-major index of `(x, y)`, or `None` if out of bounds.
     fn index(&self, x: u32, y: u32) -> Option<usize> {
         if x >= self.width || y >= self.height {
@@ -104,8 +191,96 @@ impl Surface {
     }
 }
 
+/// Sub-pixel samples per axis for anti-aliased polygon fills. A 4×4 grid
+/// gives 17 distinct coverage levels per pixel, enough for smooth edges
+/// without the cost of a larger kernel.
+pub const SUPERSAMPLE: u32 = 4;
+
+/// Add an unsigned source offset to a signed destination origin, returning
+/// the destination coordinate only when it is non-negative and in `u32`
+/// range (an off-surface coordinate clips rather than wrapping).
+fn add_offset(origin: i32, offset: u32) -> Option<u32> {
+    let sum = i64::from(origin) + i64::from(offset);
+    if sum < 0 {
+        return None;
+    }
+    u32::try_from(sum).ok()
+}
+
 /// `width * height` as a `usize`, or `None` on overflow.
 fn pixel_count(width: u32, height: u32) -> Option<usize> {
     let count = u64::from(width).checked_mul(u64::from(height))?;
     usize::try_from(count).ok()
+}
+
+/// The number of sample sub-units spanned by `pixels` pixels: one pixel is
+/// `2 * SUPERSAMPLE` sub-units wide, so sample centres land on odd offsets
+/// and never on an exact polygon edge. `None` if the span overflows.
+fn sample_span(pixels: u32) -> Option<i64> {
+    let span = u64::from(pixels)
+        .checked_mul(2)?
+        .checked_mul(u64::from(SUPERSAMPLE))?;
+    i64::try_from(span).ok()
+}
+
+/// The fixed-point coordinate of sub-sample `sub` within output pixel
+/// `pixel`, in the same sample sub-units as a scaled polygon. The pixel
+/// spans `[pixel*2*SS, (pixel+1)*2*SS)`; the `sub`-th sample centre sits at
+/// `pixel*2*SS + 2*sub + 1`.
+fn sample_coordinate(pixel: u32, sub: u32) -> i64 {
+    let base = i64::from(pixel) * 2 * i64::from(SUPERSAMPLE);
+    base + 2 * i64::from(sub) + 1
+}
+
+/// The number of sub-samples of pixel `(px, py)` that fall inside `polygon`.
+fn coverage_at(polygon: &[(i64, i64)], px: u32, py: u32) -> u32 {
+    let mut hits = 0;
+    for sy in 0..SUPERSAMPLE {
+        let sample_y = sample_coordinate(py, sy);
+        for sx in 0..SUPERSAMPLE {
+            let sample_x = sample_coordinate(px, sx);
+            if point_in_polygon(polygon, sample_x, sample_y) {
+                hits += 1;
+            }
+        }
+    }
+    hits
+}
+
+/// Even-odd point-in-polygon test in integer sample space.
+///
+/// A horizontal ray is cast in `+x`; each edge that straddles `py` flips the
+/// inside flag when its crossing lies to the right of `px`. The comparison
+/// is cross-multiplied (with the edge's vertical direction accounted for) so
+/// no division is needed and the result stays exact (`AGENTS.md` §2.9).
+fn point_in_polygon(polygon: &[(i64, i64)], px: i64, py: i64) -> bool {
+    let mut inside = false;
+    let n = polygon.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = polygon[i];
+        let (xj, yj) = polygon[j];
+        if (yi > py) != (yj > py) {
+            let lhs = (px - xi) * (yj - yi);
+            let rhs = (xj - xi) * (py - yi);
+            if yj - yi > 0 {
+                if lhs < rhs {
+                    inside = !inside;
+                }
+            } else if lhs > rhs {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Map a sample hit count to an alpha factor in `0..=255`.
+fn coverage_to_alpha(hits: u32, samples: u32) -> u8 {
+    if samples == 0 {
+        return 0;
+    }
+    let scaled = u32::from(u8::MAX) * hits / samples;
+    u8::try_from(scaled.min(u32::from(u8::MAX))).unwrap_or(u8::MAX)
 }

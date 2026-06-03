@@ -27,6 +27,11 @@ rustos-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # blitter, lifted to `lib/*` (§16.4) so the taskbar draws the clock and task
 # titles without depending on the window manager (§17.4).
 rustos-font = { path = "../../../lib/font", version = "=0.0.0" }
+# Shared desktop-icon library (`builtin_icon`/`IconKind`) — scalable, themeable
+# vector notification glyphs rasterised through `lib/raster`'s single polygon
+# path, lifted to `lib/*` (§10) so the taskbar draws status icons without
+# depending on the window manager and without a second scan converter (§2.2).
+rustos-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The single shared theme definition (§10): the taskbar takes its corner
 # radius (and, in later increments, colours/fonts) from the active theme so
 # it stays consistent with the window manager and apps.

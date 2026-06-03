@@ -8,8 +8,9 @@ start-menu / task-list / notification-area state machines, and painting those
 regions — including the clock label and task-title **text** — into a themed
 pixel surface, the **start-menu popup** geometry and rendering, plus
 **routing** pointer presses into taskbar actions (including selecting an entry
-in the open menu). Notification-icon artwork and the live window-manager IPC
-build on this model in later increments.
+in the open menu), and drawing **notification-icon artwork** (scalable,
+themeable vector glyphs). The live window-manager IPC builds on this model in
+later increments.
 
 ## Where it sits
 
@@ -74,7 +75,8 @@ filling each region with a colour role from the active theme's `Palette`:
   the **raised surface** colour (so it recedes into the bar) when minimised,
   and the plain **surface** colour otherwise — which the palette guarantees
   reads as distinct from the raised background;
-- each notification icon slot is the **muted** foreground colour.
+- each notification icon slot draws a **scalable vector glyph** (see
+  *Notification icons* below), tinted in the **muted** foreground colour.
 
 On top of those fills, `render` draws **text** with the shared `rustos-font`
 `BitmapFont` (the built-in 5×7 monospace face): the clock label is centred in
@@ -98,6 +100,22 @@ translated into the bar's local surface space, the translation saturates, and
 `fill_rect` clips, so a degenerate layout paints nothing rather than
 panicking (`AGENTS.md` §2.9). Switching themes simply re-renders with the new
 palette.
+
+## Notification icons
+
+The notification area holds an ordered list of status icons, each with a
+stable `IconId` and a theme **asset id**. When the bar renders, every
+notification slot resolves its asset id to a `rustos-icon` `IconKind`
+(`IconKind::for_asset`, falling back to a generic glyph for an unknown id,
+`AGENTS.md` §2.9), builds the matching scalable `VectorIcon` in the **muted**
+foreground colour, rasterises it to the slot size at the active scale, and
+composites it onto the bar through `rustos-raster`'s `Surface::blit`. The
+glyph is artwork, not a flood fill, so the raised bar background shows through
+around it. The icons rasterise through the *same* supersampled polygon path
+(`Surface::fill_polygon`) the cursors use — there is no second scan converter
+(`AGENTS.md` §2.2) — and a slot too small to hold a glyph paints nothing
+rather than panicking (`AGENTS.md` §2.9). See [Desktop icons](icons.md) for
+the vector representation and the glyph set.
 
 ## Start menu
 

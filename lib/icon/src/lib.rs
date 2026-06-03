@@ -1,0 +1,54 @@
+//! Shared desktop-icon library (`lib/icon`).
+//!
+//! The desktop's status and notification icons are scalable vector artwork,
+//! not fixed-resolution bitmaps: each [`VectorIcon`] is a small stack of
+//! filled polygon layers over a resolution-independent design grid, so the
+//! same glyph rasterises crisply at any DPI / UI scale and is tinted by the
+//! active theme rather than baking a palette into a bitmap. This is the
+//! notification-icon artwork of `PLAN.md` Stage 7, and the same SVG-first
+//! vector-then-rasterise pipeline the cursors already use (`AGENTS.md` §10).
+//!
+//! Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, and
+//! `lib/cursor`, this crate lives in `lib/*` so the taskbar uses it without
+//! the taskbar and the window manager depending on one another (`AGENTS.md`
+//! §6, §17.4). It owns no scan converter or colour arithmetic of its own:
+//! every glyph rasterises through `lib/raster`'s single supersampled
+//! [`Surface::fill_polygon`] path (`AGENTS.md` §2.2), exactly as a cursor
+//! does — there is no second polygon rasteriser.
+//!
+//! # Pipeline
+//!
+//! [`IconKind`] names a status/notification glyph; [`builtin_icon`] turns a
+//! kind plus a single theme colour into a [`VectorIcon`]; the taskbar
+//! rasterises that icon to a [`Surface`] sized to the notification slot at
+//! the active scale and composites it onto the bar.
+//!
+//! ```
+//! use rustos_icon::{builtin_icon, IconKind};
+//! use rustos_raster::Color;
+//!
+//! let icon = builtin_icon(IconKind::Battery, Color::rgb(230, 230, 235));
+//! let image = icon.rasterise(16).expect("renderable");
+//! assert_eq!(image.width(), 16);
+//! assert_eq!(image.height(), 16);
+//! // The glyph drew at least one pixel.
+//! assert!(image.pixels().iter().any(|p| p.a > 0));
+//! ```
+//!
+//! [`Surface`]: rustos_raster::Surface
+//! [`Surface::fill_polygon`]: rustos_raster::Surface::fill_polygon
+
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+extern crate alloc;
+
+pub mod glyph;
+pub mod vector;
+
+#[cfg(test)]
+mod tests;
+
+pub use glyph::{builtin_icon, IconKind};
+pub use vector::{IconLayer, VectorIcon};

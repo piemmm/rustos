@@ -23,6 +23,12 @@ geometry rather than a fixed bitmap:
   composited through `lib/raster`'s single premultiplied-alpha path, so the
   cursor library duplicates no colour arithmetic (`AGENTS.md` §2.2).
 
+Both the supersampling scan conversion and the blend live in one place —
+`lib/raster`'s `Surface::fill_polygon`. The cursor library maps each `Shape`
+onto its design grid and hands the polygon to that shared path rather than
+carrying its own scan converter, so the desktop has exactly one polygon
+rasteriser, shared with the icon library (`AGENTS.md` §2.2 / §10).
+
 Rasterising yields a `CursorImage`: a `lib/raster` `Surface` (transparent
 outside the artwork) plus the hotspot in that image's pixel coordinates.
 Degenerate cursors and scales fail closed with `None` rather than panicking

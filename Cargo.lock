@@ -719,6 +719,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-icon"
+version = "0.0.0"
+dependencies = [
+ "rustos-raster",
+]
+
+[[package]]
 name = "rustos-init"
 version = "0.0.0"
 dependencies = [
@@ -1020,6 +1027,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-font",
  "rustos-geometry",
+ "rustos-icon",
  "rustos-input",
  "rustos-raster",
  "rustos-theme",

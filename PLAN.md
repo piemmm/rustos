@@ -5019,6 +5019,38 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
     so only those pixels recomposite (the same damage model the window stack
     uses) and hiding restores the pixels beneath. The WM depends on
     `lib/cursor` (§17.4); 6 new headless tests (45 total).
+- **Shared polygon path + desktop icons (notification-icon artwork) —
+  DONE (increment).** The anti-aliased supersampled filled-polygon scan
+  converter that `lib/cursor` carried privately was lifted into
+  `lib/raster` as `Surface::fill_polygon` — the desktop's single polygon
+  rasteriser (§10 "one rasterisation/blend path", §2.2): vertices are
+  authored on a square design grid and mapped across the surface, each
+  pixel probed on a 4×4 sub-pixel grid, every covered pixel composited
+  through the one `Pixel::over` path. `lib/cursor::VectorCursor::rasterise`
+  now delegates to it (pixel-identical; its 17 tests unchanged), so there
+  is no second scan converter. `lib/raster` also gains `Surface::blit`
+  (composite one surface over another, clipping a negative origin / oversize
+  source) for transparent-background sprites. The **notification-icon
+  artwork** that was open is now drawn: a new `lib/icon` crate
+  (`rustos-icon`, `no_std`, `#![forbid(unsafe_code)]`, dep only `lib/raster`,
+  `Layer::Lib`) holds a `VectorIcon` (a stack of filled `IconLayer` polygons
+  over a design grid) rasterising through `fill_polygon`, plus a closed
+  `IconKind` glyph set (network, volume, battery, bell, generic) with
+  `IconKind::for_asset` falling back to `Generic` for an unknown id (§2.9)
+  and `builtin_icon(kind, colour)` tinting each monochrome glyph from the
+  theme (re-theming is data, §10). The taskbar's `render` now resolves each
+  notification slot's asset id to an `IconKind`, builds the glyph in the
+  `on_surface_muted` role, rasterises it to the slot size at the active
+  scale, and blits it (artwork, not a flood fill — the bar background shows
+  through); a slot too small paints nothing (§2.9). 5 new `lib/raster` tests
+  (21 total), 8 `lib/icon` tests + a doctest, taskbar +1 (58 total);
+  `lib/cursor` unchanged. Added to `AGENTS.md` §3's `lib/` list and the
+  workspace manifest; docs `docs/src/desktop/icons.md` (+ SUMMARY),
+  updates to `docs/src/desktop/{cursors,taskbar}.md`, and the `rustos-icon`
+  / `rustos-raster` `README.md`s. No new `unsafe`, no
+  `unwrap`/`expect`/`panic!` in production paths. **Still open:** decoding
+  cursor *and* icon sets from on-disk SVG assets under `/System/Graphics`
+  (the SVG-first pipeline).
 - **Variable DPI / UI scale — DONE (increment).** Variable DPI is now a
   binding, **settable** desktop property (`AGENTS.md` §10): the same image is
   comfortable on a low- or high-DPI panel and the user picks the density.
@@ -5237,13 +5269,14 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   `TaskbarInput`, both over the `lib/input` vocabulary) to **live**
   pointer/keyboard device events and the taskbar–WM event glue (presenting and
   placing the start-menu popup surface, presenting the file-browser window, and
-  relaying the session's theme switch over live IPC), notification-icon
-  artwork, selecting a font face
+  relaying the session's theme switch over live IPC), selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist, the
   **SVG-first asset pipeline** (decoding SVG sources under `/System/Graphics`
   through the §16.4 image-decoding library in a §19.5 sandbox and caching the
-  rasterised/converted forms — this is also how cursor sets are decoded from
-  on-disk assets). The two default apps — the filesystem browser and the
+  rasterised/converted forms — this is also how on-disk cursor **and icon**
+  sets are decoded; the in-memory vector forms (`lib/cursor`, `lib/icon`) and
+  the notification-icon artwork that consumes them have landed). The two
+  default apps — the filesystem browser and the
   terminal emulator — have both landed (model + renderer over an injected
   seam); what remains for them is the live VFS/shell channels and WM-presented
   windows (deferred wiring).

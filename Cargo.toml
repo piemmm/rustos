@@ -39,6 +39,7 @@ members = [
     "lib/cursor",
     "lib/font",
     "lib/geometry",
+    "lib/icon",
     "lib/input",
     "lib/log",
     "lib/procinfo",

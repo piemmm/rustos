@@ -20,6 +20,15 @@ This crate owns:
 - `Surface` — a dense row-major premultiplied pixel buffer with bounds-checked
   `get`/`set`, `fill`, and clipped `fill_rect`. It is the rendered content of
   a window for the compositor and the painted body of the taskbar.
+- `Surface::fill_polygon` — the single supersampled, anti-aliased
+  filled-polygon scan converter. Vector artwork (pointer cursors in
+  `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
+  drawn through this one path, so the desktop has exactly one polygon
+  rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10).
+- `Surface::blit` — composite one surface over another through the `over`
+  path, clipping a negative origin or an over-large source, so a
+  transparent-background sprite (a rasterised cursor or icon) lays onto the
+  destination without a rectangular halo.
 
 There is exactly one definition of the colour algebra here, so it is never
 duplicated into a sibling crate (`AGENTS.md` §2.2). A theme `Rgba` token meets

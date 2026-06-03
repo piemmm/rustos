@@ -29,9 +29,10 @@
 //! anti-aliased rounded-corner path (`AGENTS.md` §2.2), exactly as it rounds
 //! windows.
 //!
-//! Glyph rendering (clock and task-title text), notification-icon artwork,
-//! and the live IPC wiring to the window manager build on this model in
-//! later Stage 7 increments.
+//! Glyph rendering (clock and task-title text) and notification-icon artwork
+//! (scalable, themeable [`rustos_icon`] vector glyphs) are wired here; the
+//! live IPC wiring to the window manager builds on this model in later Stage 7
+//! increments.
 //!
 //! [`render`]: render::render
 //!

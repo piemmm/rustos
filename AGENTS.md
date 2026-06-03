@@ -158,6 +158,10 @@ rustos/
 │   │                    #   the desktop DPI / UI Scale (logical->physical
 │   │                    #   pixels) for the WM, taskbar, cursors, and apps
 │   │                    #   (§10, §17.4).
+│   ├── icon/            # Shared desktop icons: scalable, themeable vector
+│   │                    #   notification/status glyphs rasterised onto a
+│   │                    #   raster Surface via the shared fill_polygon path
+│   │                    #   for the taskbar (§10, §17.4).
 │   ├── input/           # Shared pointer input-event vocabulary
 │   │                    #   (PointerButton/InputEvent) routed by the WM and
 │   │                    #   taskbar (§17.4).
@@ -165,7 +169,9 @@ rustos/
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
-│   │                    #   Color/Pixel + Surface for the WM and taskbar (§17.4).
+│   │                    #   Color/Pixel + Surface (fill_rect, the single
+│   │                    #   supersampled fill_polygon, blit) for the WM,
+│   │                    #   taskbar, cursors, and icons (§2.2, §17.4).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).

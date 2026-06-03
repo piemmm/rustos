@@ -14,20 +14,27 @@
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
 //! nothing rather than panicking (`AGENTS.md` §2.9). A label is truncated to
 //! the characters that fit its region so text never spills into a neighbour.
-//! Notification-icon artwork remains a later increment.
+//! Each notification slot draws a scalable, themeable [`rustos_icon`] vector
+//! glyph resolved from the icon's asset id, rasterised to the slot size and
+//! composited through `lib/raster`'s single blit path (`AGENTS.md` §2.2).
 
 use rustos_font::BitmapFont;
 use rustos_geometry::{Point, Rect};
+use rustos_icon::{builtin_icon, IconKind};
 use rustos_raster::{Color, Surface};
 use rustos_theme::{Palette, Theme};
 
 use crate::layout::{BarLayout, MenuLayout};
 use crate::menu::StartMenu;
+use crate::notifications::NotificationArea;
 use crate::taskbar::Taskbar;
 use crate::tasks::TaskList;
 
 /// Padding in pixels between a task slot's edge and its title text.
 const LABEL_PADDING: u32 = 4;
+
+/// Padding in pixels between a notification slot's edge and its icon glyph.
+const ICON_PADDING: u32 = 4;
 
 /// Paint `taskbar` into a [`Surface`] using `theme`'s palette.
 ///
@@ -41,6 +48,7 @@ pub fn render(taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
     paint(
         &layout,
         taskbar.tasks(),
+        taskbar.notifications(),
         taskbar.clock().label(),
         theme.palette(),
     )
@@ -51,6 +59,7 @@ pub fn render(taskbar: &Taskbar, theme: &Theme) -> Option<Surface> {
 fn paint(
     layout: &BarLayout,
     tasks: &TaskList,
+    notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
 ) -> Option<Surface> {
@@ -85,8 +94,14 @@ fn paint(
         );
     }
 
-    for slot in &layout.notifications {
-        fill_region(&mut surface, origin, *slot, palette.on_surface_muted.into());
+    for (slot, icon) in layout.notifications.iter().zip(notifications.icons()) {
+        draw_icon(
+            &mut surface,
+            origin,
+            *slot,
+            &icon.asset,
+            palette.on_surface_muted.into(),
+        );
     }
 
     draw_label(
@@ -219,6 +234,38 @@ fn draw_label(
         .saturating_sub(origin.y)
         .saturating_add(to_i32(y_offset));
     font.draw_text(surface, x, y, fitted, color);
+}
+
+/// Draw a notification icon's glyph centred in its screen-space `rect`,
+/// tinted with `color`. The glyph is a scalable [`rustos_icon`] vector icon
+/// resolved from the asset id and rasterised to the slot size at this scale,
+/// then composited onto the bar-local surface through the shared blit path
+/// (`AGENTS.md` §2.2). An empty slot, a slot too small to hold a glyph, or an
+/// unrenderable size paints nothing rather than panicking (`AGENTS.md` §2.9).
+fn draw_icon(surface: &mut Surface, origin: Point, rect: Rect, asset: &str, color: Color) {
+    if rect.is_empty() {
+        return;
+    }
+    let side = rect
+        .width
+        .min(rect.height)
+        .saturating_sub(ICON_PADDING.saturating_mul(2));
+    let kind = IconKind::for_asset(asset_key(asset));
+    let Some(image) = builtin_icon(kind, color).rasterise(side) else {
+        return;
+    };
+    let x_offset = rect.width.saturating_sub(side) / 2;
+    let y_offset = rect.height.saturating_sub(side) / 2;
+    let x = to_i32(local(rect.left(), origin.x).saturating_add(x_offset));
+    let y = to_i32(local(rect.top(), origin.y).saturating_add(y_offset));
+    surface.blit(x, y, &image);
+}
+
+/// The glyph key for an asset id: the segment after the last `.`, so the
+/// taskbar's namespaced ids (`icon.network`) resolve to the bare glyph name
+/// (`network`) the icon library knows. A dotless id maps to itself.
+fn asset_key(asset: &str) -> &str {
+    asset.rsplit('.').next().unwrap_or(asset)
 }
 
 /// Fill a screen-space `rect` into the bar-local surface, offsetting by the
