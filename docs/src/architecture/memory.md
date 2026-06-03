@@ -119,9 +119,12 @@ move bytes to or from that buffer without ever trusting it — the
 `tests/SECURITY.md` §5). The [`uaccess`] module is the
 architecture-neutral half of that boundary: [`copy_in`] reads from the
 caller's address space into a kernel slice, [`copy_out`] writes a kernel
-slice into it. Both compose the two layers above — `AddressSpace`'s
-`translate` and the `PhysMap` direct map — so there is one validated
-traversal, never a second pointer-walk implementation (`AGENTS.md` §2.2).
+slice into it. Both take the address space as a `&dyn UserAddressSpace`
+(the read-only `translate` view, §3b) and compose the two layers above —
+that one `translate` operation and the `PhysMap` direct map — so the
+copy path walks any task's page-table backend behind a single
+non-generic call site, with one validated traversal and never a second
+pointer-walk implementation (`AGENTS.md` §2.2).
 
 The copy walks the user range **one page at a time** (user memory is
 contiguous in the virtual address space but its frames need not be
@@ -164,8 +167,9 @@ per-architecture page-fault fix-up all build on it (see `PLAN.md`).
 
 ## 3b. Per-task address-space registry
 
-`copy_in` / `copy_out` take *an* `AddressSpace`, but a syscall handler
-only knows the caller's `TaskId`. The bridge is the **address-space
+`copy_in` / `copy_out` take a `&dyn UserAddressSpace` (so the call site
+names no concrete page-table backend), but a syscall handler only knows
+the caller's `TaskId`. The bridge is the **address-space
 registry** (`kernel/core`, `aspace` module): a
 `BTreeMap<TaskId, (address space, PhysMap)>` that the syscall path reads
 to resolve the calling task to the pair the copy walk consumes. It is
@@ -208,7 +212,10 @@ accessor in `kernel/core` is deliberate: the decoupled dispatcher
 (`kernel/syscall`) reaches user memory without ever depending on
 `kernel/mem` (`AGENTS.md` §17.4). The handler-side copies that consume
 it (`ipc_send` / `ipc_recv` / `cap_delegate` / `random_get` through
-`copy_in` / `copy_out`) are increment D (see `PLAN.md`).
+`copy_in` / `copy_out`) are increment D (see `PLAN.md`). Because the
+copy entry points already accept `&dyn UserAddressSpace`, the pair that
+`with_caller_aspace` yields drives them directly, with no concrete
+`AddressSpace<P>` re-erasure at the boundary.
 
 [`UserAddressSpace`]: ../../rustos_kernel_mem/vmm/trait.UserAddressSpace.html
 

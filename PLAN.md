@@ -5833,6 +5833,23 @@ subsystem (§2.1). Each session lands one increment and updates
   `cap_delegate` copies the capability set in; `random_get` copies reserve
   bytes out. Map `UaccessError` → `Errno` (fail closed), and retire the
   `feature = user_memory_copyin` / `random_output_reserve` deferral audits.
+  - **D.0 — Reconcile the copy path to the registry's erased type. DONE
+    (increment).** `uaccess::copy_in` / `copy_out` (and the shared `walk`)
+    previously took a generic `&AddressSpace<P>`, while `with_caller_aspace`
+    yields a `&dyn UserAddressSpace`. They now take `&dyn UserAddressSpace`
+    directly — the trait exposes exactly the one `translate` the walk needs, so
+    there is still a single validated traversal (§2.2) — letting the
+    `with_caller_aspace` pair drive the copies with no concrete `AddressSpace<P>`
+    re-erasure at the boundary. A `&AddressSpace<HostPageTable>` unsized-coerces
+    to the trait object, so the existing host tests are unchanged; one new
+    `uaccess` test drives both directions through an explicit erased
+    `&dyn UserAddressSpace` (16 `uaccess` host tests pass). Docs
+    `docs/src/architecture/memory.md` (§3a/§3b) + module rustdoc. No
+    `unwrap`/`expect`/`panic!` in production paths. **Still open in D:** the
+    handler wiring itself (`ipc_send`/`ipc_recv`/`cap_delegate`/`random_get`)
+    and retiring the deferral audits — `ipc_recv` needs a peek/commit on `Port`
+    so a failed `copy_out` does not drop a drained message, and `random_get`
+    needs the RNG `OutputReserve` composed into `KernelState`.
 - **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
   ports.** The page-fault recovery path each arch port needs so a faulting user
   access returns an error instead of trapping (the Stage-6 item

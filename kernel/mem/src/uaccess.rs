@@ -4,8 +4,8 @@
 //! move bytes to or from that buffer without ever trusting it. This
 //! module is the architecture-neutral half of the kernel's
 //! `copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4 /
-//! `tests/SECURITY.md` §5): it walks the caller's [`AddressSpace`] one
-//! page at a time, proves each page is a legitimate *user* page with the
+//! `tests/SECURITY.md` §5): it walks the caller's [`UserAddressSpace`]
+//! one page at a time, proves each page is a legitimate *user* page with the
 //! permission the direction requires, turns the backing frame into a
 //! CPU-dereferenceable pointer through the kernel's [`PhysMap`], and
 //! moves only the in-page byte span. Any failure stops the copy
@@ -18,7 +18,7 @@
 //! User memory is contiguous in the *virtual* address space but its
 //! frames need not be contiguous in physical RAM. The copy therefore
 //! visits each `[page_start, page_start + PAGE_SIZE)` window the range
-//! touches, [`translate`](AddressSpace::translate)s it to its
+//! touches, [`translate`](UserAddressSpace::translate)s it to its
 //! `(Frame, MapFlags)`, and copies the slice of the user buffer that
 //! falls inside that one page. The first page may begin at a non-zero
 //! offset and the last may end before the page boundary.
@@ -46,7 +46,7 @@
 
 use crate::frame::{PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
-use crate::vmm::{AddressSpace, MapFlags, Page, PageTableOps, VirtAddr};
+use crate::vmm::{MapFlags, Page, UserAddressSpace, VirtAddr};
 
 /// Why a user-memory copy refused to proceed.
 ///
@@ -91,8 +91,8 @@ pub enum UaccessError {
 /// # Errors
 ///
 /// A [`UaccessError`] naming the first invariant the range breaks.
-pub fn copy_in<P: PageTableOps>(
-    space: &AddressSpace<P>,
+pub fn copy_in(
+    space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
     uaddr: VirtAddr,
     dst: &mut [u8],
@@ -132,8 +132,8 @@ pub fn copy_in<P: PageTableOps>(
 /// # Errors
 ///
 /// A [`UaccessError`] naming the first invariant the range breaks.
-pub fn copy_out<P: PageTableOps>(
-    space: &AddressSpace<P>,
+pub fn copy_out(
+    space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
     uaddr: VirtAddr,
     src: &[u8],
@@ -171,8 +171,8 @@ pub fn copy_out<P: PageTableOps>(
 /// byte move; `walk` owns every bounds and permission check so the two
 /// public entry points share exactly one validated traversal
 /// (`AGENTS.md` §2.2).
-fn walk<P, F>(
-    space: &AddressSpace<P>,
+fn walk<F>(
+    space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
     uaddr: VirtAddr,
     len: usize,
@@ -181,7 +181,6 @@ fn walk<P, F>(
     mut per_span: F,
 ) -> Result<(), UaccessError>
 where
-    P: PageTableOps,
     F: FnMut(*mut u8, usize, usize),
 {
     if len == 0 {
@@ -496,6 +495,28 @@ mod tests {
         // we exercise the `checked_add` guard rather than a mapping.
         let res = copy_in(&space, &sim, VirtAddr::new(u64::MAX - 1), &mut dst);
         assert_eq!(res, Err(UaccessError::LengthOverflow));
+    }
+
+    #[test]
+    fn round_trips_through_an_erased_trait_object() {
+        // The copy path takes `&dyn UserAddressSpace`; prove an erased
+        // trait object (the shape `kernel/core`'s per-task registry
+        // hands a syscall handler) drives both directions, so the call
+        // site never needs the concrete page-table backend.
+        let sim = sim();
+        let frame = Frame(SIM_BASE_FRAME);
+        let space = space_with(&[(
+            0xA000,
+            frame,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+        )]);
+        let erased: &dyn UserAddressSpace = &space;
+
+        let src = [0x11u8, 0x22, 0x33, 0x44, 0x55];
+        copy_out(erased, &sim, VirtAddr::new(0xA000), &src).expect("copy_out via dyn");
+        let mut dst = [0u8; 5];
+        copy_in(erased, &sim, VirtAddr::new(0xA000), &mut dst).expect("copy_in via dyn");
+        assert_eq!(dst, src);
     }
 
     #[test]
