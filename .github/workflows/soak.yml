@@ -56,6 +56,15 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # Self-hosted runner: persist build outputs in one fixed dir on the runner's
+  # own disk instead of round-tripping a >1 GB `target/` tarball through
+  # GitHub's hosted cache service (no `actions/cache` step is used here).
+  # `actions/checkout` only wipes the workspace, so a target dir outside it
+  # survives every run, and `~/.cargo/{registry,git,bin}` already persist on a
+  # self-hosted runner. The soak runs on its *own* runner instance (the `soak`
+  # label) concurrently with `ci.yml` on the same host, so it gets a distinct
+  # target dir to avoid two concurrent jobs stomping on a shared `target/`.
+  CARGO_TARGET_DIR: /var/lib/actions-runner/rustos-cache/target-soak
 
 jobs:
   soak:

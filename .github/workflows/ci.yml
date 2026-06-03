@@ -31,6 +31,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # Self-hosted runner: persist build outputs in one fixed dir on the runner's
+  # own disk instead of round-tripping a >1 GB `target/` tarball through
+  # GitHub's hosted cache service. `actions/checkout` only wipes the workspace,
+  # so a target dir outside it survives every run. `~/.cargo/{registry,git,bin}`
+  # already persist on a self-hosted runner, so no cache action is needed.
+  CARGO_TARGET_DIR: /var/lib/actions-runner/rustos-cache/target
 
 jobs:
   xtask-ci:
@@ -50,29 +56,14 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache cargo registry, git index and target directory
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache xtask helper tools
-        id: cache-tools
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin
-          key: ${{ runner.os }}-xtask-tools-v1
-
+      # No `actions/cache` step: on this self-hosted runner the cargo caches
+      # (`~/.cargo/registry`, `~/.cargo/git`, `~/.cargo/bin`) and the
+      # `CARGO_TARGET_DIR` above already persist locally between runs, so there
+      # is nothing to upload to GitHub.
       - name: Install xtask helper tools
-        if: steps.cache-tools.outputs.cache-hit != 'true'
         run: |
-          cargo install --locked cargo-deny
-          cargo install --locked mdbook
+          command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
+          command -v mdbook     >/dev/null || cargo install --locked mdbook
 
       - name: cargo xtask ci
         run: cargo xtask ci
