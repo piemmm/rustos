@@ -22,18 +22,28 @@
 //!   single lock-ordering policy (`AGENTS.md` §2.4).
 //! * `&'a A` — the arch port, for `clock_get` via
 //!   [`KernelArch::monotonic_ns`].
+//! * `&'a RwLock<PortRegistry>` — the named-port registry, for
+//!   `ipc_send` / `ipc_recv` endpoint resolution. Wrapped in the same
+//!   reader-preferring lock as `CapTable` so the IPC hot path takes
+//!   only a shared lock.
 //!
-//! Two deferred-feature branches deliberately return stable errnos
-//! plus a [`AuditEvent::SyscallFeatureUnavailable`] record per
-//! `AGENTS.md` §15.1 — *announce the deferral, never stub*:
+//! `ipc_send` / `ipc_recv` now resolve the destination endpoint
+//! against that live registry: an endpoint that is not currently
+//! bound fails closed with `NotFound` (a real lookup miss; the
+//! dispatcher's standard pipeline audits it). For a *bound* endpoint
+//! the message body still needs the user-memory copy-in/out path,
+//! which has not landed (Stage 5 / Stage 6); that one remaining branch
+//! returns a stable errno plus a [`AuditEvent::SyscallFeatureUnavailable`]
+//! record per `AGENTS.md` §15.1 — *announce the deferral, never stub*:
 //!
-//! | Syscall              | Errno              | Reason |
-//! |----------------------|--------------------|--------|
-//! | `ipc_send`/`ipc_recv` | `NotFound`         | The named-port registry (`kernel/ipc::PortRegistry`) now exists, but it is not yet composed into `KernelState` and the user-memory copy-in path the handlers need is still deferred (Stage 5 / Stage 6). |
-//! | `cap_delegate`       | `NotImplemented`   | User-memory copy-in not landed (Stage 5 / Stage 6).    |
+//! | Syscall              | Condition            | Errno            | Reason |
+//! |----------------------|----------------------|------------------|--------|
+//! | `ipc_send`/`ipc_recv` | endpoint unbound     | `NotFound`       | No port is bound to the endpoint in the [`PortRegistry`]; a real lookup miss. |
+//! | `ipc_send`/`ipc_recv` | endpoint bound       | `NotImplemented` | The port resolves, but copying the payload to/from the caller's address space needs the user-memory copy-in path (Stage 5 / Stage 6). |
+//! | `cap_delegate`       | always               | `NotImplemented` | User-memory copy-in not landed (Stage 5 / Stage 6).    |
 //!
-//! Both branches still go through the dispatcher's standard audit
-//! pipeline (the `IPC_SEND` / `CAP_DELEGATE` entries are
+//! The deferred-feature branches still go through the dispatcher's
+//! standard audit pipeline (the `IPC_SEND` / `CAP_DELEGATE` entries are
 //! `spec.audit = true`) and **additionally** emit the
 //! `SyscallFeatureUnavailable` record so a downstream consumer can
 //! tell apart "handler rejected because the call failed" from
@@ -49,6 +59,7 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{CapabilityId, Errno, IrqHandle, RandomFlags, RANDOM_REQUEST_MAX_BYTES};
+use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
@@ -84,6 +95,13 @@ where
     /// `irq_bind` / `irq_wait` syscall handlers themselves do not
     /// dereference it (mask happens on `fire`, not on `wait`).
     irq_controller: &'a (dyn IrqController + Sync),
+    /// Named-port registry consulted by `ipc_send` / `ipc_recv` to
+    /// resolve the endpoint carried in the syscall to a live, kernel-
+    /// owned [`rustos_kernel_ipc::Port`]. Borrowed under the same
+    /// reader-preferring lock `KernelState` wraps it in; the handlers
+    /// take only a read guard (`AGENTS.md` §2.1 — no global mutable
+    /// static; the registry owns no lock of its own).
+    ipc: &'a RwLock<PortRegistry>,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -109,6 +127,7 @@ where
         audit: &'a (dyn Sink + Sync),
         irq: &'a IrqTable,
         irq_controller: &'a (dyn IrqController + Sync),
+        ipc: &'a RwLock<PortRegistry>,
     ) -> Self {
         Self {
             sched,
@@ -117,6 +136,7 @@ where
             audit,
             irq,
             irq_controller,
+            ipc,
         }
     }
 
@@ -233,23 +253,47 @@ where
     fn ipc_send(
         &self,
         caller: &CallerContext<'_>,
-        _endpoint: u64,
+        endpoint: u64,
         _ptr: u64,
         _len: usize,
     ) -> SyscallResult {
-        self.audit_feature_unavailable(caller, "ipc_named_ports");
-        Err(Errno::NotFound)
+        // §5.4: resolve the destination endpoint against the live
+        // named-port registry before doing anything else. An endpoint
+        // that is not currently bound fails closed with `NotFound` — a
+        // real lookup miss now, not a blanket stub; the dispatcher's
+        // standard pipeline audits the rejection at this boundary
+        // (`PortRegistry::lookup` deliberately does not). For a *bound*
+        // endpoint the message body must still be copied in from the
+        // caller's address space (`ptr`/`len`); that user-memory
+        // copy-in path has not yet landed (`PLAN.md` Stage 5 / Stage
+        // 6), so the handler announces the deferral and refuses rather
+        // than fabricating a transfer (`AGENTS.md` §15.1 — announce,
+        // never stub).
+        if !self.ipc.read().contains(EndpointId(endpoint)) {
+            return Err(Errno::NotFound);
+        }
+        self.audit_feature_unavailable(caller, "user_memory_copyin");
+        Err(Errno::NotImplemented)
     }
 
     fn ipc_recv(
         &self,
         caller: &CallerContext<'_>,
-        _endpoint: u64,
+        endpoint: u64,
         _ptr: u64,
         _len: usize,
     ) -> SyscallResult {
-        self.audit_feature_unavailable(caller, "ipc_named_ports");
-        Err(Errno::NotFound)
+        // Mirror `ipc_send`: resolve the endpoint against the live
+        // registry (unbound → `NotFound`), then announce the deferred
+        // user-memory copy-out path for a bound endpoint. The receive
+        // side needs the same copy primitive to deliver a drained
+        // [`rustos_kernel_ipc::Message`] payload into the caller's
+        // buffer.
+        if !self.ipc.read().contains(EndpointId(endpoint)) {
+            return Err(Errno::NotFound);
+        }
+        self.audit_feature_unavailable(caller, "user_memory_copyin");
+        Err(Errno::NotImplemented)
     }
 
     fn cap_query(&self, caller: &CallerContext<'_>, cap: CapabilityId) -> SyscallResult {
@@ -513,9 +557,18 @@ where
         audit: &'a (dyn Sink + Sync),
         irq: &'a IrqTable,
         irq_controller: &'a (dyn IrqController + Sync),
+        ipc: &'a RwLock<PortRegistry>,
     ) -> Self {
         Self {
-            handlers: KernelSyscallHandlers::new(sched, caps, arch, audit, irq, irq_controller),
+            handlers: KernelSyscallHandlers::new(
+                sched,
+                caps,
+                arch,
+                audit,
+                irq,
+                irq_controller,
+                ipc,
+            ),
             sched,
             caps,
             arch,
@@ -615,6 +668,7 @@ mod tests {
     use alloc::sync::Arc;
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
+    use rustos_kernel_ipc::Port;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sec::{TaskCapabilities, UserId};
     use rustos_log::{set_max_level, Level};
@@ -654,6 +708,34 @@ mod tests {
         Scheduler::new(cfg, arch).expect("scheduler builds")
     }
 
+    /// Bind an unrestricted port at `endpoint` into `registry`.
+    ///
+    /// The port accepts any sender (empty `required_send_caps`, so no
+    /// `IPC_BIND_PRIVILEGED` is needed) and any receiver, which is all
+    /// the `ipc_send` / `ipc_recv` *endpoint-resolution* path under
+    /// test cares about; the per-send capability check lives on
+    /// `Port::send` and is exercised by `kernel/ipc`'s own tests.
+    fn register_port(registry: &RwLock<PortRegistry>, endpoint: u64, sink: &(dyn Sink + Sync)) {
+        let creator = make_caps_record(0xB1, &[], sink);
+        let port = Port::create(
+            EndpointId(endpoint),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            64,
+            4,
+            sink,
+        )
+        .expect("unrestricted port creation succeeds");
+        // `register`'s error half is `(Box<Port>, Errno)`, which is not
+        // `Debug`, so assert on the `Ok` discriminant rather than
+        // `.expect()`ing the value.
+        assert!(
+            registry.write().register(port, sink).is_ok(),
+            "first registration of a fresh endpoint succeeds"
+        );
+    }
+
     /// `yield_now` against an unknown task surfaces `NotFound`.
     #[test]
     fn yield_now_unknown_task_returns_not_found() {
@@ -662,6 +744,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(0xDEAD, &[], sink);
@@ -670,7 +753,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         assert_eq!(h.yield_now(&ctx), Err(Errno::NotFound));
     }
 
@@ -682,6 +765,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -697,7 +781,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let r = h.exit(&ctx, 0);
         // Scheduler half returns `NoSuchTask` → `NotFound`.
         assert_eq!(r, Err(Errno::NotFound));
@@ -713,6 +797,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(1, &[CapabilityId::FS_MOUNT], sink);
@@ -721,19 +806,23 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         assert_eq!(h.cap_query(&ctx, CapabilityId::FS_MOUNT), Ok(1));
         assert_eq!(h.cap_query(&ctx, CapabilityId::DRV_KERNEL), Ok(0));
     }
 
-    /// `ipc_send` is intentionally inert and announces the deferral.
+    /// `ipc_send` to an endpoint that is not bound in the registry
+    /// fails closed with `NotFound` — a real lookup miss. The deferral
+    /// audit is *not* emitted: the call never reached the copy-in
+    /// branch, so there is no `SyscallFeatureUnavailable` record.
     #[test]
-    fn ipc_send_returns_not_found_and_audits_feature_unavailable() {
+    fn ipc_send_to_unbound_endpoint_is_not_found_without_deferral_audit() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -742,25 +831,54 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotFound));
-        // Exactly one SyscallFeatureUnavailable record.
-        let ids = sink.event_ids();
-        assert_eq!(
-            ids,
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
-        );
+        // The endpoint never resolved, so the handler did not announce
+        // the copy-in deferral.
+        assert!(sink.event_ids().is_empty());
     }
 
-    /// `ipc_recv` mirrors `ipc_send`'s deferral.
+    /// `ipc_send` to a *bound* endpoint resolves the live port and then
+    /// announces the (unlanded) user-memory copy-in path, returning
+    /// `NotImplemented` and exactly one `SyscallFeatureUnavailable`
+    /// record (`AGENTS.md` §15.1 — announce, never stub).
     #[test]
-    fn ipc_recv_returns_not_found_and_audits_feature_unavailable() {
+    fn ipc_send_to_bound_endpoint_defers_copy_in() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
+        sink.clear();
+        assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotImplemented));
+        assert_eq!(
+            sink.event_ids(),
+            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+        );
+    }
+
+    /// `ipc_recv` from an unbound endpoint mirrors `ipc_send`: a real
+    /// lookup miss is `NotFound` with no deferral audit.
+    #[test]
+    fn ipc_recv_from_unbound_endpoint_is_not_found_without_deferral_audit() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(3, &[], sink);
@@ -769,9 +887,34 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotFound));
+        assert!(sink.event_ids().is_empty());
+    }
+
+    /// `ipc_recv` from a *bound* endpoint resolves the port and defers
+    /// the user-memory copy-out exactly like the send side.
+    #[test]
+    fn ipc_recv_from_bound_endpoint_defers_copy_out() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
+        sink.clear();
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotImplemented));
         assert_eq!(
             sink.event_ids(),
             alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
@@ -786,6 +929,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(4, &[CapabilityId::FS_MOUNT], sink);
@@ -794,7 +938,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         assert_eq!(h.cap_delegate(&ctx, 5, 0x3000), Err(Errno::NotImplemented));
         assert_eq!(
@@ -812,6 +956,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -825,7 +970,7 @@ mod tests {
             caps: &caller_caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
 
         // Hit: revoke FS_MOUNT from task 10.
         assert_eq!(h.cap_revoke(&ctx, 10, CapabilityId::FS_MOUNT), Ok(0));
@@ -857,6 +1002,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -865,7 +1011,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         let raw = h.irq_bind(&ctx, 5).expect("bind succeeds");
         assert_ne!(raw, 0, "fresh handle must not be IrqHandle::INVALID");
@@ -897,6 +1043,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -905,7 +1052,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         assert_eq!(h.irq_bind(&ctx, 100), Err(Errno::OutOfRange));
     }
 
@@ -919,6 +1066,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -927,7 +1075,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let _ = h.irq_bind(&ctx, 5).expect("first bind ok");
         assert_eq!(h.irq_bind(&ctx, 5), Err(Errno::OutOfRange));
     }
@@ -942,6 +1090,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
@@ -950,7 +1099,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         assert_eq!(
             h.irq_wait(&ctx, IrqHandle::from_raw(0xDEAD_BEEF), 0),
             Err(Errno::NotFound)
@@ -966,6 +1115,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
@@ -974,7 +1124,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let raw = h.irq_bind(&ctx, 5).expect("bind");
         assert_eq!(
             h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0),
@@ -1005,6 +1155,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController; // syscall handler does not invoke `fire`
         let permissive = PermissiveController;
@@ -1014,7 +1165,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let raw = h.irq_bind(&ctx, 5).expect("bind");
         // Fire externally against the permissive controller (the
         // arch-port's trap path uses the controller borrowed by
@@ -1035,6 +1186,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(9, &[CapabilityId::IRQ_BIND], sink);
@@ -1043,7 +1195,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let _ = h.irq_bind(&ctx, 5).expect("bind 5");
         let _ = h.irq_bind(&ctx, 6).expect("bind 6");
         assert_eq!(irq.len(), 2);
@@ -1064,6 +1216,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
@@ -1072,7 +1225,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let a = h.clock_get(&ctx).expect("first read");
         let b = h.clock_get(&ctx).expect("second read");
         // Full resolution: consecutive single-tick reads are distinct.
@@ -1090,6 +1243,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[], sink);
@@ -1098,7 +1252,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         let g = rustos_abi::COARSE_CLOCK_GRANULARITY_NS;
 
         // Stage a known raw reading; the next `monotonic_ns` returns
@@ -1129,6 +1283,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let hires = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
@@ -1142,7 +1297,7 @@ mod tests {
             caps: &plain,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
 
         arch.set_monotonic_ns(7_000);
         let raw = h.clock_get(&hires_ctx).expect("hires read"); // 7_001
@@ -1162,6 +1317,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(11, &[], sink);
@@ -1170,7 +1326,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         assert_eq!(
             h.random_get(
@@ -1196,6 +1352,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(12, &[], sink);
@@ -1204,7 +1361,7 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc);
         sink.clear();
         assert_eq!(
             h.random_get(&ctx, 0x4000, 32, RandomFlags::NON_BLOCKING),

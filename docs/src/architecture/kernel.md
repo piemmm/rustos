@@ -47,7 +47,7 @@ break the boot-timeline they key off (`AGENTS.md` §5.4, §2.4).
 | 4 | `sched` | `crate::sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))` — the build-time-selected policy (§17.1). |
 | 5 | `irq`   | `arch.irq_routing()` returns the architecture-installed `IrqRouting`; the kernel core builds `rustos_kernel_irq::IrqTable::new(routing.max_line)` and stores `routing.controller` in `KernelState`. Immediately after the leak, `arch.install_irq_dispatch(&state.irq)` publishes the `'static` table reference into the arch port's external-IRQ dispatcher slot (Stage 4.D Item 2-tail.2). |
 | 6 | `syscall` | Production `DispatchHook` published into `boot.dispatcher_callback_slot` (see [Syscall registration phase](#syscall-registration-phase)). |
-| 7 | `ipc`   | No global state at this stage; the phase event still fires for timeline uniformity.   |
+| 7 | `ipc`   | The named-port `PortRegistry` is composed into `KernelState` (`ipc: RwLock<PortRegistry>`) above and borrowed by the dispatch hook; it boots empty and the phase event fires for timeline uniformity. |
 | ∞ | —       | `BootCompleted` event emitted; `arch.halt()` parks the CPU.                           |
 
 Each phase emits exactly:
@@ -74,7 +74,7 @@ callback the arch-port installed before `syscall` was enabled
   sched ready                                       static DISPATCH_SLOT:
    │                                                DispatchCallbackSlot = new();
    ▼                                                   ▲
-  KernelDispatchHook::new(&sched,&caps,arch,audit)     │ (referenced from BootInfo)
+  KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc)  │ (from BootInfo)
   Box::leak(hook)                                       │
   slot.install_dispatcher(hook)  ──publishes──────────┘ ───> production_dispatch (f5)
    │                                                   reads slot.get(),
@@ -85,12 +85,14 @@ callback the arch-port installed before `syscall` was enabled
 The `Phase::Syscall` step:
 
 1. Builds a `KernelDispatchHook<A>` around `KernelState`'s scheduler,
-   capability table, arch port, and audit sink.
+   capability table, arch port, audit sink, IRQ table/controller, and
+   named-port registry (`ipc`).
 2. Lifts both the `KernelState` and the hook to `'static` lifetimes
    via `Box::leak` (one-shot publish; the kernel never returns from
    `kernel_main`'s halt). The leak is immutable after publish — not
    a global mutable static; every interior field carries its own
-   synchronisation primitive (`Scheduler::tasks`, `RwLock<CapTable>`).
+   synchronisation primitive (`Scheduler::tasks`, `RwLock<CapTable>`,
+   `RwLock<PortRegistry>`).
 3. Calls `boot.dispatcher_callback_slot.install_dispatcher(&hook)`.
 4. On `Err(AlreadyInstalledError)` (slot already published; programmer
    error), surfaces `InitError::DispatcherAlreadyInstalled`, which the

@@ -5705,8 +5705,37 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   and `kernel/ipc::registry` rustdoc. No `unsafe`, no
   `unwrap`/`expect`/`panic!` in production paths. **Still open here:** wiring the
   desktop's `MessagePort` to a live `ipc_recv` over a published input-port name,
-  which still awaits composing the registry into `KernelState` and the
-  user-memory copy-in path.
+  which still awaits the user-memory copy-in path (the registry is now composed
+  into `KernelState`, see the next increment).
+- **Named-port registry composed into `KernelState` + live IPC endpoint
+  resolution — DONE (increment).** The `kernel/ipc::PortRegistry` is now part of
+  the running kernel: `kernel/core`'s `KernelState` gains
+  `ipc: RwLock<PortRegistry>` (mirroring `caps: RwLock<CapTable>` — the registry
+  owns no lock, the synchronisation policy lives with `KernelState`, §2.1), and
+  `KernelDispatchHook::new` / `KernelSyscallHandlers::new` take a seventh
+  `&RwLock<PortRegistry>` borrow so the dispatch hook reaches it on every
+  syscall. The `ipc_send` / `ipc_recv` handlers, until now blanket-inert stubs,
+  now **resolve the destination endpoint against the live map** (§5.4): an
+  endpoint that is not currently bound fails closed with `Errno::NotFound` — a
+  real lookup miss the dispatcher's standard pipeline audits, no longer a
+  blanket stub — while a *bound* endpoint resolves and then announces the one
+  remaining deferral, the user-memory copy-in/out path that copies the payload
+  to/from the caller's address space (`Errno::NotImplemented` +
+  `SYSCALL_FEATURE_UNAVAILABLE` `feature = user_memory_copyin`, §15.1 — announce,
+  never stub; the same prerequisite `cap_delegate` waits on). The Ipc init phase
+  comment and the `KernelSyscallHandlers` module-doc deferral table were updated
+  to match; the QEMU syscall-dispatch integration test composes the registry
+  exactly as production does. 4 new `rustos-kernel-core` `syscalls` tests
+  (unbound → `NotFound` with no deferral audit, bound → `NotImplemented` +
+  one `SyscallFeatureUnavailable`, per direction); 112 `rustos-kernel-core`
+  unit tests pass. Docs `docs/src/architecture/syscalls.md` (handler-wiring
+  table + deferral prose), `docs/src/architecture/ipc.md` (registry now composed
+  into `KernelState`), `docs/src/architecture/kernel.md` (Ipc phase + dispatch
+  hook). No `unsafe`, no `unwrap`/`expect`/`panic!` in production paths. **Still
+  open here:** the user-memory copy-in/out path that lets a bound endpoint
+  actually transfer a payload (Stage 5 / Stage 6), and then publishing the
+  desktop's input ports under their names so `IpcInputChannel`'s `MessagePort`
+  resolves to a live `ipc_recv`.
 - **Still to do this stage:** backing the
   desktop shell's `InputSource` (the `DesktopShell` event loop that fans the
   shared `lib/input` stream to the WM `InputRouter` and the taskbar
@@ -5714,10 +5743,12 @@ check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§
   running-task list in step with the window stack through `TaskBridge` now
   exists) with **live** pointer/keyboard device events — the IPC-message
   framing now exists (`IpcInputChannel`) and the kernel named-port registry it
-  needs has now landed (`kernel/ipc::PortRegistry`, see above), so what remains
-  is composing that registry into `KernelState` and wiring the `MessagePort` to
-  the live `ipc_recv` syscall through the user-memory copy-in path — and
-  relaying the
+  needs has now landed (`kernel/ipc::PortRegistry`, see above) and is now
+  composed into `KernelState` with the `ipc_send` / `ipc_recv` handlers
+  resolving an endpoint against it, so what remains is the user-memory copy-in
+  path that lets a bound endpoint transfer a payload and then publishing the
+  input ports under their names so the `MessagePort` resolves to a live
+  `ipc_recv` — and relaying the
   session's theme switch over live IPC, selecting a font face
   from the theme's `FontSpec` roles once installed fonts exist (the SVG-first
   **caching layer** that converts each asset once at the active scale and

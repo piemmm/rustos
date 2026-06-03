@@ -104,6 +104,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_kernel_core::{IrqRouting, KernelSyscallHandlers};
+    use rustos_kernel_ipc::PortRegistry;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
@@ -314,6 +315,11 @@ mod kernel {
         //      the behaviour `kernel/core::init` installs.
         let irq_table = IrqTable::new(0);
         let irq_controller = UnsupportedController;
+        // Named-port registry composed exactly as production
+        // `kernel/core::init` does; this test exercises `cap_query` and
+        // `exit`, neither of which touches IPC, so the registry boots
+        // empty and is never published into.
+        let port_registry = RwLock::new(PortRegistry::new());
 
         let handlers: KernelSyscallHandlers<'_, BinArch> = KernelSyscallHandlers::new(
             &sched,
@@ -322,6 +328,7 @@ mod kernel {
             &INNER_SINK,
             &irq_table,
             &irq_controller,
+            &port_registry,
         );
         let dispatcher = Dispatcher::new(&handlers, &INNER_SINK);
         let caller = CallerContext {

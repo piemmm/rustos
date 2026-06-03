@@ -138,8 +138,8 @@ re-validates arguments — the dispatcher does that first.
 | --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
-| `ipc_send`      | *deferred* — registry landed (`kernel/ipc::PortRegistry`), but not yet composed into `KernelState` and user-memory copy-in is pending | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = ipc_named_ports`) + `NotFound`. |
-| `ipc_recv`      | *deferred* — same as `ipc_send`                                                                               | Same.                                                                     |
+| `ipc_send`      | `PortRegistry::contains(endpoint)` in `KernelState.ipc`; payload copy-in deferred                            | Unbound endpoint → `NotFound` (no extra audit). Bound endpoint → `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
+| `ipc_recv`      | *same as `ipc_send`* — resolve the endpoint, defer the payload copy-out                                       | Same.                                                                     |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
@@ -172,16 +172,29 @@ contract the `irq_wait` timeout loop relies on. Tightening or relaxing
 the granularity changes only that one constant (`AGENTS.md` §5.7 —
 security by default).
 
-The two deferred-feature branches return a stable `Errno` and emit
-exactly one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE`
-(id 4020, see `kernel/core::audit`) — so an external consumer can
-tell apart "handler rejected because the call failed" from "handler
-rejected because the backing subsystem is intentionally inert"
-(`AGENTS.md` §15.1 — announce the deferral, never stub). The
+`ipc_send` / `ipc_recv` now resolve the destination endpoint against
+the live named-port registry composed into `KernelState`
+(`ipc: RwLock<PortRegistry>`, mirroring `caps: RwLock<CapTable>`). An
+endpoint that is not currently bound fails closed with `NotFound` — a
+real lookup miss, not a blanket stub; only the dispatcher's standard
+pipeline audits it. For a *bound* endpoint the message body must still
+be copied to/from the caller's address space, and that user-memory
+copy-in path has not landed, so that one remaining branch returns
+`NotImplemented`.
+
+The deferred-feature branches return a stable `Errno` and emit exactly
+one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
+`kernel/core::audit`) — so an external consumer can tell apart
+"handler rejected because the call failed" from "handler rejected
+because the backing subsystem is intentionally inert" (`AGENTS.md`
+§15.1 — announce the deferral, never stub). That record is emitted by
+`ipc_send` / `ipc_recv` **only** on the bound-endpoint copy-in branch
+(`feature = user_memory_copyin`) and always by `cap_delegate`. The
 dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is *also*
-emitted for syscalls whose `SyscallSpec::audit == true`
-(`ipc_send`, `cap_delegate`); `ipc_recv` is unaudited so only the
-`SYSCALL_FEATURE_UNAVAILABLE` record reaches the sink.
+emitted for syscalls whose `SyscallSpec::audit == true` (`ipc_send`,
+`cap_delegate`); `ipc_recv` is unaudited so on its copy-out deferral
+only the `SYSCALL_FEATURE_UNAVAILABLE` record reaches the sink, and on
+an unbound endpoint it emits nothing of its own.
 
 `exit` additionally calls `IrqTable::release_for(caller.task_id)`
 **before** the capability-record / scheduler eviction so no audited
@@ -192,10 +205,11 @@ a freshly created task that wants the same line must re-issue
 
 The Stage 2.7 follow-up tracker in `PLAN.md` records the remaining
 pieces required to lift these deferrals. The named-port registry that
-`ipc_send` / `ipc_recv` resolve an `EndpointId` through has since landed
-(`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry));
-what remains for IPC is composing it into `KernelState` and the
-user-memory copy-in path (which `cap_delegate` also waits on).
+`ipc_send` / `ipc_recv` resolve an `EndpointId` through
+(`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry))
+is now composed into `KernelState` and borrowed by the handlers, so
+endpoint resolution is live; what remains for IPC is the user-memory
+copy-in path (which `cap_delegate` also waits on).
 
 ## Dispatcher contract
 

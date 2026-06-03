@@ -1333,6 +1333,7 @@ dependencies = [
  "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-core",
+ "rustos-kernel-ipc",
  "rustos-kernel-irq",
  "rustos-kernel-sched-eevdf",
  "rustos-kernel-sec",

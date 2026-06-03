@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use crate::sched::{SchedError, Scheduler};
+use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator};
 use rustos_kernel_sec::{CapTable, IdentityTable};
@@ -376,6 +377,7 @@ fn run_phases<A: KernelArch>(
         identity_table,
         scheduler,
         caps: RwLock::new(CapTable::new()),
+        ipc: RwLock::new(PortRegistry::new()),
         arch,
         audit_sink,
         irq: irq_table,
@@ -404,15 +406,20 @@ fn run_phases<A: KernelArch>(
             audit_sink,
             &state.irq,
             state.irq_controller,
+            &state.ipc,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
         .map_err(InitError::DispatcherAlreadyInstalled)?;
     phase_ready(log_sink, Phase::Syscall);
 
-    // Phase 6 — Ipc. `kernel/ipc` holds no global state at this stage
-    // (Stage 2.5 deliberately keeps ports per-process); the phase
-    // event still fires so the boot timeline is uniform.
+    // Phase 6 — Ipc. The named-port registry is composed into
+    // `KernelState` above (`ipc: RwLock<PortRegistry>`) and borrowed by
+    // the `KernelDispatchHook` so the `ipc_send` / `ipc_recv` handlers
+    // resolve an endpoint against a live, kernel-owned map. It boots
+    // empty — every endpoint is published at runtime by the binder that
+    // holds the bind authority (`AGENTS.md` §5.2); the phase event fires
+    // so the boot timeline is uniform.
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
 
@@ -443,6 +450,16 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// `RwLock` so the syscall hot path takes only a shared lock
     /// (mirrors `Scheduler::tasks`'s composition strategy).
     pub(crate) caps: RwLock<CapTable>,
+    /// Named-port registry. The `KernelDispatchHook` reads this on
+    /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
+    /// in the syscall against the live, kernel-owned [`PortRegistry`];
+    /// the binder that holds the bind authority publishes endpoints
+    /// into it at runtime (`AGENTS.md` §5.2). Wrapped in the same
+    /// reader-preferring `RwLock` as `caps` so the syscall hot path
+    /// takes only a shared lock and the kernel composes both
+    /// registries under one lock-ordering policy (`AGENTS.md` §2.1 —
+    /// the registry itself owns no lock, mirroring `CapTable`).
+    pub(crate) ipc: RwLock<PortRegistry>,
     pub(crate) arch: Arc<A>,
     /// Audit sink the dispatch hook emits security-relevant records
     /// through. Held here so the hook borrows it for the lifetime of

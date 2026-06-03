@@ -81,9 +81,15 @@ capability.
 
 The registry performs no capability check of its own — bind authority
 was proven at `Port::create` time and send authority is re-checked on
-every `Port::send` — so it is a pure ownership map. Wiring it into the
-`ipc_send` / `ipc_recv` syscall handlers awaits the user-memory copy-in
-path (the same prerequisite `cap_delegate` is waiting on).
+every `Port::send` — so it is a pure ownership map. It is now composed
+into `kernel/core`'s `KernelState` as `ipc: RwLock<PortRegistry>`
+(mirroring `caps: RwLock<CapTable>`) and borrowed by the
+`KernelDispatchHook`, so the `ipc_send` / `ipc_recv` handlers resolve
+the syscall's endpoint against the live map: an unbound endpoint fails
+closed with `Errno::NotFound`, while a bound one resolves and then
+defers on the user-memory copy-in/out path (the same prerequisite
+`cap_delegate` is waiting on). See
+[the syscall handler-wiring table](./syscalls.md#handler-wiring-stage-27-follow-up-f3).
 
 ### Well-known names
 
