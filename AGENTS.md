@@ -243,6 +243,12 @@ rustos/
 │   │   └── platform/
 │   └── book.toml
 │
+├── include/             # Generated C development headers for the ABI, so a
+│   └── rustos/          #   non-Rust program (C, …) can call abi-v1. Emitted
+│                        #   from the lib/abi source of truth by
+│                        #   `cargo xtask c-header --write`; verified by
+│                        #   `cargo xtask c-header` in CI. Do not hand-edit.
+│
 ├── tests/               # Cross-crate / integration tests only.
 │                        # Per-crate unit tests live in `src/` next to code
 │                        # (see §7).
@@ -437,12 +443,37 @@ an update to this section.
   - Required capabilities.
   - Target ABI version (`abi-vN`).
   - Linked syscall interface hashes (refuse to load on mismatch).
-- The ABI is versioned. `abi-v1` once shipped is immutable. New behaviour
-  ships as `abi-v2`.
+- The ABI is versioned. `abi-v1` becomes immutable **once shipped**; new
+  behaviour then ships as `abi-v2`. **RustOS has not shipped a release, so
+  `abi-v1` is not frozen yet** — it is still mutable, and changing a `lib/abi`
+  type today is allowed (it merely requires regenerating the generated views
+  below, which the drift guards enforce). The immutability rule binds from the
+  first release onward.
 - Userland-to-kernel transitions use a single, documented syscall table per
   architecture. The table lives in `kernel/syscall/src/table.rs` and is
   generated from `lib/abi/src/syscalls.rs` — do not edit either by hand
   without updating the other; `cargo xtask abi-check` enforces this.
+- The ABI must be callable from programs not written in Rust (C, …), and
+  **all of `lib/abi` is part of that surface**, not just the syscalls. `lib/abi`
+  is the single source of truth for every type a program exchanges with the
+  kernel and with system services, and it is a public developer surface for
+  third-party programs, not only the OS. The C-language view — every public
+  `#[repr(C)]` type, every constant and enum discriminant, the syscall numbers,
+  the error codes, the capability identifiers, and a prototype per syscall
+  entry point — is **generated** from the same `lib/abi` source of truth into
+  `include/` (§3), never hand-maintained as a parallel definition (§2.2).
+  `cargo xtask c-header --write` regenerates it and `cargo xtask c-header` (run
+  by `cargo xtask ci`) fails closed if the committed header has drifted. Each
+  syscall is exported under the stable symbol `rustos_sys_<name>`; the
+  user-space stub runtime pins that symbol with
+  `#[export_name = "rustos_sys_<name>"]` (or `#[unsafe(no_mangle)]`) so the
+  compiler does not mangle it (`extern "C"` alone fixes only the calling
+  convention, not the symbol name). That stub runtime and the matching program
+  startup object (crt0) are an OS-provided shared library (§16.4); they only
+  marshal to the kernel and are **not** a privileged bypass — every capability
+  and input check still happens kernel-side (§5.4), and non-Rust binaries obey
+  the `rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2)
+  identically. The staged build plan for this surface is `plans/CCOMPAT.md`.
 
 ---
 
@@ -719,6 +750,15 @@ The permitted classes are:
   escape-sequence vocabulary it builds on (`lib/termcap`, `lib/vt`).
   It is part of the OS, so apps dynamically link it like any other
   `/System/Libraries/` library (§10 — text-mode infrastructure).
+- System runtime / C ABI: the minimal libc-equivalent that lets a
+  program **not** written in Rust call `abi-v1` (§9) — the
+  `rustos_sys_<name>` syscall stubs and the program startup object
+  (crt0). It is deliberately minimal: it marshals to the kernel and
+  starts/stops the program, nothing more. It is **not** a privileged
+  path — every capability and input check happens kernel-side (§5.4),
+  and third-party native code is treated as potentially hostile (§5,
+  §19). Like every curated library it is dynamically linked, so one
+  security update covers every consumer. Staged in `plans/CCOMPAT.md`.
 
 Adding a new class of OS-provided shared library requires an update to
 this list **and** to `PLAN.md`. "Convenience" libraries are forbidden.

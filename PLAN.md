@@ -26,7 +26,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `.cargo/config.toml` declaring per-target build flags and linker scripts.
 - `rustfmt.toml`, `clippy.toml`, `deny.toml` (license + advisory rules).
 - `tools/xtask/` with subcommands: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `docs-check`, `abi-check`, `c-header`, `deps-check`, `cfg-check`, `coverage`, `ci`,
   `image`.
 - `docs/` mdBook scaffold.
 - CI definition (`.github/workflows/ci.yml` or equivalent) running
@@ -62,11 +62,18 @@ Do **not** begin a stage before all its listed dependencies are complete.
   sources` on the bumped toolchain.
 - `tools/xtask` exposes the closed set of subcommands required by
   `AGENTS.md` §7 / §14 / §17.5: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `docs-check`, `abi-check`, `c-header`, `deps-check`, `cfg-check`, `coverage`, `ci`,
   `image`. `abi-check` deliberately fails loudly if only one half of the
   `lib/abi/src/syscalls.rs` ↔ `kernel/syscall/src/table.rs` pair appears;
-  `deps-check` and `cfg-check` enforce the §17 modularity contracts (see
-  the §17 burn-down section below).
+  `c-header` generates (`--write`) and verifies the C ABI development
+  header(s) under `include/rustos/` from the same `lib/abi` source of truth,
+  so a non-Rust program (C, …) can call `abi-v1` and the committed header can
+  never drift (`AGENTS.md` §9). That surface is the **whole** of `lib/abi`
+  (every `#[repr(C)]` type, constant, and enum discriminant — not just the
+  syscalls) and is staged, together with the `rustos_sys_*` stub runtime and
+  crt0, in `plans/CCOMPAT.md`; `deps-check` and `cfg-check`
+  enforce the §17 modularity contracts (see the §17 burn-down section
+  below).
 - `docs/` ships a mdBook scaffold (`book.toml`, `src/SUMMARY.md`,
   `introduction.md`, `contributing.md`, `architecture/overview.md`) and the
   Stage 1 per-crate `lib/*` pages.
@@ -133,9 +140,14 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - All six `lib/*` crates implemented (`abi`, `caps`, `collections`, `crypto`,
   `log`, `util`), `no_std`, with rustdoc on every public item and unit tests
   alongside the code per §7.
-- `lib/abi` ships frozen `abi-v1` types (`Errno`, `CapabilityId`,
+- `lib/abi` ships the `abi-v1` types (`Errno`, `CapabilityId`,
   `SyscallNumber`, `IpcMessageHeader`, `ManifestHeader`) plus a deterministic
-  100 000-input fuzz harness in `lib/abi/tests/fuzz_decode.rs`.
+  100 000-input fuzz harness in `lib/abi/tests/fuzz_decode.rs`. `abi-v1` is
+  **not frozen yet** — RustOS has not shipped a release, so these types remain
+  mutable; they become immutable at the first release and new behaviour then
+  ships as `abi-v2` (`AGENTS.md` §9). "Frozen" elsewhere in this plan refers to
+  the per-type stability discipline (a shipped wire layout is not widened in
+  place), not to a released `abi-v1`.
 - `lib/caps` enforces the subset-only delegation invariant; an exhaustive
   property test exercises every 2⁸ subset of the well-known capabilities.
 - `lib/crypto` exposes audited SHA-256 and Ed25519 verification only;
@@ -7045,6 +7057,49 @@ surface — only `lib/curses` API and a new `userland/apps/` crate.
 
 C6 (remote terminals — serial / SSH to Linux hosts) is the next stage and has
 not been started.
+
+---
+
+## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
+
+Staged build plan: `plans/CCOMPAT.md` (binding under `AGENTS.md`). It makes the
+**whole** of `lib/abi` — every public `#[repr(C)]` type, constant, and enum
+discriminant, not just the syscalls — callable from programs not written in
+Rust (C first), so `lib/abi` is a public developer surface for third-party
+programs and not only the OS (`AGENTS.md` §9). The C header is a generated
+*view* of `lib/abi` under `include/` (never a hand-maintained parallel
+definition, §2.2), guarded against drift by `cargo xtask c-header` in
+`cargo xtask ci`. Third-party native code is treated as potentially hostile
+and/or poorly written: the stub runtime is not a privileged bypass, every
+capability/input check stays kernel-side (§5.4), and C binaries obey the
+`rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2) identically.
+
+This adds the curated `/System/Libraries/` class **System runtime / C ABI**
+(`AGENTS.md` §16.4): the minimal libc-equivalent (the `rustos_sys_<name>`
+syscall stubs + crt0), dynamically linked like every other curated library.
+
+**Stages** (see `plans/CCOMPAT.md` for deliverables, tests, docs):
+
+- CC1 — Full `lib/abi` C header surface (grow `cargo xtask c-header` from the
+  syscall/errno/capability seed to the whole crate). **Not started.**
+- CC2 — `lib/abi-sys`: the C-callable `rustos_sys_*` stub runtime (per-arch
+  trap stubs). Depends on the per-arch trap layer (Stage 6+). **Not started.**
+- CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
+  invariants. Depends on CC2 + the Stage 6 loader. **Not started.**
+- CC4 — Loader / bundle integration for native `rxe` programs (resolve the
+  runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
+  **Not started.**
+- CC5 — End-to-end C program built+run under QEMU (audited toolchain wrapper,
+  §12) exercising a slice of `abi-v1` including §21 `Time64` edges; fuzz the
+  new decoders. **Not started.**
+
+Native Tier-1 targets only (`x86_64`, `aarch64`, `riscv64`); the syscall-stub
+runtime and crt0 are out of scope for `wasm32` (no trap instruction).
+
+Done seed (current): `cargo xtask c-header` ships the seed surface (ABI
+version, error codes, capability ids, syscall numbers + one prototype per
+syscall) into `include/rustos/rustos_abi.h`, wired into `cargo xtask ci`; the
+docs page is `docs/src/abi/c-abi.md`.
 
 ---
 

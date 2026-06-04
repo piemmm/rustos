@@ -19,6 +19,8 @@
 //! - `docs-check`   — rustdoc (deny warnings) + mdBook build + link check
 //! - `abi-check`    — verifies the generated kernel syscall table matches
 //!   its source of truth in `lib/abi`
+//! - `c-header`     — generates (`--write`) or verifies the C ABI
+//!   development header in `include/` from the `lib/abi` source of truth
 //! - `deps-check`   — enforces the §17.4 modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check`    — rejects target-conditional compilation (§17.2)
@@ -41,7 +43,7 @@
 //!   Actions runner to catch flaky tests, §7; once locally so a pre-push
 //!   `ci` is not punishingly slow), `docs-check`, `cargo deny check`,
 //!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
-//!   `spec-review`, `abi-check`
+//!   `spec-review`, `abi-check`, `c-header`
 //! - `image`        — build platform images via `tools/mkimage`
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
