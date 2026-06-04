@@ -7139,7 +7139,8 @@ syscall stubs + crt0), dynamically linked like every other curated library.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
   trap stubs). The blocker is cleared (the per-arch trap layer exists in
   `kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`). **Runtime +
-  host tests done; per-arch QEMU round-trip pending.** The crate
+  host tests done; x86_64 QEMU round-trip done; aarch64/riscv64 QEMU
+  round-trip pending (needs the EL0/U-mode loader).** The crate
   `rustos-abi-sys` exports the eleven export-name-pinned `ros_sys_<name>`
   functions matching the CC1 header; each marshals into the canonical
   `[u64; SYSCALL_MAX_ARGS]` register layout (syscall numbers read from
@@ -7150,9 +7151,17 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `-> !`. Registered as the curated `/System/Libraries/` *System runtime / C
   ABI* class (§16.4, `experimental` tier). Host tests inject a trap seam and
   assert marshalling + return decoding for every stub, plus a drift test
-  against `rustos_abi::SYSCALLS`. Remaining: the per-native-target QEMU
-  round-trip test (tracked in `.junie/next-ccompat-prompt.md`; not in the
-  host-only `cargo xtask ci` gate).
+  against `rustos_abi::SYSCALLS`. The x86_64 QEMU round-trip
+  (`tests/integration/abi_sys_syscall_qemu`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`) boots the production kernel,
+  overrides the dispatch callback on `BootCompleted`, and issues the `abi-sys`
+  `ros_sys_cap_query` stub so the real `syscall` instruction + the kernel's
+  `IA32_LSTAR` entry stub are exercised together, asserting the kernel-observed
+  `(number, args)` before `qemu_exit`. Remaining: the aarch64/riscv64
+  round-trips, which need an EL0/U-mode user context to raise `svc`/`ecall`
+  from (a kernel-mode `svc`/`ecall` is not the user-syscall path), arriving
+  with the program loader (tracked in `.junie/next-ccompat-prompt.md`; QEMU
+  round-trips are not in the host-only `cargo xtask ci` gate).
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
   invariants. Depends on CC2 + the Stage 6 loader. **Not started.**
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the

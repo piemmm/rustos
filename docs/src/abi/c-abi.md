@@ -118,6 +118,23 @@ on the far side of the trap — the C entry point is not a privileged bypass
 (`AGENTS.md` §5.4 / `plans/CCOMPAT.md` §4), and a C program reaches no syscall
 a Rust program could not.
 
+### Verifying the trap end-to-end
+
+The marshalling each `ros_sys_*` stub performs is host-tested behind an
+injectable trap seam (`lib/abi-sys`), but the trap *instruction* itself is
+exercised under QEMU. The CC2 round-trip test
+(`tests/integration/abi_sys_syscall_qemu`, enrolled as
+`rustos-test-abi-sys-syscall-qemu` in `cargo xtask test --qemu`) boots the
+production kernel pipeline on `x86_64-unknown-none`, overrides the syscall
+dispatch callback once boot completes, and then calls `ros_sys_cap_query`. The
+CPU's `syscall` enters the kernel's `IA32_LSTAR` entry stub, which rebuilds the
+canonical argument array and calls the installed callback; the callback asserts
+the kernel-observed `(number, arguments)` are exactly what the stub should have
+placed in the registers before exiting QEMU. This proves `lib/abi-sys` and the
+kernel agree on the syscall register layout. The aarch64/riscv64 round-trips
+(which require an `EL0`/`U-mode` user context to raise `svc`/`ecall` from) land
+with the program loader; see `plans/CCOMPAT.md` (CC2/CC3).
+
 ## Stability
 
 `abi-v1` is not frozen yet. Once it is released, the numbers, error codes,

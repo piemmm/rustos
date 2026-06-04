@@ -244,7 +244,8 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 
 ### Stage CC2 — `lib/abi-sys`: the C-callable syscall stub runtime
 
-**Status: runtime + host tests done; per-arch QEMU round-trip pending.**
+**Status: runtime + host tests done; x86_64 QEMU round-trip done;
+aarch64/riscv64 QEMU round-trip pending (needs the EL0/U-mode loader).**
 The blocker is cleared — the per-architecture trap layer exists on all three
 native targets (`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
 The crate `lib/abi-sys` (`rustos-abi-sys`) has landed: it exports the eleven
@@ -278,13 +279,32 @@ discipline of CC1's completeness test. Verified: clippy `-D warnings` clean,
 the three native targets build, and `nm`/`llvm-objdump` confirm the eleven
 unmangled `ros_sys_*` symbols and the emitted `syscall`/`svc`/`ecall`.
 
-**Remaining for CC2:** the QEMU integration test per native target that traps
-the stub into a (stub) kernel and checks register marshalling end-to-end.
-This needs the per-arch boot harness to install a syscall dispatch callback
-and then execute the `abi-sys` stub (the existing `syscall_dispatch_qemu`
-test drives `Dispatcher::dispatch` directly and does not exercise the trap
-instruction). It is **not** part of the `cargo xtask ci` gate (which is
-host-only) and is tracked in `.junie/next-ccompat-prompt.md`.
+**x86_64 QEMU round-trip — done.** The integration bin
+`tests/integration/abi_sys_syscall_qemu` (`rustos-test-abi-sys-syscall-qemu`,
+enrolled in `tools/xtask/src/commands/qemu_tests.rs`) boots the production
+kernel, and on `AuditEvent::BootCompleted` overrides the syscall dispatch
+callback and calls the `abi-sys` stub `ros_sys_cap_query`. Issuing `syscall`
+from ring 0 enters the kernel's `IA32_LSTAR` entry stub exactly as a ring-3
+call does (`swapgs`, switch to the per-CPU kernel stack, rebuild the canonical
+`[u64; SYSCALL_MAX_ARGS]` array), so the installed callback observes the
+register marshalling end-to-end and asserts the dispatched `(number, args)`
+match what `ros_sys_cap_query` should have placed in the registers before
+flipping `qemu_exit::exit_success` (any mismatch — or the `syscall` returning to
+its caller — flips `exit_failure`; verified PASS, and a deliberately-wrong
+expectation verified FAIL). This exercises the real `syscall` instruction
+(`lib/abi-sys/src/trap.rs`) — the existing `syscall_dispatch_qemu` test drives
+`Dispatcher::dispatch` directly and does not. It is **not** part of the
+`cargo xtask ci` gate (which is host-only); it runs under
+`cargo xtask test --qemu`.
+
+**Remaining for CC2:** the aarch64/riscv64 QEMU round-trips. Unlike x86_64's
+`syscall` (which traps identically from ring 0), an `svc` from EL1 / `ecall`
+from S-mode is **not** the user-syscall path — the kernel routes only
+`svc`-from-EL0 / `ecall`-from-U-mode to the dispatch callback. So the
+aarch64/riscv64 round-trips need an `EL0`/`U-mode` user context to raise the
+trap from, which arrives with the program loader (`PLAN.md` Stage 6 / CC3). The
+`abi-sys` register marshalling is host-tested on all three targets in the
+meantime. Tracked in `.junie/next-ccompat-prompt.md`.
 
 **Deliverables**
 - A new crate (`lib/abi-sys`, `rustos-abi-sys`) providing one `extern "C"`,

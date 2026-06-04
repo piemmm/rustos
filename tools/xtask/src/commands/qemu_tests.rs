@@ -161,6 +161,33 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
+    // target QEMU round-trip for the C-callable syscall stub runtime
+    // (`lib/abi-sys`). Unlike `rustos-test-syscall-dispatch-qemu` (which
+    // drives `Dispatcher::dispatch` directly and never executes a trap),
+    // this test boots the production kernel pipeline and, on
+    // `AuditEvent::BootCompleted`, overrides the syscall dispatch callback
+    // and then *issues* the `abi-sys` `ros_sys_cap_query` stub — exercising
+    // the real x86_64 `syscall` instruction (`lib/abi-sys/src/trap.rs`) and
+    // the kernel's `IA32_LSTAR` entry stub
+    // (`kernel/arch/x86_64/src/syscall_entry.rs`) together. The installed
+    // callback asserts the kernel-observed `(number, args)` are exactly
+    // what `ros_sys_cap_query` should have marshalled into the syscall
+    // registers and flips `qemu_exit::exit_success`; any mismatch (or the
+    // `syscall` returning to its caller at all) flips
+    // `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
+    // budget matches the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu",
+        binary: "rustos-test-abi-sys-syscall-qemu",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →
