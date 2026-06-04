@@ -276,6 +276,36 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // crt0-linked-program spawn round-trip. The build script compiles the
+    // separate fixture program (`tests/integration/cc3_program`, crt0 +
+    // abi-sys) position-independent and converts it to an `rxe` blob
+    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // On boot the test stands up an Sv39 address space (identity-mapping the
+    // kernel + MMIO), activates it, installs the trap vector and a dispatch
+    // callback, then calls the production capability-checked, audited spawn
+    // caller (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`)
+    // to build the program's U-mode image — segments mapped + filled, user
+    // stack, startup-vector block — and `sret`s into it through the Arch HAL
+    // `EnterUser` primitive. The program (built via `build_process_image` at a
+    // high `USER_BIAS`) parses `argv[1]`, returns it, and crt0 routes the
+    // return through the `exit` syscall, whose `ecall` traps back through the
+    // kernel S-mode vector to the dispatch callback, which asserts the code
+    // equals the spawned decimal argument before the `SiFive` Test PASS
+    // finisher; any mismatch (or a returning spawn) writes a distinct failure
+    // finisher. Single CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-riscv64",
+        binary: "rustos-test-spawn-program-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

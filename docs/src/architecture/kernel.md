@@ -184,6 +184,9 @@ record under the `log` phase and halts.
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
 | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
 | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  |
+| 4030 | Info  | `PROCESS_SPAWNED`            | audit  |
+| 4031 | Error | `PROCESS_SPAWN_DENIED`       | audit  |
+| 4032 | Error | `PROCESS_SPAWN_FAILED`       | audit  |
 
 The **Sink** column names the `BootInfo`-supplied channel each record
 is emitted on. Audit-class boot lifecycle events

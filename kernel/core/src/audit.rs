@@ -25,6 +25,9 @@
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU (`AGENTS.md` §5.4.5). |
+//! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
+//! | 4031 | Error | `PROCESS_SPAWN_DENIED`        | audit  | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (`AGENTS.md` §5.4 — fail closed). |
+//! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -82,6 +85,31 @@ pub enum AuditEvent {
     /// callback halts the CPU exactly as the pre-(f5)
     /// `fail_closed_dispatch` did.
     SyscallNoCallerContext,
+    /// A process was spawned: its image was built and the calling CPU is
+    /// about to enter it in user mode.
+    ///
+    /// Emitted by the capability-checked spawn caller
+    /// ([`crate::spawn::spawn_and_enter`]) after the user address space
+    /// has been materialised and immediately before the Arch HAL
+    /// `enter_user` transition (which never returns). The record carries
+    /// the relocated entry-point virtual address (`AGENTS.md` §5.4.4 —
+    /// security-relevant decisions are audited).
+    ProcessSpawned,
+    /// A spawn was refused because the caller lacks `CAP_PROC_SPAWN`.
+    ///
+    /// Emitted by [`crate::spawn::spawn_and_enter`] before any state is
+    /// touched: the capability check fails closed and no address space is
+    /// built (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// checks before state touches).
+    ProcessSpawnDenied,
+    /// A spawn was authorised but building the process image failed.
+    ///
+    /// Emitted by [`crate::spawn::spawn_and_enter`] when
+    /// [`rustos_kernel_mem::build_process_image`] returns an error (a
+    /// malformed image, an out-of-range segment, or frame exhaustion).
+    /// The partially built address space is discarded by the caller
+    /// (`AGENTS.md` §2.9 — fail closed).
+    ProcessSpawnFailed,
 }
 
 impl AuditEvent {
@@ -97,6 +125,9 @@ impl AuditEvent {
             Self::Panic => 4010,
             Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
+            Self::ProcessSpawned => 4030,
+            Self::ProcessSpawnDenied => 4031,
+            Self::ProcessSpawnFailed => 4032,
         })
     }
 
@@ -114,6 +145,9 @@ impl AuditEvent {
             Self::Panic => "kernel panic",
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
+            Self::ProcessSpawned => "process spawned",
+            Self::ProcessSpawnDenied => "process spawn denied",
+            Self::ProcessSpawnFailed => "process spawn failed",
         }
     }
 }
@@ -133,6 +167,9 @@ mod tests {
             AuditEvent::Panic,
             AuditEvent::SyscallFeatureUnavailable,
             AuditEvent::SyscallNoCallerContext,
+            AuditEvent::ProcessSpawned,
+            AuditEvent::ProcessSpawnDenied,
+            AuditEvent::ProcessSpawnFailed,
         ] {
             let id = ev.id().0;
             assert!(
@@ -153,6 +190,9 @@ mod tests {
             AuditEvent::Panic.id().0,
             AuditEvent::SyscallFeatureUnavailable.id().0,
             AuditEvent::SyscallNoCallerContext.id().0,
+            AuditEvent::ProcessSpawned.id().0,
+            AuditEvent::ProcessSpawnDenied.id().0,
+            AuditEvent::ProcessSpawnFailed.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

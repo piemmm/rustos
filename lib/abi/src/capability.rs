@@ -120,6 +120,19 @@ impl CapabilityId {
     /// so the precise timer is available only to principals explicitly
     /// trusted with it (`AGENTS.md` §5.7 — security by default).
     pub const TIME_HIRES: Self = Self(16);
+    /// Spawn a new process: build a fresh user address space from a
+    /// validated `rxe` image and drop into it in user mode.
+    ///
+    /// Spawning a program is a privileged operation — it materialises a
+    /// new principal's address space and hands it the CPU — so it is
+    /// gated rather than ambient (`AGENTS.md` §4 — no ambient authority;
+    /// §5.4 — capability checks before state touches). The kernel-side
+    /// spawn caller (`kernel/core`) verifies this capability and audits
+    /// the decision before building the image; the memory mechanism in
+    /// `kernel/mem` stays capability-agnostic (§17.4). The hosted
+    /// program still receives only the intersection of its own signed
+    /// manifest request and its user's grants (§16.5).
+    pub const PROC_SPAWN: Self = Self(17);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -148,6 +161,7 @@ impl CapabilityId {
         (Self::SYSINFO_KERNEL, "CAP_SYSINFO_KERNEL"),
         (Self::SYSINFO_HW, "CAP_SYSINFO_HW"),
         (Self::TIME_HIRES, "CAP_TIME_HIRES"),
+        (Self::PROC_SPAWN, "CAP_PROC_SPAWN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -259,6 +273,7 @@ mod tests {
         assert_eq!(CapabilityId::SYSINFO_KERNEL.as_u16(), 14);
         assert_eq!(CapabilityId::SYSINFO_HW.as_u16(), 15);
         assert_eq!(CapabilityId::TIME_HIRES.as_u16(), 16);
+        assert_eq!(CapabilityId::PROC_SPAWN.as_u16(), 17);
     }
 
     #[test]
@@ -269,6 +284,7 @@ mod tests {
         assert_eq!(CapabilityId::AUDIT_READ.name(), Some("CAP_AUDIT_READ"));
         assert_eq!(CapabilityId::SYSINFO_HW.name(), Some("CAP_SYSINFO_HW"));
         assert_eq!(CapabilityId::TIME_HIRES.name(), Some("CAP_TIME_HIRES"));
+        assert_eq!(CapabilityId::PROC_SPAWN.name(), Some("CAP_PROC_SPAWN"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -279,9 +295,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=16 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=17 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=16 {
+        for raw in 1..=17 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

@@ -19,13 +19,19 @@
 //!   rejected — the fixture links with none, and accepting them would mean
 //!   running a userland dynamic linker the kernel spawn path does not have.
 //!
-//! Relocations are applied for a **zero load bias**: the fixture is mapped at
-//! its link addresses (see `program.ld`), so each `R_*_RELATIVE` target is
-//! patched to its addend. The emitted image still declares
-//! [`rustos_abi::rxe::LOAD_FLAG_PIE`]; baking the relocations in for zero bias
-//! is what lets the kernel map the validated image directly without a runtime
-//! relocator, while the load-time policy in [`rustos_abi::rxe::LoadImage`]
-//! still enforces every invariant.
+//! Relocations are applied for a caller-chosen **load bias**: each
+//! `R_*_RELATIVE` target is patched to `addend + load_bias`, and the emitted
+//! segment virtual addresses are left at the ELF link addresses. The kernel
+//! spawn path (`rustos_kernel_mem::build_process_image`) maps each segment
+//! at `vaddr + bias` and relocates the entry point the same way, so passing
+//! the *same* bias to both keeps the in-memory pointers consistent with where
+//! the image is mapped. A zero bias maps the image at its link addresses (the
+//! simplest case); a non-zero bias places it at a high virtual base that does
+//! not collide with the kernel's identity map. The emitted image still
+//! declares [`rustos_abi::rxe::LOAD_FLAG_PIE`]; baking the relocations in for a
+//! fixed bias is what lets the kernel map the validated image directly without
+//! a runtime relocator, while the load-time policy in
+//! [`rustos_abi::rxe::LoadImage`] still enforces every invariant.
 //!
 //! The `rxe` wire format itself is never re-encoded here: the header and
 //! segment records come from [`rustos_abi::rxe`]'s own encoders (§2.2).
@@ -154,8 +160,11 @@ struct LoadSeg {
 ///
 /// `cfi_tag` is the syscall-interface hash the emitted image declares; it must
 /// match the kernel's compiled-in hash, or [`rustos_abi::rxe::LoadImage::parse`]
-/// will reject the image (§9 / §19.2). Relocations are baked in for a zero load
-/// bias (the image is mapped at its link addresses).
+/// will reject the image (§9 / §19.2). `load_bias` is the virtual base the
+/// image will be mapped at: every `R_*_RELATIVE` target is patched to
+/// `addend + load_bias`, so the caller must map each segment at `vaddr +
+/// load_bias` (the kernel spawn path does exactly that). Pass `0` to map at the
+/// link addresses.
 ///
 /// # Errors
 ///
@@ -164,6 +173,7 @@ struct LoadSeg {
 pub fn elf_to_rxe(
     elf: &[u8],
     cfi_tag: &[u8; SYSCALL_TABLE_HASH_LEN],
+    load_bias: u64,
 ) -> Result<Vec<u8>, Elf2RxeError> {
     let machine = parse_identification(elf)?;
     let entry = read_u64(elf, 24)?;
@@ -204,7 +214,7 @@ pub fn elf_to_rxe(
     loads.sort_by_key(|s| s.vaddr);
 
     if let Some((dyn_vaddr, dyn_filesz)) = dynamic {
-        apply_relocations(elf, machine, dyn_vaddr, dyn_filesz, &mut loads)?;
+        apply_relocations(elf, machine, dyn_vaddr, dyn_filesz, load_bias, &mut loads)?;
     }
 
     encode_rxe(entry, cfi_tag, &loads)
@@ -282,12 +292,13 @@ fn decode_load(elf: &[u8], phdr: &[u8]) -> Result<LoadSeg, Elf2RxeError> {
 }
 
 /// Walk the dynamic section, reject every unsupported relocation form, and
-/// patch each `R_*_RELATIVE` target with its addend (zero load bias).
+/// patch each `R_*_RELATIVE` target with `addend + load_bias`.
 fn apply_relocations(
     elf: &[u8],
     machine: u16,
     dyn_vaddr: u64,
     dyn_filesz: u64,
+    load_bias: u64,
     loads: &mut [LoadSeg],
 ) -> Result<(), Elf2RxeError> {
     let dyn_off = vaddr_to_elf_offset(loads, dyn_vaddr, dyn_filesz)?;
@@ -340,7 +351,7 @@ fn apply_relocations(
     }
 
     for (r_offset, r_addend) in patched {
-        patch_relative(loads, r_offset, r_addend)?;
+        patch_relative(loads, r_offset, r_addend.wrapping_add(load_bias))?;
     }
     Ok(())
 }
@@ -624,7 +635,7 @@ mod tests {
 
     #[test]
     fn converts_a_valid_pie_and_round_trips_through_loadimage() {
-        let rxe = elf_to_rxe(&sample_elf(), &TAG).expect("conversion");
+        let rxe = elf_to_rxe(&sample_elf(), &TAG, 0).expect("conversion");
         let image = LoadImage::parse(&rxe, &TAG).expect("valid rxe");
         assert_eq!(image.entry(), CODE_VADDR);
 
@@ -638,7 +649,7 @@ mod tests {
 
     #[test]
     fn relative_relocation_is_applied_at_zero_bias() {
-        let rxe = elf_to_rxe(&sample_elf(), &TAG).expect("conversion");
+        let rxe = elf_to_rxe(&sample_elf(), &TAG, 0).expect("conversion");
         let image = LoadImage::parse(&rxe, &TAG).expect("valid rxe");
         let data = segment_bytes(&rxe, &image, DATA_VADDR);
         let patched = u64::from_le_bytes(data[0..8].try_into().unwrap());
@@ -646,17 +657,30 @@ mod tests {
     }
 
     #[test]
+    fn relative_relocation_is_offset_by_a_non_zero_load_bias() {
+        const BIAS: u64 = 0x10_0000_0000;
+        let rxe = elf_to_rxe(&sample_elf(), &TAG, BIAS).expect("conversion");
+        let image = LoadImage::parse(&rxe, &TAG).expect("valid rxe");
+        // Segment vaddrs stay at the link addresses; only the relocated
+        // value carries the bias, so the kernel maps at `vaddr + bias`.
+        assert_eq!(image.entry(), CODE_VADDR);
+        let data = segment_bytes(&rxe, &image, DATA_VADDR);
+        let patched = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        assert_eq!(patched, RELOC_VALUE + BIAS);
+    }
+
+    #[test]
     fn rejects_non_elf() {
         let mut elf = sample_elf();
         elf[1] ^= 0xFF;
-        assert_eq!(elf_to_rxe(&elf, &TAG), Err(Elf2RxeError::NotElf));
+        assert_eq!(elf_to_rxe(&elf, &TAG, 0), Err(Elf2RxeError::NotElf));
     }
 
     #[test]
     fn rejects_non_elf64_le() {
         let mut elf = sample_elf();
         elf[4] = 1; // ELFCLASS32
-        assert_eq!(elf_to_rxe(&elf, &TAG), Err(Elf2RxeError::NotElf64Le));
+        assert_eq!(elf_to_rxe(&elf, &TAG, 0), Err(Elf2RxeError::NotElf64Le));
     }
 
     #[test]
@@ -664,7 +688,7 @@ mod tests {
         let mut elf = sample_elf();
         w16(&mut elf, 16, 2); // ET_EXEC
         assert_eq!(
-            elf_to_rxe(&elf, &TAG),
+            elf_to_rxe(&elf, &TAG, 0),
             Err(Elf2RxeError::NotPositionIndependent)
         );
     }
@@ -674,7 +698,7 @@ mod tests {
         let mut elf = sample_elf();
         w16(&mut elf, 18, 0);
         assert_eq!(
-            elf_to_rxe(&elf, &TAG),
+            elf_to_rxe(&elf, &TAG, 0),
             Err(Elf2RxeError::UnsupportedMachine)
         );
     }
@@ -684,14 +708,20 @@ mod tests {
         let mut elf = sample_elf();
         // phdr0 flags -> R|W|X.
         w32(&mut elf, PHOFF + 4, PF_R | PF_W | PF_X);
-        assert_eq!(elf_to_rxe(&elf, &TAG), Err(Elf2RxeError::WriteExecSegment));
+        assert_eq!(
+            elf_to_rxe(&elf, &TAG, 0),
+            Err(Elf2RxeError::WriteExecSegment)
+        );
     }
 
     #[test]
     fn rejects_misaligned_segment_vaddr() {
         let mut elf = sample_elf();
         w64(&mut elf, PHOFF + 16, CODE_VADDR + 1);
-        assert_eq!(elf_to_rxe(&elf, &TAG), Err(Elf2RxeError::BadProgramHeader));
+        assert_eq!(
+            elf_to_rxe(&elf, &TAG, 0),
+            Err(Elf2RxeError::BadProgramHeader)
+        );
     }
 
     #[test]
@@ -701,7 +731,7 @@ mod tests {
         let rela_off = DATA_OFF + RELA_AT;
         w64(&mut elf, rela_off + 8, 1); // R_RISCV_32, an absolute reloc
         assert_eq!(
-            elf_to_rxe(&elf, &TAG),
+            elf_to_rxe(&elf, &TAG, 0),
             Err(Elf2RxeError::UnsupportedRelocation)
         );
     }
@@ -717,7 +747,7 @@ mod tests {
             (1u64 << 32) | u64::from(R_RISCV_RELATIVE),
         );
         assert_eq!(
-            elf_to_rxe(&elf, &TAG),
+            elf_to_rxe(&elf, &TAG, 0),
             Err(Elf2RxeError::UnsupportedRelocation)
         );
     }
@@ -725,7 +755,10 @@ mod tests {
     #[test]
     fn rejects_truncated_image() {
         let elf = sample_elf();
-        assert_eq!(elf_to_rxe(&elf[..32], &TAG), Err(Elf2RxeError::Truncated));
+        assert_eq!(
+            elf_to_rxe(&elf[..32], &TAG, 0),
+            Err(Elf2RxeError::Truncated)
+        );
     }
 
     #[test]
@@ -735,14 +768,14 @@ mod tests {
         // Point the relocation at an address no PT_LOAD covers.
         w64(&mut elf, rela_off, 0x9000_0000);
         assert_eq!(
-            elf_to_rxe(&elf, &TAG),
+            elf_to_rxe(&elf, &TAG, 0),
             Err(Elf2RxeError::RelocationOutOfRange)
         );
     }
 
     #[test]
     fn cfi_tag_mismatch_is_caught_by_loadimage() {
-        let rxe = elf_to_rxe(&sample_elf(), &TAG).expect("conversion");
+        let rxe = elf_to_rxe(&sample_elf(), &TAG, 0).expect("conversion");
         let mut wrong = TAG;
         wrong[0] ^= 0xFF;
         assert!(LoadImage::parse(&rxe, &wrong).is_err());

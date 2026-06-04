@@ -6640,19 +6640,23 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    `paging::map_4k_user`, which shares one walk with `map_4k`, §2.2), `iretq`s
    to ring 3, and asserts the stub's real `syscall` traps back with the
    expected `(number, args)` (PASS; deliberately-wrong expectation FAILs).
-   The CC3 program-packaging infrastructure has now landed too (chunk 1 of
-   the round-trip): the separate PIE fixture program
+   The first CC3 **spawn round-trip** has now landed on riscv64
+   (`tests/integration/spawn_program_qemu_riscv64`, QEMU-proven PASS + a
+   deliberately-wrong-expectation FAIL): the separate PIE fixture program
    `tests/integration/cc3_program` (links only `rustos-crt0` +
-   `rustos-abi-sys`, so no `_start` collision) and the host-tested ELF→rxe
-   converter `rustos_itest_harness::elf2rxe::elf_to_rxe` (LE ELF64 `ET_DYN` →
-   W^X `rxe` segments, applying only `R_*_RELATIVE` at zero bias and failing
-   closed on every other relocation, re-encoding via the `rustos_abi::rxe`
-   encoders, §2.2; 13 unit tests). Remaining: the CC3 "separate crt0-linked
-   program starts / reads args / exits" round-trips per native target — an
-   arch `PageTableOps` adapter so `build_process_image` runs on real arch
-   paging, the capability-checked / audited spawn caller, and the per-native
-   QEMU test — plus stack-canary / shadow-stack selection (real arch page
-   tables).
+   `rustos-abi-sys`, so no `_start` collision) is converted to an `rxe` blob
+   by `rustos_itest_harness::elf2rxe::elf_to_rxe` (now taking a `load_bias` so
+   the image maps at a high `USER_BIAS` clear of the kernel identity map),
+   built into a real U-mode address space by the production capability-checked,
+   audited spawn caller `rustos_kernel_core::spawn_and_enter` (gated on the new
+   `CapabilityId::PROC_SPAWN`; audited via the `ProcessSpawned` /
+   `ProcessSpawnDenied` / `ProcessSpawnFailed` events; the cap gate + audit
+   live in the caller, **not** `kernel/mem`, §17.4), and `sret`-entered through
+   the Arch HAL `EnterUser`; the program parses `argv[1]` and exits with it.
+   The bare-metal `PageTableOps` adapter is test-local (an arch-crate impl
+   would invert §17.4 layering). Remaining: the **aarch64 (EL0)** and **x86_64
+   (ring 3)** spawn round-trips (same caller + converter), plus stack-canary /
+   shadow-stack selection (real arch page tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
    surface: `SideChannelMitigation` (syscall entry/exit speculation
@@ -7248,12 +7252,21 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `rustos_itest_harness::elf2rxe::elf_to_rxe` (LE ELF64 `ET_DYN` → W^X `rxe`
   segments, applying only `R_*_RELATIVE` at zero bias and failing closed on any
   symbolic/GOT/PLT/`REL` relocation, re-encoding via the `rustos_abi::rxe`
-  encoders, §2.2; 13 host unit tests). Remaining for CC3: an arch
-  `PageTableOps` adapter so `build_process_image` runs on real arch paging, the
-  capability-checked / `lib/log`-audited spawn caller (§4/§5.4/§17.4, in the
-  caller not `kernel/mem`), and the per-native QEMU round-trip that builds the
-  `cc3_program` blob via `elf2rxe`, spawns it, and asserts `exit` carries the
-  argument. See `.junie/next-ccompat-prompt.md`.
+  encoders, §2.2; 13 host unit tests). **The first spawn round-trip has now
+  landed on riscv64** (`tests/integration/spawn_program_qemu_riscv64`,
+  QEMU-proven PASS + a deliberately-wrong-expectation FAIL): a test-local
+  riscv64 `PageTableOps` adapter over the bare-metal Sv39 `paging::AddressSpace`
+  (test-local because §17.4 forbids an arch crate depending on `kernel/mem`),
+  the capability-checked / `lib/log`-audited spawn caller
+  `rustos_kernel_core::spawn_and_enter` (gated on the new
+  `CapabilityId::PROC_SPAWN`; audited via `ProcessSpawned` /
+  `ProcessSpawnDenied` / `ProcessSpawnFailed`; in the caller not `kernel/mem`,
+  §4/§5.4/§17.4; host-tested deny + build-failure paths), and the QEMU test
+  whose `build.rs` builds the `cc3_program` blob via `elf_to_rxe` (now taking a
+  `load_bias` so the image maps clear of the kernel identity map), spawns it,
+  and asserts `exit` carries the argument. Remaining for CC3: the **aarch64
+  (EL0)** and **x86_64 (ring 3)** spawn round-trips (same caller + converter).
+  See `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

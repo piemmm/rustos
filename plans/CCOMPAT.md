@@ -353,25 +353,32 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: SHELVED — the startup-vector `abi-v1` type *and* the crt0 object
-have landed and are green; the per-target QEMU round-trip is the only
-remaining piece and it is blocked on userland (see below). CC3 is parked here
-deliberately until the U-mode/EL0 process-spawn path exists.** **Depends on**
-CC2 and the loader (`PLAN.md` Stage 6 bundle loader / dynamic-loader policy).
+**Status: IN PROGRESS — un-shelved. The first end-to-end spawn round-trip has
+landed: on riscv64 a separately-linked crt0+abi-sys program is built into a
+U-mode address space by the production capability-checked, audited spawn caller
+(`rustos_kernel_core::spawn_and_enter`) and `sret`-entered, and its `exit`
+syscall is observed to carry the spawned decimal argument
+(`tests/integration/spawn_program_qemu_riscv64`, QEMU-proven PASS + a
+deliberately-wrong-expectation FAIL).** The crt0 object, the startup-vector
+`abi-v1` type, `build_process_image`, and the Arch HAL `EnterUser` primitive
+were already green; this chunk added the spawn caller, the `CAP_PROC_SPAWN`
+capability, a test-local riscv64 `PageTableOps` adapter, and an `elf_to_rxe`
+`load_bias` so the image maps clear of the kernel identity map. **Remaining:
+the aarch64 (EL0) and x86_64 (ring 3) spawn round-trips**, each its own
+increment reusing the same spawn caller + converter (a per-arch `PageTableOps`
+adapter as needed). **Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle
+loader / dynamic-loader policy).
 
-**Why shelved (blocker).** The only remaining CC3 deliverable — a QEMU
-"crt0-linked program starts, reads its args, exits" round-trip — cannot be
-stood up cleanly the way the CC2 syscall round-trips were. crt0 is not a
-self-contained leaf: its `_start` calls `build_c_runtime`, `ProcessStart::parse`,
-the test `main`, and `ros_sys_exit`, so the CC2 single-page-alias trick is
-insufficient, and linking the test program against `rustos-arch-riscv64` (for
-the QEMU finisher) collides `_start` (the kernel boot vector) with crt0's
-`_start`. A faithful test needs an actual U-mode/EL0 drop into a freshly loaded
-program with an argument vector — i.e. **getting userland up**. That is the
-Stage 6 loader / process-spawn work, which CC4 and CC5 also depend on, so it is
-the correct next thing to build before resuming CC3. The crt0 object itself is
-complete, tested, and documented; only its end-to-end QEMU proof waits on the
-loader.
+**How the round-trip blocker was resolved.** The earlier blocker — crt0's
+`_start` is not a self-contained leaf, and linking the program against an
+architecture crate collided `_start` — was solved by building the program as a
+**separate** crate (`tests/integration/cc3_program`, crt0 + abi-sys only, its
+own `program.ld` rooting `_start`), converting it to an `rxe` blob at build
+time (`elf_to_rxe`), and having the kernel-side test build a real U-mode address
+space with `build_process_image` and `sret` into it through `EnterUser` — i.e.
+a genuine process spawn rather than a single-page alias. The riscv64 vertical
+(`tests/integration/spawn_program_qemu_riscv64`) is QEMU-proven; aarch64 and
+x86_64 follow as later chunks.
 
 The crt0 object has now landed: the new `lib/crt0` crate (`rustos-crt0`)
 provides the per-native-target `_start` trampoline — the §1 assembly carve-out
@@ -511,19 +518,29 @@ image `build_process_image` consumes — now exist and are host-green:
   misalignment / non-relative / symbolic / truncated / out-of-range). Full
   `cargo xtask ci` + `fuzz --secs 5` + soak green on this host.
 
-**Still to do:** the full CC3 deliverable — the QEMU "crt0-linked program starts,
-reads its args, exits" round-trip per native target (plus the `RWX`/non-PIE
-load-refusal assertion). The remaining pieces are: (1) an arch `PageTableOps`
-adapter so `build_process_image` runs against the bare-metal arch paging
-(`kernel/arch/<target>` exposes its own `paging::AddressSpace`/`map_4k`, not the
-host `HostPageTable`); (2) the capability-checked, `lib/log`-audited spawn
-caller wrapping `build_process_image` + `EnterUser::enter_user`
-(§4/§5.4/§17.4, in the caller, **not** `kernel/mem`); and (3) the per-native
-QEMU test that builds the `cc3_program` blob via `elf2rxe`, spawns it, and
-asserts the `exit` code equals the argument. Start with **riscv64** (template:
-`tests/integration/abi_sys_syscall_qemu_riscv64`, which already drives the HAL
-primitive); then aarch64 and x86_64; enroll each in
-`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
+**riscv64 round-trip landed (this chunk).** The full CC3 deliverable now exists
+on riscv64: `tests/integration/spawn_program_qemu_riscv64`. The three pieces
+that were outstanding are done: (1) a **test-local** riscv64 `PageTableOps`
+adapter (`RiscvUserPageTable`) over the bare-metal Sv39 `paging::AddressSpace`
+— test-local rather than in `kernel/arch/riscv64` because §17.4 forbids an arch
+crate depending on `kernel/mem` where the trait lives; (2) the
+capability-checked, `lib/log`-audited spawn caller
+`rustos_kernel_core::spawn_and_enter` (gated on the new `CAP_PROC_SPAWN`,
+audited via `ProcessSpawned`/`ProcessSpawnDenied`/`ProcessSpawnFailed`,
+fail-closed, in the caller **not** `kernel/mem`, §4/§5.4/§17.4), with host
+tests for the deny and build-failure paths; and (3) the QEMU test whose
+`build.rs` compiles `cc3_program` PIE, converts it via `elf_to_rxe` (now taking
+a `load_bias` so the image maps at a high `USER_BIAS` clear of the kernel
+identity map), builds the U-mode image, `sret`s in, and asserts the program's
+`exit` carries its decimal argument (PASS verified; a deliberately-wrong
+expectation FAILs). The `RWX`/non-PIE load-refusal is already covered at
+`LoadImage::parse` and in `elf_to_rxe`'s rejection tests.
+
+**Still to do:** the **aarch64 (EL0)** and **x86_64 (ring 3)** spawn
+round-trips, each its own increment reusing the same `spawn_and_enter` caller +
+`elf_to_rxe` converter (add a per-arch `PageTableOps` adapter as needed) and
+enrolled in `tools/xtask/src/commands/qemu_tests.rs` and the workspace
+`Cargo.toml`.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a
