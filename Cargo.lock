@@ -1157,6 +1157,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-enter-user-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-fat32-image"
 version = "0.0.0"
 dependencies = [

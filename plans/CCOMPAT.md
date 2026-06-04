@@ -458,18 +458,44 @@ matrix. No host conformance vertical: the transition is only meaningful on
 bare metal; the `UserEntry` value is host-tested and the QEMU round-trips are
 the proof.
 
-**Still to do:** the **x86_64** `EnterUser` implementation (`iretq` to ring 3,
-with the `swapgs` / per-CPU-GS handling the production syscall path assumes) —
-deliberately not shipped untested; it lands with its own ring-3 QEMU exercise.
-Then the full CC3 deliverable: the QEMU "crt0-linked program starts, reads its
-args, exits" round-trip per native target (plus the `RWX`/non-PIE load-refusal
-assertion). With `build_process_image` + the HAL enter-user primitive in place,
-the round-trip is: build the image from a separate crt0-linked program blob,
-then `EnterUser::enter_user(ProcessImage)` — no `_start` collision, because the
-spawn comes from a normally-booting kernel dropping a *separate* program image.
-Start with riscv64 (template: `tests/integration/abi_sys_syscall_qemu_riscv64`,
-which already drives the HAL primitive), then aarch64 and x86_64; enroll each in
-`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
+**Progress (Arch HAL enter-user primitive — x86_64 landed).** The **x86_64**
+`EnterUser` implementation now exists too: `kernel/arch/x86_64/src/userentry.rs`
+(`UserMode`) drops to ring 3 with `iretq`, building the interrupt-return frame
+from the ring-3 GDT selectors (`gdt::USER_CS_INDEX`/`USER_DS_INDEX`, RPL 3) with
+`RFLAGS.IF` clear (interrupts masked in ring 3, parity with the other ports). It
+adds **no** `swapgs`: the production syscall entry stub keeps the per-CPU TLS in
+`IA32_KERNEL_GS_BASE` throughout ring-0 execution and balances its own `swapgs`
+pair, so entering ring 3 already leaves `IA32_KERNEL_GS_BASE` correct for the
+next `syscall`. It was **not** shipped untested — it lands with its own ring-3
+QEMU exercise, `tests/integration/enter_user_qemu_x86_64`
+(`rustos-test-enter-user-qemu-x86_64`, enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`): the
+production kernel boots, and on `BootCompleted` the test builds a ring-3 address
+space — a USER-accessible, executable, non-writable alias of the
+`ros_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write stack, using
+the new `paging::map_4k_user` (which OR-s the USER bit into the leaf and every
+intermediate table entry; `map_4k`/`map_4k_user` share one walk, §2.2) — switches
+CR3, and `iretq`s to ring 3 through `UserMode::new().enter_user(...)`. The stub's
+real `syscall` then traps back through the kernel's `IA32_LSTAR` stub; reaching
+the installed dispatch callback proves the ring-3 entry succeeded, and the
+callback asserts the kernel-observed `(number, args)`. Verified PASS, and a
+deliberately-wrong expectation verified FAIL (callback reached, mismatch
+detected — not a timeout). All three native `EnterUser` ports now exist and are
+QEMU-proven.
+
+**Still to do:** the full CC3 deliverable — the QEMU "crt0-linked program starts,
+reads its args, exits" round-trip per native target (plus the `RWX`/non-PIE
+load-refusal assertion). With `build_process_image` + the HAL enter-user
+primitive (now on all three native targets) in place, the round-trip is: build
+the image from a separate crt0-linked program blob, then
+`EnterUser::enter_user(ProcessImage)` — no `_start` collision, because the spawn
+comes from a normally-booting kernel dropping a *separate* program image. Start
+with riscv64 (template: `tests/integration/abi_sys_syscall_qemu_riscv64`, which
+already drives the HAL primitive), then aarch64 and x86_64; enroll each in
+`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`. The
+capability-checked, `lib/log`-audited spawn caller that wraps
+`build_process_image` + `EnterUser::enter_user` (§4/§5.4/§17.4) lands alongside
+the first such round-trip.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a

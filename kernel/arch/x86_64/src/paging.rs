@@ -49,6 +49,10 @@ pub mod flags {
     pub const PRESENT: u64 = 1 << 0;
     /// Writable.
     pub const WRITABLE: u64 = 1 << 1;
+    /// User-accessible (CPL 3 may reach the page). Must be set on the
+    /// leaf **and** on every intermediate entry on the walk, otherwise
+    /// the CPU denies the ring-3 access (Intel SDM Vol 3A §4.6).
+    pub const USER: u64 = 1 << 2;
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
 }
@@ -212,12 +216,52 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
+        self.map_4k_inner(pool, vaddr, paddr, writable, false)
+    }
+
+    /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
+    /// the leaf and every intermediate table entry on the walk get the
+    /// [`flags::USER`] bit, so a ring-3 (CPL 3) program may reach the
+    /// page. `writable` selects [`flags::WRITABLE`] on the leaf; an
+    /// executable ring-3 page is mapped with `writable = false` (W^X,
+    /// `AGENTS.md` §19.2).
+    ///
+    /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
+    /// page-table-pool exhaustion or if the walk hits an existing huge
+    /// page.
+    pub fn map_4k_user(
+        &mut self,
+        pool: &'static PageTablePool,
+        vaddr: u64,
+        paddr: u64,
+        writable: bool,
+    ) -> Option<()> {
+        self.map_4k_inner(pool, vaddr, paddr, writable, true)
+    }
+
+    /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
+    /// [`Self::map_4k_user`] (`AGENTS.md` §2.2 — one definition).
+    ///
+    /// When `user` is set, [`flags::USER`] is OR-ed into the leaf and
+    /// into each intermediate entry on the walk; a kernel mapping leaves
+    /// every level without the bit, so ring 3 cannot reach it.
+    fn map_4k_inner(
+        &mut self,
+        pool: &'static PageTablePool,
+        vaddr: u64,
+        paddr: u64,
+        writable: bool,
+        user: bool,
+    ) -> Option<()> {
         assert_eq!(vaddr & 0xFFF, 0, "vaddr must be page-aligned");
         assert_eq!(paddr & 0xFFF, 0, "paddr must be page-aligned");
 
         let mut flags_ = flags::PRESENT;
         if writable {
             flags_ |= flags::WRITABLE;
+        }
+        if user {
+            flags_ |= flags::USER;
         }
 
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
@@ -226,7 +270,13 @@ impl AddressSpace {
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
 
         let pdpt = ensure_child(self.pml4, i4, pool)?;
+        if user {
+            self.pml4[i4] |= flags::USER;
+        }
         let pd = ensure_child(pdpt, i3, pool)?;
+        if user {
+            pdpt[i3] |= flags::USER;
+        }
 
         // Refuse to silently shatter an existing huge page — the test
         // explicitly uses VAs outside the bootstrap identity range so
@@ -235,6 +285,9 @@ impl AddressSpace {
             return None;
         }
         let pt = ensure_child(pd, i2, pool)?;
+        if user {
+            pd[i2] |= flags::USER;
+        }
         pt[i1] = paddr | flags_;
         Some(())
     }
@@ -328,5 +381,10 @@ mod tests {
         use super::*;
         assert_eq!(PAGE_SIZE, 4096);
         assert_eq!(ENTRIES_PER_TABLE, 512);
+        // Intel SDM Vol 3A §4.5 paging-structure flag bit positions.
+        assert_eq!(flags::PRESENT, 1 << 0);
+        assert_eq!(flags::WRITABLE, 1 << 1);
+        assert_eq!(flags::USER, 1 << 2);
+        assert_eq!(flags::HUGE, 1 << 7);
     }
 }

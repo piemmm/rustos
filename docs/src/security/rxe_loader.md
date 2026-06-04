@@ -106,19 +106,32 @@ the security policy).
 ## Entering user mode
 
 The Arch HAL "enter user mode" primitive that consumes the
-`ProcessImage` now lands as a closed HAL slice
-(`rustos_arch_api::EnterUser` over the architecture-neutral `UserEntry`
-register state, `AGENTS.md` §17.2). It is implemented for riscv64 (the
-`sret` sequence) and aarch64 (the EL0 `eret` sequence); each port owns
-the one definition of its privilege-transition `asm!`, so the CC2 QEMU
-round-trips reach it through the HAL rather than copying the sequence
+`ProcessImage` is a closed HAL slice (`rustos_arch_api::EnterUser` over
+the architecture-neutral `UserEntry` register state, `AGENTS.md` §17.2).
+All three native ports implement it: riscv64 (the `sret` sequence),
+aarch64 (the EL0 `eret` sequence), and x86_64 (the `iretq`-to-ring-3
+sequence — it builds the interrupt-return frame from the ring-3 GDT
+selectors with `RFLAGS.IF` clear, and adds no `swapgs` because the
+production syscall entry stub keeps the per-CPU TLS in
+`IA32_KERNEL_GS_BASE` during ring-0 execution). Each port owns the one
+definition of its privilege-transition `asm!`, so the CC2/CC3 QEMU
+verticals reach it through the HAL rather than copying the sequence
 (§2.2). The transition is only meaningful on bare metal, so it carries
 no host conformance vertical — the `UserEntry` value is host-tested and
 the QEMU round-trips are the proof.
 
+Each port is exercised by a ring-3/EL0/U-mode QEMU round-trip: the
+riscv64/aarch64 CC2 syscall round-trips already drive the HAL primitive,
+and the x86_64 `iretq` path lands with its own ring-3 exercise
+(`tests/integration/enter_user_qemu_x86_64`) that boots the production
+kernel, builds a ring-3 address space (a USER-accessible, executable,
+non-writable alias of the `ros_sys_cap_query` stub plus a USER read/write
+stack — W^X), `iretq`s to ring 3 through `UserMode::new().enter_user(...)`,
+and asserts the stub's real `syscall` traps back into the kernel with the
+expected `(number, args)`.
+
 ## What is not yet enforced here
 
-The x86_64 `EnterUser` implementation (`iretq` to ring 3) and the
-stack-canary / shadow-stack selection in the arch `unsafe` cores build
-on this validated `LoadImage` and `ProcessImage` without relaxing any
-invariant above.
+The stack-canary / shadow-stack selection in the arch `unsafe` cores
+builds on this validated `LoadImage` and `ProcessImage` without relaxing
+any invariant above.

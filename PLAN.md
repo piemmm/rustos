@@ -6628,12 +6628,22 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    and aarch64: `kernel/arch/api/src/userentry.rs` defines the
    architecture-neutral `UserEntry { entry, stack_pointer, arg0 }` register
    state (mirroring `ProcessImage`) and the object-safe `EnterUser` trait
-   (diverging `unsafe fn enter_user(&self, UserEntry) -> !`); riscv64
-   (`sret`) and aarch64 (EL0 `eret`) implement it, with the one `asm!`
-   definition each lifted off the CC2 QEMU round-trips (§2.2) which now reach
-   the transition through the HAL and stay green. Remaining: the x86_64
-   `iretq`-to-ring-3 implementation (with its own ring-3 QEMU exercise) and
-   stack-canary / shadow-stack selection (real arch page tables).
+   (diverging `unsafe fn enter_user(&self, UserEntry) -> !`); all three
+   native ports implement it — riscv64 (`sret`), aarch64 (EL0 `eret`), and
+   x86_64 (`iretq` to ring 3) — with the one `asm!` definition each. The
+   riscv64/aarch64 `asm!` was lifted off the CC2 QEMU round-trips (§2.2)
+   which reach the transition through the HAL; the x86_64 `iretq` path lands
+   with its own ring-3 QEMU exercise (`tests/integration/enter_user_qemu_x86_64`,
+   enrolled in `qemu_tests.rs` + the workspace) that boots the production
+   kernel, builds a ring-3 space (a USER-exec, non-writable alias of the
+   `ros_sys_cap_query` stub — W^X — plus a USER r/w stack, via the new
+   `paging::map_4k_user`, which shares one walk with `map_4k`, §2.2), `iretq`s
+   to ring 3, and asserts the stub's real `syscall` traps back with the
+   expected `(number, args)` (PASS; deliberately-wrong expectation FAILs).
+   Remaining: the CC3 "separate crt0-linked program starts / reads args /
+   exits" round-trips per native target (with the capability-checked,
+   audited spawn caller) and stack-canary / shadow-stack selection (real
+   arch page tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
    surface: `SideChannelMitigation` (syscall entry/exit speculation
@@ -7216,15 +7226,18 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   enforced at load by `rustos_abi::rxe::LoadImage::parse` (a non-conforming
   image is refused, not patched). **The kernel-side `build_process_image`
   (`kernel/mem/src/spawn.rs`) and the Arch HAL "enter user mode" primitive
-  (`kernel/arch/api` `EnterUser` / `UserEntry`, implemented for riscv64 `sret`
-  and aarch64 EL0 `eret`, with the inline CC2 round-trip `asm!` lifted onto the
-  HAL, §2.2) have now landed and are green.** Remaining for CC3: the x86_64
-  `iretq`-to-ring-3 `EnterUser` (with its own ring-3 QEMU exercise — not shipped
-  untested) and the QEMU "crt0 program starts, reads its args, exits"
-  round-trip per native target. With `build_process_image` + the enter-user
-  primitive in place, that round-trip is now a normally-booting kernel building
-  a *separate* crt0-linked program blob and `EnterUser::enter_user`-ing into it
-  (no `_start` collision). See `.junie/next-ccompat-prompt.md`.
+  (`kernel/arch/api` `EnterUser` / `UserEntry`) have now landed on all three
+  native ports and are QEMU-proven** — riscv64 `sret`, aarch64 EL0 `eret` (the
+  inline CC2 round-trip `asm!` lifted onto the HAL, §2.2), and x86_64 `iretq`
+  to ring 3, the last with its own ring-3 QEMU exercise
+  (`tests/integration/enter_user_qemu_x86_64`, using the new
+  `paging::map_4k_user`). Remaining for CC3: the QEMU "crt0 program starts,
+  reads its args, exits" round-trip per native target (plus the
+  capability-checked, audited spawn caller, §4/§5.4/§17.4). With
+  `build_process_image` + the enter-user primitive in place, that round-trip is
+  a normally-booting kernel building a *separate* crt0-linked program blob and
+  `EnterUser::enter_user`-ing into it (no `_start` collision). See
+  `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

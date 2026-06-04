@@ -245,6 +245,37 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // ring-3 exercise for the Arch HAL "enter user mode" primitive
+    // (`kernel/arch/x86_64/src/userentry.rs`, `rustos_arch_api::EnterUser`,
+    // `AGENTS.md` §17.2). Unlike `rustos-test-abi-sys-syscall-qemu`, which
+    // issues the same `abi-sys` stub from ring 0 (the x86_64 `syscall`
+    // traps identically from any privilege level and never crosses a
+    // boundary), this test boots the production kernel and, on
+    // `AuditEvent::BootCompleted`, builds a ring-3 address space — a
+    // user-accessible, executable, non-writable alias of the
+    // `ros_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write
+    // stack — switches CR3, and `iretq`s to ring 3 through
+    // `UserMode::new().enter_user(...)`. The stub's real `syscall`
+    // (`lib/abi-sys/src/trap.rs`) then traps back through the kernel's
+    // `IA32_LSTAR` entry stub; reaching the installed dispatch callback
+    // at all proves the `iretq` entry succeeded, and the callback asserts
+    // the kernel-observed `(number, args)` are exactly what
+    // `ros_sys_cap_query` should have marshalled into the syscall
+    // registers before flipping `qemu_exit::exit_success`; any mismatch
+    // flips `qemu_exit::exit_failure`. Single CPU suffices and the
+    // 60-second budget matches the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-enter-user-qemu-x86_64",
+        binary: "rustos-test-enter-user-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →
