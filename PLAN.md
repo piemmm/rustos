@@ -6640,10 +6640,19 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    `paging::map_4k_user`, which shares one walk with `map_4k`, §2.2), `iretq`s
    to ring 3, and asserts the stub's real `syscall` traps back with the
    expected `(number, args)` (PASS; deliberately-wrong expectation FAILs).
-   Remaining: the CC3 "separate crt0-linked program starts / reads args /
-   exits" round-trips per native target (with the capability-checked,
-   audited spawn caller) and stack-canary / shadow-stack selection (real
-   arch page tables).
+   The CC3 program-packaging infrastructure has now landed too (chunk 1 of
+   the round-trip): the separate PIE fixture program
+   `tests/integration/cc3_program` (links only `rustos-crt0` +
+   `rustos-abi-sys`, so no `_start` collision) and the host-tested ELF→rxe
+   converter `rustos_itest_harness::elf2rxe::elf_to_rxe` (LE ELF64 `ET_DYN` →
+   W^X `rxe` segments, applying only `R_*_RELATIVE` at zero bias and failing
+   closed on every other relocation, re-encoding via the `rustos_abi::rxe`
+   encoders, §2.2; 13 unit tests). Remaining: the CC3 "separate crt0-linked
+   program starts / reads args / exits" round-trips per native target — an
+   arch `PageTableOps` adapter so `build_process_image` runs on real arch
+   paging, the capability-checked / audited spawn caller, and the per-native
+   QEMU test — plus stack-canary / shadow-stack selection (real arch page
+   tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
    surface: `SideChannelMitigation` (syscall entry/exit speculation
@@ -7231,13 +7240,20 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   inline CC2 round-trip `asm!` lifted onto the HAL, §2.2), and x86_64 `iretq`
   to ring 3, the last with its own ring-3 QEMU exercise
   (`tests/integration/enter_user_qemu_x86_64`, using the new
-  `paging::map_4k_user`). Remaining for CC3: the QEMU "crt0 program starts,
-  reads its args, exits" round-trip per native target (plus the
-  capability-checked, audited spawn caller, §4/§5.4/§17.4). With
-  `build_process_image` + the enter-user primitive in place, that round-trip is
-  a normally-booting kernel building a *separate* crt0-linked program blob and
-  `EnterUser::enter_user`-ing into it (no `_start` collision). See
-  `.junie/next-ccompat-prompt.md`.
+  `paging::map_4k_user`). **The program-packaging infrastructure has now landed
+  too (chunk 1 of the round-trip):** the separate PIE fixture program
+  `tests/integration/cc3_program` (links only `rustos-crt0` + `rustos-abi-sys`,
+  so no `_start` collision; `extern crate rustos_crt0;` pulls crt0's `_start`
+  onto the link line) and the host-tested ELF→rxe converter
+  `rustos_itest_harness::elf2rxe::elf_to_rxe` (LE ELF64 `ET_DYN` → W^X `rxe`
+  segments, applying only `R_*_RELATIVE` at zero bias and failing closed on any
+  symbolic/GOT/PLT/`REL` relocation, re-encoding via the `rustos_abi::rxe`
+  encoders, §2.2; 13 host unit tests). Remaining for CC3: an arch
+  `PageTableOps` adapter so `build_process_image` runs on real arch paging, the
+  capability-checked / `lib/log`-audited spawn caller (§4/§5.4/§17.4, in the
+  caller not `kernel/mem`), and the per-native QEMU round-trip that builds the
+  `cc3_program` blob via `elf2rxe`, spawns it, and asserts `exit` carries the
+  argument. See `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

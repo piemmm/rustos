@@ -788,6 +788,9 @@ version = "0.0.0"
 [[package]]
 name = "rustos-itest-harness"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-kernel"
@@ -1139,6 +1142,15 @@ dependencies = [
  "rustos-arch-riscv64",
  "rustos-itest-harness",
  "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-cc3-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi-sys",
+ "rustos-crt0",
+ "rustos-itest-harness",
 ]
 
 [[package]]

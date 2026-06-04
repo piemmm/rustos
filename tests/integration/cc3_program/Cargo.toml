@@ -1,0 +1,27 @@
+[package]
+name = "rustos-test-cc3-program"
+description = "CCOMPAT stage CC3 fixture: a minimal, separately-linked C-ABI program (crt0 + abi-sys) whose `main` parses argv[1] as a decimal integer and returns it, so the spawn round-trip can assert the exit syscall carries that code. Built PIE for a native Tier-1 target and converted to an `rxe` blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-cc3-program"
+path = "src/main.rs"
+
+# The program links the curated System runtime / C ABI class (crt0 + the
+# `ros_sys_*` syscall stubs) exactly as a non-Rust program would, and only
+# on the three native Tier-1 targets (`target_os = "none"`). On the host it
+# is an inert stub so `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-crt0 = { path = "../../../lib/crt0", version = "=0.0.0" }
+rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

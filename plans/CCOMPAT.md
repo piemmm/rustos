@@ -483,19 +483,47 @@ deliberately-wrong expectation verified FAIL (callback reached, mismatch
 detected — not a timeout). All three native `EnterUser` ports now exist and are
 QEMU-proven.
 
+**Progress (program-packaging infrastructure landed — chunk 1 of the CC3
+round-trip).** The two build-time pieces the round-trip needs — a *separate*,
+position-independent program artifact and a way to turn it into the `rxe`
+image `build_process_image` consumes — now exist and are host-green:
+- **The separate fixture program** `tests/integration/cc3_program`
+  (`rustos-test-cc3-program`): a `no_std`/`no_main` C-ABI program whose `main`
+  parses `argv[1]` as a decimal integer and returns it. It links **only**
+  `rustos-crt0` + `rustos-abi-sys` (never an architecture crate, so no `_start`
+  collision, the trap the backed-out `crt0_program_qemu_riscv64` hit) and an
+  `extern crate rustos_crt0;` forces crt0's rlib (and thus `_start`) onto the
+  link line. Built PIE with `tests/integration/cc3_program/program.ld`
+  (`ENTRY(_start)`, fixed non-zero base, one architecture-neutral script,
+  §2.2), the riscv64 build verified to root at `_start`, keep `main`, and carry
+  only `R_RISCV_RELATIVE` relocations (clean PIE, no GOT/PLT). On the host it is
+  an inert stub so the workspace tooling still covers it.
+- **The ELF→rxe converter** `rustos_itest_harness::elf2rxe::elf_to_rxe`
+  (`tests/integration/harness`): parses a little-endian ELF64 `ET_DYN`,
+  classifies each `PT_LOAD` into a W^X-clean `rxe` segment, applies **only**
+  the architecture's `R_*_RELATIVE` relocations at a zero load bias (the image
+  maps at its link addresses) and **fails closed** on any symbolic / GOT / PLT
+  / `REL`-form relocation, then re-emits the blob through `rustos_abi::rxe`'s
+  own `LoadHeader`/`Segment` encoders (the wire format is never re-encoded by
+  hand, §2.2). 13 host unit tests over a synthetic ELF builder cover the valid
+  round-trip through `LoadImage::parse`, the relocation-applied check, and every
+  rejection (non-ELF / non-ELF64-LE / non-PIE / unsupported machine / W^X /
+  misalignment / non-relative / symbolic / truncated / out-of-range). Full
+  `cargo xtask ci` + `fuzz --secs 5` + soak green on this host.
+
 **Still to do:** the full CC3 deliverable — the QEMU "crt0-linked program starts,
 reads its args, exits" round-trip per native target (plus the `RWX`/non-PIE
-load-refusal assertion). With `build_process_image` + the HAL enter-user
-primitive (now on all three native targets) in place, the round-trip is: build
-the image from a separate crt0-linked program blob, then
-`EnterUser::enter_user(ProcessImage)` — no `_start` collision, because the spawn
-comes from a normally-booting kernel dropping a *separate* program image. Start
-with riscv64 (template: `tests/integration/abi_sys_syscall_qemu_riscv64`, which
-already drives the HAL primitive), then aarch64 and x86_64; enroll each in
-`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`. The
-capability-checked, `lib/log`-audited spawn caller that wraps
-`build_process_image` + `EnterUser::enter_user` (§4/§5.4/§17.4) lands alongside
-the first such round-trip.
+load-refusal assertion). The remaining pieces are: (1) an arch `PageTableOps`
+adapter so `build_process_image` runs against the bare-metal arch paging
+(`kernel/arch/<target>` exposes its own `paging::AddressSpace`/`map_4k`, not the
+host `HostPageTable`); (2) the capability-checked, `lib/log`-audited spawn
+caller wrapping `build_process_image` + `EnterUser::enter_user`
+(§4/§5.4/§17.4, in the caller, **not** `kernel/mem`); and (3) the per-native
+QEMU test that builds the `cc3_program` blob via `elf2rxe`, spawns it, and
+asserts the `exit` code equals the argument. Start with **riscv64** (template:
+`tests/integration/abi_sys_syscall_qemu_riscv64`, which already drives the HAL
+primitive); then aarch64 and x86_64; enroll each in
+`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a
