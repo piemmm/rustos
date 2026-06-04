@@ -1417,6 +1417,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-spawn-program-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-spawn-program-qemu-riscv64"
 version = "0.0.0"
 dependencies = [

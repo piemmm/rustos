@@ -78,6 +78,16 @@ fn el0_leaf_attrs_encode_unprivileged_access() {
     assert_ne!(data & attrs::PXN, 0);
     assert_ne!(data & attrs::UXN, 0);
     assert_eq!(data & 0b11, 0b11);
+
+    // Read-only data: read-only at EL0 (AP=0b11) and execute-never at both
+    // ELs — unlike code, the page is *not* EL0-executable (UXN set).
+    let rodata = el0_rodata_leaf_attrs();
+    assert_eq!(rodata & AP_MASK, attrs::AP_RO_EL0);
+    assert_ne!(rodata & attrs::PXN, 0);
+    assert_ne!(rodata & attrs::UXN, 0);
+    assert_eq!(rodata & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_eq!(rodata & 0b11, 0b11);
+    assert_ne!(rodata & attrs::AF, 0);
 }
 
 #[test]

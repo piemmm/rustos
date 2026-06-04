@@ -306,6 +306,37 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
+    // test above. The build script compiles the separate fixture program
+    // (`tests/integration/cc3_program`, crt0 + abi-sys) position-independent
+    // and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // carrying the kernel's syscall CFI tag. On boot the test stands up a
+    // stage-1 address space (identity-mapping the kernel + MMIO, EL1),
+    // activates it, installs the EL1 vector table and a dispatch callback, then
+    // calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's EL0 image — segments mapped + filled, user stack,
+    // startup-vector block — and `eret`s into it through the Arch HAL
+    // `EnterUser` primitive. The program (built via `build_process_image` at a
+    // high `USER_BIAS`) parses `argv[1]`, returns it, and crt0 routes the
+    // return through the `exit` syscall, whose `svc` traps back through the
+    // kernel EL1 vector to the dispatch callback, which asserts the code equals
+    // the spawned decimal argument before the ARM semihosting PASS finisher;
+    // any mismatch (or a returning spawn) writes a distinct failure finisher.
+    // Single CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-aarch64",
+        binary: "rustos-test-spawn-program-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

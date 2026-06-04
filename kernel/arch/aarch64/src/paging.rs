@@ -169,6 +169,24 @@ pub const fn el0_code_leaf_attrs() -> u64 {
         | attrs::PXN
 }
 
+/// Lower attributes for an **EL0 read-only, non-executable** Normal-memory
+/// page leaf: read-only at EL1 and EL0 (`AP_RO_EL0`) and execute-never at
+/// both ELs (`PXN | UXN`). Used for a read-only EL0 data page — an `rxe`
+/// `ReadOnly` segment (`.rodata`) or the kernel-written process startup
+/// block — where [`el0_code_leaf_attrs`] would wrongly leave the page
+/// EL0-executable. The output is a page descriptor (`TABLE_OR_PAGE`).
+#[must_use]
+pub const fn el0_rodata_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::SH_INNER
+        | attrs::AP_RO_EL0
+        | attrs::ATTR_IDX_NORMAL
+        | attrs::PXN
+        | attrs::UXN
+}
+
 /// Lower attributes for an **EL0-writable** Normal-memory page leaf:
 /// read/write at EL1 and EL0 (`AP_RW_EL0`), execute-never at both ELs
 /// (`PXN | UXN`). Used for an EL0 data page such as a user stack. The

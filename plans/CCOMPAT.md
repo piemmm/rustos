@@ -353,21 +353,25 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: IN PROGRESS — un-shelved. The first end-to-end spawn round-trip has
-landed: on riscv64 a separately-linked crt0+abi-sys program is built into a
-U-mode address space by the production capability-checked, audited spawn caller
-(`rustos_kernel_core::spawn_and_enter`) and `sret`-entered, and its `exit`
-syscall is observed to carry the spawned decimal argument
-(`tests/integration/spawn_program_qemu_riscv64`, QEMU-proven PASS + a
+**Status: IN PROGRESS — un-shelved. The end-to-end spawn round-trip has now
+landed on two native targets: on riscv64 and aarch64 a separately-linked
+crt0+abi-sys program is built into a user (U-mode / EL0) address space by the
+production capability-checked, audited spawn caller
+(`rustos_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret`), and
+its `exit` syscall is observed to carry the spawned decimal argument
+(`tests/integration/spawn_program_qemu_riscv64` and
+`tests/integration/spawn_program_qemu_aarch64`, each QEMU-proven PASS + a
 deliberately-wrong-expectation FAIL).** The crt0 object, the startup-vector
 `abi-v1` type, `build_process_image`, and the Arch HAL `EnterUser` primitive
-were already green; this chunk added the spawn caller, the `CAP_PROC_SPAWN`
-capability, a test-local riscv64 `PageTableOps` adapter, and an `elf_to_rxe`
-`load_bias` so the image maps clear of the kernel identity map. **Remaining:
-the aarch64 (EL0) and x86_64 (ring 3) spawn round-trips**, each its own
-increment reusing the same spawn caller + converter (a per-arch `PageTableOps`
-adapter as needed). **Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle
-loader / dynamic-loader policy).
+were already green; the riscv64 chunk added the spawn caller, the
+`CAP_PROC_SPAWN` capability, a test-local riscv64 `PageTableOps` adapter, and an
+`elf_to_rxe` `load_bias`; the aarch64 chunk added a test-local aarch64 EL0
+`PageTableOps` adapter, the production `el0_rodata_leaf_attrs()` helper
+(EL0 read-only, non-executable), and the test-kernel `CPACR_EL1.FPEN` enable.
+**Remaining: the x86_64 (ring 3) spawn round-trip**, its own increment reusing
+the same spawn caller + converter (a per-arch `PageTableOps` adapter as needed).
+**Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle loader /
+dynamic-loader policy).
 
 **How the round-trip blocker was resolved.** The earlier blocker — crt0's
 `_start` is not a self-contained leaf, and linking the program against an
@@ -536,11 +540,25 @@ identity map), builds the U-mode image, `sret`s in, and asserts the program's
 expectation FAILs). The `RWX`/non-PIE load-refusal is already covered at
 `LoadImage::parse` and in `elf_to_rxe`'s rejection tests.
 
-**Still to do:** the **aarch64 (EL0)** and **x86_64 (ring 3)** spawn
-round-trips, each its own increment reusing the same `spawn_and_enter` caller +
-`elf_to_rxe` converter (add a per-arch `PageTableOps` adapter as needed) and
-enrolled in `tools/xtask/src/commands/qemu_tests.rs` and the workspace
-`Cargo.toml`.
+**aarch64 round-trip landed (this chunk).** `tests/integration/spawn_program_qemu_aarch64`
+is the EL0 analogue of the riscv64 vertical and is QEMU-proven (PASS + a
+deliberately-wrong-expectation FAIL). It reuses `cc3_program` + `elf_to_rxe`
+(passing the aarch64 `USER_BIAS`) and the same `spawn_and_enter` caller, adds a
+**test-local** aarch64 `PageTableOps` adapter (`AarchUserPageTable`) over the
+stage-1 `paging::AddressSpace` that maps EL0 leaves through
+`el0_code`/`el0_rodata`/`el0_data_leaf_attrs` and invalidates by VA with
+`tlbi vaae1`. Two supporting changes landed: a new production
+`el0_rodata_leaf_attrs()` (EL0 read-only, **non-executable** — `AP_RO_EL0` +
+`PXN` + `UXN`, with a host test) so an `rxe` `ReadOnly` segment (`.rodata`) and
+the kernel-written startup block stay W^X rather than being mapped
+EL0-executable; and the test kernel enables `CPACR_EL1.FPEN` before the
+NEON-vectorised `rxe` decoder runs (the boot trampoline leaves FP/SIMD trapped,
+so a freestanding kernel that uses FP enables it itself).
+
+**Still to do:** the **x86_64 (ring 3)** spawn round-trip, its own increment
+reusing the same `spawn_and_enter` caller + `elf_to_rxe` converter (add a
+per-arch `PageTableOps` adapter as needed) and enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a
