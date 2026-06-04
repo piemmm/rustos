@@ -160,3 +160,46 @@ fn map_4k_refuses_to_shatter_a_gigapage() {
     // VA 0 lives under the identity gigapage at root slot 0 — a leaf.
     assert!(space.map_4k(pool, 0x0, 0x8000_0000, flags::READ).is_none());
 }
+
+#[test]
+fn map_gigapage_aliases_a_whole_gigabyte_at_a_high_va() {
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
+    // Alias the kernel's gigabyte (phys 0x8000_0000) at a high VA with the
+    // USER bit — the BIAS-alias trick the crt0 QEMU vertical uses.
+    let bias: u64 = 64 << 30; // 64 GiB, 1 GiB-aligned.
+    let paddr: u64 = 0x8000_0000;
+    let vaddr = paddr + bias;
+    space
+        .map_gigapage(
+            vaddr,
+            paddr,
+            flags::USER | flags::READ | flags::WRITE | flags::EXEC,
+        )
+        .expect("gigapage alias");
+    // Every address in the aliased gigabyte resolves to its phys base.
+    assert_eq!(translate(&space, vaddr), Some(paddr));
+    assert_eq!(
+        translate(&space, vaddr + 0x20_0000),
+        Some(paddr),
+        "a megabyte into the gigapage still resolves to the gigapage base"
+    );
+    // The installed leaf carries the USER bit.
+    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
+    assert_ne!(root[vpn_index(vaddr, 2)] & flags::USER, 0);
+}
+
+#[test]
+fn map_gigapage_rejects_misaligned_and_occupied() {
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
+    // Misaligned virtual / physical addresses are refused.
+    assert!(space
+        .map_gigapage((64 << 30) + 0x1000, 0x8000_0000, flags::READ)
+        .is_none());
+    assert!(space
+        .map_gigapage(64 << 30, 0x8000_0000 + 0x1000, flags::READ)
+        .is_none());
+    // Root slot 0 is occupied by the identity gigapage; refuse to clobber it.
+    assert!(space.map_gigapage(0, 0x8000_0000, flags::READ).is_none());
+}

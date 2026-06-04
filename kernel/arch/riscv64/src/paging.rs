@@ -240,6 +240,38 @@ impl AddressSpace {
         Some(())
     }
 
+    /// Map the 1 GiB region at `paddr` to `vaddr` with a single root-level
+    /// gigapage leaf.
+    ///
+    /// `vaddr` and `paddr` must be 1 GiB-aligned. This installs one leaf
+    /// directly in the root table (no child tables), so it costs no pool
+    /// frames — the cheap way to alias a whole gigabyte of physical memory at
+    /// a high virtual address with different permissions (e.g. the `USER`
+    /// bit) than the identity map carries. Returns `None` on a misaligned
+    /// address or if the target root slot is already occupied (a leaf or a
+    /// table pointer) — it refuses to overwrite an existing mapping rather
+    /// than silently clobber it.
+    ///
+    /// **TEST-ONLY SCAFFOLDING.** This exists solely to let the (in-progress)
+    /// crt0 QEMU round-trip vertical alias the kernel's RAM at a high `BIAS`
+    /// with the `USER` bit so it can `sret` into U-mode. It is gated to test
+    /// builds and the `test-harness` feature so it is **never** compiled into
+    /// a production kernel image; remove the gate (and this note) only when a
+    /// real U-mode loader in `kernel/mem` makes it a supported primitive.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn map_gigapage(&mut self, vaddr: u64, paddr: u64, flags: u64) -> Option<()> {
+        const GIB: u64 = 1 << 30;
+        if (vaddr & (GIB - 1)) != 0 || (paddr & (GIB - 1)) != 0 {
+            return None;
+        }
+        let i2 = vpn_index(vaddr, 2);
+        if (self.root[i2] & flags::VALID) != 0 {
+            return None;
+        }
+        self.root[i2] = pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY);
+        Some(())
+    }
+
     /// Switch the active page table to this address space (write `satp`
     /// and flush the TLB).
     ///

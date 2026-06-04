@@ -14,6 +14,14 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# TEST-ONLY: opt-in surface for test harnesses that link this crate as a
+# non-`cfg(test)` target binary (the in-progress crt0 QEMU round-trip
+# vertical). It gates temporary test-support scaffolding such as
+# `AddressSpace::map_gigapage` so that code is never compiled into a
+# production kernel image. Off by default; production builds must not set it.
+test-harness = []
+
 # Like `kernel/arch/x86_64`, this crate is a pure Arch HAL
 # implementation (`AGENTS.md` §17.2 / §17.4): it names only the Arch
 # HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
