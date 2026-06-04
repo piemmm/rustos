@@ -86,7 +86,7 @@ use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_mem::{copy_in, PhysMap, UaccessError, UserAddressSpace, VirtAddr};
+use rustos_kernel_mem::{copy_in, copy_out, PhysMap, UaccessError, UserAddressSpace, VirtAddr};
 use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Field, Sink};
@@ -401,20 +401,63 @@ where
         &self,
         caller: &CallerContext<'_>,
         endpoint: u64,
-        _ptr: u64,
-        _len: usize,
+        ptr: u64,
+        len: usize,
     ) -> SyscallResult {
-        // Mirror `ipc_send`: resolve the endpoint against the live
-        // registry (unbound → `NotFound`), then announce the deferred
-        // user-memory copy-out path for a bound endpoint. The receive
-        // side needs the same copy primitive to deliver a drained
-        // [`rustos_kernel_ipc::Message`] payload into the caller's
-        // buffer.
-        if !self.ipc.read().contains(EndpointId(endpoint)) {
+        // §5.4: resolve the destination endpoint against the live
+        // named-port registry. An endpoint that is not currently bound
+        // fails closed with `NotFound`; the dispatcher's standard
+        // pipeline audits the rejection.
+        let ipc = self.ipc.read();
+        let Some(port) = ipc.lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
+        };
+
+        // Peek-then-commit (D.2): the message is dequeued only once it
+        // has been copied into the caller's buffer through the validated
+        // `copy_to_user` boundary. Resolving the caller's address space
+        // first nests the mailbox lock *inside* the address-space read
+        // guard, so the spinlock is held only for the bounded copy.
+        //
+        // `with_caller_aspace` yields `None` when the caller has no
+        // registered address space (a kernel task, or one withdrawn on
+        // `exit`); `recv_with` yields `Some(None)` when the mailbox is
+        // momentarily empty. The two are kept distinct so an empty
+        // mailbox is the retryable `WouldBlock`, never confused with a
+        // faulting pointer (§19.1).
+        let copied = self.with_caller_aspace(caller, |space, physmap| {
+            port.recv_with(|msg| -> Result<usize, Errno> {
+                let payload = msg.payload.as_slice();
+                // Refuse to truncate: a buffer smaller than the message
+                // fails closed and — because `recv_with` only commits on
+                // `Ok` — leaves the message queued for a retry with a
+                // larger buffer (§2.9).
+                if payload.len() > len {
+                    return Err(Errno::BufferTooSmall);
+                }
+                // Every `UaccessError` collapses onto the single
+                // `BadAddress` so a faulting pointer cannot be used as a
+                // memory-layout oracle (§19.1, §5.4). A fault leaves the
+                // message queued.
+                copy_out(space, physmap, VirtAddr::new(ptr), payload)
+                    .map(|()| payload.len())
+                    .map_err(copy_fault_errno)
+            })
+        });
+
+        match copied {
+            // No registered address space — fail closed with the same
+            // `BadAddress` a fault produces, never leaking the case.
+            None => Err(Errno::BadAddress),
+            // Bound but empty: a live endpoint with nothing to deliver
+            // is retryable, not an error in the endpoint itself.
+            Some(None) => Err(Errno::WouldBlock),
+            // Delivered: return the number of payload bytes copied.
+            Some(Some(Ok(n))) => Ok(n as u64),
+            // Copy-out fault or undersized buffer: the message stays
+            // queued (`recv_with` did not commit).
+            Some(Some(Err(err))) => Err(err),
         }
-        self.audit_feature_unavailable(caller, "user_memory_copyin");
-        Err(Errno::NotImplemented)
     }
 
     fn cap_query(&self, caller: &CallerContext<'_>, cap: CapabilityId) -> SyscallResult {
@@ -1164,10 +1207,172 @@ mod tests {
         assert!(sink.event_ids().is_empty());
     }
 
-    /// `ipc_recv` from a *bound* endpoint resolves the port and defers
-    /// the user-memory copy-out exactly like the send side.
+    /// Enqueue `payload` into the port bound at `endpoint`. Used to
+    /// stage a message the `ipc_recv` copy-out tests then drain.
+    fn enqueue(registry: &RwLock<PortRegistry>, endpoint: u64, payload: &[u8], sink: &TestSink) {
+        let sender = make_caps_record(0xB1, &[], sink);
+        registry
+            .read()
+            .lookup(EndpointId(endpoint))
+            .expect("endpoint is bound")
+            .send(&sender, payload, sink)
+            .expect("unrestricted port accepts the send");
+    }
+
+    /// `ipc_recv` from a *bound* endpoint copies the queued message out
+    /// into the caller's buffer and commits the dequeue — the
+    /// increment-D.2 wiring of the user-memory copy-out path. The
+    /// handler returns the payload length, the mailbox is drained, and
+    /// the bytes land at the caller's pointer.
     #[test]
-    fn ipc_recv_from_bound_endpoint_defers_copy_out() {
+    fn ipc_recv_from_bound_endpoint_copies_payload_out_and_commits() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A writable + readable user page so `copy_out` can deliver and
+        // the test can read the bytes back through `copy_in`.
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(3), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        enqueue(&ipc, 1, &payload, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Ok(payload.len() as u64));
+        // The dequeue committed: the mailbox is now empty.
+        assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
+        // The bytes landed at the caller's pointer.
+        let read_back = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 4];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(read_back, payload);
+    }
+
+    /// `ipc_recv` from a bound but *empty* endpoint is `WouldBlock` — a
+    /// live endpoint with nothing to deliver is retryable, distinct from
+    /// the `NotFound` an unbound endpoint returns.
+    #[test]
+    fn ipc_recv_from_empty_bound_endpoint_is_would_block() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(3), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::WouldBlock));
+    }
+
+    /// `ipc_recv` into a buffer smaller than the queued message fails
+    /// closed with `BufferTooSmall` and — because the dequeue is only
+    /// committed on a successful copy — leaves the message queued for a
+    /// retry with a larger buffer.
+    #[test]
+    fn ipc_recv_into_undersized_buffer_is_buffer_too_small_and_retains() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(3), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+
+        // A 2-byte buffer cannot hold the 4-byte message.
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 2), Err(Errno::BufferTooSmall));
+        // Nothing was dropped: the message is still queued.
+        assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
+    }
+
+    /// `ipc_recv` with a faulting user pointer fails closed with
+    /// `BadAddress` and leaves the message queued (the copy-out did not
+    /// commit), so a transient fault never loses a delivered message.
+    #[test]
+    fn ipc_recv_with_faulting_pointer_is_bad_address_and_retains() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(3), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+
+        register_port(&ipc, 1, sink);
+        enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+
+        // Page 2 (`0x2000`) is unmapped in the caller's space.
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 64), Err(Errno::BadAddress));
+        assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
+    }
+
+    /// `ipc_recv` from a caller with no registered address space fails
+    /// closed with `BadAddress` — the same code a fault produces — and
+    /// is resolved before the mailbox is even peeked, so the message is
+    /// left untouched.
+    #[test]
+    fn ipc_recv_without_registered_aspace_is_bad_address_and_retains() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -1184,13 +1389,10 @@ mod tests {
         };
 
         register_port(&ipc, 1, sink);
+        enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
         let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
-        sink.clear();
-        assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotImplemented));
-        assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
-        );
+        assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::BadAddress));
+        assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
 
     /// `cap_delegate` defers user-memory copy-in.

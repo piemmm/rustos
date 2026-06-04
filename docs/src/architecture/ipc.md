@@ -51,6 +51,19 @@ fast path:
 Every rejection emits exactly one audit event before returning.
 `Port::destroy` drains in-flight messages and is idempotent.
 
+The receive side offers two shapes. `Port::recv` pops and returns the
+oldest message unconditionally. `Port::recv_with(f)` is a **peek/commit**
+variant for receivers that must move the payload across a fallible
+boundary before they can accept it: it holds the mailbox lock while it
+runs `f` against the head message and dequeues it **only** when `f`
+returns `Ok`, so a failure — for example a faulting `copy_to_user` when
+the kernel delivers the payload into the receiver's address space, or a
+receive buffer too small to hold it — leaves the message at the head of
+the mailbox to be re-delivered rather than dropping it on the floor
+(`AGENTS.md` §5.4, fail closed). Like `recv` it performs no capability
+check; the receiver's authority was fixed at bind time. The `ipc_recv`
+syscall is built on this primitive (see the syscall page).
+
 ## Named-port registry
 
 A `Port` on its own is anonymous: `Port::create` proves bind authority
@@ -91,8 +104,12 @@ copies the payload in through the kernel's `copy_from_user` boundary
 ([`rustos_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess))
 and hands it to `Port::send`, returning `Errno::BadAddress` (the RustOS
 `EFAULT`) for a faulting buffer or a caller with no registered address
-space. A bound `ipc_recv` still defers on the user-memory copy-*out*
-path (which needs a peek/commit on `Port`). See
+space. A bound `ipc_recv` is now wired too: it copies the head message
+out through the kernel's `copy_to_user` boundary
+([`rustos_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess))
+using `Port::recv_with` (below), returning `Errno::WouldBlock` (the
+RustOS `EAGAIN`) when the bound mailbox is momentarily empty and
+`Errno::BadAddress` for a faulting buffer. See
 [the syscall handler-wiring table](./syscalls.md#handler-wiring-stage-27-follow-up-f3).
 
 ### Well-known names

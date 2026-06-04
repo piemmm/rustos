@@ -139,7 +139,7 @@ re-validates arguments — the dispatcher does that first.
 | `yield_now`     | `Scheduler::yield_current(caller.task_id)`                                                                    | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
-| `ipc_recv`      | `PortRegistry::lookup(endpoint)`; payload copy-out deferred (increment D.2)                                   | Unbound endpoint → `NotFound` (no extra audit). Bound endpoint → `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
+| `ipc_recv`      | `PortRegistry::lookup(endpoint)`; `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
@@ -192,10 +192,23 @@ RustOS `EFAULT`; the kernel returns that one code for every
 faulting-pointer reason so it cannot be used as a memory-layout oracle
 (`AGENTS.md` §19.1). A failed send enqueues nothing.
 
-`ipc_recv` still defers: delivering a drained `Port` message needs the
-copy-*out* path with a peek/commit on `Port` so a failed copy does not
-drop the message (increment D.2). For a *bound* endpoint it returns
-`NotImplemented` plus the deferral audit below.
+`ipc_recv` is now **fully wired** (increment D.2 of the staged
+user-memory copy path, `PLAN.md` Stage 7). For a bound endpoint it
+delivers the head `Port` message through a **peek/commit**:
+`Port::recv_with` holds the mailbox lock while the handler copies the
+payload into the caller's buffer over the validated `copy_to_user`
+boundary
+([`rustos_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess),
+reached via `with_caller_aspace`) and dequeues the message **only** when
+that copy succeeds, so a faulting pointer or an undersized buffer leaves
+the message queued for a retry rather than dropping it (`AGENTS.md`
+§5.4, fail closed). A bound but momentarily empty endpoint returns
+`WouldBlock` (the RustOS `EAGAIN`) — retryable and distinct from the
+`NotFound` an unbound endpoint returns; a buffer smaller than the
+message returns `BufferTooSmall`; a faulting buffer, or a caller with no
+registered address space, fails closed with the same `BadAddress`
+`ipc_send` uses, never an oracle (`AGENTS.md` §19.1). On success it
+returns the number of payload bytes copied.
 
 The deferred-feature branches return a stable `Errno` and emit exactly
 one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
@@ -203,13 +216,12 @@ one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
 "handler rejected because the call failed" from "handler rejected
 because the backing subsystem is intentionally inert" (`AGENTS.md`
 §15.1 — announce the deferral, never stub). That record is now emitted
-by `ipc_recv` (on its bound-endpoint copy-out branch) and by
-`cap_delegate` / `random_get`; `ipc_send` no longer emits it. The
-dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is *also*
-emitted for syscalls whose `SyscallSpec::audit == true` (`ipc_send`,
-`cap_delegate`); `ipc_recv` is unaudited so on its copy-out deferral
-only the `SYSCALL_FEATURE_UNAVAILABLE` record reaches the sink, and on
-an unbound endpoint it emits nothing of its own.
+by `cap_delegate` / `random_get`; `ipc_send` and `ipc_recv` no longer
+emit it. The dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is
+*also* emitted for syscalls whose `SyscallSpec::audit == true`
+(`ipc_send`, `cap_delegate`); `ipc_recv` is unaudited, so on a failed
+receive only the dispatcher's pipeline records it, and on an unbound or
+empty endpoint it emits nothing of its own.
 
 `exit` additionally calls `IrqTable::release_for(caller.task_id)`
 **before** the capability-record / scheduler eviction so no audited
@@ -223,9 +235,10 @@ pieces required to lift these deferrals. The named-port registry that
 `ipc_send` / `ipc_recv` resolve an `EndpointId` through
 (`kernel/ipc::PortRegistry`, see [the IPC page](./ipc.md#named-port-registry))
 is composed into `KernelState` and borrowed by the handlers, so
-endpoint resolution is live, and `ipc_send`'s copy-in is wired; what
-remains for IPC is `ipc_recv`'s copy-out path (which needs a peek/commit
-on `Port`).
+endpoint resolution is live, and both `ipc_send`'s copy-in and
+`ipc_recv`'s peek/commit copy-out are wired; what remains for IPC is
+publishing the desktop's input ports under their well-known `PortName`s
+so a userland `MessagePort` resolves to a live `ipc_recv` (increment E).
 
 The first half of that copy path is now wired (increment C of the
 staged "User-memory copy path & per-task address spaces" effort,
@@ -242,9 +255,10 @@ bridge lives in `kernel/core`, so the decoupled dispatcher
 (`kernel/syscall`) never gains a `kernel/mem` dependency (`AGENTS.md`
 §17.4). Increment D wires `ipc_send` / `ipc_recv` / `cap_delegate` /
 `random_get` through this accessor and retires their
-`user_memory_copyin` deferral audits; D.1 has landed `ipc_send` (a
-faulting copy maps to `BadAddress`, the RustOS `EFAULT`), leaving
-`ipc_recv` (D.2), `cap_delegate` (D.3), and `random_get` (D.4).
+`user_memory_copyin` deferral audits; D.1 landed `ipc_send` and D.2
+landed `ipc_recv` (both map a faulting copy to `BadAddress`, the RustOS
+`EFAULT`; an empty mailbox is `WouldBlock`), leaving `cap_delegate`
+(D.3) and `random_get` (D.4).
 
 ## Dispatcher contract
 

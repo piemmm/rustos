@@ -351,6 +351,35 @@ impl Port {
         self.mailbox.lock().pop_front()
     }
 
+    /// Deliver the oldest message to `f`, dequeuing it only if `f`
+    /// succeeds (peek-then-commit).
+    ///
+    /// The message stays at the head of the mailbox while `f` runs and
+    /// is removed only when `f` returns `Ok`. If `f` returns `Err` —
+    /// for example the receiver's `copy_to_user` faulted, or the
+    /// destination buffer was too small — the message is left queued so
+    /// a later [`Self::recv`] / `recv_with` re-delivers it rather than
+    /// dropping it on the floor (`AGENTS.md` §5.4, fail closed). The
+    /// mailbox lock is held for the duration of `f`, so the peek and the
+    /// commit are atomic against a concurrent `recv`: two receivers can
+    /// never observe the same head message.
+    ///
+    /// Returns `None` when the mailbox is empty (and `f` is not called),
+    /// otherwise `Some` of whatever `f` returned. Like [`Self::recv`] it
+    /// performs no capability check — the receiver's authority is fixed
+    /// at bind time (`AGENTS.md` §5.2).
+    pub fn recv_with<R, E>(
+        &self,
+        f: impl FnOnce(&Message) -> Result<R, E>,
+    ) -> Option<Result<R, E>> {
+        let mut q = self.mailbox.lock();
+        let outcome = f(q.front()?);
+        if outcome.is_ok() {
+            q.pop_front();
+        }
+        Some(outcome)
+    }
+
     /// Number of messages currently buffered in the mailbox.
     ///
     /// Snapshot only — the value may change immediately under
@@ -611,5 +640,50 @@ mod tests {
         let sender = task_with(99, &[]); // no caps at all
         port.send(&sender, b"ok", &sink).expect("anyone can send");
         let _ = port.recv().expect("delivered");
+    }
+
+    #[test]
+    fn recv_with_on_empty_mailbox_does_not_call_the_closure() {
+        let (_sink, port) = open_port();
+        let mut called = false;
+        let outcome = port.recv_with(|_msg| -> Result<(), ()> {
+            called = true;
+            Ok(())
+        });
+        assert!(outcome.is_none(), "empty mailbox yields None");
+        assert!(!called, "the closure runs only when a message is present");
+    }
+
+    #[test]
+    fn recv_with_commits_the_message_when_the_closure_succeeds() {
+        let (sink, port) = open_port();
+        let sender = task_with(7, &[CapabilityId::NET_RAW]);
+        port.send(&sender, b"payload", &sink).expect("delivered");
+
+        let seen = port
+            .recv_with(|msg| -> Result<Vec<u8>, ()> { Ok(msg.payload.clone()) })
+            .expect("a message was present")
+            .expect("the closure succeeded");
+        assert_eq!(seen, b"payload");
+        // A successful closure commits the dequeue.
+        assert!(port.is_empty());
+    }
+
+    #[test]
+    fn recv_with_retains_the_message_when_the_closure_fails() {
+        let (sink, port) = open_port();
+        let sender = task_with(7, &[CapabilityId::NET_RAW]);
+        port.send(&sender, b"first", &sink).expect("delivered");
+        port.send(&sender, b"second", &sink).expect("delivered");
+
+        // A failing closure (e.g. a faulting `copy_to_user`) must leave
+        // the head message queued so it is not dropped on the floor.
+        let outcome = port.recv_with(|_msg| -> Result<(), Errno> { Err(Errno::BadAddress) });
+        assert_eq!(outcome, Some(Err(Errno::BadAddress)));
+        assert_eq!(port.len(), 2, "a failed receive drops nothing");
+
+        // The very next receive still sees the original head message.
+        let head = port.recv().expect("head still present");
+        assert_eq!(head.payload, b"first");
     }
 }

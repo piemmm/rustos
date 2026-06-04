@@ -115,6 +115,17 @@ pub enum Errno {
     /// closed; §19.1). It is also the fail-closed result when the caller
     /// has no registered address space at all (e.g. a kernel task).
     BadAddress = 18,
+    /// A non-blocking operation has nothing to return right now and
+    /// would have to block to make progress.
+    ///
+    /// The RustOS equivalent of POSIX `EAGAIN` / `EWOULDBLOCK`. Emitted
+    /// by the non-blocking `ipc_recv` syscall when the addressed port's
+    /// mailbox is momentarily empty: the endpoint is live and bound, the
+    /// caller may simply retry. It is deliberately distinct from
+    /// [`NotFound`](Self::NotFound) (the endpoint does not exist) so a
+    /// receiver can tell "no message yet" from "no such port" without
+    /// the distinction leaking any other state.
+    WouldBlock = 19,
 }
 
 impl Errno {
@@ -146,6 +157,7 @@ impl fmt::Display for Errno {
             Self::EntropyNotReady => "entropy not ready",
             Self::AlreadyExists => "object already exists",
             Self::BadAddress => "bad user-space address",
+            Self::WouldBlock => "operation would block",
         };
         f.write_str(message)
     }
@@ -176,6 +188,7 @@ mod tests {
         assert_eq!(Errno::EntropyNotReady.as_i32(), 16);
         assert_eq!(Errno::AlreadyExists.as_i32(), 17);
         assert_eq!(Errno::BadAddress.as_i32(), 18);
+        assert_eq!(Errno::WouldBlock.as_i32(), 19);
     }
 
     #[test]

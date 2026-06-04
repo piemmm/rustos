@@ -5864,11 +5864,34 @@ subsystem (§2.1). Each session lands one increment and updates
     — 124 `rustos-kernel-core` tests pass; `lib/abi` gains the frozen-
     discriminant + `Display` coverage for `BadAddress` (253 pass). Docs
     `docs/src/architecture/{syscalls,ipc}.md` + module rustdoc. No `unsafe`, no
+    `unwrap`/`expect`/`panic!` in production paths.
+  - **D.2 — Wire `ipc_recv` through the copy-out path. DONE (increment).**
+    `ipc_recv` now `lookup`s the `Port` against the live `PortRegistry` and
+    delivers its head message through a **peek/commit**: the new
+    `Port::recv_with(f)` holds the mailbox lock while the handler copies the
+    payload into the caller's buffer through `copy_to_user`
+    (`with_caller_aspace` → `rustos_kernel_mem::copy_out`) and dequeues the
+    message **only** when the copy succeeds, so a faulting pointer or an
+    undersized buffer leaves the message queued rather than dropping it
+    (§5.4, fail closed). A bound but momentarily empty endpoint returns the new
+    **`Errno::WouldBlock`** (the RustOS `EAGAIN`, `lib/abi` discriminant 19,
+    append-only — `abi-v1` is not frozen), distinct from the `NotFound` an
+    unbound endpoint returns; a buffer too small is `BufferTooSmall`; a faulting
+    buffer or a caller with no registered address space collapses onto
+    `BadAddress` via the shared `copy_fault_errno` (§19.1). On success it
+    returns the payload-byte count; the `feature = user_memory_copyin` deferral
+    audit is retired on the receive side. 3 new `rustos-kernel-ipc` `recv_with`
+    tests (empty → no closure call, commit on `Ok`, retain on `Err`) and 5
+    new/reworked `rustos-kernel-core` `syscalls` tests (copies out + commits;
+    empty → `WouldBlock`; undersized → `BufferTooSmall` retained; faulting →
+    `BadAddress` retained; no aspace → `BadAddress` retained) — 128
+    `rustos-kernel-core` tests pass; `lib/abi` gains frozen-discriminant +
+    `Display` coverage for `WouldBlock`. Docs
+    `docs/src/architecture/{syscalls,ipc}.md` + module rustdoc. No `unsafe`, no
     `unwrap`/`expect`/`panic!` in production paths. **Still open in D:**
-    **D.2** `ipc_recv` — needs a peek/commit on `Port` so a failed `copy_out`
-    does not drop a drained message; **D.3** `cap_delegate` — copy the
-    capability set in + the `CapTable` delegate path; **D.4** `random_get` —
-    needs the RNG `OutputReserve` composed into `KernelState`.
+    **D.3** `cap_delegate` — copy the capability set in + the `CapTable`
+    delegate path; **D.4** `random_get` — needs the RNG `OutputReserve`
+    composed into `KernelState`.
 - **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
   ports.** The page-fault recovery path each arch port needs so a faulting user
   access returns an error instead of trapping (the Stage-6 item
