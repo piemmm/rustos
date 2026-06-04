@@ -28,6 +28,7 @@
 #include "rustos_ipc.h"
 #include "rustos_stdinfo.h"
 #include "rustos_manifest.h"
+#include "rustos_input.h"
 #include "rustos_syscall.h"
 
 #endif /* ROS_ABI_H */

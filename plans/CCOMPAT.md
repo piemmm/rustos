@@ -133,9 +133,18 @@ The `manifest` module has now landed too: `rustos_manifest.h` declares the
 `#[repr(C)]` `ros_manifest_header_t` struct (mirroring `ManifestHeader`) plus
 the `ROS_MANIFEST_MAGIC` / `ROS_MANIFEST_MAX_CAPABILITIES` /
 `ROS_SYSCALL_TABLE_HASH_LEN` / `ROS_MANIFEST_HEADER_WIRE_LEN` constants, every
-value read from `lib/abi` and pinned by an in-module test.
+value read from `lib/abi` and pinned by an in-module test. The `input` module
+has now landed too: `rustos_input.h` declares the `PointerInput` / `KeyInput`
+record magics (`ROS_POINTER_INPUT_MAGIC` / `ROS_KEY_INPUT_MAGIC`) and packed
+wire sizes (`ROS_POINTER_INPUT_WIRE_LEN` / `ROS_KEY_INPUT_WIRE_LEN`), the
+`ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*`
+field codes, and the `ROS_POINTER_BUTTON_*` (`PointerButtonCode`) /
+`ROS_KEY_*` (`NamedKeyCode`) `#[repr(u16)]` discriminants — every value read
+from `lib/abi` (the records are hand-serialised byte images, so the header
+exports their field codes and wire sizes rather than a C struct mirror) and
+pinned by an in-module test.
 **Remaining for CC1:** the rest of the modules — `appinfo`, `rxe`,
-`input`, `sysinfo`, the `capability` query POD types, and `driver/*` POD
+`sysinfo`, the `capability` query POD types, and `driver/*` POD
 types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
 the header" completeness test once the surface is covered.
 

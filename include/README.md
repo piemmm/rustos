@@ -25,6 +25,11 @@ pull in exactly what they need, plus an umbrella that includes them all:
 - `rustos/rustos_manifest.h` — the signed `rxe` manifest header
   (`ros_manifest_header_t`) and its constants (`ROS_MANIFEST_*`,
   `ROS_SYSCALL_TABLE_HASH_LEN`).
+- `rustos/rustos_input.h` — the desktop pointer and keyboard input records:
+  their magics and wire sizes, the record-kind / button / key-class / modifier
+  field codes (`ROS_INPUT_KIND_*`, `ROS_INPUT_BUTTON_NONE`, `ROS_KEY_CLASS_*`,
+  `ROS_MOD_*`), and the pointer-button and named-key discriminants
+  (`ROS_POINTER_BUTTON_*`, `ROS_KEY_*`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

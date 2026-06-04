@@ -42,12 +42,15 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, ManifestHeader, PortName,
-    RandomFlags, Severity, StdInfoKind, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RANDOM_RESERVE_DEFAULT_BYTES, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
+    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, KeyInput, ManifestHeader,
+    NamedKeyCode, PointerButtonCode, PointerInput, PortName, RandomFlags, Severity, StdInfoKind,
+    Time64, ABI_VERSION_V1, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, NANOS_PER_SEC,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -471,6 +474,121 @@ fn generate_manifest() -> String {
     out
 }
 
+/// `rustos_input.h` — the desktop input event ABI (`AGENTS.md` §9, §10).
+///
+/// Declares the pointer ([`PointerInput`]) and keyboard ([`KeyInput`]) record
+/// magics and packed wire sizes, the `kind`, `button`, `key_class`, and
+/// modifier field codes, and the [`PointerButtonCode`] / [`NamedKeyCode`]
+/// `#[repr(u16)]` discriminant sets. Both records are hand-serialised
+/// little-endian byte images (not a `#[repr(C)]` struct), so the header
+/// exports their field codes and wire sizes rather than a C struct mirror; a
+/// [`Errno`] decoder on the Rust side validates the bytes. Every value is read
+/// from `lib/abi`, never re-typed; only the C spelling lives here.
+fn generate_input() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Desktop pointer and keyboard input ABI (AGENTS.md sec.9, sec.10).");
+    out.push_str("#ifndef ROS_INPUT_H\n#define ROS_INPUT_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    // Record magics ("PIN1" / "KIN1") and their packed little-endian wire sizes.
+    let _ = writeln!(out, "#define ROS_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u");
+    let _ = writeln!(out, "#define ROS_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u");
+    let pwl = PointerInput::WIRE_LEN;
+    let kwl = KeyInput::WIRE_LEN;
+    let _ = writeln!(out, "#define ROS_POINTER_INPUT_WIRE_LEN {pwl}u");
+    let _ = writeln!(out, "#define ROS_KEY_INPUT_WIRE_LEN {kwl}u");
+    out.push('\n');
+
+    // Each uint16_t field code, grouped by record field; `hex` selects the C
+    // spelling (bitmask fields read better in hex). Only the names live here.
+    let mut emit = |comment: &str, defs: &[(&str, u16)], hex: bool| {
+        let _ = writeln!(out, "/* {comment} */");
+        for &(name, value) in defs {
+            if hex {
+                let _ = writeln!(out, "#define {name} ((uint16_t){value:#x}u)");
+            } else {
+                let _ = writeln!(out, "#define {name} ((uint16_t){value}u)");
+            }
+        }
+        out.push('\n');
+    };
+    emit(
+        "Record `kind` codes: pointer moves/clicks then key down/up (uint16_t).",
+        &[
+            ("ROS_INPUT_KIND_MOVED", KIND_MOVED),
+            ("ROS_INPUT_KIND_PRESSED", KIND_PRESSED),
+            ("ROS_INPUT_KIND_RELEASED", KIND_RELEASED),
+            ("ROS_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
+            ("ROS_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
+        ],
+        false,
+    );
+    emit(
+        "`button` (motion=none, else a button) and keyboard `key_class` codes (uint16_t).",
+        &[
+            ("ROS_INPUT_BUTTON_NONE", BUTTON_NONE),
+            ("ROS_POINTER_BUTTON_PRIMARY", PointerButtonCode::Primary.code()),
+            ("ROS_POINTER_BUTTON_SECONDARY", PointerButtonCode::Secondary.code()),
+            ("ROS_POINTER_BUTTON_MIDDLE", PointerButtonCode::Middle.code()),
+            ("ROS_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
+            ("ROS_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
+        ],
+        false,
+    );
+    emit(
+        "Modifier bits held while a key event was produced (uint16_t).",
+        &[
+            ("ROS_MOD_SHIFT", MOD_SHIFT),
+            ("ROS_MOD_CTRL", MOD_CTRL),
+            ("ROS_MOD_ALT", MOD_ALT),
+            ("ROS_MOD_META", MOD_META),
+            ("ROS_MOD_MASK", MOD_MASK),
+        ],
+        true,
+    );
+    emit(
+        "Named non-character key codes carried in a record's `named` field (uint16_t).",
+        &NAMED_KEY_CODES,
+        false,
+    );
+
+    out.push_str("#endif /* ROS_INPUT_H */\n");
+    out
+}
+
+/// The C spelling of each [`NamedKeyCode`] variant paired with its frozen wire
+/// code, read from `lib/abi` via [`NamedKeyCode::code`]. Only the C *name*
+/// lives here (Rust offers no variant-name reflection); the numeric value is
+/// the source of truth and is pinned by the in-module test.
+const NAMED_KEY_CODES: [(&str, u16); 26] = [
+    ("ROS_KEY_ENTER", NamedKeyCode::Enter.code()),
+    ("ROS_KEY_ESCAPE", NamedKeyCode::Escape.code()),
+    ("ROS_KEY_BACKSPACE", NamedKeyCode::Backspace.code()),
+    ("ROS_KEY_TAB", NamedKeyCode::Tab.code()),
+    ("ROS_KEY_DELETE", NamedKeyCode::Delete.code()),
+    ("ROS_KEY_INSERT", NamedKeyCode::Insert.code()),
+    ("ROS_KEY_HOME", NamedKeyCode::Home.code()),
+    ("ROS_KEY_END", NamedKeyCode::End.code()),
+    ("ROS_KEY_PAGE_UP", NamedKeyCode::PageUp.code()),
+    ("ROS_KEY_PAGE_DOWN", NamedKeyCode::PageDown.code()),
+    ("ROS_KEY_LEFT", NamedKeyCode::Left.code()),
+    ("ROS_KEY_RIGHT", NamedKeyCode::Right.code()),
+    ("ROS_KEY_UP", NamedKeyCode::Up.code()),
+    ("ROS_KEY_DOWN", NamedKeyCode::Down.code()),
+    ("ROS_KEY_F1", NamedKeyCode::F1.code()),
+    ("ROS_KEY_F2", NamedKeyCode::F2.code()),
+    ("ROS_KEY_F3", NamedKeyCode::F3.code()),
+    ("ROS_KEY_F4", NamedKeyCode::F4.code()),
+    ("ROS_KEY_F5", NamedKeyCode::F5.code()),
+    ("ROS_KEY_F6", NamedKeyCode::F6.code()),
+    ("ROS_KEY_F7", NamedKeyCode::F7.code()),
+    ("ROS_KEY_F8", NamedKeyCode::F8.code()),
+    ("ROS_KEY_F9", NamedKeyCode::F9.code()),
+    ("ROS_KEY_F10", NamedKeyCode::F10.code()),
+    ("ROS_KEY_F11", NamedKeyCode::F11.code()),
+    ("ROS_KEY_F12", NamedKeyCode::F12.code()),
+];
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -521,6 +639,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_ipc.h\"\n");
     out.push_str("#include \"rustos_stdinfo.h\"\n");
     out.push_str("#include \"rustos_manifest.h\"\n");
+    out.push_str("#include \"rustos_input.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -561,6 +680,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_manifest.h",
             body: generate_manifest(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_input.h",
+            body: generate_input(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -672,6 +795,7 @@ mod tests {
             "rustos_ipc.h",
             "rustos_stdinfo.h",
             "rustos_manifest.h",
+            "rustos_input.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -926,6 +1050,60 @@ mod tests {
             4,
             "ManifestHeader repr(C) align"
         );
+    }
+
+    #[test]
+    fn input_header_pins_constants_and_discriminants() {
+        use rustos_abi::{
+            KeyInput, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE, KEY_CLASS_CHAR,
+            KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED,
+            KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
+            POINTER_INPUT_MAGIC,
+        };
+        let h = body("rustos_input.h");
+        assert!(h.contains("#ifndef ROS_INPUT_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let mut expected = vec![
+            format!("#define ROS_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u"),
+            format!("#define ROS_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u"),
+            format!("#define ROS_POINTER_INPUT_WIRE_LEN {}u", PointerInput::WIRE_LEN),
+            format!("#define ROS_KEY_INPUT_WIRE_LEN {}u", KeyInput::WIRE_LEN),
+        ];
+        for (name, value) in [
+            ("ROS_INPUT_KIND_MOVED", KIND_MOVED),
+            ("ROS_INPUT_KIND_PRESSED", KIND_PRESSED),
+            ("ROS_INPUT_KIND_RELEASED", KIND_RELEASED),
+            ("ROS_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
+            ("ROS_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
+            ("ROS_INPUT_BUTTON_NONE", BUTTON_NONE),
+            ("ROS_POINTER_BUTTON_PRIMARY", PointerButtonCode::Primary.code()),
+            ("ROS_POINTER_BUTTON_SECONDARY", PointerButtonCode::Secondary.code()),
+            ("ROS_POINTER_BUTTON_MIDDLE", PointerButtonCode::Middle.code()),
+            ("ROS_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
+            ("ROS_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
+        ] {
+            expected.push(format!("#define {name} ((uint16_t){value}u)"));
+        }
+        for (name, bits) in [
+            ("ROS_MOD_SHIFT", MOD_SHIFT),
+            ("ROS_MOD_CTRL", MOD_CTRL),
+            ("ROS_MOD_ALT", MOD_ALT),
+            ("ROS_MOD_META", MOD_META),
+            ("ROS_MOD_MASK", MOD_MASK),
+        ] {
+            expected.push(format!("#define {name} ((uint16_t){bits:#x}u)"));
+        }
+        for (name, code) in NAMED_KEY_CODES {
+            expected.push(format!("#define {name} ((uint16_t){code}u)"));
+        }
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // The named-key discriminants are frozen at their lib/abi values.
+        assert_eq!(NamedKeyCode::Enter.code(), 1, "Enter wire code frozen");
+        assert_eq!(NamedKeyCode::F12.code(), 26, "F12 wire code frozen");
     }
 
     #[test]
