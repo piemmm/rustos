@@ -151,8 +151,16 @@ pinned by an in-module test. The `appinfo` module has now landed too:
 `ROS_SYSTEM_LIBRARIES_DIR`, the fixed `ROS_BUNDLE_ENTRY_*` top-level entry
 names (read from `BundleEntry::as_str`), and the `ROS_LIBRARY_SCOPE_*`
 discriminants — every value read from `lib/abi` and pinned by an in-module
-test.
-**Remaining for CC1:** the rest of the modules — `rxe`,
+test. The `rxe` module has now landed too: `rustos_rxe.h` declares the
+`#[repr(C)]` `ros_load_header_t` struct (mirroring `LoadHeader`) plus the
+`ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` /
+`ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_READ` / `ROS_SEG_FLAG_WRITE` /
+`ROS_SEG_FLAG_EXEC` / `ROS_LOAD_HEADER_WIRE_LEN` / `ROS_SEGMENT_WIRE_LEN`
+constants and the `ROS_RXE_PERMISSION_*` (`RxePermission`) `#[repr(u8)]`
+discriminants — a `Segment` record is hand-serialised, so the header exports
+its wire size and `ROS_SEG_FLAG_*` field codes rather than a C struct mirror —
+every value read from `lib/abi` and pinned by an in-module test.
+**Remaining for CC1:** the rest of the modules —
 `sysinfo`, the `capability` query POD types, and `driver/*` POD
 types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
 the header" completeness test once the surface is covered.

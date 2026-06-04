@@ -22,13 +22,14 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_manifest.h` | `ros_manifest_header_t` and the `ROS_MANIFEST_*` / `ROS_SYSCALL_TABLE_HASH_LEN` constants |
 | `include/rustos/rustos_input.h` | the pointer/keyboard record magics and wire sizes, the `ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants |
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
+| `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
 Growing the set to cover the rest of `lib/abi` (`capability` queries,
-`driver/*`, `rxe`, `sysinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
+`driver/*`, `sysinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written
 

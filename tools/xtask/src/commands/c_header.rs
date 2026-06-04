@@ -43,15 +43,17 @@ use std::path::Path;
 
 use rustos_abi::{
     AbiType, AppInfoHeader, BundleEntry, CapabilityId, Duration64, Errno, IpcMessageHeader,
-    KeyInput, LibraryScope, ManifestHeader, NamedKeyCode, PointerButtonCode, PointerInput,
-    PortName, RandomFlags, Severity, StdInfoKind, Time64, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
-    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
+    KeyInput, LibraryScope, LoadHeader, ManifestHeader, NamedKeyCode, PointerButtonCode,
+    PointerInput, PortName, RandomFlags, RxePermission, Segment, Severity, StdInfoKind, Time64,
+    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
+    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
     MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, NANOS_PER_SEC,
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
     SYSCALL_TABLE_HASH_LEN, SYSTEM_LIBRARIES_DIR,
 };
 
@@ -711,6 +713,95 @@ fn generate_appinfo() -> String {
     out
 }
 
+/// `rustos_rxe.h` — the `rxe` load-image table and load-time hardening
+/// policy (`AGENTS.md` §9, §19.2).
+///
+/// `ros_load_header_t` mirrors the `#[repr(C)]` layout of [`LoadHeader`] (the
+/// fixed image prefix; naturally aligned, so the struct size equals the wire
+/// size). A [`Segment`] record is hand-serialised, so the header exports its
+/// packed wire size (`ROS_SEGMENT_WIRE_LEN`) and the `ROS_SEG_FLAG_*` field
+/// codes rather than a C struct mirror. Alongside them the header declares the
+/// `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` /
+/// `ROS_LOAD_FLAG_PIE` constants and the [`RxePermission`] discriminants.
+/// Every numeric value and discriminant is read from `lib/abi`, never
+/// re-typed; only the C spelling lives here.
+fn generate_rxe() -> String {
+    use std::fmt::Write as _;
+    let mut out =
+        banner("rxe load-image table and load-time hardening (AGENTS.md sec.9, sec.19.2).");
+    out.push_str("#ifndef ROS_RXE_H\n#define ROS_RXE_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Magic word identifying an abi-v1 load header (\"RXEL\" little-endian). */\n");
+    let _ = writeln!(out, "#define ROS_LOAD_MAGIC {LOAD_MAGIC:#x}u");
+    out.push_str("/* Page size the load image is expressed in, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RXE_PAGE_SIZE ((uint64_t){RXE_PAGE_SIZE}ull)"
+    );
+    out.push_str("/* Maximum number of segment records a single load image may carry. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOAD_MAX_SEGMENTS ((uintptr_t){LOAD_MAX_SEGMENTS}u)"
+    );
+    out.push('\n');
+
+    out.push_str("/* Load-header flag bits (uint32_t). Every undefined bit must be zero. */\n");
+    out.push_str("/* The image is position-independent (PIE); required by sec.19.2. */\n");
+    let _ = writeln!(out, "#define ROS_LOAD_FLAG_PIE {LOAD_FLAG_PIE:#x}u");
+    out.push('\n');
+
+    out.push_str("/* Segment flag bits (uint32_t) in a packed segment record. */\n");
+    let _ = writeln!(out, "#define ROS_SEG_FLAG_READ {SEG_FLAG_READ:#x}u");
+    let _ = writeln!(out, "#define ROS_SEG_FLAG_WRITE {SEG_FLAG_WRITE:#x}u");
+    let _ = writeln!(out, "#define ROS_SEG_FLAG_EXEC {SEG_FLAG_EXEC:#x}u");
+    out.push('\n');
+
+    out.push_str("/* Packed little-endian wire size of a load header, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOAD_HEADER_WIRE_LEN {}u",
+        LoadHeader::WIRE_LEN
+    );
+    out.push_str("/* Packed little-endian wire size of one segment record, in bytes. */\n");
+    let _ = writeln!(out, "#define ROS_SEGMENT_WIRE_LEN {}u", Segment::WIRE_LEN);
+    out.push('\n');
+
+    out.push_str("/* W^X-clean permission a segment is mapped with (uint8_t). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RXE_PERMISSION_READ_ONLY ((uint8_t){}u)",
+        RxePermission::ReadOnly as u8
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_RXE_PERMISSION_READ_EXECUTE ((uint8_t){}u)",
+        RxePermission::ReadExecute as u8
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_RXE_PERMISSION_READ_WRITE ((uint8_t){}u)",
+        RxePermission::ReadWrite as u8
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Fixed rxe load-image prefix; encoded little-endian on the wire. */\n\
+         typedef struct ros_load_header {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint16_t segment_count;\n\
+         \x20   uint16_t reserved0;\n\
+         \x20   uint64_t entry;\n",
+    );
+    let _ = writeln!(out, "\x20   uint8_t cfi_tag[{SYSCALL_TABLE_HASH_LEN}];");
+    out.push_str("} ros_load_header_t;\n\n");
+
+    out.push_str("#endif /* ROS_RXE_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -763,6 +854,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_manifest.h\"\n");
     out.push_str("#include \"rustos_input.h\"\n");
     out.push_str("#include \"rustos_appinfo.h\"\n");
+    out.push_str("#include \"rustos_rxe.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -811,6 +903,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_appinfo.h",
             body: generate_appinfo(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_rxe.h",
+            body: generate_rxe(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -1310,6 +1406,68 @@ mod tests {
         // The library-scope discriminants are frozen at their lib/abi values.
         assert_eq!(LibraryScope::Bundle as u8, 0, "Bundle scope discriminant");
         assert_eq!(LibraryScope::System as u8, 1, "System scope discriminant");
+    }
+
+    #[test]
+    fn rxe_header_pins_layout_constants_and_discriminants() {
+        use rustos_abi::{
+            LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS,
+            RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SYSCALL_TABLE_HASH_LEN,
+        };
+        let h = body("rustos_rxe.h");
+        assert!(h.contains("#ifndef ROS_RXE_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("typedef struct ros_load_header {"),
+            "load-header struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let expected = [
+            format!("#define ROS_LOAD_MAGIC {LOAD_MAGIC:#x}u"),
+            format!("#define ROS_RXE_PAGE_SIZE ((uint64_t){RXE_PAGE_SIZE}ull)"),
+            format!("#define ROS_LOAD_MAX_SEGMENTS ((uintptr_t){LOAD_MAX_SEGMENTS}u)"),
+            format!("#define ROS_LOAD_FLAG_PIE {LOAD_FLAG_PIE:#x}u"),
+            format!("#define ROS_SEG_FLAG_READ {SEG_FLAG_READ:#x}u"),
+            format!("#define ROS_SEG_FLAG_WRITE {SEG_FLAG_WRITE:#x}u"),
+            format!("#define ROS_SEG_FLAG_EXEC {SEG_FLAG_EXEC:#x}u"),
+            format!("#define ROS_LOAD_HEADER_WIRE_LEN {}u", LoadHeader::WIRE_LEN),
+            format!("#define ROS_SEGMENT_WIRE_LEN {}u", Segment::WIRE_LEN),
+            format!(
+                "#define ROS_RXE_PERMISSION_READ_ONLY ((uint8_t){}u)",
+                RxePermission::ReadOnly as u8
+            ),
+            format!(
+                "#define ROS_RXE_PERMISSION_READ_EXECUTE ((uint8_t){}u)",
+                RxePermission::ReadExecute as u8
+            ),
+            format!(
+                "#define ROS_RXE_PERMISSION_READ_WRITE ((uint8_t){}u)",
+                RxePermission::ReadWrite as u8
+            ),
+            format!("uint8_t cfi_tag[{SYSCALL_TABLE_HASH_LEN}];"),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // The C struct mirrors the #[repr(C)] Rust layout (no trailing pad).
+        assert_eq!(
+            core::mem::size_of::<LoadHeader>(),
+            LoadHeader::WIRE_LEN,
+            "LoadHeader repr(C) size equals wire len"
+        );
+        assert_eq!(
+            core::mem::align_of::<LoadHeader>(),
+            8,
+            "LoadHeader repr(C) align"
+        );
+        // The permission discriminants are frozen at their lib/abi values.
+        assert_eq!(RxePermission::ReadOnly as u8, 0, "ReadOnly discriminant");
+        assert_eq!(
+            RxePermission::ReadExecute as u8,
+            1,
+            "ReadExecute discriminant"
+        );
+        assert_eq!(RxePermission::ReadWrite as u8, 2, "ReadWrite discriminant");
     }
 
     #[test]

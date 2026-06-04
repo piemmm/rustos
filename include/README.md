@@ -36,6 +36,11 @@ pull in exactly what they need, plus an umbrella that includes them all:
   (`ROS_SYSTEM_LIBRARIES_DIR`), the permitted bundle top-level entry names
   (`ROS_BUNDLE_ENTRY_*`), and the library-scope discriminants
   (`ROS_LIBRARY_SCOPE_*`).
+- `rustos/rustos_rxe.h` — the `rxe` load-image header (`ros_load_header_t`)
+  and its constants and load-time hardening codes (`ROS_LOAD_MAGIC`,
+  `ROS_RXE_PAGE_SIZE`, `ROS_LOAD_MAX_SEGMENTS`, `ROS_LOAD_FLAG_PIE`,
+  `ROS_SEG_FLAG_*`, `*_WIRE_LEN`), and the segment-permission discriminants
+  (`ROS_RXE_PERMISSION_*`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

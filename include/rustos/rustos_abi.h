@@ -30,6 +30,7 @@
 #include "rustos_manifest.h"
 #include "rustos_input.h"
 #include "rustos_appinfo.h"
+#include "rustos_rxe.h"
 #include "rustos_syscall.h"
 
 #endif /* ROS_ABI_H */
