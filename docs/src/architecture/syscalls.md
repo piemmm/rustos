@@ -141,7 +141,7 @@ re-validates arguments — the dispatcher does that first.
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
-| `cap_delegate`  | *deferred* — user-memory copy-in not landed (the `set_ptr` argument cannot be read until Stage 5 / Stage 6)   | Emits `SYSCALL_FEATURE_UNAVAILABLE` (`feature = user_memory_copyin`) + `NotImplemented`. |
+| `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::caps_for_mut(target).delegate(set, audit)` | Faulting `set_ptr` / no registered address space → `BadAddress`. Unknown `target` → `NotFound`. A widening request → `DelegationWiden`. |
 | `cap_revoke`    | `CapTable::caps_for_mut(target).revoke(cap, audit)`                                                           | Unknown `target` → `NotFound`.                                            |
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
@@ -216,12 +216,15 @@ one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
 "handler rejected because the call failed" from "handler rejected
 because the backing subsystem is intentionally inert" (`AGENTS.md`
 §15.1 — announce the deferral, never stub). That record is now emitted
-by `cap_delegate` / `random_get`; `ipc_send` and `ipc_recv` no longer
-emit it. The dispatcher's standard `SYSCALL_HANDLER_REJECTED` record is
-*also* emitted for syscalls whose `SyscallSpec::audit == true`
-(`ipc_send`, `cap_delegate`); `ipc_recv` is unaudited, so on a failed
-receive only the dispatcher's pipeline records it, and on an unbound or
-empty endpoint it emits nothing of its own.
+by `random_get` alone; `ipc_send`, `ipc_recv`, and `cap_delegate` no
+longer emit it. The dispatcher's standard `SYSCALL_HANDLER_REJECTED`
+record is *also* emitted for syscalls whose `SyscallSpec::audit == true`
+(`ipc_send`, `cap_delegate`); `cap_delegate` additionally records the
+delegate decision itself through `CapTable` (`TASK_CAPABILITIES_DELEGATED`
+on success, `TASK_CAPABILITIES_DELEGATE_WIDEN` on a rejected widening).
+`ipc_recv` is unaudited, so on a failed receive only the dispatcher's
+pipeline records it, and on an unbound or empty endpoint it emits
+nothing of its own.
 
 `exit` additionally calls `IrqTable::release_for(caller.task_id)`
 **before** the capability-record / scheduler eviction so no audited
@@ -255,10 +258,14 @@ bridge lives in `kernel/core`, so the decoupled dispatcher
 (`kernel/syscall`) never gains a `kernel/mem` dependency (`AGENTS.md`
 §17.4). Increment D wires `ipc_send` / `ipc_recv` / `cap_delegate` /
 `random_get` through this accessor and retires their
-`user_memory_copyin` deferral audits; D.1 landed `ipc_send` and D.2
-landed `ipc_recv` (both map a faulting copy to `BadAddress`, the RustOS
-`EFAULT`; an empty mailbox is `WouldBlock`), leaving `cap_delegate`
-(D.3) and `random_get` (D.4).
+`user_memory_copyin` deferral audits; D.1 landed `ipc_send`, D.2 landed
+`ipc_recv` (both map a faulting copy to `BadAddress`, the RustOS
+`EFAULT`; an empty mailbox is `WouldBlock`), and D.3 landed
+`cap_delegate` — it copies the 32-byte `CapabilitySet` in (a faulting
+pointer or absent address space maps to `BadAddress`) and runs the
+`CapTable` delegate path (`AGENTS.md` §5.2: a widening request is
+`DelegationWiden`, an unknown target is `NotFound`). Only `random_get`
+(D.4) remains.
 
 ## Dispatcher contract
 

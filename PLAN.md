@@ -5888,10 +5888,32 @@ subsystem (§2.1). Each session lands one increment and updates
     `rustos-kernel-core` tests pass; `lib/abi` gains frozen-discriminant +
     `Display` coverage for `WouldBlock`. Docs
     `docs/src/architecture/{syscalls,ipc}.md` + module rustdoc. No `unsafe`, no
+    `unwrap`/`expect`/`panic!` in production paths.
+  - **D.3 — Wire `cap_delegate` through the copy-in path. DONE (increment).**
+    `cap_delegate` now copies the fixed-size `CapabilitySet` (its 256-bit
+    bitmap as four little-endian `u64` words) in from `set_ptr` through
+    `copy_from_user` (`with_caller_aspace` → `rustos_kernel_mem::copy_in`) and
+    runs the `CapTable` delegate path:
+    `caps.write().caps_for_mut(SecTaskId(target)).delegate(&set, audit)`. A
+    faulting pointer, or a caller with no registered address space, collapses
+    onto `BadAddress` via the shared `copy_fault_errno` (§19.1); an unknown
+    target is `NotFound` (the same miss `cap_revoke` surfaces); a request that
+    would *widen* the target's authority is `DelegationWiden` and is audited by
+    `TaskCapabilities::delegate` (`TASK_CAPABILITIES_DELEGATED` /
+    `…DELEGATE_WIDEN`, §5.2). The `feature = user_memory_copyin` deferral audit
+    is retired on the delegate side. The on-wire `CapabilitySet` layout now has
+    a single definition — `CapabilitySet::{WIRE_LEN, to_le_bytes, from_le_bytes}`
+    in `lib/caps` — which `lib/caps/token.rs` (the signed-token codec) reuses,
+    so there is one capability-set wire format, not two (§2.2). 5 new/reworked
+    `rustos-kernel-core` `syscalls` tests (copies in + narrows the target;
+    widen → `DelegationWiden` + target preserved; unknown target → `NotFound`;
+    faulting pointer → `BadAddress`; no aspace → `BadAddress`) and 4 new
+    `lib/caps` codec tests (round-trip, little-endian layout, short buffer →
+    `BufferTooSmall`, trailing-byte tolerance). Docs
+    `docs/src/architecture/syscalls.md` + module rustdoc. No `unsafe`, no
     `unwrap`/`expect`/`panic!` in production paths. **Still open in D:**
-    **D.3** `cap_delegate` — copy the capability set in + the `CapTable`
-    delegate path; **D.4** `random_get` — needs the RNG `OutputReserve`
-    composed into `KernelState`.
+    **D.4** `random_get` — needs the RNG `OutputReserve` composed into
+    `KernelState`.
 - **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
   ports.** The page-fault recovery path each arch port needs so a faulting user
   access returns an error instead of trapping (the Stage-6 item

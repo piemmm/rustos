@@ -79,11 +79,9 @@ impl CapabilityToken {
         out[0..4].copy_from_slice(&abi_version.to_le_bytes());
         out[4..12].copy_from_slice(&subject.to_le_bytes());
         out[12..20].copy_from_slice(&epoch.0.to_le_bytes());
-        let words = caps.as_words();
-        out[20..28].copy_from_slice(&words[0].to_le_bytes());
-        out[28..36].copy_from_slice(&words[1].to_le_bytes());
-        out[36..44].copy_from_slice(&words[2].to_le_bytes());
-        out[44..52].copy_from_slice(&words[3].to_le_bytes());
+        // The capability-set layout has a single definition on
+        // `CapabilitySet` (`AGENTS.md` §2.2); the token embeds it verbatim.
+        out[20..20 + CapabilitySet::WIRE_LEN].copy_from_slice(&caps.to_le_bytes());
         out
     }
 
@@ -109,12 +107,9 @@ impl CapabilityToken {
         let abi_version = u32::from_le_bytes(bytes_at::<4>(bytes, 0));
         let subject = u64::from_le_bytes(bytes_at::<8>(bytes, 4));
         let epoch = RevocationEpoch(u64::from_le_bytes(bytes_at::<8>(bytes, 12)));
-        let caps = CapabilitySet::from_words([
-            u64::from_le_bytes(bytes_at::<8>(bytes, 20)),
-            u64::from_le_bytes(bytes_at::<8>(bytes, 28)),
-            u64::from_le_bytes(bytes_at::<8>(bytes, 36)),
-            u64::from_le_bytes(bytes_at::<8>(bytes, 44)),
-        ]);
+        // Reuse the single capability-set wire decoder (`AGENTS.md` §2.2);
+        // the body length above guarantees the 32-byte window is present.
+        let caps = CapabilitySet::from_le_bytes(&bytes[20..20 + CapabilitySet::WIRE_LEN])?;
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(&bytes[TOKEN_BODY_LEN..TOKEN_WIRE_LEN]);
         Ok(Self {

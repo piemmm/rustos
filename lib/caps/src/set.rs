@@ -51,6 +51,46 @@ impl CapabilitySet {
         self.bits.as_words()
     }
 
+    /// Length, in bytes, of the [`CapabilitySet`] wire form: the 256-bit
+    /// bitmap as four little-endian `u64` words, lowest-indexed first.
+    pub const WIRE_LEN: usize = 32;
+
+    /// Encode the set into its little-endian wire form ([`Self::WIRE_LEN`]
+    /// bytes): four `u64` words, lowest-indexed first.
+    ///
+    /// This is the single definition of the on-wire capability-set layout;
+    /// [`crate::token::CapabilityToken`] embeds the same bytes, and the
+    /// `cap_delegate` syscall copies them in (`AGENTS.md` §2.2).
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let words = self.bits.as_words();
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..8].copy_from_slice(&words[0].to_le_bytes());
+        out[8..16].copy_from_slice(&words[1].to_le_bytes());
+        out[16..24].copy_from_slice(&words[2].to_le_bytes());
+        out[24..32].copy_from_slice(&words[3].to_le_bytes());
+        out
+    }
+
+    /// Decode a [`CapabilitySet`] from its little-endian wire form.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    /// [`Self::WIRE_LEN`]; the first [`Self::WIRE_LEN`] bytes are consumed.
+    /// Every bit pattern is a representable set, so no further validation is
+    /// needed — a set carrying a bit outside the parent's authority is
+    /// rejected later by [`Self::delegate`] (fail closed, `AGENTS.md` §5.4).
+    pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let word = |offset: usize| {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&bytes[offset..offset + 8]);
+            u64::from_le_bytes(buf)
+        };
+        Ok(Self::from_words([word(0), word(8), word(16), word(24)]))
+    }
+
     /// Add a capability to the set.
     pub fn insert(&mut self, cap: CapabilityId) {
         self.bits.insert(cap.as_u16());
@@ -320,6 +360,55 @@ mod tests {
                 _ => panic!("iter and IntoIterator disagree"),
             }
         }
+    }
+
+    #[test]
+    fn wire_round_trip_preserves_the_set() {
+        // The empty set, a typical multi-capability set, and a set with
+        // a high bit index all survive an encode/decode round-trip.
+        for set in [CapabilitySet::empty(), parent(), {
+            let mut s = CapabilitySet::empty();
+            s.insert(CapabilityId::AUDIT_WRITE);
+            s.insert(CapabilityId::FS_MOUNT);
+            s
+        }] {
+            let bytes = set.to_le_bytes();
+            assert_eq!(bytes.len(), CapabilitySet::WIRE_LEN);
+            assert_eq!(CapabilitySet::from_le_bytes(&bytes), Ok(set));
+        }
+    }
+
+    #[test]
+    fn wire_form_is_little_endian_words() {
+        // `FS_MOUNT` is capability id 1, so it sets bit 1 of the first
+        // little-endian word, landing in byte 0 with value 0b10.
+        let mut s = CapabilitySet::empty();
+        s.insert(CapabilityId::FS_MOUNT);
+        assert_eq!(CapabilityId::FS_MOUNT.as_u16(), 1);
+        let bytes = s.to_le_bytes();
+        assert_eq!(bytes[0], 0b10);
+        assert!(bytes[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn from_le_bytes_rejects_a_short_buffer() {
+        let short = [0u8; CapabilitySet::WIRE_LEN - 1];
+        assert_eq!(
+            CapabilitySet::from_le_bytes(&short),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn from_le_bytes_ignores_trailing_bytes() {
+        // A buffer longer than `WIRE_LEN` decodes from its first
+        // `WIRE_LEN` bytes; trailing bytes are not consumed.
+        let mut bytes = [0u8; CapabilitySet::WIRE_LEN + 8];
+        bytes[CapabilitySet::WIRE_LEN] = 0xFF;
+        assert_eq!(
+            CapabilitySet::from_le_bytes(&bytes),
+            Ok(CapabilitySet::empty())
+        );
     }
 
     #[test]

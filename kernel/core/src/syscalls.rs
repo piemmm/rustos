@@ -42,32 +42,33 @@
 //! closed with `NotFound` (a real lookup miss; the dispatcher's
 //! standard pipeline audits it).
 //!
-//! `ipc_send` is **fully wired** (increment D.1 of `PLAN.md` Stage 7's
-//! "User-memory copy path"): for a bound endpoint it stages the
-//! payload through the validated [`rustos_kernel_mem::copy_in`]
+//! `ipc_send` (increment D.1), `ipc_recv` (D.2), and `cap_delegate`
+//! (D.3) of `PLAN.md` Stage 7's "User-memory copy path" are **fully
+//! wired**: each stages its payload through the validated
+//! [`rustos_kernel_mem::copy_in`] / [`rustos_kernel_mem::copy_out`]
 //! boundary ([`KernelSyscallHandlers::with_caller_aspace`] →
-//! `copy_fault_errno`) and hands it to
-//! [`rustos_kernel_ipc::Port::send`]. A faulting user pointer — or a
-//! caller with no registered address space — fails closed with
-//! [`Errno::BadAddress`] (the RustOS `EFAULT`), never an oracle that
-//! distinguishes the cause (`AGENTS.md` §19.1).
+//! `copy_fault_errno`) and then runs the backing subsystem
+//! ([`rustos_kernel_ipc::Port::send`] / `recv_with`, the `CapTable`
+//! delegate path). A faulting user pointer — or a caller with no
+//! registered address space — fails closed with [`Errno::BadAddress`]
+//! (the RustOS `EFAULT`), never an oracle that distinguishes the cause
+//! (`AGENTS.md` §19.1).
 //!
-//! The remaining copy-path consumers still need their own increments;
-//! for a *bound* `ipc_recv` (and for `cap_delegate` / `random_get`)
-//! the body needs the matching copy-out / delegate / RNG-reserve work
-//! that has not landed, so those branches return a stable errno plus a
+//! The remaining copy-path consumer still needs its own increment;
+//! `random_get` needs the kernel RNG output reserve composed into
+//! `KernelState` and the matching copy-out work (increment D.4), so it
+//! returns a stable errno plus a
 //! [`AuditEvent::SyscallFeatureUnavailable`] record per `AGENTS.md`
 //! §15.1 — *announce the deferral, never stub*:
 //!
 //! | Syscall              | Condition            | Errno            | Reason |
 //! |----------------------|----------------------|------------------|--------|
 //! | `ipc_send`/`ipc_recv` | endpoint unbound     | `NotFound`       | No port is bound to the endpoint in the [`PortRegistry`]; a real lookup miss. |
-//! | `ipc_recv`           | endpoint bound       | `NotImplemented` | The port resolves, but delivering a drained message needs the copy-out path with a peek/commit on [`rustos_kernel_ipc::Port`] (increment D.2). |
-//! | `cap_delegate`       | always               | `NotImplemented` | The capability-set copy-in + `CapTable` delegate path has not landed (increment D.3). |
+//! | `random_get`         | always               | `NotImplemented` | The kernel RNG output reserve and the copy-out path it would write through have not landed (increment D.4). |
 //!
-//! The deferred-feature branches still go through the dispatcher's
-//! standard audit pipeline (the `IPC_RECV` / `CAP_DELEGATE` entries are
-//! `spec.audit = true`) and **additionally** emit the
+//! The deferred-feature branch still goes through the dispatcher's
+//! standard audit pipeline (the `RANDOM_GET` entry is
+//! `spec.audit = true`) and **additionally** emits the
 //! `SyscallFeatureUnavailable` record so a downstream consumer can
 //! tell apart "handler rejected because the call failed" from
 //! "handler rejected because the backing subsystem is intentionally
@@ -82,6 +83,7 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{CapabilityId, Errno, IrqHandle, RandomFlags, RANDOM_REQUEST_MAX_BYTES};
+use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
@@ -472,15 +474,39 @@ where
     fn cap_delegate(
         &self,
         caller: &CallerContext<'_>,
-        _target: u64,
-        _set_ptr: u64,
+        target: u64,
+        set_ptr: u64,
     ) -> SyscallResult {
-        // `set_ptr` is a user-space pointer naming a `CapabilitySet`.
-        // Reading it requires the user-memory copy-in path, which has
-        // not yet landed (`PLAN.md` Stage 5 / Stage 6). Until that
-        // arrives the handler announces the deferral and refuses.
-        self.audit_feature_unavailable(caller, "user_memory_copyin");
-        Err(Errno::NotImplemented)
+        // `set_ptr` names a fixed-size `CapabilitySet` (its 256-bit bitmap
+        // as four little-endian `u64` words, `CapabilitySet::WIRE_LEN`
+        // bytes) in the caller's address space. Copy it in through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // touching the capability table. A caller with no registered
+        // address space (a kernel task, or one withdrawn on `exit`) and
+        // any copy fault both collapse onto `BadAddress`, never leaking
+        // which case occurred (§19.1).
+        let mut buf = [0u8; CapabilitySet::WIRE_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(set_ptr), &mut buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Every 32-byte pattern is a representable set, and `buf` is
+        // exactly `WIRE_LEN`, so decoding cannot fail. Run the `CapTable`
+        // delegate path: `delegate` replaces the target's effective set
+        // with the requested subset, rejecting a *widening* request with
+        // `DelegationWiden` and auditing the decision (§5.2). An unknown
+        // target task is the stable `NotFound`, not a kernel bug — the
+        // same condition `cap_revoke` surfaces.
+        let requested = CapabilitySet::from_le_bytes(&buf)?;
+        let mut guard = self.caps.write();
+        match guard.caps_for_mut(SecTaskId(target)) {
+            Some(record) => record.delegate(&requested, self.audit).map(|()| 0),
+            None => Err(Errno::NotFound),
+        }
     }
 
     fn cap_revoke(
@@ -1395,9 +1421,26 @@ mod tests {
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
 
-    /// `cap_delegate` defers user-memory copy-in.
+    /// Stage `set`'s wire form (`CapabilitySet::WIRE_LEN` bytes) at the
+    /// caller's page 1 (`0x1000`) and register the caller's task id in
+    /// `aspaces`. Mirrors `send_aspace` for the `cap_delegate` copy-in
+    /// path; the page is `READ | USER` because the handler only reads it.
+    fn register_set_at_page1(aspaces: &RwLock<AddressSpaceRegistry>, task: u64, set: &CapabilitySet) {
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &set.to_le_bytes());
+        aspaces
+            .write()
+            .register(SecTaskId(task), space, physmap)
+            .expect("registration succeeds");
+    }
+
+    /// `cap_delegate` copies the requested set in and narrows the target
+    /// task's effective set to that subset — the increment-D.3 wiring of
+    /// the capability-set copy-in + `CapTable` delegate path. The handler
+    /// returns `0`, the target loses the un-delegated capability, and the
+    /// `CapTable` delegate decision is audited (no
+    /// `SyscallFeatureUnavailable` deferral).
     #[test]
-    fn cap_delegate_returns_not_implemented_and_audits_feature_unavailable() {
+    fn cap_delegate_copies_set_in_and_narrows_target() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -1407,19 +1450,164 @@ mod tests {
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(4, &[CapabilityId::FS_MOUNT], sink);
+
+        // Target task 10 holds two capabilities; we delegate only one.
+        let target = make_caps_record(10, &[CapabilityId::FS_MOUNT, CapabilityId::DRV_LOAD], sink);
+        table.write().insert(target);
+
+        let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &caps,
+        };
+        register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        sink.clear();
+        assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Ok(0));
+
+        // The target's effective set was replaced with the delegated subset.
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(10)).expect("target still present");
+        assert!(record.has(CapabilityId::FS_MOUNT));
+        assert!(!record.has(CapabilityId::DRV_LOAD));
+        drop(guard);
+
+        // The delegate decision is audited through `kernel/sec`'s own
+        // `AuditEvent` (distinct from `kernel/core`'s); no `kernel/core`
+        // deferral record is announced.
+        let ids = sink.event_ids();
+        assert!(ids.contains(&rustos_kernel_sec::AuditEvent::TaskCapabilitiesDelegated.id().0));
+        assert!(!ids.contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
+    }
+
+    /// A delegation that would *widen* the target's authority fails closed
+    /// with `DelegationWiden` and leaves the target's set untouched
+    /// (`AGENTS.md` §5.2 — the central capability invariant).
+    #[test]
+    fn cap_delegate_rejects_widening_and_preserves_target() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let target = make_caps_record(10, &[CapabilityId::FS_MOUNT], sink);
+        table.write().insert(target);
+
+        let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &caps,
+        };
+        // Request a superset of the target's set: FS_MOUNT + NET_RAW.
+        register_set_at_page1(
+            &aspaces,
+            4,
+            &caps_with(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]),
+        );
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Err(Errno::DelegationWiden));
+        // The target's set is unchanged: it still holds FS_MOUNT and
+        // never gained NET_RAW.
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(10)).expect("target still present");
+        assert!(record.has(CapabilityId::FS_MOUNT));
+        assert!(!record.has(CapabilityId::NET_RAW));
+    }
+
+    /// `cap_delegate` to an unknown target task is `NotFound` — a real
+    /// table miss, the same condition `cap_revoke` surfaces.
+    #[test]
+    fn cap_delegate_unknown_target_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &caps,
+        };
+        register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        assert_eq!(h.cap_delegate(&ctx, 999, 0x1000), Err(Errno::NotFound));
+    }
+
+    /// `cap_delegate` with a faulting set pointer fails closed with
+    /// `BadAddress` (the RustOS `EFAULT`) and never touches the table:
+    /// page 2 (`0x2000`) is unmapped in the caller's space.
+    #[test]
+    fn cap_delegate_with_faulting_pointer_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let target = make_caps_record(10, &[CapabilityId::FS_MOUNT], sink);
+        table.write().insert(target);
+
+        let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &caps,
+        };
+        register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
+
+        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        assert_eq!(h.cap_delegate(&ctx, 10, 0x2000), Err(Errno::BadAddress));
+        // The target's set is untouched.
+        assert!(table
+            .read()
+            .caps_for(SecTaskId(10))
+            .expect("target still present")
+            .has(CapabilityId::FS_MOUNT));
+    }
+
+    /// `cap_delegate` from a caller with no registered address space
+    /// fails closed with `BadAddress` rather than an oracle that
+    /// distinguishes "no space" from "faulting pointer" (`AGENTS.md`
+    /// §19.1).
+    #[test]
+    fn cap_delegate_without_caller_aspace_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let target = make_caps_record(10, &[CapabilityId::FS_MOUNT], sink);
+        table.write().insert(target);
+
+        // The caller (task 4) is never registered in `aspaces`.
+        let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(4),
             caps: &caps,
         };
 
         let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
-        sink.clear();
-        assert_eq!(h.cap_delegate(&ctx, 5, 0x3000), Err(Errno::NotImplemented));
-        assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
-        );
+        assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Err(Errno::BadAddress));
     }
 
     /// `cap_revoke` against a known task succeeds; unknown target is

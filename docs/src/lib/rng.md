@@ -110,8 +110,9 @@ running the DRBG on every call:
 The reserve does not hand bytes to userland by itself: the production
 `kernel/core` `random_get` handler enforces the request cap today and
 announces the deferral of the per-CPU reserve + user-memory copy-out
-(the same Stage 6 user-memory prerequisite `cap_delegate` waits on),
-rather than stubbing randomness (§15.1).
+(increment D.4 of `PLAN.md` Stage 7's staged copy path — the last
+remaining consumer now that `ipc_send`, `ipc_recv`, and `cap_delegate`
+are wired), rather than stubbing randomness (§15.1).
 
 ## Fast, non-cryptographic generator
 
