@@ -423,14 +423,37 @@ round-trips and every rejection path, and the three new decoders
 `lib/abi` and pinned by the generator's per-module and completeness tests;
 `docs/src/abi/c-abi.md` and `include/README.md` document it.
 
-**Still to do:** the per-target crt0 startup object and the QEMU "crt0-linked
-program starts, reads its args, exits" test (plus the `RWX`/non-PIE load-refusal
-test). Both need the Stage 6 U-mode/EL0 loader — or, as in CC2, a minimal
-harness that stands up the program context itself. **First confirm the Stage 6
-loader / process-spawn status**: `PLAN.md` Stage 6 is marked complete, but the
-actual EL0/U-mode loader (drop into a freshly loaded program with an argument
-vector) may still be the missing piece, just as the EL0/U-mode user-context was
-for CC2.
+**Progress (kernel-side loader half landed).** The kernel-side process-image
+builder the QEMU round-trip needs now exists: `kernel/mem/src/spawn.rs`
+(`build_process_image`) takes a validated `LoadImage` and **materialises a
+runnable user address space** — it maps and *fills* every segment page with its
+file content (zeroing the BSS tail), maps a zeroed user stack, and writes the
+`rustos_abi::process` startup-vector block into the new address space, returning
+a `ProcessImage` (relocated entry / user-sp / startup-block address). It shares
+one page-mapping loop with `map_image` (`map_region`, §2.2); content is written
+kernel-side through `PhysMap` (not `copy_out`) so a read-execute page is
+initialised without being user-writable (W^X); it is capability-agnostic and
+fails closed with `SpawnError` (the cap gate + audit live in the calling spawn
+path, §17.4). The matching **production startup-vector builder** also landed in
+`lib/abi` — `process::encoded_len` / `process::write_into` (allocation-free,
+fail-closed on the frozen limits, round-tripping through `ProcessStart::parse`),
+replacing the old test-only block builder (§2.2) and enrolled in the
+`fuzz_decode` harness (§19.6). 10 spawn + 13 process-builder host tests; full
+`cargo xtask ci` + `fuzz --secs 5` + soak green.
+
+**Still to do:** the **Arch HAL "enter U-mode/EL0" primitive** that consumes a
+`ProcessImage` (the riscv64 `sret` sequence already exists inline in
+`tests/integration/abi_sys_syscall_qemu_riscv64`; lift it onto the HAL, then
+aarch64 EL0 `eret` and x86_64), and the QEMU "crt0-linked program starts, reads
+its args, exits" round-trip per native target (plus the `RWX`/non-PIE
+load-refusal assertion). With `build_process_image` in place, the round-trip is:
+build the image from a separate crt0-linked program blob, then enter U-mode at
+`ProcessImage.entry` with the stack and startup-block pointer — no `_start`
+collision, because the spawn comes from a normally-booting kernel dropping a
+*separate* program image. Start with riscv64
+(template: `tests/integration/abi_sys_syscall_qemu_riscv64`), then aarch64 and
+x86_64; enroll each in `tools/xtask/src/commands/qemu_tests.rs` and the
+workspace `Cargo.toml`.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a

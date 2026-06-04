@@ -56,6 +56,7 @@ pub mod phys;
 pub mod ptr;
 pub mod sensitive;
 pub mod slab;
+pub mod spawn;
 pub mod swap;
 pub mod uaccess;
 pub mod vmm;
@@ -69,6 +70,7 @@ pub use mmio::{MmioError, MmioMap, MmioRegion};
 pub use phys::{DirectPhysMap, PhysMap};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
+pub use spawn::{build_process_image, ProcessImage, SpawnError, UserStack};
 pub use swap::{
     EncryptedSwap, EntropySource, SwapBackend, SwapError, SwapKey, SwapPage, SWAP_RECORD_LEN,
 };

@@ -62,12 +62,50 @@ by a KASLR bias, and maps every segment page into an `AddressSpace`
 with the permissions from `map_flags_for`, returning the relocated
 entry point. Frame allocation is injected as a closure, so the loader is
 allocator-agnostic and host-testable; out-of-frames surfaces as
-`LoadError::OutOfFrames` rather than a panic (§4).
+`LoadError::OutOfFrames` rather than a panic (§4). Both `map_image` and
+the spawn builder below share one page-mapping loop (`map_region`), so
+the relocation/allocation arithmetic exists in exactly one place
+(`AGENTS.md` §2.2).
+
+## Building a runnable process image
+
+`kernel/mem::build_process_image` turns a validated `LoadImage` into a
+runnable user address space — the kernel-side step a spawn must perform
+before it can drop to U-mode/EL0. It:
+
+1. maps every segment page (R/RX/RW + USER) **and** fills it with the
+   segment's file content, zeroing the BSS tail past `file_size`;
+2. maps a zeroed user stack (U|R|W); and
+3. serialises the `rustos_abi::process` startup-vector block (the
+   arguments, environment, and §19.2 stack-canary seed) and writes it
+   into the new address space (U|R|W).
+
+It returns a `ProcessImage` — the relocated entry point, the initial
+user stack pointer, and the user address of the startup block — i.e. the
+register state an Arch HAL "enter U-mode/EL0" primitive consumes.
+
+Content is written through the kernel's `PhysMap` directly to the
+freshly allocated frame, **not** through `copy_out`: a read-execute code
+page must hold its bytes before it runs, yet must never be user-writable
+(W^X). The page is still mapped R/RX/RW in user space, never RWX. Every
+input is validated and the builder fails closed with a `SpawnError`
+(misaligned bases, a segment file range outside the image, an
+over-limit startup block) rather than panicking (`AGENTS.md` §2.9).
+
+The startup-vector block is produced by `rustos_abi::process::write_into`
+(sized by `process::encoded_len`) — the production, allocation-free
+builder that `lib/abi` exposes for the kernel and that round-trips
+through the untrusted-input `ProcessStart::parse` crt0 uses.
+
+The capability gate that authorises a spawn and its `lib/log` audit
+record live in the higher-level spawn path that calls this builder, not
+in `kernel/mem` (the §17.4 layering keeps the memory subsystem free of
+the security policy).
 
 ## What is not yet enforced here
 
-Copying segment file contents into the mapped frames, stack-canary /
-shadow-stack selection in the arch `unsafe` cores, and the live
-process-creation path depend on the Stage 6 process model and the real
-arch page tables; they build on this validated `LoadImage` without
-relaxing any invariant above.
+The Arch HAL "enter U-mode/EL0" primitive (which consumes the
+`ProcessImage`) and stack-canary / shadow-stack selection in the arch
+`unsafe` cores depend on the real arch page tables; they build on this
+validated `LoadImage` and `ProcessImage` without relaxing any invariant
+above.

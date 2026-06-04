@@ -59,7 +59,8 @@ pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
 pub use process::{
-    ProcessStart, ProcessStartHeader, StringSlot, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+    encoded_len as process_start_encoded_len, write_into as process_start_write_into, ProcessStart,
+    ProcessStartHeader, StringSlot, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
     PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};

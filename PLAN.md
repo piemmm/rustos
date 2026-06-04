@@ -6608,9 +6608,24 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    and returns the relocated entry — W^X holding twice over (loader +
    `PageTableOps`). ~25 `rxe` unit tests + 4 loader tests; all `no_std`,
    clippy `-D warnings` clean. Docs: `docs/src/security/rxe_loader.md`.
-   Remaining for later stages: copying segment file contents into mapped
-   frames and stack-canary / shadow-stack selection (Stage 6 process model
-   + real arch page tables).
+   The **process-image spawn builder** (`kernel/mem/src/spawn.rs`,
+   `build_process_image`) now closes the segment-content gap: it shares one
+   page-mapping loop with `map_image` (`map_region`, §2.2), maps **and**
+   fills every segment page with its file content (zeroing the BSS tail),
+   maps a zeroed user stack, and serialises the `rustos_abi::process`
+   startup-vector block into the new address space, returning the
+   `ProcessImage` (entry / user-sp / startup-block address) an Arch HAL
+   enter-U-mode primitive consumes. Content is written kernel-side through
+   `PhysMap` (not `copy_out`) so a read-execute page can be initialised
+   without ever being user-writable; every input is validated and the
+   builder fails closed with `SpawnError`. The production startup-vector
+   builder lives in `lib/abi` (`process::encoded_len` / `process::write_into`,
+   allocation-free, fail-closed on the frozen limits, round-tripping through
+   `ProcessStart::parse`; the test helper and a new `fuzz_decode` target now
+   drive it, §2.2/§19.6). 10 spawn + 13 process-builder unit tests. Docs:
+   `docs/src/security/rxe_loader.md`. Remaining: the Arch HAL
+   "enter U-mode/EL0" primitive that consumes the `ProcessImage`, plus
+   stack-canary / shadow-stack selection (real arch page tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
    surface: `SideChannelMitigation` (syscall entry/exit speculation

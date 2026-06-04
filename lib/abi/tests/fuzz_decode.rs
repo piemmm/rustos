@@ -180,6 +180,50 @@ fn exercise_process(bytes: &[u8]) {
             assert!(view.env(i).is_some());
         }
     }
+    exercise_process_builder(bytes);
+}
+
+/// Drive the production startup-vector *builder* on `bytes` (§19.6).
+///
+/// The fuzz bytes are split on `0xFF` into argument/environment strings and
+/// fed to [`rustos_abi::process::write_into`]; an accepted build must parse
+/// back to exactly those strings, and a rejected build (e.g. an embedded NUL)
+/// must fail closed rather than panic.
+fn exercise_process_builder(bytes: &[u8]) {
+    let mut parts: Vec<&[u8]> = bytes.split(|&b| b == 0xFF).collect();
+    // Keep the builder cheap and comfortably within the abi-v1 limits.
+    parts.truncate(8);
+    let split = parts.len() / 2;
+    let (args, env) = parts.split_at(split);
+
+    let mut seed = [0u8; 8];
+    let take = core::cmp::min(8, bytes.len());
+    seed[..take].copy_from_slice(&bytes[..take]);
+    let canary = u64::from_le_bytes(seed);
+
+    let Ok(len) = rustos_abi::process::encoded_len(args, env) else {
+        return;
+    };
+    let mut buf = vec![0u8; len];
+    let Ok(written) = rustos_abi::process::write_into(&mut buf, args, env, canary) else {
+        // A rejected build (an embedded NUL, say) is a fail-closed outcome.
+        return;
+    };
+    assert_eq!(written, len);
+    let view = ProcessStart::parse(&buf).expect("a freshly built block must parse");
+    assert_eq!(view.arg_count() as usize, args.len());
+    assert_eq!(view.env_count() as usize, env.len());
+    assert_eq!(view.canary(), canary);
+    let mut idx: u32 = 0;
+    for a in args {
+        assert_eq!(view.arg(idx), Some(*a));
+        idx += 1;
+    }
+    idx = 0;
+    for e in env {
+        assert_eq!(view.env(idx), Some(*e));
+        idx += 1;
+    }
 }
 
 /// Lehmer LCG (Park–Miller) — deterministic, no_std, no allocator.

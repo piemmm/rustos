@@ -379,6 +379,127 @@ fn usize_or_range(value: u64) -> Result<usize, Errno> {
     usize::try_from(value).map_err(|_| Errno::LengthOutOfRange)
 }
 
+/// Validate the argument and environment counts against the frozen `abi-v1`
+/// limits and return the total number of [`StringSlot`] records the block
+/// will carry.
+///
+/// Each of `args` and `env`, and their sum, must be within
+/// [`PROCESS_START_MAX_STRINGS`].
+fn checked_slot_count(args: &[&[u8]], env: &[&[u8]]) -> Result<usize, Errno> {
+    let max = PROCESS_START_MAX_STRINGS as usize;
+    if args.len() > max || env.len() > max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let slot_count = args
+        .len()
+        .checked_add(env.len())
+        .ok_or(Errno::LengthOutOfRange)?;
+    if slot_count > max {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(slot_count)
+}
+
+/// The exact encoded length, in bytes, of the startup-vector block that
+/// [`write_into`] produces for `args` and `env`.
+///
+/// This is the buffer size the kernel loader must allocate before calling
+/// [`write_into`]. It is computed with the same checked arithmetic and the
+/// same frozen `abi-v1` limits the builder enforces, so a successful
+/// [`encoded_len`] guarantees [`write_into`] will not reject the same inputs
+/// for a size reason.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] if the argument or environment count exceeds
+/// [`PROCESS_START_MAX_STRINGS`], a single string is longer than
+/// [`PROCESS_START_MAX_STRING_LEN`], or the whole block would exceed
+/// [`PROCESS_START_MAX_TOTAL_LEN`].
+pub fn encoded_len(args: &[&[u8]], env: &[&[u8]]) -> Result<usize, Errno> {
+    let slot_count = checked_slot_count(args, env)?;
+    let slots_bytes = slot_count
+        .checked_mul(StringSlot::WIRE_LEN)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let strings_base = ProcessStartHeader::WIRE_LEN
+        .checked_add(slots_bytes)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let mut total = strings_base;
+    for s in args.iter().chain(env.iter()) {
+        if s.len() > PROCESS_START_MAX_STRING_LEN as usize {
+            return Err(Errno::LengthOutOfRange);
+        }
+        total = total.checked_add(s.len()).ok_or(Errno::LengthOutOfRange)?;
+    }
+    if total as u64 > PROCESS_START_MAX_TOTAL_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(total)
+}
+
+/// Build a startup-vector block for `args` / `env` with the per-process
+/// stack-canary seed `canary` into `buf`, returning the number of bytes
+/// written.
+///
+/// This is the production builder the §16.5 loader uses: the kernel sizes a
+/// buffer with [`encoded_len`], calls this to serialise the block, and copies
+/// the written bytes into the new process's address space.
+///
+/// `lib/abi` performs no allocation, so the caller owns the buffer; `buf` must
+/// be at least [`encoded_len`] bytes. The produced block round-trips through
+/// [`ProcessStart::parse`].
+///
+/// # Errors
+///
+/// * any error from [`encoded_len`] (counts, string length, or total size
+///   over the frozen `abi-v1` limits);
+/// * [`Errno::BufferTooSmall`] if `buf` is shorter than [`encoded_len`];
+/// * [`Errno::OutOfRange`] if any string contains an embedded NUL byte (which
+///   would make it unrepresentable as a C string — the same rule
+///   [`ProcessStart::parse`] enforces).
+pub fn write_into(
+    buf: &mut [u8],
+    args: &[&[u8]],
+    env: &[&[u8]],
+    canary: u64,
+) -> Result<usize, Errno> {
+    let total_len = encoded_len(args, env)?;
+    if buf.len() < total_len {
+        return Err(Errno::BufferTooSmall);
+    }
+    for s in args.iter().chain(env.iter()) {
+        if s.contains(&0) {
+            return Err(Errno::OutOfRange);
+        }
+    }
+
+    let slot_count = args.len() + env.len();
+    let strings_base = ProcessStartHeader::WIRE_LEN + slot_count * StringSlot::WIRE_LEN;
+
+    let header = ProcessStartHeader {
+        magic: PROCESS_START_MAGIC,
+        abi_version: crate::ABI_VERSION_CURRENT,
+        arg_count: u32::try_from(args.len()).map_err(|_| Errno::LengthOutOfRange)?,
+        env_count: u32::try_from(env.len()).map_err(|_| Errno::LengthOutOfRange)?,
+        total_len: total_len as u64,
+        canary,
+    };
+    buf[..ProcessStartHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+
+    let mut slot_at = ProcessStartHeader::WIRE_LEN;
+    let mut string_off = strings_base;
+    for s in args.iter().chain(env.iter()) {
+        let slot = StringSlot {
+            offset: u32::try_from(string_off).map_err(|_| Errno::LengthOutOfRange)?,
+            len: u32::try_from(s.len()).map_err(|_| Errno::LengthOutOfRange)?,
+        };
+        buf[slot_at..slot_at + StringSlot::WIRE_LEN].copy_from_slice(&slot.to_le_bytes());
+        buf[string_off..string_off + s.len()].copy_from_slice(s);
+        slot_at += StringSlot::WIRE_LEN;
+        string_off += s.len();
+    }
+    Ok(total_len)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -396,37 +517,13 @@ mod tests {
     }
 
     fn build_with_canary(args: &[&[u8]], env: &[&[u8]], canary: u64) -> Vec<u8> {
-        let slot_count = args.len() + env.len();
-        let strings_base = ProcessStartHeader::WIRE_LEN + slot_count * StringSlot::WIRE_LEN;
-
-        let mut slots = Vec::new();
-        let mut strings = Vec::new();
-        for s in args.iter().chain(env.iter()) {
-            let offset = strings_base + strings.len();
-            slots.push(StringSlot {
-                offset: u32::try_from(offset).expect("offset fits"),
-                len: u32::try_from(s.len()).expect("len fits"),
-            });
-            strings.extend_from_slice(s);
-        }
-        let total_len = strings_base + strings.len();
-
-        let header = ProcessStartHeader {
-            magic: PROCESS_START_MAGIC,
-            abi_version: ABI_VERSION_CURRENT,
-            arg_count: u32::try_from(args.len()).expect("argc fits"),
-            env_count: u32::try_from(env.len()).expect("envc fits"),
-            total_len: u64::try_from(total_len).expect("total fits"),
-            canary,
-        };
-
-        let mut block = Vec::new();
-        block.extend_from_slice(&header.to_le_bytes());
-        for slot in &slots {
-            block.extend_from_slice(&slot.to_le_bytes());
-        }
-        block.extend_from_slice(&strings);
-        assert_eq!(block.len(), total_len);
+        // The tests drive the very same production builder the kernel loader
+        // uses (`AGENTS.md` §2.2 — one definition), proving the writer and the
+        // parser agree end-to-end rather than re-implementing the layout.
+        let total_len = super::encoded_len(args, env).expect("within abi-v1 limits");
+        let mut block = alloc::vec![0u8; total_len];
+        let written = super::write_into(&mut block, args, env, canary).expect("fits the buffer");
+        assert_eq!(written, total_len);
         block
     }
 
@@ -588,7 +685,74 @@ mod tests {
 
     #[test]
     fn rejects_embedded_nul() {
-        let block = build(&[b"a\0b"], &[]);
+        // Build a clean block, then poke a NUL into the string region so the
+        // parser sees an embedded NUL (the builder itself refuses NULs, so we
+        // cannot ask it to produce this block — see `write_into_rejects_nul`).
+        let mut block = build(&[b"aXb"], &[]);
+        let string_at = ProcessStartHeader::WIRE_LEN + StringSlot::WIRE_LEN + 1;
+        block[string_at] = 0;
         assert_eq!(ProcessStart::parse(&block), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn encoded_len_matches_the_written_block() {
+        let args: &[&[u8]] = &[b"prog", b"--flag"];
+        let env: &[&[u8]] = &[b"PATH=/Apps"];
+        let len = super::encoded_len(args, env).expect("within limits");
+        let block = build(args, env);
+        assert_eq!(block.len(), len);
+        // Header(32) + 3 slots(24) + strings("prog"+"--flag"+"PATH=/Apps").
+        assert_eq!(len, 32 + 3 * 8 + 4 + 6 + 10);
+    }
+
+    #[test]
+    fn write_into_round_trips_through_parse() {
+        let args: &[&[u8]] = &[b"a", b"bb", b"ccc"];
+        let env: &[&[u8]] = &[b"K=v"];
+        let len = super::encoded_len(args, env).expect("len");
+        let mut buf = alloc::vec![0u8; len];
+        let written = super::write_into(&mut buf, args, env, 0x1122_3344_5566_7788).expect("write");
+        assert_eq!(written, len);
+        let view = ProcessStart::parse(&buf).expect("round-trips");
+        assert_eq!(view.arg_count(), 3);
+        assert_eq!(view.env_count(), 1);
+        assert_eq!(view.arg(2), Some(&b"ccc"[..]));
+        assert_eq!(view.env(0), Some(&b"K=v"[..]));
+        assert_eq!(view.canary(), 0x1122_3344_5566_7788);
+    }
+
+    #[test]
+    fn write_into_rejects_a_short_buffer() {
+        let args: &[&[u8]] = &[b"prog"];
+        let len = super::encoded_len(args, &[]).expect("len");
+        let mut buf = alloc::vec![0u8; len - 1];
+        assert_eq!(
+            super::write_into(&mut buf, args, &[], 0),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn write_into_rejects_nul() {
+        let args: &[&[u8]] = &[b"a\0b"];
+        let mut buf = alloc::vec![0u8; 64];
+        assert_eq!(
+            super::write_into(&mut buf, args, &[], 0),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn encoded_len_rejects_too_many_strings() {
+        let one: &[u8] = b"x";
+        let args: Vec<&[u8]> = alloc::vec![one; PROCESS_START_MAX_STRINGS as usize + 1];
+        assert_eq!(super::encoded_len(&args, &[]), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn encoded_len_rejects_oversized_string() {
+        let big = alloc::vec![b'a'; PROCESS_START_MAX_STRING_LEN as usize + 1];
+        let args: &[&[u8]] = &[&big];
+        assert_eq!(super::encoded_len(args, &[]), Err(Errno::LengthOutOfRange));
     }
 }
