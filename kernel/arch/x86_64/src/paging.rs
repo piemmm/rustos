@@ -55,6 +55,12 @@ pub mod flags {
     pub const USER: u64 = 1 << 2;
     /// Page Size (1 for huge pages at PD or PDPT level).
     pub const HUGE: u64 = 1 << 7;
+    /// No-Execute (bit 63): an instruction fetch from the page faults.
+    /// Honoured only while `IA32_EFER.NXE` is set; with NXE clear the bit
+    /// is reserved and would fault the walk, so callers that set it must
+    /// have enabled NXE first. Used to mark writable user data and
+    /// read-only user data non-executable (W^X, `AGENTS.md` §19.2).
+    pub const NO_EXECUTE: u64 = 1 << 63;
 }
 
 /// One page-table page: 512 × u64, naturally aligned.
@@ -216,7 +222,7 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(pool, vaddr, paddr, writable, false)
+        self.map_4k_inner(pool, vaddr, paddr, writable, false, false)
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
@@ -236,7 +242,31 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(pool, vaddr, paddr, writable, true)
+        self.map_4k_inner(pool, vaddr, paddr, writable, true, false)
+    }
+
+    /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
+    /// explicit W^X leaf permissions: `writable` selects [`flags::WRITABLE`]
+    /// and `executable` selects whether the page is instruction-fetchable.
+    /// A non-executable leaf gets the [`flags::NO_EXECUTE`] bit, so a
+    /// writable data page is mapped non-executable (`RW`) and a read-only
+    /// data page non-executable (`R`) — the `AGENTS.md` §19.2 W^X contract a
+    /// process image's `RW`/`R` segments and its stack need (a code segment
+    /// is mapped `executable = true`, `writable = false`, i.e. `RX`).
+    ///
+    /// The caller must have enabled `IA32_EFER.NXE` before mapping any
+    /// non-executable page (otherwise bit 63 is reserved and the walk
+    /// faults). `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
+    /// page-table-pool exhaustion or if the walk hits an existing huge page.
+    pub fn map_4k_user_wx(
+        &mut self,
+        pool: &'static PageTablePool,
+        vaddr: u64,
+        paddr: u64,
+        writable: bool,
+        executable: bool,
+    ) -> Option<()> {
+        self.map_4k_inner(pool, vaddr, paddr, writable, true, !executable)
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
@@ -252,6 +282,7 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
         user: bool,
+        no_execute: bool,
     ) -> Option<()> {
         assert_eq!(vaddr & 0xFFF, 0, "vaddr must be page-aligned");
         assert_eq!(paddr & 0xFFF, 0, "paddr must be page-aligned");
@@ -262,6 +293,9 @@ impl AddressSpace {
         }
         if user {
             flags_ |= flags::USER;
+        }
+        if no_execute {
+            flags_ |= flags::NO_EXECUTE;
         }
 
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
@@ -386,5 +420,6 @@ mod tests {
         assert_eq!(flags::WRITABLE, 1 << 1);
         assert_eq!(flags::USER, 1 << 2);
         assert_eq!(flags::HUGE, 1 << 7);
+        assert_eq!(flags::NO_EXECUTE, 1 << 63);
     }
 }

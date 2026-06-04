@@ -337,6 +337,40 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // crt0-linked-program spawn round-trip — the ring-3 analogue of the
+    // riscv64/aarch64 tests above, completing CC3. The build script compiles
+    // the separate fixture program (`tests/integration/cc3_program`, crt0 +
+    // abi-sys) position-independent and converts it to an `rxe` blob
+    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // Because the x86_64 ring-3 transition needs the GDT user selectors, the
+    // TSS, and `syscall`/`IA32_LSTAR` entry installed, the test boots the
+    // production kernel pipeline and, on `AuditEvent::BootCompleted`, enables
+    // `IA32_EFER.NXE`, builds a fresh address space (low 32 MiB identity +
+    // higher-half kernel window), switches CR3, installs a dispatch callback,
+    // then calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's ring-3 image — segments mapped + filled W^X (code RX,
+    // data RW-NX, rodata R-NX), user stack, startup-vector block — and `iretq`s
+    // into it through the Arch HAL `EnterUser` primitive. The program (built via
+    // `build_process_image` at a high `USER_BIAS`) parses `argv[1]`, returns it,
+    // and crt0 routes the return through the `exit` syscall, whose `syscall`
+    // traps back through the kernel's `IA32_LSTAR` entry stub to the dispatch
+    // callback, which asserts the code equals the spawned decimal argument
+    // before `qemu_exit::exit_success`; any mismatch (or a returning spawn)
+    // flips `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
+    // budget matches the other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-x86_64",
+        binary: "rustos-test-spawn-program-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

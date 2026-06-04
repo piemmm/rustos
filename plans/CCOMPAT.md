@@ -353,25 +353,26 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: IN PROGRESS — un-shelved. The end-to-end spawn round-trip has now
-landed on two native targets: on riscv64 and aarch64 a separately-linked
-crt0+abi-sys program is built into a user (U-mode / EL0) address space by the
-production capability-checked, audited spawn caller
-(`rustos_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret`), and
-its `exit` syscall is observed to carry the spawned decimal argument
-(`tests/integration/spawn_program_qemu_riscv64` and
-`tests/integration/spawn_program_qemu_aarch64`, each QEMU-proven PASS + a
-deliberately-wrong-expectation FAIL).** The crt0 object, the startup-vector
-`abi-v1` type, `build_process_image`, and the Arch HAL `EnterUser` primitive
-were already green; the riscv64 chunk added the spawn caller, the
-`CAP_PROC_SPAWN` capability, a test-local riscv64 `PageTableOps` adapter, and an
-`elf_to_rxe` `load_bias`; the aarch64 chunk added a test-local aarch64 EL0
-`PageTableOps` adapter, the production `el0_rodata_leaf_attrs()` helper
-(EL0 read-only, non-executable), and the test-kernel `CPACR_EL1.FPEN` enable.
-**Remaining: the x86_64 (ring 3) spawn round-trip**, its own increment reusing
-the same spawn caller + converter (a per-arch `PageTableOps` adapter as needed).
-**Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle loader /
-dynamic-loader policy).
+**Status: DONE. The end-to-end spawn round-trip has landed and is QEMU-proven
+on all three native targets: on riscv64, aarch64, and x86_64 a separately-linked
+crt0+abi-sys program is built into a user (U-mode / EL0 / ring-3) address space
+by the production capability-checked, audited spawn caller
+(`rustos_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret` /
+`iretq`), and its `exit` syscall is observed to carry the spawned decimal
+argument (`tests/integration/spawn_program_qemu_{riscv64,aarch64,x86_64}`, each
+QEMU-proven PASS + a deliberately-wrong-expectation FAIL).** The crt0 object,
+the startup-vector `abi-v1` type, `build_process_image`, and the Arch HAL
+`EnterUser` primitive were already green; the riscv64 chunk added the spawn
+caller, the `CAP_PROC_SPAWN` capability, a test-local riscv64 `PageTableOps`
+adapter, and an `elf_to_rxe` `load_bias`; the aarch64 chunk added a test-local
+aarch64 EL0 `PageTableOps` adapter, the production `el0_rodata_leaf_attrs()`
+helper (EL0 read-only, non-executable), and the test-kernel `CPACR_EL1.FPEN`
+enable; the x86_64 chunk added a test-local x86_64 `PageTableOps` adapter, the
+production `paging::map_4k_user_wx` / `flags::NO_EXECUTE` W^X mapping, and the
+test-kernel `IA32_EFER.NXE` enable (the round-trip boots the production kernel
+pipeline so the GDT ring-3 selectors / TSS / `IA32_LSTAR` entry are installed).
+**Depended on** CC2 and the loader (`PLAN.md` Stage 6 bundle loader /
+dynamic-loader policy); CC4 unblocks from here.
 
 **How the round-trip blocker was resolved.** The earlier blocker — crt0's
 `_start` is not a self-contained leaf, and linking the program against an
@@ -555,9 +556,23 @@ EL0-executable; and the test kernel enables `CPACR_EL1.FPEN` before the
 NEON-vectorised `rxe` decoder runs (the boot trampoline leaves FP/SIMD trapped,
 so a freestanding kernel that uses FP enables it itself).
 
-**Still to do:** the **x86_64 (ring 3)** spawn round-trip, its own increment
-reusing the same `spawn_and_enter` caller + `elf_to_rxe` converter (add a
-per-arch `PageTableOps` adapter as needed) and enrolled in
+**x86_64 round-trip landed (this chunk — CC3 complete).**
+`tests/integration/spawn_program_qemu_x86_64` is the ring-3 analogue of the
+riscv64/aarch64 verticals and is QEMU-proven (PASS + a deliberately-wrong-
+expectation FAIL). Because the x86_64 ring-3 transition needs the GDT user
+selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, it boots the
+production kernel pipeline (like `enter_user_qemu_x86_64`) and, on
+`BootCompleted`, enables `IA32_EFER.NXE`, builds a fresh address space (low
+32 MiB identity + the higher-half kernel window), switches CR3, then calls the
+same `spawn_and_enter` caller to build the ring-3 image and `iretq` into it
+through the Arch HAL `EnterUser` primitive. It reuses `cc3_program` +
+`elf_to_rxe` (passing the x86_64 `USER_BIAS`) and adds a **test-local** x86_64
+`PageTableOps` adapter (`X86UserPageTable`) over the `paging::AddressSpace`,
+mapping W^X leaves through the new production `paging::map_4k_user_wx`
+(`writable` / `executable`, setting the `flags::NO_EXECUTE` leaf bit on
+non-executable data/rodata pages) and flushing by `invlpg`; the frame source
+offsets the kernel-static `FRAME_POOL` by `KERNEL_VMA_BASE` and the builder
+reaches it through a `DirectPhysMap` with that same offset. It is enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
 
 **Deliverables**
