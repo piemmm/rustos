@@ -7178,9 +7178,22 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   harness. It is surfaced in the C header as `rustos_process.h`
   (`ros_process_start_header_t` / `ros_string_slot_t` + the `ROS_PROCESS_START_*`
   macros), pinned by the generator completeness test and documented in
-  `docs/src/abi/c-abi.md`. **Still to do:** the per-target crt0 object itself
-  and the QEMU "crt0 program starts, reads its args, exits" test, which depend
-  on the Stage 6 U-mode/EL0 loader (or a minimal CC2-style harness).
+  `docs/src/abi/c-abi.md`. **The crt0 object has now landed too:** the new
+  `lib/crt0` crate (`rustos-crt0`) provides the per-native-target `_start`
+  trampoline — the §1 assembly carve-out, gated on a build-script-emitted
+  `crt0_native_*` cfg (so §17.2 `cfg-check` stays green) — which aligns the
+  stack, carves a bounded scratch region, and calls the host-testable,
+  allocation-free `build_c_runtime` that validates the startup vector and lays
+  out the C `argv`/`envp` (copying each NUL-free string + NUL-terminating it,
+  fail closed §2.9), installs the §19.2 stack canary into `__stack_chk_guard`
+  from the kernel-supplied per-process seed, calls the hosted `main`, and
+  routes its return through `ros_sys_exit`. It is the crt0 half of the curated
+  `/System/Libraries/` *System runtime / C ABI* class (§16.4, `experimental`
+  tier). The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are
+  enforced at load by `rustos_abi::rxe::LoadImage::parse` (a non-conforming
+  image is refused, not patched). **Still to do:** the QEMU "crt0 program
+  starts, reads its args, exits" round-trip per native target (a minimal
+  CC2-style U-mode/EL0 harness), tracked in `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

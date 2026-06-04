@@ -559,6 +559,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-crt0"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+]
+
+[[package]]
 name = "rustos-crypto"
 version = "0.0.0"
 dependencies = [

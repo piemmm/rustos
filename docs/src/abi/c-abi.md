@@ -168,8 +168,39 @@ crt0 (which parses it) share (`AGENTS.md` §2.2):
 The block is untrusted input: `rustos_abi::process::ProcessStart::parse`
 bounds-checks every field against the frozen `ROS_PROCESS_START_MAX_*` limits
 and the declared `total_len`, rejects an embedded NUL, and fails closed rather
-than ever indexing out of range (`AGENTS.md` §2.9, §19.5/§19.6). The crt0
-runtime that consumes this block is staged in `plans/CCOMPAT.md` (stage CC3).
+than ever indexing out of range (`AGENTS.md` §2.9, §19.5/§19.6).
+
+## Building and linking a C program (crt0)
+
+The startup object that consumes the startup vector is `lib/crt0`
+(`rustos-crt0`) — the crt0 half of the curated `/System/Libraries/` *System
+runtime / C ABI* class (`AGENTS.md` §16.4), alongside the `lib/abi-sys` syscall
+stubs. A non-Rust program links it as its startup object; it provides the
+program's `_start` entry symbol and does the minimum a freestanding C program
+needs before `main`:
+
+1. The kernel transfers control to `_start` with the startup-vector base in the
+   platform's first integer-argument register (`rdi` on x86_64, `x0` on
+   aarch64, `a0` on riscv64) and a valid stack. `_start` (the §1 assembly
+   carve-out) aligns the stack to the platform C ABI and carves a bounded
+   scratch region from it.
+2. `build_c_runtime` validates the block (via `ProcessStart::parse`) and lays
+   out the C `argv` / `envp` in the scratch: each NUL-free string is copied and
+   NUL-terminated, and the two NULL-terminated pointer arrays are built ahead of
+   them. Nothing is allocated; an oversized vector fails closed rather than
+   truncating.
+3. crt0 seeds the compiler's `__stack_chk_guard` with the block's per-process
+   random canary (`AGENTS.md` §19.2), calls
+   `int main(int argc, char **argv, char **envp)`, and routes its return value
+   through `ros_sys_exit`. A startup-vector validation failure exits with a
+   reserved non-zero code instead.
+
+The `rxe` hardening invariants a hosted image must satisfy — position-independence
+(PIE), `R`/`RX`/`RW`-only segments (no `RWX`), and the syscall-hash CFI tag
+(`AGENTS.md` §9/§19.2) — are enforced at load time by the single point
+`rustos_abi::rxe::LoadImage::parse`; a non-conforming image is refused, not
+patched. The marshalling core is host-tested; the per-target `_start`
+trampoline is exercised under QEMU (`plans/CCOMPAT.md` stage CC3).
 
 ## Stability
 

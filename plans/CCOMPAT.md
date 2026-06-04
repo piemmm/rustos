@@ -353,9 +353,38 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: in progress — the startup-vector `abi-v1` type has landed; crt0 and
-the loader hook are still to do.** **Depends on** CC2 and the loader
-(`PLAN.md` Stage 6 bundle loader / dynamic-loader policy).
+**Status: in progress — the startup-vector `abi-v1` type *and* the crt0 object
+have landed; the per-target QEMU round-trip is the only remaining piece.**
+**Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle loader /
+dynamic-loader policy).
+
+The crt0 object has now landed: the new `lib/crt0` crate (`rustos-crt0`)
+provides the per-native-target `_start` trampoline — the §1 assembly carve-out
+gated on a build-script-emitted `crt0_native_*` cfg (so §17.2 `cfg-check` stays
+green, mirroring `lib/abi-sys`) — which aligns the stack to the platform C ABI,
+carves a bounded scratch region from it, and calls the host-testable,
+allocation-free `build_c_runtime`. That core validates the startup vector
+through `ProcessStart::parse` (untrusted input) and lays out the C `argv` /
+`envp` a hosted `main` expects: it copies each NUL-free string and
+NUL-terminates it, and builds the two NULL-terminated pointer arrays, all in
+the caller-supplied scratch with no allocation, failing closed
+(`Errno::BufferTooSmall`) rather than truncating (§2.9). crt0 then installs the
+per-process §19.2 stack canary into the compiler's `__stack_chk_guard` from the
+kernel-supplied seed, calls `main`, and routes its return through `ros_sys_exit`
+(the CC2 stub); a startup-vector failure exits with a reserved non-zero code.
+The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are enforced at
+load by `rustos_abi::rxe::LoadImage::parse` — the single enforcement point,
+already host-tested (`refuses_write_execute_segment` / `refuses_non_pie_image`
+/ `refuses_cfi_tag_mismatch` in `lib/abi/src/rxe.rs`) — so a non-conforming
+image is refused, not patched, and crt0 does not duplicate that check (§2.2).
+The crate is registered as the crt0 half of the curated `/System/Libraries/`
+*System runtime / C ABI* class (§16.4, `experimental` tier); `AGENTS.md` §3 and
+`PLAN.md` were updated. Eight host tests cover the marshalling, the
+empty-vector and empty-string cases, parse-error propagation, the fail-closed
+scratch-too-small path, and `read_total_len`. Verified on this host:
+`cargo test -p rustos-crt0` green and clippy `-D warnings` clean on the host
+and all three native targets, with `_start` / `rust_crt0_start` /
+`__stack_chk_guard` confirmed in the emitted object.
 
 The third deliverable below (the kernel→process startup-vector type) is done:
 `lib/abi/src/process.rs` defines the one shared definition the kernel builder

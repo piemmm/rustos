@@ -155,6 +155,14 @@ rustos/
 │   ├── compress/        # First-party LZ (zstd-fast-style) codec. RustFS
 │   │                    #   compresses every data record with it; no external
 │   │                    #   zstd/compression dependency (§2.12, §16.4).
+│   ├── crt0/            # C-callable abi-v1 program startup/teardown object:
+│   │                    #   the per-arch _start trampoline that marshals the
+│   │                    #   kernel startup vector (rustos_abi::process) into C
+│   │                    #   argc/argv/envp, installs the §19.2 stack canary,
+│   │                    #   calls main, and routes its return through the exit
+│   │                    #   syscall — the crt0 half of the curated
+│   │                    #   /System/Libraries/ "System runtime / C ABI" class
+│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC3).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library
 │   │                    #   (plans/CURSES.md C4): client Window/pad draw model,
