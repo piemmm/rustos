@@ -22,6 +22,9 @@ pull in exactly what they need, plus an umbrella that includes them all:
   reserved file descriptor (`ROS_STDINFO_FD`), the framing version tags
   (`ROS_STDINFO_VERSION_*`), and the record-kind and severity discriminants
   (`ROS_STDINFO_KIND_*`, `ROS_STDINFO_SEVERITY_*`).
+- `rustos/rustos_manifest.h` — the signed `rxe` manifest header
+  (`ros_manifest_header_t`) and its constants (`ROS_MANIFEST_*`,
+  `ROS_SYSCALL_TABLE_HASH_LEN`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

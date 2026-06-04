@@ -42,11 +42,12 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, PortName, RandomFlags, Severity,
-    StdInfoKind, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
-    IPC_MESSAGE_HEADER_MAGIC, NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES,
+    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, ManifestHeader, PortName,
+    RandomFlags, Severity, StdInfoKind, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES,
     RANDOM_RESERVE_DEFAULT_BYTES, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -418,6 +419,58 @@ fn generate_stdinfo() -> String {
     out
 }
 
+/// `rustos_manifest.h` — the signed `rxe` manifest header (`AGENTS.md` §9).
+///
+/// `ros_manifest_header_t` mirrors the `#[repr(C)]` layout of
+/// [`ManifestHeader`]: the fixed-size prefix of the signed manifest section of
+/// an `rxe` binary. Its packed little-endian *wire* size is the separate
+/// `ROS_MANIFEST_HEADER_WIRE_LEN` macro (equal to the struct size here, as the
+/// layout has no trailing padding). Every numeric value is read from
+/// `lib/abi`, never re-typed; only the C spelling lives here.
+fn generate_manifest() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Signed rxe manifest header (AGENTS.md sec.9).");
+    out.push_str("#ifndef ROS_MANIFEST_H\n#define ROS_MANIFEST_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Magic word identifying an abi-v1 manifest (\"RXM1\" little-endian). */\n");
+    let _ = writeln!(out, "#define ROS_MANIFEST_MAGIC {MANIFEST_MAGIC:#x}u");
+    out.push_str("/* Maximum number of capability identifiers a manifest may request. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_MANIFEST_MAX_CAPABILITIES {MANIFEST_MAX_CAPABILITIES}u"
+    );
+    out.push_str("/* Length, in bytes, of the linked syscall-table hash (SHA-256). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSCALL_TABLE_HASH_LEN {SYSCALL_TABLE_HASH_LEN}u"
+    );
+    out.push_str("/* Packed little-endian wire size of a manifest header, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_MANIFEST_HEADER_WIRE_LEN {}u",
+        ManifestHeader::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Signed rxe manifest prefix; encoded little-endian on the wire. */\n\
+         typedef struct ros_manifest_header {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint16_t capability_count;\n\
+         \x20   uint16_t reserved0;\n\
+         \x20   uint8_t syscall_table_hash[ROS_SYSCALL_TABLE_HASH_LEN];\n\
+         \x20   uint8_t signer_pubkey[32];\n\
+         \x20   uint8_t signature[64];\n\
+         } ros_manifest_header_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_MANIFEST_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -467,6 +520,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_random.h\"\n");
     out.push_str("#include \"rustos_ipc.h\"\n");
     out.push_str("#include \"rustos_stdinfo.h\"\n");
+    out.push_str("#include \"rustos_manifest.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -503,6 +557,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_stdinfo.h",
             body: generate_stdinfo(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_manifest.h",
+            body: generate_manifest(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -613,6 +671,7 @@ mod tests {
             "rustos_random.h",
             "rustos_ipc.h",
             "rustos_stdinfo.h",
+            "rustos_manifest.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -820,6 +879,52 @@ mod tests {
                 Severity::Debug as u8
             )),
             "debug severity: {h}"
+        );
+    }
+
+    #[test]
+    fn manifest_header_pins_layout_and_values() {
+        let h = body("rustos_manifest.h");
+        assert!(h.contains("#ifndef ROS_MANIFEST_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("typedef struct ros_manifest_header {"),
+            "manifest-header struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(
+            h.contains(&format!("#define ROS_MANIFEST_MAGIC {MANIFEST_MAGIC:#x}u")),
+            "magic word: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_MANIFEST_MAX_CAPABILITIES {MANIFEST_MAX_CAPABILITIES}u"
+            )),
+            "max capabilities: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_SYSCALL_TABLE_HASH_LEN {SYSCALL_TABLE_HASH_LEN}u"
+            )),
+            "hash length: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_MANIFEST_HEADER_WIRE_LEN {}u",
+                ManifestHeader::WIRE_LEN
+            )),
+            "header wire len: {h}"
+        );
+        // The C struct mirrors the #[repr(C)] Rust layout (no trailing pad).
+        assert_eq!(
+            core::mem::size_of::<ManifestHeader>(),
+            ManifestHeader::WIRE_LEN,
+            "ManifestHeader repr(C) size equals wire len"
+        );
+        assert_eq!(
+            core::mem::align_of::<ManifestHeader>(),
+            4,
+            "ManifestHeader repr(C) align"
         );
     }
 

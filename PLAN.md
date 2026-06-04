@@ -7084,16 +7084,19 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   syscall/errno/capability seed to the whole crate). **In progress:** the
   generator now emits one header per `lib/abi` module under `include/rustos/`
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
-  `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_syscall.h`)
-  plus the umbrella `rustos_abi.h` that `#include`s them, with a tree-wide
-  drift guard; the `time` module (`ros_time64_t` / `ros_duration64_t` +
-  constants), the `random` module (`ROS_RANDOM_FLAG_*` + the
-  `ROS_RANDOM_*_BYTES` limits), the `ipc` module (`ros_ipc_message_header_t` /
-  `ros_port_name_t` + the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants), and the
-  `stdinfo` module (`ROS_STDINFO_FD`, the `ROS_STDINFO_VERSION_*` framing tags,
-  and the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` `#[repr(u8)]`
-  discriminants), values read from `lib/abi`, are the grown modules so far.
-  **Remaining:** `manifest`, `appinfo`, `rxe`, `input`, `sysinfo`, the
+  `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
+  `rustos_syscall.h`) plus the umbrella `rustos_abi.h` that `#include`s them,
+  with a tree-wide drift guard; the `time` module (`ros_time64_t` /
+  `ros_duration64_t` + constants), the `random` module (`ROS_RANDOM_FLAG_*` +
+  the `ROS_RANDOM_*_BYTES` limits), the `ipc` module
+  (`ros_ipc_message_header_t` / `ros_port_name_t` + the `ROS_IPC_*` /
+  `ROS_PORT_NAME_*` constants), the `stdinfo` module (`ROS_STDINFO_FD`, the
+  `ROS_STDINFO_VERSION_*` framing tags, and the `ROS_STDINFO_KIND_*` /
+  `ROS_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants), and the `manifest`
+  module (`ros_manifest_header_t` + the `ROS_MANIFEST_*` /
+  `ROS_SYSCALL_TABLE_HASH_LEN` constants), values read from `lib/abi`, are the
+  grown modules so far.
+  **Remaining:** `appinfo`, `rxe`, `input`, `sysinfo`, the
   `capability` query types, and `driver/*` POD types, plus the "every pub
   `#[repr(C)]` type is represented" completeness test once the surface is
   covered.
@@ -7118,11 +7121,13 @@ header set under `include/rustos/` — the umbrella `rustos_abi.h` plus
 `rustos_time.h` (`ros_time64_t` / `ros_duration64_t` + the `Time64`/
 `Duration64` constants), `rustos_random.h` (`ROS_RANDOM_FLAG_*` + the
 `ROS_RANDOM_*_BYTES` limits), `rustos_ipc.h` (`ros_ipc_message_header_t` /
-`ros_port_name_t` + the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants), and
+`ros_port_name_t` + the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants),
 `rustos_stdinfo.h` (`ROS_STDINFO_FD` + the `ROS_STDINFO_VERSION_*` framing
-tags + the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` discriminants) —
-each value read from `lib/abi` and guarded byte-for-byte against drift, wired
-into `cargo xtask ci`; the docs page is `docs/src/abi/c-abi.md`.
+tags + the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` discriminants), and
+`rustos_manifest.h` (`ros_manifest_header_t` + the `ROS_MANIFEST_*` /
+`ROS_SYSCALL_TABLE_HASH_LEN` constants) — each value read from `lib/abi` and
+guarded byte-for-byte against drift, wired into `cargo xtask ci`; the docs page
+is `docs/src/abi/c-abi.md`.
 
 ---
 

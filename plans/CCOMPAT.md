@@ -129,7 +129,12 @@ by an in-module test. The `stdinfo` module has now landed too:
 `ROS_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants (the kinds and severities
 travel on the wire as strings; the discriminants give the C view a name for
 each variant), every value read from `lib/abi` and pinned by an in-module test.
-**Remaining for CC1:** the rest of the modules — `manifest`, `appinfo`, `rxe`,
+The `manifest` module has now landed too: `rustos_manifest.h` declares the
+`#[repr(C)]` `ros_manifest_header_t` struct (mirroring `ManifestHeader`) plus
+the `ROS_MANIFEST_MAGIC` / `ROS_MANIFEST_MAX_CAPABILITIES` /
+`ROS_SYSCALL_TABLE_HASH_LEN` / `ROS_MANIFEST_HEADER_WIRE_LEN` constants, every
+value read from `lib/abi` and pinned by an in-module test.
+**Remaining for CC1:** the rest of the modules — `appinfo`, `rxe`,
 `input`, `sysinfo`, the `capability` query POD types, and `driver/*` POD
 types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
 the header" completeness test once the surface is covered.
