@@ -82,7 +82,8 @@ before it can drop to U-mode/EL0. It:
 
 It returns a `ProcessImage` — the relocated entry point, the initial
 user stack pointer, and the user address of the startup block — i.e. the
-register state an Arch HAL "enter U-mode/EL0" primitive consumes.
+register state the Arch HAL "enter user mode" primitive
+(`rustos_arch_api::EnterUser`, taking a `UserEntry`) consumes.
 
 Content is written through the kernel's `PhysMap` directly to the
 freshly allocated frame, **not** through `copy_out`: a read-execute code
@@ -102,10 +103,22 @@ record live in the higher-level spawn path that calls this builder, not
 in `kernel/mem` (the §17.4 layering keeps the memory subsystem free of
 the security policy).
 
+## Entering user mode
+
+The Arch HAL "enter user mode" primitive that consumes the
+`ProcessImage` now lands as a closed HAL slice
+(`rustos_arch_api::EnterUser` over the architecture-neutral `UserEntry`
+register state, `AGENTS.md` §17.2). It is implemented for riscv64 (the
+`sret` sequence) and aarch64 (the EL0 `eret` sequence); each port owns
+the one definition of its privilege-transition `asm!`, so the CC2 QEMU
+round-trips reach it through the HAL rather than copying the sequence
+(§2.2). The transition is only meaningful on bare metal, so it carries
+no host conformance vertical — the `UserEntry` value is host-tested and
+the QEMU round-trips are the proof.
+
 ## What is not yet enforced here
 
-The Arch HAL "enter U-mode/EL0" primitive (which consumes the
-`ProcessImage`) and stack-canary / shadow-stack selection in the arch
-`unsafe` cores depend on the real arch page tables; they build on this
-validated `LoadImage` and `ProcessImage` without relaxing any invariant
-above.
+The x86_64 `EnterUser` implementation (`iretq` to ring 3) and the
+stack-canary / shadow-stack selection in the arch `unsafe` cores build
+on this validated `LoadImage` and `ProcessImage` without relaxing any
+invariant above.

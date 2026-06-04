@@ -80,8 +80,10 @@ mod kernel {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     use rustos_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
+    use rustos_arch_api::{EnterUser, UserEntry};
     use rustos_arch_riscv64::{
-        handle_panic_via_serial, paging, qemu_exit, syscall_entry, trap, SERIAL_SINK,
+        handle_panic_via_serial, paging, qemu_exit, syscall_entry, trap, userentry::UserMode,
+        SERIAL_SINK,
     };
     use rustos_log::{log, Event, EventId, Level};
 
@@ -187,48 +189,6 @@ mod kernel {
         qemu_exit::exit_success();
     }
 
-    /// Drop to U-mode at `entry` with stack pointer `sp` and `a0` set.
-    ///
-    /// # Safety
-    ///
-    /// `entry` must be a valid U-accessible, executable virtual address in
-    /// the active address space and `sp` a valid U-accessible writable
-    /// stack top; the caller must have installed the syscall dispatch
-    /// callback and the trap vector first. Clears `sstatus.SPP` (so `sret`
-    /// targets U-mode) and `sstatus.SPIE` (so interrupts stay masked in
-    /// U-mode), and sets `sstatus.SUM` (so the S-mode trap handler that
-    /// runs after the `ecall` may access the U-bit user stack). Diverges:
-    /// `sret` transfers control to U-mode and never returns here.
-    unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
-        /// `sstatus.SUM` — permit S-mode data access to U-bit pages (bit 18).
-        const SSTATUS_SUM: u64 = 1 << 18;
-        /// `sstatus.SPP` (bit 8) | `sstatus.SPIE` (bit 5): cleared so
-        /// `sret` enters U-mode with interrupts disabled.
-        const SSTATUS_SPP_SPIE: u64 = (1 << 8) | (1 << 5);
-
-        // SAFETY: the §1-sanctioned assembly carve-out (no Rust spelling
-        // for `sret` or the `sstatus` CSR edits). `csrs`/`csrc` set/clear
-        // exactly the named bits; `csrw sepc` and the `sp`/`a0` moves load
-        // the U-mode entry state; `sret` performs the documented S→U
-        // transition. The caller's safety contract guarantees the mapped
-        // entry/stack. `options(noreturn)` matches the divergence.
-        unsafe {
-            core::arch::asm!(
-                "csrs sstatus, {sum}",
-                "csrc sstatus, {clr}",
-                "csrw sepc, {entry}",
-                "mv sp, {sp}",
-                "sret",
-                sum = in(reg) SSTATUS_SUM,
-                clr = in(reg) SSTATUS_SPP_SPIE,
-                entry = in(reg) entry,
-                sp = in(reg) sp,
-                in("a0") a0,
-                options(noreturn, nostack),
-            );
-        }
-    }
-
     /// Boot entry point — the symbol the arch crate's boot trampoline
     /// calls (via `rustos_arch_riscv64_main`).
     #[no_mangle]
@@ -310,11 +270,18 @@ mod kernel {
 
         note(TEST_START, "dropping to U-mode to issue ros_sys_cap_query");
 
-        // ---- Drop to U-mode and issue the stub. ----
+        // ---- Drop to U-mode and issue the stub via the Arch HAL. ----
         // SAFETY: `user_entry` aliases the executable U|R|X stub page and
         // `user_sp` tops the U|R|W stack, both mapped above; the dispatch
-        // callback and trap vector are installed.
-        unsafe { enter_user_mode(user_entry, user_sp, u64::from(EXPECTED_CAP.as_u16())) }
+        // callback and trap vector are installed. The `sret` sequence is
+        // the one HAL definition (`rustos_arch_riscv64::userentry`).
+        unsafe {
+            UserMode::new().enter_user(UserEntry::new(
+                user_entry,
+                user_sp,
+                u64::from(EXPECTED_CAP.as_u16()),
+            ))
+        }
 
         // `enter_user_mode` diverges via `sret`; this point is reached
         // only if the `ecall` resumed in U-mode and the stub returned to a

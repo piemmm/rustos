@@ -44,6 +44,7 @@ path = "src/main.rs"
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

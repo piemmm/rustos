@@ -85,8 +85,10 @@ mod kernel {
         el0_code_leaf_attrs, el0_data_leaf_attrs, AddressSpace, PageTablePool, PAGE_SIZE,
     };
     use rustos_arch_aarch64::{
-        exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
+        exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode,
+        SERIAL_SINK,
     };
+    use rustos_arch_api::{EnterUser, UserEntry};
     use rustos_log::{log, Event, EventId, Level};
 
     /// Capability id `kernel_main` passes to `ros_sys_cap_query` and
@@ -197,44 +199,6 @@ mod kernel {
         qemu_exit::exit_success();
     }
 
-    /// Drop to EL0 at `entry` with `SP_EL0` = `sp` and `x0` set.
-    ///
-    /// # Safety
-    ///
-    /// `entry` must be a valid EL0-executable virtual address in the
-    /// active address space and `sp` a valid EL0-writable stack top; the
-    /// caller must have installed the syscall dispatch callback and the
-    /// EL1 vector table first. Programs `SP_EL0`, `ELR_EL1`, and
-    /// `SPSR_EL1` (EL0t with `DAIF` masked so EL0 runs with interrupts
-    /// disabled), then `eret`s — which transfers control to EL0 and never
-    /// returns here.
-    unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
-        /// `SPSR_EL1` for an `eret` to EL0t (`M[3:0] = 0b0000`) with the
-        /// four `DAIF` interrupt masks set (bits `[9:6]`).
-        const SPSR_EL0T_DAIF_MASKED: u64 = 0b1111 << 6;
-
-        // SAFETY: the §1-sanctioned assembly carve-out (no Rust spelling
-        // for `eret` or the EL1 system-register writes). Writing
-        // `SP_EL0`/`ELR_EL1`/`SPSR_EL1` loads the EL0 entry state; `eret`
-        // performs the documented EL1→EL0 transition (a
-        // context-synchronising event). The caller's safety contract
-        // guarantees the mapped entry/stack. `options(noreturn)` matches
-        // the divergence.
-        unsafe {
-            core::arch::asm!(
-                "msr SP_EL0, {sp}",
-                "msr ELR_EL1, {entry}",
-                "msr SPSR_EL1, {spsr}",
-                "eret",
-                sp = in(reg) sp,
-                entry = in(reg) entry,
-                spsr = in(reg) SPSR_EL0T_DAIF_MASKED,
-                in("x0") x0,
-                options(noreturn, nostack),
-            );
-        }
-    }
-
     /// Log a setup failure, report it to QEMU, and never return.
     fn fail_setup(what: &'static str) -> ! {
         note(TEST_FAIL, Level::Error, what);
@@ -311,13 +275,20 @@ mod kernel {
             "dropping to EL0 to issue ros_sys_cap_query",
         );
 
-        // ---- Drop to EL0 and issue the stub. ----
+        // ---- Drop to EL0 and issue the stub via the Arch HAL. ----
         // SAFETY: `user_entry` aliases the EL0-executable stub page and
         // `user_sp` tops the EL0 stack, both mapped above; the dispatch
-        // callback and vector table are installed.
-        unsafe { enter_el0(user_entry, user_sp, u64::from(EXPECTED_CAP.as_u16())) }
+        // callback and vector table are installed. The `eret` sequence is
+        // the one HAL definition (`rustos_arch_aarch64::userentry`).
+        unsafe {
+            UserMode::new().enter_user(UserEntry::new(
+                user_entry,
+                user_sp,
+                u64::from(EXPECTED_CAP.as_u16()),
+            ))
+        }
 
-        // `enter_el0` diverges via `eret`; this point is reached only if
+        // `enter_user` diverges via `eret`; this point is reached only if
         // the `svc` resumed in EL0 and the stub returned to a caller that
         // fell through — neither can happen here, so it is a closed
         // failure.

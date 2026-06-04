@@ -1124,6 +1124,7 @@ dependencies = [
  "rustos-abi",
  "rustos-abi-sys",
  "rustos-arch-aarch64",
+ "rustos-arch-api",
  "rustos-itest-harness",
  "rustos-log",
 ]
@@ -1134,6 +1135,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-abi-sys",
+ "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-itest-harness",
  "rustos-log",

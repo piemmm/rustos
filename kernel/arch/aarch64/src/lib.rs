@@ -90,6 +90,10 @@ pub mod qemu_exit;
 /// §19.1).
 pub mod sidechannel;
 pub mod syscall_entry;
+/// aarch64 implementation of the Arch HAL "enter user mode" surface
+/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `eret`
+/// sequence that drops a built process image into EL0.
+pub mod userentry;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod entry;

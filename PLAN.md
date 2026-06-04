@@ -6623,8 +6623,16 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    allocation-free, fail-closed on the frozen limits, round-tripping through
    `ProcessStart::parse`; the test helper and a new `fuzz_decode` target now
    drive it, §2.2/§19.6). 10 spawn + 13 process-builder unit tests. Docs:
-   `docs/src/security/rxe_loader.md`. Remaining: the Arch HAL
-   "enter U-mode/EL0" primitive that consumes the `ProcessImage`, plus
+   `docs/src/security/rxe_loader.md`. The **Arch HAL "enter user mode"
+   primitive** that consumes the `ProcessImage` has now landed for riscv64
+   and aarch64: `kernel/arch/api/src/userentry.rs` defines the
+   architecture-neutral `UserEntry { entry, stack_pointer, arg0 }` register
+   state (mirroring `ProcessImage`) and the object-safe `EnterUser` trait
+   (diverging `unsafe fn enter_user(&self, UserEntry) -> !`); riscv64
+   (`sret`) and aarch64 (EL0 `eret`) implement it, with the one `asm!`
+   definition each lifted off the CC2 QEMU round-trips (§2.2) which now reach
+   the transition through the HAL and stay green. Remaining: the x86_64
+   `iretq`-to-ring-3 implementation (with its own ring-3 QEMU exercise) and
    stack-canary / shadow-stack selection (real arch page tables).
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
@@ -7206,17 +7214,17 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `/System/Libraries/` *System runtime / C ABI* class (§16.4, `experimental`
   tier). The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are
   enforced at load by `rustos_abi::rxe::LoadImage::parse` (a non-conforming
-  image is refused, not patched). **SHELVED — remaining piece blocked on
-  userland.** The last CC3 deliverable, a QEMU "crt0 program starts, reads its
-  args, exits" round-trip per native target, cannot be stood up the CC2 way:
-  crt0 is not a self-contained leaf (its `_start` calls `build_c_runtime`,
-  `ProcessStart::parse`, the test `main`, and `ros_sys_exit`), and linking a
-  test program against `rustos-arch-riscv64` for the QEMU finisher collides
-  the crt0 `_start` with the kernel boot `_start`. A faithful proof needs a
-  real U-mode/EL0 drop into a freshly loaded program with an argument vector —
-  i.e. the Stage 6 process-spawn / "getting userland up" work that CC4 and CC5
-  also depend on. CC3 is parked until that lands; see
-  `.junie/next-ccompat-prompt.md`.
+  image is refused, not patched). **The kernel-side `build_process_image`
+  (`kernel/mem/src/spawn.rs`) and the Arch HAL "enter user mode" primitive
+  (`kernel/arch/api` `EnterUser` / `UserEntry`, implemented for riscv64 `sret`
+  and aarch64 EL0 `eret`, with the inline CC2 round-trip `asm!` lifted onto the
+  HAL, §2.2) have now landed and are green.** Remaining for CC3: the x86_64
+  `iretq`-to-ring-3 `EnterUser` (with its own ring-3 QEMU exercise — not shipped
+  untested) and the QEMU "crt0 program starts, reads its args, exits"
+  round-trip per native target. With `build_process_image` + the enter-user
+  primitive in place, that round-trip is now a normally-booting kernel building
+  a *separate* crt0-linked program blob and `EnterUser::enter_user`-ing into it
+  (no `_start` collision). See `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

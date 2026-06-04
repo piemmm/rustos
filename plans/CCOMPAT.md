@@ -441,19 +441,35 @@ replacing the old test-only block builder (§2.2) and enrolled in the
 `fuzz_decode` harness (§19.6). 10 spawn + 13 process-builder host tests; full
 `cargo xtask ci` + `fuzz --secs 5` + soak green.
 
-**Still to do:** the **Arch HAL "enter U-mode/EL0" primitive** that consumes a
-`ProcessImage` (the riscv64 `sret` sequence already exists inline in
-`tests/integration/abi_sys_syscall_qemu_riscv64`; lift it onto the HAL, then
-aarch64 EL0 `eret` and x86_64), and the QEMU "crt0-linked program starts, reads
-its args, exits" round-trip per native target (plus the `RWX`/non-PIE
-load-refusal assertion). With `build_process_image` in place, the round-trip is:
-build the image from a separate crt0-linked program blob, then enter U-mode at
-`ProcessImage.entry` with the stack and startup-block pointer — no `_start`
-collision, because the spawn comes from a normally-booting kernel dropping a
-*separate* program image. Start with riscv64
-(template: `tests/integration/abi_sys_syscall_qemu_riscv64`), then aarch64 and
-x86_64; enroll each in `tools/xtask/src/commands/qemu_tests.rs` and the
-workspace `Cargo.toml`.
+**Progress (Arch HAL enter-user primitive — riscv64 + aarch64 landed).**
+The **Arch HAL "enter user mode" primitive** now exists:
+`kernel/arch/api/src/userentry.rs` defines the architecture-neutral
+`UserEntry { entry, stack_pointer, arg0 }` register state (mirroring
+`ProcessImage`) and the object-safe `EnterUser` trait whose single diverging
+`unsafe fn enter_user(&self, UserEntry) -> !` drops a built process image into
+user mode. riscv64 (`kernel/arch/riscv64/src/userentry.rs`, the `sret`
+sequence) and aarch64 (`kernel/arch/aarch64/src/userentry.rs`, the EL0 `eret`
+sequence) both implement it, and the CC2 QEMU round-trips
+(`abi_sys_syscall_qemu_riscv64` / `_aarch64`) were refactored to reach the
+transition through the HAL handle (`UserMode::new().enter_user(...)`) instead
+of copying the inline `asm!` — so the `sret`/`eret` sequence now has exactly
+one definition each (§2.2), proven end-to-end by the existing (green) QEMU
+matrix. No host conformance vertical: the transition is only meaningful on
+bare metal; the `UserEntry` value is host-tested and the QEMU round-trips are
+the proof.
+
+**Still to do:** the **x86_64** `EnterUser` implementation (`iretq` to ring 3,
+with the `swapgs` / per-CPU-GS handling the production syscall path assumes) —
+deliberately not shipped untested; it lands with its own ring-3 QEMU exercise.
+Then the full CC3 deliverable: the QEMU "crt0-linked program starts, reads its
+args, exits" round-trip per native target (plus the `RWX`/non-PIE load-refusal
+assertion). With `build_process_image` + the HAL enter-user primitive in place,
+the round-trip is: build the image from a separate crt0-linked program blob,
+then `EnterUser::enter_user(ProcessImage)` — no `_start` collision, because the
+spawn comes from a normally-booting kernel dropping a *separate* program image.
+Start with riscv64 (template: `tests/integration/abi_sys_syscall_qemu_riscv64`,
+which already drives the HAL primitive), then aarch64 and x86_64; enroll each in
+`tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a
