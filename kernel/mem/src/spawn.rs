@@ -365,7 +365,7 @@ mod tests {
             abi_version: ABI_VERSION_CURRENT,
             flags: LOAD_FLAG_PIE,
             segment_count: u16::try_from(specs.len()).unwrap(),
-            reserved0: 0,
+            needed_count: 0,
             entry,
             cfi_tag: TAG,
         };

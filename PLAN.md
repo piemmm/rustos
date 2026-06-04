@@ -7287,7 +7287,24 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   See `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
-  **Not started.**
+  **DONE.** The `rxe` format gained a needed-shared-library table (the
+  analogue of an ELF `DT_NEEDED`): the spare `LoadHeader::reserved0` became
+  `needed_count` (wire size unchanged) followed by `NeededLibrary` records
+  (NUL-free, `LIBREF_MAX`-byte paths; `LOAD_MAX_NEEDED` cap) that
+  `LoadImage::parse` validates fail-closed and `LoadImage::needed_libraries()`
+  exposes; the decoder is fuzzed and the C header
+  (`include/rustos/rustos_rxe.h`) regenerated. The application-bundle loader
+  (`userland/system/appmgr`) gained a `read_run` seam and now, in
+  `AppLoader::load`, validates the `Run` binary through `LoadImage::parse`
+  with the kernel's syscall hash as the **expected CFI tag** (enforcing the
+  §19.2 PIE / W^X / CFI invariants on a C binary identically to a Rust one)
+  and resolves every needed library through the existing §16.4
+  `resolve_library` policy — the curated *System runtime / C ABI* runtime
+  (`/System/Libraries/`) and bundle-private libraries resolve, anything else
+  fails closed. No new ambient authority (capability intersection unchanged).
+  New audit event `APP_RUN_IMAGE_INVALID`; 6 new rxe + 5 new appmgr tests;
+  docs in `docs/src/abi/c-abi.md`, `docs/src/security/rxe_loader.md`, and the
+  appmgr `lib.rs`/`README.md`. See `.junie/next-ccompat-prompt.md`.
 - CC5 — End-to-end C program built+run under QEMU (audited toolchain wrapper,
   §12) exercising a slice of `abi-v1` including §21 `Time64` edges; fuzz the
   new decoders. **Not started.**

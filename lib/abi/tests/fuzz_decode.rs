@@ -32,7 +32,15 @@ use rustos_abi::sysinfo::{
     SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{AppInfoHeader, IpcMessageHeader, ManifestHeader, PortName};
+use rustos_abi::{
+    AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
+    SYSCALL_TABLE_HASH_LEN,
+};
+
+/// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
+/// is overwhelmingly unlikely to match it, so the loader fails closed long
+/// before mapping anything; the point is that no input panics.
+const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN];
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -147,6 +155,23 @@ fn exercise(bytes: &[u8]) {
         let redecoded = PortName::from_bytes(&name.to_le_bytes())
             .expect("round-trip of an accepted port name must succeed");
         assert_eq!(name, redecoded);
+    }
+    if let Ok(lib) = NeededLibrary::decode(bytes) {
+        let redecoded = NeededLibrary::decode(&lib.to_le_bytes())
+            .expect("round-trip of an accepted needed-library record must succeed");
+        assert_eq!(lib, redecoded);
+    }
+    // The whole-image loader has no single round-trip encoder (the builder is
+    // test-only), so the contract here is the §19.6 "must not panic for any
+    // input"; an accepted image must additionally re-parse deterministically
+    // and yield resolvable needed-library references.
+    if let Ok(image) = LoadImage::parse(bytes, &FUZZ_CFI_TAG) {
+        let reparsed = LoadImage::parse(bytes, &FUZZ_CFI_TAG)
+            .expect("re-parse of an accepted load image must succeed");
+        assert_eq!(image, reparsed);
+        for name in image.needed_libraries() {
+            assert!(!name.is_empty());
+        }
     }
     exercise_process(bytes);
 }

@@ -23,6 +23,10 @@
 #define ROS_RXE_PAGE_SIZE ((uint64_t)4096ull)
 /* Maximum number of segment records a single load image may carry. */
 #define ROS_LOAD_MAX_SEGMENTS ((uintptr_t)64u)
+/* Maximum number of needed-library references a load image may declare. */
+#define ROS_LOAD_MAX_NEEDED ((uintptr_t)8u)
+/* Maximum length, in bytes, of a needed-library reference path. */
+#define ROS_LIBREF_MAX ((uintptr_t)255u)
 
 /* Load-header flag bits (uint32_t). Every undefined bit must be zero. */
 /* The image is position-independent (PIE); required by sec.19.2. */
@@ -37,6 +41,8 @@
 #define ROS_LOAD_HEADER_WIRE_LEN 56u
 /* Packed little-endian wire size of one segment record, in bytes. */
 #define ROS_SEGMENT_WIRE_LEN 40u
+/* Packed little-endian wire size of one needed-library record, in bytes. */
+#define ROS_NEEDED_LIBRARY_WIRE_LEN 256u
 
 /* W^X-clean permission a segment is mapped with (uint8_t). */
 #define ROS_RXE_PERMISSION_READ_ONLY ((uint8_t)0u)
@@ -49,7 +55,7 @@ typedef struct ros_load_header {
     uint32_t abi_version;
     uint32_t flags;
     uint16_t segment_count;
-    uint16_t reserved0;
+    uint16_t needed_count;
     uint64_t entry;
     uint8_t cfi_tag[32];
 } ros_load_header_t;

@@ -419,7 +419,7 @@ fn encode_rxe(
         abi_version: ABI_VERSION_CURRENT,
         flags: LOAD_FLAG_PIE,
         segment_count: count,
-        reserved0: 0,
+        needed_count: 0,
         entry,
         cfi_tag: *cfi_tag,
     };

@@ -602,8 +602,46 @@ crt0 crate `README.md`.
 
 ### Stage CC4 — Loader / bundle integration for native programs
 
-**Status: not started.** **Depends on** CC2, CC3, and `PLAN.md` Stage 6
-dynamic-loader policy.
+**Status: DONE.** A C-compiled `.app` bundle now loads through the
+language-agnostic application-bundle loader (`userland/system/appmgr`), which
+validates its `Run` `rxe` image and resolves the `ros_sys_*` runtime **only**
+from the curated `/System/Libraries/` class or the app's own bundle
+`Libraries/`. **Depended on** CC2, CC3, and `PLAN.md` Stage 6 (the
+`AppLoader` pipeline + `rustos_abi::resolve_library` policy, both already
+green).
+
+**What landed this stage.**
+- **`rxe` now declares the shared libraries a binary needs.** `lib/abi/src/rxe.rs`
+  grew a needed-library table — the `rxe` analogue of an ELF `DT_NEEDED`: the
+  spare `LoadHeader::reserved0` became `needed_count` (wire size unchanged at
+  56 bytes; an image with zero needed libraries is byte-identical to before),
+  followed by `needed_count` `NeededLibrary` records after the segment table.
+  `NeededLibrary` (`LIBREF_MAX`-byte, NUL-free, UTF-8 path; `LOAD_MAX_NEEDED`
+  cap) decodes fail-closed (`RxeError::TooManyNeeded` / `BadNeededLibrary`),
+  and `LoadImage::needed_libraries()` exposes the validated list. The new
+  decoder is enrolled in the `lib/abi` fuzz harness (`fuzz_decode.rs`, §19.6),
+  and `cargo xtask c-header --write` regenerated `include/rustos/rustos_rxe.h`
+  (`ROS_LOAD_MAX_NEEDED` / `ROS_LIBREF_MAX` / `ROS_NEEDED_LIBRARY_WIRE_LEN` +
+  the `needed_count` field). 6 new rxe tests.
+- **The loader resolves the runtime, fail-closed.** `userland/system/appmgr`
+  gained a `read_run` `BundleStore` seam; `AppLoader::load` now reads the
+  `Run` binary, validates it through `LoadImage::parse` with the kernel's
+  syscall hash as the **expected CFI tag** (so the §19.2 PIE / W^X / CFI-tag
+  invariants are enforced on a C binary identically to a Rust one — a
+  mismatch is a load-time refusal, `AppError::RunImage`), and resolves every
+  needed library through the existing §16.4 `resolve_library` policy. The
+  curated *System runtime / C ABI* library (`/System/Libraries/libros-sys.so`)
+  resolves as `LibraryScope::System`; a bundle-private library as
+  `LibraryScope::Bundle`; anything else (or a `..`) fails closed
+  (`AppError::Library`). The resolved set is returned in `LoadedApp::libraries`.
+  New audit event `APP_RUN_IMAGE_INVALID` (`11010`). 5 new appmgr tests.
+- **No new ambient authority.** A hosted C program still receives only the
+  intersection of its signed `AppInfo` request and the launching user's
+  grants; the runtime is not a privileged path (the kernel re-checks every
+  syscall on the far side of the trap, §4 / §5.4).
+- **Docs:** `docs/src/abi/c-abi.md` (the "Bundles and the dynamic-loader
+  policy" section), `docs/src/security/rxe_loader.md` (the "Needed shared
+  libraries" section), and the appmgr `lib.rs`/`README.md`.
 
 **Deliverables**
 - Confirm and, where needed, extend the `rxe` loader and the §16.4/§16.5

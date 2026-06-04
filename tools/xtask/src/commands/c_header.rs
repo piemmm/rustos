@@ -45,7 +45,7 @@ use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
     DriverKind, DriverManifest, Duration64, Errno, IpcMessageHeader, KernelMemoryStats, KeyInput,
     LibraryScope, LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode,
-    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
     ProcessStartHeader, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
     StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
@@ -53,17 +53,17 @@ use rustos_abi::{
     COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES,
     DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
     IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
-    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR,
+    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE,
+    LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
+    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
+    SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -753,6 +753,13 @@ fn generate_rxe() -> String {
         out,
         "#define ROS_LOAD_MAX_SEGMENTS ((uintptr_t){LOAD_MAX_SEGMENTS}u)"
     );
+    out.push_str("/* Maximum number of needed-library references a load image may declare. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOAD_MAX_NEEDED ((uintptr_t){LOAD_MAX_NEEDED}u)"
+    );
+    out.push_str("/* Maximum length, in bytes, of a needed-library reference path. */\n");
+    let _ = writeln!(out, "#define ROS_LIBREF_MAX ((uintptr_t){LIBREF_MAX}u)");
     out.push('\n');
 
     out.push_str("/* Load-header flag bits (uint32_t). Every undefined bit must be zero. */\n");
@@ -774,6 +781,12 @@ fn generate_rxe() -> String {
     );
     out.push_str("/* Packed little-endian wire size of one segment record, in bytes. */\n");
     let _ = writeln!(out, "#define ROS_SEGMENT_WIRE_LEN {}u", Segment::WIRE_LEN);
+    out.push_str("/* Packed little-endian wire size of one needed-library record, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_NEEDED_LIBRARY_WIRE_LEN {}u",
+        NeededLibrary::WIRE_LEN
+    );
     out.push('\n');
 
     out.push_str("/* W^X-clean permission a segment is mapped with (uint8_t). */\n");
@@ -801,7 +814,7 @@ fn generate_rxe() -> String {
          \x20   uint32_t abi_version;\n\
          \x20   uint32_t flags;\n\
          \x20   uint16_t segment_count;\n\
-         \x20   uint16_t reserved0;\n\
+         \x20   uint16_t needed_count;\n\
          \x20   uint64_t entry;\n",
     );
     let _ = writeln!(out, "\x20   uint8_t cfi_tag[{SYSCALL_TABLE_HASH_LEN}];");

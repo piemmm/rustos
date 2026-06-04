@@ -37,16 +37,20 @@ pub const LIBRARY_RESOLVED: EventId = EventId(11_008);
 /// A shared-library reference was refused because it points outside the
 /// bundle's `Libraries/` and `/System/Libraries/` (`AGENTS.md` §16.4).
 pub const LIBRARY_REFUSED: EventId = EventId(11_009);
+/// A bundle was refused because its entry-point `Run` binary is not a valid
+/// `rxe` load image, or its CFI tag does not match the kernel's syscall
+/// interface hash (`AGENTS.md` §9 / §19.2).
+pub const APP_RUN_IMAGE_INVALID: EventId = EventId(11_010);
 
 #[cfg(test)]
 mod tests {
     use super::{
         APPMGR_RANGE_END, APPMGR_RANGE_START, APP_CONTENT_MISMATCH, APP_INTERFACE_MISMATCH,
-        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_SIGNATURE_INVALID,
-        APP_STORE_ERROR, LIBRARY_REFUSED, LIBRARY_RESOLVED,
+        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_RUN_IMAGE_INVALID,
+        APP_SIGNATURE_INVALID, APP_STORE_ERROR, LIBRARY_REFUSED, LIBRARY_RESOLVED,
     };
 
-    const ALL: [u32; 9] = [
+    const ALL: [u32; 10] = [
         APP_LOADED.0,
         APP_LAYOUT_REJECTED.0,
         APP_MANIFEST_INVALID.0,
@@ -56,6 +60,7 @@ mod tests {
         APP_STORE_ERROR.0,
         LIBRARY_RESOLVED.0,
         LIBRARY_REFUSED.0,
+        APP_RUN_IMAGE_INVALID.0,
     ];
 
     #[test]

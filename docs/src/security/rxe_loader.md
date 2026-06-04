@@ -9,17 +9,39 @@ the `kernel/mem` loader that consumes its output.
 
 An `rxe` binary carries the signed `ManifestHeader` (capabilities,
 signature — see [security](../architecture/security.md)) and a **load
-image**: a fixed `LoadHeader` followed by a table of `Segment` records.
+image**: a fixed `LoadHeader` followed by a table of `Segment` records
+and then a table of `NeededLibrary` records.
 
 `LoadHeader` (`abi-v1`, 56 bytes) declares the magic word, ABI version,
-flags, segment count, entry point, and the **CFI type-tag** — the
-SHA-256 of the syscall interface the binary was linked against. Each
-`Segment` (40 bytes) declares an image-relative virtual address, the
-file/memory sizes, and a permission flag word.
+flags, segment count, **needed-library count**, entry point, and the
+**CFI type-tag** — the SHA-256 of the syscall interface the binary was
+linked against. Each `Segment` (40 bytes) declares an image-relative
+virtual address, the file/memory sizes, and a permission flag word.
 
 `LoadImage::parse(bytes, expected_cfi_tag)` is the single,
 fail-closed entry point. Holding a `LoadImage` is proof that every
 invariant below holds.
+
+## Needed shared libraries
+
+After the segment table the image carries `needed_count` (at most
+`LOAD_MAX_NEEDED`) `NeededLibrary` records — the `rxe` analogue of an ELF
+`DT_NEEDED` list, the shared libraries the binary dynamically links
+(`AGENTS.md` §16.4). Each record is a NUL-free path no longer than
+`LIBREF_MAX` bytes; `parse` bounds-checks the count and every record and
+fails closed (`RxeError::TooManyNeeded` / `RxeError::BadNeededLibrary`),
+so a hostile image cannot force unbounded work or smuggle a non-UTF-8 or
+embedded-NUL reference. `LoadImage::needed_libraries()` exposes the
+validated list.
+
+`parse` only *validates and carries* the references; it does not resolve
+them. Binding each reference to a concrete file is the user-space
+dynamic-loader policy enforced by `userland/system/appmgr` (the
+application-bundle loader): a reference must lie inside the requesting
+bundle's own `Libraries/` directory or the curated `/System/Libraries/`,
+with no `..` component, or the load fails closed. This is where the
+curated *System runtime / C ABI* library (`lib/abi-sys` + `lib/crt0`)
+that a non-Rust program links is bound (`plans/CCOMPAT.md` stage CC4).
 
 ## W^X
 

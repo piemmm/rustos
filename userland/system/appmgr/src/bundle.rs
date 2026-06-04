@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use rustos_caps::CapabilitySet;
 
-use rustos_abi::Errno;
+use rustos_abi::{Errno, LibraryScope};
 
 /// Reads an application bundle from storage.
 ///
@@ -45,6 +45,30 @@ pub trait BundleStore {
     ///
     /// Returns the store's [`Errno`] if the contents cannot be hashed.
     fn content_hash(&self, bundle: &str) -> Result<[u8; 32], Errno>;
+
+    /// The raw bytes of the bundle's entry-point `Run` binary (an `rxe`
+    /// load image, `AGENTS.md` §9). The loader validates it through
+    /// [`rustos_abi::LoadImage::parse`] and resolves the shared libraries it
+    /// declares it needs (`AGENTS.md` §16.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's [`Errno`] if the `Run` binary cannot be read.
+    fn read_run(&self, bundle: &str) -> Result<Vec<u8>, Errno>;
+}
+
+/// One shared-library reference the entry-point binary declares it needs,
+/// paired with the policy root it resolved against (`AGENTS.md` §16.4).
+///
+/// Holding a `ResolvedLibrary` is proof the reference passed the
+/// dynamic-loader policy: it lies inside the bundle's own `Libraries/` or
+/// the curated [`rustos_abi::SYSTEM_LIBRARIES_DIR`], with no `..` component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedLibrary {
+    /// The shared-library reference path, exactly as the binary declared it.
+    pub reference: String,
+    /// Which policy root the reference resolved against.
+    pub scope: LibraryScope,
 }
 
 /// Verifies a detached Ed25519 signature over a byte range.
@@ -85,6 +109,7 @@ pub struct LoadedApp {
     version: String,
     run_path: String,
     granted: CapabilitySet,
+    libraries: Vec<ResolvedLibrary>,
 }
 
 impl LoadedApp {
@@ -94,6 +119,7 @@ impl LoadedApp {
         version: String,
         run_path: String,
         granted: CapabilitySet,
+        libraries: Vec<ResolvedLibrary>,
     ) -> Self {
         Self {
             id,
@@ -101,6 +127,7 @@ impl LoadedApp {
             version,
             run_path,
             granted,
+            libraries,
         }
     }
 
@@ -133,5 +160,14 @@ impl LoadedApp {
     #[must_use]
     pub fn granted(&self) -> &CapabilitySet {
         &self.granted
+    }
+
+    /// The shared libraries the entry-point binary declared it needs, each
+    /// already resolved against the §16.4 dynamic-loader policy (the
+    /// bundle's own `Libraries/` or the curated
+    /// [`rustos_abi::SYSTEM_LIBRARIES_DIR`]).
+    #[must_use]
+    pub fn libraries(&self) -> &[ResolvedLibrary] {
+        &self.libraries
     }
 }

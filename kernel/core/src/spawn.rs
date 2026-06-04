@@ -264,7 +264,7 @@ mod tests {
             abi_version: ABI_VERSION_CURRENT,
             flags: LOAD_FLAG_PIE,
             segment_count: 1,
-            reserved0: 0,
+            needed_count: 0,
             entry: 0x1000,
             cfi_tag: TAG,
         };

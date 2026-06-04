@@ -22,7 +22,7 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_manifest.h` | `ros_manifest_header_t` and the `ROS_MANIFEST_*` / `ROS_SYSCALL_TABLE_HASH_LEN` constants |
 | `include/rustos/rustos_input.h` | the pointer/keyboard record magics and wire sizes, the `ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants |
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
-| `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
+| `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_MAX_NEEDED` / `ROS_LIBREF_MAX` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
 | `include/rustos/rustos_process.h` | `ros_process_start_header_t` / `ros_string_slot_t` — the process startup vector handed to a freshly spawned program — and the `ROS_PROCESS_START_MAGIC` / `ROS_PROCESS_START_MAX_*` / `*_WIRE_LEN` constants |
 | `include/rustos/rustos_sysinfo.h` | the eight System Information wire types (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`, `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`, `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`) and the `ROS_SYSINFO_*` framing / query-id / registry constants, the `ROS_PROCESS_STATE_*` discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
 | `include/rustos/rustos_driver.h` | the driver-class ABI: `ros_driver_manifest_t` + `ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` discriminants, the `ROS_DRIVER_ERROR_*` codes, the `ROS_DRIVER_HANDLE_NONE` sentinel; **and the driver-class POD types**: the storage/bus/display/filesystem/input/net structs (`ros_block_geometry_t`, `ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`, `ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`, `ros_dir_entry_t`, `ros_node_times_t`, `ros_input_event_t`, `ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants, and the `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*` discriminants |
@@ -34,10 +34,10 @@ that only needs, say, the time types can include `rustos_time.h` directly.
 The header set now covers the whole `lib/abi` public `#[repr(C)]` type
 surface; a completeness test in the generator pins every such type's
 size/align and asserts it has a C `typedef`, so a new type cannot silently
-escape the C view. The `ros_sys_*` trap-stub runtime that backs the syscall
-prototypes has landed in `lib/abi-sys` (see below); the remaining C-ABI work
-(crt0 and the loader/bundle integration) is staged in `plans/CCOMPAT.md`
-(stages CC3+).
+escape the C view. The `ros_sys_*` trap-stub runtime (`lib/abi-sys`), the
+crt0 startup object (`lib/crt0`), and the loader/bundle integration (below)
+have all landed; the remaining C-ABI work (an end-to-end C program + its
+fuzzing) is staged in `plans/CCOMPAT.md` (stage CC5).
 
 A handful of `driver/*` items are deliberately **not** in the header: the
 Rust-only error enums (`WindowError`, `MmioMapError`) and the opaque
@@ -201,6 +201,39 @@ The `rxe` hardening invariants a hosted image must satisfy — position-independ
 `rustos_abi::rxe::LoadImage::parse`; a non-conforming image is refused, not
 patched. The marshalling core is host-tested; the per-target `_start`
 trampoline is exercised under QEMU (`plans/CCOMPAT.md` stage CC3).
+
+## Bundles and the dynamic-loader policy
+
+A C program ships exactly like any other RustOS application: a signed
+`/Apps/<Name>.app/` bundle whose `Run` binary is a PIE `rxe` image
+(`AGENTS.md` §16.5). The application-bundle loader (`userland/system/appmgr`)
+treats a C bundle no differently from a Rust one — the whole pipeline is
+language-agnostic:
+
+1. The `AppInfo` manifest is decoded, its ABI version and syscall-table hash
+   matched against the kernel's, its signature verified, and its content hash
+   checked. The granted capability set is the manifest request **intersected**
+   with the launching user's grants — a hosted C program gains no ambient
+   authority (`AGENTS.md` §4, §5.2; `plans/CCOMPAT.md` §4).
+2. The `Run` image is validated through `rustos_abi::rxe::LoadImage::parse`,
+   which enforces the §19.2 hardening invariants — PIE, `R`/`RX`/`RW`-only
+   segments (no `RWX`), and the syscall-hash **CFI tag** — on a C binary
+   identically to a Rust one. A mismatched CFI tag is a load-time refusal.
+3. Each shared library the `Run` image declares it needs (an `rxe`
+   needed-library record, the analogue of an ELF `DT_NEEDED`) is resolved
+   under the §16.4 dynamic-loader policy: it must lie inside the bundle's own
+   `Libraries/` directory or the curated `/System/Libraries/`
+   (`ROS_SYSTEM_LIBRARIES_DIR`). This is where the curated *System runtime /
+   C ABI* library (`lib/abi-sys` + `lib/crt0`, which export `ros_sys_*` and
+   `_start`) is bound. A reference to any other path — or one containing a
+   `..` component — fails closed, and nothing is launched.
+
+The needed-library list is carried in the `rxe` load header
+(`ros_load_header_t.needed_count`, bounded by `ROS_LOAD_MAX_NEEDED`) followed
+by that many `ROS_NEEDED_LIBRARY_WIRE_LEN`-byte records after the segment
+table; each record is a NUL-free path no longer than `ROS_LIBREF_MAX` bytes.
+Like every other `rxe` field it is untrusted input and is bounds-checked,
+fail-closed, and fuzzed (`AGENTS.md` §19.5/§19.6).
 
 ## Stability
 

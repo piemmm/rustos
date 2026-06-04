@@ -65,8 +65,9 @@ pub use process::{
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rxe::{
-    kaslr_bias, LoadHeader, LoadImage, RxeError, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
+    kaslr_bias, LoadHeader, LoadImage, NeededLibrary, RxeError, RxePermission, Segment, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
+    SEG_FLAG_READ, SEG_FLAG_WRITE,
 };
 pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
