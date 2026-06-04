@@ -42,9 +42,10 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, PortName, RandomFlags, Time64,
-    ABI_VERSION_V1, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC,
-    NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, PortName, RandomFlags, Severity,
+    StdInfoKind, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    IPC_MESSAGE_HEADER_MAGIC, NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_RESERVE_DEFAULT_BYTES, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
     SYSCALLS, SYSCALL_MAX_ARGS,
 };
 
@@ -338,6 +339,85 @@ fn generate_ipc() -> String {
     out
 }
 
+/// `rustos_stdinfo.h` — the Standard Information Stream ABI (`AGENTS.md` §20).
+///
+/// Declares the reserved `stdinfo` file descriptor, the framing version tags,
+/// and the closed [`StdInfoKind`] / [`Severity`] discriminant sets. The kinds
+/// and severities travel on the wire as strings; the `#[repr(u8)]`
+/// discriminants are emitted so a C consumer can name each variant. Every
+/// value is read from `lib/abi`, never re-typed; only the C spelling lives
+/// here.
+fn generate_stdinfo() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Standard Information Stream ABI (AGENTS.md sec.20).");
+    out.push_str("#ifndef ROS_STDINFO_H\n#define ROS_STDINFO_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Reserved stdinfo file descriptor; no component may repurpose it. */\n");
+    let _ = writeln!(out, "#define ROS_STDINFO_FD {STDINFO_FD}u");
+    out.push_str("/* stdinfo framing version tag for the frozen v1 framing. */\n");
+    let _ = writeln!(out, "#define ROS_STDINFO_VERSION_V1 {STDINFO_VERSION_V1}u");
+    out.push_str("/* stdinfo framing version this header set describes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_VERSION_CURRENT {STDINFO_VERSION_CURRENT}u"
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Closed set of record kinds (uint8_t). Wire spelling is the string in parens. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_KIND_OMISSION ((uint8_t){}u) /* \"{}\" */",
+        StdInfoKind::Omission as u8,
+        StdInfoKind::Omission.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_KIND_SUMMARY ((uint8_t){}u) /* \"{}\" */",
+        StdInfoKind::Summary as u8,
+        StdInfoKind::Summary.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_KIND_SCHEMA ((uint8_t){}u) /* \"{}\" */",
+        StdInfoKind::Schema as u8,
+        StdInfoKind::Schema.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_KIND_SUGGESTION ((uint8_t){}u) /* \"{}\" */",
+        StdInfoKind::Suggestion as u8,
+        StdInfoKind::Suggestion.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_KIND_CONTEXT ((uint8_t){}u) /* \"{}\" */",
+        StdInfoKind::Context as u8,
+        StdInfoKind::Context.as_str()
+    );
+    out.push('\n');
+
+    out.push_str("/* Advisory severity (uint8_t). Security events use lib/log, not fd 3. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_SEVERITY_INFO ((uint8_t){}u) /* \"{}\" */",
+        Severity::Info as u8,
+        Severity::Info.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_STDINFO_SEVERITY_DEBUG ((uint8_t){}u) /* \"{}\" */",
+        Severity::Debug as u8,
+        Severity::Debug.as_str()
+    );
+    out.push('\n');
+
+    out.push_str("#endif /* ROS_STDINFO_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -386,6 +466,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
     out.push_str("#include \"rustos_ipc.h\"\n");
+    out.push_str("#include \"rustos_stdinfo.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -418,6 +499,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_ipc.h",
             body: generate_ipc(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_stdinfo.h",
+            body: generate_stdinfo(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -527,6 +612,7 @@ mod tests {
             "rustos_time.h",
             "rustos_random.h",
             "rustos_ipc.h",
+            "rustos_stdinfo.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -682,6 +768,58 @@ mod tests {
             core::mem::align_of::<PortName>(),
             1,
             "PortName repr(C) align"
+        );
+    }
+
+    #[test]
+    fn stdinfo_header_pins_fd_versions_and_discriminants() {
+        let h = body("rustos_stdinfo.h");
+        assert!(h.contains("#ifndef ROS_STDINFO_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(
+            h.contains(&format!("#define ROS_STDINFO_FD {STDINFO_FD}u")),
+            "reserved fd: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_VERSION_V1 {STDINFO_VERSION_V1}u"
+            )),
+            "version v1: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_VERSION_CURRENT {STDINFO_VERSION_CURRENT}u"
+            )),
+            "current version: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_KIND_OMISSION ((uint8_t){}u)",
+                StdInfoKind::Omission as u8
+            )),
+            "omission discriminant: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_KIND_CONTEXT ((uint8_t){}u)",
+                StdInfoKind::Context as u8
+            )),
+            "context discriminant: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_SEVERITY_INFO ((uint8_t){}u)",
+                Severity::Info as u8
+            )),
+            "info severity: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_STDINFO_SEVERITY_DEBUG ((uint8_t){}u)",
+                Severity::Debug as u8
+            )),
+            "debug severity: {h}"
         );
     }
 

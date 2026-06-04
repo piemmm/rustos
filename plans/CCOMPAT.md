@@ -123,11 +123,16 @@ limits, pinned by an in-module test. The `ipc` module has now landed too:
 `ROS_IPC_MESSAGE_HEADER_MAGIC` / `ROS_IPC_MESSAGE_MAX_PAYLOAD_LEN` /
 `ROS_IPC_MESSAGE_HEADER_WIRE_LEN` / `ROS_PORT_NAME_MAX_LEN` /
 `ROS_PORT_NAME_WIRE_LEN` constants, every value read from `lib/abi` and pinned
-by an in-module test. **Remaining for CC1:** the rest of the modules —
-`stdinfo`, `manifest`, `appinfo`, `rxe`, `input`, `sysinfo`, the
-`capability` query POD types, and `driver/*` POD types — plus the
-"every `pub` `#[repr(C)]` type in `lib/abi` is represented in the header"
-completeness test once the surface is covered.
+by an in-module test. The `stdinfo` module has now landed too:
+`rustos_stdinfo.h` declares `ROS_STDINFO_FD`, the `ROS_STDINFO_VERSION_V1` /
+`ROS_STDINFO_VERSION_CURRENT` framing tags, and the `ROS_STDINFO_KIND_*` /
+`ROS_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants (the kinds and severities
+travel on the wire as strings; the discriminants give the C view a name for
+each variant), every value read from `lib/abi` and pinned by an in-module test.
+**Remaining for CC1:** the rest of the modules — `manifest`, `appinfo`, `rxe`,
+`input`, `sysinfo`, the `capability` query POD types, and `driver/*` POD
+types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
+the header" completeness test once the surface is covered.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

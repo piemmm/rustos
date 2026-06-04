@@ -18,6 +18,10 @@ pull in exactly what they need, plus an umbrella that includes them all:
 - `rustos/rustos_ipc.h` — the IPC message header and port-name wire types
   (`ros_ipc_message_header_t`, `ros_port_name_t`) and their constants
   (`ROS_IPC_*`, `ROS_PORT_NAME_*`).
+- `rustos/rustos_stdinfo.h` — the Standard Information Stream ABI: the
+  reserved file descriptor (`ROS_STDINFO_FD`), the framing version tags
+  (`ROS_STDINFO_VERSION_*`), and the record-kind and severity discriminants
+  (`ROS_STDINFO_KIND_*`, `ROS_STDINFO_SEVERITY_*`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

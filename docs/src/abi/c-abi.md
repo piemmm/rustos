@@ -18,13 +18,14 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_time.h` | `ros_time64_t` / `ros_duration64_t` and the `ROS_NANOS_PER_SEC` / `*_WIRE_LEN` constants |
 | `include/rustos/rustos_random.h` | `ROS_RANDOM_FLAG_*` request flags and the `ROS_RANDOM_*_BYTES` request limits |
 | `include/rustos/rustos_ipc.h` | `ros_ipc_message_header_t` / `ros_port_name_t` and the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants |
+| `include/rustos/rustos_stdinfo.h` | `ROS_STDINFO_FD`, the `ROS_STDINFO_VERSION_*` framing tags, and the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` discriminants |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
 Growing the set to cover the rest of `lib/abi` (`appinfo`, `capability`
-queries, `driver/*`, `input`, `manifest`, `rxe`, `sysinfo`, `stdinfo`) is
+queries, `driver/*`, `input`, `manifest`, `rxe`, `sysinfo`) is
 staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written

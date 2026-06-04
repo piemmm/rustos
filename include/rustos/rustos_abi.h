@@ -26,6 +26,7 @@
 #include "rustos_time.h"
 #include "rustos_random.h"
 #include "rustos_ipc.h"
+#include "rustos_stdinfo.h"
 #include "rustos_syscall.h"
 
 #endif /* ROS_ABI_H */
