@@ -13,6 +13,8 @@ pull in exactly what they need, plus an umbrella that includes them all:
 - `rustos/rustos_capability.h` — the capability identifiers (`ROS_CAP_*`).
 - `rustos/rustos_time.h` — the 64-bit-native time types (`ros_time64_t`,
   `ros_duration64_t`) and their constants.
+- `rustos/rustos_random.h` — the random-request flags (`ROS_RANDOM_FLAG_*`)
+  and the per-request byte limits (`ROS_RANDOM_*_BYTES`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

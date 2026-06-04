@@ -24,6 +24,7 @@
 #include "rustos_error.h"
 #include "rustos_capability.h"
 #include "rustos_time.h"
+#include "rustos_random.h"
 #include "rustos_syscall.h"
 
 #endif /* ROS_ABI_H */

@@ -42,8 +42,9 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Duration64, Errno, RandomFlags, Time64, ABI_VERSION_V1,
+    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC, RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_RESERVE_DEFAULT_BYTES, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -231,6 +232,44 @@ fn generate_time() -> String {
     out
 }
 
+/// `rustos_random.h` — the canonical random-number ABI (`AGENTS.md` §22).
+///
+/// Declares the single defined request flag bit (`ROS_RANDOM_FLAG_*`, read
+/// from [`RandomFlags`]) and the byte-count limits of a single request. The
+/// flag register is a `uint32_t`; the byte counts are register-width
+/// quantities (`uintptr_t`), matching the `Len` mapping in [`c_type`].
+fn generate_random() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Canonical random-number ABI (AGENTS.md sec.22).");
+    out.push_str("#ifndef ROS_RANDOM_H\n#define ROS_RANDOM_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str(
+        "/* Request flags (uint32_t). Every undefined bit is reserved and must be zero. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_RANDOM_FLAG_NON_BLOCKING {:#x}u",
+        RandomFlags::NON_BLOCKING.bits()
+    );
+    out.push('\n');
+
+    out.push_str("/* Default per-CPU random output reserve, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RANDOM_RESERVE_DEFAULT_BYTES ((uintptr_t){RANDOM_RESERVE_DEFAULT_BYTES}u)"
+    );
+    out.push_str("/* Maximum number of bytes a single random request may ask for. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RANDOM_REQUEST_MAX_BYTES ((uintptr_t){RANDOM_REQUEST_MAX_BYTES}u)"
+    );
+    out.push('\n');
+
+    out.push_str("#endif /* ROS_RANDOM_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -277,6 +316,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_error.h\"\n");
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
+    out.push_str("#include \"rustos_random.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -301,6 +341,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_time.h",
             body: generate_time(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_random.h",
+            body: generate_random(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -408,6 +452,7 @@ mod tests {
             "rustos_error.h",
             "rustos_capability.h",
             "rustos_time.h",
+            "rustos_random.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -467,6 +512,33 @@ mod tests {
         assert_eq!(core::mem::size_of::<Time64>(), 16, "Time64 repr(C) size");
         assert_eq!(core::mem::align_of::<Time64>(), 8, "Time64 repr(C) align");
         assert_eq!(core::mem::size_of::<Duration64>(), 16, "Duration64 size");
+    }
+
+    #[test]
+    fn random_header_pins_flags_and_limits() {
+        let h = body("rustos_random.h");
+        assert!(h.contains("#ifndef ROS_RANDOM_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_RANDOM_FLAG_NON_BLOCKING {:#x}u",
+                RandomFlags::NON_BLOCKING.bits()
+            )),
+            "non-blocking flag bit: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_RANDOM_RESERVE_DEFAULT_BYTES ((uintptr_t){RANDOM_RESERVE_DEFAULT_BYTES}u)"
+            )),
+            "reserve default: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_RANDOM_REQUEST_MAX_BYTES ((uintptr_t){RANDOM_REQUEST_MAX_BYTES}u)"
+            )),
+            "request max: {h}"
+        );
     }
 
     #[test]

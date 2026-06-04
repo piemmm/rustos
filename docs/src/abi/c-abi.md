@@ -16,13 +16,14 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_error.h` | `ROS_E_*` — the stable error codes (matching the `Errno` discriminants) |
 | `include/rustos/rustos_capability.h` | `ROS_CAP_*` and `ROS_CAPABILITY_ID_MAX` — the capability identifiers |
 | `include/rustos/rustos_time.h` | `ros_time64_t` / `ros_duration64_t` and the `ROS_NANOS_PER_SEC` / `*_WIRE_LEN` constants |
+| `include/rustos/rustos_random.h` | `ROS_RANDOM_FLAG_*` request flags and the `ROS_RANDOM_*_BYTES` request limits |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
 Growing the set to cover the rest of `lib/abi` (`appinfo`, `capability`
-queries, `driver/*`, `input`, `ipc`, `manifest`, `random`, `rxe`, `sysinfo`,
+queries, `driver/*`, `input`, `ipc`, `manifest`, `rxe`, `sysinfo`,
 `stdinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written

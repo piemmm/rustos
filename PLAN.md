@@ -7084,10 +7084,11 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   syscall/errno/capability seed to the whole crate). **In progress:** the
   generator now emits one header per `lib/abi` module under `include/rustos/`
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
-  `rustos_syscall.h`) plus the umbrella `rustos_abi.h` that `#include`s them,
-  with a tree-wide drift guard; the `time` module (`ros_time64_t` /
-  `ros_duration64_t` + constants, values read from `lib/abi`) is the first
-  grown module. **Remaining:** `random`, `ipc`, `stdinfo`, `manifest`,
+  `rustos_random.h`, `rustos_syscall.h`) plus the umbrella `rustos_abi.h` that
+  `#include`s them, with a tree-wide drift guard; the `time` module
+  (`ros_time64_t` / `ros_duration64_t` + constants) and the `random` module
+  (`ROS_RANDOM_FLAG_*` + the `ROS_RANDOM_*_BYTES` limits), values read from
+  `lib/abi`, are the grown modules so far. **Remaining:** `ipc`, `stdinfo`, `manifest`,
   `appinfo`, `rxe`, `input`, `sysinfo`, the `capability` query types, and
   `driver/*` POD types, plus the "every pub `#[repr(C)]` type is represented"
   completeness test once the surface is covered.
@@ -7108,9 +7109,10 @@ runtime and crt0 are out of scope for `wasm32` (no trap instruction).
 Done seed (current): `cargo xtask c-header` ships the surface as a per-module
 header set under `include/rustos/` — the umbrella `rustos_abi.h` plus
 `rustos_error.h` (error codes), `rustos_capability.h` (capability ids),
-`rustos_syscall.h` (syscall numbers + one prototype per syscall), and
+`rustos_syscall.h` (syscall numbers + one prototype per syscall),
 `rustos_time.h` (`ros_time64_t` / `ros_duration64_t` + the `Time64`/
-`Duration64` constants) — each value read from `lib/abi` and guarded
+`Duration64` constants), and `rustos_random.h` (`ROS_RANDOM_FLAG_*` + the
+`ROS_RANDOM_*_BYTES` limits) — each value read from `lib/abi` and guarded
 byte-for-byte against drift, wired into `cargo xtask ci`; the docs page is
 `docs/src/abi/c-abi.md`.
 
