@@ -584,19 +584,19 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             ));
         }
     }
-    let header = ctx.workspace_root.join(c_header::DEFAULT_HEADER_PATH);
+    let include_dir = ctx.workspace_root.join(c_header::DEFAULT_INCLUDE_DIR);
     if write {
         eprintln!(
             "xtask: [c-header --write] {}",
-            relative(&ctx.workspace_root, &header)
+            relative(&ctx.workspace_root, &include_dir)
         );
-        c_header::write(&ctx.workspace_root, &header)
+        c_header::write(&ctx.workspace_root, &include_dir)
     } else {
         eprintln!(
             "xtask: [c-header] {}",
-            relative(&ctx.workspace_root, &header)
+            relative(&ctx.workspace_root, &include_dir)
         );
-        c_header::check_sync(&ctx.workspace_root, &header)
+        c_header::check_sync(&ctx.workspace_root, &include_dir)
     }
 }
 

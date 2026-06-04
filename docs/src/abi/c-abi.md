@@ -5,33 +5,44 @@ binary contract (`AGENTS.md` §9) that programs written in other languages —
 C in particular — must be able to call. Those programs need a C-language
 *view* of the ABI rather than the Rust crate `rustos-abi`.
 
-That view is the **C development header**, shipped under the top-level
-`include/` directory:
+That view is the **C development header set**, shipped under the top-level
+`include/` directory. It is split into one header per `lib/abi` module so a
+developer can pull in exactly what they need, plus the umbrella
+`rustos_abi.h` that `#include`s them all:
 
-- `include/rustos/rustos_abi.h`
+| Header | Declares |
+|--------|----------|
+| `include/rustos/rustos_abi.h` | umbrella: `ROS_ABI_VERSION` + `#include` of every module header |
+| `include/rustos/rustos_error.h` | `ROS_E_*` — the stable error codes (matching the `Errno` discriminants) |
+| `include/rustos/rustos_capability.h` | `ROS_CAP_*` and `ROS_CAPABILITY_ID_MAX` — the capability identifiers |
+| `include/rustos/rustos_time.h` | `ros_time64_t` / `ros_duration64_t` and the `ROS_NANOS_PER_SEC` / `*_WIRE_LEN` constants |
+| `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
-It declares, for `abi-v1`:
+Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
+that only needs, say, the time types can include `rustos_time.h` directly.
 
-- `ROS_ABI_VERSION` — the ABI version the header describes.
-- `ROS_E_*` — the stable error codes (matching the `Errno` discriminants).
-- `ROS_CAP_*` and `ROS_CAPABILITY_ID_MAX` — the capability identifiers.
-- `ROS_SYS_*` and `ROS_SYSCALL_MAX_ARGS` — the syscall numbers.
-- One `extern "C"` prototype per syscall entry point.
+Growing the set to cover the rest of `lib/abi` (`appinfo`, `capability`
+queries, `driver/*`, `input`, `ipc`, `manifest`, `random`, `rxe`, `sysinfo`,
+`stdinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written
 
-The header is generated from the single source of truth in `lib/abi`, so it
-can never drift into a parallel, hand-maintained ABI definition (`AGENTS.md`
-§2.2, §9). The generator lives in `tools/xtask`:
+Every header is generated from the single source of truth in `lib/abi`, so
+the set can never drift into a parallel, hand-maintained ABI definition
+(`AGENTS.md` §2.2, §9). Every value — error-code numbers, capability ids,
+syscall numbers, struct sizes, and constant values — is read straight from
+`lib/abi`; only the C *spelling* (the `ROS_*` macro name, the
+`ros_<name>_t` type name) lives in the generator, because Rust offers no
+run-time reflection over a type's name. The generator lives in `tools/xtask`:
 
 ```text
-cargo xtask c-header --write   # regenerate include/rustos/rustos_abi.h
+cargo xtask c-header --write   # regenerate the include/rustos/ header set
 cargo xtask c-header           # verify it is in sync (fails closed on drift)
 ```
 
-`cargo xtask ci` runs the verifying form, so a change to `lib/abi` that
-forgets to regenerate the header fails the pipeline rather than silently
-shipping a stale contract.
+`cargo xtask ci` runs the verifying form over the whole set, so a change to
+`lib/abi` that forgets to regenerate a header fails the pipeline rather than
+silently shipping a stale contract.
 
 ## Calling convention and symbol names
 
@@ -54,6 +65,17 @@ on every Tier-1 target:
 | length        | `uintptr_t` |
 | user pointer  | `void *`    |
 | error code    | `int32_t`   |
+| `Time64` / `Duration64` | `ros_time64_t` / `ros_duration64_t` (`{ int64_t secs; uint32_t nanos; }`) |
+
+### Endianness and wire vs. in-memory form
+
+The `#[repr(C)]` struct types (`ros_time64_t`, `ros_duration64_t`) mirror the
+Rust in-memory layout: naturally aligned, so `sizeof(ros_time64_t) == 16`
+(8-byte seconds + 4-byte nanos + 4 bytes of tail padding). The separate
+`*_WIRE_LEN` macros give the **packed little-endian wire size** (12 bytes for
+a time value) used when a value is serialised into a byte buffer. The
+encode/decode helpers in `lib/abi` are little-endian on every target, so the
+serialised byte image does not depend on host endianness.
 
 The trap-issuing implementation of each `ros_sys_<name>` lives in the
 user-space stub library (future work, gated on the per-architecture trap

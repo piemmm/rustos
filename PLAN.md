@@ -7081,7 +7081,16 @@ syscall stubs + crt0), dynamically linked like every other curated library.
 **Stages** (see `plans/CCOMPAT.md` for deliverables, tests, docs):
 
 - CC1 — Full `lib/abi` C header surface (grow `cargo xtask c-header` from the
-  syscall/errno/capability seed to the whole crate). **Not started.**
+  syscall/errno/capability seed to the whole crate). **In progress:** the
+  generator now emits one header per `lib/abi` module under `include/rustos/`
+  (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
+  `rustos_syscall.h`) plus the umbrella `rustos_abi.h` that `#include`s them,
+  with a tree-wide drift guard; the `time` module (`ros_time64_t` /
+  `ros_duration64_t` + constants, values read from `lib/abi`) is the first
+  grown module. **Remaining:** `random`, `ipc`, `stdinfo`, `manifest`,
+  `appinfo`, `rxe`, `input`, `sysinfo`, the `capability` query types, and
+  `driver/*` POD types, plus the "every pub `#[repr(C)]` type is represented"
+  completeness test once the surface is covered.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
   trap stubs). Depends on the per-arch trap layer (Stage 6+). **Not started.**
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
@@ -7096,10 +7105,14 @@ syscall stubs + crt0), dynamically linked like every other curated library.
 Native Tier-1 targets only (`x86_64`, `aarch64`, `riscv64`); the syscall-stub
 runtime and crt0 are out of scope for `wasm32` (no trap instruction).
 
-Done seed (current): `cargo xtask c-header` ships the seed surface (ABI
-version, error codes, capability ids, syscall numbers + one prototype per
-syscall) into `include/rustos/rustos_abi.h`, wired into `cargo xtask ci`; the
-docs page is `docs/src/abi/c-abi.md`.
+Done seed (current): `cargo xtask c-header` ships the surface as a per-module
+header set under `include/rustos/` — the umbrella `rustos_abi.h` plus
+`rustos_error.h` (error codes), `rustos_capability.h` (capability ids),
+`rustos_syscall.h` (syscall numbers + one prototype per syscall), and
+`rustos_time.h` (`ros_time64_t` / `ros_duration64_t` + the `Time64`/
+`Duration64` constants) — each value read from `lib/abi` and guarded
+byte-for-byte against drift, wired into `cargo xtask ci`; the docs page is
+`docs/src/abi/c-abi.md`.
 
 ---
 

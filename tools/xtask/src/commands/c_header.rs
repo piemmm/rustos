@@ -4,24 +4,29 @@
 //! (`abi-v1`, `AGENTS.md` §9) is a stable binary contract that programs
 //! written in other languages — C in particular — must be able to call.
 //! Those programs need a C-language *view* of the ABI: the syscall numbers,
-//! the error codes, the capability identifiers, and a prototype for each
-//! syscall entry point.
+//! the error codes, the capability identifiers, the `#[repr(C)]` types, and a
+//! prototype for each syscall entry point.
 //!
-//! That view is the C development header. It is **generated** from the one
+//! That view is the C development header set. It is **generated** from the one
 //! source of truth in `lib/abi` (`AGENTS.md` §2.2 — no duplication, §9 — the
 //! ABI is versioned and a C surface is a view of the existing definition,
-//! never a hand-maintained parallel one). The committed header lives in its
-//! own top-level [`include/`](DEFAULT_HEADER_PATH) folder so it can be handed
-//! to developers building non-Rust programs without shipping the whole
-//! workspace.
+//! never a hand-maintained parallel one). The committed headers live in their
+//! own top-level `include/` folder so they can be handed to developers
+//! building non-Rust programs without shipping the whole workspace.
+//!
+//! The surface is split into **one header per `lib/abi` module** under
+//! `include/rustos/` (`rustos_error.h`, `rustos_capability.h`,
+//! `rustos_time.h`, `rustos_syscall.h`, …) plus the umbrella `rustos_abi.h`
+//! (in [`DEFAULT_INCLUDE_DIR`]) that `#include`s them all, so a developer can
+//! pull in exactly what they need (`plans/CCOMPAT.md` CC1).
 //!
 //! Like `abi-check` (`commands/abi_check.rs`), the generator doubles as a
 //! drift guard:
 //!
-//! - `cargo xtask c-header` (no arguments) regenerates the header in memory
-//!   and compares it byte for byte with the committed copy, failing closed on
-//!   any mismatch. It runs as part of `cargo xtask ci`.
-//! - `cargo xtask c-header --write` regenerates the committed copy (reviewed
+//! - `cargo xtask c-header` (no arguments) regenerates every header in memory
+//!   and compares each byte for byte with the committed copy, failing closed
+//!   on any mismatch. It runs as part of `cargo xtask ci`.
+//! - `cargo xtask c-header --write` regenerates the committed copies (reviewed
 //!   by diff, exactly like the kernel syscall table the abi-check watches).
 //!
 //! ## Stable export-symbol convention
@@ -37,12 +42,13 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Errno, ABI_VERSION_V1, CAPABILITY_ID_MAX, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Duration64, Errno, Time64, ABI_VERSION_V1, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 
-/// Default on-disk location of the generated C ABI header, relative to the
-/// workspace root.
-pub const DEFAULT_HEADER_PATH: &str = "include/rustos/rustos_abi.h";
+/// Default on-disk location of the generated C ABI header set, relative to
+/// the workspace root. The umbrella header is `rustos_abi.h` inside it.
+pub const DEFAULT_INCLUDE_DIR: &str = "include/rustos";
 
 /// The `abi-v1` error codes, paired with the `ROS_E_*` suffix each is
 /// emitted under.
@@ -75,6 +81,15 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("BAD_ADDRESS", Errno::BadAddress),
     ("WOULD_BLOCK", Errno::WouldBlock),
 ];
+
+/// One generated C header: its file name (relative to the include directory)
+/// and its full text.
+pub struct GeneratedHeader {
+    /// File name relative to [`DEFAULT_INCLUDE_DIR`], e.g. `rustos_time.h`.
+    pub file_name: &'static str,
+    /// Complete header text, including its include guard.
+    pub body: String,
+}
 
 /// The C type a syscall argument or return [`AbiType`] is rendered as in the
 /// generated header.
@@ -114,50 +129,45 @@ fn prototype(spec: &rustos_abi::SyscallSpec) -> String {
     format!("{ret} ros_sys_{}({params});", spec.name)
 }
 
-/// Generate the full C ABI header text from the `lib/abi` source of truth.
+/// Shared `GENERATED FILE` banner for one module header.
 ///
-/// The output is deterministic: the same workspace always produces the same
-/// bytes, which is what lets [`check_sync`] use a byte-for-byte comparison as
-/// a drift guard.
-#[must_use]
-pub fn generate() -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(4096);
-
-    out.push_str(
+/// `purpose` is a one-line description of what the header declares.
+fn banner(purpose: &str) -> String {
+    format!(
         "/*\n\
          * RustOS abi-v1 C development header.\n\
          *\n\
          * GENERATED FILE - DO NOT EDIT BY HAND.\n\
          *\n\
-         * This is the C-language view of the RustOS kernel/user ABI. It is\n\
-         * generated from the single source of truth in `lib/abi` by\n\
+         * {purpose}\n\
+         *\n\
+         * This is part of the C-language view of the RustOS kernel/user ABI.\n\
+         * It is generated from the single source of truth in `lib/abi` by\n\
          * `cargo xtask c-header --write` and verified on every CI run by\n\
          * `cargo xtask c-header`. Edit `lib/abi` and regenerate; never edit\n\
          * this file directly (AGENTS.md sec.2.2, sec.9).\n\
-         *\n\
-         * Each syscall is exported by the user-space stub library under the\n\
-         * symbol `ros_sys_<name>` (e.g. `ros_sys_ipc_send`); link\n\
-         * against that library to call the kernel from a non-Rust program.\n\
-         */\n\n",
-    );
+         */\n\n"
+    )
+}
 
-    out.push_str("#ifndef ROS_ABI_H\n#define ROS_ABI_H\n\n");
-    out.push_str("#include <stdint.h>\n\n");
-    out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
-
-    // ABI version.
-    out.push_str("/* ABI version this header describes (AGENTS.md sec.9). */\n");
-    let _ = writeln!(out, "#define ROS_ABI_VERSION {ABI_VERSION_V1}u\n");
-
-    // Error codes.
+/// `rustos_error.h` — the stable `abi-v1` error codes.
+fn generate_error() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Stable abi-v1 error codes (Errno discriminants).");
+    out.push_str("#ifndef ROS_ERROR_H\n#define ROS_ERROR_H\n\n");
     out.push_str("/* Stable abi-v1 error codes (int32_t). */\n");
     for (name, errno) in ERRNO_NAMES {
         let _ = writeln!(out, "#define ROS_E_{name} {}", errno.as_i32());
     }
-    out.push('\n');
+    out.push_str("\n#endif /* ROS_ERROR_H */\n");
+    out
+}
 
-    // Capability identifiers.
+/// `rustos_capability.h` — the capability identifiers (`AGENTS.md` §5.2).
+fn generate_capability() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Capability identifiers (AGENTS.md sec.5.2).");
+    out.push_str("#ifndef ROS_CAPABILITY_H\n#define ROS_CAPABILITY_H\n\n");
     out.push_str("/* Capability identifiers (AGENTS.md sec.5.2). */\n");
     let _ = writeln!(out, "#define ROS_CAPABILITY_ID_MAX {CAPABILITY_ID_MAX}u");
     for raw in 1..=CAPABILITY_ID_MAX {
@@ -168,9 +178,67 @@ pub fn generate() -> String {
             let _ = writeln!(out, "#define ROS_{name} {raw}u");
         }
     }
+    out.push_str("\n#endif /* ROS_CAPABILITY_H */\n");
+    out
+}
+
+/// `rustos_time.h` — the 64-bit-native time types (`AGENTS.md` §21).
+///
+/// `ros_time64_t` / `ros_duration64_t` mirror the `#[repr(C)]` layout of
+/// [`Time64`] / [`Duration64`] (8-byte signed seconds + a 4-byte canonical
+/// nanosecond field). Their packed little-endian *wire* size is the separate
+/// `*_WIRE_LEN` macro (12 bytes); the in-memory struct is naturally aligned.
+fn generate_time() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("64-bit-native time types (AGENTS.md sec.21).");
+    out.push_str("#ifndef ROS_TIME_H\n#define ROS_TIME_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Nanoseconds in one second; the sub-second field stays in 0..this. */\n");
+    let _ = writeln!(out, "#define ROS_NANOS_PER_SEC {NANOS_PER_SEC}u");
+    out.push_str(
+        "/* Coarse monotonic-clock granularity, ns, for callers without CAP_TIME_HIRES. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_COARSE_CLOCK_GRANULARITY_NS {COARSE_CLOCK_GRANULARITY_NS}ull"
+    );
+    out.push_str("/* Packed little-endian wire size of each time value, in bytes. */\n");
+    let _ = writeln!(out, "#define ROS_TIME64_WIRE_LEN {}u", Time64::WIRE_LEN);
+    let _ = writeln!(
+        out,
+        "#define ROS_DURATION64_WIRE_LEN {}u",
+        Duration64::WIRE_LEN
+    );
     out.push('\n');
 
-    // Syscall numbers.
+    out.push_str(
+        "/* Absolute instant: signed seconds since the Unix epoch + canonical nanos. */\n\
+         typedef struct ros_time64 {\n\
+         \x20   int64_t secs;\n\
+         \x20   uint32_t nanos;\n\
+         } ros_time64_t;\n\n",
+    );
+    out.push_str(
+        "/* Span of time: signed seconds + canonical nanos (companion to ros_time64). */\n\
+         typedef struct ros_duration64 {\n\
+         \x20   int64_t secs;\n\
+         \x20   uint32_t nanos;\n\
+         } ros_duration64_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_TIME_H */\n");
+    out
+}
+
+/// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
+fn generate_syscall() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Syscall numbers and C entry-point prototypes (AGENTS.md sec.9).");
+    out.push_str("#ifndef ROS_SYSCALL_H\n#define ROS_SYSCALL_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+    out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+
     out.push_str("/* Syscall numbers (AGENTS.md sec.9). */\n");
     let _ = writeln!(out, "#define ROS_SYSCALL_MAX_ARGS {SYSCALL_MAX_ARGS}u");
     for spec in SYSCALLS {
@@ -183,7 +251,6 @@ pub fn generate() -> String {
     }
     out.push('\n');
 
-    // Syscall stub prototypes.
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
     for spec in SYSCALLS {
         let _ = writeln!(out, "{}", prototype(spec));
@@ -191,57 +258,108 @@ pub fn generate() -> String {
     out.push('\n');
 
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
-    out.push_str("#endif /* ROS_ABI_H */\n");
-
+    out.push_str("#endif /* ROS_SYSCALL_H */\n");
     out
 }
 
-/// Verify that the committed header matches freshly generated output.
+/// `rustos_abi.h` — the umbrella header that includes every module header.
+fn generate_umbrella() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner(
+        "Umbrella header: the whole abi-v1 C surface in one include.\n\
+         * Each syscall is exported by the user-space stub library under the\n\
+         * symbol `ros_sys_<name>` (e.g. `ros_sys_ipc_send`); link against\n\
+         * that library to call the kernel from a non-Rust program.",
+    );
+    out.push_str("#ifndef ROS_ABI_H\n#define ROS_ABI_H\n\n");
+    out.push_str("/* ABI version this header set describes (AGENTS.md sec.9). */\n");
+    let _ = writeln!(out, "#define ROS_ABI_VERSION {ABI_VERSION_V1}u\n");
+    out.push_str("#include \"rustos_error.h\"\n");
+    out.push_str("#include \"rustos_capability.h\"\n");
+    out.push_str("#include \"rustos_time.h\"\n");
+    out.push_str("#include \"rustos_syscall.h\"\n\n");
+    out.push_str("#endif /* ROS_ABI_H */\n");
+    out
+}
+
+/// Generate the full C ABI header set from the `lib/abi` source of truth.
 ///
-/// `workspace_root` is recorded in error messages; `header_path` points at
-/// the committed copy (callers default it to [`DEFAULT_HEADER_PATH`]). A
-/// missing or stale header is a hard error directing the developer to
-/// `cargo xtask c-header --write`.
-pub fn check_sync(workspace_root: &Path, header_path: &Path) -> Result<(), String> {
-    let rel = relative(workspace_root, header_path);
-    let on_disk = match std::fs::read_to_string(header_path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+/// The output is deterministic: the same workspace always produces the same
+/// bytes for every file, which is what lets [`check_sync`] use a
+/// byte-for-byte comparison as a drift guard.
+#[must_use]
+pub fn generate_all() -> Vec<GeneratedHeader> {
+    vec![
+        GeneratedHeader {
+            file_name: "rustos_error.h",
+            body: generate_error(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_capability.h",
+            body: generate_capability(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_time.h",
+            body: generate_time(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_syscall.h",
+            body: generate_syscall(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_abi.h",
+            body: generate_umbrella(),
+        },
+    ]
+}
+
+/// Verify that every committed header matches freshly generated output.
+///
+/// `include_dir` points at the committed header directory (callers default it
+/// to [`DEFAULT_INCLUDE_DIR`]). A missing or stale header is a hard error
+/// directing the developer to `cargo xtask c-header --write`.
+pub fn check_sync(workspace_root: &Path, include_dir: &Path) -> Result<(), String> {
+    for header in generate_all() {
+        let path = include_dir.join(header.file_name);
+        let rel = relative(workspace_root, &path);
+        let on_disk = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "c-header: `{rel}` is missing; run `cargo xtask c-header --write` \
+                     to generate it from lib/abi (AGENTS.md sec.9)."
+                ));
+            }
+            Err(err) => return Err(format!("c-header: cannot read {rel}: {err}")),
+        };
+        if on_disk != header.body {
             return Err(format!(
-                "c-header: `{rel}` is missing; run `cargo xtask c-header --write` \
-                 to generate it from lib/abi (AGENTS.md sec.9)."
+                "c-header: `{rel}` is out of date with the lib/abi source of truth; \
+                 run `cargo xtask c-header --write` and commit the result \
+                 (AGENTS.md sec.2.2, sec.9)."
             ));
         }
-        Err(err) => return Err(format!("c-header: cannot read {rel}: {err}")),
-    };
-
-    let expected = generate();
-    if on_disk != expected {
-        return Err(format!(
-            "c-header: `{rel}` is out of date with the lib/abi source of truth; \
-             run `cargo xtask c-header --write` and commit the result (AGENTS.md sec.2.2, sec.9)."
-        ));
     }
     Ok(())
 }
 
-/// Regenerate the committed header at `header_path`, creating any missing
-/// parent directories.
-pub fn write(workspace_root: &Path, header_path: &Path) -> Result<(), String> {
-    if let Some(parent) = header_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
+/// Regenerate every committed header in `include_dir`, creating it if needed.
+pub fn write(workspace_root: &Path, include_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(include_dir).map_err(|e| {
+        format!(
+            "c-header: cannot create {}: {e}",
+            relative(workspace_root, include_dir)
+        )
+    })?;
+    for header in generate_all() {
+        let path = include_dir.join(header.file_name);
+        std::fs::write(&path, header.body).map_err(|e| {
             format!(
-                "c-header: cannot create {}: {e}",
-                relative(workspace_root, parent)
+                "c-header: cannot write {}: {e}",
+                relative(workspace_root, &path)
             )
         })?;
     }
-    std::fs::write(header_path, generate()).map_err(|e| {
-        format!(
-            "c-header: cannot write {}: {e}",
-            relative(workspace_root, header_path)
-        )
-    })?;
     Ok(())
 }
 
@@ -266,20 +384,59 @@ mod tests {
         p
     }
 
-    #[test]
-    fn generation_is_deterministic() {
-        assert_eq!(generate(), generate());
+    fn body(file_name: &str) -> String {
+        generate_all()
+            .into_iter()
+            .find(|h| h.file_name == file_name)
+            .map_or_else(|| panic!("missing header {file_name}"), |h| h.body)
     }
 
     #[test]
-    fn header_contains_expected_anchors() {
-        let h = generate();
+    fn generation_is_deterministic() {
+        for (a, b) in generate_all().iter().zip(generate_all().iter()) {
+            assert_eq!(a.file_name, b.file_name);
+            assert_eq!(a.body, b.body);
+        }
+    }
+
+    #[test]
+    fn umbrella_includes_every_module_header() {
+        let h = body("rustos_abi.h");
         assert!(h.contains("#ifndef ROS_ABI_H"), "guard present");
+        assert!(h.contains("#define ROS_ABI_VERSION 1u"), "version macro");
+        for module in [
+            "rustos_error.h",
+            "rustos_capability.h",
+            "rustos_time.h",
+            "rustos_syscall.h",
+        ] {
+            assert!(
+                h.contains(&format!("#include \"{module}\"")),
+                "umbrella must include {module}: {h}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_header_has_codes() {
+        let h = body("rustos_error.h");
+        assert!(h.contains("#ifndef ROS_ERROR_H"), "guard present");
+        assert!(h.contains("#define ROS_E_PERMISSION_DENIED 6"), "errno");
+    }
+
+    #[test]
+    fn capability_header_has_ids() {
+        let h = body("rustos_capability.h");
+        assert!(h.contains("#ifndef ROS_CAPABILITY_H"), "guard present");
+        assert!(h.contains("#define ROS_CAP_USER_ADMIN 5u"), "capability");
+    }
+
+    #[test]
+    fn syscall_header_has_numbers_and_prototypes() {
+        let h = body("rustos_syscall.h");
+        assert!(h.contains("#ifndef ROS_SYSCALL_H"), "guard present");
         assert!(h.contains("#include <stdint.h>"), "stdint included");
         assert!(h.contains("extern \"C\""), "C++ guard present");
-        assert!(h.contains("#define ROS_ABI_VERSION 1u"), "version macro");
-        assert!(h.contains("#define ROS_E_PERMISSION_DENIED 6"), "errno");
-        assert!(h.contains("#define ROS_CAP_USER_ADMIN 5u"), "capability");
         assert!(h.contains("#define ROS_SYS_EXIT 1u"), "syscall number");
         assert!(
             h.contains("void ros_sys_yield(void);"),
@@ -292,8 +449,29 @@ mod tests {
     }
 
     #[test]
+    fn time_header_pins_layout_and_values() {
+        let h = body("rustos_time.h");
+        assert!(h.contains("#ifndef ROS_TIME_H"), "guard present");
+        assert!(h.contains("typedef struct ros_time64 {"), "time struct");
+        assert!(
+            h.contains("typedef struct ros_duration64 {"),
+            "duration struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(h.contains(&format!("#define ROS_NANOS_PER_SEC {NANOS_PER_SEC}u")));
+        assert!(h.contains(&format!(
+            "#define ROS_TIME64_WIRE_LEN {}u",
+            Time64::WIRE_LEN
+        )));
+        // The C struct mirrors the #[repr(C)] Rust layout (8 + 4 + 4 pad).
+        assert_eq!(core::mem::size_of::<Time64>(), 16, "Time64 repr(C) size");
+        assert_eq!(core::mem::align_of::<Time64>(), 8, "Time64 repr(C) align");
+        assert_eq!(core::mem::size_of::<Duration64>(), 16, "Duration64 size");
+    }
+
+    #[test]
     fn every_syscall_has_a_number_and_a_prototype() {
-        let h = generate();
+        let h = body("rustos_syscall.h");
         for spec in SYSCALLS {
             let upper = spec.name.to_ascii_uppercase();
             assert!(
@@ -341,16 +519,16 @@ mod tests {
     }
 
     #[test]
-    fn committed_header_is_in_sync() {
+    fn committed_headers_are_in_sync() {
         let root = workspace_root();
-        let header = root.join(DEFAULT_HEADER_PATH);
-        check_sync(&root, &header).expect("committed header must match lib/abi");
+        let dir = root.join(DEFAULT_INCLUDE_DIR);
+        check_sync(&root, &dir).expect("committed headers must match lib/abi");
     }
 
     #[test]
     fn missing_header_is_an_error() {
         let root = workspace_root();
-        let absent = root.join("include/rustos/__nope__.h");
+        let absent = root.join("include").join("__nope__");
         let err = check_sync(&root, &absent).unwrap_err();
         assert!(err.contains("is missing"), "{err}");
     }
@@ -358,13 +536,14 @@ mod tests {
     #[test]
     fn stale_header_is_detected() {
         let root = workspace_root();
-        // Write a deliberately wrong header under the workspace scratch area
-        // (target/tmp) so a failed test never leaks into /tmp.
+        // Write a deliberately wrong header set under the workspace scratch
+        // area (target/tmp) so a failed test never leaks into /tmp.
         let tmp = root.join("target").join("tmp").join("xtask_c_header_stale");
         std::fs::create_dir_all(&tmp).expect("tmpdir");
-        let stale = tmp.join("rustos_abi.h");
-        std::fs::write(&stale, "/* not the generated header */\n").expect("write stale");
-        let err = check_sync(&root, &stale).unwrap_err();
+        for header in generate_all() {
+            std::fs::write(tmp.join(header.file_name), "/* not generated */\n").expect("write");
+        }
+        let err = check_sync(&root, &tmp).unwrap_err();
         assert!(err.contains("out of date"), "{err}");
     }
 }

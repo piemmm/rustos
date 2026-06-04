@@ -104,7 +104,21 @@ before its predecessor is green on the whole-project gate (§7).
 
 ### Stage CC1 — Full `lib/abi` C header surface
 
-**Status: not started.**
+**Status: in progress.** The generator has been grown from a single
+`rustos_abi.h` into a per-module header set under `include/rustos/`: the
+umbrella `rustos_abi.h` now only carries `ROS_ABI_VERSION` and `#include`s
+the module headers `rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
+and `rustos_syscall.h`. The drift guard (`cargo xtask c-header`) checks the
+whole tree byte-for-byte and `--write` regenerates it. The first **grown**
+module is `time`: `rustos_time.h` declares `ros_time64_t` / `ros_duration64_t`
+(mirroring the `#[repr(C)]` layout of `Time64` / `Duration64`) and the
+`ROS_NANOS_PER_SEC` / `ROS_COARSE_CLOCK_GRANULARITY_NS` / `*_WIRE_LEN`
+constants, every value read from `lib/abi` (never re-typed) and pinned by an
+in-module test. **Remaining for CC1:** the rest of the modules — `random`,
+`ipc`, `stdinfo`, `manifest`, `appinfo`, `rxe`, `input`, `sysinfo`, the
+`capability` query POD types, and `driver/*` POD types — plus the
+"every `pub` `#[repr(C)]` type in `lib/abi` is represented in the header"
+completeness test once the surface is covered.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

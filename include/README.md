@@ -4,9 +4,20 @@ C-language development headers for the RustOS ABI. These let a program
 written in a language other than Rust (C, C++, anything with a C FFI) call
 the RustOS kernel/user interface.
 
-- `rustos/rustos_abi.h` — the `abi-v1` surface: the ABI version, the stable
-  error codes, the capability identifiers, the syscall numbers, and a
+The surface is split into one header per `lib/abi` module so a developer can
+pull in exactly what they need, plus an umbrella that includes them all:
+
+- `rustos/rustos_abi.h` — umbrella header: the ABI version plus an `#include`
+  of every module header below.
+- `rustos/rustos_error.h` — the stable error codes (`ROS_E_*`).
+- `rustos/rustos_capability.h` — the capability identifiers (`ROS_CAP_*`).
+- `rustos/rustos_time.h` — the 64-bit-native time types (`ros_time64_t`,
+  `ros_duration64_t`) and their constants.
+- `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
+
+Growing this set to the rest of `lib/abi` is staged in `plans/CCOMPAT.md`
+(stage CC1).
 
 ## These files are generated
 
