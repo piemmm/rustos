@@ -88,5 +88,18 @@ job outside `ci`.
 
 A crashing input found by a harness is added to that crate's regression
 corpus alongside a unit test, so the same bytes are replayed
-deterministically on every subsequent run (`AGENTS.md` §19.6). No crash
-has been found to date, so no corpus entry exists yet.
+deterministically on every subsequent run (`AGENTS.md` §19.6).
+
+`lib/abi/tests/regression_corpus.rs` is the seeded corpus for the
+CCOMPAT CC3/CC4 decoders — the `rxe` needed-library table
+(`NeededLibrary::decode`) and whole-image loader (`LoadImage::parse`)
+from stage CC4, and the program startup vector (`ProcessStart::parse`
+and the `ProcessStartHeader` / `StringSlot` field readers) from stage
+CC3 (`plans/CCOMPAT.md`). No crash has been found in these decoders, so
+the corpus is seeded with hand-crafted boundary cases that ring each
+decoder's accept/reject edge: every entry is replayed through the same
+"must not panic, and an accepted decode round-trips" contract the fuzz
+harness enforces, and the *validating* decoders' accept/reject verdicts
+are pinned by dedicated tests. A future crashing input is appended to
+that file with a name and a verdict test rather than left only in the
+PRNG stream. No other crash has been found to date.

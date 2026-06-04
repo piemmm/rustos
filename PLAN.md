@@ -7307,7 +7307,19 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   appmgr `lib.rs`/`README.md`. See `.junie/next-ccompat-prompt.md`.
 - CC5 — End-to-end C program built+run under QEMU (audited toolchain wrapper,
   §12) exercising a slice of `abi-v1` including §21 `Time64` edges; fuzz the
-  new decoders. **Not started.**
+  new decoders. **In progress.** The fuzz/regression sub-deliverable has
+  landed: the CC3/CC4 decoders (`ProcessStart::parse` / `ProcessStartHeader` /
+  `StringSlot`, `NeededLibrary::decode`, `LoadImage::parse`) were already
+  enrolled in `lib/abi/tests/fuzz_decode.rs` (§19.6), and a seeded regression
+  corpus now backs them (`lib/abi/tests/regression_corpus.rs`): hand-crafted
+  boundary images replayed through the "must not panic + accepted decode
+  round-trips" contract plus per-validating-decoder accept/reject verdict
+  locks; `docs/src/security/fuzzing.md` documents it. **Still outstanding:**
+  the audited, version-pinned, checksummed C toolchain wrapper under `tools/`
+  (in the spirit of §12), the minimal in-tree C program that `#include`s
+  `include/rustos/…` + links the `ros_sys_*` runtime + crt0, and the QEMU
+  round-trip exercising a representative `abi-v1` slice. See
+  `.junie/next-ccompat-prompt.md`.
 
 Native Tier-1 targets only (`x86_64`, `aarch64`, `riscv64`); the syscall-stub
 runtime and crt0 are out of scope for `wasm32` (no trap instruction).

@@ -664,7 +664,31 @@ manifest/syscall-hash mismatch.
 
 ### Stage CC5 — End-to-end C program + fuzzing
 
-**Status: not started.** **Depends on** CC1–CC4.
+**Status: in progress — the fuzz/regression deliverable has landed; the
+audited C toolchain wrapper, the in-tree C program, and the QEMU round-trip
+are still outstanding.** **Depends on** CC1–CC4 (all done).
+
+**What landed this stage (fuzz/regression).** The CC3/CC4 decoders
+(`ProcessStart::parse`, `ProcessStartHeader::from_bytes`,
+`StringSlot::from_bytes`, `NeededLibrary::decode`, `LoadImage::parse`) were
+already enrolled in the `lib/abi` fuzz harness (`fuzz_decode.rs`, §19.6); the
+companion **regression corpus** the charter requires alongside it
+(`AGENTS.md` §19.6) now exists: `lib/abi/tests/regression_corpus.rs` seeds a
+named corpus of hand-crafted boundary images (degenerate lengths, valid
+images with 0 / 1 / `LOAD_MAX_NEEDED` needed records, a truncated and an
+over-cap needed table, a bad magic, a non-PIE image, the needed-record
+zero-length / embedded-NUL / dirty-padding / overlong-length edges, and the
+startup-vector valid / bad-magic / truncated cases), replays each through the
+same "must not panic + an accepted decode round-trips" contract the fuzz
+harness enforces, and pins the accept/reject **verdict** of each *validating*
+decoder (`NeededLibrary::decode`, `LoadImage::parse`, `ProcessStart::parse`)
+with a dedicated test. (`ProcessStartHeader` / `StringSlot` are fixed-width
+field readers whose only failure is `BufferTooSmall`, so no verdict is pinned
+on them.) `docs/src/security/fuzzing.md` documents the corpus. 13 tests.
+
+**Still outstanding (the headline):** the audited, version-pinned, checksummed
+C toolchain wrapper under `tools/` (§12), the minimal in-tree C program, and
+the QEMU round-trip — see the deliverables below.
 
 **Deliverables**
 - A minimal in-tree C program (built by an audited, version-pinned, checksummed
