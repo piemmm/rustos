@@ -7191,9 +7191,17 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `/System/Libraries/` *System runtime / C ABI* class (§16.4, `experimental`
   tier). The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are
   enforced at load by `rustos_abi::rxe::LoadImage::parse` (a non-conforming
-  image is refused, not patched). **Still to do:** the QEMU "crt0 program
-  starts, reads its args, exits" round-trip per native target (a minimal
-  CC2-style U-mode/EL0 harness), tracked in `.junie/next-ccompat-prompt.md`.
+  image is refused, not patched). **SHELVED — remaining piece blocked on
+  userland.** The last CC3 deliverable, a QEMU "crt0 program starts, reads its
+  args, exits" round-trip per native target, cannot be stood up the CC2 way:
+  crt0 is not a self-contained leaf (its `_start` calls `build_c_runtime`,
+  `ProcessStart::parse`, the test `main`, and `ros_sys_exit`), and linking a
+  test program against `rustos-arch-riscv64` for the QEMU finisher collides
+  the crt0 `_start` with the kernel boot `_start`. A faithful proof needs a
+  real U-mode/EL0 drop into a freshly loaded program with an argument vector —
+  i.e. the Stage 6 process-spawn / "getting userland up" work that CC4 and CC5
+  also depend on. CC3 is parked until that lands; see
+  `.junie/next-ccompat-prompt.md`.
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

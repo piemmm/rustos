@@ -353,10 +353,25 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: in progress — the startup-vector `abi-v1` type *and* the crt0 object
-have landed; the per-target QEMU round-trip is the only remaining piece.**
-**Depends on** CC2 and the loader (`PLAN.md` Stage 6 bundle loader /
-dynamic-loader policy).
+**Status: SHELVED — the startup-vector `abi-v1` type *and* the crt0 object
+have landed and are green; the per-target QEMU round-trip is the only
+remaining piece and it is blocked on userland (see below). CC3 is parked here
+deliberately until the U-mode/EL0 process-spawn path exists.** **Depends on**
+CC2 and the loader (`PLAN.md` Stage 6 bundle loader / dynamic-loader policy).
+
+**Why shelved (blocker).** The only remaining CC3 deliverable — a QEMU
+"crt0-linked program starts, reads its args, exits" round-trip — cannot be
+stood up cleanly the way the CC2 syscall round-trips were. crt0 is not a
+self-contained leaf: its `_start` calls `build_c_runtime`, `ProcessStart::parse`,
+the test `main`, and `ros_sys_exit`, so the CC2 single-page-alias trick is
+insufficient, and linking the test program against `rustos-arch-riscv64` (for
+the QEMU finisher) collides `_start` (the kernel boot vector) with crt0's
+`_start`. A faithful test needs an actual U-mode/EL0 drop into a freshly loaded
+program with an argument vector — i.e. **getting userland up**. That is the
+Stage 6 loader / process-spawn work, which CC4 and CC5 also depend on, so it is
+the correct next thing to build before resuming CC3. The crt0 object itself is
+complete, tested, and documented; only its end-to-end QEMU proof waits on the
+loader.
 
 The crt0 object has now landed: the new `lib/crt0` crate (`rustos-crt0`)
 provides the per-native-target `_start` trampoline — the §1 assembly carve-out
