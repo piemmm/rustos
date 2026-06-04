@@ -122,18 +122,28 @@ a Rust program could not.
 
 The marshalling each `ros_sys_*` stub performs is host-tested behind an
 injectable trap seam (`lib/abi-sys`), but the trap *instruction* itself is
-exercised under QEMU. The CC2 round-trip test
-(`tests/integration/abi_sys_syscall_qemu`, enrolled as
-`rustos-test-abi-sys-syscall-qemu` in `cargo xtask test --qemu`) boots the
-production kernel pipeline on `x86_64-unknown-none`, overrides the syscall
-dispatch callback once boot completes, and then calls `ros_sys_cap_query`. The
-CPU's `syscall` enters the kernel's `IA32_LSTAR` entry stub, which rebuilds the
-canonical argument array and calls the installed callback; the callback asserts
-the kernel-observed `(number, arguments)` are exactly what the stub should have
-placed in the registers before exiting QEMU. This proves `lib/abi-sys` and the
-kernel agree on the syscall register layout. The aarch64/riscv64 round-trips
-(which require an `EL0`/`U-mode` user context to raise `svc`/`ecall` from) land
-with the program loader; see `plans/CCOMPAT.md` (CC2/CC3).
+exercised under QEMU. There is one CC2 round-trip test per native target
+(`cargo xtask test --qemu`); each installs a syscall dispatch callback, issues
+the `ros_sys_cap_query` stub so the **real** trap instruction runs, and the
+callback asserts the kernel-observed `(number, arguments)` are exactly what the
+stub should have placed in the registers before exiting QEMU — proving
+`lib/abi-sys` and the kernel agree on the syscall register layout:
+
+| Target | Test crate | How the trap is raised |
+|--------|------------|------------------------|
+| `x86_64-unknown-none` | `rustos-test-abi-sys-syscall-qemu` | boots the production kernel, then issues `syscall` from ring 0 — which enters the `IA32_LSTAR` entry stub identically to a ring-3 call |
+| `riscv64gc-unknown-none-elf` | `rustos-test-abi-sys-syscall-qemu-riscv64` | stands up a minimal **U-mode** context (identity-mapped kernel + a U-bit alias of the stub page + a user stack) and `sret`s to U-mode so the stub's `ecall` is a genuine environment-call-from-U |
+| `aarch64-unknown-none` | `rustos-test-abi-sys-syscall-qemu-aarch64` | stands up a minimal **EL0** context (identity-mapped kernel + an EL0-executable alias of the stub page + an EL0 stack) and `eret`s to EL0 so the stub's `svc` is a genuine lower-EL synchronous exception |
+
+Unlike x86_64's `syscall` (which traps identically from any privilege level),
+a riscv64 `ecall` from S-mode / an aarch64 `svc` from EL1 is **not** the
+user-syscall path — the kernel routes only `ecall`-from-U / `svc`-from-EL0 to
+the dispatch callback. The riscv64/aarch64 tests therefore raise the trap from
+a real lower-privilege context built with the Stage-3 paging primitives; the
+aarch64 EL0 `svc` dispatch wiring (`kernel/arch/aarch64/src/exceptions.rs`) is
+the analogue of riscv64's already-wired `ecall` path. These round-trips are
+**not** part of the host-only `cargo xtask ci` gate; they run under
+`cargo xtask test --qemu`.
 
 ## Stability
 

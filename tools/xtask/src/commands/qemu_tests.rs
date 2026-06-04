@@ -188,6 +188,63 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // half of the `lib/abi-sys` syscall-stub round-trip. riscv64 has no
+    // x86_64-style "trap identically from any privilege" shortcut — the
+    // kernel routes only an `ecall` *from U-mode* to the syscall dispatch
+    // callback (`kernel/arch/riscv64/src/syscall_entry.rs`) — so this test
+    // stands up a minimal U-mode context with the Stage-3 Sv39 primitives:
+    // it identity-maps the kernel (S-mode), aliases the `ros_sys_cap_query`
+    // stub page at a user virtual address with the U bit set plus a user
+    // stack, installs the dispatch callback, sets `sstatus.SUM`, and
+    // `sret`s to U-mode. The stub's real `ecall` (`lib/abi-sys/src/trap.rs`)
+    // then traps into the kernel S-mode trap vector, and the installed
+    // callback asserts the kernel-observed `(number, args)` are exactly
+    // what `ros_sys_cap_query` should have marshalled into `a7`/`a0` before
+    // writing the `SiFive` Test PASS finisher; any mismatch (or the `ecall`
+    // resuming in U-mode at all) writes a distinct failure finisher. Single
+    // CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu-riscv64",
+        binary: "rustos-test-abi-sys-syscall-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // half of the `lib/abi-sys` syscall-stub round-trip. Like riscv64,
+    // aarch64 has no x86_64-style "trap identically from any privilege"
+    // shortcut — the kernel routes only an `svc` *from EL0* (a lower-EL
+    // synchronous exception) to the syscall dispatch callback
+    // (`kernel/arch/aarch64/src/exceptions.rs`) — so this test stands up a
+    // minimal EL0 context with the Stage-3 stage-1 primitives: it
+    // identity-maps the kernel (EL1), aliases the `ros_sys_cap_query` stub
+    // page at a user virtual address with EL0-executable attributes plus
+    // an EL0 stack, installs the dispatch callback and the EL1 vector
+    // table, and `eret`s to EL0. The stub's real `svc`
+    // (`lib/abi-sys/src/trap.rs`) then traps into the EL1 vector, and the
+    // installed callback asserts the kernel-observed `(number, args)` are
+    // exactly what `ros_sys_cap_query` should have marshalled into
+    // `x8`/`x0` before the ARM semihosting PASS finisher; any mismatch (or
+    // the `svc` resuming in EL0 at all) writes a distinct failure
+    // finisher. Single CPU suffices and the 60-second budget matches the
+    // other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu-aarch64",
+        binary: "rustos-test-abi-sys-syscall-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

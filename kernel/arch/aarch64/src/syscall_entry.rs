@@ -78,6 +78,30 @@ pub const fn pack_raw_args(
     [x0, x1, x2, x3, x4, x5]
 }
 
+/// Number of general-purpose registers (`x0`–`x30`) the EL1 vector
+/// trampoline (`vectors.s`) saves into its register frame, in order. The
+/// frame is read as a `[u64; SAVED_GPRS]` to recover the syscall
+/// registers (`AGENTS.md` §2.2 — the frame layout has one definition,
+/// pinned by `frame_offsets_match_vectors_s`).
+pub const SAVED_GPRS: usize = 31;
+
+/// Recover the syscall [`SyscallFrame`] from the saved GP register frame
+/// the EL1 vector trampoline builds.
+///
+/// `saved[i]` is `xi`, so the arguments are `x0`–`x5` (`saved[0..6]`) and
+/// the syscall number is `x8` (`saved[8]`), per the AArch64 syscall
+/// convention. Pure and host-testable: the freestanding exception
+/// handler reads the frame into a `[u64; SAVED_GPRS]` and calls this,
+/// keeping the register-extraction logic off the unsafe asm path
+/// (mirroring how riscv64's host-constructible `TrapFrame` is read).
+#[must_use]
+pub fn syscall_frame_from_saved(saved: &[u64; SAVED_GPRS]) -> SyscallFrame {
+    SyscallFrame {
+        args: pack_raw_args(saved[0], saved[1], saved[2], saved[3], saved[4], saved[5]),
+        number: saved[8],
+    }
+}
+
 /// Signature of the Rust callback the syscall path forwards each syscall
 /// to. `number` is the user's `x8`; `args_ptr` points at a
 /// `[u64; SYSCALL_MAX_ARGS]` the handler built on its stack. The return
@@ -151,6 +175,21 @@ mod tests {
     #[test]
     fn pack_preserves_argument_order() {
         assert_eq!(pack_raw_args(1, 2, 3, 4, 5, 6), [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn saved_frame_extracts_args_and_number() {
+        // `saved[i]` is `xi`: arguments x0–x5, number x8. Distinct
+        // sentinels so a swapped index is caught.
+        let mut saved = [0u64; SAVED_GPRS];
+        for (i, slot) in saved.iter_mut().enumerate() {
+            *slot = 0x100 + i as u64;
+        }
+        let frame = syscall_frame_from_saved(&saved);
+        assert_eq!(frame.args, [0x100, 0x101, 0x102, 0x103, 0x104, 0x105]);
+        assert_eq!(frame.number, 0x108);
+        // x6, x7 (between the args and the number) are not read.
+        assert_eq!(SAVED_GPRS, 31);
     }
 
     #[test]

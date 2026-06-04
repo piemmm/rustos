@@ -244,10 +244,10 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 
 ### Stage CC2 — `lib/abi-sys`: the C-callable syscall stub runtime
 
-**Status: runtime + host tests done; x86_64 QEMU round-trip done;
-aarch64/riscv64 QEMU round-trip pending (needs the EL0/U-mode loader).**
-The blocker is cleared — the per-architecture trap layer exists on all three
-native targets (`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
+**Status: DONE — runtime + host tests + the QEMU round-trip on all three
+native targets (x86_64, riscv64, aarch64).**
+The per-architecture trap layer exists on all three native targets
+(`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
 The crate `lib/abi-sys` (`rustos-abi-sys`) has landed: it exports the eleven
 `extern "C"`, export-name-pinned `ros_sys_<name>` functions matching the CC1
 header (`include/rustos/rustos_syscall.h`), each of which marshals its typed
@@ -297,14 +297,38 @@ expectation verified FAIL). This exercises the real `syscall` instruction
 `cargo xtask ci` gate (which is host-only); it runs under
 `cargo xtask test --qemu`.
 
-**Remaining for CC2:** the aarch64/riscv64 QEMU round-trips. Unlike x86_64's
-`syscall` (which traps identically from ring 0), an `svc` from EL1 / `ecall`
-from S-mode is **not** the user-syscall path — the kernel routes only
-`svc`-from-EL0 / `ecall`-from-U-mode to the dispatch callback. So the
-aarch64/riscv64 round-trips need an `EL0`/`U-mode` user context to raise the
-trap from, which arrives with the program loader (`PLAN.md` Stage 6 / CC3). The
-`abi-sys` register marshalling is host-tested on all three targets in the
-meantime. Tracked in `.junie/next-ccompat-prompt.md`.
+**aarch64/riscv64 QEMU round-trips — done.** Unlike x86_64's `syscall` (which
+traps identically from ring 0), an `svc` from EL1 / `ecall` from S-mode is
+**not** the user-syscall path — the kernel routes only `svc`-from-EL0 /
+`ecall`-from-U-mode to the dispatch callback. Rather than wait for the full
+program loader, each test stands up a minimal lower-privilege context itself
+with the Stage-3 paging primitives:
+
+- **riscv64** (`tests/integration/abi_sys_syscall_qemu_riscv64`,
+  `rustos-test-abi-sys-syscall-qemu-riscv64`): identity-maps the kernel
+  (S-mode), aliases the `ros_sys_cap_query` stub page at a high user VA with the
+  `U` bit (`paging::flags::USER`) + a user stack, installs the dispatch
+  callback, sets `sstatus.SUM`, and `sret`s to U-mode. The stub's `ecall` is a
+  genuine environment-call-from-U; the callback asserts `(number, args)` before
+  the `SiFive` PASS finisher. The riscv64 trap handler already routed
+  `ecall`-from-U to `dispatch_ecall`, so no arch change was needed.
+- **aarch64** (`tests/integration/abi_sys_syscall_qemu_aarch64`,
+  `rustos-test-abi-sys-syscall-qemu-aarch64`): identity-maps the kernel (EL1),
+  aliases the stub page with EL0-executable attributes
+  (`paging::el0_code_leaf_attrs`, via the new `map_4k_with_attrs`) + an EL0
+  stack (`el0_data_leaf_attrs`), installs the dispatch callback + EL1 vector
+  table, and `eret`s to EL0. This required wiring the EL0 `svc` dispatch in the
+  arch port (the analogue of riscv64's `ecall` path): `vectors.s` now passes the
+  saved-frame base to the handler, which routes a lower-EL `svc` through the
+  host-tested `syscall_entry::syscall_frame_from_saved` → `dispatch_svc` and
+  writes the result back into the saved `x0` slot. New EL0 paging primitives
+  (`AP_RW_EL0`/`AP_RO_EL0`, `el0_code_leaf_attrs`/`el0_data_leaf_attrs`,
+  `map_4k_with_attrs`) carry host tests; `map_4k` delegates to
+  `map_4k_with_attrs` (§2.2).
+
+Both verified PASS, and a deliberately-wrong expectation verified FAIL.
+Neither is part of the host-only `cargo xtask ci` gate; they run under
+`cargo xtask test --qemu`.
 
 **Deliverables**
 - A new crate (`lib/abi-sys`, `rustos-abi-sys`) providing one `extern "C"`,

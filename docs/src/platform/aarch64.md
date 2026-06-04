@@ -79,22 +79,29 @@ system-register/assembly/MMIO operations to the freestanding target.
   timer), and `on_timer_interrupt` (callback → re-arm).
 - **Interrupts** (`exceptions` + `vectors.s`, `gic`). A 16-entry EL1
   vector table (`VBAR_EL1`) routes IRQs to the GICv2 acknowledge →
-  timer → end-of-interrupt handshake and synchronous exceptions to the
-  installed `fault` handler. `gic` is a GICv2 distributor / CPU-interface
-  / SGI driver.
+  timer → end-of-interrupt handshake, an EL0 `svc` (lower-EL synchronous
+  exception) to the installed syscall dispatch callback, and any other
+  synchronous exception to the installed `fault` handler. `gic` is a
+  GICv2 distributor / CPU-interface / SGI driver.
 - **Syscall entry** (`syscall_entry`). The `svc` exception class decode
   and the `x8`/`x0`–`x5` → `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
   marshalling, with a set-once dispatch callback (the same shape the
-  x86_64 and riscv64 ports install). Wiring the live EL0 register frame
-  through to the dispatcher is the remaining aarch64 follow-up; the
-  marshalling logic is host-tested.
+  x86_64 and riscv64 ports install). The EL0 register frame is now wired
+  through: the `vectors.s` trampoline passes the saved-frame base to the
+  handler, which on a lower-EL `svc` reads the registers via the
+  host-tested `syscall_frame_from_saved`, forwards `(x8, &args)` to the
+  dispatch callback, and writes the result back into the saved `x0` slot
+  so the `eret` returns it to EL0 (the aarch64 analogue of riscv64's
+  `ecall` dispatch). Absent a callback it fails closed. The
+  architecture-neutral validation/capability/audit dispatcher lives in
+  `kernel/syscall`.
 
 ## QEMU verticals
 
-Three freestanding integration binaries cover the Stage-3 per-sub-stage
-checklist on the `virt` board; each links only the arch port and reports
-its result through the semihosting finisher. They are enrolled in
-`cargo xtask test --qemu`.
+Four freestanding integration binaries cover the Stage-3 per-sub-stage
+checklist (plus the CCOMPAT CC2 syscall round-trip) on the `virt` board;
+each links only the arch port and reports its result through the
+semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
   trampoline reaches `kernel_main` at EL1 and logs over the PL011 UART.
@@ -105,6 +112,19 @@ its result through the semihosting finisher. They are enrolled in
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
+- `rustos-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
+  (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
+  the kernel (EL1), aliases the `lib/abi-sys` `ros_sys_cap_query` stub
+  page at a user VA with EL0-executable attributes
+  (`paging::el0_code_leaf_attrs`, mapped via `map_4k_with_attrs`) plus an
+  EL0 stack (`el0_data_leaf_attrs`), installs the dispatch callback and
+  the EL1 vector table, and `eret`s to EL0. The stub's real `svc` then
+  traps into the EL1 vector and the callback asserts the kernel-observed
+  `(number, args)` are exactly what `ros_sys_cap_query` should have
+  marshalled into `x8`/`x0` before the semihosting PASS finisher; any
+  mismatch (or the `svc` resuming in EL0) trips a distinct failure
+  finisher. This exercises the real `svc` (`lib/abi-sys/src/trap.rs`) and
+  the EL0 dispatch wiring together.
 
 ## Building and running
 

@@ -137,6 +137,8 @@ members = [
     "tests/integration/riscv64_boot",
     "tests/integration/syscall_dispatch_qemu",
     "tests/integration/abi_sys_syscall_qemu",
+    "tests/integration/abi_sys_syscall_qemu_riscv64",
+    "tests/integration/abi_sys_syscall_qemu_aarch64",
     "tests/integration/drvhost_qemu",
     "tests/integration/ps2_input_qemu_x86_64",
     "tests/integration/irq_qemu_x86_64",
