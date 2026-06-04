@@ -7086,7 +7086,7 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
   `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
   `rustos_input.h`, `rustos_appinfo.h`, `rustos_rxe.h`, `rustos_sysinfo.h`,
-  `rustos_syscall.h`)
+  `rustos_driver.h`, `rustos_syscall.h`)
   plus the umbrella `rustos_abi.h` that `#include`s them,
   with a tree-wide drift guard; the `time` module (`ros_time64_t` /
   `ros_duration64_t` + constants), the `random` module (`ROS_RANDOM_FLAG_*` +
@@ -7112,10 +7112,16 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `ros_mount_list_request_t` / `ros_mount_record_t` + the `ROS_SYSINFO_*`
   framing / query-id / registry constants, the `ROS_PROCESS_STATE_*`
   discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the
-  per-record `*_WIRE_LEN` sizes), values
+  per-record `*_WIRE_LEN` sizes), and the `driver` core
+  (`ros_driver_manifest_t` + the `ROS_DRIVER_MANIFEST_*` /
+  `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the
+  `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*`
+  discriminants, and the `ROS_DRIVER_HANDLE_NONE` sentinel), values
   read from `lib/abi`, are the grown modules so far.
+  The `capability` module needs no new header (its ids already ship in
+  `rustos_capability.h`; `CapabilityQuery` is a trait with no C form).
   **Remaining:** the
-  `capability` query types and `driver/*` POD types, plus the "every pub
+  `driver/*` submodule POD types, plus the "every pub
   `#[repr(C)]` type is represented" completeness test once the surface is
   covered.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
@@ -7155,7 +7161,11 @@ constants + `ROS_SYSTEM_LIBRARIES_DIR` + the `ROS_BUNDLE_ENTRY_*` names + the
 `ROS_RXE_PERMISSION_*` discriminants), and `rustos_sysinfo.h` (the eight
 System Information wire-type struct mirrors + the `ROS_SYSINFO_*` framing /
 query-id / registry constants + the `ROS_PROCESS_STATE_*` discriminants + the
-`ROS_*_MAX` / `ROS_*_LEN` buffer caps + the per-record `*_WIRE_LEN` sizes) —
+`ROS_*_MAX` / `ROS_*_LEN` buffer caps + the per-record `*_WIRE_LEN` sizes), and
+`rustos_driver.h` (`ros_driver_manifest_t` + the `ROS_DRIVER_MANIFEST_*` /
+`ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants + the
+`ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*` discriminants
++ the `ROS_DRIVER_HANDLE_NONE` sentinel) —
 each value read from
 `lib/abi` and guarded byte-for-byte against drift, wired into `cargo xtask ci`;
 the docs page is `docs/src/abi/c-abi.md`.

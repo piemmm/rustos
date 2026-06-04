@@ -24,13 +24,14 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
 | `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
 | `include/rustos/rustos_sysinfo.h` | the eight System Information wire types (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`, `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`, `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`) and the `ROS_SYSINFO_*` framing / query-id / registry constants, the `ROS_PROCESS_STATE_*` discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
+| `include/rustos/rustos_driver.h` | `ros_driver_manifest_t` and the `ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` discriminants, the `ROS_DRIVER_ERROR_*` driver error codes, and the `ROS_DRIVER_HANDLE_NONE` sentinel |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
-Growing the set to cover the rest of `lib/abi` (the `capability` query POD
-types and `driver/*`) is staged in `plans/CCOMPAT.md` (stage CC1).
+Growing the set to cover the rest of `lib/abi` (the remaining `driver/*`
+submodule POD types) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written
 

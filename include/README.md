@@ -49,11 +49,18 @@ pull in exactly what they need, plus an umbrella that includes them all:
   process-state discriminants (`ROS_PROCESS_STATE_*`), the inline-buffer caps
   (`ROS_PROCESS_NAME_MAX`, `ROS_MACHINE_ID_LEN`, `ROS_HOSTNAME_MAX`,
   `ROS_MOUNT_*_MAX`), and the per-record `*_WIRE_LEN` sizes.
+- `rustos/rustos_driver.h` — the driver-class ABI core: the signed driver
+  manifest header (`ros_driver_manifest_t`) and its constants
+  (`ROS_DRIVER_MANIFEST_*`, `ROS_DRIVER_SIGNER_PUBKEY_LEN`,
+  `ROS_DRIVER_SIGNATURE_LEN`), the driver-kind and buffer-class discriminants
+  (`ROS_DRIVER_KIND_*`, `ROS_BUFFER_CLASS_*`), the driver-ABI error codes
+  (`ROS_DRIVER_ERROR_*`), and the no-handle sentinel
+  (`ROS_DRIVER_HANDLE_NONE`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 
-Growing this set to the rest of `lib/abi` is staged in `plans/CCOMPAT.md`
-(stage CC1).
+Growing this set to the rest of `lib/abi` (the remaining `driver/*` submodule
+POD types) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## These files are generated
 

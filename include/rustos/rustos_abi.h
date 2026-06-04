@@ -32,6 +32,7 @@
 #include "rustos_appinfo.h"
 #include "rustos_rxe.h"
 #include "rustos_sysinfo.h"
+#include "rustos_driver.h"
 #include "rustos_syscall.h"
 
 #endif /* ROS_ABI_H */

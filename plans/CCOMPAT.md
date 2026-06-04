@@ -176,9 +176,23 @@ are the `ros_duration64_t` / `ros_time64_t` types from `rustos_time.h`, which it
 is the separate `*_WIRE_LEN`) — every value read from `lib/abi` and pinned by an
 in-module test (`MountRecord`'s `flags` is mirrored as `uint32_t`; the
 `MountFlags` bit constants belong to the forthcoming `driver/*` header, §2.2).
-**Remaining for CC1:** the `capability` query POD types and `driver/*` POD
-types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
-the header" completeness test once the surface is covered.
+The `capability` module needs no new header: its `CapabilityId` ids and
+`CAPABILITY_ID_MAX` already ship in `rustos_capability.h`, and `CapabilityQuery`
+is a Rust trait with no C representation. The `driver` core has now landed too:
+`rustos_driver.h` declares the `#[repr(C)]` `ros_driver_manifest_t` struct
+(mirroring `DriverManifest`) plus the `ROS_DRIVER_MANIFEST_MAGIC` /
+`_MAX_CAPABILITIES` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN`
+/ `ROS_DRIVER_MANIFEST_WIRE_LEN` constants, the `ROS_DRIVER_KIND_*`
+(`DriverKind`) / `ROS_BUFFER_CLASS_*` (`BufferClass`) `#[repr(u8)]` and
+`ROS_DRIVER_ERROR_*` (`DriverError`) `#[repr(i32)]` discriminant sets, and the
+`ROS_DRIVER_HANDLE_NONE` (`DriverHandle::NONE`) sentinel — a live driver handle
+travels as a `uint64_t`. It reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
+`rustos_manifest.h` (which it `#include`s) rather than re-declaring it (§2.2);
+every value is read from `lib/abi` and pinned by an in-module test.
+**Remaining for CC1:** the `driver/*` submodule POD types (e.g. `MmioMapError`,
+`MsiMessage`, `WindowError`, the `VIRTIO_PCI_*` constants) — plus the "every
+`pub` `#[repr(C)]` type in `lib/abi` is represented in the header" completeness
+test once the surface is covered.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

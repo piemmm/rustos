@@ -42,13 +42,15 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, AppInfoHeader, BundleEntry, CapabilityId, Duration64, Errno, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryScope, LoadHeader, ManifestHeader, MountListRequest,
-    MountRecord, NamedKeyCode, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
-    ProcessRecord, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
-    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1,
-    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
+    DriverKind, DriverManifest, Duration64, Errno, IpcMessageHeader, KernelMemoryStats, KeyInput,
+    LibraryScope, LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode,
+    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord, ProcessState,
+    RandomFlags, RxePermission, Segment, Severity, StdInfoKind, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
     ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR,
     KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED,
     KIND_PRESSED, KIND_RELEASED, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN,
@@ -1044,6 +1046,151 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          } ros_mount_record_t;\n\n",
 );
 
+/// Emit the driver-manifest magic / count / key-length / wire-size constants
+/// (every value read from `lib/abi`).
+fn driver_emit_constants(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* Magic word identifying an abi-v1 driver manifest (\"DRV1\" little-endian). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_MANIFEST_MAGIC {DRIVER_MANIFEST_MAGIC:#x}u"
+    );
+    out.push_str("/* Maximum number of capability identifiers a driver manifest may request. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_MANIFEST_MAX_CAPABILITIES {DRIVER_MANIFEST_MAX_CAPABILITIES}u"
+    );
+    out.push_str("/* Length, in bytes, of the Ed25519 signer public key. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_SIGNER_PUBKEY_LEN {DRIVER_SIGNER_PUBKEY_LEN}u"
+    );
+    out.push_str("/* Length, in bytes, of the Ed25519 manifest signature. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_SIGNATURE_LEN {DRIVER_SIGNATURE_LEN}u"
+    );
+    out.push_str("/* Packed little-endian wire size of a driver manifest, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_MANIFEST_WIRE_LEN {}u",
+        DriverManifest::WIRE_LEN
+    );
+    out.push('\n');
+}
+
+/// Emit the [`DriverKind`] / [`BufferClass`] / [`DriverError`] discriminants
+/// and the [`DriverHandle`] sentinel (every value read from `lib/abi`).
+fn driver_emit_discriminants(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* Driver execution domain (uint8_t); IN_KERNEL additionally needs CAP_DRV_KERNEL. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_KIND_USER_SPACE ((uint8_t){}u)",
+        DriverKind::UserSpace.as_u8()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_KIND_IN_KERNEL ((uint8_t){}u)",
+        DriverKind::InKernel.as_u8()
+    );
+    out.push('\n');
+
+    out.push_str("/* Payload sensitivity hint (uint8_t); SENSITIVE requires zero-on-free. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_BUFFER_CLASS_NON_SENSITIVE ((uint8_t){}u)",
+        BufferClass::NonSensitive.as_u8()
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_BUFFER_CLASS_SENSITIVE ((uint8_t){}u)",
+        BufferClass::Sensitive.as_u8()
+    );
+    out.push('\n');
+
+    out.push_str("/* Sentinel \"no driver handle\"; a live handle travels as a uint64_t. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_HANDLE_NONE ((uint64_t){}ull)",
+        DriverHandle::NONE.as_u64()
+    );
+    out.push('\n');
+
+    out.push_str("/* Stable driver-ABI error codes (int32_t), disjoint from ROS_E_* errno. */\n");
+    for (name, err) in [
+        ("BUFFER_TOO_SMALL", DriverError::BufferTooSmall),
+        ("BAD_MAGIC", DriverError::BadMagic),
+        (
+            "ABI_VERSION_UNSUPPORTED",
+            DriverError::AbiVersionUnsupported,
+        ),
+        ("LENGTH_OUT_OF_RANGE", DriverError::LengthOutOfRange),
+        ("OUT_OF_RANGE", DriverError::OutOfRange),
+        ("PERMISSION_DENIED", DriverError::PermissionDenied),
+        ("NOT_FOUND", DriverError::NotFound),
+        ("SIGNATURE_INVALID", DriverError::SignatureInvalid),
+        ("UNSUPPORTED", DriverError::Unsupported),
+        ("DEVICE_FAULT", DriverError::DeviceFault),
+        ("BUSY", DriverError::Busy),
+        ("NOT_IMPLEMENTED", DriverError::NotImplemented),
+        ("NO_SPACE", DriverError::NoSpace),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_DRIVER_ERROR_{name} ((int32_t){})",
+            err.as_i32()
+        );
+    }
+    out.push('\n');
+}
+
+/// `rustos_driver.h` — the driver-class ABI core (`AGENTS.md` §8, §9).
+///
+/// `ros_driver_manifest_t` mirrors the `#[repr(C)]` layout of
+/// [`DriverManifest`] (the signed driver-manifest prefix; naturally aligned,
+/// so the struct size equals the wire size). Alongside it the header declares
+/// the `ROS_DRIVER_MANIFEST_MAGIC` / `_MAX_CAPABILITIES` / `_WIRE_LEN` and
+/// signer-key/signature length constants, the [`DriverKind`] / [`BufferClass`]
+/// `#[repr(u8)]` and [`DriverError`] `#[repr(i32)]` discriminant sets, and the
+/// [`DriverHandle`] `ROS_DRIVER_HANDLE_NONE` sentinel (a live driver handle
+/// travels as a `uint64_t`). The syscall-table-hash length is shared with the
+/// application manifest, so the struct reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
+/// `rustos_manifest.h` rather than re-declaring it (`AGENTS.md` §2.2). Every
+/// numeric value and discriminant is read from `lib/abi`, never re-typed; only
+/// the C spelling lives here.
+fn generate_driver() -> String {
+    let mut out =
+        banner("Driver-class ABI core: manifest, kinds, errors (AGENTS.md sec.8, sec.9).");
+    out.push_str("#ifndef ROS_DRIVER_H\n#define ROS_DRIVER_H\n\n");
+    out.push_str("#include <stdint.h>\n");
+    out.push_str("#include \"rustos_manifest.h\"\n\n");
+
+    driver_emit_constants(&mut out);
+    driver_emit_discriminants(&mut out);
+
+    out.push_str(
+        "/* Signed driver-manifest prefix; encoded little-endian on the wire. */\n\
+         typedef struct ros_driver_manifest {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   uint8_t kind;\n\
+         \x20   uint8_t reserved0;\n\
+         \x20   uint16_t capability_count;\n\
+         \x20   uint8_t syscall_table_hash[ROS_SYSCALL_TABLE_HASH_LEN];\n\
+         \x20   uint8_t signer_pubkey[ROS_DRIVER_SIGNER_PUBKEY_LEN];\n\
+         \x20   uint8_t signature[ROS_DRIVER_SIGNATURE_LEN];\n\
+         } ros_driver_manifest_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_DRIVER_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -1098,6 +1245,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_appinfo.h\"\n");
     out.push_str("#include \"rustos_rxe.h\"\n");
     out.push_str("#include \"rustos_sysinfo.h\"\n");
+    out.push_str("#include \"rustos_driver.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -1154,6 +1302,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_sysinfo.h",
             body: generate_sysinfo(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_driver.h",
+            body: generate_driver(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -1269,6 +1421,7 @@ mod tests {
             "rustos_appinfo.h",
             "rustos_rxe.h",
             "rustos_sysinfo.h",
+            "rustos_driver.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -1894,6 +2047,74 @@ mod tests {
         assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6, "mount list id");
         assert_eq!(ProcessState::Runnable as u8, 0, "Runnable discriminant");
         assert_eq!(ProcessState::Stopped as u8, 4, "Stopped discriminant");
+    }
+
+    #[test]
+    fn driver_header_pins_layout_constants_and_discriminants() {
+        let h = body("rustos_driver.h");
+        assert!(h.contains("#ifndef ROS_DRIVER_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // Reuses the syscall-table-hash length from the manifest header (no
+        // re-declaration; AGENTS.md sec.2.2).
+        assert!(
+            h.contains("#include \"rustos_manifest.h\""),
+            "manifest header included for ROS_SYSCALL_TABLE_HASH_LEN: {h}"
+        );
+        assert!(
+            h.contains("typedef struct ros_driver_manifest {"),
+            "manifest struct mirror: {h}"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let expected = [
+            format!("#define ROS_DRIVER_MANIFEST_MAGIC {DRIVER_MANIFEST_MAGIC:#x}u"),
+            format!(
+                "#define ROS_DRIVER_MANIFEST_MAX_CAPABILITIES {DRIVER_MANIFEST_MAX_CAPABILITIES}u"
+            ),
+            format!("#define ROS_DRIVER_SIGNER_PUBKEY_LEN {DRIVER_SIGNER_PUBKEY_LEN}u"),
+            format!("#define ROS_DRIVER_SIGNATURE_LEN {DRIVER_SIGNATURE_LEN}u"),
+            format!(
+                "#define ROS_DRIVER_MANIFEST_WIRE_LEN {}u",
+                DriverManifest::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_DRIVER_KIND_USER_SPACE ((uint8_t){}u)",
+                DriverKind::UserSpace.as_u8()
+            ),
+            format!(
+                "#define ROS_DRIVER_KIND_IN_KERNEL ((uint8_t){}u)",
+                DriverKind::InKernel.as_u8()
+            ),
+            format!(
+                "#define ROS_BUFFER_CLASS_NON_SENSITIVE ((uint8_t){}u)",
+                BufferClass::NonSensitive.as_u8()
+            ),
+            format!(
+                "#define ROS_BUFFER_CLASS_SENSITIVE ((uint8_t){}u)",
+                BufferClass::Sensitive.as_u8()
+            ),
+            format!(
+                "#define ROS_DRIVER_HANDLE_NONE ((uint64_t){}ull)",
+                DriverHandle::NONE.as_u64()
+            ),
+            format!(
+                "#define ROS_DRIVER_ERROR_PERMISSION_DENIED ((int32_t){})",
+                DriverError::PermissionDenied.as_i32()
+            ),
+            format!(
+                "#define ROS_DRIVER_ERROR_NO_SPACE ((int32_t){})",
+                DriverError::NoSpace.as_i32()
+            ),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // The C struct mirrors the #[repr(C)] Rust layout with no trailing
+        // padding, so the in-memory size equals the packed wire size.
+        assert_eq!(
+            core::mem::size_of::<DriverManifest>(),
+            DriverManifest::WIRE_LEN,
+            "DriverManifest repr(C) size == wire size"
+        );
     }
 
     #[test]
