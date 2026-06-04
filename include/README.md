@@ -24,10 +24,12 @@ closed if a committed header has drifted from `lib/abi`.
 ## Calling convention
 
 Each syscall is exported by the user-space stub library under the symbol
-`rustos_sys_<name>` (for example `rustos_sys_ipc_send`). The stub library
-implements each entry with an explicit `#[export_name = "rustos_sys_<name>"]`
-so the Rust compiler does not mangle the symbol. Link against that library
-and include `rustos/rustos_abi.h` to call the kernel.
+`ros_sys_<name>` (for example `ros_sys_ipc_send`). The stub library
+implements each entry with an explicit `#[export_name = "ros_sys_<name>"]`
+so the Rust compiler does not mangle the symbol. The short `ros_` / `ROS_`
+prefix namespaces the C-visible surface so it survives C's single flat symbol
+namespace (`AGENTS.md` §9). Link against that library and include
+`rustos/rustos_abi.h` to call the kernel.
 
 `abi-v1` is not frozen yet; once it is released its layout, numbers, and
 symbol names become immutable and new behaviour ships as `abi-v2`.

@@ -26,11 +26,12 @@
 //!
 //! ## Stable export-symbol convention
 //!
-//! Each syscall is exposed to C as a function named `rustos_sys_<name>`
-//! (for example `rustos_sys_ipc_send`). The names are namespaced and frozen
+//! Each syscall is exposed to C as a function named `ros_sys_<name>`
+//! (for example `ros_sys_ipc_send`). The names use the short `ros_` /
+//! `ROS_` C-ABI prefix (`AGENTS.md` §9) and are namespaced and frozen
 //! alongside the rest of `abi-v1`. The future user-space stub crate that
 //! issues the actual trap implements each one with an explicit
-//! `#[export_name = "rustos_sys_<name>"]` so the Rust compiler does not
+//! `#[export_name = "ros_sys_<name>"]` so the Rust compiler does not
 //! mangle it; this header is the contract those exports satisfy.
 
 use std::path::Path;
@@ -43,7 +44,7 @@ use rustos_abi::{
 /// workspace root.
 pub const DEFAULT_HEADER_PATH: &str = "include/rustos/rustos_abi.h";
 
-/// The `abi-v1` error codes, paired with the `RUSTOS_E_*` suffix each is
+/// The `abi-v1` error codes, paired with the `ROS_E_*` suffix each is
 /// emitted under.
 ///
 /// The numeric value of every entry is read straight from the
@@ -97,7 +98,7 @@ fn c_type(ty: AbiType) -> &'static str {
     }
 }
 
-/// Render one syscall's C prototype, e.g. `int32_t rustos_sys_ipc_send(...)`.
+/// Render one syscall's C prototype, e.g. `int32_t ros_sys_ipc_send(...)`.
 fn prototype(spec: &rustos_abi::SyscallSpec) -> String {
     let ret = c_type(spec.ret);
     let arg_count = usize::from(spec.arg_count);
@@ -110,7 +111,7 @@ fn prototype(spec: &rustos_abi::SyscallSpec) -> String {
         }
         parts.join(", ")
     };
-    format!("{ret} rustos_sys_{}({params});", spec.name)
+    format!("{ret} ros_sys_{}({params});", spec.name)
 }
 
 /// Generate the full C ABI header text from the `lib/abi` source of truth.
@@ -136,46 +137,46 @@ pub fn generate() -> String {
          * this file directly (AGENTS.md sec.2.2, sec.9).\n\
          *\n\
          * Each syscall is exported by the user-space stub library under the\n\
-         * symbol `rustos_sys_<name>` (e.g. `rustos_sys_ipc_send`); link\n\
+         * symbol `ros_sys_<name>` (e.g. `ros_sys_ipc_send`); link\n\
          * against that library to call the kernel from a non-Rust program.\n\
          */\n\n",
     );
 
-    out.push_str("#ifndef RUSTOS_ABI_V1_H\n#define RUSTOS_ABI_V1_H\n\n");
+    out.push_str("#ifndef ROS_ABI_V1_H\n#define ROS_ABI_V1_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
     // ABI version.
     out.push_str("/* ABI version this header describes (AGENTS.md sec.9). */\n");
-    let _ = writeln!(out, "#define RUSTOS_ABI_VERSION {ABI_VERSION_V1}u\n");
+    let _ = writeln!(out, "#define ROS_ABI_VERSION {ABI_VERSION_V1}u\n");
 
     // Error codes.
     out.push_str("/* Stable abi-v1 error codes (int32_t). */\n");
     for (name, errno) in ERRNO_NAMES {
-        let _ = writeln!(out, "#define RUSTOS_E_{name} {}", errno.as_i32());
+        let _ = writeln!(out, "#define ROS_E_{name} {}", errno.as_i32());
     }
     out.push('\n');
 
     // Capability identifiers.
     out.push_str("/* Capability identifiers (AGENTS.md sec.5.2). */\n");
-    let _ = writeln!(out, "#define RUSTOS_CAPABILITY_ID_MAX {CAPABILITY_ID_MAX}u");
+    let _ = writeln!(out, "#define ROS_CAPABILITY_ID_MAX {CAPABILITY_ID_MAX}u");
     for raw in 1..=CAPABILITY_ID_MAX {
         if let Some(name) = CapabilityId::from_raw(raw)
             .ok()
             .and_then(CapabilityId::name)
         {
-            let _ = writeln!(out, "#define RUSTOS_{name} {raw}u");
+            let _ = writeln!(out, "#define ROS_{name} {raw}u");
         }
     }
     out.push('\n');
 
     // Syscall numbers.
     out.push_str("/* Syscall numbers (AGENTS.md sec.9). */\n");
-    let _ = writeln!(out, "#define RUSTOS_SYSCALL_MAX_ARGS {SYSCALL_MAX_ARGS}u");
+    let _ = writeln!(out, "#define ROS_SYSCALL_MAX_ARGS {SYSCALL_MAX_ARGS}u");
     for spec in SYSCALLS {
         let _ = writeln!(
             out,
-            "#define RUSTOS_SYS_{} {}u",
+            "#define ROS_SYS_{} {}u",
             spec.name.to_ascii_uppercase(),
             spec.number.as_u16()
         );
@@ -190,7 +191,7 @@ pub fn generate() -> String {
     out.push('\n');
 
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
-    out.push_str("#endif /* RUSTOS_ABI_V1_H */\n");
+    out.push_str("#endif /* ROS_ABI_V1_H */\n");
 
     out
 }
@@ -273,19 +274,19 @@ mod tests {
     #[test]
     fn header_contains_expected_anchors() {
         let h = generate();
-        assert!(h.contains("#ifndef RUSTOS_ABI_V1_H"), "guard present");
+        assert!(h.contains("#ifndef ROS_ABI_V1_H"), "guard present");
         assert!(h.contains("#include <stdint.h>"), "stdint included");
         assert!(h.contains("extern \"C\""), "C++ guard present");
-        assert!(h.contains("#define RUSTOS_ABI_VERSION 1u"), "version macro");
-        assert!(h.contains("#define RUSTOS_E_PERMISSION_DENIED 6"), "errno");
-        assert!(h.contains("#define RUSTOS_CAP_USER_ADMIN 5u"), "capability");
-        assert!(h.contains("#define RUSTOS_SYS_EXIT 1u"), "syscall number");
+        assert!(h.contains("#define ROS_ABI_VERSION 1u"), "version macro");
+        assert!(h.contains("#define ROS_E_PERMISSION_DENIED 6"), "errno");
+        assert!(h.contains("#define ROS_CAP_USER_ADMIN 5u"), "capability");
+        assert!(h.contains("#define ROS_SYS_EXIT 1u"), "syscall number");
         assert!(
-            h.contains("void rustos_sys_yield(void);"),
+            h.contains("void ros_sys_yield(void);"),
             "nullary prototype: {h}"
         );
         assert!(
-            h.contains("int32_t rustos_sys_ipc_send(uint64_t a0, void * a1, uintptr_t a2);"),
+            h.contains("int32_t ros_sys_ipc_send(uint64_t a0, void * a1, uintptr_t a2);"),
             "typed prototype: {h}"
         );
     }
@@ -296,12 +297,12 @@ mod tests {
         for spec in SYSCALLS {
             let upper = spec.name.to_ascii_uppercase();
             assert!(
-                h.contains(&format!("#define RUSTOS_SYS_{upper} ")),
+                h.contains(&format!("#define ROS_SYS_{upper} ")),
                 "missing number macro for {}",
                 spec.name
             );
             assert!(
-                h.contains(&format!("rustos_sys_{}(", spec.name)),
+                h.contains(&format!("ros_sys_{}(", spec.name)),
                 "missing prototype for {}",
                 spec.name
             );

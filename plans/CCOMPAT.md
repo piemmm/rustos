@@ -75,18 +75,22 @@ header means the same thing on every native Tier-1 target.
 - **Little-endian wire layout.** The encode/decode helpers in `lib/abi`
   (`le.rs`, the `to_le_bytes`/`from_bytes` pairs) are little-endian; the header
   documents this and the byte images do not depend on host endianness.
-- **Stable C names.** Rust newtypes and enums get a namespaced C spelling:
-  constants as `RUSTOS_<AREA>_<NAME>`, enum discriminants pinned to their Rust
-  value, structs as `rustos_<snake_case>_t`. The names are part of the frozen
-  surface once `abi-v1` ships.
-- **Stable export symbols.** Each syscall is exported as `rustos_sys_<name>`
-  (e.g. `rustos_sys_ipc_send`). The Rust stub pins each with
-  `#[export_name = "rustos_sys_<name>"]` (or `#[unsafe(no_mangle)]` where the
+- **Stable C names — the short `ros_` / `ROS_` prefix (`AGENTS.md` §9).** Rust
+  newtypes and enums get a namespaced C spelling: constants as
+  `ROS_<AREA>_<NAME>`, enum discriminants pinned to their Rust value, structs
+  as `ros_<snake_case>_t`. The prefix exists to survive C's single flat symbol
+  namespace against the hostile/sloppy third-party code §4 assumes, and it
+  belongs **only** on the C-visible boundary — never on internal `lib/abi`
+  Rust items (`AGENTS.md` §9, §2.3). The names are part of the frozen surface
+  once `abi-v1` ships.
+- **Stable export symbols.** Each syscall is exported as `ros_sys_<name>`
+  (e.g. `ros_sys_ipc_send`). The Rust stub pins each with
+  `#[export_name = "ros_sys_<name>"]` (or `#[unsafe(no_mangle)]` where the
   symbol equals the item name) so the compiler does not mangle it. `extern "C"`
   alone only fixes the *calling convention*; it does **not** stop mangling —
   hence the explicit pin.
 - **No panic across the boundary (`AGENTS.md` §2.9).** Every `extern "C"`
-  entry point is panic-free: errors are returned as `int32_t` `RUSTOS_E_*`
+  entry point is panic-free: errors are returned as `int32_t` `ROS_E_*`
   codes (an unwind across an FFI boundary is undefined behaviour and is
   forbidden).
 
@@ -140,13 +144,13 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 
 **Deliverables**
 - A new crate (`lib/abi-sys`, `rustos-abi-sys`) providing one `extern "C"`,
-  export-name-pinned `rustos_sys_<name>` function per `abi-v1` syscall that
+  export-name-pinned `ros_sys_<name>` function per `abi-v1` syscall that
   issues the actual trap (`syscall` / `svc` / `ecall`) on the three native
   targets. The per-arch trap instruction is the §1-sanctioned assembly
   carve-out; each such file carries the §1 justification header and a
   `// SAFETY:` block (§2.10).
 - Panic-free at the boundary (§2.9): every stub marshals registers and returns
-  an `int32_t` `RUSTOS_E_*` code; no unwind crosses `extern "C"`.
+  an `int32_t` `ROS_E_*` code; no unwind crosses `extern "C"`.
 - This crate is the implementation behind the CC1 header. It is an
   **OS-provided shared library** (the new §16.4 class — see §5 of this plan),
   dynamically linked by consumers; OS-bundled apps must not vendor it.
@@ -197,7 +201,7 @@ dynamic-loader policy.
 **Deliverables**
 - Confirm and, where needed, extend the `rxe` loader and the §16.4/§16.5
   dynamic-loader policy so a C-compiled, PIE, capability-manifested bundle
-  loads and resolves the `rustos_sys_*` runtime **only** from the curated
+  loads and resolves the `ros_sys_*` runtime **only** from the curated
   `/System/Libraries/` class or the app's own bundle `Libraries/` — never an
   arbitrary path (§16.4). The CFI tag / syscall-hash check (§19.2) applies to C
   binaries identically.
@@ -241,7 +245,7 @@ Native third-party code is assumed **potentially hostile and/or poorly
 written**. Every stage upholds this; it is as non-negotiable as `AGENTS.md` §2.
 
 - **The kernel re-checks everything; the stub is not a bypass (`AGENTS.md`
-  §5.4).** The `rustos_sys_*` runtime only marshals registers and traps. Every
+  §5.4).** The `ros_sys_*` runtime only marshals registers and traps. Every
   capability check, every input validation, and every "fail closed" decision
   happens kernel-side, on the far side of the trap, exactly as for a Rust
   caller. A C program reaches no syscall, IPC endpoint, or filesystem op that a
@@ -267,12 +271,12 @@ written**. Every stage upholds this; it is as non-negotiable as `AGENTS.md` §2.
 
 ## 5. New curated `/System/Libraries/` class (charter amendment, §16.4)
 
-The runtime that exports `rustos_sys_<name>` and provides crt0 is a new
+The runtime that exports `ros_sys_<name>` and provides crt0 is a new
 OS-provided shared-library class. Per `AGENTS.md` §16.4, adding a class
 "requires an update to this list **and** to `PLAN.md`"; this plan drives both:
 
 - **Class:** *System runtime / C ABI* — the minimal libc-equivalent that lets a
-  non-Rust program call `abi-v1`: the `rustos_sys_*` syscall stubs (CC2) and the
+  non-Rust program call `abi-v1`: the `ros_sys_*` syscall stubs (CC2) and the
   crt0 startup/teardown (CC3). It is deliberately minimal (no sprawling libc):
   it marshals to the kernel and starts/stops the program; everything else a
   program wants it brings itself (§16.5) or links from another curated class.

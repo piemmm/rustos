@@ -12,10 +12,10 @@ That view is the **C development header**, shipped under the top-level
 
 It declares, for `abi-v1`:
 
-- `RUSTOS_ABI_VERSION` — the ABI version the header describes.
-- `RUSTOS_E_*` — the stable error codes (matching the `Errno` discriminants).
-- `RUSTOS_CAP_*` and `RUSTOS_CAPABILITY_ID_MAX` — the capability identifiers.
-- `RUSTOS_SYS_*` and `RUSTOS_SYSCALL_MAX_ARGS` — the syscall numbers.
+- `ROS_ABI_VERSION` — the ABI version the header describes.
+- `ROS_E_*` — the stable error codes (matching the `Errno` discriminants).
+- `ROS_CAP_*` and `ROS_CAPABILITY_ID_MAX` — the capability identifiers.
+- `ROS_SYS_*` and `ROS_SYSCALL_MAX_ARGS` — the syscall numbers.
 - One `extern "C"` prototype per syscall entry point.
 
 ## Generated, never hand-written
@@ -35,9 +35,13 @@ shipping a stale contract.
 
 ## Calling convention and symbol names
 
-Each syscall is exposed to C under the symbol `rustos_sys_<name>` — for
-example `rustos_sys_ipc_send`. These names are namespaced and frozen
-alongside the rest of `abi-v1`.
+Each syscall is exposed to C under the symbol `ros_sys_<name>` — for
+example `ros_sys_ipc_send`. The C-visible surface uses the short `ros_` /
+`ROS_` prefix (symbols `ros_sys_*`, macros `ROS_*`, `#[repr(C)]` types
+`ros_<name>_t`); it namespaces the surface so it survives C's single flat
+symbol namespace, and it belongs only on the C boundary, never on internal
+`lib/abi` Rust items (`AGENTS.md` §9). These names are frozen alongside the
+rest of `abi-v1`.
 
 The Rust types map to fixed-width C types so the header means the same thing
 on every Tier-1 target:
@@ -51,9 +55,9 @@ on every Tier-1 target:
 | user pointer  | `void *`    |
 | error code    | `int32_t`   |
 
-The trap-issuing implementation of each `rustos_sys_<name>` lives in the
+The trap-issuing implementation of each `ros_sys_<name>` lives in the
 user-space stub library (future work, gated on the per-architecture trap
-layer). It pins each symbol with `#[export_name = "rustos_sys_<name>"]` so
+layer). It pins each symbol with `#[export_name = "ros_sys_<name>"]` so
 the Rust compiler does not mangle it; this header is the contract those
 exports satisfy. The kernel still performs every capability and input check
 on the far side of the trap — the C entry point is not a privileged bypass

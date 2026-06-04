@@ -70,7 +70,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
   so a non-Rust program (C, …) can call `abi-v1` and the committed header can
   never drift (`AGENTS.md` §9). That surface is the **whole** of `lib/abi`
   (every `#[repr(C)]` type, constant, and enum discriminant — not just the
-  syscalls) and is staged, together with the `rustos_sys_*` stub runtime and
+  syscalls) and is staged, together with the `ros_sys_*` stub runtime and
   crt0, in `plans/CCOMPAT.md`; `deps-check` and `cfg-check`
   enforce the §17 modularity contracts (see the §17 burn-down section
   below).
@@ -7075,14 +7075,14 @@ capability/input check stays kernel-side (§5.4), and C binaries obey the
 `rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2) identically.
 
 This adds the curated `/System/Libraries/` class **System runtime / C ABI**
-(`AGENTS.md` §16.4): the minimal libc-equivalent (the `rustos_sys_<name>`
+(`AGENTS.md` §16.4): the minimal libc-equivalent (the `ros_sys_<name>`
 syscall stubs + crt0), dynamically linked like every other curated library.
 
 **Stages** (see `plans/CCOMPAT.md` for deliverables, tests, docs):
 
 - CC1 — Full `lib/abi` C header surface (grow `cargo xtask c-header` from the
   syscall/errno/capability seed to the whole crate). **Not started.**
-- CC2 — `lib/abi-sys`: the C-callable `rustos_sys_*` stub runtime (per-arch
+- CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
   trap stubs). Depends on the per-arch trap layer (Stage 6+). **Not started.**
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
   invariants. Depends on CC2 + the Stage 6 loader. **Not started.**
