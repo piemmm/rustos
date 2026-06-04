@@ -22,6 +22,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use crate::commands::parallel::{self, Job};
 use crate::Context;
 
 /// One in-tree fuzz harness the orchestrator knows how to run.
@@ -243,25 +244,33 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         None => opts.mode.budget(),
     };
     let targets = selected(opts)?;
-    for t in &targets {
-        let mut cmd = ctx.cargo();
-        // `--test <name>` runs exactly that integration harness; `--exact`
-        // is unnecessary because the test binary contains only fuzz fns.
-        cmd.args([
-            "test",
-            "-p",
-            t.package,
-            "--test",
-            t.test,
-            "--locked",
-            "--",
-            "--nocapture",
-        ]);
-        cmd.env("RUSTOS_FUZZ_BUDGET_SECS", budget.as_secs().to_string());
-        let label = format!("fuzz {} ({} s)", t.test, budget.as_secs());
-        ctx.run(&label, cmd)?;
-    }
-    Ok(())
+    // Each harness is an independent, budget-bounded host process, so the
+    // registry runs concurrently rather than paying the sum of every
+    // harness's budget. The shared runner caps concurrency at the host's
+    // parallelism and fails closed (`commands::parallel`).
+    let jobs: Vec<Job> = targets
+        .iter()
+        .map(|t| {
+            let mut cmd = ctx.cargo();
+            // `--test <name>` runs exactly that integration harness; `--exact`
+            // is unnecessary because the test binary contains only fuzz fns.
+            cmd.args([
+                "test",
+                "-p",
+                t.package,
+                "--test",
+                t.test,
+                "--locked",
+                "--",
+                "--nocapture",
+            ]);
+            cmd.env("RUSTOS_FUZZ_BUDGET_SECS", budget.as_secs().to_string());
+            let label = format!("fuzz {} ({} s)", t.test, budget.as_secs());
+            Job::new(label, cmd)
+        })
+        .collect();
+    let concurrency = parallel::default_concurrency(jobs.len());
+    parallel::run(jobs, concurrency)
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use crate::commands::parallel::{self, Job};
 use crate::Context;
 
 /// One in-tree stateful proptest model the orchestrator knows how to run.
@@ -202,23 +203,31 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         None => opts.mode.budget(),
     };
     let models = selected(opts)?;
-    for m in &models {
-        let mut cmd = ctx.cargo();
-        cmd.args([
-            "test",
-            "-p",
-            m.package,
-            "--test",
-            m.test,
-            "--locked",
-            "--",
-            "--nocapture",
-        ]);
-        cmd.env("RUSTOS_PROPTEST_BUDGET_SECS", budget.as_secs().to_string());
-        let label = format!("proptest {} ({} s)", m.name, budget.as_secs());
-        ctx.run(&label, cmd)?;
-    }
-    Ok(())
+    // Each model is an independent, budget-bounded host process, so the
+    // registry runs concurrently rather than paying the sum of every model's
+    // budget. The shared runner caps concurrency at the host's parallelism
+    // and fails closed (`commands::parallel`).
+    let jobs: Vec<Job> = models
+        .iter()
+        .map(|m| {
+            let mut cmd = ctx.cargo();
+            cmd.args([
+                "test",
+                "-p",
+                m.package,
+                "--test",
+                m.test,
+                "--locked",
+                "--",
+                "--nocapture",
+            ]);
+            cmd.env("RUSTOS_PROPTEST_BUDGET_SECS", budget.as_secs().to_string());
+            let label = format!("proptest {} ({} s)", m.name, budget.as_secs());
+            Job::new(label, cmd)
+        })
+        .collect();
+    let concurrency = parallel::default_concurrency(jobs.len());
+    parallel::run(jobs, concurrency)
 }
 
 #[cfg(test)]

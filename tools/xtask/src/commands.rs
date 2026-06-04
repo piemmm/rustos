@@ -18,6 +18,7 @@ mod fssoak;
 mod fuzz;
 mod linkcheck;
 mod model_check;
+mod parallel;
 mod proptest;
 mod qemu_tests;
 mod sbom;

@@ -762,10 +762,40 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// §7's no-flaky-tests rule: the value of repetition is in the *runs*).
 pub fn build_all(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
-    for t in TESTS {
-        build_one(ctx, t)?;
+    // Group the enrolled packages by target triple and build each triple in a
+    // single `cargo build`. One invocation per triple (rather than one per
+    // enrolment) lets cargo compile that triple's packages concurrently and
+    // share a single build-lock acquisition, instead of serialising behind the
+    // lock once per test. The QEMU *runs* themselves stay one-at-a-time — a
+    // hard wall-clock deadline plus tick-counting guests make co-scheduled
+    // VMs flaky under TCG (§7); see `commands::parallel`.
+    for target in build_targets() {
+        let packages: Vec<&str> = TESTS
+            .iter()
+            .filter(|t| t.target == target)
+            .map(|t| t.package)
+            .collect();
+        let mut cmd = ctx.cargo();
+        cmd.args(["build", "--locked", "--target", target]);
+        for pkg in &packages {
+            cmd.args(["-p", pkg]);
+        }
+        let label = format!("test --qemu (build {target}: {} pkg)", packages.len());
+        ctx.run(&label, cmd)?;
     }
     Ok(())
+}
+
+/// The distinct target triples across the enrolled tests, in first-seen
+/// order, so each triple is built exactly once.
+fn build_targets() -> Vec<&'static str> {
+    let mut targets: Vec<&'static str> = Vec::new();
+    for t in TESTS {
+        if !targets.contains(&t.target) {
+            targets.push(t.target);
+        }
+    }
+    targets
 }
 
 /// Execute every enrolled QEMU test once. Returns the first failure.
@@ -778,12 +808,6 @@ pub fn run_once(ctx: &Context) -> Result<(), String> {
         run_one(ctx, t)?;
     }
     Ok(())
-}
-
-fn build_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
-    let mut cmd = ctx.cargo();
-    cmd.args(["build", "--locked", "-p", t.package, "--target", t.target]);
-    ctx.run(&format!("test --qemu (build {})", t.package), cmd)
 }
 
 fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
@@ -888,8 +912,27 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_timeout, DEVELOPER_TIMEOUT_CAP};
+    use super::{build_targets, effective_timeout, DEVELOPER_TIMEOUT_CAP, TESTS};
     use std::time::Duration;
+
+    #[test]
+    fn build_targets_are_distinct_and_cover_every_enrolment() {
+        let targets = build_targets();
+        // No triple appears twice — each is built in exactly one invocation.
+        for (i, a) in targets.iter().enumerate() {
+            for b in &targets[i + 1..] {
+                assert_ne!(a, b, "duplicate build target {a}");
+            }
+        }
+        // Every enrolled test's triple is covered by the grouped build.
+        for t in TESTS {
+            assert!(
+                targets.contains(&t.target),
+                "build_targets missing {}",
+                t.target
+            );
+        }
+    }
 
     #[test]
     fn developer_machine_clamps_long_budgets_to_the_cap() {

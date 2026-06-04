@@ -3,12 +3,14 @@
 # and the §7 repeated-test soak) with every harness, model, and the test
 # matrix running IN PARALLEL, one log per job.
 #
-# `cargo xtask fuzz --soak` and `cargo xtask proptest --soak` run their
-# registries sequentially, so the full nightly would otherwise take
-# (harnesses + models) x 24 h. Both orchestrators expose `--target NAME`
-# (and `--list`), so this script fans the registry out into one process per
-# target, all sharing the single 24 h wall-clock budget. The registries stay
-# the single source of truth — this script never hard-codes the target list.
+# `cargo xtask fuzz --soak` and `cargo xtask proptest --soak` already run
+# their registries concurrently in-process (bounded by host parallelism).
+# This script still fans the registry out into one process per target so the
+# nightly soak gets per-target isolation and one log file per target: a crash
+# in one harness leaves the others' logs intact, and every target shares the
+# single 24 h wall-clock budget. Both orchestrators expose `--target NAME`
+# (and `--list`), and the registries stay the single source of truth — this
+# script never hard-codes the target list.
 #
 # `cargo xtask test --soak` is the §7 counterpart: it repeats the whole test
 # matrix for the same 24 h budget so a flake too rare to surface in the
