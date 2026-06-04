@@ -42,15 +42,17 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, KeyInput, ManifestHeader,
-    NamedKeyCode, PointerButtonCode, PointerInput, PortName, RandomFlags, Severity, StdInfoKind,
-    Time64, ABI_VERSION_V1, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, NANOS_PER_SEC,
+    AbiType, AppInfoHeader, BundleEntry, CapabilityId, Duration64, Errno, IpcMessageHeader,
+    KeyInput, LibraryScope, ManifestHeader, NamedKeyCode, PointerButtonCode, PointerInput,
+    PortName, RandomFlags, Severity, StdInfoKind, Time64, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, NANOS_PER_SEC,
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN,
+    SYSCALL_TABLE_HASH_LEN, SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -491,7 +493,10 @@ fn generate_input() -> String {
     out.push_str("#include <stdint.h>\n\n");
 
     // Record magics ("PIN1" / "KIN1") and their packed little-endian wire sizes.
-    let _ = writeln!(out, "#define ROS_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u");
+    let _ = writeln!(
+        out,
+        "#define ROS_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u"
+    );
     let _ = writeln!(out, "#define ROS_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u");
     let pwl = PointerInput::WIRE_LEN;
     let kwl = KeyInput::WIRE_LEN;
@@ -527,9 +532,18 @@ fn generate_input() -> String {
         "`button` (motion=none, else a button) and keyboard `key_class` codes (uint16_t).",
         &[
             ("ROS_INPUT_BUTTON_NONE", BUTTON_NONE),
-            ("ROS_POINTER_BUTTON_PRIMARY", PointerButtonCode::Primary.code()),
-            ("ROS_POINTER_BUTTON_SECONDARY", PointerButtonCode::Secondary.code()),
-            ("ROS_POINTER_BUTTON_MIDDLE", PointerButtonCode::Middle.code()),
+            (
+                "ROS_POINTER_BUTTON_PRIMARY",
+                PointerButtonCode::Primary.code(),
+            ),
+            (
+                "ROS_POINTER_BUTTON_SECONDARY",
+                PointerButtonCode::Secondary.code(),
+            ),
+            (
+                "ROS_POINTER_BUTTON_MIDDLE",
+                PointerButtonCode::Middle.code(),
+            ),
             ("ROS_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
             ("ROS_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
         ],
@@ -589,6 +603,114 @@ const NAMED_KEY_CODES: [(&str, u16); 26] = [
     ("ROS_KEY_F12", NamedKeyCode::F12.code()),
 ];
 
+/// `rustos_appinfo.h` — the application-bundle manifest ABI
+/// (`AGENTS.md` §16.5, §16.4).
+///
+/// `ros_appinfo_header_t` mirrors the `#[repr(C)]` layout of [`AppInfoHeader`]
+/// (the signed manifest prefix; naturally aligned with no trailing padding, so
+/// the struct size equals the wire size). Alongside it the header declares the
+/// `APPINFO_*` / `BUNDLE_*` / `MIME_*` size and count limits, the curated
+/// shared-library directory ([`SYSTEM_LIBRARIES_DIR`]), the fixed set of
+/// permitted bundle top-level entry names ([`BundleEntry::as_str`]), and the
+/// [`LibraryScope`] discriminants. Every numeric value, name, and discriminant
+/// is read from `lib/abi`, never re-typed; only the C spelling lives here.
+fn generate_appinfo() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Application-bundle manifest ABI (AGENTS.md sec.16.5, sec.16.4).");
+    out.push_str("#ifndef ROS_APPINFO_H\n#define ROS_APPINFO_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str(
+        "/* Magic word identifying an abi-v1 AppInfo manifest (\"RAI1\" little-endian). */\n",
+    );
+    let _ = writeln!(out, "#define ROS_APPINFO_MAGIC {APPINFO_MAGIC:#x}u");
+    out.push_str("/* Maximum number of capability identifiers a manifest may request. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_APPINFO_MAX_CAPABILITIES {APPINFO_MAX_CAPABILITIES}u"
+    );
+    out.push_str("/* Maximum number of MIME / file-type associations a bundle may declare. */\n");
+    let _ = writeln!(out, "#define ROS_APPINFO_MAX_MIME {APPINFO_MAX_MIME}u");
+    out.push_str("/* Maximum length, in bytes, of a bundle identifier. */\n");
+    let _ = writeln!(out, "#define ROS_BUNDLE_ID_MAX {BUNDLE_ID_MAX}u");
+    out.push_str("/* Maximum length, in bytes, of a bundle's human-readable name. */\n");
+    let _ = writeln!(out, "#define ROS_BUNDLE_NAME_MAX {BUNDLE_NAME_MAX}u");
+    out.push_str("/* Maximum length, in bytes, of a bundle version string. */\n");
+    let _ = writeln!(out, "#define ROS_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u");
+    out.push_str("/* Maximum length, in bytes, of one declared MIME-type string. */\n");
+    let _ = writeln!(out, "#define ROS_MIME_TYPE_MAX {MIME_TYPE_MAX}u");
+    out.push_str("/* Encoded length of one MIME-type body entry (length byte + buffer). */\n");
+    let _ = writeln!(out, "#define ROS_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u");
+    out.push_str("/* Packed little-endian wire size of an AppInfo header, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_APPINFO_HEADER_WIRE_LEN {}u",
+        AppInfoHeader::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str("/* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSTEM_LIBRARIES_DIR \"{SYSTEM_LIBRARIES_DIR}\""
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Fixed set of names permitted at a bundle's top level (AGENTS.md sec.16.5). */\n",
+    );
+    for entry in BundleEntry::ALL {
+        let _ = writeln!(
+            out,
+            "#define ROS_BUNDLE_ENTRY_{} \"{}\"",
+            entry.as_str().to_ascii_uppercase(),
+            entry.as_str()
+        );
+    }
+    out.push('\n');
+
+    out.push_str(
+        "/* Which permitted root a shared-library reference resolved against (uint8_t). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_LIBRARY_SCOPE_BUNDLE ((uint8_t){}u)",
+        LibraryScope::Bundle as u8
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_LIBRARY_SCOPE_SYSTEM ((uint8_t){}u)",
+        LibraryScope::System as u8
+    );
+    out.push('\n');
+
+    let _ = writeln!(
+        out,
+        "/* Signed AppInfo manifest prefix; encoded little-endian on the wire. */\n\
+         typedef struct ros_appinfo_header {{\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint16_t capability_count;\n\
+         \x20   uint16_t mime_count;\n\
+         \x20   uint8_t id_len;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t version_len;\n\
+         \x20   uint8_t reserved0;\n\
+         \x20   uint8_t id[ROS_BUNDLE_ID_MAX];\n\
+         \x20   uint8_t name[ROS_BUNDLE_NAME_MAX];\n\
+         \x20   uint8_t version[ROS_BUNDLE_VERSION_MAX];\n\
+         \x20   uint8_t syscall_table_hash[{SYSCALL_TABLE_HASH_LEN}];\n\
+         \x20   uint8_t content_hash[32];\n\
+         \x20   uint8_t signer_pubkey[32];\n\
+         \x20   uint8_t signature[64];\n\
+         }} ros_appinfo_header_t;\n",
+    );
+
+    out.push_str("#endif /* ROS_APPINFO_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -640,6 +762,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_stdinfo.h\"\n");
     out.push_str("#include \"rustos_manifest.h\"\n");
     out.push_str("#include \"rustos_input.h\"\n");
+    out.push_str("#include \"rustos_appinfo.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -684,6 +807,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_input.h",
             body: generate_input(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_appinfo.h",
+            body: generate_appinfo(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -796,6 +923,7 @@ mod tests {
             "rustos_stdinfo.h",
             "rustos_manifest.h",
             "rustos_input.h",
+            "rustos_appinfo.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -1068,7 +1196,10 @@ mod tests {
         let mut expected = vec![
             format!("#define ROS_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u"),
             format!("#define ROS_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u"),
-            format!("#define ROS_POINTER_INPUT_WIRE_LEN {}u", PointerInput::WIRE_LEN),
+            format!(
+                "#define ROS_POINTER_INPUT_WIRE_LEN {}u",
+                PointerInput::WIRE_LEN
+            ),
             format!("#define ROS_KEY_INPUT_WIRE_LEN {}u", KeyInput::WIRE_LEN),
         ];
         for (name, value) in [
@@ -1078,9 +1209,18 @@ mod tests {
             ("ROS_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
             ("ROS_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
             ("ROS_INPUT_BUTTON_NONE", BUTTON_NONE),
-            ("ROS_POINTER_BUTTON_PRIMARY", PointerButtonCode::Primary.code()),
-            ("ROS_POINTER_BUTTON_SECONDARY", PointerButtonCode::Secondary.code()),
-            ("ROS_POINTER_BUTTON_MIDDLE", PointerButtonCode::Middle.code()),
+            (
+                "ROS_POINTER_BUTTON_PRIMARY",
+                PointerButtonCode::Primary.code(),
+            ),
+            (
+                "ROS_POINTER_BUTTON_SECONDARY",
+                PointerButtonCode::Secondary.code(),
+            ),
+            (
+                "ROS_POINTER_BUTTON_MIDDLE",
+                PointerButtonCode::Middle.code(),
+            ),
             ("ROS_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
             ("ROS_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
         ] {
@@ -1104,6 +1244,72 @@ mod tests {
         // The named-key discriminants are frozen at their lib/abi values.
         assert_eq!(NamedKeyCode::Enter.code(), 1, "Enter wire code frozen");
         assert_eq!(NamedKeyCode::F12.code(), 26, "F12 wire code frozen");
+    }
+
+    #[test]
+    fn appinfo_header_pins_layout_constants_and_names() {
+        use rustos_abi::{
+            AppInfoHeader, BundleEntry, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
+            APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, MIME_ENTRY_LEN,
+            MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
+        };
+        let h = body("rustos_appinfo.h");
+        assert!(h.contains("#ifndef ROS_APPINFO_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("typedef struct ros_appinfo_header {"),
+            "appinfo-header struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let expected = [
+            format!("#define ROS_APPINFO_MAGIC {APPINFO_MAGIC:#x}u"),
+            format!("#define ROS_APPINFO_MAX_CAPABILITIES {APPINFO_MAX_CAPABILITIES}u"),
+            format!("#define ROS_APPINFO_MAX_MIME {APPINFO_MAX_MIME}u"),
+            format!("#define ROS_BUNDLE_ID_MAX {BUNDLE_ID_MAX}u"),
+            format!("#define ROS_BUNDLE_NAME_MAX {BUNDLE_NAME_MAX}u"),
+            format!("#define ROS_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u"),
+            format!("#define ROS_MIME_TYPE_MAX {MIME_TYPE_MAX}u"),
+            format!("#define ROS_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u"),
+            format!(
+                "#define ROS_APPINFO_HEADER_WIRE_LEN {}u",
+                AppInfoHeader::WIRE_LEN
+            ),
+            format!("#define ROS_SYSTEM_LIBRARIES_DIR \"{SYSTEM_LIBRARIES_DIR}\""),
+            format!(
+                "#define ROS_LIBRARY_SCOPE_BUNDLE ((uint8_t){}u)",
+                LibraryScope::Bundle as u8
+            ),
+            format!(
+                "#define ROS_LIBRARY_SCOPE_SYSTEM ((uint8_t){}u)",
+                LibraryScope::System as u8
+            ),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // Every permitted bundle entry name is exported, read from lib/abi.
+        for entry in BundleEntry::ALL {
+            let line = format!(
+                "#define ROS_BUNDLE_ENTRY_{} \"{}\"",
+                entry.as_str().to_ascii_uppercase(),
+                entry.as_str()
+            );
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+        // The C struct mirrors the #[repr(C)] Rust layout (no trailing pad).
+        assert_eq!(
+            core::mem::size_of::<AppInfoHeader>(),
+            AppInfoHeader::WIRE_LEN,
+            "AppInfoHeader repr(C) size equals wire len"
+        );
+        assert_eq!(
+            core::mem::align_of::<AppInfoHeader>(),
+            4,
+            "AppInfoHeader repr(C) align"
+        );
+        // The library-scope discriminants are frozen at their lib/abi values.
+        assert_eq!(LibraryScope::Bundle as u8, 0, "Bundle scope discriminant");
+        assert_eq!(LibraryScope::System as u8, 1, "System scope discriminant");
     }
 
     #[test]

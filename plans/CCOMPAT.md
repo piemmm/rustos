@@ -142,8 +142,17 @@ field codes, and the `ROS_POINTER_BUTTON_*` (`PointerButtonCode`) /
 `ROS_KEY_*` (`NamedKeyCode`) `#[repr(u16)]` discriminants — every value read
 from `lib/abi` (the records are hand-serialised byte images, so the header
 exports their field codes and wire sizes rather than a C struct mirror) and
-pinned by an in-module test.
-**Remaining for CC1:** the rest of the modules — `appinfo`, `rxe`,
+pinned by an in-module test. The `appinfo` module has now landed too:
+`rustos_appinfo.h` declares the `#[repr(C)]` `ros_appinfo_header_t` struct
+(mirroring `AppInfoHeader`) plus the `ROS_APPINFO_MAGIC` /
+`ROS_APPINFO_MAX_CAPABILITIES` / `ROS_APPINFO_MAX_MIME` / `ROS_BUNDLE_ID_MAX` /
+`ROS_BUNDLE_NAME_MAX` / `ROS_BUNDLE_VERSION_MAX` / `ROS_MIME_TYPE_MAX` /
+`ROS_MIME_ENTRY_LEN` / `ROS_APPINFO_HEADER_WIRE_LEN` constants, the curated
+`ROS_SYSTEM_LIBRARIES_DIR`, the fixed `ROS_BUNDLE_ENTRY_*` top-level entry
+names (read from `BundleEntry::as_str`), and the `ROS_LIBRARY_SCOPE_*`
+discriminants — every value read from `lib/abi` and pinned by an in-module
+test.
+**Remaining for CC1:** the rest of the modules — `rxe`,
 `sysinfo`, the `capability` query POD types, and `driver/*` POD
 types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
 the header" completeness test once the surface is covered.

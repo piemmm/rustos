@@ -7085,8 +7085,8 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   generator now emits one header per `lib/abi` module under `include/rustos/`
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
   `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
-  `rustos_input.h`, `rustos_syscall.h`) plus the umbrella `rustos_abi.h` that
-  `#include`s them,
+  `rustos_input.h`, `rustos_appinfo.h`, `rustos_syscall.h`) plus the umbrella
+  `rustos_abi.h` that `#include`s them,
   with a tree-wide drift guard; the `time` module (`ros_time64_t` /
   `ros_duration64_t` + constants), the `random` module (`ROS_RANDOM_FLAG_*` +
   the `ROS_RANDOM_*_BYTES` limits), the `ipc` module
@@ -7098,9 +7098,12 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   `ROS_SYSCALL_TABLE_HASH_LEN` constants), and the `input` module (the
   pointer/keyboard record magics + wire sizes, the `ROS_INPUT_KIND_*` /
   `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the
-  `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants), values read from
+  `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants), and the `appinfo`
+  module (`ros_appinfo_header_t` + the `ROS_APPINFO_*` / `ROS_BUNDLE_*` /
+  `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*`
+  names, and the `ROS_LIBRARY_SCOPE_*` discriminants), values read from
   `lib/abi`, are the grown modules so far.
-  **Remaining:** `appinfo`, `rxe`, `sysinfo`, the
+  **Remaining:** `rxe`, `sysinfo`, the
   `capability` query types, and `driver/*` POD types, plus the "every pub
   `#[repr(C)]` type is represented" completeness test once the surface is
   covered.
@@ -7129,10 +7132,13 @@ header set under `include/rustos/` — the umbrella `rustos_abi.h` plus
 `rustos_stdinfo.h` (`ROS_STDINFO_FD` + the `ROS_STDINFO_VERSION_*` framing
 tags + the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` discriminants), and
 `rustos_manifest.h` (`ros_manifest_header_t` + the `ROS_MANIFEST_*` /
-`ROS_SYSCALL_TABLE_HASH_LEN` constants), and `rustos_input.h` (the
+`ROS_SYSCALL_TABLE_HASH_LEN` constants), `rustos_input.h` (the
 pointer/keyboard record magics + wire sizes + the `ROS_INPUT_KIND_*` /
 `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes + the
-`ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants) — each value read from
+`ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants), and `rustos_appinfo.h`
+(`ros_appinfo_header_t` + the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*`
+constants + `ROS_SYSTEM_LIBRARIES_DIR` + the `ROS_BUNDLE_ENTRY_*` names + the
+`ROS_LIBRARY_SCOPE_*` discriminants) — each value read from
 `lib/abi` and guarded byte-for-byte against drift, wired into `cargo xtask ci`;
 the docs page is `docs/src/abi/c-abi.md`.
 
