@@ -45,23 +45,25 @@ use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
     DriverKind, DriverManifest, Duration64, Errno, IpcMessageHeader, KernelMemoryStats, KeyInput,
     LibraryScope, LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode,
-    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord, ProcessState,
-    RandomFlags, RxePermission, Segment, Severity, StdInfoKind, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
-    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR,
-    KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED,
-    KIND_PRESSED, KIND_RELEASED, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN,
-    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
-    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
-    SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    ProcessStartHeader, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
+    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -809,6 +811,89 @@ fn generate_rxe() -> String {
     out
 }
 
+/// `rustos_process.h` — the process startup vector the kernel hands a freshly
+/// spawned program (`AGENTS.md` §16.5; `plans/CCOMPAT.md` CC3).
+///
+/// `ros_process_start_header_t` mirrors the `#[repr(C)]` layout of
+/// [`ProcessStartHeader`] (the fixed block prefix; naturally aligned, so the
+/// struct size equals the wire size) and `ros_string_slot_t` that of
+/// [`StringSlot`] (one `(offset, len)` reference into the block's string
+/// region). Alongside them the header declares the `ROS_PROCESS_START_MAGIC`
+/// magic, the `ROS_PROCESS_START_MAX_*` limits, and the packed `*_WIRE_LEN`
+/// sizes. Every numeric value is read from `lib/abi`, never re-typed; only the
+/// C spelling lives here.
+fn generate_process() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner(
+        "Process startup vector handed to a freshly spawned program \
+         (AGENTS.md sec.16.5; plans/CCOMPAT.md CC3).",
+    );
+    out.push_str("#ifndef ROS_PROCESS_H\n#define ROS_PROCESS_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str(
+        "/* Magic word identifying an abi-v1 startup-vector block (\"PSV1\" little-endian). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_START_MAGIC {PROCESS_START_MAGIC:#x}u"
+    );
+    out.push_str(
+        "/* Maximum number of strings (arguments + environment entries) a vector may carry. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_START_MAX_STRINGS {PROCESS_START_MAX_STRINGS}u"
+    );
+    out.push_str("/* Maximum length, in bytes, of one argument or environment string. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_START_MAX_STRING_LEN {PROCESS_START_MAX_STRING_LEN}u"
+    );
+    out.push_str("/* Maximum total size, in bytes, of a startup-vector block. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_START_MAX_TOTAL_LEN ((uint64_t){PROCESS_START_MAX_TOTAL_LEN}ull)"
+    );
+    out.push('\n');
+
+    out.push_str("/* Packed little-endian wire size of a startup-vector header, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_PROCESS_START_HEADER_WIRE_LEN {}u",
+        ProcessStartHeader::WIRE_LEN
+    );
+    out.push_str("/* Packed little-endian wire size of one string slot, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_STRING_SLOT_WIRE_LEN {}u",
+        StringSlot::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* One string's (offset, len) reference into the block; encoded little-endian. */\n\
+         typedef struct ros_string_slot {\n\
+         \x20   uint32_t offset;\n\
+         \x20   uint32_t len;\n\
+         } ros_string_slot_t;\n\n",
+    );
+    out.push_str(
+        "/* Fixed startup-vector block prefix; followed by the slot table then string data. */\n\
+         typedef struct ros_process_start_header {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   uint32_t arg_count;\n\
+         \x20   uint32_t env_count;\n\
+         \x20   uint64_t total_len;\n\
+         \x20   uint64_t canary;\n\
+         } ros_process_start_header_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_PROCESS_H */\n");
+    out
+}
+
 /// `rustos_sysinfo.h` — the System Information API surface (`AGENTS.md` §16.6).
 ///
 /// Declares the `sysinfo-v1` framing (`ROS_SYSINFO_VERSION_*` /
@@ -1494,6 +1579,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_input.h\"\n");
     out.push_str("#include \"rustos_appinfo.h\"\n");
     out.push_str("#include \"rustos_rxe.h\"\n");
+    out.push_str("#include \"rustos_process.h\"\n");
     out.push_str("#include \"rustos_sysinfo.h\"\n");
     out.push_str("#include \"rustos_driver.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
@@ -1548,6 +1634,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_rxe.h",
             body: generate_rxe(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_process.h",
+            body: generate_process(),
         },
         GeneratedHeader {
             file_name: "rustos_sysinfo.h",
@@ -1670,6 +1760,7 @@ mod tests {
             "rustos_input.h",
             "rustos_appinfo.h",
             "rustos_rxe.h",
+            "rustos_process.h",
             "rustos_sysinfo.h",
             "rustos_driver.h",
             "rustos_syscall.h",
@@ -2123,6 +2214,53 @@ mod tests {
     }
 
     #[test]
+    fn process_header_pins_layout_constants_and_sizes() {
+        use rustos_abi::{
+            ProcessStartHeader, StringSlot, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+            PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+        };
+        let h = body("rustos_process.h");
+        assert!(h.contains("#ifndef ROS_PROCESS_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("typedef struct ros_process_start_header {"),
+            "start-header struct"
+        );
+        assert!(
+            h.contains("typedef struct ros_string_slot {"),
+            "string-slot struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let expected = [
+            format!("#define ROS_PROCESS_START_MAGIC {PROCESS_START_MAGIC:#x}u"),
+            format!("#define ROS_PROCESS_START_MAX_STRINGS {PROCESS_START_MAX_STRINGS}u"),
+            format!("#define ROS_PROCESS_START_MAX_STRING_LEN {PROCESS_START_MAX_STRING_LEN}u"),
+            format!(
+                "#define ROS_PROCESS_START_MAX_TOTAL_LEN ((uint64_t){PROCESS_START_MAX_TOTAL_LEN}ull)"
+            ),
+            format!(
+                "#define ROS_PROCESS_START_HEADER_WIRE_LEN {}u",
+                ProcessStartHeader::WIRE_LEN
+            ),
+            format!("#define ROS_STRING_SLOT_WIRE_LEN {}u", StringSlot::WIRE_LEN),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // The C struct mirrors the #[repr(C)] Rust layout (no trailing pad).
+        assert_eq!(
+            core::mem::size_of::<ProcessStartHeader>(),
+            ProcessStartHeader::WIRE_LEN,
+            "ProcessStartHeader repr(C) size equals wire len"
+        );
+        assert_eq!(
+            core::mem::size_of::<StringSlot>(),
+            StringSlot::WIRE_LEN,
+            "StringSlot repr(C) size equals wire len"
+        );
+    }
+
+    #[test]
     fn sysinfo_header_pins_layout_constants_and_discriminants() {
         use rustos_abi::{
             KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
@@ -2459,8 +2597,8 @@ mod tests {
         use rustos_abi::{
             AppInfoHeader, DriverManifest, Duration64, IpcMessageHeader, KernelMemoryStats,
             LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
-            ProcessListRequest, ProcessRecord, SysinfoRequestHeader, SystemIdentity, Time64,
-            Uptime,
+            ProcessListRequest, ProcessRecord, ProcessStartHeader, StringSlot,
+            SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
         };
 
         // (header file, typedef-closing line, type, frozen size, frozen align).
@@ -2475,6 +2613,8 @@ mod tests {
             ("rustos_manifest.h", "} ros_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
             ("rustos_appinfo.h", "} ros_appinfo_header_t;", size_of::<AppInfoHeader>(), 340, align_of::<AppInfoHeader>(), 4),
             ("rustos_rxe.h", "} ros_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
+            ("rustos_process.h", "} ros_process_start_header_t;", size_of::<ProcessStartHeader>(), 32, align_of::<ProcessStartHeader>(), 8),
+            ("rustos_process.h", "} ros_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("rustos_sysinfo.h", "} ros_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("rustos_sysinfo.h", "} ros_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
             ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 64, align_of::<ProcessRecord>(), 8),

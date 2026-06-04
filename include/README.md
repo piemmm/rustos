@@ -41,6 +41,11 @@ pull in exactly what they need, plus an umbrella that includes them all:
   `ROS_RXE_PAGE_SIZE`, `ROS_LOAD_MAX_SEGMENTS`, `ROS_LOAD_FLAG_PIE`,
   `ROS_SEG_FLAG_*`, `*_WIRE_LEN`), and the segment-permission discriminants
   (`ROS_RXE_PERMISSION_*`).
+- `rustos/rustos_process.h` — the process startup vector the kernel hands a
+  freshly spawned program: the block header and string-slot wire types
+  (`ros_process_start_header_t`, `ros_string_slot_t`), the magic
+  (`ROS_PROCESS_START_MAGIC`), the size limits (`ROS_PROCESS_START_MAX_*`), and
+  the packed `*_WIRE_LEN` sizes.
 - `rustos/rustos_sysinfo.h` — the System Information API wire types
   (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`,
   `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`,

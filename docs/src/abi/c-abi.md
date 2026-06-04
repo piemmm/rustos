@@ -23,6 +23,7 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_input.h` | the pointer/keyboard record magics and wire sizes, the `ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants |
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
 | `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
+| `include/rustos/rustos_process.h` | `ros_process_start_header_t` / `ros_string_slot_t` — the process startup vector handed to a freshly spawned program — and the `ROS_PROCESS_START_MAGIC` / `ROS_PROCESS_START_MAX_*` / `*_WIRE_LEN` constants |
 | `include/rustos/rustos_sysinfo.h` | the eight System Information wire types (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`, `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`, `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`) and the `ROS_SYSINFO_*` framing / query-id / registry constants, the `ROS_PROCESS_STATE_*` discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
 | `include/rustos/rustos_driver.h` | the driver-class ABI: `ros_driver_manifest_t` + `ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` discriminants, the `ROS_DRIVER_ERROR_*` codes, the `ROS_DRIVER_HANDLE_NONE` sentinel; **and the driver-class POD types**: the storage/bus/display/filesystem/input/net structs (`ros_block_geometry_t`, `ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`, `ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`, `ros_dir_entry_t`, `ros_node_times_t`, `ros_input_event_t`, `ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants, and the `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*` discriminants |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
@@ -144,6 +145,31 @@ aarch64 EL0 `svc` dispatch wiring (`kernel/arch/aarch64/src/exceptions.rs`) is
 the analogue of riscv64's already-wired `ecall` path. These round-trips are
 **not** part of the host-only `cargo xtask ci` gate; they run under
 `cargo xtask test --qemu`.
+
+## Process startup vector
+
+When the loader drops into a freshly spawned program it materialises a single
+contiguous **startup-vector block** in the new address space and hands the
+program's entry trampoline (crt0) a pointer to it. `rustos_process.h` declares
+that block's wire format — the one definition the kernel (which builds it) and
+crt0 (which parses it) share (`AGENTS.md` §2.2):
+
+- `ros_process_start_header_t` is the fixed prefix: the `ROS_PROCESS_START_MAGIC`
+  magic, the ABI version, the argument and environment counts, the block's
+  `total_len`, and a per-process random seed for the §19.2 stack canary.
+- It is followed by `arg_count + env_count` `ros_string_slot_t` records
+  (arguments first, then environment), each an `(offset, len)` reference into
+  the trailing string region.
+- The block is **position-independent** — strings are referenced by offset from
+  the block base, never an absolute pointer — so it works wherever the loader
+  places it in a PIE address space. The strings carry no NUL terminator; crt0
+  copies and NUL-terminates them when it builds the C `argv` / `envp` vectors.
+
+The block is untrusted input: `rustos_abi::process::ProcessStart::parse`
+bounds-checks every field against the frozen `ROS_PROCESS_START_MAX_*` limits
+and the declared `total_len`, rejects an embedded NUL, and fails closed rather
+than ever indexing out of range (`AGENTS.md` §2.9, §19.5/§19.6). The crt0
+runtime that consumes this block is staged in `plans/CCOMPAT.md` (stage CC3).
 
 ## Stability
 

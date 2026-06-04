@@ -353,8 +353,40 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: not started.** **Depends on** CC2 and the loader (`PLAN.md` Stage 6
-bundle loader / dynamic-loader policy).
+**Status: in progress — the startup-vector `abi-v1` type has landed; crt0 and
+the loader hook are still to do.** **Depends on** CC2 and the loader
+(`PLAN.md` Stage 6 bundle loader / dynamic-loader policy).
+
+The third deliverable below (the kernel→process startup-vector type) is done:
+`lib/abi/src/process.rs` defines the one shared definition the kernel builder
+and crt0 use (`AGENTS.md` §2.2) — `ProcessStartHeader` + `StringSlot` + the
+fail-closed `ProcessStart::parse` view, with `PROCESS_START_MAGIC` and the
+`PROCESS_START_MAX_*` limits. It is a **position-independent**, offset-based
+block (the slot table references strings by offset from the block base, never
+an absolute pointer, so it survives PIE placement, §19.2): the argument slots
+first, then the environment slots, then a NUL-free string region, plus a
+per-process random seed for the §19.2 stack canary. `parse` treats the whole
+block as untrusted input (`AGENTS.md` §19.5/§19.6): it bounds-checks every
+count, length, offset, and the declared `total_len`, rejects an embedded NUL
+(so each string is C-representable), and fails closed with an `Errno` rather
+than ever indexing out of range (§2.9). Eighteen in-module host tests cover the
+round-trips and every rejection path, and the three new decoders
+(`ProcessStartHeader::from_bytes`, `StringSlot::from_bytes`,
+`ProcessStart::parse`) are enrolled in the `lib/abi` fuzz harness
+(`lib/abi/tests/fuzz_decode.rs`, §19.6). It is surfaced in the CC1 header as
+`include/rustos/rustos_process.h` (`ros_process_start_header_t` /
+`ros_string_slot_t` + the `ROS_PROCESS_START_*` macros), generated from
+`lib/abi` and pinned by the generator's per-module and completeness tests;
+`docs/src/abi/c-abi.md` and `include/README.md` document it.
+
+**Still to do:** the per-target crt0 startup object and the QEMU "crt0-linked
+program starts, reads its args, exits" test (plus the `RWX`/non-PIE load-refusal
+test). Both need the Stage 6 U-mode/EL0 loader — or, as in CC2, a minimal
+harness that stands up the program context itself. **First confirm the Stage 6
+loader / process-spawn status**: `PLAN.md` Stage 6 is marked complete, but the
+actual EL0/U-mode loader (drop into a freshly loaded program with an argument
+vector) may still be the missing piece, just as the EL0/U-mode user-context was
+for CC2.
 
 **Deliverables**
 - A first-party, per-native-target crt0 (program entry/exit runtime) that a

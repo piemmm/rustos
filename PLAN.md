@@ -7166,7 +7166,21 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   all host-tested. The QEMU round-trips are not in the host-only
   `cargo xtask ci` gate; they run under `cargo xtask test --qemu`.
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
-  invariants. Depends on CC2 + the Stage 6 loader. **Not started.**
+  invariants. Depends on CC2 + the Stage 6 loader. **In progress — the
+  startup-vector `abi-v1` type has landed.** The kernel→process startup vector
+  is now defined once in `lib/abi` (`process` module: `ProcessStartHeader` +
+  `StringSlot` + the fail-closed `ProcessStart::parse` view, with the
+  `PROCESS_START_MAGIC` / `PROCESS_START_MAX_*` limits), so the kernel builder
+  and crt0 will share one definition (§2.2). It is a position-independent,
+  offset-based block (argv + envp, no NUL terminators, plus a per-process §19.2
+  stack-canary seed) parsed as untrusted input (bounds/limit/embedded-NUL
+  checks, fail closed, §2.9/§19.5/§19.6) and enrolled in the `lib/abi` fuzz
+  harness. It is surfaced in the C header as `rustos_process.h`
+  (`ros_process_start_header_t` / `ros_string_slot_t` + the `ROS_PROCESS_START_*`
+  macros), pinned by the generator completeness test and documented in
+  `docs/src/abi/c-abi.md`. **Still to do:** the per-target crt0 object itself
+  and the QEMU "crt0 program starts, reads its args, exits" test, which depend
+  on the Stage 6 U-mode/EL0 loader (or a minimal CC2-style harness).
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
   runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
   **Not started.**

@@ -24,6 +24,7 @@ pub mod input;
 pub mod ipc;
 pub(crate) mod le;
 pub mod manifest;
+pub mod process;
 pub mod random;
 pub mod rxe;
 pub mod stdinfo;
@@ -56,6 +57,10 @@ pub use input::{
 pub use ipc::{IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN};
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
+};
+pub use process::{
+    ProcessStart, ProcessStartHeader, StringSlot, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rxe::{

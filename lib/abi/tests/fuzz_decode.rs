@@ -26,6 +26,7 @@
 //! so it runs once regardless of the budget.
 
 use rustos_abi::input::{KeyInput, PointerInput};
+use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
     SysinfoRequestHeader, SystemIdentity, Uptime,
@@ -146,6 +147,38 @@ fn exercise(bytes: &[u8]) {
         let redecoded = PortName::from_bytes(&name.to_le_bytes())
             .expect("round-trip of an accepted port name must succeed");
         assert_eq!(name, redecoded);
+    }
+    exercise_process(bytes);
+}
+
+/// Drive the `process` startup-vector decoders on `bytes`.
+///
+/// Split out of [`exercise`] so each helper stays a single, readable unit;
+/// the contract is identical (must not panic; an accepted decode round-trips
+/// or re-parses deterministically).
+fn exercise_process(bytes: &[u8]) {
+    if let Ok(header) = ProcessStartHeader::from_bytes(bytes) {
+        let redecoded = ProcessStartHeader::from_bytes(&header.to_le_bytes())
+            .expect("round-trip of an accepted start header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(slot) = StringSlot::from_bytes(bytes) {
+        let redecoded = StringSlot::from_bytes(&slot.to_le_bytes())
+            .expect("round-trip of an accepted string slot must succeed");
+        assert_eq!(slot, redecoded);
+    }
+    if let Ok(view) = ProcessStart::parse(bytes) {
+        // The view borrows `bytes`; re-parsing the same bytes must be
+        // deterministic, and every accepted string must resolve.
+        let reparsed = ProcessStart::parse(bytes)
+            .expect("re-parse of an accepted startup vector must succeed");
+        assert_eq!(view, reparsed);
+        for i in 0..view.arg_count() {
+            assert!(view.arg(i).is_some());
+        }
+        for i in 0..view.env_count() {
+            assert!(view.env(i).is_some());
+        }
     }
 }
 
