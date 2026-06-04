@@ -142,7 +142,7 @@ pub fn generate() -> String {
          */\n\n",
     );
 
-    out.push_str("#ifndef ROS_ABI_V1_H\n#define ROS_ABI_V1_H\n\n");
+    out.push_str("#ifndef ROS_ABI_H\n#define ROS_ABI_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
@@ -191,7 +191,7 @@ pub fn generate() -> String {
     out.push('\n');
 
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
-    out.push_str("#endif /* ROS_ABI_V1_H */\n");
+    out.push_str("#endif /* ROS_ABI_H */\n");
 
     out
 }
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn header_contains_expected_anchors() {
         let h = generate();
-        assert!(h.contains("#ifndef ROS_ABI_V1_H"), "guard present");
+        assert!(h.contains("#ifndef ROS_ABI_H"), "guard present");
         assert!(h.contains("#include <stdint.h>"), "stdint included");
         assert!(h.contains("extern \"C\""), "C++ guard present");
         assert!(h.contains("#define ROS_ABI_VERSION 1u"), "version macro");

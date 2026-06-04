@@ -14,8 +14,8 @@
 * against that library to call the kernel from a non-Rust program.
 */
 
-#ifndef ROS_ABI_V1_H
-#define ROS_ABI_V1_H
+#ifndef ROS_ABI_H
+#define ROS_ABI_H
 
 #include <stdint.h>
 
@@ -97,4 +97,4 @@ uint64_t ros_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 } /* extern "C" */
 #endif
 
-#endif /* ROS_ABI_V1_H */
+#endif /* ROS_ABI_H */
