@@ -49,18 +49,28 @@ pull in exactly what they need, plus an umbrella that includes them all:
   process-state discriminants (`ROS_PROCESS_STATE_*`), the inline-buffer caps
   (`ROS_PROCESS_NAME_MAX`, `ROS_MACHINE_ID_LEN`, `ROS_HOSTNAME_MAX`,
   `ROS_MOUNT_*_MAX`), and the per-record `*_WIRE_LEN` sizes.
-- `rustos/rustos_driver.h` — the driver-class ABI core: the signed driver
-  manifest header (`ros_driver_manifest_t`) and its constants
+- `rustos/rustos_driver.h` — the driver-class ABI. The core: the signed
+  driver manifest header (`ros_driver_manifest_t`) and its constants
   (`ROS_DRIVER_MANIFEST_*`, `ROS_DRIVER_SIGNER_PUBKEY_LEN`,
   `ROS_DRIVER_SIGNATURE_LEN`), the driver-kind and buffer-class discriminants
   (`ROS_DRIVER_KIND_*`, `ROS_BUFFER_CLASS_*`), the driver-ABI error codes
   (`ROS_DRIVER_ERROR_*`), and the no-handle sentinel
-  (`ROS_DRIVER_HANDLE_NONE`).
+  (`ROS_DRIVER_HANDLE_NONE`). Plus the driver-class POD types: the
+  storage/bus/display/filesystem/input/net structs (`ros_block_geometry_t`,
+  `ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`,
+  `ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`,
+  `ros_dir_entry_t`, `ros_node_times_t`, `ros_input_event_t`,
+  `ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` /
+  `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants, and the
+  `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*`
+  discriminants.
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 
-Growing this set to the rest of `lib/abi` (the remaining `driver/*` submodule
-POD types) is staged in `plans/CCOMPAT.md` (stage CC1).
+This set now covers the whole `lib/abi` public `#[repr(C)]` type surface (a
+generator completeness test pins every such type's size/align and that it has
+a C `typedef`). The remaining C-ABI work — the `ros_sys_*` trap-stub runtime
+and crt0 — is staged in `plans/CCOMPAT.md` (stages CC2+).
 
 ## These files are generated
 

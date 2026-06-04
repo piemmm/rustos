@@ -7081,7 +7081,7 @@ syscall stubs + crt0), dynamically linked like every other curated library.
 **Stages** (see `plans/CCOMPAT.md` for deliverables, tests, docs):
 
 - CC1 — Full `lib/abi` C header surface (grow `cargo xtask c-header` from the
-  syscall/errno/capability seed to the whole crate). **In progress:** the
+  syscall/errno/capability seed to the whole crate). **Done:** the
   generator now emits one header per `lib/abi` module under `include/rustos/`
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
   `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
@@ -7116,14 +7116,26 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   (`ros_driver_manifest_t` + the `ROS_DRIVER_MANIFEST_*` /
   `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the
   `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*`
-  discriminants, and the `ROS_DRIVER_HANDLE_NONE` sentinel), values
-  read from `lib/abi`, are the grown modules so far.
+  discriminants, and the `ROS_DRIVER_HANDLE_NONE` sentinel), and the
+  `driver/*` submodule POD surface in `rustos_driver.h` (the
+  storage/bus/display/filesystem/input/net struct mirrors
+  `ros_block_geometry_t` / `ros_discard_capability_t` /
+  `ros_health_snapshot_t` / `ros_bus_device_t` / `ros_display_mode_t` /
+  `ros_accel_caps_t` / `ros_node_info_t` / `ros_dir_entry_t` /
+  `ros_node_times_t` / `ros_input_event_t` / `ros_mac_address_t`, the
+  `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` /
+  `ROS_NODE_ID_NONE` constants, and the `ROS_DISPLAY_FORMAT_*` /
+  `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*` discriminants), all values
+  read from `lib/abi`, are the grown modules.
   The `capability` module needs no new header (its ids already ship in
-  `rustos_capability.h`; `CapabilityQuery` is a trait with no C form).
-  **Remaining:** the
-  `driver/*` submodule POD types, plus the "every pub
-  `#[repr(C)]` type is represented" completeness test once the surface is
-  covered.
+  `rustos_capability.h`; `CapabilityQuery` is a trait with no C form). A
+  generator completeness test pins every `lib/abi` `#[repr(C)]` type's
+  size/align and asserts it has a C `typedef`, so a new type cannot silently
+  escape the C surface (the type-surface analogue of the dense errno table).
+  The Rust-only error enums (`WindowError`, `MmioMapError`), the opaque
+  `MsiMessage`, the in-process policy records, the runtime objects, and the
+  driver-host traits carry no C form and are deliberately omitted (§2.3). CC1
+  is complete and green on the whole-project gate.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
   trap stubs). Depends on the per-arch trap layer (Stage 6+). **Not started.**
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
@@ -7162,12 +7174,21 @@ constants + `ROS_SYSTEM_LIBRARIES_DIR` + the `ROS_BUNDLE_ENTRY_*` names + the
 System Information wire-type struct mirrors + the `ROS_SYSINFO_*` framing /
 query-id / registry constants + the `ROS_PROCESS_STATE_*` discriminants + the
 `ROS_*_MAX` / `ROS_*_LEN` buffer caps + the per-record `*_WIRE_LEN` sizes), and
-`rustos_driver.h` (`ros_driver_manifest_t` + the `ROS_DRIVER_MANIFEST_*` /
-`ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants + the
-`ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*` discriminants
-+ the `ROS_DRIVER_HANDLE_NONE` sentinel) —
+`rustos_driver.h` (the core `ros_driver_manifest_t` + the
+`ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` /
+`ROS_DRIVER_SIGNATURE_LEN` constants + the `ROS_DRIVER_KIND_*` /
+`ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*` discriminants + the
+`ROS_DRIVER_HANDLE_NONE` sentinel, plus the driver-class POD mirrors
+`ros_block_geometry_t` / `ros_discard_capability_t` / `ros_health_snapshot_t`
+/ `ros_bus_device_t` / `ros_display_mode_t` / `ros_accel_caps_t` /
+`ros_node_info_t` / `ros_dir_entry_t` / `ros_node_times_t` /
+`ros_input_event_t` / `ros_mac_address_t` + the `ROS_VIRTIO_PCI_*` /
+`ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants +
+the `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*`
+discriminants) —
 each value read from
-`lib/abi` and guarded byte-for-byte against drift, wired into `cargo xtask ci`;
+`lib/abi`, guarded byte-for-byte against drift and by a completeness test that
+pins every `#[repr(C)]` type's size/align, wired into `cargo xtask ci`;
 the docs page is `docs/src/abi/c-abi.md`.
 
 ---

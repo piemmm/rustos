@@ -104,7 +104,7 @@ before its predecessor is green on the whole-project gate (§7).
 
 ### Stage CC1 — Full `lib/abi` C header surface
 
-**Status: in progress.** The generator has been grown from a single
+**Status: done.** The generator has been grown from a single
 `rustos_abi.h` into a per-module header set under `include/rustos/`: the
 umbrella `rustos_abi.h` now only carries `ROS_ABI_VERSION` and `#include`s
 the module headers `rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
@@ -189,10 +189,28 @@ is a Rust trait with no C representation. The `driver` core has now landed too:
 travels as a `uint64_t`. It reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
 `rustos_manifest.h` (which it `#include`s) rather than re-declaring it (§2.2);
 every value is read from `lib/abi` and pinned by an in-module test.
-**Remaining for CC1:** the `driver/*` submodule POD types (e.g. `MmioMapError`,
-`MsiMessage`, `WindowError`, the `VIRTIO_PCI_*` constants) — plus the "every
-`pub` `#[repr(C)]` type in `lib/abi` is represented in the header" completeness
-test once the surface is covered.
+The `driver/*` submodule POD surface has now landed in `rustos_driver.h`: the
+storage/bus/display/filesystem/input/net struct mirrors (`ros_block_geometry_t`,
+`ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`,
+`ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`, `ros_dir_entry_t`,
+`ros_node_times_t` — built from `ros_time64_t`, so the header `#include`s
+`rustos_time.h` —, `ros_input_event_t`, and the `#[repr(transparent)]`
+`ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` /
+`ROS_MOUNT_FLAG_*` (with `KNOWN_MASK`) / `ROS_NODE_ID_NONE` constants, and the
+`ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*`
+discriminants — every value read from `lib/abi`. `BusDevice::class` is spelled
+`device_class` in the mirror because `class` is reserved in C++; the driver
+input-event kinds are `ROS_INPUT_EVENT_KIND_*` to stay disjoint from the
+windowing `ROS_INPUT_KIND_*` in `rustos_input.h` (§2.2). The Rust-only error
+enums (`WindowError`, `MmioMapError`), the opaque arch-built `MsiMessage`, the
+in-process policy records (`NodeSecurity`, `SecurityAcl`, `SecuritySubject`),
+and the runtime objects (`RegisterWindow`, `DmaSlab`, `PoolId`) carry no
+`#[repr(C)]`/explicit-primitive layout and never cross the C boundary, so —
+like the driver-host traits — they are deliberately omitted (§2.3). The CC1
+**completeness test** (`every_repr_c_abi_type_is_represented_in_the_header_set`)
+now pins every `lib/abi` `#[repr(C)]` type's size/align and asserts it has a C
+`typedef`, the type-surface analogue of `errno_table_matches_the_frozen_enum`.
+CC1 is complete and green on the whole-project gate.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

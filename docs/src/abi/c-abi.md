@@ -24,14 +24,26 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
 | `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
 | `include/rustos/rustos_sysinfo.h` | the eight System Information wire types (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`, `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`, `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`) and the `ROS_SYSINFO_*` framing / query-id / registry constants, the `ROS_PROCESS_STATE_*` discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
-| `include/rustos/rustos_driver.h` | `ros_driver_manifest_t` and the `ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` discriminants, the `ROS_DRIVER_ERROR_*` driver error codes, and the `ROS_DRIVER_HANDLE_NONE` sentinel |
+| `include/rustos/rustos_driver.h` | the driver-class ABI: `ros_driver_manifest_t` + `ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` discriminants, the `ROS_DRIVER_ERROR_*` codes, the `ROS_DRIVER_HANDLE_NONE` sentinel; **and the driver-class POD types**: the storage/bus/display/filesystem/input/net structs (`ros_block_geometry_t`, `ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`, `ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`, `ros_dir_entry_t`, `ros_node_times_t`, `ros_input_event_t`, `ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants, and the `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*` discriminants |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
-Growing the set to cover the rest of `lib/abi` (the remaining `driver/*`
-submodule POD types) is staged in `plans/CCOMPAT.md` (stage CC1).
+The header set now covers the whole `lib/abi` public `#[repr(C)]` type
+surface; a completeness test in the generator pins every such type's
+size/align and asserts it has a C `typedef`, so a new type cannot silently
+escape the C view. The remaining C-ABI work (the `ros_sys_*` trap-stub
+runtime and crt0) is staged in `plans/CCOMPAT.md` (stages CC2+).
+
+A handful of `driver/*` items are deliberately **not** in the header: the
+Rust-only error enums (`WindowError`, `MmioMapError`) and the opaque
+arch-built `MsiMessage` carry no `#[repr(C)]`/explicit-primitive layout and
+never cross the C boundary (errors collapse to `ROS_DRIVER_ERROR_*`); the
+in-process policy records (`NodeSecurity`, `SecurityAcl`, `SecuritySubject`)
+and runtime objects (`RegisterWindow`, `DmaSlab`, `PoolId`) are not wire
+types; and the driver-host traits have no C form — all skipped for the same
+reason as the syscall traits (`AGENTS.md` §2.3).
 
 ## Generated, never hand-written
 

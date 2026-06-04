@@ -1149,7 +1149,141 @@ fn driver_emit_discriminants(out: &mut String) {
     out.push('\n');
 }
 
-/// `rustos_driver.h` — the driver-class ABI core (`AGENTS.md` §8, §9).
+/// Emit the driver-submodule POD constants: the `VIRTIO_PCI_*` ids, the
+/// Ethernet `MAC_ADDRESS_LEN`, the [`MountFlags`] bit set, and the
+/// [`NodeId`] sentinel (every value read from `lib/abi`).
+///
+/// The [`MountFlags`] bits live here — not in `rustos_sysinfo.h` where the
+/// `MountRecord.flags` field is a bare `uint32_t` — because the flag
+/// semantics are owned by the filesystem driver ABI (`AGENTS.md` §2.2).
+///
+/// [`MountFlags`]: rustos_abi::driver::filesystem::MountFlags
+/// [`NodeId`]: rustos_abi::driver::filesystem::NodeId
+fn driver_emit_submodule_constants(out: &mut String) {
+    use rustos_abi::driver::filesystem::{MountFlags, NodeId};
+    use rustos_abi::driver::net::MAC_ADDRESS_LEN;
+    use rustos_abi::{
+        VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY,
+        VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
+    };
+    use std::fmt::Write as _;
+
+    out.push_str(
+        "/* PCI vendor ID assigned to virtio devices (uint16_t; virtio 1.1 sec.4.1.2). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_VIRTIO_PCI_VENDOR_ID ((uint16_t){VIRTIO_PCI_VENDOR_ID:#x}u)"
+    );
+    out.push_str(
+        "/* virtio PCI capability `cfg_type` values (uint8_t; virtio 1.1 sec.4.1.4). */\n",
+    );
+    for (name, value) in [
+        ("COMMON", VIRTIO_PCI_CFG_COMMON),
+        ("NOTIFY", VIRTIO_PCI_CFG_NOTIFY),
+        ("ISR", VIRTIO_PCI_CFG_ISR),
+        ("DEVICE", VIRTIO_PCI_CFG_DEVICE),
+        ("PCI", VIRTIO_PCI_CFG_PCI),
+    ] {
+        let _ = writeln!(out, "#define ROS_VIRTIO_PCI_CFG_{name} ((uint8_t){value}u)");
+    }
+    out.push('\n');
+
+    out.push_str("/* Length, in bytes, of an Ethernet MAC address. */\n");
+    let _ = writeln!(out, "#define ROS_MAC_ADDRESS_LEN {MAC_ADDRESS_LEN}u");
+    out.push('\n');
+
+    out.push_str(
+        "/* Mount-flag bitmap (uint32_t); any bit outside KNOWN_MASK is reserved and rejected. */\n",
+    );
+    for (name, flag) in [
+        ("READ_ONLY", MountFlags::READ_ONLY),
+        ("NOSUID", MountFlags::NOSUID),
+        ("NODEV", MountFlags::NODEV),
+        ("NOEXEC", MountFlags::NOEXEC),
+        ("KNOWN_MASK", MountFlags::KNOWN_MASK),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_MOUNT_FLAG_{name} ((uint32_t){:#x}u)",
+            flag.bits()
+        );
+    }
+    out.push('\n');
+
+    out.push_str("/* Sentinel \"no node\"; a live NodeId travels as a uint64_t. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_NODE_ID_NONE ((uint64_t){}ull)",
+        NodeId::NONE.raw()
+    );
+    out.push('\n');
+}
+
+/// Emit the driver-submodule enum discriminants: [`DisplayFormat`],
+/// [`NodeKind`], and the driver-class [`InputEventKind`] (every value read
+/// from `lib/abi`).
+///
+/// The driver input-event kinds are spelled `ROS_INPUT_EVENT_KIND_*` to
+/// stay disjoint from the windowing `ROS_INPUT_KIND_*` codes in
+/// `rustos_input.h`; they are different ABIs that happen to share the word
+/// "input" (`AGENTS.md` §2.2/§2.3).
+///
+/// [`DisplayFormat`]: rustos_abi::driver::display::DisplayFormat
+/// [`NodeKind`]: rustos_abi::driver::filesystem::NodeKind
+/// [`InputEventKind`]: rustos_abi::driver::input::InputEventKind
+fn driver_emit_submodule_discriminants(out: &mut String) {
+    use rustos_abi::driver::display::DisplayFormat;
+    use rustos_abi::driver::filesystem::NodeKind;
+    use rustos_abi::driver::input::InputEventKind;
+    use std::fmt::Write as _;
+
+    out.push_str(
+        "/* Display pixel encoding (uint8_t); named by the byte order of the first pixel. */\n",
+    );
+    for (name, fmt) in [
+        ("RGBA8888", DisplayFormat::Rgba8888),
+        ("BGRA8888", DisplayFormat::Bgra8888),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_DISPLAY_FORMAT_{name} ((uint8_t){}u)",
+            fmt.as_u8()
+        );
+    }
+    out.push('\n');
+
+    out.push_str("/* Filesystem node kind (uint8_t). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_NODE_KIND_DIRECTORY ((uint8_t){}u)",
+        NodeKind::Directory as u8
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_NODE_KIND_REGULAR_FILE ((uint8_t){}u)",
+        NodeKind::RegularFile as u8
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Driver input-event kind (uint8_t); distinct from the windowing ROS_INPUT_KIND_*. */\n",
+    );
+    for (name, kind) in [
+        ("KEY", InputEventKind::Key),
+        ("POINTER", InputEventKind::Pointer),
+        ("SCROLL", InputEventKind::Scroll),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_INPUT_EVENT_KIND_{name} ((uint8_t){}u)",
+            kind.as_u8()
+        );
+    }
+    out.push('\n');
+}
+
+/// `rustos_driver.h` — the driver-class ABI (`AGENTS.md` §8, §9).
 ///
 /// `ros_driver_manifest_t` mirrors the `#[repr(C)]` layout of
 /// [`DriverManifest`] (the signed driver-manifest prefix; naturally aligned,
@@ -1160,18 +1294,34 @@ fn driver_emit_discriminants(out: &mut String) {
 /// [`DriverHandle`] `ROS_DRIVER_HANDLE_NONE` sentinel (a live driver handle
 /// travels as a `uint64_t`). The syscall-table-hash length is shared with the
 /// application manifest, so the struct reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
-/// `rustos_manifest.h` rather than re-declaring it (`AGENTS.md` §2.2). Every
-/// numeric value and discriminant is read from `lib/abi`, never re-typed; only
-/// the C spelling lives here.
+/// `rustos_manifest.h` rather than re-declaring it (`AGENTS.md` §2.2).
+///
+/// The header also carries the driver-class **submodule** POD surface: the
+/// `VIRTIO_PCI_*` / `MAC_ADDRESS_LEN` / [`MountFlags`] / [`NodeId`] constants
+/// (see [`driver_emit_submodule_constants`]), the [`DisplayFormat`] /
+/// [`NodeKind`] / [`InputEventKind`] discriminants (see
+/// [`driver_emit_submodule_discriminants`]), and the struct mirrors in
+/// [`DRIVER_SUBMODULE_TYPEDEFS`]. `NodeTimes` is built from `ros_time64_t`, so
+/// the header `#include`s `rustos_time.h`. Every numeric value and discriminant
+/// is read from `lib/abi`, never re-typed; only the C spelling lives here.
+///
+/// [`MountFlags`]: rustos_abi::driver::filesystem::MountFlags
+/// [`NodeId`]: rustos_abi::driver::filesystem::NodeId
+/// [`DisplayFormat`]: rustos_abi::driver::display::DisplayFormat
+/// [`NodeKind`]: rustos_abi::driver::filesystem::NodeKind
+/// [`InputEventKind`]: rustos_abi::driver::input::InputEventKind
 fn generate_driver() -> String {
     let mut out =
         banner("Driver-class ABI core: manifest, kinds, errors (AGENTS.md sec.8, sec.9).");
     out.push_str("#ifndef ROS_DRIVER_H\n#define ROS_DRIVER_H\n\n");
     out.push_str("#include <stdint.h>\n");
-    out.push_str("#include \"rustos_manifest.h\"\n\n");
+    out.push_str("#include \"rustos_manifest.h\"\n");
+    out.push_str("#include \"rustos_time.h\"\n\n");
 
     driver_emit_constants(&mut out);
     driver_emit_discriminants(&mut out);
+    driver_emit_submodule_constants(&mut out);
+    driver_emit_submodule_discriminants(&mut out);
 
     out.push_str(
         "/* Signed driver-manifest prefix; encoded little-endian on the wire. */\n\
@@ -1187,9 +1337,109 @@ fn generate_driver() -> String {
          } ros_driver_manifest_t;\n\n",
     );
 
+    out.push_str(DRIVER_SUBMODULE_TYPEDEFS);
+
     out.push_str("#endif /* ROS_DRIVER_H */\n");
     out
 }
+
+/// The C struct mirrors of the driver-submodule `#[repr(C)]` POD types, as
+/// static text. The field names/order are the frozen `abi-v1` view; the
+/// in-module pinning test checks each mirror's size/align against `lib/abi`.
+///
+/// Every struct is the naturally-aligned in-memory layout. None of these
+/// types has a packed wire encoder (unlike [`DriverManifest`]), so the C
+/// mirror *is* the layout and there is no separate `*_WIRE_LEN` macro. The
+/// `BusDevice::class` field is spelled `device_class` here because `class`
+/// is reserved in C++ and the umbrella header must compile under a C++
+/// `extern "C"` include; only the byte layout is part of the ABI, not the
+/// field name.
+///
+/// The error enums (`WindowError`, `MmioMapError`), the opaque arch-built
+/// `MsiMessage`, the in-process policy records (`NodeSecurity`,
+/// `SecurityAcl`, `SecuritySubject`) and the runtime objects (`RegisterWindow`,
+/// `DmaSlab`, `PoolId`) carry no `#[repr(C)]`/explicit-primitive layout and do
+/// not cross the C boundary, so — like the driver traits — they are
+/// deliberately omitted (`AGENTS.md` §2.3).
+const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
+    "/* Block-device geometry (drivers/storage/*). */\n\
+         typedef struct ros_block_geometry {\n\
+         \x20   uint32_t block_size;\n\
+         \x20   uint64_t block_count;\n\
+         } ros_block_geometry_t;\n\n",
+    "/* Discard (TRIM/unmap) capability a block device reports. */\n\
+         typedef struct ros_discard_capability {\n\
+         \x20   uint8_t supported;\n\
+         \x20   uint64_t granularity_blocks;\n\
+         \x20   uint64_t max_blocks_per_request;\n\
+         } ros_discard_capability_t;\n\n",
+    "/* Point-in-time device-health snapshot (SMART / NVMe telemetry). */\n\
+         typedef struct ros_health_snapshot {\n\
+         \x20   uint64_t power_on_hours;\n\
+         \x20   uint64_t unsafe_shutdowns;\n\
+         \x20   uint64_t media_errors;\n\
+         \x20   uint64_t reallocated_sectors;\n\
+         \x20   uint64_t pending_sectors;\n\
+         \x20   uint64_t uncorrectable_sectors;\n\
+         \x20   uint64_t crc_errors;\n\
+         \x20   uint16_t percentage_used;\n\
+         \x20   uint16_t available_spare;\n\
+         \x20   uint16_t temperature_kelvin;\n\
+         \x20   uint8_t critical_warning;\n\
+         } ros_health_snapshot_t;\n\n",
+    "/* Identifying tuple for a discovered device (drivers/bus/*).\n\
+         * `device_class` mirrors the Rust `class` field (renamed for C++). */\n\
+         typedef struct ros_bus_device {\n\
+         \x20   uint32_t vendor;\n\
+         \x20   uint32_t device;\n\
+         \x20   uint16_t device_class;\n\
+         \x20   uint16_t reserved0;\n\
+         \x20   uint64_t address;\n\
+         } ros_bus_device_t;\n\n",
+    "/* Active display mode (drivers/display/*); `format` is a ROS_DISPLAY_FORMAT_*. */\n\
+         typedef struct ros_display_mode {\n\
+         \x20   uint32_t width_px;\n\
+         \x20   uint32_t height_px;\n\
+         \x20   uint32_t stride_bytes;\n\
+         \x20   uint8_t format;\n\
+         } ros_display_mode_t;\n\n",
+    "/* What a hardware compositor back-end can do this frame. */\n\
+         typedef struct ros_accel_caps {\n\
+         \x20   uint32_t max_layers;\n\
+         \x20   uint32_t max_width_px;\n\
+         \x20   uint32_t max_height_px;\n\
+         \x20   uint8_t per_layer_opacity;\n\
+         } ros_accel_caps_t;\n\n",
+    "/* Structural metadata about a filesystem node; `kind` is a ROS_NODE_KIND_*. */\n\
+         typedef struct ros_node_info {\n\
+         \x20   uint8_t kind;\n\
+         \x20   uint64_t size;\n\
+         } ros_node_info_t;\n\n",
+    "/* One directory entry; `node` is a NodeId (uint64_t), `kind` a ROS_NODE_KIND_*. */\n\
+         typedef struct ros_dir_entry {\n\
+         \x20   uint64_t node;\n\
+         \x20   uint8_t kind;\n\
+         \x20   uintptr_t name_len;\n\
+         } ros_dir_entry_t;\n\n",
+    "/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. */\n\
+         typedef struct ros_node_times {\n\
+         \x20   ros_time64_t created;\n\
+         \x20   ros_time64_t modified;\n\
+         \x20   ros_time64_t accessed;\n\
+         \x20   ros_time64_t changed;\n\
+         } ros_node_times_t;\n\n",
+    "/* A single input event; `kind` is a ROS_INPUT_EVENT_KIND_*. */\n\
+         typedef struct ros_input_event {\n\
+         \x20   uint8_t kind;\n\
+         \x20   uint8_t reserved0;\n\
+         \x20   uint16_t code;\n\
+         \x20   int32_t value;\n\
+         } ros_input_event_t;\n\n",
+    "/* A 48-bit IEEE 802 link-layer address (drivers/network/*). */\n\
+         typedef struct ros_mac_address {\n\
+         \x20   uint8_t octets[ROS_MAC_ADDRESS_LEN];\n\
+         } ros_mac_address_t;\n\n",
+);
 
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
@@ -2115,6 +2365,146 @@ mod tests {
             DriverManifest::WIRE_LEN,
             "DriverManifest repr(C) size == wire size"
         );
+    }
+
+    #[test]
+    fn driver_header_pins_submodule_constants_and_discriminants() {
+        use rustos_abi::driver::display::DisplayFormat;
+        use rustos_abi::driver::filesystem::{MountFlags, NodeId, NodeKind};
+        use rustos_abi::driver::input::InputEventKind;
+        use rustos_abi::driver::net::MAC_ADDRESS_LEN;
+        use rustos_abi::{VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID};
+
+        let h = body("rustos_driver.h");
+        // NodeTimes mirrors ros_time64_t, so the header must pull in time.
+        assert!(
+            h.contains("#include \"rustos_time.h\""),
+            "time header included for ros_time64_t: {h}"
+        );
+        // Every value/discriminant is read from lib/abi, never re-typed.
+        let expected = [
+            format!("#define ROS_VIRTIO_PCI_VENDOR_ID ((uint16_t){VIRTIO_PCI_VENDOR_ID:#x}u)"),
+            format!("#define ROS_VIRTIO_PCI_CFG_COMMON ((uint8_t){VIRTIO_PCI_CFG_COMMON}u)"),
+            format!("#define ROS_VIRTIO_PCI_CFG_PCI ((uint8_t){VIRTIO_PCI_CFG_PCI}u)"),
+            format!("#define ROS_MAC_ADDRESS_LEN {MAC_ADDRESS_LEN}u"),
+            format!(
+                "#define ROS_MOUNT_FLAG_READ_ONLY ((uint32_t){:#x}u)",
+                MountFlags::READ_ONLY.bits()
+            ),
+            format!(
+                "#define ROS_MOUNT_FLAG_NOEXEC ((uint32_t){:#x}u)",
+                MountFlags::NOEXEC.bits()
+            ),
+            format!(
+                "#define ROS_MOUNT_FLAG_KNOWN_MASK ((uint32_t){:#x}u)",
+                MountFlags::KNOWN_MASK.bits()
+            ),
+            format!(
+                "#define ROS_NODE_ID_NONE ((uint64_t){}ull)",
+                NodeId::NONE.raw()
+            ),
+            format!(
+                "#define ROS_DISPLAY_FORMAT_RGBA8888 ((uint8_t){}u)",
+                DisplayFormat::Rgba8888.as_u8()
+            ),
+            format!(
+                "#define ROS_DISPLAY_FORMAT_BGRA8888 ((uint8_t){}u)",
+                DisplayFormat::Bgra8888.as_u8()
+            ),
+            format!(
+                "#define ROS_NODE_KIND_DIRECTORY ((uint8_t){}u)",
+                NodeKind::Directory as u8
+            ),
+            format!(
+                "#define ROS_NODE_KIND_REGULAR_FILE ((uint8_t){}u)",
+                NodeKind::RegularFile as u8
+            ),
+            format!(
+                "#define ROS_INPUT_EVENT_KIND_KEY ((uint8_t){}u)",
+                InputEventKind::Key.as_u8()
+            ),
+            format!(
+                "#define ROS_INPUT_EVENT_KIND_SCROLL ((uint8_t){}u)",
+                InputEventKind::Scroll.as_u8()
+            ),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+        // The driver input-event kinds must stay disjoint from the windowing
+        // input kinds in rustos_input.h (different ABIs, AGENTS.md sec.2.2).
+        assert!(
+            !body("rustos_input.h").contains("ROS_INPUT_EVENT_KIND_"),
+            "driver input-event kinds must not leak into rustos_input.h"
+        );
+    }
+
+    /// Completeness guard: every `#[repr(C)]` ABI type (and the
+    /// `#[repr(transparent)]` `MacAddress`, which the generator emits as a
+    /// struct mirror) has a C `typedef` in the header set, and its in-memory
+    /// size/align match the frozen `abi-v1` layout. This is the
+    /// type-surface analogue of `errno_table_matches_the_frozen_enum`: a new
+    /// `#[repr(C)]` type that escapes the C surface, or a layout change,
+    /// fails here. Sizes/aligns are pinned for the host (64-bit) target; the
+    /// `uintptr_t`-bearing types (`DirEntry`) are register-width by design.
+    #[test]
+    fn every_repr_c_abi_type_is_represented_in_the_header_set() {
+        use core::mem::{align_of, size_of};
+        use rustos_abi::driver::block::{BlockGeometry, DiscardCapability, HealthSnapshot};
+        use rustos_abi::driver::bus::BusDevice;
+        use rustos_abi::driver::display::{AccelCaps, DisplayMode};
+        use rustos_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes};
+        use rustos_abi::driver::input::InputEvent;
+        use rustos_abi::driver::net::MacAddress;
+        use rustos_abi::{
+            AppInfoHeader, DriverManifest, Duration64, IpcMessageHeader, KernelMemoryStats,
+            LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
+            ProcessListRequest, ProcessRecord, SysinfoRequestHeader, SystemIdentity, Time64,
+            Uptime,
+        };
+
+        // (header file, typedef-closing line, type, frozen size, frozen align).
+        // One entry per public abi-v1 `#[repr(C)]`/`#[repr(transparent)]` POD type;
+        // adding a type without an entry here leaves it unrepresented and fails CI.
+        #[rustfmt::skip]
+        let registry: &[(&str, &str, usize, usize, usize, usize)] = &[
+            ("rustos_time.h", "} ros_time64_t;", size_of::<Time64>(), 16, align_of::<Time64>(), 8),
+            ("rustos_time.h", "} ros_duration64_t;", size_of::<Duration64>(), 16, align_of::<Duration64>(), 8),
+            ("rustos_ipc.h", "} ros_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
+            ("rustos_ipc.h", "} ros_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
+            ("rustos_manifest.h", "} ros_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
+            ("rustos_appinfo.h", "} ros_appinfo_header_t;", size_of::<AppInfoHeader>(), 340, align_of::<AppInfoHeader>(), 4),
+            ("rustos_rxe.h", "} ros_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
+            ("rustos_sysinfo.h", "} ros_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
+            ("rustos_sysinfo.h", "} ros_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
+            ("rustos_sysinfo.h", "} ros_process_record_t;", size_of::<ProcessRecord>(), 64, align_of::<ProcessRecord>(), 8),
+            ("rustos_sysinfo.h", "} ros_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
+            ("rustos_sysinfo.h", "} ros_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
+            ("rustos_sysinfo.h", "} ros_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
+            ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
+            ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 152, align_of::<MountRecord>(), 4),
+            ("rustos_driver.h", "} ros_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
+            ("rustos_driver.h", "} ros_block_geometry_t;", size_of::<BlockGeometry>(), 16, align_of::<BlockGeometry>(), 8),
+            ("rustos_driver.h", "} ros_discard_capability_t;", size_of::<DiscardCapability>(), 24, align_of::<DiscardCapability>(), 8),
+            ("rustos_driver.h", "} ros_health_snapshot_t;", size_of::<HealthSnapshot>(), 64, align_of::<HealthSnapshot>(), 8),
+            ("rustos_driver.h", "} ros_bus_device_t;", size_of::<BusDevice>(), 24, align_of::<BusDevice>(), 8),
+            ("rustos_driver.h", "} ros_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
+            ("rustos_driver.h", "} ros_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
+            ("rustos_driver.h", "} ros_node_info_t;", size_of::<NodeInfo>(), 16, align_of::<NodeInfo>(), 8),
+            ("rustos_driver.h", "} ros_dir_entry_t;", size_of::<DirEntry>(), 24, align_of::<DirEntry>(), 8),
+            ("rustos_driver.h", "} ros_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
+            ("rustos_driver.h", "} ros_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
+            ("rustos_driver.h", "} ros_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
+        ];
+        for &(header, typedef, size, want_size, align, want_align) in registry {
+            let h = body(header);
+            assert!(
+                h.contains(typedef),
+                "type `{typedef}` is not represented in {header}"
+            );
+            assert_eq!(size, want_size, "repr(C) size of `{typedef}`");
+            assert_eq!(align, want_align, "repr(C) align of `{typedef}`");
+        }
     }
 
     #[test]
