@@ -33,8 +33,10 @@ that only needs, say, the time types can include `rustos_time.h` directly.
 The header set now covers the whole `lib/abi` public `#[repr(C)]` type
 surface; a completeness test in the generator pins every such type's
 size/align and asserts it has a C `typedef`, so a new type cannot silently
-escape the C view. The remaining C-ABI work (the `ros_sys_*` trap-stub
-runtime and crt0) is staged in `plans/CCOMPAT.md` (stages CC2+).
+escape the C view. The `ros_sys_*` trap-stub runtime that backs the syscall
+prototypes has landed in `lib/abi-sys` (see below); the remaining C-ABI work
+(crt0 and the loader/bundle integration) is staged in `plans/CCOMPAT.md`
+(stages CC3+).
 
 A handful of `driver/*` items are deliberately **not** in the header: the
 Rust-only error enums (`WindowError`, `MmioMapError`) and the opaque
@@ -101,12 +103,20 @@ little-endian on every target, so the serialised byte image does not depend
 on host endianness.
 
 The trap-issuing implementation of each `ros_sys_<name>` lives in the
-user-space stub library (future work, gated on the per-architecture trap
-layer). It pins each symbol with `#[export_name = "ros_sys_<name>"]` so
-the Rust compiler does not mangle it; this header is the contract those
-exports satisfy. The kernel still performs every capability and input check
+user-space stub library `lib/abi-sys` (`rustos-abi-sys`), the curated
+`/System/Libraries/` *System runtime / C ABI* class (`AGENTS.md` §16.4). Each
+stub marshals its typed arguments into the syscall registers and issues the
+per-architecture trap — `syscall` (x86_64, number in `rax`, arguments
+`rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`, result `rax`), `svc #0` (AArch64, `x8` /
+`x0`–`x5` / `x0`), or `ecall` (RISC-V, `a7` / `a0`–`a5` / `a0`) — the §1
+assembly carve-out, compiled in only for the three native targets. It pins
+each symbol with `#[export_name = "ros_sys_<name>"]` so the Rust compiler does
+not mangle it; this header is the contract those exports satisfy. Every entry
+point is panic-free (an unwind across `extern "C"` is undefined behaviour,
+`AGENTS.md` §2.9). The kernel still performs every capability and input check
 on the far side of the trap — the C entry point is not a privileged bypass
-(`AGENTS.md` §5.4).
+(`AGENTS.md` §5.4 / `plans/CCOMPAT.md` §4), and a C program reaches no syscall
+a Rust program could not.
 
 ## Stability
 

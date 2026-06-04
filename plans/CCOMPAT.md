@@ -244,9 +244,47 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 
 ### Stage CC2 — `lib/abi-sys`: the C-callable syscall stub runtime
 
-**Status: not started.** **Depends on** the per-architecture trap layer
-(`PLAN.md` Stage 6+; the kernel entry already exists per arch in
-`kernel/arch/*/src/syscall_entry.rs`).
+**Status: runtime + host tests done; per-arch QEMU round-trip pending.**
+The blocker is cleared — the per-architecture trap layer exists on all three
+native targets (`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
+The crate `lib/abi-sys` (`rustos-abi-sys`) has landed: it exports the eleven
+`extern "C"`, export-name-pinned `ros_sys_<name>` functions matching the CC1
+header (`include/rustos/rustos_syscall.h`), each of which marshals its typed
+arguments into the canonical `[u64; SYSCALL_MAX_ARGS]` register layout
+(reading the syscall numbers from `rustos_abi::SyscallNumber`, never
+re-typing them — §2.2) and issues the real trap on each native target:
+`syscall` (x86_64, number in `rax`, args `rdi/rsi/rdx/r10/r8/r9`, result
+`rax`), `svc #0` (aarch64, `x8` / `x0`–`x5` / `x0`), and `ecall` (riscv64,
+`a7` / `a0`–`a5` / `a0`). Each per-arch block is the §1 assembly carve-out
+(justification header + `// SAFETY:`), gated on a **build-script-emitted**
+`abi_sys_trap_<arch>` cfg (`build.rs`) rather than `cfg(target_arch)` so the
+§17.2 `cfg-check` stays green (mirroring `kernel/rustos-kernel/build.rs`).
+Every entry point is panic-free (only constant-index array writes and
+infallible casts before the trap, §2.9) and returns the typed value the C
+header declares (`int32_t` `ROS_E_*` for the `Errno`-returning calls,
+`uint32_t`/`uint64_t` otherwise); `exit` is `-> !` and re-issues `exit` if a
+buggy kernel ever returns (fail-closed loop, not a busy-wait, §2.1). The
+runtime adds **no** authority (§4 / §5.4): every check happens kernel-side.
+The crate is registered as the curated `/System/Libraries/` *System runtime /
+C ABI* class (§16.4) with an `experimental` stability tier in its
+`README.md`; `AGENTS.md` §3 and `PLAN.md` were updated.
+
+Host tests (the "trap injected behind a seam" requirement) inject a
+per-thread trap seam and assert the marshalled `(number, args)` and the
+return decoding for every stub, plus a drift test
+(`registry_covers_exactly_the_frozen_table`) that cross-checks every stub's
+number and arg count against `rustos_abi::SYSCALLS` — the dense/complete
+discipline of CC1's completeness test. Verified: clippy `-D warnings` clean,
+the three native targets build, and `nm`/`llvm-objdump` confirm the eleven
+unmangled `ros_sys_*` symbols and the emitted `syscall`/`svc`/`ecall`.
+
+**Remaining for CC2:** the QEMU integration test per native target that traps
+the stub into a (stub) kernel and checks register marshalling end-to-end.
+This needs the per-arch boot harness to install a syscall dispatch callback
+and then execute the `abi-sys` stub (the existing `syscall_dispatch_qemu`
+test drives `Dispatcher::dispatch` directly and does not exercise the trap
+instruction). It is **not** part of the `cargo xtask ci` gate (which is
+host-only) and is tracked in `.junie/next-ccompat-prompt.md`.
 
 **Deliverables**
 - A new crate (`lib/abi-sys`, `rustos-abi-sys`) providing one `extern "C"`,

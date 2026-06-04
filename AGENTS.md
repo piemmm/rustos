@@ -142,6 +142,13 @@ rustos/
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
+│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: one
+│   │                    #   export-name-pinned ros_sys_<name> per syscall
+│   │                    #   that issues the per-arch trap (syscall/svc/ecall),
+│   │                    #   panic-free, no added authority — the implementation
+│   │                    #   behind the generated C header and the curated
+│   │                    #   /System/Libraries/ "System runtime / C ABI" class
+│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC2).
 │   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.

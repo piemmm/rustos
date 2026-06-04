@@ -31,6 +31,7 @@ members = [
 
     # Shared libraries
     "lib/abi",
+    "lib/abi-sys",
     "lib/bumpalloc",
     "lib/caps",
     "lib/collections",

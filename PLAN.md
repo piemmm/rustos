@@ -7137,7 +7137,22 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   driver-host traits carry no C form and are deliberately omitted (§2.3). CC1
   is complete and green on the whole-project gate.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
-  trap stubs). Depends on the per-arch trap layer (Stage 6+). **Not started.**
+  trap stubs). The blocker is cleared (the per-arch trap layer exists in
+  `kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`). **Runtime +
+  host tests done; per-arch QEMU round-trip pending.** The crate
+  `rustos-abi-sys` exports the eleven export-name-pinned `ros_sys_<name>`
+  functions matching the CC1 header; each marshals into the canonical
+  `[u64; SYSCALL_MAX_ARGS]` register layout (syscall numbers read from
+  `rustos_abi`, §2.2) and issues the real trap — `syscall`/`svc`/`ecall` — as
+  the §1 assembly carve-out gated on a build-script-emitted `abi_sys_trap_*`
+  cfg (so §17.2 `cfg-check` stays green). Every stub is panic-free (§2.9),
+  adds no authority (§4/§5.4), and returns the C-declared type; `exit` is
+  `-> !`. Registered as the curated `/System/Libraries/` *System runtime / C
+  ABI* class (§16.4, `experimental` tier). Host tests inject a trap seam and
+  assert marshalling + return decoding for every stub, plus a drift test
+  against `rustos_abi::SYSCALLS`. Remaining: the per-native-target QEMU
+  round-trip test (tracked in `.junie/next-ccompat-prompt.md`; not in the
+  host-only `cargo xtask ci` gate).
 - CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
   invariants. Depends on CC2 + the Stage 6 loader. **Not started.**
 - CC4 — Loader / bundle integration for native `rxe` programs (resolve the
