@@ -117,8 +117,14 @@ constants, every value read from `lib/abi` (never re-typed) and pinned by an
 in-module test. The `random` module has since landed too: `rustos_random.h`
 declares `ROS_RANDOM_FLAG_NON_BLOCKING` (read from `RandomFlags`) and the
 `ROS_RANDOM_RESERVE_DEFAULT_BYTES` / `ROS_RANDOM_REQUEST_MAX_BYTES` `uintptr_t`
-limits, pinned by an in-module test. **Remaining for CC1:** the rest of the
-modules — `ipc`, `stdinfo`, `manifest`, `appinfo`, `rxe`, `input`, `sysinfo`, the
+limits, pinned by an in-module test. The `ipc` module has now landed too:
+`rustos_ipc.h` declares the `#[repr(C)]` `ros_ipc_message_header_t` /
+`ros_port_name_t` structs (mirroring `IpcMessageHeader` / `PortName`) plus the
+`ROS_IPC_MESSAGE_HEADER_MAGIC` / `ROS_IPC_MESSAGE_MAX_PAYLOAD_LEN` /
+`ROS_IPC_MESSAGE_HEADER_WIRE_LEN` / `ROS_PORT_NAME_MAX_LEN` /
+`ROS_PORT_NAME_WIRE_LEN` constants, every value read from `lib/abi` and pinned
+by an in-module test. **Remaining for CC1:** the rest of the modules —
+`stdinfo`, `manifest`, `appinfo`, `rxe`, `input`, `sysinfo`, the
 `capability` query POD types, and `driver/*` POD types — plus the
 "every `pub` `#[repr(C)]` type in `lib/abi` is represented in the header"
 completeness test once the surface is covered.

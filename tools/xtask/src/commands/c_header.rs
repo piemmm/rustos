@@ -42,9 +42,10 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, CapabilityId, Duration64, Errno, RandomFlags, Time64, ABI_VERSION_V1,
-    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC, RANDOM_REQUEST_MAX_BYTES,
-    RANDOM_RESERVE_DEFAULT_BYTES, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Duration64, Errno, IpcMessageHeader, PortName, RandomFlags, Time64,
+    ABI_VERSION_V1, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC,
+    NANOS_PER_SEC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    SYSCALLS, SYSCALL_MAX_ARGS,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -270,6 +271,73 @@ fn generate_random() -> String {
     out
 }
 
+/// `rustos_ipc.h` — the IPC message header and port-name wire types
+/// (`AGENTS.md` §4).
+///
+/// `ros_ipc_message_header_t` mirrors the `#[repr(C)]` layout of
+/// [`IpcMessageHeader`] and `ros_port_name_t` that of [`PortName`]; each is
+/// naturally aligned. Their packed little-endian *wire* size is the separate
+/// `*_WIRE_LEN` macro. Every numeric value is read from `lib/abi`, never
+/// re-typed; only the C spelling lives here.
+fn generate_ipc() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("IPC message header and port-name wire types (AGENTS.md sec.4).");
+    out.push_str("#ifndef ROS_IPC_H\n#define ROS_IPC_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Magic word identifying an abi-v1 IPC message (\"IPC1\" little-endian). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_IPC_MESSAGE_HEADER_MAGIC {IPC_MESSAGE_HEADER_MAGIC:#x}u"
+    );
+    out.push_str("/* Maximum payload length, in bytes, an IPC message header may advertise. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_IPC_MESSAGE_MAX_PAYLOAD_LEN {}u",
+        rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN
+    );
+    out.push_str("/* Packed little-endian wire size of an IPC message header, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_IPC_MESSAGE_HEADER_WIRE_LEN {}u",
+        IpcMessageHeader::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str("/* Maximum length, in bytes, of a port name (excludes the length byte). */\n");
+    let _ = writeln!(out, "#define ROS_PORT_NAME_MAX_LEN {PORT_NAME_MAX_LEN}u");
+    out.push_str("/* Packed little-endian wire size of a port name, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_PORT_NAME_WIRE_LEN {}u",
+        PortName::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* IPC message header: prefixes every message; encoded little-endian on the wire. */\n\
+         typedef struct ros_ipc_message_header {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint16_t version;\n\
+         \x20   uint16_t flags;\n\
+         \x20   uint64_t endpoint;\n\
+         \x20   uint64_t sender;\n\
+         \x20   uint32_t payload_len;\n\
+         \x20   uint32_t reserved;\n\
+         } ros_ipc_message_header_t;\n\n",
+    );
+    out.push_str(
+        "/* Validated well-known IPC port name: NUL-padded name bytes + a length byte. */\n\
+         typedef struct ros_port_name {\n\
+         \x20   uint8_t bytes[ROS_PORT_NAME_MAX_LEN];\n\
+         \x20   uint8_t len;\n\
+         } ros_port_name_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_IPC_H */\n");
+    out
+}
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -317,6 +385,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
+    out.push_str("#include \"rustos_ipc.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -345,6 +414,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_random.h",
             body: generate_random(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_ipc.h",
+            body: generate_ipc(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -453,6 +526,7 @@ mod tests {
             "rustos_capability.h",
             "rustos_time.h",
             "rustos_random.h",
+            "rustos_ipc.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -538,6 +612,76 @@ mod tests {
                 "#define ROS_RANDOM_REQUEST_MAX_BYTES ((uintptr_t){RANDOM_REQUEST_MAX_BYTES}u)"
             )),
             "request max: {h}"
+        );
+    }
+
+    #[test]
+    fn ipc_header_pins_layout_and_values() {
+        use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+        let h = body("rustos_ipc.h");
+        assert!(h.contains("#ifndef ROS_IPC_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("typedef struct ros_ipc_message_header {"),
+            "message-header struct"
+        );
+        assert!(
+            h.contains("typedef struct ros_port_name {"),
+            "port-name struct"
+        );
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_IPC_MESSAGE_HEADER_MAGIC {IPC_MESSAGE_HEADER_MAGIC:#x}u"
+            )),
+            "magic word: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_IPC_MESSAGE_MAX_PAYLOAD_LEN {IPC_MESSAGE_MAX_PAYLOAD_LEN}u"
+            )),
+            "max payload: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_IPC_MESSAGE_HEADER_WIRE_LEN {}u",
+                IpcMessageHeader::WIRE_LEN
+            )),
+            "header wire len: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_PORT_NAME_MAX_LEN {PORT_NAME_MAX_LEN}u"
+            )),
+            "port-name max len: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_PORT_NAME_WIRE_LEN {}u",
+                PortName::WIRE_LEN
+            )),
+            "port-name wire len: {h}"
+        );
+        // The C structs mirror the #[repr(C)] Rust layout.
+        assert_eq!(
+            core::mem::size_of::<IpcMessageHeader>(),
+            32,
+            "IpcMessageHeader repr(C) size"
+        );
+        assert_eq!(
+            core::mem::align_of::<IpcMessageHeader>(),
+            8,
+            "IpcMessageHeader repr(C) align"
+        );
+        assert_eq!(
+            core::mem::size_of::<PortName>(),
+            32,
+            "PortName repr(C) size"
+        );
+        assert_eq!(
+            core::mem::align_of::<PortName>(),
+            1,
+            "PortName repr(C) align"
         );
     }
 

@@ -15,6 +15,9 @@ pull in exactly what they need, plus an umbrella that includes them all:
   `ros_duration64_t`) and their constants.
 - `rustos/rustos_random.h` — the random-request flags (`ROS_RANDOM_FLAG_*`)
   and the per-request byte limits (`ROS_RANDOM_*_BYTES`).
+- `rustos/rustos_ipc.h` — the IPC message header and port-name wire types
+  (`ros_ipc_message_header_t`, `ros_port_name_t`) and their constants
+  (`ROS_IPC_*`, `ROS_PORT_NAME_*`).
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

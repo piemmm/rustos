@@ -17,14 +17,15 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_capability.h` | `ROS_CAP_*` and `ROS_CAPABILITY_ID_MAX` — the capability identifiers |
 | `include/rustos/rustos_time.h` | `ros_time64_t` / `ros_duration64_t` and the `ROS_NANOS_PER_SEC` / `*_WIRE_LEN` constants |
 | `include/rustos/rustos_random.h` | `ROS_RANDOM_FLAG_*` request flags and the `ROS_RANDOM_*_BYTES` request limits |
+| `include/rustos/rustos_ipc.h` | `ros_ipc_message_header_t` / `ros_port_name_t` and the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
 Growing the set to cover the rest of `lib/abi` (`appinfo`, `capability`
-queries, `driver/*`, `input`, `ipc`, `manifest`, `rxe`, `sysinfo`,
-`stdinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
+queries, `driver/*`, `input`, `manifest`, `rxe`, `sysinfo`, `stdinfo`) is
+staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written
 
@@ -67,16 +68,19 @@ on every Tier-1 target:
 | user pointer  | `void *`    |
 | error code    | `int32_t`   |
 | `Time64` / `Duration64` | `ros_time64_t` / `ros_duration64_t` (`{ int64_t secs; uint32_t nanos; }`) |
+| `IpcMessageHeader` / `PortName` | `ros_ipc_message_header_t` / `ros_port_name_t` (mirroring the `#[repr(C)]` layout) |
 
 ### Endianness and wire vs. in-memory form
 
-The `#[repr(C)]` struct types (`ros_time64_t`, `ros_duration64_t`) mirror the
-Rust in-memory layout: naturally aligned, so `sizeof(ros_time64_t) == 16`
-(8-byte seconds + 4-byte nanos + 4 bytes of tail padding). The separate
-`*_WIRE_LEN` macros give the **packed little-endian wire size** (12 bytes for
-a time value) used when a value is serialised into a byte buffer. The
-encode/decode helpers in `lib/abi` are little-endian on every target, so the
-serialised byte image does not depend on host endianness.
+The `#[repr(C)]` struct types (`ros_time64_t`, `ros_duration64_t`,
+`ros_ipc_message_header_t`, `ros_port_name_t`) mirror the Rust in-memory
+layout: naturally aligned, so `sizeof(ros_time64_t) == 16` (8-byte seconds +
+4-byte nanos + 4 bytes of tail padding). The separate `*_WIRE_LEN` macros
+give the **packed little-endian wire size** (12 bytes for a time value, 32
+bytes for an IPC message header or a port name) used when a value is
+serialised into a byte buffer. The encode/decode helpers in `lib/abi` are
+little-endian on every target, so the serialised byte image does not depend
+on host endianness.
 
 The trap-issuing implementation of each `ros_sys_<name>` lives in the
 user-space stub library (future work, gated on the per-architecture trap
