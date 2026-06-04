@@ -41,6 +41,14 @@ pull in exactly what they need, plus an umbrella that includes them all:
   `ROS_RXE_PAGE_SIZE`, `ROS_LOAD_MAX_SEGMENTS`, `ROS_LOAD_FLAG_PIE`,
   `ROS_SEG_FLAG_*`, `*_WIRE_LEN`), and the segment-permission discriminants
   (`ROS_RXE_PERMISSION_*`).
+- `rustos/rustos_sysinfo.h` — the System Information API wire types
+  (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`,
+  `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`,
+  `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`),
+  the framing / query-id / registry constants (`ROS_SYSINFO_*`), the
+  process-state discriminants (`ROS_PROCESS_STATE_*`), the inline-buffer caps
+  (`ROS_PROCESS_NAME_MAX`, `ROS_MACHINE_ID_LEN`, `ROS_HOSTNAME_MAX`,
+  `ROS_MOUNT_*_MAX`), and the per-record `*_WIRE_LEN` sizes.
 - `rustos/rustos_syscall.h` — the syscall numbers (`ROS_SYS_*`) and a
   prototype for each syscall entry point.
 

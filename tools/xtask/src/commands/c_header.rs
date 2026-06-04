@@ -43,18 +43,23 @@ use std::path::Path;
 
 use rustos_abi::{
     AbiType, AppInfoHeader, BundleEntry, CapabilityId, Duration64, Errno, IpcMessageHeader,
-    KeyInput, LibraryScope, LoadHeader, ManifestHeader, NamedKeyCode, PointerButtonCode,
-    PointerInput, PortName, RandomFlags, RxePermission, Segment, Severity, StdInfoKind, Time64,
-    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
-    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, NANOS_PER_SEC,
-    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
-    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN, SYSTEM_LIBRARIES_DIR,
+    KernelMemoryStats, KeyInput, LibraryScope, LoadHeader, ManifestHeader, MountListRequest,
+    MountRecord, NamedKeyCode, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
+    ProcessRecord, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
+    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1,
+    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR,
+    KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED,
+    KIND_PRESSED, KIND_RELEASED, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN,
+    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
+    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
+    SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -802,6 +807,243 @@ fn generate_rxe() -> String {
     out
 }
 
+/// `rustos_sysinfo.h` — the System Information API surface (`AGENTS.md` §16.6).
+///
+/// Declares the `sysinfo-v1` framing (`ROS_SYSINFO_VERSION_*` /
+/// `ROS_SYSINFO_REQUEST_MAGIC` / `ROS_SYSINFO_MAX_PAYLOAD_LEN`), the
+/// [`SysinfoQueryId`] well-known identifiers and their `ROS_SYSINFO_QUERY_ID_MAX`
+/// ceiling, the canonical registry-encoding constants
+/// (`ROS_SYSINFO_QUERY_NAME_MAX` / `_RECORD_LEN` / `_ENCODED_QUERY_TABLE_LEN`),
+/// the [`ProcessState`] `#[repr(u8)]` discriminants, the inline-buffer size
+/// limits (`ROS_PROCESS_NAME_MAX`, `ROS_MACHINE_ID_LEN`, `ROS_HOSTNAME_MAX`,
+/// `ROS_MOUNT_*_MAX`), and a `#[repr(C)]` C struct mirror plus a packed
+/// `*_WIRE_LEN` macro for each of the eight wire types
+/// ([`SysinfoRequestHeader`], [`ProcessListRequest`], [`ProcessRecord`],
+/// [`KernelMemoryStats`], [`Uptime`], [`SystemIdentity`], [`MountListRequest`],
+/// [`MountRecord`]). [`Uptime`]'s members are the `ros_duration64_t` /
+/// `ros_time64_t` types from `rustos_time.h`. Every numeric value and
+/// discriminant is read from `lib/abi`, never re-typed; only the C spelling
+/// lives here.
+fn generate_sysinfo() -> String {
+    let mut out = banner("System Information API surface (AGENTS.md sec.16.6).");
+    out.push_str("#ifndef ROS_SYSINFO_H\n#define ROS_SYSINFO_H\n\n");
+    out.push_str("#include <stdint.h>\n");
+    out.push_str("#include \"rustos_time.h\"\n\n");
+
+    sysinfo_emit_framing(&mut out);
+    sysinfo_emit_record_sizes(&mut out);
+    out.push_str(SYSINFO_RECORD_TYPEDEFS);
+    out.push_str("#endif /* ROS_SYSINFO_H */\n");
+    out
+}
+
+/// Emit the sysinfo framing, registry-encoding, query-id, and process-state
+/// constants (every value read from `lib/abi`).
+fn sysinfo_emit_framing(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str("/* sysinfo protocol version tag for the frozen v1 surface. */\n");
+    let _ = writeln!(out, "#define ROS_SYSINFO_VERSION_V1 {SYSINFO_VERSION_V1}u");
+    out.push_str("/* sysinfo protocol version this header set describes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_VERSION_CURRENT {SYSINFO_VERSION_CURRENT}u"
+    );
+    out.push_str("/* Magic word identifying a sysinfo-v1 request (\"SYI1\" little-endian). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_REQUEST_MAGIC {SYSINFO_REQUEST_MAGIC:#x}u"
+    );
+    out.push_str(
+        "/* Maximum request/response payload length, in bytes, a header may advertise. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_MAX_PAYLOAD_LEN {SYSINFO_MAX_PAYLOAD_LEN}u"
+    );
+    out.push_str("/* Inclusive upper bound on the sysinfo-v1 query identifier space. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_QUERY_ID_MAX {}u",
+        SysinfoQueryId::MAX
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Canonical query-registry encoding constants (the hashable registry image). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_QUERY_NAME_MAX {SYSINFO_QUERY_NAME_MAX}u"
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_QUERY_RECORD_LEN {SYSINFO_QUERY_RECORD_LEN}u"
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN {ENCODED_QUERY_TABLE_LEN}u"
+    );
+    out.push('\n');
+
+    out.push_str("/* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */\n");
+    let query_ids = [
+        (
+            "ROS_SYSINFO_QUERY_SELF_PROCESS_LIST",
+            SysinfoQueryId::SELF_PROCESS_LIST,
+        ),
+        (
+            "ROS_SYSINFO_QUERY_GLOBAL_PROCESS_LIST",
+            SysinfoQueryId::GLOBAL_PROCESS_LIST,
+        ),
+        (
+            "ROS_SYSINFO_QUERY_KERNEL_MEMORY_STATS",
+            SysinfoQueryId::KERNEL_MEMORY_STATS,
+        ),
+        (
+            "ROS_SYSINFO_QUERY_HARDWARE_TREE",
+            SysinfoQueryId::HARDWARE_TREE,
+        ),
+        (
+            "ROS_SYSINFO_QUERY_SYSTEM_IDENTITY",
+            SysinfoQueryId::SYSTEM_IDENTITY,
+        ),
+        ("ROS_SYSINFO_QUERY_UPTIME", SysinfoQueryId::UPTIME),
+        ("ROS_SYSINFO_QUERY_MOUNT_LIST", SysinfoQueryId::MOUNT_LIST),
+    ];
+    for (name, id) in query_ids {
+        let _ = writeln!(out, "#define {name} ((uint16_t){}u)", id.as_u16());
+    }
+    out.push('\n');
+
+    out.push_str("/* Process lifecycle state carried in a process record (uint8_t). */\n");
+    let process_states = [
+        ("ROS_PROCESS_STATE_RUNNABLE", ProcessState::Runnable),
+        ("ROS_PROCESS_STATE_RUNNING", ProcessState::Running),
+        ("ROS_PROCESS_STATE_BLOCKED", ProcessState::Blocked),
+        ("ROS_PROCESS_STATE_ZOMBIE", ProcessState::Zombie),
+        ("ROS_PROCESS_STATE_STOPPED", ProcessState::Stopped),
+    ];
+    for (name, state) in process_states {
+        let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
+    }
+    out.push('\n');
+}
+
+/// Emit the inline-buffer capacities and the per-record packed wire sizes.
+fn sysinfo_emit_record_sizes(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str("/* Inline fixed-buffer capacities carried in the record types below. */\n");
+    let _ = writeln!(out, "#define ROS_PROCESS_NAME_MAX {PROCESS_NAME_MAX}u");
+    let _ = writeln!(out, "#define ROS_MACHINE_ID_LEN {MACHINE_ID_LEN}u");
+    let _ = writeln!(out, "#define ROS_HOSTNAME_MAX {HOSTNAME_MAX}u");
+    let _ = writeln!(out, "#define ROS_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u");
+    let _ = writeln!(out, "#define ROS_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u");
+    let _ = writeln!(out, "#define ROS_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u");
+    out.push('\n');
+
+    out.push_str("/* Packed little-endian wire size of each sysinfo record type, in bytes. */\n");
+    let wire_lens = [
+        (
+            "ROS_SYSINFO_REQUEST_HEADER_WIRE_LEN",
+            SysinfoRequestHeader::WIRE_LEN,
+        ),
+        (
+            "ROS_PROCESS_LIST_REQUEST_WIRE_LEN",
+            ProcessListRequest::WIRE_LEN,
+        ),
+        ("ROS_PROCESS_RECORD_WIRE_LEN", ProcessRecord::WIRE_LEN),
+        (
+            "ROS_KERNEL_MEMORY_STATS_WIRE_LEN",
+            KernelMemoryStats::WIRE_LEN,
+        ),
+        ("ROS_UPTIME_WIRE_LEN", Uptime::WIRE_LEN),
+        ("ROS_SYSTEM_IDENTITY_WIRE_LEN", SystemIdentity::WIRE_LEN),
+        (
+            "ROS_MOUNT_LIST_REQUEST_WIRE_LEN",
+            MountListRequest::WIRE_LEN,
+        ),
+        ("ROS_MOUNT_RECORD_WIRE_LEN", MountRecord::WIRE_LEN),
+    ];
+    for (name, len) in wire_lens {
+        let _ = writeln!(out, "#define {name} {len}u");
+    }
+    out.push('\n');
+}
+
+/// The C struct mirrors of the eight `#[repr(C)]` System Information wire
+/// types, as static text (the field names/order are part of the frozen ABI
+/// view; the in-module pinning test checks the layout against `lib/abi`).
+const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
+    "/* Envelope prefixing every sysinfo request; encoded little-endian on the wire. */\n\
+         typedef struct ros_sysinfo_request_header {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint16_t version;\n\
+         \x20   uint16_t flags;\n\
+         \x20   uint16_t query;\n\
+         \x20   uint16_t reserved;\n\
+         \x20   uint32_t payload_len;\n\
+         \x20   uint64_t request_id;\n\
+         } ros_sysinfo_request_header_t;\n\n",
+    "/* Process-list request payload (offset/limit paging). */\n\
+         typedef struct ros_process_list_request {\n\
+         \x20   uint32_t offset;\n\
+         \x20   uint16_t limit;\n\
+         \x20   uint16_t flags;\n\
+         } ros_process_list_request_t;\n\n",
+    "/* One process entry; the inline name is valid for name_len bytes. */\n\
+         typedef struct ros_process_record {\n\
+         \x20   uint64_t pid;\n\
+         \x20   uint64_t parent_pid;\n\
+         \x20   uint32_t uid;\n\
+         \x20   uint32_t gid;\n\
+         \x20   uint8_t state;\n\
+         \x20   uint8_t cpu;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t name[ROS_PROCESS_NAME_MAX];\n\
+         } ros_process_record_t;\n\n",
+    "/* Kernel memory statistics response. */\n\
+         typedef struct ros_kernel_memory_stats {\n\
+         \x20   uint64_t total_bytes;\n\
+         \x20   uint64_t free_bytes;\n\
+         \x20   uint64_t kernel_heap_bytes;\n\
+         \x20   uint64_t user_resident_bytes;\n\
+         \x20   uint32_t page_size;\n\
+         \x20   uint32_t reserved;\n\
+         } ros_kernel_memory_stats_t;\n\n",
+    "/* Uptime response: monotonic span since boot + wall-clock boot instant. */\n\
+         typedef struct ros_uptime {\n\
+         \x20   ros_duration64_t since_boot;\n\
+         \x20   ros_time64_t boot_time;\n\
+         } ros_uptime_t;\n\n",
+    "/* Machine identity response; the inline hostname is valid for hostname_len bytes. */\n\
+         typedef struct ros_system_identity {\n\
+         \x20   uint8_t machine_id[ROS_MACHINE_ID_LEN];\n\
+         \x20   uint16_t version_major;\n\
+         \x20   uint16_t version_minor;\n\
+         \x20   uint16_t version_patch;\n\
+         \x20   uint8_t hostname_len;\n\
+         \x20   uint8_t hostname[ROS_HOSTNAME_MAX];\n\
+         } ros_system_identity_t;\n\n",
+    "/* Mount-list request payload (offset/limit paging). */\n\
+         typedef struct ros_mount_list_request {\n\
+         \x20   uint32_t offset;\n\
+         \x20   uint16_t limit;\n\
+         \x20   uint16_t flags;\n\
+         } ros_mount_list_request_t;\n\n",
+    "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
+         * its flag bits are defined by the filesystem driver ABI. The inline source/\n\
+         * target/fstype buffers are valid for their respective *_len byte counts. */\n\
+         typedef struct ros_mount_record {\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint8_t source_len;\n\
+         \x20   uint8_t target_len;\n\
+         \x20   uint8_t fstype_len;\n\
+         \x20   uint8_t source[ROS_MOUNT_SOURCE_MAX];\n\
+         \x20   uint8_t target[ROS_MOUNT_TARGET_MAX];\n\
+         \x20   uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];\n\
+         } ros_mount_record_t;\n\n",
+);
+
 /// `rustos_syscall.h` — the syscall numbers and C entry-point prototypes.
 fn generate_syscall() -> String {
     use std::fmt::Write as _;
@@ -855,6 +1097,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_input.h\"\n");
     out.push_str("#include \"rustos_appinfo.h\"\n");
     out.push_str("#include \"rustos_rxe.h\"\n");
+    out.push_str("#include \"rustos_sysinfo.h\"\n");
     out.push_str("#include \"rustos_syscall.h\"\n\n");
     out.push_str("#endif /* ROS_ABI_H */\n");
     out
@@ -907,6 +1150,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_rxe.h",
             body: generate_rxe(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_sysinfo.h",
+            body: generate_sysinfo(),
         },
         GeneratedHeader {
             file_name: "rustos_syscall.h",
@@ -1020,6 +1267,8 @@ mod tests {
             "rustos_manifest.h",
             "rustos_input.h",
             "rustos_appinfo.h",
+            "rustos_rxe.h",
+            "rustos_sysinfo.h",
             "rustos_syscall.h",
         ] {
             assert!(
@@ -1468,6 +1717,183 @@ mod tests {
             "ReadExecute discriminant"
         );
         assert_eq!(RxePermission::ReadWrite as u8, 2, "ReadWrite discriminant");
+    }
+
+    #[test]
+    fn sysinfo_header_pins_layout_constants_and_discriminants() {
+        use rustos_abi::{
+            KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+            ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+            ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+            MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN,
+            SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+            SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+        };
+        let h = body("rustos_sysinfo.h");
+        assert!(h.contains("#ifndef ROS_SYSINFO_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("#include \"rustos_time.h\""),
+            "time header included for ros_uptime"
+        );
+        for typedef in [
+            "typedef struct ros_sysinfo_request_header {",
+            "typedef struct ros_process_list_request {",
+            "typedef struct ros_process_record {",
+            "typedef struct ros_kernel_memory_stats {",
+            "typedef struct ros_uptime {",
+            "typedef struct ros_system_identity {",
+            "typedef struct ros_mount_list_request {",
+            "typedef struct ros_mount_record {",
+        ] {
+            assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
+        }
+        // Values are read from lib/abi, never re-typed: assert they match.
+        let expected = [
+            format!("#define ROS_SYSINFO_VERSION_V1 {SYSINFO_VERSION_V1}u"),
+            format!("#define ROS_SYSINFO_VERSION_CURRENT {SYSINFO_VERSION_CURRENT}u"),
+            format!("#define ROS_SYSINFO_REQUEST_MAGIC {SYSINFO_REQUEST_MAGIC:#x}u"),
+            format!("#define ROS_SYSINFO_MAX_PAYLOAD_LEN {SYSINFO_MAX_PAYLOAD_LEN}u"),
+            format!("#define ROS_SYSINFO_QUERY_ID_MAX {}u", SysinfoQueryId::MAX),
+            format!("#define ROS_SYSINFO_QUERY_NAME_MAX {SYSINFO_QUERY_NAME_MAX}u"),
+            format!("#define ROS_SYSINFO_QUERY_RECORD_LEN {SYSINFO_QUERY_RECORD_LEN}u"),
+            format!("#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN {ENCODED_QUERY_TABLE_LEN}u"),
+            format!(
+                "#define ROS_SYSINFO_QUERY_SELF_PROCESS_LIST ((uint16_t){}u)",
+                SysinfoQueryId::SELF_PROCESS_LIST.as_u16()
+            ),
+            format!(
+                "#define ROS_SYSINFO_QUERY_MOUNT_LIST ((uint16_t){}u)",
+                SysinfoQueryId::MOUNT_LIST.as_u16()
+            ),
+            format!(
+                "#define ROS_PROCESS_STATE_RUNNABLE ((uint8_t){}u)",
+                ProcessState::Runnable as u8
+            ),
+            format!(
+                "#define ROS_PROCESS_STATE_STOPPED ((uint8_t){}u)",
+                ProcessState::Stopped as u8
+            ),
+            format!("#define ROS_PROCESS_NAME_MAX {PROCESS_NAME_MAX}u"),
+            format!("#define ROS_MACHINE_ID_LEN {MACHINE_ID_LEN}u"),
+            format!("#define ROS_HOSTNAME_MAX {HOSTNAME_MAX}u"),
+            format!("#define ROS_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u"),
+            format!("#define ROS_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u"),
+            format!("#define ROS_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u"),
+            format!(
+                "#define ROS_SYSINFO_REQUEST_HEADER_WIRE_LEN {}u",
+                SysinfoRequestHeader::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_PROCESS_LIST_REQUEST_WIRE_LEN {}u",
+                ProcessListRequest::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_PROCESS_RECORD_WIRE_LEN {}u",
+                ProcessRecord::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_KERNEL_MEMORY_STATS_WIRE_LEN {}u",
+                KernelMemoryStats::WIRE_LEN
+            ),
+            format!("#define ROS_UPTIME_WIRE_LEN {}u", Uptime::WIRE_LEN),
+            format!(
+                "#define ROS_SYSTEM_IDENTITY_WIRE_LEN {}u",
+                SystemIdentity::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_MOUNT_LIST_REQUEST_WIRE_LEN {}u",
+                MountListRequest::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_MOUNT_RECORD_WIRE_LEN {}u",
+                MountRecord::WIRE_LEN
+            ),
+        ];
+        for line in &expected {
+            assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+    }
+
+    #[test]
+    fn sysinfo_header_struct_layout_matches_lib_abi() {
+        use rustos_abi::{
+            KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+            ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        };
+        // The C struct mirrors are the naturally-aligned #[repr(C)] in-memory
+        // layout (the separate *_WIRE_LEN macros give the packed wire size).
+        let sizes_aligns = [
+            (
+                "SysinfoRequestHeader",
+                core::mem::size_of::<SysinfoRequestHeader>(),
+                24,
+                core::mem::align_of::<SysinfoRequestHeader>(),
+                8,
+            ),
+            (
+                "ProcessListRequest",
+                core::mem::size_of::<ProcessListRequest>(),
+                8,
+                core::mem::align_of::<ProcessListRequest>(),
+                4,
+            ),
+            (
+                "ProcessRecord",
+                core::mem::size_of::<ProcessRecord>(),
+                64,
+                core::mem::align_of::<ProcessRecord>(),
+                8,
+            ),
+            (
+                "KernelMemoryStats",
+                core::mem::size_of::<KernelMemoryStats>(),
+                40,
+                core::mem::align_of::<KernelMemoryStats>(),
+                8,
+            ),
+            (
+                "Uptime",
+                core::mem::size_of::<Uptime>(),
+                32,
+                core::mem::align_of::<Uptime>(),
+                8,
+            ),
+            (
+                "SystemIdentity",
+                core::mem::size_of::<SystemIdentity>(),
+                88,
+                core::mem::align_of::<SystemIdentity>(),
+                2,
+            ),
+            (
+                "MountListRequest",
+                core::mem::size_of::<MountListRequest>(),
+                8,
+                core::mem::align_of::<MountListRequest>(),
+                4,
+            ),
+            (
+                "MountRecord",
+                core::mem::size_of::<MountRecord>(),
+                152,
+                core::mem::align_of::<MountRecord>(),
+                4,
+            ),
+        ];
+        for (name, size, want_size, align, want_align) in sizes_aligns {
+            assert_eq!(size, want_size, "{name} repr(C) size");
+            assert_eq!(align, want_align, "{name} repr(C) align");
+        }
+        // The well-known query ids and process-state discriminants are frozen.
+        assert_eq!(
+            SysinfoQueryId::SELF_PROCESS_LIST.as_u16(),
+            0,
+            "self list id"
+        );
+        assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6, "mount list id");
+        assert_eq!(ProcessState::Runnable as u8, 0, "Runnable discriminant");
+        assert_eq!(ProcessState::Stopped as u8, 4, "Stopped discriminant");
     }
 
     #[test]

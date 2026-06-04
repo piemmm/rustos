@@ -7085,7 +7085,8 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   generator now emits one header per `lib/abi` module under `include/rustos/`
   (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
   `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
-  `rustos_input.h`, `rustos_appinfo.h`, `rustos_rxe.h`, `rustos_syscall.h`)
+  `rustos_input.h`, `rustos_appinfo.h`, `rustos_rxe.h`, `rustos_sysinfo.h`,
+  `rustos_syscall.h`)
   plus the umbrella `rustos_abi.h` that `#include`s them,
   with a tree-wide drift guard; the `time` module (`ros_time64_t` /
   `ros_duration64_t` + constants), the `random` module (`ROS_RANDOM_FLAG_*` +
@@ -7104,10 +7105,17 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   names, and the `ROS_LIBRARY_SCOPE_*` discriminants), and the `rxe` module
   (`ros_load_header_t` + the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` /
   `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` /
-  `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants), values
+  `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants), and the
+  `sysinfo` module (the eight wire types `ros_sysinfo_request_header_t` /
+  `ros_process_list_request_t` / `ros_process_record_t` /
+  `ros_kernel_memory_stats_t` / `ros_uptime_t` / `ros_system_identity_t` /
+  `ros_mount_list_request_t` / `ros_mount_record_t` + the `ROS_SYSINFO_*`
+  framing / query-id / registry constants, the `ROS_PROCESS_STATE_*`
+  discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the
+  per-record `*_WIRE_LEN` sizes), values
   read from `lib/abi`, are the grown modules so far.
-  **Remaining:** `sysinfo`, the
-  `capability` query types, and `driver/*` POD types, plus the "every pub
+  **Remaining:** the
+  `capability` query types and `driver/*` POD types, plus the "every pub
   `#[repr(C)]` type is represented" completeness test once the surface is
   covered.
 - CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
@@ -7144,7 +7152,11 @@ constants + `ROS_SYSTEM_LIBRARIES_DIR` + the `ROS_BUNDLE_ENTRY_*` names + the
 `ROS_LIBRARY_SCOPE_*` discriminants), and `rustos_rxe.h` (`ros_load_header_t`
 + the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` /
 `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants + the
-`ROS_RXE_PERMISSION_*` discriminants) — each value read from
+`ROS_RXE_PERMISSION_*` discriminants), and `rustos_sysinfo.h` (the eight
+System Information wire-type struct mirrors + the `ROS_SYSINFO_*` framing /
+query-id / registry constants + the `ROS_PROCESS_STATE_*` discriminants + the
+`ROS_*_MAX` / `ROS_*_LEN` buffer caps + the per-record `*_WIRE_LEN` sizes) —
+each value read from
 `lib/abi` and guarded byte-for-byte against drift, wired into `cargo xtask ci`;
 the docs page is `docs/src/abi/c-abi.md`.
 

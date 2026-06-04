@@ -23,13 +23,14 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/rustos/rustos_input.h` | the pointer/keyboard record magics and wire sizes, the `ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants |
 | `include/rustos/rustos_appinfo.h` | `ros_appinfo_header_t` and the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*` names, and the `ROS_LIBRARY_SCOPE_*` discriminants |
 | `include/rustos/rustos_rxe.h` | `ros_load_header_t` and the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants |
+| `include/rustos/rustos_sysinfo.h` | the eight System Information wire types (`ros_sysinfo_request_header_t`, `ros_process_list_request_t`, `ros_process_record_t`, `ros_kernel_memory_stats_t`, `ros_uptime_t`, `ros_system_identity_t`, `ros_mount_list_request_t`, `ros_mount_record_t`) and the `ROS_SYSINFO_*` framing / query-id / registry constants, the `ROS_PROCESS_STATE_*` discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the `*_WIRE_LEN` sizes |
 | `include/rustos/rustos_syscall.h` | `ROS_SYS_*`, `ROS_SYSCALL_MAX_ARGS`, and one prototype per syscall entry point |
 
 Including the umbrella `rustos_abi.h` pulls in the whole surface; a program
 that only needs, say, the time types can include `rustos_time.h` directly.
 
-Growing the set to cover the rest of `lib/abi` (`capability` queries,
-`driver/*`, `sysinfo`) is staged in `plans/CCOMPAT.md` (stage CC1).
+Growing the set to cover the rest of `lib/abi` (the `capability` query POD
+types and `driver/*`) is staged in `plans/CCOMPAT.md` (stage CC1).
 
 ## Generated, never hand-written
 

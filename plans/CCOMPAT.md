@@ -159,9 +159,24 @@ test. The `rxe` module has now landed too: `rustos_rxe.h` declares the
 constants and the `ROS_RXE_PERMISSION_*` (`RxePermission`) `#[repr(u8)]`
 discriminants — a `Segment` record is hand-serialised, so the header exports
 its wire size and `ROS_SEG_FLAG_*` field codes rather than a C struct mirror —
-every value read from `lib/abi` and pinned by an in-module test.
-**Remaining for CC1:** the rest of the modules —
-`sysinfo`, the `capability` query POD types, and `driver/*` POD
+every value read from `lib/abi` and pinned by an in-module test. The `sysinfo`
+module has now landed too: `rustos_sysinfo.h` declares C struct mirrors of the
+eight `#[repr(C)]` System Information wire types (`SysinfoRequestHeader`,
+`ProcessListRequest`, `ProcessRecord`, `KernelMemoryStats`, `Uptime`,
+`SystemIdentity`, `MountListRequest`, `MountRecord`) — `ros_uptime_t`'s members
+are the `ros_duration64_t` / `ros_time64_t` types from `rustos_time.h`, which it
+`#include`s — plus the `ROS_SYSINFO_VERSION_*` / `ROS_SYSINFO_REQUEST_MAGIC` /
+`ROS_SYSINFO_MAX_PAYLOAD_LEN` / `ROS_SYSINFO_QUERY_ID_MAX` framing, the
+`ROS_SYSINFO_QUERY_*` well-known ids, the `ROS_SYSINFO_QUERY_NAME_MAX` /
+`_RECORD_LEN` / `_ENCODED_QUERY_TABLE_LEN` registry constants, the
+`ROS_PROCESS_STATE_*` (`ProcessState`) `#[repr(u8)]` discriminants, the
+`ROS_PROCESS_NAME_MAX` / `ROS_MACHINE_ID_LEN` / `ROS_HOSTNAME_MAX` /
+`ROS_MOUNT_*_MAX` inline-buffer caps, and a packed `*_WIRE_LEN` macro per record
+(the struct mirrors are the naturally-aligned in-memory layout; the wire image
+is the separate `*_WIRE_LEN`) — every value read from `lib/abi` and pinned by an
+in-module test (`MountRecord`'s `flags` is mirrored as `uint32_t`; the
+`MountFlags` bit constants belong to the forthcoming `driver/*` header, §2.2).
+**Remaining for CC1:** the `capability` query POD types and `driver/*` POD
 types — plus the "every `pub` `#[repr(C)]` type in `lib/abi` is represented in
 the header" completeness test once the surface is covered.
 
