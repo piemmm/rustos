@@ -245,20 +245,17 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt() {
     let slot = hart_slot();
-    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
     let cpu = TIMER_CPU_ID[slot].load(Ordering::Relaxed);
-    if raw != 0 && cpu != NO_CPU {
-        // SAFETY: every store into `TIMER_CALLBACK_FN` is the round-trip
-        // of a valid `extern "C" fn(CpuId)` pointer through
-        // `set_timer_callback`; the callback is a `fn` with no captured
-        // environment, safe to invoke from trap context.
-        let cb: extern "C" fn(CpuId) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
-        // `cpu` was stored from a `CpuId` (`u32`) in `init_local_preempt`,
-        // so the low 32 bits are the whole value.
+    if cpu != NO_CPU {
+        // Dispatch the tick through the Arch HAL timer surface so the
+        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // the HAL handle reaches the same `TIMER_CALLBACK_FN` static this
+        // module owns. `cpu` was stored from a `CpuId` (`u32`) in
+        // `init_local_preempt`, so the low 32 bits are the whole value.
         #[allow(clippy::cast_possible_truncation)]
         let cpu = cpu as u32;
-        cb(cpu);
+        use rustos_arch_api::Timer;
+        crate::timer_hal::TimerHal::new().dispatch_tick(cpu);
     }
     // Re-arm (and acknowledge) the timer last so the scheduler runs at
     // least one tick before the next interrupt can stack.

@@ -82,6 +82,11 @@ pub mod preempt;
 /// §19.1).
 pub mod sidechannel;
 pub mod syscall_entry;
+/// wasm32 implementation of the Arch HAL timer-programming surface
+/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// neutral scheduler-tick callback install + dispatch over the
+/// cooperative `requestAnimationFrame` loop wired in [`preempt`].
+pub mod timer_hal;
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings;

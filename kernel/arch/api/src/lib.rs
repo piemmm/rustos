@@ -34,13 +34,18 @@
 //! **interrupt entry/exit** slice (`AGENTS.md` §17.2): the
 //! [`IrqController`] line-masking trait and the [`InterruptEntry`]
 //! claim/complete prologue/epilogue every claim-based port exposes, plus
-//! their [`irq::conformance`] verticals. It also hosts
+//! their [`irq::conformance`] verticals — and the **timer-programming**
+//! slice (`AGENTS.md` §17.2): the [`Timer`] trait that installs the one
+//! scheduler-tick callback and dispatches a tick to it (the LAPIC timer,
+//! the EL1 generic timer, the SBI timer, and the wasm32
+//! `requestAnimationFrame` loop all drive it), plus its
+//! [`timer::conformance`] vertical. It also hosts
 //! the **§17.2 conformance vertical** ([`conformance`]): the harness
 //! every port runs over its real HAL handles so parity is *enforced*
 //! rather than asserted by inspection (`plans/WIRING.md`). The remaining
 //! HAL surface enumerated by
-//! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
-//! shootdown, and timer programming) is migrated
+//! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, and TLB
+//! shootdown) is migrated
 //! here as the
 //! §17 burn-down advances; see `PLAN.md`. Until a primitive lives here
 //! it stays in its current owning crate, and the move is tracked, not
@@ -67,6 +72,7 @@ pub mod memtag;
 pub mod percpu;
 pub mod platform;
 pub mod sidechannel;
+pub mod timer;
 pub mod userentry;
 
 pub use sidechannel::{
@@ -88,6 +94,8 @@ pub use platform::{
 pub use percpu::{conformance as percpu_conformance, PerCpu};
 
 pub use irq::{conformance as irq_conformance, InterruptEntry, IrqControlError, IrqController};
+
+pub use timer::{conformance as timer_conformance, TickFn, Timer};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

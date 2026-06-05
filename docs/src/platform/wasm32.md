@@ -38,6 +38,7 @@ wasm target.
 | `kernel_arch`   | `WasmArch` — the `SchedulerArch` impl + `performance.now()` clock. |
 | `percpu_hal`    | `PerCpuStorage` — the `PerCpu` per-CPU storage slice (worker slot). |
 | `preempt`       | `requestAnimationFrame` cooperative tick + `MessageChannel` IPI.   |
+| `timer_hal`     | `TimerHal` — the `Timer` timer-programming slice (tick dispatch).  |
 | `isolation`     | WASM-linear-memory isolation model (the "MMU" analogue).          |
 | `syscall_entry` | Host-call argument marshalling + dispatch callback.               |
 | `bindings`      | Hand-rolled JS host imports (freestanding wasm only).             |
@@ -56,6 +57,21 @@ tick (`kernel/sched::Scheduler::on_timer_tick`) and requests the next
 frame. A directed reschedule to another worker arrives over a
 `MessageChannel` post (`WasmArch::send_ipi`) and re-enters the exported
 `rustos_arch_wasm32_on_message`.
+
+### Timer programming (`Timer`)
+
+The `timer_hal` module implements the Arch HAL `Timer` slice (`AGENTS.md`
+§17.2 / `plans/WIRING.md` Stage W4). `TimerHal::set_tick_callback` /
+`tick_callback` forward to the `preempt` cooperative-tick callback static,
+and `dispatch_tick` invokes it. `preempt::on_animation_frame` dispatches
+each frame's tick through `TimerHal::dispatch_tick`, so the callback
+invoke lives in one place (§2.2); requesting the next animation frame
+stays in `preempt` (§2.4). Because `on_animation_frame` is host-callable,
+the handle is zero-sized and forwards to the same `preempt` static on
+both the wasm target and the host build (rather than keeping a private
+host cell), so the `passes_timer_conformance` host test runs
+`timer::conformance::run_all` over a real `TimerHal`; it shares the
+`preempt` host-test serialisation lock so the suites do not race.
 
 ### WASM-memory isolation
 

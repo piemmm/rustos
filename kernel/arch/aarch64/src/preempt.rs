@@ -200,18 +200,17 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt(cpu: CpuId) {
     let slot = cpu_slot(cpu);
-    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
     let recorded = TIMER_CPU_ID[slot].load(Ordering::Relaxed);
-    if raw != 0 && recorded != NO_CPU {
-        // SAFETY: every store into `TIMER_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` pointer through
-        // `set_timer_callback`; the callback is a `fn` with no captured
-        // environment, safe to invoke from interrupt context.
-        let cb: extern "C" fn(CpuId) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+    if recorded != NO_CPU {
+        // Dispatch the tick through the Arch HAL timer surface so the
+        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // the HAL handle reaches the same `TIMER_CALLBACK_FN` static this
+        // module owns. `recorded` was stored from a `CpuId` (`u32`) in
+        // `init_local_preempt`, so the low 32 bits are the whole value.
         #[allow(clippy::cast_possible_truncation)]
         let recorded_cpu = recorded as u32;
-        cb(recorded_cpu);
+        use rustos_arch_api::Timer;
+        crate::timer_hal::TimerHal::new().dispatch_tick(recorded_cpu);
     }
     // Re-arm last so the scheduler runs at least one tick before the next
     // interrupt can stack.

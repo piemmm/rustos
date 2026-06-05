@@ -8,9 +8,10 @@
 //! exercises exactly that path on the aarch64 `virt` board, end to end:
 //!
 //! 1. Read the counter frequency from `CNTFRQ_EL0`.
-//! 2. Install a tick callback through
-//!    `rustos_arch_aarch64::preempt::set_timer_callback` that counts each
-//!    generic-timer interrupt.
+//! 2. Install a tick callback through the Arch HAL
+//!    `rustos_arch_aarch64::timer_hal::TimerHal` (`rustos_arch_api::Timer`)
+//!    that counts each generic-timer interrupt; the IRQ path dispatches
+//!    back through the same HAL handle (`AGENTS.md` §17.2).
 //! 3. Install the EL1 exception vector table
 //!    (`rustos_arch_aarch64::exceptions::init_vectors`) and initialise the
 //!    GICv2 (`rustos_arch_aarch64::gic::init`).
@@ -45,10 +46,11 @@ mod kernel {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     use rustos_arch_aarch64::kernel_arch::read_cntfrq;
+    use rustos_arch_aarch64::timer_hal::TimerHal;
     use rustos_arch_aarch64::{
         exceptions, gic, handle_panic_via_serial, preempt, qemu_exit, SERIAL_SINK,
     };
-    use rustos_arch_api::CpuId;
+    use rustos_arch_api::{CpuId, Timer};
     use rustos_log::{log, Event, EventId, Level};
 
     /// Scheduler-tick frequency to drive the timer at.
@@ -110,8 +112,9 @@ mod kernel {
             qemu_exit::exit_failure(1);
         }
 
-        // 2. Install the tick callback before any timer can fire.
-        preempt::set_timer_callback(on_tick);
+        // 2. Install the tick callback through the Arch HAL timer handle
+        //    before any timer can fire.
+        TimerHal::new().set_tick_callback(on_tick);
 
         // 3. Vector table + GIC bring-up.
         // SAFETY: called once on the boot CPU with a stack established and

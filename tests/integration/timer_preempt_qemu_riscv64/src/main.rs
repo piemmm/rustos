@@ -8,9 +8,10 @@
 //! exercises exactly that path on the riscv64 `virt` board, end to end:
 //!
 //! 1. Read the `/cpus` `timebase-frequency` from the device tree.
-//! 2. Install a tick callback through
-//!    `rustos_arch_riscv64::preempt::set_timer_callback` that counts
-//!    each supervisor-timer interrupt.
+//! 2. Install a tick callback through the Arch HAL
+//!    `rustos_arch_riscv64::timer_hal::TimerHal` (`rustos_arch_api::Timer`)
+//!    that counts each supervisor-timer interrupt; the trap path
+//!    dispatches back through the same HAL handle (`AGENTS.md` §17.2).
 //! 3. Install the S-mode trap vector and enable interrupts
 //!    (`rustos_arch_riscv64::trap::init_traps`).
 //! 4. Arm the SBI timer at 100 Hz and enable `sie.STIE`
@@ -42,8 +43,9 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use rustos_arch_api::CpuId;
+    use rustos_arch_api::{CpuId, Timer};
     use rustos_arch_riscv64::fdt::Fdt;
+    use rustos_arch_riscv64::timer_hal::TimerHal;
     use rustos_arch_riscv64::{
         halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, trap, SERIAL_SINK,
     };
@@ -115,8 +117,9 @@ mod kernel {
             }
         };
 
-        // 2. Install the tick callback before any timer can fire.
-        preempt::set_timer_callback(on_tick);
+        // 2. Install the tick callback through the Arch HAL timer handle
+        //    before any timer can fire.
+        TimerHal::new().set_tick_callback(on_tick);
 
         // 3. Trap vector + global interrupt enable.
         // SAFETY: called once on the boot hart with a stack established

@@ -138,6 +138,11 @@ pub mod sbi;
 pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
+/// riscv64 implementation of the Arch HAL timer-programming surface
+/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// neutral scheduler-tick callback install + dispatch over the
+/// supervisor (SBI) timer wired in [`preempt`].
+pub mod timer_hal;
 pub mod trap;
 /// riscv64 implementation of the Arch HAL "enter user mode" surface
 /// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `sret`

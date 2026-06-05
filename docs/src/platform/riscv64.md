@@ -424,3 +424,20 @@ Because the controller already abstracts its registers behind the
 host-testable `PlicMmio` seam, the `plic_controller_passes_arch_hal_irq_conformance`
 host test drives `irq::conformance::run_controller` (source 8 valid, 32
 out of range) and `run_entry` over a real `PlicController` on a mock MMIO.
+
+## Timer programming (`Timer`)
+
+The riscv64 port implements the Arch HAL `Timer` slice (`AGENTS.md`
+§17.2 / `plans/WIRING.md` Stage W4) in
+`kernel/arch/riscv64::timer_hal` (struct `TimerHal`) over the
+supervisor (SBI) timer wired in `kernel/arch/riscv64::preempt`.
+`TimerHal::set_tick_callback` / `tick_callback` forward to the `preempt`
+callback static, and `dispatch_tick` invokes it. The S-mode trap
+handler's `preempt::on_timer_interrupt` dispatches each supervisor-timer
+interrupt through `TimerHal::dispatch_tick`, so the callback invoke lives
+in one place (§2.2); the SBI `set_timer` re-arm and the `sie.STIE` enable
+stay in `preempt` (§2.4). On the host build the handle forwards to the
+same static, so the `passes_timer_conformance` host test runs
+`timer::conformance::run_all` over a real `TimerHal`. The
+`timer_preempt_qemu_riscv64` vertical installs its tick callback through
+`TimerHal` and stays green through the HAL.

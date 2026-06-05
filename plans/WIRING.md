@@ -66,12 +66,13 @@ per-CPU storage (`percpu`), the `syscall`-instruction entry, `iretq`
 user entry, a context switch, Sv-equivalent paging, TSC, and Intel
 hybrid (`big`/`Atom`) **core-class** discovery.
 
-The HAL surface currently *migrated* into `kernel/arch/api` is only four
-slices: `SchedulerArch` (per-CPU id, ticks, IPI, `core_class`),
-`SideChannelMitigation` (§19.1), `MemoryTagging` (§19.10), and
-`EnterUser`/`UserEntry` (§17.2). Everything else (context switch, MMU,
-TLB shootdown, timer, interrupt entry/exit, per-CPU storage, early-boot
-discovery) is still ad-hoc inside each port — the §17.2 surface
+The HAL surface *migrated* into `kernel/arch/api` so far:
+`SchedulerArch` (per-CPU id, ticks, IPI, `core_class`),
+`SideChannelMitigation` (§19.1), `MemoryTagging` (§19.10),
+`EnterUser`/`UserEntry` (§17.2), `PlatformDiscovery` (W1), `PerCpu`
+(W2), `IrqController` + `InterruptEntry` (W3), and `Timer` (W4). The
+remaining slices (context switch, MMU/paging, TLB shootdown, SMP
+bring-up) are still ad-hoc inside each port — the §17.2 surface
 `PLAN.md` flags as "migrated here as the §17 burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
@@ -83,7 +84,7 @@ discovery) is still ad-hoc inside each port — the §17.2 surface
 | Paging / MMU primitives           |   ✓    |    ✓    |    ✓    |  n/a   |
 | Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    |   ~    |
 | Context switch                    |   ✓    |    ✓    |    ✓    |  n/a   |
-| Timer + preemption hook           |   ✓    |    ✓    |    ✓    |   ~    |
+| Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
 | Interrupt controller + entry/exit |   ✓    |    ✓    |    ✓    |  n/a   |
 | **SMP secondary-CPU bring-up**    |   ✓    |  **✗**  |    ✓    | **✗**  |
 | **IPI delivery (real cores)**     |   ✓    |  **✗**  |    ✓    | **✗**  |
@@ -277,7 +278,26 @@ Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (60 s, single CPU)
 and QEMU-green. Docs: `docs/src/security/irq.md`,
 `docs/src/platform/aarch64.md`.
 
-### Stage W4 — Timer-programming HAL
+### Stage W4 — Timer-programming HAL — ✅ landed
+
+**Landed:** `kernel/arch/api::timer` defines `Timer`
+(`set_tick_callback` / `tick_callback` / `dispatch_tick`) over the
+architecture-neutral `TickFn = extern "C" fn(CpuId)`, plus a host-run
+`timer::conformance` vertical (`run_all`: an installed callback fires on
+dispatch with the CPU it was handed; a handle with no callback dispatches
+harmlessly). Each port exposes a `timer_hal::TimerHal` handle that
+forwards the callback install/read to its `preempt` static and dispatches
+through the trait: riscv64 (`on_timer_interrupt`), aarch64
+(`on_timer_interrupt`), and wasm32 (`on_animation_frame`) now route their
+tick handler through `TimerHal::dispatch_tick`, so the invoke lives in
+one place (§2.2); x86_64's vectored ISR keeps its LAPIC-ID/EOI dispatch
+and `TimerHal` is its HAL-facing surface. The *hardware* arming/re-arming
+stays in each port's `preempt` (§2.4). The `timer_preempt_qemu_{aarch64,
+riscv64}` verticals install the callback through `TimerHal` and stay
+green through the HAL. Driven per-port (not folded into
+`conformance::run_all`) for the same reason as `irq` — the handle is
+constructed per port and reaches a port-private callback slot. Docs:
+`docs/src/architecture/modularity.md`, platform pages, `PLAN.md`.
 
 - Define `Timer`; migrate the LAPIC-timer, generic-timer, SBI-timer, and
   `requestAnimationFrame` tick sources behind it, each driving the same

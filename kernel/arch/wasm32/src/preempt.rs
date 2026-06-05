@@ -47,7 +47,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
+use rustos_arch_api::{CpuId, Timer};
 
 /// `u64` sentinel meaning "no `CpuId` recorded for this context yet".
 const NO_CPU: u64 = u32::MAX as u64;
@@ -167,13 +167,15 @@ pub fn init_local_preempt(cpu: CpuId) {
 /// scheduler running at least one tick before the loop can re-enter.
 pub fn on_animation_frame() {
     let cpu = TICK_CPU_ID.load(Ordering::Acquire);
-    if let Some(cb) = tick_callback() {
-        if cpu != NO_CPU {
-            // `cpu` was stored from a `CpuId` (`u32`), so the low 32 bits
-            // are the whole value.
-            #[allow(clippy::cast_possible_truncation)]
-            let cpu = cpu as u32;
-            cb(cpu);
+    if cpu != NO_CPU {
+        // Dispatch the tick through the Arch HAL timer surface so the
+        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // the HAL handle reaches the same `TICK_CALLBACK_FN` static this
+        // module owns. `cpu` was stored from a `CpuId` (`u32`), so the
+        // low 32 bits are the whole value.
+        #[allow(clippy::cast_possible_truncation)]
+        let cpu = cpu as u32;
+        if crate::timer_hal::TimerHal::new().dispatch_tick(cpu) {
             TICK_COUNT.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -209,6 +211,24 @@ fn request_frame() {
 /// into a wasm image.
 #[cfg(not(target_arch = "wasm32"))]
 fn request_frame() {}
+
+/// Serialises the host tests that mutate this module's process-global
+/// callback / counter statics — both the [`crate::preempt`] suite and
+/// the [`crate::timer_hal`] conformance vertical, which forwards to the
+/// same statics. Lives here (not in the test module) so both files can
+/// share one lock and the suites do not race (`AGENTS.md` §7 — no flaky
+/// tests).
+#[cfg(test)]
+static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the shared host-test serialisation lock. A poisoned lock from
+/// an unrelated test panic must not cascade, so the guard is recovered.
+#[cfg(test)]
+pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[cfg(test)]
 #[path = "preempt_tests.rs"]

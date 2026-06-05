@@ -5,15 +5,19 @@
 //! `requestAnimationFrame` re-arm is a no-op off the wasm target, so a
 //! test drives [`on_animation_frame`] directly.
 //!
-//! The stateful tests share this module's global statics, so they hold a
-//! single [`STATE_LOCK`] for their duration. Serialising them keeps the
-//! suite deterministic rather than flaky (`AGENTS.md` §7).
+//! The stateful tests share this module's global statics, so they hold
+//! the single shared lock ([`super::test_state_lock`]) for their
+//! duration — the same lock the `timer_hal` conformance vertical takes.
+//! Serialising them keeps the suite deterministic rather than flaky
+//! (`AGENTS.md` §7).
 
 use super::*;
-use std::sync::Mutex;
 
-/// Serialises tests that mutate the shared callback / counter statics.
-static STATE_LOCK: Mutex<()> = Mutex::new(());
+/// Acquire the shared serialisation lock (defined in [`super`] so the
+/// `timer_hal` conformance vertical shares it).
+fn lock_state() -> std::sync::MutexGuard<'static, ()> {
+    super::test_state_lock()
+}
 
 extern "C" fn record_a(_cpu: CpuId) {
     HITS_A.fetch_add(1, Ordering::AcqRel);
@@ -46,7 +50,7 @@ fn budget_fails_closed_on_degenerate_inputs() {
 
 #[test]
 fn callbacks_round_trip() {
-    let _guard = STATE_LOCK.lock().expect("lock");
+    let _guard = lock_state();
     clear_for_tests();
     assert!(tick_callback().is_none());
     assert!(ipi_callback().is_none());
@@ -66,7 +70,7 @@ fn callbacks_round_trip() {
 
 #[test]
 fn diagnostic_slots_start_clear() {
-    let _guard = STATE_LOCK.lock().expect("lock");
+    let _guard = lock_state();
     clear_for_tests();
     assert_eq!(tick_cpu_id(), u32::MAX);
     assert_eq!(tick_count(), 0);
@@ -75,7 +79,7 @@ fn diagnostic_slots_start_clear() {
 
 #[test]
 fn animation_frame_drives_the_tick_callback_and_counts() {
-    let _guard = STATE_LOCK.lock().expect("lock");
+    let _guard = lock_state();
     clear_for_tests();
     HITS_A.store(0, Ordering::Release);
 
@@ -94,7 +98,7 @@ fn animation_frame_drives_the_tick_callback_and_counts() {
 
 #[test]
 fn animation_frame_without_recorded_cpu_does_not_fire() {
-    let _guard = STATE_LOCK.lock().expect("lock");
+    let _guard = lock_state();
     clear_for_tests();
     HITS_A.store(0, Ordering::Release);
 
@@ -110,7 +114,7 @@ fn animation_frame_without_recorded_cpu_does_not_fire() {
 
 #[test]
 fn ipi_message_drives_the_ipi_callback() {
-    let _guard = STATE_LOCK.lock().expect("lock");
+    let _guard = lock_state();
     clear_for_tests();
     HITS_B.store(0, Ordering::Release);
 

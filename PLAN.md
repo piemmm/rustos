@@ -538,6 +538,30 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       QEMU-green. Docs: `docs/src/security/irq.md`,
       `docs/src/platform/aarch64.md`. Split out of W3 to keep W3-A a
       host-gated, low-risk landing.
+- [x] **WIRING Stage W4 — Timer-programming HAL.** `kernel/arch/api`
+      gains the `timer` slice (`timer.rs`): the `Timer` trait
+      (`set_tick_callback` / `tick_callback` / `dispatch_tick`) over the
+      architecture-neutral `TickFn = extern "C" fn(CpuId)`, plus a
+      host-run `timer::conformance` vertical (`run_all`: an installed
+      callback fires on dispatch with the CPU it was handed; a handle
+      with no callback dispatches harmlessly). Driven **per-port** (not
+      folded into `conformance::run_all`) — the handle is constructed per
+      port and reaches a port-private callback slot, the same precedent
+      as `irq`. Per-port impls land in a `timer_hal` module (struct
+      `TimerHal`): each forwards the callback install/read to its
+      `preempt` static and the riscv64 (`on_timer_interrupt`), aarch64
+      (`on_timer_interrupt`), and wasm32 (`on_animation_frame`) tick
+      handlers dispatch back through `TimerHal::dispatch_tick`, so the
+      invoke lives in one place (§2.2); x86_64's vectored ISR keeps its
+      LAPIC-ID/EOI dispatch and `TimerHal` is its HAL-facing surface
+      (`sched-arch`-gated). The hardware arming/re-arming (LAPIC LVT,
+      `CNTP_TVAL_EL0`, SBI timer, next animation frame) stays in each
+      port's `preempt` (§2.4). The `timer_preempt_qemu_{aarch64,riscv64}`
+      verticals install the callback through `TimerHal` and stay green
+      through the HAL. Each port carries a host `passes_timer_conformance`
+      test. Docs: `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
+      `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

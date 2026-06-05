@@ -20,6 +20,7 @@ use rustos_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT}
 use rustos_arch_api::percpu;
 use rustos_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
+use rustos_arch_api::timer::{self, TickFn, Timer};
 use rustos_arch_api::{CpuId, PerCpu, SchedulerArch};
 
 #[derive(Default)]
@@ -112,4 +113,39 @@ fn arch_hal_conformance_suite_runs() {
 #[test]
 fn per_cpu_isolation_vertical_runs_over_two_handles() {
     percpu::conformance::run_isolation(&DoublePerCpu::default(), &DoublePerCpu::default());
+}
+
+#[derive(Default)]
+struct DoubleTimer {
+    callback: AtomicUsize,
+}
+
+impl Timer for DoubleTimer {
+    fn set_tick_callback(&self, callback: TickFn) {
+        self.callback.store(callback as usize, Ordering::Relaxed);
+    }
+    fn tick_callback(&self) -> Option<TickFn> {
+        let raw = self.callback.load(Ordering::Relaxed);
+        if raw == 0 {
+            None
+        } else {
+            // SAFETY: every store is the round-trip of a valid `TickFn`
+            // pointer through `set_tick_callback`.
+            Some(unsafe { core::mem::transmute::<usize, TickFn>(raw) })
+        }
+    }
+    fn dispatch_tick(&self, cpu: CpuId) -> bool {
+        match self.tick_callback() {
+            Some(cb) => {
+                cb(cpu);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+#[test]
+fn timer_vertical_runs_over_a_handle() {
+    timer::conformance::run_all(&DoubleTimer::default());
 }

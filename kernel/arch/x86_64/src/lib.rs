@@ -146,6 +146,16 @@ pub mod serial;
 pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
+/// x86_64 implementation of the Arch HAL timer-programming surface
+/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// neutral scheduler-tick callback install + dispatch over the LAPIC
+/// timer wired in [`preempt`].
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
+/// §2.3).
+#[cfg(feature = "sched-arch")]
+pub mod timer_hal;
 /// x86_64 Time-Stamp Counter suitability validation: the Invariant TSC
 /// CPUID probe the boot path consults before trusting `RDTSC` as a
 /// cross-CPU monotonic clock source (`AGENTS.md` §17.2, §19.1).

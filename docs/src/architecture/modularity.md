@@ -161,6 +161,31 @@ check needs a port-specific valid/invalid line pair and `InterruptEntry`
 is implemented by only a subset of ports — the same reason
 `percpu::conformance::run_isolation` stands apart.
 
+### Timer programming
+
+The `Timer` slice gives the kernel one vocabulary for the periodic
+per-CPU scheduler tick, whose hardware differs entirely per target: the
+x86_64 LAPIC timer, the aarch64 EL1 physical generic timer
+(`CNTP_*_EL0` + GIC PPI 30), the riscv64 supervisor (SBI) timer, and the
+wasm32 cooperative `requestAnimationFrame` loop. `Timer::set_tick_callback`
+installs the one architecture-neutral scheduler-tick callback
+(`extern "C" fn(CpuId)`), and `Timer::dispatch_tick` invokes it on a
+tick — the shared half of every port's interrupt/frame handler, so the
+callback invoke lives in exactly one place (`AGENTS.md` §2.2). The
+*hardware* arming/re-arming (programming the LAPIC LVT, `CNTP_TVAL_EL0`,
+the SBI timer, or requesting the next frame) stays in the port's
+`preempt` module — it is per-CPU register/MMIO work with no
+architecture-neutral shape, and folding it into the trait would be
+interface creep (`AGENTS.md` §2.4). Each port exposes a `TimerHal`
+handle and the riscv64/aarch64/wasm32 tick handlers dispatch back
+through it; x86_64's vectored ISR must read the LAPIC ID and issue the
+EOI itself, so it keeps its own dispatch and `TimerHal` is its
+HAL-facing surface. `timer::conformance::run_all` asserts an installed
+callback fires on dispatch with the CPU it was handed and that a handle
+with no callback dispatches harmlessly. Like the interrupt verticals it
+is driven per-port (the handle is constructed per port and reaches a
+port-private callback slot), not folded into `conformance::run_all`.
+
 ## `cargo xtask cfg-check`
 
 Scans every workspace `.rs` file and fails if a `cfg` predicate names
