@@ -262,3 +262,26 @@ the layout equality); the switch invoke lives in one place (§2.2). The
 (`passes_context_switch_conformance`); the switch itself, like
 `enter_user`, is proven only on the bare-metal target (the scheduler-
 drive vertical), so it carries no host check (§2.1 — no fake primitive).
+
+## MMU / page-table (`AddressSpace`)
+
+The aarch64 port implements the Arch HAL `AddressSpace` slice
+(`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W5b-1) on its
+`kernel/arch/aarch64::paging::AddressSpace` (the three-level, 4 KiB-granule
+stage-1 table programmed into `TTBR0_EL1` with `SCTLR_EL1.M`).
+`AddressSpace::map_page` translates the neutral `PageFlags` into a stage-1
+leaf-attribute word — W^X by default (`AGENTS.md` §19.2): a `USER | EXEC`
+page is mapped read-only EL0-executable (`el0_code_leaf_attrs`), a
+`USER | WRITE` page execute-never (`el0_data_leaf_attrs`), a read-only
+user page execute-never (`el0_rodata_leaf_attrs`), a kernel page EL1 RW
+EL0-XN (`normal_leaf_attrs`), and a `DEVICE` page `device_leaf_attrs` —
+then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
+closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`).
+`root_phys` returns the L1 root and `activate` forwards to the gated
+`switch` (the `TTBR0_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
+intermediate tables through the identity map (phys == virt), the whole
+`map_page` path is host-runnable: `passes_mmu_conformance` drives
+`mmu::conformance::run_all` over a real `AddressSpace`, and a companion
+host test asserts the W^X leaf-attribute translation. The `activate`
+register write itself is proven by `memory_isolation_qemu_aarch64`, which
+now builds its victim/attacker spaces through this trait.

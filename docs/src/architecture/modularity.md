@@ -216,6 +216,50 @@ so it carries no host check. The vertical is driven per-port (it seeds a
 frame over a caller-supplied stack and runs over the port's real handle),
 not folded into `conformance::run_all`.
 
+### MMU / page-table
+
+The `AddressSpace` slice (`kernel/arch/api::mmu`) gives the kernel one
+vocabulary for the page-table primitive, whose format differs entirely
+per target: the x86_64 four-level PML4 loaded into `CR3`, the riscv64
+three-level Sv39 hierarchy selected by `satp`, and the aarch64
+three-level stage-1 table programmed into `TTBR0_EL1` with `SCTLR_EL1.M`.
+`AddressSpace::map_page` installs a 4 KiB mapping over the neutral
+`PageFlags` permission set (`READ`/`WRITE`/`EXEC`/`USER`/`DEVICE`, decoded
+once at the HAL boundary into native PTE bits — one vocabulary, `AGENTS.md`
+§2.2), failing closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/
+`InvalidFlags`, `AGENTS.md` §2.9) and rejecting a W^X-violating write+exec
+leaf (`AGENTS.md` §19.2). `AddressSpace::root_phys` reports the
+root-table physical address, and `AddressSpace::activate` makes the space
+the live translation regime (and performs the port's coarse TLB flush).
+Each port implements the trait on its existing `paging::AddressSpace`,
+translating `PageFlags` into native leaf attributes and forwarding
+`activate` to its gated `switch` primitive, so the page-table walk and
+the register write each live in exactly one place.
+
+`mmu::conformance::run_all` asserts the `map_page` contract on the host
+(a non-null root; misaligned addresses rejected; a good mapping accepted;
+a double mapping refused), driven per-port — the suite needs a
+port-constructed address space and a port-specific mappable address pair,
+the same reason the `irq`/`timer` verticals stand apart. riscv64 and
+aarch64 run it over their real `AddressSpace` (their walk recovers tables
+through the identity map, so it is host-runnable); x86_64's walk reaches
+intermediate tables through the higher-half kernel window (phys ≠ virt),
+so it is not host-runnable and its `map_page`/`activate` are proven by the
+`memory_isolation` QEMU vertical instead — like the bare-metal `switch`,
+which never carries a host check (`AGENTS.md` §2.1 — no fake primitive).
+wasm32 has no page table (each Web Worker is a sandboxed linear-memory
+instance the kernel never re-maps), so the slice is **n/a** there. The
+three `memory_isolation_qemu_*` verticals build their victim/attacker
+spaces through this trait, so the §4 "isolation is enforced by hardware"
+property is proven *through the HAL*.
+
+This is the `plans/WIRING.md` Stage W5b-1 slice: the bootstrap page-table
+primitive lifted behind the HAL. Wiring `kernel/mem`'s allocator-backed
+per-process address space onto the trait, and the per-page + cross-CPU
+TLB shootdown (whose aarch64 half depends on the Stage W6 IPI), are the
+tracked Stage W5b-2 / W6 follow-ups, not duplicated here (`AGENTS.md`
+§2.2).
+
 ## `cargo xtask cfg-check`
 
 Scans every workspace `.rs` file and fails if a `cfg` predicate names

@@ -198,3 +198,58 @@ fn host_leaf_descriptor(root_phys: u64, va: u64) -> Option<u64> {
     }
     None
 }
+
+#[test]
+fn passes_mmu_conformance() {
+    use rustos_arch_api::mmu;
+    static POOL: PageTablePool = PageTablePool::new();
+    static POOL2: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // A VA well above the identity window so the conformance map allocates
+    // fresh L2/L3 tables and never shatters a block; the phys frame is RAM.
+    let va = 64u64 << 30;
+    let pa = 0x4123_4000;
+    mmu::conformance::run_all(&mut space, va, pa);
+    // And over the object-safe erasure the kernel registry stores.
+    let mut dynamic = AddressSpace::new_identity_gigapages(&POOL2, 2).expect("identity map");
+    let erased: &mut dyn mmu::AddressSpace = &mut dynamic;
+    mmu::conformance::run_all(erased, va, pa);
+}
+
+#[test]
+fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
+    use rustos_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // A USER + EXEC page must be mapped EL0-executable and read-only
+    // (W^X): the leaf is `el0_code_leaf_attrs` (AP_RO_EL0, UXN clear).
+    let code_va = 64u64 << 30;
+    mmu::AddressSpace::map_page(
+        &mut space,
+        code_va,
+        0x4100_0000,
+        PageFlags::READ | PageFlags::EXEC | PageFlags::USER,
+    )
+    .expect("user code map");
+    let code_leaf = host_leaf_descriptor(space.root_phys(), code_va).expect("mapped");
+    assert_eq!(
+        code_leaf & attrs::UXN,
+        0,
+        "user code must be EL0-executable"
+    );
+    assert_ne!(code_leaf & attrs::PXN, 0, "user code must be PXN at EL1");
+
+    // A USER + WRITE page must be execute-never at both ELs (W^X).
+    let data_va = (64u64 << 30) + (1u64 << 21);
+    mmu::AddressSpace::map_page(
+        &mut space,
+        data_va,
+        0x4101_0000,
+        PageFlags::READ | PageFlags::WRITE | PageFlags::USER,
+    )
+    .expect("user data map");
+    let data_leaf = host_leaf_descriptor(space.root_phys(), data_va).expect("mapped");
+    assert_ne!(data_leaf & attrs::UXN, 0, "user data must be EL0 XN");
+    assert_ne!(data_leaf & attrs::PXN, 0, "user data must be EL1 XN");
+}

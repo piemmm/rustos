@@ -29,6 +29,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
 
@@ -303,6 +305,10 @@ impl PageTablePool {
 pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
+    /// The pool the page-table walk allocates intermediate tables from,
+    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
+    /// install mappings without the caller re-supplying it.
+    pool: &'static PageTablePool,
 }
 
 impl AddressSpace {
@@ -333,7 +339,45 @@ impl AddressSpace {
             *slot = descriptor(paddr, leaf);
         }
         let root_phys = phys_of(root);
-        Some(Self { root_phys, root })
+        Some(Self {
+            root_phys,
+            root,
+            pool,
+        })
+    }
+
+    /// `true` if `vaddr` already resolves to a live leaf (block or page)
+    /// in this hierarchy.
+    ///
+    /// A read-only stage-1 walk used by the
+    /// [`rustos_arch_api::mmu::AddressSpace`] HAL impl to report
+    /// [`rustos_arch_api::mmu::MapError::AlreadyMapped`] rather than
+    /// silently clobber an existing mapping. It dereferences present
+    /// table descriptors through the identity map (phys == virt for every
+    /// table the kernel owns), the same round-trip [`ensure_child`] uses.
+    fn leaf_present(&self, vaddr: u64) -> bool {
+        let e1 = self.root[table_index(vaddr, 1)];
+        if (e1 & attrs::VALID) == 0 {
+            return false;
+        }
+        if is_block(e1) {
+            return true;
+        }
+        // SAFETY: a present table descriptor holds an output address
+        // `ensure_child` wrote from `phys_of(&mut [u64; 512])`; identity
+        // mapping makes it dereferenceable directly.
+        let l2 = unsafe { &*(phys_from_descriptor(e1) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e2 = l2[table_index(vaddr, 2)];
+        if (e2 & attrs::VALID) == 0 {
+            return false;
+        }
+        if is_block(e2) {
+            return true;
+        }
+        // SAFETY: as above — a present L2 table descriptor's output
+        // address is a valid identity-mapped table.
+        let l3 = unsafe { &*(phys_from_descriptor(e2) as *const [u64; ENTRIES_PER_TABLE]) };
+        (l3[table_index(vaddr, 3)] & attrs::VALID) != 0
     }
 
     /// Map `paddr` at `vaddr` with 4 KiB granularity as Normal memory
@@ -386,6 +430,31 @@ impl AddressSpace {
         self.root_phys
     }
 
+    /// Translate the architecture-neutral [`PageFlags`] into a stage-1
+    /// page-leaf attribute word (`AGENTS.md` §2.2 — one neutral
+    /// vocabulary, decoded once at the HAL boundary). W^X is the default
+    /// (`AGENTS.md` §19.2): an executable user page is mapped read-only
+    /// ([`el0_code_leaf_attrs`]); a writable user page is execute-never
+    /// ([`el0_data_leaf_attrs`]); a read-only user page is execute-never
+    /// ([`el0_rodata_leaf_attrs`]). A kernel page uses the EL1 RW,
+    /// EL0-execute-never [`normal_leaf_attrs`]; a Device page uses
+    /// [`device_leaf_attrs`].
+    fn leaf_attrs_for(flags: PageFlags) -> u64 {
+        if flags.contains(PageFlags::DEVICE) {
+            device_leaf_attrs(false)
+        } else if flags.contains(PageFlags::USER) {
+            if flags.contains(PageFlags::EXEC) {
+                el0_code_leaf_attrs()
+            } else if flags.contains(PageFlags::WRITE) {
+                el0_data_leaf_attrs()
+            } else {
+                el0_rodata_leaf_attrs()
+            }
+        } else {
+            normal_leaf_attrs(false)
+        }
+    }
+
     /// Activate this address space: program `MAIR_EL1`, `TCR_EL1`,
     /// `TTBR0_EL1`, and enable the MMU (`SCTLR_EL1.M`), then synchronise.
     ///
@@ -424,6 +493,44 @@ impl AddressSpace {
                 tmp = out(reg) _,
                 options(nostack, preserves_flags),
             );
+        }
+    }
+}
+
+impl MmuAddressSpace for AddressSpace {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        if flags.is_write_exec() {
+            return Err(MapError::InvalidFlags);
+        }
+        if self.leaf_present(vaddr) {
+            return Err(MapError::AlreadyMapped);
+        }
+        let pool = self.pool;
+        // Alignment and prior-mapping are already ruled out, so the only
+        // remaining failure from the walk is page-table-pool exhaustion.
+        self.map_4k_with_attrs(pool, vaddr, paddr, Self::leaf_attrs_for(flags))
+            .ok_or(MapError::PoolExhausted)
+    }
+
+    fn root_phys(&self) -> u64 {
+        self.root_phys
+    }
+
+    unsafe fn activate(&self) {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            // SAFETY: forwards to the gated stage-1 enable primitive; the
+            // caller upholds the `MmuAddressSpace::activate` contract (this
+            // space maps the current `pc`/`sp`/MMIO), which is exactly
+            // `AddressSpace::switch`'s contract.
+            unsafe { self.switch() };
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            unreachable!("stage-1 activation is only meaningful on the aarch64 bare-metal target")
         }
     }
 }

@@ -26,6 +26,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
 
@@ -177,6 +179,10 @@ impl PageTablePool {
 pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
+    /// The pool the page-table walk allocates intermediate tables from,
+    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
+    /// install mappings without the caller re-supplying it.
+    pool: &'static PageTablePool,
 }
 
 impl AddressSpace {
@@ -207,7 +213,44 @@ impl AddressSpace {
             let paddr = (i as u64) << 30;
             *slot = pte_from_phys(paddr, leaf);
         }
-        Some(Self { root_phys, root })
+        Some(Self {
+            root_phys,
+            root,
+            pool,
+        })
+    }
+
+    /// `true` if `vaddr` already resolves to a leaf in this hierarchy.
+    ///
+    /// A read-only Sv39 walk used by the [`rustos_arch_api::mmu::AddressSpace`]
+    /// HAL impl to report [`rustos_arch_api::mmu::MapError::AlreadyMapped`]
+    /// rather than silently clobber an existing mapping. The walk
+    /// dereferences present non-leaf entries through the identity map
+    /// (phys == virt for every table the kernel owns), the same
+    /// round-trip [`ensure_child`] relies on.
+    fn leaf_present(&self, vaddr: u64) -> bool {
+        let e2 = self.root[vpn_index(vaddr, 2)];
+        if (e2 & flags::VALID) == 0 {
+            return false;
+        }
+        if pte_is_leaf(e2) {
+            return true;
+        }
+        // SAFETY: a present non-leaf entry holds a PPN `ensure_child`
+        // wrote from `phys_of(&mut [u64; 512])`; identity mapping makes
+        // the physical address dereferenceable directly.
+        let l1 = unsafe { &*(phys_from_pte(e2) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e1 = l1[vpn_index(vaddr, 1)];
+        if (e1 & flags::VALID) == 0 {
+            return false;
+        }
+        if pte_is_leaf(e1) {
+            return true;
+        }
+        // SAFETY: as above — a present non-leaf L1 entry's PPN is a valid
+        // identity-mapped table address.
+        let l0 = unsafe { &*(phys_from_pte(e1) as *const [u64; ENTRIES_PER_TABLE]) };
+        (l0[vpn_index(vaddr, 0)] & flags::VALID) != 0
     }
 
     /// Map `paddr` at `vaddr` with 4 KiB granularity.
@@ -303,6 +346,67 @@ impl AddressSpace {
     #[must_use]
     pub fn root_phys(&self) -> u64 {
         self.root_phys
+    }
+}
+
+/// Translate the architecture-neutral [`PageFlags`] into the Sv39
+/// permission bits (`AGENTS.md` §2.2 — one neutral vocabulary, decoded
+/// once at the HAL boundary). The `VALID`/`ACCESSED`/`DIRTY` bits are
+/// added by [`AddressSpace::map_4k`]; riscv64 has no page-table Device
+/// attribute (memory type is PMA-driven), so [`PageFlags::DEVICE`] only
+/// affects the absent caching attribute and maps to the same R/W/X here.
+fn sv39_flags(flags: PageFlags) -> u64 {
+    let mut bits = 0;
+    if flags.contains(PageFlags::READ) {
+        bits |= flags::READ;
+    }
+    if flags.contains(PageFlags::WRITE) {
+        bits |= flags::WRITE;
+    }
+    if flags.contains(PageFlags::EXEC) {
+        bits |= flags::EXEC;
+    }
+    if flags.contains(PageFlags::USER) {
+        bits |= flags::USER;
+    }
+    bits
+}
+
+impl MmuAddressSpace for AddressSpace {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        if flags.is_write_exec() {
+            return Err(MapError::InvalidFlags);
+        }
+        if self.leaf_present(vaddr) {
+            return Err(MapError::AlreadyMapped);
+        }
+        let pool = self.pool;
+        // Alignment and prior-mapping are already ruled out, so the only
+        // remaining failure from the walk is page-table-pool exhaustion.
+        self.map_4k(pool, vaddr, paddr, sv39_flags(flags))
+            .ok_or(MapError::PoolExhausted)
+    }
+
+    fn root_phys(&self) -> u64 {
+        self.root_phys
+    }
+
+    unsafe fn activate(&self) {
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            // SAFETY: forwards to the gated `satp` activation primitive;
+            // the caller upholds the `MmuAddressSpace::activate` contract
+            // (this space maps the current `pc`/`sp`/MMIO), which is
+            // exactly `AddressSpace::switch`'s contract.
+            unsafe { self.switch() };
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            unreachable!("Sv39 activation is only meaningful on the riscv64 bare-metal target")
+        }
     }
 }
 

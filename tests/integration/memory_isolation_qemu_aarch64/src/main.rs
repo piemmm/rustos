@@ -44,6 +44,7 @@ mod kernel {
 
     use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
     use rustos_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
     use rustos_log::{log, Event, EventId, Level};
 
     /// Virtual address the victim space maps and the attacker does not.
@@ -124,9 +125,13 @@ mod kernel {
         // Victim space: identity map + the extra VICTIM_VA mapping.
         let mut victim = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
             .unwrap_or_else(|| fail("victim identity map"));
+        // Install the victim mapping through the Arch HAL MMU surface
+        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path
+        // the architecture-neutral kernel uses, rather than the port's
+        // inherent `map_4k` (`plans/WIRING.md` W5b).
         victim
-            .map_4k(&POOL, VICTIM_VA, victim_pa)
-            .unwrap_or_else(|| fail("victim map_4k"));
+            .map_page(VICTIM_VA, victim_pa, PageFlags::READ | PageFlags::WRITE)
+            .unwrap_or_else(|_| fail("victim map_page"));
 
         // Attacker space: identity map only — VICTIM_VA stays unmapped.
         let attacker = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
@@ -146,7 +151,7 @@ mod kernel {
         // SAFETY: the attacker space identity-maps `pc`, `sp`, and MMIO
         // (RAM Normal, device-0 Device) per `new_identity_gigapages`.
         unsafe {
-            attacker.switch();
+            attacker.activate();
         }
 
         // Read the victim-only address. With the attacker space active

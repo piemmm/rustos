@@ -589,10 +589,40 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       proven only under QEMU (the scheduler-drive verticals). Docs:
       `docs/src/architecture/modularity.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
-      `plans/WIRING.md`. **Remaining for W5:** the MMU/page-table
-      (`AddressSpace`/`Mmu`) + TLB-shootdown HAL traits and the
-      `kernel/mem` wiring (W5b) — the cross-CPU TLB part depends on the
-      aarch64 IPI from W6.
+      `plans/WIRING.md`.
+- [x] **WIRING Stage W5b-1 — MMU/page-table HAL trait + per-port
+      migration.** `kernel/arch/api` gains the `mmu` slice (`mmu.rs`): the
+      neutral `PageFlags` permission set (`READ`/`WRITE`/`EXEC`/`USER`/
+      `DEVICE`, W^X-aware), the fail-closed `MapError`
+      (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`), the
+      object-safe `AddressSpace` trait (`map_page` / `root_phys` /
+      `unsafe activate`), and a per-port-driven `mmu::conformance` vertical
+      (a port-constructed space + a port-specific mappable address pair:
+      non-null root, misaligned rejected, good map accepted, double-map
+      refused) with a faithful + lenient in-test double in the api
+      `tests/conformance.rs`. Each port implements the trait on its
+      existing `paging::AddressSpace` (a retained `pool` field, a neutral
+      `PageFlags`→native leaf translation, a read-only `leaf_present` walk
+      for the `AlreadyMapped` guard, and `activate` forwarding to the
+      gated `switch`), reusing the existing walk so the inherent `map_4k*`
+      methods (used by the spawn/c-program/abi-sys verticals) keep their
+      signatures (§2.2). riscv64 + aarch64 run `passes_mmu_conformance` on
+      the host; x86_64's walk is higher-half (phys ≠ virt) so it is not
+      host-runnable and its `map_page`/`activate` are proven by the
+      `memory_isolation` QEMU vertical (the same honest asymmetry the
+      bare-metal `switch` has). All three `memory_isolation_qemu_*`
+      verticals now build their victim/attacker spaces through
+      `AddressSpace::map_page` + `activate`. wasm32 is an honest **n/a**
+      (no page table). `rustos-arch-api` became a non-optional x86_64 dep
+      (the always-compiled `paging` slice names it; `sched-arch` now only
+      gates which HAL *modules* compile). Docs:
+      `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
+      `plans/WIRING.md`. **Remaining for W5 (W5b-2):** wire `kernel/mem`'s
+      allocator-backed per-process `AddressSpace<P>` onto the HAL trait
+      (replacing `kernel/mem`'s local `PageTableOps`) and add the
+      `TlbShootdown` slice (per-page local invalidation + cross-CPU
+      shootdown, the latter depending on the aarch64 IPI from W6).
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

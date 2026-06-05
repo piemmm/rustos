@@ -54,6 +54,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
     use rustos_arch_riscv64::{
         fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK,
     };
@@ -189,12 +190,19 @@ mod kernel {
             note(TEST_FAIL, "page-table pool exhausted (victim)");
             qemu_exit::exit_failure(FAIL_POOL);
         };
-        let rw = paging::flags::READ | paging::flags::WRITE;
+        // Install the secret mapping through the Arch HAL MMU surface
+        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path
+        // the architecture-neutral kernel uses, rather than the port's
+        // inherent `map_4k` (`plans/WIRING.md` W5b).
         if victim
-            .map_4k(&PAGE_TABLE_POOL, SECRET_VADDR, secret_phys, rw)
-            .is_none()
+            .map_page(
+                SECRET_VADDR,
+                secret_phys,
+                PageFlags::READ | PageFlags::WRITE,
+            )
+            .is_err()
         {
-            note(TEST_FAIL, "page-table pool exhausted (secret mapping)");
+            note(TEST_FAIL, "secret mapping refused");
             qemu_exit::exit_failure(FAIL_POOL);
         }
 
@@ -209,7 +217,7 @@ mod kernel {
         // ---- Phase 1: confirm the victim mapping is genuine. ----
         // SAFETY: the victim identity-maps the low 4 GiB, covering the
         // current `pc` and stack, so the switch is sound.
-        unsafe { victim.switch() };
+        unsafe { victim.activate() };
         // SAFETY: `SECRET_VADDR` is mapped read/write in the victim space.
         let seen = unsafe { core::ptr::read_volatile(SECRET_VADDR as *const u8) };
         if seen != SECRET_BYTE {
@@ -231,7 +239,7 @@ mod kernel {
         ATTACKER_ACTIVE.store(true, Ordering::SeqCst);
         // SAFETY: the attacker also identity-maps the low 4 GiB, covering
         // the current `pc` and stack.
-        unsafe { attacker.switch() };
+        unsafe { attacker.activate() };
 
         // The next read MUST fault into `on_fault`. If it returns, the
         // attacker reached the victim-only frame — a broken kernel.

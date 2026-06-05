@@ -44,17 +44,21 @@
 //! never-run task's first frame ([`ContextSwitch::prepare`]) and performs
 //! the port's native task switch ([`ContextSwitch::switch`]) over the
 //! architecture-neutral [`TaskContext`] save area, plus its
-//! [`context::conformance`] vertical. It also hosts
+//! [`context::conformance`] vertical — and the **MMU/page-table** slice
+//! (`AGENTS.md` §17.2): the [`AddressSpace`] trait that installs a 4 KiB
+//! mapping ([`AddressSpace::map_page`]), reports the root-table physical
+//! address ([`AddressSpace::root_phys`]), and activates the translation
+//! regime ([`AddressSpace::activate`]) over the neutral [`PageFlags`]
+//! permission set, plus its [`mmu::conformance`] vertical. It also hosts
 //! the **§17.2 conformance vertical** ([`conformance`]): the harness
 //! every port runs over its real HAL handles so parity is *enforced*
 //! rather than asserted by inspection (`plans/WIRING.md`). The remaining
-//! HAL surface enumerated by
-//! `AGENTS.md` §17.2 (MMU/page-table primitives and TLB shootdown) is
-//! migrated
-//! here as the
-//! §17 burn-down advances; see `PLAN.md`. Until a primitive lives here
-//! it stays in its current owning crate, and the move is tracked, not
-//! silently duplicated (`AGENTS.md` §2.2).
+//! HAL surface enumerated by `AGENTS.md` §17.2 — per-page and cross-CPU
+//! TLB shootdown (the cross-CPU half depends on the aarch64 IPI from
+//! Stage W6) and SMP secondary-core bring-up — is migrated here as the
+//! §17 burn-down advances; see `PLAN.md` / `plans/WIRING.md`. Until a
+//! primitive lives here it stays in its current owning crate, and the
+//! move is tracked, not silently duplicated (`AGENTS.md` §2.2).
 //!
 //! # Why `no_std` and dependency-light
 //!
@@ -75,6 +79,7 @@ pub mod conformance;
 pub mod context;
 pub mod irq;
 pub mod memtag;
+pub mod mmu;
 pub mod percpu;
 pub mod platform;
 pub mod sidechannel;
@@ -106,6 +111,8 @@ pub use timer::{conformance as timer_conformance, TickFn, Timer};
 pub use context::{
     conformance as context_conformance, ContextSwitch, PrepareError, TaskContext, TaskEntry,
 };
+
+pub use mmu::{conformance as mmu_conformance, AddressSpace, MapError, PageFlags};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

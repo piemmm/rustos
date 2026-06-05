@@ -28,6 +28,11 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The Arch HAL MMU surface (`AGENTS.md` §17.2): the victim/attacker
+# stage-1 spaces are driven through `rustos_arch_api::mmu::AddressSpace`
+# (`map_page` / `activate`) so isolation is proven *through the HAL*
+# (`plans/WIRING.md` W5b).
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

@@ -28,6 +28,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+
 /// Size of a single x86_64 page-table page.
 pub const PAGE_SIZE: usize = 4096;
 
@@ -164,6 +166,10 @@ impl PageTablePool {
 pub struct AddressSpace {
     pml4_phys: u64,
     pml4: &'static mut [u64; ENTRIES_PER_TABLE],
+    /// The pool the page-table walk allocates intermediate tables from,
+    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
+    /// install mappings without the caller re-supplying it.
+    pool: &'static PageTablePool,
 }
 
 impl AddressSpace {
@@ -206,7 +212,60 @@ impl AddressSpace {
             *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
         }
 
-        Some(Self { pml4_phys, pml4 })
+        Some(Self {
+            pml4_phys,
+            pml4,
+            pool,
+        })
+    }
+
+    /// `true` if `vaddr` already resolves to a live leaf (4 KiB page or
+    /// 2 MiB huge page) in this hierarchy.
+    ///
+    /// A read-only four-level walk used by the
+    /// [`rustos_arch_api::mmu::AddressSpace`] HAL impl to report
+    /// [`rustos_arch_api::mmu::MapError::AlreadyMapped`] rather than
+    /// silently clobber an existing mapping (`map_4k_inner` overwrites a
+    /// PT leaf without checking, so the HAL layer must guard it here). It
+    /// recovers intermediate tables from the low physical address each
+    /// entry holds, exactly as [`ensure_child`] does, so it is only valid
+    /// on the bare-metal target where the low identity map is live.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    fn leaf_present(&self, vaddr: u64) -> bool {
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        let e4 = self.pml4[i4];
+        if e4 & flags::PRESENT == 0 {
+            return false;
+        }
+        // SAFETY: a present entry holds a low physical table address
+        // `ensure_child` wrote; the low 32 MiB is identity-mapped, so the
+        // address dereferences directly on the bare-metal target.
+        let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e3 = pdpt[i3];
+        if e3 & flags::PRESENT == 0 {
+            return false;
+        }
+        if e3 & flags::HUGE != 0 {
+            return true;
+        }
+        // SAFETY: as above — a present non-huge PDPT entry's address is a
+        // live identity-mapped PD.
+        let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e2 = pd[i2];
+        if e2 & flags::PRESENT == 0 {
+            return false;
+        }
+        if e2 & flags::HUGE != 0 {
+            return true;
+        }
+        // SAFETY: as above — a present non-huge PD entry's address is a
+        // live identity-mapped PT.
+        let pt = unsafe { &*((e2 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+        pt[i1] & flags::PRESENT != 0
     }
 
     /// Map `paddr` at `vaddr` with a 4 KiB page granularity.
@@ -355,6 +414,64 @@ impl AddressSpace {
     #[must_use]
     pub fn pml4_phys(&self) -> u64 {
         self.pml4_phys
+    }
+}
+
+impl MmuAddressSpace for AddressSpace {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        if flags.is_write_exec() {
+            return Err(MapError::InvalidFlags);
+        }
+        // The four-level walk is only valid on the bare-metal target (it
+        // recovers tables through the low identity map). `map_page` is
+        // therefore proven by the `memory_isolation` QEMU vertical, not a
+        // host conformance test; on the host it is unreachable.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            if self.leaf_present(vaddr) {
+                return Err(MapError::AlreadyMapped);
+            }
+            let pool = self.pool;
+            let writable = flags.contains(PageFlags::WRITE);
+            let result = if flags.contains(PageFlags::USER) {
+                let executable = flags.contains(PageFlags::EXEC);
+                self.map_4k_user_wx(pool, vaddr, paddr, writable, executable)
+            } else {
+                self.map_4k(pool, vaddr, paddr, writable)
+            };
+            // Alignment and prior-mapping are ruled out, so the only
+            // remaining failure is page-table-pool exhaustion.
+            result.ok_or(MapError::PoolExhausted)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            // `self.pool` is read only by the bare-metal walk above; touch
+            // it here so the host build does not flag the field unused.
+            let _ = (vaddr, paddr, flags, self.pool);
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
+    }
+
+    fn root_phys(&self) -> u64 {
+        self.pml4_phys
+    }
+
+    unsafe fn activate(&self) {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // SAFETY: forwards to the gated `CR3` load primitive; the
+            // caller upholds the `MmuAddressSpace::activate` contract (this
+            // space maps the current `rip`/`rsp`), which is exactly
+            // `AddressSpace::switch`'s contract.
+            unsafe { self.switch() };
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            unreachable!("CR3 activation is only meaningful on the x86_64 bare-metal target")
+        }
     }
 }
 

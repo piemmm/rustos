@@ -203,3 +203,44 @@ fn map_gigapage_rejects_misaligned_and_occupied() {
     // Root slot 0 is occupied by the identity gigapage; refuse to clobber it.
     assert!(space.map_gigapage(0, 0x8000_0000, flags::READ).is_none());
 }
+
+#[test]
+fn passes_mmu_conformance() {
+    use rustos_arch_api::mmu;
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+    // A VA in gigapage slot 100 — outside the single identity gigapage, so
+    // the conformance map allocates fresh L1/L0 tables and never shatters a
+    // leaf. The phys frame is in the kernel's RAM gigabyte.
+    let va = 100u64 << 30;
+    let pa = 0x8200_0000;
+    mmu::conformance::run_all(&mut space, va, pa);
+    // And over the object-safe erasure the kernel registry stores.
+    let mut dynamic = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    let erased: &mut dyn mmu::AddressSpace = &mut dynamic;
+    mmu::conformance::run_all(erased, va, pa);
+}
+
+#[test]
+fn map_page_translates_neutral_flags_and_walks() {
+    use rustos_arch_api::mmu::{self, PageFlags};
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
+    let vaddr = (100u64 << 30) | (7u64 << 21) | (9u64 << 12);
+    let paddr = 0x8200_0000;
+    mmu::AddressSpace::map_page(&mut space, vaddr, paddr, PageFlags::READ | PageFlags::WRITE)
+        .expect("neutral map");
+    assert_eq!(translate(&space, vaddr), Some(paddr));
+    // The installed leaf carries exactly the translated R|W bits (plus the
+    // always-set VALID/ACCESSED/DIRTY), not EXEC or USER.
+    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
+    let l1 =
+        unsafe { &*(phys_from_pte(root[vpn_index(vaddr, 2)]) as *const [u64; ENTRIES_PER_TABLE]) };
+    let l0 =
+        unsafe { &*(phys_from_pte(l1[vpn_index(vaddr, 1)]) as *const [u64; ENTRIES_PER_TABLE]) };
+    let leaf = l0[vpn_index(vaddr, 0)];
+    assert_ne!(leaf & flags::READ, 0);
+    assert_ne!(leaf & flags::WRITE, 0);
+    assert_eq!(leaf & flags::EXEC, 0);
+    assert_eq!(leaf & flags::USER, 0);
+}

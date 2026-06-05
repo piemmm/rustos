@@ -458,3 +458,23 @@ the layout equality); the switch invoke lives in one place (§2.2). The
 (`passes_context_switch_conformance`); the switch itself is proven on the
 bare-metal target by `sched_drive_qemu_riscv64`, so it carries no host
 check (§2.1 — no fake primitive).
+
+## MMU / page-table (`AddressSpace`)
+
+The riscv64 port implements the Arch HAL `AddressSpace` slice
+(`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W5b-1) on its
+`kernel/arch/riscv64::paging::AddressSpace` (the three-level Sv39 hierarchy
+selected by `satp`). `AddressSpace::map_page` translates the neutral
+`PageFlags` into Sv39 R/W/X/U permission bits (`sv39_flags`; `DEVICE` has
+no Sv39 page-table attribute — memory type is PMA-driven — so it maps to
+the same R/W/X), then walks the table (reusing `map_4k`, one walk, §2.2)
+and fails closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/
+`InvalidFlags`). `root_phys` returns the root table's address and
+`activate` forwards to the gated `switch` (the `satp` write +
+`sfence.vma`). Because the walk recovers intermediate tables through the
+identity map (phys == virt), the whole `map_page` path is host-runnable:
+`passes_mmu_conformance` drives `mmu::conformance::run_all` over a real
+`AddressSpace`, and a companion host test asserts the flag translation and
+the resulting leaf bits. The `satp` write itself is proven by
+`memory_isolation_qemu_riscv64`, which now builds its victim/attacker
+spaces through this trait.

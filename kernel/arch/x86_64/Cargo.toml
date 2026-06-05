@@ -42,18 +42,21 @@ path = "src/lib.rs"
 # kernel/sec, kernel/ipc remain forbidden as arch-crate deps.
 [features]
 # `sched-arch` opts the crate into compiling the `kernel_arch` module
-# (the [`X86_64Arch`] `SchedulerArch` impl) and pulls the Arch HAL
-# `rustos-arch-api` into the dependency graph. It stays optional so a
-# freestanding consumer that does not need the arch handle (e.g.
-# `tests/integration/memory_isolation`, which exercises page-table
-# isolation, not scheduling) compiles neither the module nor the dep.
-# AGENTS.md §2.3 (no bloat) — pay only for what you use.
+# (the [`X86_64Arch`] `SchedulerArch` impl) and the other scheduler-,
+# side-channel-, timer-, per-CPU-, platform-, and user-entry HAL impls.
+# The Arch HAL `rustos-arch-api` itself is **not** optional: the
+# always-compiled `paging` module implements the §17.2 MMU/page-table
+# HAL slice ([`rustos_arch_api::mmu::AddressSpace`]) and so every build
+# of this crate names the HAL. The crate is `no_std` and
+# dependency-free, so the dep pulls no `#[global_allocator]` burden
+# (`AGENTS.md` §17.4); `sched-arch` therefore only gates which HAL
+# *modules* compile, not the dependency (`AGENTS.md` §2.3).
 default = []
-sched-arch = ["dep:rustos-arch-api"]
+sched-arch = []
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../api", version = "=0.0.0", optional = true }
+rustos-arch-api = { path = "../api", version = "=0.0.0" }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical

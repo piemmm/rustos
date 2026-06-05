@@ -70,10 +70,12 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 `SchedulerArch` (per-CPU id, ticks, IPI, `core_class`),
 `SideChannelMitigation` (§19.1), `MemoryTagging` (§19.10),
 `EnterUser`/`UserEntry` (§17.2), `PlatformDiscovery` (W1), `PerCpu`
-(W2), `IrqController` + `InterruptEntry` (W3), `Timer` (W4), and
-`ContextSwitch` (W5a). The remaining slices (MMU/paging, TLB shootdown,
-SMP bring-up) are still ad-hoc inside each port — the §17.2 surface
-`PLAN.md` flags as "migrated here as the §17 burn-down advances".
+(W2), `IrqController` + `InterruptEntry` (W3), `Timer` (W4),
+`ContextSwitch` (W5a), and the MMU `AddressSpace` page-table trait
+(W5b-1). The remaining slices (per-process/allocator-backed paging +
+TLB shootdown in `kernel/mem`, SMP bring-up) are still ad-hoc inside each
+port — the §17.2 surface `PLAN.md` flags as "migrated here as the §17
+burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
 
@@ -81,7 +83,7 @@ SMP bring-up) are still ad-hoc inside each port — the §17.2 surface
 | --------------------------------- | :----: | :-----: | :-----: | :----: |
 | Boot stub + early console         |   ✓    |    ✓    |    ✓    |   ✓    |
 | `SchedulerArch` impl              |   ✓    |    ✓    |    ✓    |   ✓    |
-| Paging / MMU primitives           |   ✓    |    ✓    |    ✓    |  n/a   |
+| Paging / MMU primitives (`AddressSpace` HAL) | ✓ | ✓ | ✓ | n/a |
 | Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    |   ~    |
 | Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
@@ -333,13 +335,53 @@ only under QEMU (the scheduler-drive verticals). Docs:
 `docs/src/architecture/modularity.md`,
 `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
 
-#### Stage W5b — MMU/paging + TLB-shootdown HAL — next
+#### Stage W5b-1 — MMU/page-table HAL trait + per-port migration — ✅ landed
 
-- Define `AddressSpace`/`Mmu`, `TlbShootdown`; migrate each port's
-  `paging` behind them and wire `AddressSpace` into `kernel/mem`. Add
-  cross-CPU TLB shootdown (depends on W6 IPI on aarch64).
-- **Deliverable:** `memory_isolation_qemu_*` verticals green through the
-  HAL on every applicable port; `kernel/mem` names only the HAL trait.
+**Landed:** `kernel/arch/api::mmu` defines the neutral `PageFlags`
+permission set (`READ`/`WRITE`/`EXEC`/`USER`/`DEVICE`, W^X-aware), the
+fail-closed `MapError` (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/
+`InvalidFlags`), the object-safe `AddressSpace` trait (`map_page` /
+`root_phys` / `unsafe activate`), and a per-port-driven `mmu::conformance`
+vertical (a port-constructed space + a port-specific mappable address
+pair: non-null root, misaligned rejected, good map accepted, double-map
+refused) with a faithful + lenient in-test double in
+`kernel/arch/api/tests/conformance.rs`. Each port implements the trait on
+its existing `paging::AddressSpace` — a retained `pool` field, a neutral
+`PageFlags`→native leaf translation (Sv39 R/W/X/U; aarch64 W^X-aware
+EL0/kernel/device leaf attrs; x86_64 user/kernel + W^X), a read-only
+`leaf_present` walk for the `AlreadyMapped` guard, and `activate`
+forwarding to the gated `switch` — reusing the existing walk (one walk,
+§2.2) so the inherent `map_4k*` methods (used by the spawn/c-program/
+abi-sys verticals) keep their signatures. riscv64 + aarch64 run
+`passes_mmu_conformance` on the host (their walk recovers tables through
+the identity map); x86_64's walk reaches tables through the higher-half
+window (phys ≠ virt), so it is not host-runnable and its `map_page`/
+`activate` are proven by the `memory_isolation` QEMU vertical instead
+(the honest asymmetry the bare-metal `switch` already has). All three
+`memory_isolation_qemu_*` verticals now build their victim/attacker
+spaces through `AddressSpace::map_page` + `activate` (proven *through the
+HAL*). wasm32 is an honest **n/a** (no page table; sandboxed linear
+memory). `rustos-arch-api` became a non-optional x86_64 dep (the
+always-compiled `paging` slice names it; `sched-arch` now only gates which
+HAL *modules* compile). Docs:
+`docs/src/architecture/modularity.md` (MMU/page-table),
+`docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
+
+#### Stage W5b-2 — `kernel/mem` on the HAL + TLB shootdown — next
+
+- Wire `kernel/mem`'s allocator-backed per-process `AddressSpace<P>` onto
+  the HAL `AddressSpace` trait (replacing `kernel/mem`'s local
+  `PageTableOps`), so `kernel/mem` names only the HAL trait. This is the
+  Stage-3a allocator-backed page-table work the ports' `paging` module
+  docs flag — the per-port table must take frames from
+  `kernel/mem`'s frame allocator, not a static `PageTablePool`.
+- Add the `TlbShootdown` HAL slice: a per-page local invalidation
+  (`invlpg` / `tlbi vae1is` / `sfence.vma vaddr`) consumed by the
+  per-process `flush` path, plus cross-CPU shootdown (which depends on
+  the aarch64 directed IPI from Stage W6).
+- **Deliverable:** `kernel/mem` names only the HAL trait; the per-process
+  map/unmap/flush path is exercised; the `memory_isolation_qemu_*`
+  verticals stay green.
 
 ### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI ⭐
 

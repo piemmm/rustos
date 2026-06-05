@@ -30,6 +30,11 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+# The Arch HAL MMU surface (`AGENTS.md` §17.2): the test drives the
+# victim/attacker page tables through `rustos_arch_api::mmu::AddressSpace`
+# (`map_page` / `activate`) so the isolation property is proven *through
+# the HAL*, not the port's inherent methods (`plans/WIRING.md` W5b).
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 
 [build-dependencies]
 rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

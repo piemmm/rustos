@@ -49,6 +49,8 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(itest_x86_64)]
+use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
+#[cfg(itest_x86_64)]
 use rustos_arch_x86_64::{idt, paging, qemu_exit, serial};
 
 /// Virtual address only the *victim* address space maps. Chosen well
@@ -121,11 +123,19 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (victim)");
         qemu_exit::exit_failure();
     };
+    // Install the secret mapping through the Arch HAL MMU surface
+    // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path the
+    // architecture-neutral kernel uses, rather than the port's inherent
+    // `map_4k` (`plans/WIRING.md` W5b).
     if victim
-        .map_4k(&PAGE_TABLE_POOL, SECRET_VADDR, secret_paddr, true)
-        .is_none()
+        .map_page(
+            SECRET_VADDR,
+            secret_paddr,
+            PageFlags::READ | PageFlags::WRITE,
+        )
+        .is_err()
     {
-        let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (mapping)");
+        let _ = writeln!(com1, "[memory_isolation] FAIL: secret mapping refused");
         qemu_exit::exit_failure();
     }
     let victim_pml4 = victim.pml4_phys();
@@ -148,7 +158,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // SAFETY: both address spaces map the low 32 MiB (boot stack / low
     // physical) and the higher-half kernel window (RIP and the
     // higher-half-linked code/data), so switching to the victim is sound.
-    unsafe { victim.switch() };
+    unsafe { victim.activate() };
     // SAFETY: SECRET_VADDR is mapped read/write in the victim space.
     let v_byte = unsafe { core::ptr::read_volatile(SECRET_VADDR as *const u8) };
     if v_byte != SECRET_BYTE {
@@ -165,7 +175,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // SAFETY: the attacker space maps the same low 32 MiB and higher-half
     // kernel window, so RIP/RSP stay mapped across the switch; only
     // `SECRET_VADDR` is absent (the property under test).
-    unsafe { attacker.switch() };
+    unsafe { attacker.activate() };
     let _ = writeln!(
         com1,
         "[memory_isolation] attacker about to read 0x{SECRET_VADDR:x} (expect #PF)"

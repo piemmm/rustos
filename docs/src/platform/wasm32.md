@@ -112,6 +112,21 @@ swap. Synthesising a fake switch the host cannot perform would be a fake
 primitive (`AGENTS.md` §2.1), so the slice is honestly absent here, the
 same shape as the missing paging/user-entry primitives.
 
+### MMU / page-table (`AddressSpace`) — n/a
+
+The Arch HAL `AddressSpace` slice (`AGENTS.md` §17.2 / `plans/WIRING.md`
+Stage W5b-1) is **not applicable** to wasm32 and the port implements no
+`AddressSpace`: there is no page table to program. A WebAssembly module's
+address space is a single linear memory the host (the browser engine)
+owns and bounds-checks; the kernel has no `CR3`/`satp`/`TTBR0_EL1` to
+load and no leaf entries to encode, and isolation between "CPUs" is the
+separate Web Worker module instances, not page-table divergence. Mapping
+a virtual page to a physical frame has no meaning under the sandbox, so
+synthesising a `map_page`/`activate` the host cannot perform would be a
+fake primitive (`AGENTS.md` §2.1). The slice is honestly absent, the same
+shape as the missing context-switch/user-entry primitives, which is why
+wasm32 has no `memory_isolation` QEMU vertical.
+
 ### Hand-rolled host bindings
 
 The host imports in `bindings` are a plain `extern "C"` block resolved

@@ -1390,6 +1390,7 @@ dependencies = [
 name = "rustos-test-memory-isolation"
 version = "0.0.0"
 dependencies = [
+ "rustos-arch-api",
  "rustos-arch-x86_64",
  "rustos-itest-harness",
 ]
@@ -1399,6 +1400,7 @@ name = "rustos-test-memory-isolation-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
+ "rustos-arch-api",
  "rustos-itest-harness",
  "rustos-log",
 ]
@@ -1407,6 +1409,7 @@ dependencies = [
 name = "rustos-test-memory-isolation-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
+ "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-itest-harness",
  "rustos-log",
