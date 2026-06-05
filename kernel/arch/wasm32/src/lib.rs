@@ -81,6 +81,11 @@ pub mod preempt;
 /// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
 /// §19.1).
 pub mod sidechannel;
+/// wasm32 multi-worker (SMP) bring-up: spawn a Web Worker as a secondary
+/// logical CPU and recover the running context's id (`AGENTS.md` §17.2 /
+/// §4). Kept port-side like the riscv64 / aarch64 ports, not behind an
+/// `Smp` Arch HAL trait (`plans/WIRING.md` Stage W6 / W8).
+pub mod smp;
 pub mod syscall_entry;
 /// wasm32 implementation of the Arch HAL timer-programming surface
 /// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-

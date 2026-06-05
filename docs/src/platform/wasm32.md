@@ -38,6 +38,7 @@ wasm target.
 | `kernel_arch`   | `WasmArch` — the `SchedulerArch` impl + `performance.now()` clock. |
 | `percpu_hal`    | `PerCpuStorage` — the `PerCpu` per-CPU storage slice (worker slot). |
 | `preempt`       | `requestAnimationFrame` cooperative tick + `MessageChannel` IPI.   |
+| `smp`           | Multi-worker bring-up: spawn a Web Worker as a secondary CPU.      |
 | `timer_hal`     | `TimerHal` — the `Timer` timer-programming slice (tick dispatch).  |
 | `isolation`     | WASM-linear-memory isolation model (the "MMU" analogue).          |
 | `syscall_entry` | Host-call argument marshalling + dispatch callback.               |
@@ -57,6 +58,33 @@ tick (`kernel/sched::Scheduler::on_timer_tick`) and requests the next
 frame. A directed reschedule to another worker arrives over a
 `MessageChannel` post (`WasmArch::send_ipi`) and re-enters the exported
 `rustos_arch_wasm32_on_message`.
+
+The tick and IPI callbacks drive a *live* `kernel/sched` scheduler — the
+same `rustos-kernel-sched-mlfq::Scheduler` the bare-metal ports run
+(`plans/WIRING.md` Stage W8). On the main thread the
+`requestAnimationFrame` loop drives `Scheduler::on_timer_tick` and
+dispatches a ready task with `Scheduler::step` each frame; a delivered
+cross-context IPI does the same on the receiving worker. A dedicated Web
+Worker has no `requestAnimationFrame`, so a worker drives its cooperative
+tick from `setTimeout` instead — the kernel side (`request_frame`) is
+identical.
+
+### Multi-worker SMP (`smp`)
+
+The boot context is the main thread, logical CPU 0. The `smp` module is
+the wasm32 analogue of the bare-metal ports' secondary-core bring-up
+(`kernel/arch/riscv64::smp` over SBI HSM, `kernel/arch/aarch64::smp` over
+PSCI `CPU_ON`). `smp::start_worker(n)` range-checks `n` against the
+spawnable secondary range (`1..MAX_WORKERS`) and asks the host to spawn a
+real Web Worker that instantiates this same module as logical CPU `n`,
+with its own linear memory; `smp::current_worker` recovers the running
+context's logical id. Like riscv64 and aarch64, SMP is kept **port-side**
+here, not behind an `Smp` Arch HAL trait — an `Smp` HAL slice remains a
+future §17.2 decision shared by all three ports. An out-of-range index or
+a host refusal fails closed with a `StartWorkerError` (`AGENTS.md` §2.9).
+Because each worker is a separate module instance with its own scheduler
+and heap, an inter-context IPI is the only path between them; the main
+thread is the routing hub for worker→worker posts.
 
 ### Timer programming (`Timer`)
 
@@ -83,6 +111,14 @@ of that boundary: a `MemoryRegion` names one worker's span, and an
 `AddressSpace` rejects any access outside its region with a `WasmFault`
 (the wasm32 equivalent of a page fault). This is the same isolation
 guarantee the bare-metal ports get from hardware page tables.
+
+The browser vertical's isolation check is **per worker** and tied to real
+memory: `isolation::live_memory_region` reads this instance's actual
+linear-memory size from the engine (`memory.size` × the 64 KiB WASM
+page), and every context — the main thread and each spawned worker —
+builds an `AddressSpace` over its own memory, confirms a live in-bounds
+address is owned, and confirms an attacker confined to a disjoint region
+(standing in for another worker's separate linear memory) faults on it.
 
 ### Per-CPU storage (worker slot)
 
@@ -140,30 +176,44 @@ is tiny, fixed, and audited in one place.
 `kernel/arch/wasm32/web/rustos.js` is the JavaScript counterpart of the
 bare-metal ports' firmware hand-off. It instantiates a RustOS wasm32
 module, supplies the `env` host imports (`performance.now()`, the worker
-index, `requestAnimationFrame`, the `MessageChannel` post, and a
-`console.log` writer that decodes UTF-8 from the module's linear
-memory), and calls the exported `rustos_arch_wasm32_main` once. It is
-hand-written and dependency-free, mirroring the no-`wasm-bindgen` policy
-of the Rust side.
+index, `requestAnimationFrame`, the `MessageChannel` post, the Web Worker
+spawn, and a `console.log` writer that decodes UTF-8 from the module's
+linear memory), and calls the exported `rustos_arch_wasm32_main` once. It
+is hand-written and dependency-free, mirroring the no-`wasm-bindgen`
+policy of the Rust side.
+
+The loader also owns the multi-worker SMP plumbing. `boot` runs the
+module on the main thread as CPU 0; when the kernel calls
+`rustos_host_start_worker(n)`, the main thread spawns a real module Web
+Worker (`kernel/arch/wasm32/web/worker.js`, which re-uses the shared
+`instantiate`/`runWorker` logic) joined to the main thread by a
+`MessageChannel`. An inter-context IPI (`rustos_host_post_ipi`) is a post
+on that channel that re-enters the target's `rustos_arch_wasm32_on_message`;
+the main thread routes worker→worker posts.
 
 ## Browser-headless harness
 
-The Stage-3 per-sub-stage deliverable — "boots to `init`",
-"memory-isolation test passes", "timer interrupt drives the scheduler" —
-is exercised by a browser vertical, the wasm32 analogue of the bare-metal
-QEMU verticals:
+The deliverables — "boots to `init`", "per-worker memory isolation",
+"a live `kernel/sched` scheduler driven by the frame tick", and (Stage
+W8) "multi-worker SMP + cross-context IPI" — are exercised by a browser
+vertical, the wasm32 analogue of the bare-metal QEMU verticals:
 
 - `tests/integration/kernel_arch_boot_wasm32` is the kernel `cdylib`. Its
-  `kernel_main` constructs the `WasmArch` handle (`BOOT_OK`), runs the
-  isolation check (`ISOLATION_OK`), and arms the cooperative scheduler;
-  the tick callback prints `TICK` each frame.
+  `kernel_main` runs the per-worker isolation check (`ISOLATION_OK`) in
+  every context and branches on the logical CPU id. CPU 0 prints
+  `BOOT_OK`, builds a live `Scheduler<WasmArch>`, arms the
+  `requestAnimationFrame` loop that drives it (`TICK` per frame), spawns
+  a real Web Worker as CPU 1, and sends it a directed IPI. CPU 1 prints
+  `WORKER_OK`, builds its own live scheduler, and prints `IPI_RECV` when
+  the cross-context `MessageChannel` IPI drives it.
 - `tests/integration/kernel_arch_boot_wasm32/web/harness.mjs` is the
-  puppeteer runner. It serves the module and the host loader over a
-  loopback HTTP server, boots them in headless Chrome, scrapes the
-  console markers, and reports PASS once it has seen `BOOT_OK`,
-  `ISOLATION_OK`, and at least twenty `TICK`s. A kernel panic traps the
-  instance and surfaces as a page error, failing the run loudly with no
-  retries (`AGENTS.md` §7).
+  puppeteer runner. It serves the module, the host loader, and the worker
+  bootstrap over a loopback HTTP server, boots them in headless Chrome,
+  scrapes the console markers (workers post theirs to the main thread for
+  the page console), and reports PASS once it has seen `BOOT_OK`,
+  `ISOLATION_OK`, `WORKER_OK`, `IPI_RECV`, and at least twenty `TICK`s. A
+  kernel panic traps the instance and surfaces as a page error, failing
+  the run loudly with no retries (`AGENTS.md` §7).
 
 ## Build and run
 

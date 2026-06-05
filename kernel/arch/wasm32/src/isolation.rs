@@ -138,6 +138,26 @@ impl AddressSpace {
     }
 }
 
+/// The [`MemoryRegion`] covering this worker instance's *actual* WASM
+/// linear memory, `[0, memory_size_in_bytes)`.
+///
+/// Reads the live linear-memory size from the engine
+/// (`memory.size` × the 64 KiB WASM page) so the isolation check is tied
+/// to the real bytes this instance owns, not a synthetic span: an
+/// `AddressSpace` built from it accepts every byte the engine would let
+/// this instance load and rejects every address beyond it — including any
+/// address that belongs to another worker's separate linear memory. Each
+/// Web Worker runs this against its own memory, so the check is genuinely
+/// *per worker* (`AGENTS.md` §4 — no ambient cross-context reach).
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn live_memory_region() -> MemoryRegion {
+    /// WebAssembly fixes the linear-memory page at 64 KiB.
+    const WASM_PAGE_BYTES: u64 = 64 * 1024;
+    let pages = core::arch::wasm32::memory_size(0) as u64;
+    MemoryRegion::new(0, pages.saturating_mul(WASM_PAGE_BYTES))
+}
+
 #[cfg(test)]
 #[path = "isolation_tests.rs"]
 mod tests;

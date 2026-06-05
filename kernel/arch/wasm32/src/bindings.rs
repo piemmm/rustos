@@ -38,6 +38,14 @@ extern "C" {
     /// index is dropped by the host.
     fn rustos_host_post_ipi(worker: u32);
 
+    /// Ask the host to spawn a new Web Worker as logical CPU `worker`,
+    /// instantiating this same module in it. Returns `1` if the host
+    /// started the worker, `0` if it refused (an out-of-range index, a
+    /// duplicate, or a context that cannot spawn workers). The wasm32
+    /// analogue of the bare-metal ports' secondary-core bring-up (PSCI
+    /// `CPU_ON` / SBI HSM `hart_start`).
+    fn rustos_host_start_worker(worker: u32) -> u32;
+
     /// Ask the host to schedule one `requestAnimationFrame` callback,
     /// which re-enters [`crate::preempt::on_animation_frame`]. Idempotent
     /// within a frame on the host side.
@@ -103,6 +111,17 @@ pub fn host_logical_processors() -> u32 {
     // SAFETY: a pure host import taking no arguments; the glue returns
     // `navigator.hardwareConcurrency` clamped to at least 1.
     unsafe { rustos_host_logical_processors() }
+}
+
+/// Ask the host to spawn a new Web Worker as logical CPU `worker`.
+///
+/// Returns `true` if the host started the worker, `false` if it refused.
+#[must_use]
+pub fn host_start_worker(worker: u32) -> bool {
+    // SAFETY: `rustos_host_start_worker` takes a plain integer and has no
+    // memory side effects in this module; the host validates the index
+    // and returns a non-zero status only when it started the worker.
+    unsafe { rustos_host_start_worker(worker) != 0 }
 }
 
 /// Whether the host exposes a display surface.

@@ -87,17 +87,17 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | Boot stub + early console         |   ✓    |    ✓    |    ✓    |   ✓    |
 | `SchedulerArch` impl              |   ✓    |    ✓    |    ✓    |   ✓    |
 | Paging / MMU primitives (`AddressSpace` HAL) | ✓ | ✓ | ✓ | n/a |
-| Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    |   ~    |
+| Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    | ✓ browser |
 | Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
 | Interrupt controller + entry/exit |   ✓    |    ✓    |    ✓    |  n/a   |
-| **SMP secondary-CPU bring-up**    |   ✓    |    ✓    |    ✓    | **✗**  |
-| **IPI delivery (real cores)**     |   ✓    |    ✓    |    ✓    | **✗**  |
+| **SMP secondary-CPU bring-up**    |   ✓    |    ✓    |    ✓    | ✓ worker |
+| **IPI delivery (real cores)**     |   ✓    |    ✓    |    ✓    | ✓ MsgChan |
 | **Early-boot platform discovery** | ✓ ACPI | **✗** FDT| ✓ FDT  |  ~ JS  |
 | Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
-| Live `kernel/sched` task switch   |   ✓    |    ✓    |    ✓    | **✗**  |
+| Live `kernel/sched` task switch   |   ✓    |    ✓    |    ✓    | ✓ coop |
 | Heterogeneous `core_class`        | ✓ hybrid| **✗**  |  n/a   |  n/a   |
 | Side-channel profile (§19.1)      |   ✓    |    ~    |    ~    |   ~    |
 | Memory-tagging profile (§19.10)   |   ✓    | ~ MTE pend | ✗ unsup | ✗ unsup |
@@ -110,8 +110,8 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `kernel_arch_boot`      |   ✓    |    ✓    |    ✓    |   ✓    |
 | `memory_isolation`      |   ✓    |    ✓    |    ✓    |   —    |
 | `timer_preempt`         |   ✓    |    ✓    |    ✓    |   —    |
-| **`ipi_smp`**           | ✓(stress)|    ✓    |    ✓    |  **✗** |
-| **`sched_drive`** (live)| ✓(stress)|    ✓    |    ✓    |  **✗** |
+| **`ipi_smp`**           | ✓(stress)|    ✓    |    ✓    | ✓(browser) |
+| **`sched_drive`** (live)| ✓(stress)|    ✓    |    ✓    | ✓(browser) |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
@@ -127,8 +127,10 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
   storage HAL trait, missing input vertical.
-- **wasm32:** no multi-worker SMP, no user entry (sandbox-by-design),
-  cooperative tick not wired into the live scheduler, thin verticals.
+- **wasm32:** multi-worker SMP + real `MessageChannel` IPI and the
+  cooperative tick wired into the live `kernel/sched` scheduler landed
+  (W8, browser vertical); no user entry (sandbox-by-design), and the
+  remaining verticals (display) are thin.
 - **all ports:** the §17.2 Arch HAL conformance suite
   (`kernel/arch/api/tests/`) does not exist yet, so parity is asserted
   by inspection rather than enforced.
@@ -515,15 +517,47 @@ W6 SMP/IPI primitives are reused.
 - **Deliverable met.** Docs: `docs/src/platform/aarch64.md`, `PLAN.md`,
   this file.
 
-### Stage W8 — wasm32 multi-worker SMP + live cooperative scheduler
+### Stage W8 — wasm32 multi-worker SMP + live cooperative scheduler — ✅ landed
 
-- Spawn real Web Workers, route `MessageChannel` IPIs between live
-  instances (implementing `Smp` for wasm32), and wire the
-  `requestAnimationFrame` tick into the live `kernel/sched` scheduler.
-- Strengthen the isolation vertical into a real per-worker
-  linear-memory isolation check.
-- **Deliverable:** wasm32 runs multi-worker; `docs/src/platform/wasm32.md`
-  updated; the browser harness exercises ≥ 2 workers.
+**Landed:** wasm32 now boots multi-worker, routes real `MessageChannel`
+IPIs between live module instances, and drives the *live* `kernel/sched`
+scheduler from both the `requestAnimationFrame` tick and the IPI — the
+wasm32 analogue of the W7 bare-metal work. SMP is kept **port-side** (no
+new HAL trait), mirroring the riscv64/aarch64 `smp` modules; an `Smp` HAL
+slice remains a future §17.2 decision for all three.
+
+- **`kernel/arch/wasm32::smp`** (new, +host tests): the wasm32 analogue
+  of riscv64's SBI HSM / aarch64's PSCI bring-up. `start_worker(n)`
+  range-checks `1..MAX_WORKERS`, fails closed (`StartWorkerError`), and
+  asks the host (`rustos_host_start_worker`, new `bindings` import) to
+  spawn a real Web Worker that instantiates the same module as logical
+  CPU `n`; `current_worker` recovers the running context's id. The host
+  spawn is wasm-gated with a counter substitute so the range/decode logic
+  is unit-tested under `cargo test`.
+- **Host loader (`web/rustos.js`) + `web/worker.js`** (new): the loader
+  gained shared `instantiate`/`runWorker`, a main-thread `boot` that
+  spawns module Web Workers on `rustos_host_start_worker`, and a
+  `MessageChannel` IPI hub (`rustos_host_post_ipi` → the target's
+  `rustos_arch_wasm32_on_message`; worker→worker routed via the main
+  thread). A worker has no `requestAnimationFrame`, so it drives its
+  cooperative tick from `setTimeout` — the kernel `request_frame` is
+  unchanged.
+- **`isolation::live_memory_region`** (new, wasm-gated): the per-worker
+  isolation check is now tied to this instance's *real* linear-memory
+  size (`memory.size` × 64 KiB); every context proves it owns a live
+  in-bounds address and faults an attacker confined to a disjoint region.
+- **`tests/integration/kernel_arch_boot_wasm32`** (rewritten): CPU 0
+  builds a live `Scheduler<WasmArch>`, arms the RAF loop driving it
+  (`TICK`/frame + `step` dispatch), spawns a Web Worker (`WORKER_OK`),
+  and sends it a directed IPI; CPU 1 builds its own live scheduler and
+  prints `IPI_RECV` when the cross-context IPI drives it. The puppeteer
+  harness now serves `/worker.js` and PASSes on
+  `BOOT_OK`+`ISOLATION_OK`+`WORKER_OK`+`IPI_RECV`+≥ 20 `TICK`.
+- **Deliverable met:** `cargo xtask test --wasm` is browser-green with
+  ≥ 2 live workers and a live cooperative scheduler. Docs:
+  `docs/src/platform/wasm32.md`, `PLAN.md`, this file.
+- **Carried forward (still tracked):** cross-CPU TLB shootdown (from
+  W5b-2/W6); the `lib/fdt` runtime parse of the full ARM `virt` tree.
 
 ### Stage W9 — Side-channel + memory-tagging completeness (§19.1 / §19.10)
 

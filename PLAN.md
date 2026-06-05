@@ -700,6 +700,39 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       **Carried forward:** cross-CPU TLB shootdown; the `lib/fdt` runtime
       parse of the full ARM `virt` tree. Docs:
       `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W8 — wasm32 multi-worker SMP + live cooperative
+      scheduler.** Brought wasm32 to the W7 bare-metal level: it now boots
+      multi-worker, routes real `MessageChannel` IPIs between live module
+      instances, and drives the *live* `rustos-kernel-sched-mlfq`
+      `Scheduler` from both the `requestAnimationFrame` tick and the IPI.
+      New `kernel/arch/wasm32::smp` (the wasm32 analogue of riscv64 SBI
+      HSM / aarch64 PSCI bring-up) `start_worker(n)` range-checks
+      `1..MAX_WORKERS`, fails closed (`StartWorkerError`), and asks the
+      host (new `rustos_host_start_worker` binding) to spawn a Web Worker
+      running the same module as logical CPU `n`; `current_worker`
+      recovers the running id. SMP is kept **port-side** (no new HAL
+      trait), mirroring riscv64/aarch64; an `Smp` HAL slice remains a
+      future §17.2 decision. The host loader (`web/rustos.js`) gained
+      shared `instantiate`/`runWorker`, a main-thread `boot` that spawns
+      module Web Workers, and a `MessageChannel` IPI hub
+      (`rustos_host_post_ipi` → the target's `rustos_arch_wasm32_on_message`,
+      worker→worker routed via the main thread); `web/worker.js` is the
+      new worker bootstrap. A worker has no `requestAnimationFrame`, so it
+      drives its cooperative tick from `setTimeout` (the kernel
+      `request_frame` is unchanged). `isolation::live_memory_region` (new,
+      wasm-gated) ties the per-worker isolation check to this instance's
+      real linear-memory size. The rewritten browser vertical
+      (`tests/integration/kernel_arch_boot_wasm32`) has CPU 0 build a live
+      `Scheduler<WasmArch>` driven by the RAF loop (`TICK`/frame + `step`),
+      spawn a Web Worker (`WORKER_OK`), and send it a directed IPI; CPU 1
+      builds its own live scheduler and prints `IPI_RECV` when the
+      cross-context IPI drives it; the puppeteer harness serves
+      `/worker.js` and PASSes on
+      `BOOT_OK`+`ISOLATION_OK`+`WORKER_OK`+`IPI_RECV`+≥ 20 `TICK`.
+      **Verified browser-green via `cargo xtask test --wasm` on this
+      host.** **Carried forward:** cross-CPU TLB shootdown; the `lib/fdt`
+      runtime parse of the full ARM `virt` tree. Docs:
+      `docs/src/platform/wasm32.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

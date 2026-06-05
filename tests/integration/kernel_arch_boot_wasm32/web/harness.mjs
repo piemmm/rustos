@@ -5,12 +5,16 @@
 // decides PASS/FAIL from what the kernel prints. `cargo xtask test
 // --wasm` builds the `.wasm` and launches this script.
 //
-// It asserts the three Stage-3 per-sub-stage deliverables (`PLAN.md`):
+// It asserts the deliverables (`PLAN.md` Stage 3 + `plans/WIRING.md` W8):
 //   * BOOT_OK      — the wasm32 Arch HAL booted to `init`.
-//   * ISOLATION_OK — the WASM-memory isolation model denied a
-//                    cross-context access.
+//   * ISOLATION_OK — the per-worker WASM-linear-memory isolation check
+//                    denied a cross-context access.
+//   * WORKER_OK    — a real secondary Web Worker (logical CPU 1) booted
+//                    its own live scheduler (>= 2 workers running).
+//   * IPI_RECV     — a cross-context MessageChannel IPI drove the
+//                    secondary worker's live scheduler.
 //   * >= MIN_TICKS `TICK` lines — the `requestAnimationFrame` cooperative
-//                    loop drives the scheduler tick callback.
+//                    loop drives CPU 0's live `kernel/sched` scheduler.
 //
 // Any kernel panic traps the instance and surfaces as a page error /
 // HARNESS_ERROR line, failing the run loudly with no retries
@@ -52,6 +56,10 @@ function buildRoutes(wasmPath) {
   return {
     "/rustos.js": {
       file: resolve(REPO_ROOT, "kernel/arch/wasm32/web/rustos.js"),
+      type: CONTENT_TYPES[".js"],
+    },
+    "/worker.js": {
+      file: resolve(REPO_ROOT, "kernel/arch/wasm32/web/worker.js"),
       type: CONTENT_TYPES[".js"],
     },
     "/index.html": {
@@ -111,6 +119,8 @@ async function run() {
       if (
         lines.includes("BOOT_OK") &&
         lines.includes("ISOLATION_OK") &&
+        lines.includes("WORKER_OK") &&
+        lines.includes("IPI_RECV") &&
         ticks >= args.minTicks
       ) {
         pass = true;
@@ -141,7 +151,9 @@ async function run() {
     const ticks = lines.filter((l) => l === "TICK").length;
     console.log(
       `[wasm harness] BOOT_OK=${lines.includes("BOOT_OK")} ` +
-        `ISOLATION_OK=${lines.includes("ISOLATION_OK")} ticks=${ticks}`,
+        `ISOLATION_OK=${lines.includes("ISOLATION_OK")} ` +
+        `WORKER_OK=${lines.includes("WORKER_OK")} ` +
+        `IPI_RECV=${lines.includes("IPI_RECV")} ticks=${ticks}`,
     );
     if (!pass) {
       console.log(`[wasm harness] FAIL (${reason})`);

@@ -1393,7 +1393,9 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-api",
  "rustos-arch-wasm32",
+ "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kernel-sched-mlfq",
 ]
 
 [[package]]
