@@ -46,6 +46,12 @@ pub const CNTP_CTL_ENABLE: u64 = 1 << 0;
 /// interrupt. Left clear so the timer condition reaches the GIC.
 pub const CNTP_CTL_IMASK: u64 = 1 << 1;
 
+/// GIC INTID of the software-generated interrupt (SGI) the directed
+/// inter-processor interrupt is delivered on. INTIDs `0..16` are SGIs;
+/// INTID 0 is the reschedule IPI [`crate::kernel_arch::Aarch64Arch`]'s
+/// `send_ipi` raises through `crate::gic::send_sgi`.
+pub const IPI_SGI: u32 = 0;
+
 /// `u32` sentinel meaning "no CPU `CpuId` recorded yet".
 const NO_CPU: u64 = u32::MAX as u64;
 
@@ -60,6 +66,10 @@ static TIMER_INTERVAL_TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) 
 
 /// Per-CPU `CpuId` passed to the callback; [`NO_CPU`] until recorded.
 static TIMER_CPU_ID: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(NO_CPU) }; MAX_CPUS];
+
+/// The IPI callback the SGI IRQ path forwards each delivered IPI to,
+/// packed into a `usize`. Set up before any IPI is enabled.
+static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the timer callback.
 ///
@@ -81,6 +91,27 @@ pub fn timer_callback() -> Option<extern "C" fn(CpuId)> {
         // SAFETY: every store into `TIMER_CALLBACK_FN` round-trips a
         // valid `extern "C" fn(CpuId)` pointer through
         // `set_timer_callback`.
+        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+    }
+}
+
+/// Install the IPI callback the SGI IRQ path forwards each delivered IPI
+/// to. Storing a `fn` (not a closure) keeps it safe to call from
+/// interrupt context: there is no captured environment to drop
+/// mid-flight.
+pub fn set_ipi_callback(cb: extern "C" fn(CpuId)) {
+    IPI_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+}
+
+/// Read the currently-installed IPI callback, if any. Test/diagnostic.
+#[must_use]
+pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
+    let raw = IPI_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid
+        // `extern "C" fn(CpuId)` pointer through `set_ipi_callback`.
         Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
     }
 }
@@ -119,6 +150,7 @@ pub fn timer_cpu_id(cpu: CpuId) -> Option<CpuId> {
 #[cfg(test)]
 fn clear_for_tests() {
     TIMER_CALLBACK_FN.store(0, Ordering::Relaxed);
+    IPI_CALLBACK_FN.store(0, Ordering::Relaxed);
     for slot in &TIMER_INTERVAL_TICKS {
         slot.store(0, Ordering::Relaxed);
     }
@@ -220,6 +252,54 @@ pub(crate) fn on_timer_interrupt(cpu: CpuId) {
     }
 }
 
+/// Enable the inter-processor-interrupt SGI ([`IPI_SGI`]) at the GIC on
+/// the calling CPU so a directed IPI raised by
+/// [`crate::kernel_arch::Aarch64Arch`]'s `send_ipi` traps to this CPU's
+/// IRQ path.
+///
+/// Like [`init_local_preempt`], this does **not** unmask interrupts at
+/// the PE (`DAIF`); the caller enables IRQs via
+/// [`crate::exceptions::enable_irq`] once ready — matching the riscv64
+/// `enable_ipi` / `sstatus.SIE` split.
+///
+/// # Safety
+///
+/// The GIC must be initialised ([`crate::gic::init`]); enabling the SGI
+/// lets a delivered IPI reach the CPU. The caller must have installed
+/// the vector table ([`crate::exceptions::init_vectors`]) and the IPI
+/// callback ([`set_ipi_callback`]) first.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn enable_ipi() {
+    // SAFETY: the GIC distributor is enabled by the caller's contract;
+    // enabling the IPI SGI's distributor bit lets a directed SGI reach
+    // this CPU. `enable_ppi` programs the priority + set-enable bit for
+    // the INTID, which is valid for an SGI as well as a PPI.
+    unsafe {
+        crate::gic::enable_ppi(IPI_SGI);
+    }
+}
+
+/// Handle a delivered IPI (the reschedule SGI [`IPI_SGI`]): invoke the
+/// installed IPI callback with the running CPU's id.
+///
+/// Called only from [`crate::exceptions`]' IRQ path, with interrupts
+/// masked (the PE masked them on exception entry). The GIC
+/// end-of-interrupt handshake stays in the IRQ path, so this handler
+/// only dispatches the callback — mirroring riscv64's
+/// `on_software_interrupt`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub(crate) fn on_ipi_interrupt(cpu: CpuId) {
+    let raw = IPI_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw != 0 {
+        // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid
+        // `extern "C" fn(CpuId)` pointer through `set_ipi_callback`; the
+        // callback is a `fn` with no captured environment.
+        let cb: extern "C" fn(CpuId) =
+            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+        cb(cpu);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +330,24 @@ mod tests {
         let got = timer_callback().expect("callback installed");
         assert_eq!(got as usize, host_cb as *const () as usize);
         clear_for_tests();
+    }
+
+    #[test]
+    fn ipi_callback_round_trips_through_its_own_slot() {
+        clear_for_tests();
+        assert!(ipi_callback().is_none());
+        set_ipi_callback(host_cb);
+        let got = ipi_callback().expect("ipi callback installed");
+        assert_eq!(got as usize, host_cb as *const () as usize);
+        // The timer slot is independent of the IPI slot.
+        assert!(timer_callback().is_none());
+        clear_for_tests();
+    }
+
+    #[test]
+    fn ipi_sgi_is_a_software_generated_interrupt() {
+        // INTIDs 0..16 are SGIs (GICv2 §2.2.1); the IPI uses INTID 0.
+        const _: () = assert!(IPI_SGI < 16, "the IPI INTID must be an SGI");
+        assert_eq!(IPI_SGI, 0);
     }
 }

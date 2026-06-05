@@ -696,6 +696,29 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
+    // deliverable — the EL1/GICv2 analogue of `ipi_smp_qemu_riscv64`. It
+    // boots the `virt` board with two cores, starts core 1 through
+    // `smp::start_secondary` (the PSCI `CPU_ON` call), waits for that core
+    // to bring up its GICv2 interface and enable the IPI SGI, then sends
+    // it a directed IPI through `Aarch64Arch::send_ipi` (a GICv2 SGI,
+    // replacing the former single-CPU self-target best-effort send). The
+    // test passes once the secondary core's IRQ path has run the IPI
+    // callback with the secondary core's id — proving both core bring-up
+    // and IPI delivery. A regression that fails to start the core or
+    // deliver the IPI never reaches the PASS finisher, so the run times
+    // out. Two CPUs (the point of the test) and a 60-second budget.
+    QemuTest {
+        package: "rustos-test-ipi-smp-qemu-aarch64",
+        binary: "rustos-test-ipi-smp-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
     // that connects the `preempt` (timer + IPI) and `context` primitives

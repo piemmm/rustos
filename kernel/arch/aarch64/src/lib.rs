@@ -72,6 +72,12 @@ core::arch::global_asm!(include_str!("context.s"));
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(include_str!("vectors.s"));
 
+// The secondary-core entry trampoline is meaningful only on the
+// bare-metal target; host `cargo test` exercises the `smp` module's pure
+// validity / decode logic without it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(include_str!("smp.s"));
+
 pub mod context;
 /// aarch64 implementation of the Arch HAL context-switch surface
 /// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
@@ -102,11 +108,19 @@ pub mod percpu_hal;
 /// [`fdt`] reader.
 pub mod platform;
 pub mod preempt;
+/// PSCI (Power State Coordination Interface) firmware calls — the
+/// `CPU_ON` secondary-core power-on path the SMP bring-up issues
+/// (`AGENTS.md` §11 / `plans/WIRING.md` W6).
+pub mod psci;
 pub mod qemu_exit;
 /// aarch64 implementation of the Arch HAL side-channel mitigation
 /// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
 /// §19.1).
 pub mod sidechannel;
+/// Multi-core (SMP) secondary-core bring-up primitives: the set-once
+/// secondary entry, the `MPIDR_EL1` per-core identity read, and the PSCI
+/// `CPU_ON` launcher (`plans/WIRING.md` Stage W6).
+pub mod smp;
 pub mod syscall_entry;
 /// aarch64 implementation of the Arch HAL timer-programming surface
 /// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-

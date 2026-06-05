@@ -56,6 +56,13 @@ pub struct Aarch64Arch {
     boot_cpu: CpuId,
     timer_hz: u64,
 
+    /// Forward map: dense `CpuId` index → `MPIDR_EL1` affinity of that
+    /// CPU. `None` for unpopulated slots. Set once at construction.
+    /// [`SchedulerArch::current_cpu`] reverse-maps the running core's
+    /// affinity through it, and the SMP launcher forward-maps a dense id
+    /// to the MPIDR PSCI `CPU_ON` addresses.
+    cpu_to_mpidr: [Option<u64>; MAX_CPUS],
+
     /// Host-only IPI accounting — incremented on every `send_ipi` with
     /// an in-range target. Bare-metal builds never touch it.
     #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
@@ -76,12 +83,63 @@ impl Aarch64Arch {
     /// zero, so [`Self::monotonic_ns`] never divides by zero.
     #[must_use]
     pub fn new(boot_cpu: CpuId, timer_hz: u64) -> Self {
+        let mut cpu_to_mpidr = [None; MAX_CPUS];
+        if (boot_cpu as usize) < MAX_CPUS {
+            // On the `virt` board the boot core's affinity equals its
+            // dense index; `with_cpus` registers a full multi-core map.
+            cpu_to_mpidr[boot_cpu as usize] = Some(u64::from(boot_cpu));
+        }
+        Self::from_map(boot_cpu, timer_hz, cpu_to_mpidr)
+    }
+
+    /// Construct a multi-core handle from a dense `CpuId` → `MPIDR_EL1`
+    /// affinity slice (`mpidrs[cpu] == affinity`).
+    ///
+    /// Entries beyond [`MAX_CPUS`] are ignored — the secondary-stack pool
+    /// (`crate::smp`) only covers that many cores. `boot_cpu` names the
+    /// dense id of the boot core.
+    #[must_use]
+    pub fn with_cpus(boot_cpu: CpuId, timer_hz: u64, mpidrs: &[u64]) -> Self {
+        let mut cpu_to_mpidr = [None; MAX_CPUS];
+        let mut cpu = 0;
+        while cpu < mpidrs.len() && cpu < MAX_CPUS {
+            cpu_to_mpidr[cpu] = Some(mpidrs[cpu]);
+            cpu += 1;
+        }
+        Self::from_map(boot_cpu, timer_hz, cpu_to_mpidr)
+    }
+
+    fn from_map(boot_cpu: CpuId, timer_hz: u64, cpu_to_mpidr: [Option<u64>; MAX_CPUS]) -> Self {
         Self {
             boot_cpu,
             timer_hz,
+            cpu_to_mpidr,
             host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
             host_stray_ipi: AtomicU64::new(0),
         }
+    }
+
+    /// `MPIDR_EL1` affinity mapped to dense `cpu`, or `None` for an
+    /// unpopulated slot. The SMP launcher hands this to PSCI `CPU_ON`.
+    #[must_use]
+    pub fn mpidr_of(&self, cpu: CpuId) -> Option<u64> {
+        let idx = usize::try_from(cpu).ok()?;
+        self.cpu_to_mpidr.get(idx).copied().flatten()
+    }
+
+    /// Dense `CpuId` whose mapped affinity is `mpidr`, or `None` if no
+    /// CPU maps to it.
+    #[must_use]
+    pub fn cpu_for_mpidr(&self, mpidr: u64) -> Option<CpuId> {
+        let mut cpu = 0;
+        while cpu < MAX_CPUS {
+            if self.cpu_to_mpidr[cpu] == Some(mpidr) {
+                #[allow(clippy::cast_possible_truncation)]
+                return Some(cpu as CpuId);
+            }
+            cpu += 1;
+        }
+        None
     }
 
     /// The counter frequency this handle converts against.
@@ -128,9 +186,19 @@ impl Aarch64Arch {
 
 impl SchedulerArch for Aarch64Arch {
     fn current_cpu(&self) -> CpuId {
-        // The boot/timer slice runs one CPU; the SMP follow-up reverse-
-        // maps `MPIDR_EL1` to a dense `CpuId` here.
-        self.boot_cpu
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            // Recover the running core's affinity (`crate::smp` reads
+            // `MPIDR_EL1`) and reverse-map it to a dense `CpuId`. An
+            // unmapped core falls back to the boot CPU rather than
+            // inventing an id (`AGENTS.md` §5.4.5 — fail closed).
+            let affinity = u64::from(crate::smp::current_cpu_index());
+            self.cpu_for_mpidr(affinity).unwrap_or(self.boot_cpu)
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            self.boot_cpu
+        }
     }
 
     fn ticks_now(&self) -> u64 {
@@ -267,6 +335,35 @@ mod tests {
         // Out-of-range target is recorded as a stray, never panics.
         arch.send_ipi(u32::try_from(MAX_CPUS).unwrap());
         assert_eq!(arch.host_stray_ipi_count(), 1);
+    }
+
+    #[test]
+    fn with_cpus_round_trips_the_mpidr_map_both_ways() {
+        // A two-core `virt` board: dense CpuId 0/1 → affinity 0/1.
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        assert_eq!(arch.mpidr_of(0), Some(0));
+        assert_eq!(arch.mpidr_of(1), Some(1));
+        assert_eq!(arch.cpu_for_mpidr(0), Some(0));
+        assert_eq!(arch.cpu_for_mpidr(1), Some(1));
+        // An unpopulated slot / unmapped affinity is `None`, not a guess.
+        assert_eq!(arch.mpidr_of(2), None);
+        assert_eq!(arch.cpu_for_mpidr(7), None);
+    }
+
+    #[test]
+    fn with_cpus_supports_a_sparse_affinity_layout() {
+        // Affinity need not equal the dense index (a clustered MPIDR):
+        // dense 1 maps to affinity 0x100 (Aff1 = 1).
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x000, 0x100]);
+        assert_eq!(arch.mpidr_of(1), Some(0x100));
+        assert_eq!(arch.cpu_for_mpidr(0x100), Some(1));
+    }
+
+    #[test]
+    fn new_maps_the_boot_cpu_to_its_own_affinity() {
+        let arch = Aarch64Arch::new(0, 1_000);
+        assert_eq!(arch.mpidr_of(0), Some(0));
+        assert_eq!(arch.cpu_for_mpidr(0), Some(0));
     }
 
     /// §17.2 / W0: the port passes the shared Arch HAL conformance

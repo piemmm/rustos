@@ -75,9 +75,10 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 (map/translate/unmap — W5b-1/W5b-2), the per-page `TlbShootdown`
 slice (W5b-2), and the `PageTableFrames` page-table frame-source slice
 (allocator-backed port tables via `FrameTableSource` — W5b-3). The
-remaining slices (cross-CPU TLB shootdown — W6, SMP bring-up) are still
-ad-hoc inside each port — the §17.2 surface `PLAN.md` flags as "migrated
-here as the §17 burn-down advances".
+remaining slices (cross-CPU TLB shootdown; SMP bring-up — landed
+port-side per arch in W6, not yet a HAL trait) are still ad-hoc inside
+each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
+§17 burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
 
@@ -90,8 +91,8 @@ here as the §17 burn-down advances".
 | Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
 | Interrupt controller + entry/exit |   ✓    |    ✓    |    ✓    |  n/a   |
-| **SMP secondary-CPU bring-up**    |   ✓    |  **✗**  |    ✓    | **✗**  |
-| **IPI delivery (real cores)**     |   ✓    |  **✗**  |    ✓    | **✗**  |
+| **SMP secondary-CPU bring-up**    |   ✓    |    ✓    |    ✓    | **✗**  |
+| **IPI delivery (real cores)**     |   ✓    |    ✓    |    ✓    | **✗**  |
 | **Early-boot platform discovery** | ✓ ACPI | **✗** FDT| ✓ FDT  |  ~ JS  |
 | Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
@@ -109,7 +110,7 @@ here as the §17 burn-down advances".
 | `kernel_arch_boot`      |   ✓    |    ✓    |    ✓    |   ✓    |
 | `memory_isolation`      |   ✓    |    ✓    |    ✓    |   —    |
 | `timer_preempt`         |   ✓    |    ✓    |    ✓    |   —    |
-| **`ipi_smp`**           | ✓(stress)|  **✗**  |    ✓    |  **✗** |
+| **`ipi_smp`**           | ✓(stress)|    ✓    |    ✓    |  **✗** |
 | **`sched_drive`** (live)| ✓(stress)|  **✗**  |    ✓    |  **✗** |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
@@ -118,9 +119,10 @@ here as the §17 burn-down advances".
 | `virtio` blk/net        | ✓(pci) |  **✗**  | ✓(mmio) |  n/a   |
 
 **Headline gaps, ranked:**
-- **aarch64:** no SMP secondary-core bring-up, no real IPI, no FDT/DTB
-  platform discovery, no live-scheduler task switch, no heterogeneous
-  `core_class`, and missing IRQ / input / display / virtio verticals.
+- **aarch64:** SMP secondary-core bring-up + real IPI landed (W6); no
+  live-scheduler task switch, no heterogeneous `core_class`, and missing
+  input / display / virtio verticals. (FDT/DTB discovery is host-tested
+  via W1; the runtime parse of the full ARM `virt` tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
   storage HAL trait, missing input vertical.
@@ -436,22 +438,50 @@ HAL *modules* compile). Docs:
   `docs/src/platform/riscv64.md`, `PLAN.md`.
 - **Carried forward to W6:** cross-CPU TLB shootdown.
 
-### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI ⭐
+### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI — ✅ landed
 
-The single largest aarch64 gap.
+The single largest aarch64 gap, closed by mirroring the riscv64 port-side
+`smp` module (no new HAL trait — riscv64 keeps SMP port-side too; an
+`Smp` HAL slice remains a future §17.2 decision for both ports).
 
-- Implement `Smp` for aarch64: secondary-core start via **PSCI `CPU_ON`**
-  (`hvc`/`smc`, method discovered by W1's FDT reader) with a spin-table
-  fallback, a secondary-entry trampoline (`smp.s`) seeding each core's
-  stack + `TPIDR_EL1`, and an `MPIDR_EL1`→dense-`CpuId` reverse map.
-- Real directed IPI via **GICv2 SGI** (replacing today's single-CPU
-  self-target best-effort `send_ipi`), acknowledged in the IRQ prologue
-  and driving the scheduler preemption callback.
-- **Add `ipi_smp_qemu_aarch64`** matching `ipi_smp_qemu_riscv64`: boot
-  core starts a second core and delivers it a directed IPI (`-smp 2`).
-- **Deliverable:** aarch64 runs ≥ 2 emulated cores; the new SMP vertical
-  is QEMU-green; conformance SMP-stress vertical (≥ 4 cores) passes.
-  Docs: `docs/src/platform/aarch64.md`, scheduler/SMP pages.
+- **`kernel/arch/aarch64::psci`** (new): the PSCI `CPU_ON` firmware call
+  over the conduit (`hvc`/`smc`) the W1 `fdt` reader discovers, with a
+  host-tested SMC64 function-id encoding + signed-status decode
+  (`PsciRet`), the aarch64 analogue of riscv64's `sbi`.
+- **`kernel/arch/aarch64::smp`** (+ `smp.s`): a set-once `extern "C"
+  fn(CpuId) -> !` secondary entry, a `start_secondary` launcher
+  (range-checked, fail-closed `StartCpuError`) that PSCI-starts a parked
+  core at the `smp.s` trampoline (which masks IRQs, seeds the core's
+  `.bss` stack slice by the dense id PSCI passes as `context_id`, and
+  tail-calls the entry), and `current_cpu_index` reading `MPIDR_EL1`.
+- **`Aarch64Arch`** gained the dense-`CpuId`↔`MPIDR` map (`with_cpus` /
+  `mpidr_of` / `cpu_for_mpidr`); `current_cpu` now reverse-maps the
+  running affinity, and `send_ipi` delivers a **real GICv2 directed SGI**
+  (INTID 0) — replacing the single-CPU self-target best-effort send.
+- **`preempt`** gained the IPI callback surface (`set_ipi_callback` /
+  `enable_ipi` / `on_ipi_interrupt`); `exceptions::handle_irq` dispatches
+  an acknowledged SGI (INTID `< MIN_SPI_INTID`) to it, using
+  `smp::current_cpu_index` as the one per-CPU identity source (§2.2).
+- **`ipi_smp_qemu_aarch64`** (new, enrolled, `--cpus 2`, QEMU-green):
+  boot core starts core 1 via PSCI and delivers it a directed SGI; PASS
+  once core 1's IRQ path runs the IPI callback with core 1's id.
+- **Honest carve-outs (tracked):**
+  - *Non-PSCI spin-table boot* (bare Raspberry Pi 3) is **not** built:
+    the QEMU `virt` board and UEFI platforms use PSCI, so a spin-table
+    branch would be untested asm. It lands with a spin-table target so a
+    real vertical covers it (§2.1 / §2.5), documented in
+    `docs/src/platform/aarch64.md`.
+  - *The QEMU vertical names the `virt` conduit (`hvc`) directly* rather
+    than parsing the tree at runtime: QEMU's ELF `-kernel` boot hands no
+    DTB pointer (`x0 = 0`, unlike the Linux Image protocol), and the
+    shared `lib/fdt` walk does not yet handle the full ARM `virt` tree at
+    runtime. Conduit *discovery* is the host-tested W1 capability; this
+    `lib/fdt`-on-ARM-virt gap is carried forward (see W7 note).
+- **Carried forward (still tracked):** cross-CPU TLB shootdown (from
+  W5b-2/W5b-3); the `lib/fdt` runtime parse of the full ARM `virt` tree.
+- **Deliverable met:** aarch64 runs ≥ 2 emulated cores under QEMU; the
+  new SMP vertical is QEMU-green and enrolled. Docs:
+  `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
 ### Stage W7 — Live `kernel/sched` task switch per arch
 

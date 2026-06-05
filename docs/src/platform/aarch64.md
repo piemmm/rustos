@@ -98,11 +98,11 @@ system-register/assembly/MMIO operations to the freestanding target.
 
 ## QEMU verticals
 
-Five freestanding integration binaries cover the Stage-3 per-sub-stage
-checklist (plus the CCOMPAT CC2 syscall round-trip and the Stage W3-B
-device-IRQ vertical) on the `virt` board; each links only the arch port
-and reports its result through the semihosting finisher. They are
-enrolled in `cargo xtask test --qemu`.
+Six freestanding integration binaries cover the Stage-3 per-sub-stage
+checklist (plus the CCOMPAT CC2 syscall round-trip, the Stage W3-B
+device-IRQ vertical, and the Stage W6 SMP/IPI vertical) on the `virt`
+board; each links only the arch port and reports its result through the
+semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
   trampoline reaches `kernel_main` at EL1 and logs over the PL011 UART.
@@ -123,6 +123,12 @@ enrolled in `cargo xtask test --qemu`.
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
+- `rustos-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
+  (Stage W6): the boot core starts core 1 through `smp::start_secondary`
+  (PSCI `CPU_ON`), waits for it to bring up its GICv2 interface and
+  enable the IPI SGI, then delivers a directed IPI through
+  `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ path runs
+  the IPI callback with core 1's id. Runs with `--cpus 2`.
 - `rustos-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
   (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
   the kernel (EL1), aliases the `lib/abi-sys` `ros_sys_cap_query` stub
@@ -168,8 +174,8 @@ the flattened device tree the `virt` board hands the kernel. The
 device-tree *parser* is the shared `lib/fdt` crate (one parser for every
 arch, §2.2); `kernel/arch/aarch64::fdt` layers the aarch64-specific
 queries on it: the first `/memory` region, the `/psci` `method`
-(`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up will
-call), and the generic-timer per-CPU interrupt (PPI) number from
+(`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up calls),
+and the generic-timer per-CPU interrupt (PPI) number from
 `/timer`. `FdtDiscovery` emits a root node, a `Memory` node carrying the
 RAM window, and a `Timer` node carrying its PPI as a capability-gated
 (`CAP_IRQ_BIND`) IRQ resource. The reader is host-tested against the
@@ -228,6 +234,50 @@ The `route_spi` register arithmetic, the `MIN_SPI_INTID` boundary, and
 the fail-closed set-once dispatch slot are host-tested; the
 `rustos-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
 EL1 → dispatcher → `IrqTable::fire` path end-to-end under QEMU.
+
+## SMP secondary-core bring-up (PSCI + GICv2 IPI)
+
+The aarch64 port brings secondary cores up through PSCI (`plans/WIRING.md`
+Stage W6), in `kernel/arch/aarch64::smp`:
+
+- `smp::set_secondary_entry` installs a set-once `extern "C" fn(CpuId) -> !`
+  that a freshly-started core runs. A set-once callback (rather than a
+  mandatory `extern` symbol) keeps secondary bring-up opt-in without a
+  Cargo feature, so the single-core boot pipeline and the freestanding
+  test bins still link.
+- `smp::start_secondary` validates the dense `CpuId` against the
+  secondary-stack pool, confirms an entry is installed, then issues a
+  PSCI `CPU_ON` (`kernel/arch/aarch64::psci::cpu_on`) through the conduit
+  (`hvc`/`smc`) the `fdt` reader discovers, entering the core at the
+  `smp.s` trampoline. The trampoline masks interrupts, seeds the core's
+  slice of the `.bss` secondary-stack pool (indexed by the dense id PSCI
+  passes as the `context_id`), and tail-calls the installed entry. It
+  fails closed (`StartCpuError`) on an out-of-range id, a missing entry,
+  or a PSCI error rather than assuming the core came up.
+- `smp::current_cpu_index` reads the running core's affinity from
+  `MPIDR_EL1`; the IRQ path (`exceptions::handle_irq`) forwards it to the
+  per-CPU timer slot and the IPI callback (one identity source, §2.2).
+  `Aarch64Arch` holds the dense-`CpuId`↔`MPIDR` map (built by
+  `Aarch64Arch::with_cpus`); `SchedulerArch::current_cpu` reverse-maps the
+  running affinity through it.
+
+A directed IPI is a GICv2 software-generated interrupt (SGI): `send_ipi`
+raises INTID 0 on the target CPU through `gic::send_sgi`, and
+`exceptions::handle_irq` dispatches an acknowledged SGI (INTID
+`< MIN_SPI_INTID`) to `preempt::on_ipi_interrupt` → the IPI callback
+installed via `preempt::set_ipi_callback`. This replaces the former
+single-CPU self-target best-effort send. The `rustos-test-ipi-smp-qemu-aarch64`
+vertical above proves the full start-core → enable-IPI → directed-SGI →
+callback path on two emulated cores.
+
+Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3, whose firmware
+parks secondaries on a release address rather than offering PSCI) is a
+tracked follow-up: `start_secondary` would gain a spin-table branch
+selected from the device tree's `enable-method`. The QEMU `virt` board
+and UEFI platforms use PSCI, so the PSCI path is the one exercised today;
+the port adds the spin-table path when a spin-table target lands so it is
+covered by a real vertical rather than shipped untested (`AGENTS.md`
+§2.1 / §2.5).
 
 ## Timer programming (`Timer`)
 

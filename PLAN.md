@@ -640,6 +640,39 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       runs the suite over `FrameTableSource`; x86_64's higher-half pool is
       proven through the `memory_isolation` QEMU vertical. **Remaining:**
       cross-CPU TLB shootdown stays W6.
+- [x] **WIRING Stage W6 — aarch64 SMP secondary-core bring-up + real
+      IPI.** Closed the single largest aarch64 gap, mirroring the riscv64
+      port-side `smp` module (no new HAL trait; an `Smp` slice stays a
+      future §17.2 decision for both ports). Added
+      `kernel/arch/aarch64::psci` (the PSCI `CPU_ON` firmware call over
+      the `hvc`/`smc` conduit, host-tested SMC64 id encoding + `PsciRet`
+      status decode) and `kernel/arch/aarch64::smp` (+ `smp.s`): a
+      set-once `extern "C" fn(CpuId) -> !` secondary entry, a fail-closed
+      `start_secondary` launcher that PSCI-starts a parked core at the
+      `smp.s` trampoline (which masks IRQs, seeds the core's `.bss` stack
+      slice by the dense id PSCI passes as `context_id`, and tail-calls
+      the entry), and `current_cpu_index` reading `MPIDR_EL1`.
+      `Aarch64Arch` gained the dense-`CpuId`↔`MPIDR` map (`with_cpus` /
+      `mpidr_of` / `cpu_for_mpidr`); `current_cpu` reverse-maps the
+      running affinity, and `send_ipi` now raises a real GICv2 directed
+      SGI (INTID 0) instead of the single-CPU self-target best-effort
+      send. `preempt` gained the IPI callback surface (`set_ipi_callback`
+      / `enable_ipi` / `on_ipi_interrupt`) and `exceptions::handle_irq`
+      dispatches an acknowledged SGI (INTID `< MIN_SPI_INTID`) to it
+      through the one `smp::current_cpu_index` identity source (§2.2). New
+      QEMU vertical `tests/integration/ipi_smp_qemu_aarch64` (enrolled,
+      `--cpus 2`, QEMU-green) starts core 1 via PSCI and delivers it a
+      directed SGI, passing once core 1's IRQ path runs the IPI callback
+      with core 1's id. **Honest carve-outs (tracked):** non-PSCI
+      spin-table boot (bare Raspberry Pi 3) is not built — it would be
+      untested asm, so it lands with a spin-table target and a real
+      vertical (§2.1 / §2.5); the QEMU vertical names the `virt` conduit
+      (`hvc`) directly because QEMU's ELF `-kernel` boot hands no DTB
+      pointer and the shared `lib/fdt` walk does not yet parse the full
+      ARM `virt` tree at runtime (conduit discovery is the host-tested W1
+      capability). **Carried forward:** cross-CPU TLB shootdown; the
+      `lib/fdt` runtime parse of the full ARM `virt` tree. Docs:
+      `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

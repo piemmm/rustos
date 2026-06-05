@@ -239,9 +239,17 @@ fn handle_irq() {
         // Spurious read: nothing pending, and the GIC requires no EOI.
         return;
     }
+    // The running CPU's dense id, recovered from `MPIDR_EL1`, drives both
+    // the per-CPU timer slot and the IPI callback (`AGENTS.md` §2.2 — one
+    // identity source).
+    let cpu = crate::smp::current_cpu_index();
     if intid == crate::preempt::TIMER_PPI {
-        // Single-CPU slice: the boot CPU is logical CPU 0.
-        crate::preempt::on_timer_interrupt(0);
+        crate::preempt::on_timer_interrupt(cpu);
+    } else if intid < crate::gic::MIN_SPI_INTID {
+        // INTIDs 0..32 are SGIs/PPIs; INTID 0..16 are the inter-processor
+        // SGIs. A delivered directed IPI (`crate::kernel_arch` `send_ipi`
+        // → `gic::send_sgi`) surfaces here — run the reschedule callback.
+        crate::preempt::on_ipi_interrupt(cpu);
     } else {
         // Any other acknowledged INTID is a device interrupt (a GIC SPI
         // routed by `crate::gic::route_spi`); forward it to the installed
