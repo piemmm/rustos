@@ -348,3 +348,34 @@ intermediate tables through the identity map (phys == virt), the whole
 host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which
 now builds its victim/attacker spaces through this trait.
+
+## Heterogeneous (`big.LITTLE`) core classification
+
+The aarch64 port overrides the Arch HAL `SchedulerArch::core_class`
+slice (`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W10) so the scheduler
+can place background work on the efficiency cores of an asymmetric part.
+Unlike x86_64, where each core reports its class through a per-core CPUID
+leaf, Arm advertises per-core capacity in the device tree: each
+`/cpus/cpu@*` node carries an optional `capacity-dmips-mhz` rating.
+
+`Aarch64Arch::classify_from_fdt` enumerates those nodes through the
+shared reader's `rustos_fdt::Fdt::each_cpu` (one device-tree parser,
+§2.2), maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
+`CpuId` through the same affinity map `current_cpu`/`send_ipi` use, and
+classifies the collected ratings with the pure
+`kernel/arch/aarch64::hetcore::classify_by_capacity`: the highest rating
+present is the performance tier, and any core rated strictly below it is
+an efficiency core. A homogeneous machine — every rating equal, no
+ratings at all, or a malformed tree — leaves every core a performance
+core, the safe Arch HAL default; a core with no advertised rating is
+never guessed down. The classified table is read back through the
+`core_class` override, which returns the performance default for an
+out-of-range `CpuId` (totality, never a panic).
+
+The classifier is pure and host-tested (`hetcore`'s unit tests), and the
+device-tree read is host-tested against the shared `rustos_fdt::fixture`
+`big.LITTLE` builder, so `classify_from_fdt` is proven end-to-end on the
+host (`classify_from_fdt_reports_big_little_cores`); the shared HAL
+conformance vertical asserts `core_class` totality on every port.
+riscv64 (homogeneous) keeps the default, so adding a heterogeneous
+RISC-V part is a `core_class` override there, not a change here.

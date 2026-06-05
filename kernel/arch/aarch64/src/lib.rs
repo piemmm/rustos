@@ -91,6 +91,11 @@ pub mod fault;
 /// [`rustos_fdt`] parser (`AGENTS.md` §2.2 / §18.2).
 pub mod fdt;
 pub mod gic;
+/// Heterogeneous (`big.LITTLE`) core classification: the pure
+/// `capacity-dmips-mhz` → [`rustos_arch_api::CoreClass`] classifier
+/// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
+/// (`AGENTS.md` §17.2 / §18.2, `plans/WIRING.md` Stage W10).
+pub mod hetcore;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
 /// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10) — Arm MTE

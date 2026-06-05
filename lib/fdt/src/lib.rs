@@ -194,6 +194,83 @@ impl<'a> Fdt<'a> {
         self.walk().ok().and_then(|w| w.timebase)
     }
 
+    /// Enumerate every `/cpus/cpu@*` node in tree order, invoking
+    /// `f(reg, capacity)` once per CPU node.
+    ///
+    /// * `reg` is the integer value of the node's `reg` property — the
+    ///   CPU's `MPIDR_EL1` affinity on aarch64 / hart id on riscv64 —
+    ///   decoded from a one-cell (`u32`) or two-cell (`u64`) value. A CPU
+    ///   node with no readable `reg` is skipped (it cannot be matched to a
+    ///   logical CPU).
+    /// * `capacity` is the `capacity-dmips-mhz` value (the per-core DMIPS
+    ///   rating used to classify `big.LITTLE` cores), or `None` when the
+    ///   node omits it — a homogeneous machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError::Malformed`] if the structure block is
+    /// malformed (a truncated token, an unterminated name, or unbalanced
+    /// node nesting); the closure is not invoked for a malformed tree.
+    pub fn each_cpu<F: FnMut(u64, Option<u64>)>(&self, mut f: F) -> Result<(), FdtError> {
+        let struct_end = self.struct_off + self.struct_size;
+        let mut pos = self.struct_off;
+
+        // Per-depth "is this the `/cpus` container" / "is this a `cpu@*`
+        // node" flags, restored implicitly by `depth` on `FDT_END_NODE`.
+        let mut is_cpus = [false; MAX_DEPTH];
+        let mut is_cpu = [false; MAX_DEPTH];
+        let mut depth: usize = 0;
+
+        // Accumulators for the cpu node currently open (they never nest).
+        let mut reg: Option<u64> = None;
+        let mut capacity: Option<u64> = None;
+
+        while pos < struct_end {
+            let token = be_u32(self.blob, pos).ok_or(FdtError::Malformed)?;
+            pos += 4;
+            match token {
+                FDT_NOP => {}
+                FDT_END => break,
+                FDT_BEGIN_NODE => {
+                    let name = self.read_node_name(&mut pos, struct_end)?;
+                    if depth >= MAX_DEPTH {
+                        return Err(FdtError::Malformed);
+                    }
+                    // `/cpus` is a direct child of root (open-time depth 1);
+                    // a `cpu@*` node is a direct child of `/cpus`
+                    // (open-time depth 2 with the parent flagged).
+                    is_cpus[depth] = depth == 1 && name_stem(name) == b"cpus";
+                    is_cpu[depth] = depth == 2 && is_cpus[depth - 1] && name_stem(name) == b"cpu";
+                    if is_cpu[depth] {
+                        reg = None;
+                        capacity = None;
+                    }
+                    depth += 1;
+                }
+                FDT_END_NODE => {
+                    depth = depth.checked_sub(1).ok_or(FdtError::Malformed)?;
+                    if is_cpu[depth] {
+                        if let Some(mpidr) = reg {
+                            f(mpidr, capacity);
+                        }
+                    }
+                }
+                FDT_PROP => {
+                    let (prop_name, value) = self.read_prop(&mut pos, struct_end)?;
+                    if depth >= 1 && is_cpu[depth - 1] {
+                        if prop_name == b"reg" {
+                            reg = read_int_cells(value);
+                        } else if prop_name == b"capacity-dmips-mhz" {
+                            capacity = read_int_cells(value);
+                        }
+                    }
+                }
+                _ => return Err(FdtError::Malformed),
+            }
+        }
+        Ok(())
+    }
+
     /// Read the raw bytes of property `name` on the node reached by the
     /// child-name `path` from the root.
     ///
@@ -448,7 +525,7 @@ fn read_int_cells(value: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{virt_like, virt_like_arm, DtbBuilder};
+    use crate::fixture::{arm_with_cpus, virt_like, virt_like_arm, DtbBuilder};
     use alloc::vec::Vec;
 
     #[test]
@@ -566,6 +643,44 @@ mod tests {
         assert_eq!(fdt.property(&[b"psci"], b"absent"), None);
         // A deeper path than the tree has no match.
         assert_eq!(fdt.property(&[b"psci", b"child"], b"method"), None);
+    }
+
+    #[test]
+    fn each_cpu_reads_mpidr_and_capacity_in_tree_order() {
+        // A big.LITTLE part: two performance cores (cap 1024) and two
+        // efficiency cores (cap 512); the last core omits the capacity.
+        let blob = arm_with_cpus(
+            0x4000_0000,
+            0x2000_0000,
+            &[
+                (0x0, Some(1024)),
+                (0x1, Some(512)),
+                (0x100, Some(1024)),
+                (0x101, None),
+            ],
+        );
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut seen: Vec<(u64, Option<u64>)> = Vec::new();
+        fdt.each_cpu(|mpidr, cap| seen.push((mpidr, cap)))
+            .expect("walk succeeds");
+        assert_eq!(
+            seen,
+            [
+                (0x0, Some(1024)),
+                (0x1, Some(512)),
+                (0x100, Some(1024)),
+                (0x101, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_cpu_yields_nothing_when_there_are_no_cpu_nodes() {
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut count = 0usize;
+        fdt.each_cpu(|_, _| count += 1).expect("walk succeeds");
+        assert_eq!(count, 0);
     }
 
     #[test]

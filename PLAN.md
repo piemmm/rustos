@@ -733,6 +733,59 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       host.** **Carried forward:** cross-CPU TLB shootdown; the `lib/fdt`
       runtime parse of the full ARM `virt` tree. Docs:
       `docs/src/platform/wasm32.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W9 — side-channel + memory-tagging completeness
+      (§19.1 / §19.10).** Verification + parity-tracking landing: the
+      §19.1 `SideChannelMitigation` and §19.10 `MemoryTagging` HAL trait
+      sets (`kernel/arch/api/src/{sidechannel,memtag}.rs`, each with a
+      portable conformance vertical) were confirmed complete and honest on
+      **all four ports** and folded into every port's
+      `passes_arch_hal_conformance_suite` via
+      `rustos_arch_api::conformance::run_all`. The mitigation code was
+      delivered earlier with the original §19 framework (see §19 items 8 &
+      13), so this stage re-verified rather than rewrote it (§2.2 — no
+      duplication). Side-channel: x86_64 `lfence`+`verw` applied (KPTI/IBPB
+      `Pending`); aarch64 `csdb` applied, MDS flush `NotVulnerable`, KPTI +
+      MIDR Spectre-v2 `Pending`; riscv64 conservative `fence`,
+      release-ready (in-order cores — `fence.i`/`sfence.vma` speculation
+      sequencing unnecessary, justified); wasm32 release-ready (host-owned).
+      Memory-tagging: aarch64 real Arm MTE `stg` behind a default-off gate,
+      both slots `Pending` on the Stage 6 `FEAT_MTE` probe; x86_64 /
+      riscv64 / wasm32 justified `Unsupported`. The `kernel/mem` slab
+      software UAF tag-check (`next_free_tag` rotation,
+      `SlabError::TagMismatch`) stays the on-by-default floor on every
+      target. **Verified host-green** (`cargo test -p
+      rustos-arch-{x86_64,aarch64,riscv64,wasm32}` + `-p
+      rustos-kernel-mem`) and via `cargo xtask ci`. **Carried forward
+      (Stage-6-blocked):** KPTI + IBPB/IBRS/STIBP/SSBD (x86_64), KPTI +
+      MIDR Spectre-v2 (aarch64), auto-enabling Arm MTE on `FEAT_MTE`
+      silicon; plus cross-CPU TLB shootdown and the `lib/fdt` runtime ARM
+      `virt` parse. Docs: `docs/src/security/side_channels.md`,
+      `docs/src/security/memory_tagging.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W10 — heterogeneous `core_class` discovery
+      (aarch64).** aarch64 now overrides `SchedulerArch::core_class` with
+      `big.LITTLE` classification discovered from the device tree's
+      per-core `capacity-dmips-mhz` ratings (x86_64 hybrid already done in
+      §17.2 below; riscv64 homogeneous default stands). Shared FDT reader:
+      `rustos_fdt::Fdt::each_cpu` — a focused, allocation-free walk over
+      `/cpus/cpu@*` yielding each node's `reg` (`MPIDR_EL1` affinity) and
+      optional `capacity-dmips-mhz` — plus an `arm_with_cpus` `big.LITTLE`
+      fixture (one parser, shared by every arch, §2.2). Pure classifier:
+      `kernel/arch/aarch64::hetcore::classify_by_capacity` maps the peak
+      advertised rating to the performance tier and any core strictly
+      below it to efficiency, failing conservative to performance for a
+      homogeneous / missing rating (§2.9). Port wiring: a per-CPU
+      `core_classes` table (mirroring `X86_64Arch`), `record_core_class`,
+      `classify_from_fdt` (affinity → dense `CpuId` → recorded table), and
+      the `core_class` override (out-of-range → performance, never a
+      panic); the boot consumer calls `classify_from_fdt` once on the boot
+      core. **Verified host-green** (`cargo test -p rustos-arch-aarch64 -p
+      rustos-fdt`): asymmetric reporting
+      (`classify_from_fdt_reports_big_little_cores`) + the homogeneous
+      default, and the shared HAL conformance vertical
+      (`core_class_is_total`, run by every port via `run_all`) asserts
+      totality. **Carried forward:** cross-CPU TLB shootdown and the
+      `lib/fdt` runtime ARM `virt` parse (FDT `cpu-map` topology). Docs:
+      `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

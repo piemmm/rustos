@@ -98,10 +98,10 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
 | Live `kernel/sched` task switch   |   ✓    |    ✓    |    ✓    | ✓ coop |
-| Heterogeneous `core_class`        | ✓ hybrid| **✗**  |  n/a   |  n/a   |
-| Side-channel profile (§19.1)      |   ✓    |    ~    |    ~    |   ~    |
-| Memory-tagging profile (§19.10)   |   ✓    | ~ MTE pend | ✗ unsup | ✗ unsup |
-| **Arch HAL conformance suite**    | **✗ (none exists yet, all ports)** |||
+| Heterogeneous `core_class`        | ✓ hybrid| ✓ FDT  |  n/a   |  n/a   |
+| Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
+| Memory-tagging profile (§19.10)   |   ✓    | ✓ MTE pend | ✓ unsup | ✓ unsup |
+| **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
 
 **QEMU vertical parity** (`tests/integration/*`):
 
@@ -119,11 +119,12 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `virtio` blk/net        | ✓(pci) |  **✗**  | ✓(mmio) |  n/a   |
 
 **Headline gaps, ranked:**
-- **aarch64:** SMP secondary-core bring-up + real IPI (W6) and the
-  live-scheduler task switch (W7, `sched_drive_qemu_aarch64`) landed; no
-  heterogeneous `core_class`, and missing input / display / virtio
-  verticals. (FDT/DTB discovery is host-tested via W1; the runtime parse
-  of the full ARM `virt` tree is still a gap.)
+- **aarch64:** SMP secondary-core bring-up + real IPI (W6), the
+  live-scheduler task switch (W7, `sched_drive_qemu_aarch64`), and
+  heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`)
+  landed; missing input / display / virtio verticals. (FDT/DTB discovery
+  is host-tested via W1/W10; the runtime parse of the full ARM `virt`
+  tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
   storage HAL trait, missing input vertical.
@@ -132,8 +133,12 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
   (W8, browser vertical); no user entry (sandbox-by-design), and the
   remaining verticals (display) are thin.
 - **all ports:** the §17.2 Arch HAL conformance suite
-  (`kernel/arch/api/tests/`) does not exist yet, so parity is asserted
-  by inspection rather than enforced.
+  (`kernel/arch/api/src/conformance.rs`, run by each port's
+  `passes_arch_hal_conformance_suite`) now exists and folds in the
+  `SchedulerArch`, §19.1 side-channel, §19.10 memory-tagging, platform-
+  discovery, and per-CPU verticals, so those slices are enforced rather
+  than asserted by inspection. The remaining ad-hoc slices (cross-CPU
+  TLB shootdown, SMP bring-up) are not yet HAL traits.
 
 ---
 
@@ -559,26 +564,85 @@ slice remains a future §17.2 decision for all three.
 - **Carried forward (still tracked):** cross-CPU TLB shootdown (from
   W5b-2/W6); the `lib/fdt` runtime parse of the full ARM `virt` tree.
 
-### Stage W9 — Side-channel + memory-tagging completeness (§19.1 / §19.10)
+### Stage W9 — Side-channel + memory-tagging completeness (§19.1 / §19.10) — ✅ landed
 
-- Fill each port's `SideChannelMitigation` profile honestly: aarch64
-  CSDB/SB + KPTI-equivalent + context-switch buffer flush; riscv64
-  `fence.i`/`sfence.vma` sequencing; x86_64 IBRS/STIBP/SSBD (confirm).
-  No-op only where silicon is provably safe, justified in `README.md`.
-- aarch64 `MemoryTagging`: progress MTE from `Pending` toward enabled as
-  the Stage 6 page-table work allows (the software slab tag-check in
-  `kernel/mem` already hardens UAF on every target — keep it the floor).
-- **Deliverable:** the §19.1 conformance vertical passes on every port;
-  profiles are honest. Docs: `docs/src/security/*`, platform pages.
+**Landed:** the §19.1 `SideChannelMitigation` and §19.10 `MemoryTagging`
+HAL trait sets live in `kernel/arch/api` (`sidechannel.rs` / `memtag.rs`),
+each with a portable conformance vertical, and **all four ports** carry an
+honest, host-tested profile that is folded into the port's
+`passes_arch_hal_conformance_suite` (so the §19.1 / §19.10 verticals run
+on every port, `kernel/arch/api/src/conformance.rs::run_all`). Every
+non-applied slot carries a non-empty justification (`validate`) and the
+stricter `is_release_ready` gate rejects any `Pending`.
 
-### Stage W10 — Heterogeneous `core_class` discovery (aarch64)
+- **Side-channel profiles (`SideChannelMitigation`).** x86_64 applies
+  `lfence` (syscall entry/exit) + `verw` (MDS buffer clear) and tracks
+  KPTI + IBPB as `Pending` (Stage 6 page tables / CPUID-feature probe —
+  the IBRS/STIBP/SSBD family rides the same CPUID-gated landing). aarch64
+  applies `csdb` (Spectre-v1) and declares the MDS buffer flush
+  `NotVulnerable` (Intel-only), with KPTI + the MIDR-specific Spectre-v2
+  sequence `Pending`. riscv64 emits a conservative memory `fence` and is
+  release-ready: the in-order cores RustOS targets (QEMU `virt`, SiFive
+  U54/U74) do not speculate past a fault or mispredict, so the Meltdown /
+  MDS / Spectre-v2 controls are justified no-ops — `fence.i`/`sfence.vma`
+  *speculation* sequencing is not needed on in-order silicon and is
+  revisited only if an out-of-order RISC-V core is added. wasm32 is
+  release-ready: every microarchitectural control is host-owned
+  (site isolation, timer clamping, COOP/COEP) and memory is isolated per
+  Web Worker. Each barrier instruction is `cfg`-gated to bare metal under
+  a `// SAFETY:` block.
+- **Memory-tagging profiles (`MemoryTagging`).** aarch64 implements the
+  real Arm MTE `stg` store sequence (`#[target_feature(enable = "mte")]`,
+  16-byte / 4-bit granule) behind a default-off `mte_enabled` gate and
+  declares both slots `Pending` on the Stage 6 `FEAT_MTE` probe + `Normal
+  Tagged` mapping; x86_64 / riscv64 / wasm32 declare a justified
+  `Unsupported` (no per-granule tagging silicon). The architecture-neutral
+  `next_free_tag` rotation is shared by the ports and by the software UAF
+  floor.
+- **Software UAF floor stays on everywhere.** `kernel/mem`'s slab rotates
+  the slot tag on every allocation and rejects a stale-tag handle with
+  `SlabError::TagMismatch`; `SoftwareTagCheck::for_tagging` only stands it
+  down where a port `enforces_uaf_in_hardware()` (no Tier-1 port does
+  yet), so `Slab::new` keeps it enabled on all four targets.
+- **Deliverable met:** the §19.1 + §19.10 conformance verticals pass on
+  every port (`cargo test -p rustos-arch-{x86_64,aarch64,riscv64,wasm32}`
+  + `-p rustos-kernel-mem` green); profiles are honest. Docs:
+  `docs/src/security/side_channels.md`, `docs/src/security/memory_tagging.md`,
+  platform pages, `PLAN.md` §19 items 8 & 13, this file.
+- **Carried forward (Stage-6-blocked, "[DO IMMEDIATELY ON UNBLOCK]"):**
+  KPTI + IBPB/IBRS/STIBP/SSBD on x86_64; KPTI + the MIDR Spectre-v2
+  sequence on aarch64; auto-enabling Arm MTE on `FEAT_MTE` silicon. All
+  three depend on the Stage 6 user/kernel page-table boundary, not on this
+  stage; the software slab tag-check remains the UAF floor until then.
 
-- Override `SchedulerArch::core_class` on aarch64 with `big.LITTLE`
-  classification discovered from `MPIDR_EL1` affinity / FDT
-  `cpu-map`+`capacity-dmips-mhz` (x86_64 hybrid already done; riscv64
+### Stage W10 — Heterogeneous `core_class` discovery (aarch64) ✅ LANDED
+
+- aarch64 now overrides `SchedulerArch::core_class` with `big.LITTLE`
+  classification discovered from the device tree's per-core
+  `capacity-dmips-mhz` ratings (x86_64 hybrid already done; riscv64
   homogeneous default stands).
-- **Deliverable:** aarch64 reports asymmetric cores where present;
-  conformance asserts totality + the homogeneous default elsewhere.
+- **Shared FDT reader (`lib/fdt`).** Added `Fdt::each_cpu`, a focused,
+  allocation-free walk over `/cpus/cpu@*` that yields each node's `reg`
+  (`MPIDR_EL1` affinity) and optional `capacity-dmips-mhz`, plus an
+  `arm_with_cpus` `big.LITTLE` fixture. One device-tree parser, shared
+  by every arch (§2.2); host-tested.
+- **Pure classifier (`kernel/arch/aarch64::hetcore`).**
+  `classify_by_capacity` maps the highest advertised rating to the
+  performance tier and any core strictly below it to efficiency;
+  homogeneous (equal / absent ratings) and a missing rating fail
+  conservative to performance (§2.9). Pure and host-tested.
+- **Port wiring (`Aarch64Arch`).** A per-CPU `core_classes` table
+  (mirroring `X86_64Arch`), `record_core_class`, `classify_from_fdt`
+  (maps each cpu node's affinity to a dense `CpuId` and records the
+  classified table), and the `core_class` override (out-of-range →
+  performance, never a panic). The boot consumer calls
+  `classify_from_fdt` once on the boot core.
+- **Deliverable met:** aarch64 reports asymmetric cores where present
+  (`classify_from_fdt_reports_big_little_cores`) and the homogeneous
+  default everywhere else; the shared HAL conformance vertical
+  (`core_class_is_total`, run by every port via `run_all`) asserts
+  totality. `cargo test -p rustos-arch-aarch64 -p rustos-fdt` green.
+  Docs: `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
 ### Stage W11 — QEMU vertical parity sweep (drivers on aarch64)
 

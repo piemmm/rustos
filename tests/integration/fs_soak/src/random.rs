@@ -1,6 +1,6 @@
 //! Randomized, model-checked filesystem soak.
 //!
-//! Where [`crate::exercise`] drives one *fixed* operation sequence per
+//! Where [`crate::exercise()`] drives one *fixed* operation sequence per
 //! iteration (only the content bytes vary by seed), this body drives a
 //! genuinely **randomized** operation mix: each step the RNG picks one of
 //! create-file / create-dir / write / append / extend / truncate-grow /

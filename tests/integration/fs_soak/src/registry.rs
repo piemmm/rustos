@@ -38,7 +38,7 @@ impl EntropySource for SoakEntropy {
 /// hard-codes the list (§2.2).
 ///
 /// `rustfs`/`ext4`/`fat32` run the deterministic, fixed-sequence
-/// [`exercise`]; `rustfs-random` runs the randomized, model-checked
+/// [`exercise()`]; `rustfs-random` runs the randomized, model-checked
 /// [`random_exercise`] over rustfs, taking a different path on every
 /// launch (its start seed is drawn from entropy).
 pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32", "rustfs-random"];

@@ -34,11 +34,9 @@
 //! tests can exercise the ns conversion (`AGENTS.md` §1 — no fake
 //! primitives in production).
 
-use core::sync::atomic::AtomicU64;
-#[cfg(any(test, not(target_os = "none")))]
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
 
 /// Maximum number of logical CPUs the per-CPU accounting arrays cover.
 /// The boot/timer slice brings up one; the bound is headroom for the
@@ -71,6 +69,17 @@ pub struct Aarch64Arch {
     /// Host-only stray-IPI counter for out-of-range targets.
     #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
     host_stray_ipi: AtomicU64,
+
+    /// Static [`CoreClass`] of each CPU, indexed by dense [`CpuId`].
+    ///
+    /// Initialised to [`CoreClass::Performance`] (a homogeneous machine).
+    /// [`Self::classify_from_fdt`] rewrites the table from the device
+    /// tree's per-core `capacity-dmips-mhz` ratings at boot, and the
+    /// scheduler reads it through the [`SchedulerArch::core_class`]
+    /// override so it can place background work on the efficiency cores of
+    /// a `big.LITTLE` part (`AGENTS.md` §17.2 — static per-CPU identity
+    /// discovered by the arch port).
+    core_classes: [AtomicU8; MAX_CPUS],
 }
 
 impl Aarch64Arch {
@@ -116,6 +125,56 @@ impl Aarch64Arch {
             cpu_to_mpidr,
             host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
             host_stray_ipi: AtomicU64::new(0),
+            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; MAX_CPUS],
+        }
+    }
+
+    /// Record the [`CoreClass`] discovered for dense `cpu`.
+    ///
+    /// An out-of-range `cpu` is ignored — the table is bounded to
+    /// [`MAX_CPUS`], so a stray call cannot corrupt memory (`AGENTS.md`
+    /// §5.4 fail-closed). Mirrors `X86_64Arch::record_core_class`.
+    pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
+        if let Some(slot) = usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.core_classes.get(idx))
+        {
+            slot.store(class.as_u8(), Ordering::Relaxed);
+        }
+    }
+
+    /// Discover the per-CPU [`CoreClass`] table from the device tree.
+    ///
+    /// Walks every `/cpus/cpu@*` node (via [`rustos_fdt::Fdt::each_cpu`]),
+    /// maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
+    /// [`CpuId`] through this handle's affinity map, and classifies the
+    /// collected `capacity-dmips-mhz` ratings with
+    /// [`crate::hetcore::classify_by_capacity`]. A malformed tree, or a
+    /// CPU node whose affinity is not in the map, leaves that core at the
+    /// [`CoreClass::Performance`] default rather than guessing
+    /// (`AGENTS.md` §2.9 — fail conservative). The downstream boot
+    /// consumer calls this once on the boot core after building the
+    /// affinity map.
+    pub fn classify_from_fdt(&self, fdt: &crate::fdt::Fdt<'_>) {
+        let mut capacities: [Option<u64>; MAX_CPUS] = [None; MAX_CPUS];
+        // A malformed tree yields the all-`None` homogeneous default.
+        let _ = fdt.each_cpu(|mpidr, capacity| {
+            if let Some(idx) = self
+                .cpu_for_mpidr(mpidr)
+                .and_then(|cpu| usize::try_from(cpu).ok())
+            {
+                if let Some(slot) = capacities.get_mut(idx) {
+                    *slot = capacity;
+                }
+            }
+        });
+        for (idx, class) in crate::hetcore::classify_by_capacity(&capacities)
+            .into_iter()
+            .enumerate()
+        {
+            if let Ok(cpu) = CpuId::try_from(idx) {
+                self.record_core_class(cpu, class);
+            }
         }
     }
 
@@ -203,6 +262,18 @@ impl SchedulerArch for Aarch64Arch {
 
     fn ticks_now(&self) -> u64 {
         read_cntpct()
+    }
+
+    fn core_class(&self, cpu: CpuId) -> CoreClass {
+        // Out-of-range CPUs report the safe homogeneous default per the
+        // Arch HAL contract; a stored byte is always a valid encoding
+        // because `record_core_class` only writes `CoreClass::as_u8`.
+        usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.core_classes.get(idx))
+            .map_or(CoreClass::Performance, |slot| {
+                CoreClass::from_u8(slot.load(Ordering::Relaxed)).unwrap_or(CoreClass::Performance)
+            })
     }
 
     fn send_ipi(&self, target: CpuId) {
@@ -364,6 +435,58 @@ mod tests {
         let arch = Aarch64Arch::new(0, 1_000);
         assert_eq!(arch.mpidr_of(0), Some(0));
         assert_eq!(arch.cpu_for_mpidr(0), Some(0));
+    }
+
+    #[test]
+    fn core_class_defaults_to_performance_before_discovery() {
+        // No FDT discovery has run: every CPU, and any out-of-range id,
+        // is the safe homogeneous default.
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        assert_eq!(arch.core_class(0), CoreClass::Performance);
+        assert_eq!(arch.core_class(1), CoreClass::Performance);
+        assert_eq!(arch.core_class(CpuId::MAX), CoreClass::Performance);
+    }
+
+    #[test]
+    fn classify_from_fdt_reports_big_little_cores() {
+        // A 2+2 big.LITTLE `virt`-shaped tree: affinities 0/1 are the big
+        // cores (cap 1024), 0x100/0x101 the LITTLE cores (cap 512). The
+        // affinity map places them at dense ids 0..=3.
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x0, 0x1, 0x100, 0x101]);
+        let blob = rustos_fdt::fixture::arm_with_cpus(
+            0x4000_0000,
+            0x2000_0000,
+            &[
+                (0x0, Some(1024)),
+                (0x1, Some(1024)),
+                (0x100, Some(512)),
+                (0x101, Some(512)),
+            ],
+        );
+        let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
+        arch.classify_from_fdt(&fdt);
+        assert_eq!(arch.core_class(0), CoreClass::Performance);
+        assert_eq!(arch.core_class(1), CoreClass::Performance);
+        assert_eq!(arch.core_class(2), CoreClass::Efficiency);
+        assert_eq!(arch.core_class(3), CoreClass::Efficiency);
+        // An out-of-range id stays the safe default; totality holds.
+        assert_eq!(arch.core_class(CpuId::MAX), CoreClass::Performance);
+    }
+
+    #[test]
+    fn classify_from_fdt_is_homogeneous_without_capacities() {
+        // A tree whose cpu nodes advertise no capacity leaves every core
+        // a performance core (a homogeneous machine).
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x0, 0x1]);
+        let blob = rustos_fdt::fixture::arm_with_cpus(
+            0x4000_0000,
+            0x2000_0000,
+            &[(0x0, None), (0x1, None)],
+        );
+        let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
+        arch.classify_from_fdt(&fdt);
+        assert_eq!(arch.core_class(0), CoreClass::Performance);
+        assert_eq!(arch.core_class(1), CoreClass::Performance);
     }
 
     /// §17.2 / W0: the port passes the shared Arch HAL conformance

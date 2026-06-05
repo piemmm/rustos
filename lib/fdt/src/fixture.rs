@@ -141,6 +141,54 @@ pub fn virt_like(base: u64, size: u64, timebase: u32) -> Vec<u8> {
     b.build()
 }
 
+/// An aarch64 tree carrying a `/cpus` node whose `cpu@*` children declare
+/// per-core `reg` (the `MPIDR_EL1` affinity) and an optional
+/// `capacity-dmips-mhz` rating, plus the usual `/memory` node.
+///
+/// Each entry of `cpus` is `(mpidr, capacity)`: a `Some` capacity emits a
+/// `capacity-dmips-mhz` property (a `big.LITTLE` part), a `None` omits it
+/// (a homogeneous part). Used to exercise [`crate::Fdt::each_cpu`] and the
+/// aarch64 heterogeneous-core classifier.
+#[must_use]
+pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u8> {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+
+    b.begin_node("cpus");
+    b.prop_u32("#address-cells", 1);
+    b.prop_u32("#size-cells", 0);
+    for (mpidr, capacity) in cpus {
+        let name = alloc::format!("cpu@{mpidr:x}");
+        b.begin_node(&name);
+        b.prop_str("device_type", "cpu");
+        // The fixture writes a single-cell (`#address-cells = 1`) `reg`;
+        // `try_from` keeps the cast honest rather than silently truncating
+        // a value that does not fit one cell (`AGENTS.md` §2.1).
+        b.prop_u32(
+            "reg",
+            u32::try_from(*mpidr).expect("fixture MPIDR fits one cell"),
+        );
+        if let Some(cap) = capacity {
+            b.prop_u32("capacity-dmips-mhz", *cap);
+        }
+        b.end_node();
+    }
+    b.end_node();
+
+    b.begin_node("memory@40000000");
+    b.prop("device_type", b"memory\0");
+    let mut reg = Vec::new();
+    reg.extend_from_slice(&base.to_be_bytes());
+    reg.extend_from_slice(&size.to_be_bytes());
+    b.prop("reg", &reg);
+    b.end_node();
+
+    b.end_node();
+    b.build()
+}
+
 /// A QEMU-`virt`-shaped aarch64 tree: 2/2 root cells, a `/memory` node, a
 /// `/psci` node with a `method` (`hvc`/`smc`), and a `/timer` node with an
 /// `interrupts` cell list (the per-CPU PPI the generic timer raises).
