@@ -379,3 +379,48 @@ host (`classify_from_fdt_reports_big_little_cores`); the shared HAL
 conformance vertical asserts `core_class` totality on every port.
 riscv64 (homogeneous) keeps the default, so adding a heterogeneous
 RISC-V part is a `core_class` override there, not a change here.
+
+## virtio-MMIO device verticals (Stage W11-A)
+
+The `virt` board's virtio-MMIO bus is driven end-to-end by two QEMU
+verticals, the EL1/GICv2 analogue of the riscv64 ones:
+`tests/integration/virtio_blk_mmio_aarch64` (read sector 0 and verify the
+host-planted pattern, then write and read back sector 1) and
+`tests/integration/virtio_net_mmio_aarch64` (ARP-resolve the QEMU
+user-mode gateway `10.0.2.2` from guest `10.0.2.15`, then ICMP echo).
+Both are enrolled in `tools/xtask/src/commands/qemu_tests.rs` and report
+through the `SYS_EXIT` semihosting finisher.
+
+The device-agnostic bring-up lives in the shared
+`tests/integration/virtio_qemu_support` crate's `imp_mmio_aarch64` module
+(behind `cfg(itest_aarch64)`), and the device round-trip *tails* are the
+same shared code the riscv64 and x86_64 verticals run (`AGENTS.md` §2.2).
+The module owns only what is unique to the EL1 bring-up:
+
+- **FP/SIMD enable.** The `virt` board enters EL1 with
+  `CPACR_EL1.FPEN` trapping Advanced-SIMD/FP; the compiler emits NEON
+  register moves for the struct copies in the driver/DMA stack, so the
+  scenario sets `FPEN = 0b11` first (a trapped access otherwise faults
+  with `ESR_EL1` EC `0x07`). riscv64 gets the equivalent FP enable from
+  its boot pipeline.
+- **Stage-1 MMU.** It brings up a 2 GiB identity map through
+  `paging::AddressSpace::new_identity_gigapages` (GiB 0 Device memory for
+  the GIC/PL011/virtio-MMIO apertures, RAM Normal-cacheable). The MMU-off
+  reset state types every access as Device, where the `LDXR`/`STXR`
+  atomics the driver/DMA/sync stack relies on abort; mapping RAM as Normal
+  memory is the precondition for the rest of the bring-up.
+- **IRQ path.** It walks the device tree for the provisioned slot's GICv2
+  SPI, wires the EL1 device-IRQ dispatch (`exceptions::set_device_irq_dispatch`)
+  to a `kernel/irq` `IrqTable` over a `GicController` bridge (the bridge
+  lives in the test crate, since §17.4 forbids the arch crate depending on
+  `kernel/irq`), and parks the boot CPU on a race-free DAIF-masked `wfi`.
+
+QEMU's `-kernel <ELF>` aarch64 path treats the image as bare firmware and
+passes no DTB pointer (`x0 == 0`), unlike the riscv64 OpenSBI `a1`
+hand-off. Each vertical therefore embeds the canonical `virt` DTB, dumped
+at build time by `qemu-system-aarch64 ... dumpdtb` (gated to the
+aarch64-none target), and hands those bytes to the scenario; the
+virtio-MMIO transport bases and SPIs in that blob are the stable
+`virt`-board layout, independent of which transport slot the backing
+device lands on. The display and input verticals (Stage W11-B) reuse this
+bring-up.

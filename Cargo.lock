@@ -1637,6 +1637,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-virtio-blk-mmio-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-virtio-blk-mmio-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -1655,6 +1666,17 @@ dependencies = [
  "rustos-abi",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-virtio-net-mmio-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-network-virtio-net",
  "rustos-itest-harness",
  "rustos-test-virtio-qemu-support",
 ]
@@ -1688,6 +1710,8 @@ name = "rustos-test-virtio-qemu-support"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-arch-x86_64",
  "rustos-bumpalloc",

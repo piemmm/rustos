@@ -116,15 +116,16 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
 | display (`vesa`/fb)     |   ✓    |  **✗**  |    ✓    |  **✗** |
-| `virtio` blk/net        | ✓(pci) |  **✗**  | ✓(mmio) |  n/a   |
+| `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the
-  live-scheduler task switch (W7, `sched_drive_qemu_aarch64`), and
-  heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`)
-  landed; missing input / display / virtio verticals. (FDT/DTB discovery
-  is host-tested via W1/W10; the runtime parse of the full ARM `virt`
-  tree is still a gap.)
+  live-scheduler task switch (W7, `sched_drive_qemu_aarch64`),
+  heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`),
+  and the virtio blk/net MMIO verticals (W11-A) landed; missing input /
+  display verticals (W11-B). (FDT/DTB discovery is host-tested via W1/W10
+  and the W11-A verticals embed the canonical `virt` DTB; the runtime
+  parse of the full ARM `virt` tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
   storage HAL trait, missing input vertical.
@@ -646,14 +647,45 @@ stricter `is_release_ready` gate rejects any `Pending`.
 
 ### Stage W11 — QEMU vertical parity sweep (drivers on aarch64)
 
-- Close the remaining driver-facing verticals so aarch64 matches
-  riscv64/x86_64: `virtio_blk_mmio_aarch64`, `virtio_net_mmio_aarch64`,
-  a display vertical (framebuffer), and an input vertical. (These lean on
-  the device-detection / driver-autoload stages already in `PLAN.md`
-  §18 / Stage 4.)
-- **Deliverable:** the QEMU matrix in §1 is filled for every arch where
-  the device is emulable; each new vertical is QEMU-green and enrolled in
-  `tools/xtask/src/commands/qemu_tests.rs`.
+#### Stage W11-A — virtio blk + net MMIO verticals (aarch64) — ✅ landed
+
+- aarch64 now runs the virtio-blk and virtio-net `virt`-board MMIO
+  verticals, the EL1/GICv2 analogue of the riscv64 ones:
+  `tests/integration/virtio_blk_mmio_aarch64` (sector-0 verify +
+  sector-1 write/read-back) and `tests/integration/virtio_net_mmio_aarch64`
+  (ARP-resolve the SLIRP gateway + ICMP echo), both QEMU-green and
+  enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
+- **Shared bring-up (`tests/integration/virtio_qemu_support`).** Added the
+  `imp_mmio_aarch64` module behind `cfg(itest_aarch64)`: it enables FP/SIMD
+  at EL1 (`CPACR_EL1.FPEN`), brings up a 2 GiB identity-mapped stage-1 MMU
+  (GiB 0 Device, RAM Normal-cacheable — the precondition for the
+  atomic-heavy driver/DMA/sync stack, which riscv64 gets from its boot
+  pipeline), provisions the transport through the capability-gated
+  `KernelMmioMapper`, walks the DTB for the device's GICv2 SPI, wires the
+  EL1 device-IRQ dispatch to a `kernel/irq` `IrqTable` over a
+  `GicController` bridge, and parks on a race-free `wfi` (DAIF-masked).
+  The device-agnostic lifecycle and the blk/net round-trip tails are the
+  *same* shared code the riscv64 / x86_64 verticals run (§2.2);
+  `dtb_total_size` moved into the shared `common` module.
+- **DTB hand-off.** QEMU's `-kernel <ELF>` aarch64 path treats the image
+  as bare firmware and passes no DTB pointer (x0 = 0), so each vertical
+  embeds the canonical `virt` DTB, dumped at build time by
+  `qemu-system-aarch64 ... dumpdtb` (gated to the aarch64-none target),
+  and hands those bytes to the scenario. The transport bases and SPIs in
+  that blob are the stable `virt`-board layout, independent of which slot
+  the backing device lands on.
+- **Verified:** both verticals exit `0` under `qemu-system-aarch64 -M virt`
+  (the `cargo xtask test --qemu` enrolment path).
+
+#### Stage W11-B — display + input verticals (aarch64) — next
+
+- Remaining for full §1-matrix parity: an aarch64 display vertical
+  (a `ramfb`/framebuffer analogue of `framebuffer_display_qemu_riscv64`)
+  and an aarch64 input vertical. These reuse the W11-A `imp_mmio_aarch64`
+  bring-up (FP + MMU identity map + embedded DTB) and the device-detection
+  / driver-autoload stages in `PLAN.md` §18 / Stage 4.
+- **Deliverable:** the `display` and `input` rows of the §1 QEMU matrix
+  filled for aarch64, each QEMU-green and enrolled.
 
 ---
 

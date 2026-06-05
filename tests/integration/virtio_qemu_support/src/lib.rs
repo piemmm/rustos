@@ -39,3 +39,9 @@ pub use imp_pci::*;
 mod imp_mmio;
 #[cfg(itest_riscv64)]
 pub use imp_mmio::*;
+
+// aarch64 `virt`-board MMIO bring-up + `define_mmio_boot_harness_aarch64!`.
+#[cfg(itest_aarch64)]
+mod imp_mmio_aarch64;
+#[cfg(itest_aarch64)]
+pub use imp_mmio_aarch64::*;

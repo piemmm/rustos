@@ -21,7 +21,7 @@
 //! cell solely for the unit tests; it is never linked into a kernel image
 //! (`AGENTS.md` §1).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicUsize;
 
 use rustos_arch_api::PerCpu;
 
@@ -79,7 +79,7 @@ impl PerCpu for PerCpuStorage {
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            self.host_base.load(Ordering::Relaxed)
+            self.host_base.load(core::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -107,7 +107,8 @@ impl PerCpu for PerCpuStorage {
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            self.host_base.store(base, Ordering::Relaxed);
+            self.host_base
+                .store(base, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }

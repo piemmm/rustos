@@ -786,6 +786,33 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       totality. **Carried forward:** cross-CPU TLB shootdown and the
       `lib/fdt` runtime ARM `virt` parse (FDT `cpu-map` topology). Docs:
       `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W11-A — virtio blk + net MMIO verticals (aarch64).**
+      aarch64 now runs the virtio-blk and virtio-net `virt`-board MMIO
+      QEMU verticals, the EL1/GICv2 analogue of the riscv64 ones:
+      `tests/integration/virtio_blk_mmio_aarch64` (read sector 0 + verify
+      the planted pattern, then write/read-back sector 1) and
+      `tests/integration/virtio_net_mmio_aarch64` (ARP-resolve the SLIRP
+      gateway `10.0.2.2`, then ICMP echo), both enrolled in
+      `tools/xtask/src/commands/qemu_tests.rs`. The device-agnostic
+      bring-up moved into a new `cfg(itest_aarch64)` `imp_mmio_aarch64`
+      module in the shared `virtio_qemu_support` crate: enable FP/SIMD at
+      EL1 (`CPACR_EL1.FPEN`), bring up a 2 GiB identity-mapped stage-1 MMU
+      (GiB 0 Device, RAM Normal-cacheable — the precondition for the
+      atomic-heavy driver/DMA/sync stack, which riscv64 gets from its boot
+      pipeline), provision the transport through the capability-gated
+      `KernelMmioMapper`, walk the DTB for the device's GICv2 SPI, wire
+      the EL1 device-IRQ dispatch to a `kernel/irq` `IrqTable` over a
+      `GicController` bridge, and park on a race-free DAIF-masked `wfi`.
+      The lifecycle and the blk/net round-trip tails are the *same* shared
+      code the riscv64 / x86_64 verticals run (§2.2); `dtb_total_size`
+      moved into the shared `common` module. Because QEMU's `-kernel
+      <ELF>` aarch64 path passes no DTB pointer (x0 = 0), each vertical
+      embeds the canonical `virt` DTB dumped at build time by
+      `qemu...dumpdtb` (gated to the aarch64-none target). **Verified
+      QEMU-green:** both bins exit `0` under `qemu-system-aarch64 -M virt`.
+      **Carried forward (Stage W11-B):** the aarch64 display + input
+      verticals (they reuse this bring-up). Docs:
+      `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

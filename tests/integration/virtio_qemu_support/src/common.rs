@@ -252,6 +252,24 @@ pub fn carve_dma_map(src: &BootMemoryMap, pages: usize) -> Option<BootMemoryMap>
     Some(m)
 }
 
+/// Read the flattened device tree's total size from its header
+/// (`totalsize`, a big-endian `u32` at byte offset 4) so a `&[u8]` of the
+/// exact blob length can be formed from the raw pointer. Shared by the
+/// MMIO bring-up of every `virt`-board arch (`AGENTS.md` §2.2).
+///
+/// # Safety
+///
+/// `ptr` must address a valid flattened device-tree blob (the verbatim
+/// firmware hand-off published by the boot trampoline); the first 8 bytes
+/// must be readable.
+#[must_use]
+pub unsafe fn dtb_total_size(ptr: u64) -> usize {
+    let header = ptr as *const u8;
+    // SAFETY: the caller guarantees the 8-byte FDT header is readable.
+    let bytes = unsafe { core::slice::from_raw_parts(header, 8) };
+    u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize
+}
+
 // --- Device tails (generic over the transport) -----------------------
 
 /// Logical sector size.

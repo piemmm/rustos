@@ -50,6 +50,36 @@ rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
 rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
 rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
 
+# --- aarch64 (`virt`-board MMIO) -------------------------------------
+# The aarch64 vertical owns its bring-up directly from `kernel_main` (the
+# `virt` board hands EL1 a usable machine), so unlike riscv64 there is no
+# boot-pipeline consumer crate; the IRQ path is built on `rustos-arch-api`
+# (`IrqController`) + `rustos-kernel-irq` over a `GicController` bridge.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
+rustos-net-icmp = { path = "../../../userland/net/icmp", version = "=0.0.0" }
+
 # --- riscv64 (`virt`-board MMIO) -------------------------------------
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

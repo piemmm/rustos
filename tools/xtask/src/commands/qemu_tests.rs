@@ -912,6 +912,53 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // Stage W11 (`plans/WIRING.md` §3):
+    // `rustos-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
+    // MMIO analogue of the riscv64 virtio-blk-mmio vertical — boot the
+    // arch crate's EL1 trampoline → build the virtio-MMIO bus from the
+    // device tree → provision an `MmioTransport` through the capability-
+    // gated `KernelMmioMapper` → arm the device's GICv2 SPI + EL1 IRQ
+    // path → mint a `KernelVirtioHost` over a static per-device DMA pool →
+    // load the signed virtio-blk `.rxe` → read sector 0 (verify the
+    // planted `byte[i] = i mod 256` pattern) → write+read-back sector 1 →
+    // ARM semihosting PASS. The device-tail round-trip is the same shared
+    // code the riscv64 / x86_64 verticals run. The 2048-sector backing
+    // image gives the planted sector-0 pattern plus headroom; single CPU
+    // and a 60-second budget match the other boot-then-do-fixed-work
+    // tests.
+    QemuTest {
+        package: "rustos-test-virtio-blk-mmio-aarch64",
+        binary: "rustos-test-virtio-blk-mmio-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: Some(2048),
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // Stage W11 (`plans/WIRING.md` §3):
+    // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
+    // MMIO analogue of the riscv64 virtio-net-mmio vertical — same
+    // bring-up as the blk MMIO vertical, then drive `rustos-net-icmp`
+    // over the device: ARP-resolve the QEMU user-mode (SLIRP) gateway
+    // `10.0.2.2` from guest `10.0.2.15`, then send an ICMP echo and
+    // confirm the reply → ARM semihosting PASS. The device-tail ping is
+    // the same shared code the riscv64 / x86_64 verticals run. A
+    // user-mode netdev (no host privileges) plus a frame dump to
+    // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-virtio-net-mmio-aarch64",
+        binary: "rustos-test-virtio-net-mmio-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: true,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
     // per-sub-stage deliverable. It installs the EL1 vectors, brings up

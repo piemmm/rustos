@@ -55,7 +55,7 @@ pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as H
 pub use rustos_test_riscv64_boot::boot;
 
 use crate::common::{
-    carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
+    carve_dma_map, drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
 use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
@@ -163,22 +163,6 @@ struct PlicInfo {
     base: u64,
     /// Highest interrupt source id (`riscv,ndev`).
     ndev: u32,
-}
-
-/// Read the flattened device tree's total size from its header
-/// (`totalsize`, a big-endian `u32` at byte offset 4) so a `&[u8]` of the
-/// exact blob length can be formed from the raw pointer.
-///
-/// # Safety
-///
-/// `ptr` must address a valid flattened device-tree blob (the verbatim
-/// OpenSBI `a1` hand-off, published by `boot`); the first 8 bytes must be
-/// readable.
-unsafe fn dtb_total_size(ptr: u64) -> usize {
-    let header = ptr as *const u8;
-    // SAFETY: the caller guarantees the 8-byte FDT header is readable.
-    let bytes = unsafe { core::slice::from_raw_parts(header, 8) };
-    u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize
 }
 
 /// Find the PLIC's register base and source count in `dtb`.
