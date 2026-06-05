@@ -97,7 +97,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
-| Live `kernel/sched` task switch   |   ✓    |  **✗**  |    ~    | **✗**  |
+| Live `kernel/sched` task switch   |   ✓    |    ✓    |    ✓    | **✗**  |
 | Heterogeneous `core_class`        | ✓ hybrid| **✗**  |  n/a   |  n/a   |
 | Side-channel profile (§19.1)      |   ✓    |    ~    |    ~    |   ~    |
 | Memory-tagging profile (§19.10)   |   ✓    | ~ MTE pend | ✗ unsup | ✗ unsup |
@@ -111,7 +111,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `memory_isolation`      |   ✓    |    ✓    |    ✓    |   —    |
 | `timer_preempt`         |   ✓    |    ✓    |    ✓    |   —    |
 | **`ipi_smp`**           | ✓(stress)|    ✓    |    ✓    |  **✗** |
-| **`sched_drive`** (live)| ✓(stress)|  **✗**  |    ✓    |  **✗** |
+| **`sched_drive`** (live)| ✓(stress)|    ✓    |    ✓    |  **✗** |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
@@ -119,10 +119,11 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `virtio` blk/net        | ✓(pci) |  **✗**  | ✓(mmio) |  n/a   |
 
 **Headline gaps, ranked:**
-- **aarch64:** SMP secondary-core bring-up + real IPI landed (W6); no
-  live-scheduler task switch, no heterogeneous `core_class`, and missing
-  input / display / virtio verticals. (FDT/DTB discovery is host-tested
-  via W1; the runtime parse of the full ARM `virt` tree is still a gap.)
+- **aarch64:** SMP secondary-core bring-up + real IPI (W6) and the
+  live-scheduler task switch (W7, `sched_drive_qemu_aarch64`) landed; no
+  heterogeneous `core_class`, and missing input / display / virtio
+  verticals. (FDT/DTB discovery is host-tested via W1; the runtime parse
+  of the full ARM `virt` tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
   storage HAL trait, missing input vertical.
@@ -483,15 +484,36 @@ The single largest aarch64 gap, closed by mirroring the riscv64 port-side
   new SMP vertical is QEMU-green and enrolled. Docs:
   `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
-### Stage W7 — Live `kernel/sched` task switch per arch
+### Stage W7 — Live `kernel/sched` task switch per arch — ✅ landed
 
-- Wire the HAL `Timer` + `ContextSwitch` + `Smp` into the **live**
-  `kernel/sched` scheduler on aarch64 (riscv64 has `sched_drive`; confirm
-  + extend it; x86_64 via `scheduler_stress`).
-- **Add `sched_drive_qemu_aarch64`** matching the riscv64 vertical: a
-  real `Scheduler` drives `on_timer_tick` and a real task switch runs.
-- **Deliverable:** every bare-metal port drives the real scheduler under
-  QEMU; the new aarch64 vertical is green.
+**Landed:** the aarch64 `preempt` (generic timer + GICv2 IPI) and
+`context` primitives now drive the architecture-neutral `kernel/sched`
+`Scheduler`, closing the last live-scheduler gap on a bare-metal port.
+No new HAL trait — the existing `Timer` / `ContextSwitch` slices plus the
+W6 SMP/IPI primitives are reused.
+
+- **`tests/integration/sched_drive_qemu_aarch64`** (new, enrolled, single
+  CPU, 60 s, QEMU-green): the EL1/GICv2 analogue of
+  `sched_drive_qemu_riscv64`. On the `virt` board it (1) performs a real
+  bidirectional `context::switch` round-trip with interrupts disabled,
+  (2) builds a real `rustos-kernel-sched-mlfq::Scheduler` over
+  `Aarch64Arch`, publishes it, and installs both the `preempt`
+  generic-timer callback and the GICv2 IPI (SGI) callback so each drives
+  `Scheduler::on_timer_tick`, then (3) brings up the EL1 vectors + GICv2,
+  arms the 100 Hz generic timer + IPI, spawns 64 tasks, sends itself a
+  directed IPI, and drives the cooperative `step` loop until every task
+  has run. PASS once the generic-timer IRQ has driven the live scheduler
+  ≥ 20 times and the IPI SGI path has driven it at least once; any
+  missing path trips a dedicated failure finisher or times out
+  (`AGENTS.md` §7).
+- riscv64's `sched_drive_qemu_riscv64` already wires this end to end;
+  x86_64 drives the live scheduler under `scheduler_stress(_qemu)`. So
+  **every bare-metal port now drives the real `kernel/sched` scheduler
+  under QEMU.**
+- **Carried forward (still tracked):** cross-CPU TLB shootdown (from
+  W5b-2/W5b-3); the `lib/fdt` runtime parse of the full ARM `virt` tree.
+- **Deliverable met.** Docs: `docs/src/platform/aarch64.md`, `PLAN.md`,
+  this file.
 
 ### Stage W8 — wasm32 multi-worker SMP + live cooperative scheduler
 

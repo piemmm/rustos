@@ -1,0 +1,39 @@
+[package]
+name = "rustos-test-sched-drive-qemu-aarch64"
+description = "WIRING Stage W7 QEMU integration test: the aarch64 arch primitives drive the live kernel/sched scheduler. Boots the virt board, performs a real bidirectional context::switch round-trip, builds a real rustos-kernel-sched-mlfq Scheduler over Aarch64Arch, routes the preempt generic-timer callback and the GICv2 IPI (SGI) callback into Scheduler::on_timer_tick, spawns and dispatches tasks via the cooperative step loop, and PASSes once the timer + IPI have driven the live scheduler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "the aarch64 arch primitives drive the live scheduler"
+# integration test — the aarch64 deliverable of `plans/WIRING.md`
+# Stage W7, the EL1/GICv2 analogue of
+# `rustos-test-sched-drive-qemu-riscv64`. It links the
+# `rustos-arch-aarch64` port and the `rustos-kernel-sched-mlfq` policy:
+# the boot core performs a real `context::switch` round-trip, builds a
+# real `Scheduler`, wires the `preempt` generic-timer + IPI callbacks
+# into `Scheduler::on_timer_tick`, and drives a cooperative `step` loop
+# over spawned tasks. Keeping the QEMU-exit shortcut in a dedicated bin
+# (not a Cargo feature on the arch crate) prevents feature unification
+# from leaking it into any production build (`AGENTS.md` §5.4.5 — fail
+# closed).
+
+[[bin]]
+name = "rustos-test-sched-drive-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

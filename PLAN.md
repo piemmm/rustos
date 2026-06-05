@@ -673,6 +673,33 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       capability). **Carried forward:** cross-CPU TLB shootdown; the
       `lib/fdt` runtime parse of the full ARM `virt` tree. Docs:
       `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W7 — Live `kernel/sched` task switch per arch.**
+      Wired the aarch64 `preempt` (generic timer + GICv2 IPI) and
+      `context` primitives into the architecture-neutral `kernel/sched`
+      `Scheduler`, closing the last "live-scheduler task switch" gap on a
+      bare-metal port (x86_64 via `scheduler_stress`, riscv64 via
+      `sched_drive_qemu_riscv64`). New QEMU vertical
+      `tests/integration/sched_drive_qemu_aarch64`
+      (`rustos-test-sched-drive-qemu-aarch64`, enrolled in
+      `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s) is the
+      EL1/GICv2 analogue of the riscv64 one: on the `virt` board it (1)
+      performs a real bidirectional `context::switch` round-trip with
+      interrupts disabled (an inbound task seeded by `TaskCtx::prepare`
+      records that it ran and `switch`es straight back), (2) builds a real
+      `rustos-kernel-sched-mlfq::Scheduler` over `Aarch64Arch`, publishes
+      it, and installs both the `preempt` generic-timer callback and the
+      GICv2 IPI (SGI) callback so each drives `Scheduler::on_timer_tick`,
+      then (3) brings up the EL1 vectors + GICv2, arms the 100 Hz generic
+      timer + IPI, spawns 64 tasks, sends itself a directed IPI, and
+      drives the cooperative `step` loop until every task has run. PASS
+      once the generic-timer IRQ has driven the live scheduler ≥ 20 times
+      and the IPI SGI path has driven it at least once; any missing path
+      trips a dedicated failure finisher or times out. No new HAL trait
+      (the existing `Timer` / `ContextSwitch` slices plus the W6 SMP/IPI
+      primitives are reused). **Verified green under QEMU on this host.**
+      **Carried forward:** cross-CPU TLB shootdown; the `lib/fdt` runtime
+      parse of the full ARM `virt` tree. Docs:
+      `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

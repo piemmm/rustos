@@ -98,10 +98,12 @@ system-register/assembly/MMIO operations to the freestanding target.
 
 ## QEMU verticals
 
-Six freestanding integration binaries cover the Stage-3 per-sub-stage
+Seven freestanding integration binaries cover the Stage-3 per-sub-stage
 checklist (plus the CCOMPAT CC2 syscall round-trip, the Stage W3-B
-device-IRQ vertical, and the Stage W6 SMP/IPI vertical) on the `virt`
-board; each links only the arch port and reports its result through the
+device-IRQ vertical, the Stage W6 SMP/IPI vertical, and the Stage W7
+live-scheduler vertical) on the `virt` board; each links only the arch
+port (the live-scheduler vertical also links the
+`rustos-kernel-sched-mlfq` policy) and reports its result through the
 semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
@@ -129,6 +131,17 @@ semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
   enable the IPI SGI, then delivers a directed IPI through
   `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ path runs
   the IPI callback with core 1's id. Runs with `--cpus 2`.
+- `rustos-test-sched-drive-qemu-aarch64` — **the arch primitives drive
+  the live scheduler** (Stage W7): the EL1/GICv2 analogue of
+  `rustos-test-sched-drive-qemu-riscv64`. With interrupts off it performs
+  a real bidirectional `context::switch` round-trip, then builds a real
+  `rustos_kernel_sched_mlfq::Scheduler` over `Aarch64Arch` and installs
+  the `preempt` generic-timer callback **and** the GICv2 IPI (SGI)
+  callback so both drive `Scheduler::on_timer_tick`. It arms the 100 Hz
+  generic timer + IPI, spawns and dispatches a batch of tasks through the
+  cooperative `step` loop, sends itself a directed IPI, and PASSes once
+  the timer IRQ has driven the live scheduler ≥ 20 times and the IPI SGI
+  path has driven it at least once. Single CPU.
 - `rustos-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
   (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
   the kernel (EL1), aliases the `lib/abi-sys` `ros_sys_cap_query` stub

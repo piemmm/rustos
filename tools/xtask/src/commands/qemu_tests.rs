@@ -749,6 +749,34 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
+    // primitives drive the live scheduler" deliverable — the EL1/GICv2
+    // analogue of `sched_drive_qemu_riscv64`. It boots the `virt` board,
+    // performs a real bidirectional `context::switch` round-trip
+    // (interrupts off), builds a real `rustos-kernel-sched-mlfq::Scheduler`
+    // over `Aarch64Arch`, installs the `preempt` generic-timer callback
+    // and the GICv2 IPI (SGI) callback so both drive
+    // `Scheduler::on_timer_tick`, brings up the EL1 vectors + GICv2, arms
+    // the 100 Hz generic timer + IPI, spawns a batch of tasks, sends
+    // itself a directed IPI, and drives the cooperative `step` loop until
+    // every task has run. PASS once the generic-timer IRQ has driven the
+    // live scheduler >= 20 times and the IPI SGI path has driven it at
+    // least once. A regression that fails to switch, dispatch, tick, or
+    // deliver the IPI either trips a dedicated failure finisher or never
+    // reaches PASS, so the run fails loudly. Single CPU (the slice brings
+    // up one core) and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-sched-drive-qemu-aarch64",
+        binary: "rustos-test-sched-drive-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
     // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`

@@ -1491,6 +1491,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-sched-drive-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-sched-mlfq",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-sched-drive-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
