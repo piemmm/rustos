@@ -19,8 +19,8 @@ tagging). Nothing here may be landed as an `#[ignore]`, `todo!()`, or
 
 ### 1.1 Surfaces under test
 
-- **Memory:** `kernel/mem/{slab.rs, ptr.rs, sensitive.rs, vmm.rs, frame.rs,
-  phys.rs, dma, mmio}`.
+- **Memory:** `kernel/mem/{slab.rs, ptr.rs, sensitive.rs, uaccess.rs, vmm.rs,
+  frame.rs, phys.rs, swap, dma, mmio}`.
 - **CPU / ring boundary (x86_64):**
   `kernel/arch/x86_64/{syscall_entry.rs, gdt.rs, idt.rs, paging.rs,
   sidechannel.rs, memtag.rs}`.
@@ -34,7 +34,9 @@ tagging). Nothing here may be landed as an `#[ignore]`, `todo!()`, or
   `poke_for_test` single-byte corruption trapdoor (`#[cfg(test)] pub(crate)`).
 - `ptr.rs` already tests: one-past-the-end rejection, `usize` overflow, and
   out-of-bounds slice windows.
-- Integration tests `memory_isolation_qemu_aarch64` and `syscall_dispatch_qemu`
+- Integration tests `memory_isolation_qemu_aarch64` (plus its `riscv64`
+  sibling and the host-level `memory_isolation`), `syscall_dispatch_qemu`, and
+  the ring-3 round-trips `enter_user_qemu_x86_64` and `spawn_program_qemu_*`
   exist under `tests/integration/`.
 - `lib/caps`, `kernel/{sec, ipc, syscall}` already carry proptest models and
   fuzz harnesses.
@@ -43,10 +45,14 @@ New work targets the CVE classes these do **not** yet hit.
 
 ### 1.3 Honest reach (§2.1, §2.6)
 
-RustOS today has **no SMEP/SMAP/`clac`/`stac`** and **no live ring-3 user
-mode**; KPTI/IBPB are `Pending` and tied to **Stage 6** (`sidechannel.rs`
-states this). Tests for the full ring-break classes (SMAP bypass,
-`copy_from_user` faults) are therefore mostly Stage-6 work. Today we land:
+RustOS today has **no SMEP/SMAP/`clac`/`stac`**; KPTI/IBPB are `Pending` and
+tied to **Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path
+*does* now exist — the Arch HAL `EnterUser` `iretq` primitive
+(`kernel/arch/x86_64/src/userentry.rs`), exercised end-to-end by
+`enter_user_qemu_x86_64` — but the silicon-enforced ring barrier (SMEP/SMAP,
+KPTI) and the per-access `copy_from_user` hardware fault trap are not yet
+wired. Tests for the full ring-break classes (SMAP bypass, `copy_from_user`
+page faults) are therefore mostly Stage-6 work. Today we land:
 
 1. host-level invariant tests against code that already exists,
 2. QEMU CPU-control-register / entry-path tests that **gate** Stage 6, and
@@ -110,6 +116,12 @@ test-only. **Every** deliberate-corruption capability follows this pattern:
   corrupted"), realloc the same slot, and assert the reuse path returns
   all-zero (or detects the dirty slot). Proves zero-on-free is an *enforced*
   invariant, not incidental (§4).
+- In `swap.rs`: the zero-on-free guarantee is void if paged-out secrets can be
+  read back from a plaintext swap device (`AGENTS.md` §4), so the encrypted
+  swap layer is in scope here. Host tests assert the only read/write path is
+  `EncryptedSwap` (plaintext swap is unrepresentable), that a ciphertext record
+  tampered in place fails authentication closed, and that the ephemeral
+  per-boot `SwapKey` decrypts only its own boot's records.
 
 ### 3.4 Audit-log tampering (§19.4, CWE-345 / CWE-347)
 
@@ -170,11 +182,14 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   TF, DF, IF, AC, NT and the IOPL bits — a malicious user RFLAGS cannot carry
   `AC=1` (SMAP bypass) or `DF=1` (string direction) into the kernel. *Landable
   today; pure host test.*
-- **Stack-pivot / missing GS swap (CVE-2019-1125, `swapgs`).** QEMU test
-  (sibling to `syscall_dispatch_qemu`): enter via a real `syscall` from a
-  low-privilege context; assert the kernel ran on `rsp0`, not the user stack,
-  and `gs` was kernel-side during dispatch. Host test: `install_kernel_rsp0`
-  rejects a non-canonical / user-range `rsp0` (fail-closed).
+- **Stack-pivot / missing GS swap (CVE-2019-1125, `swapgs`).** *Landed:*
+  `enter_user_qemu_x86_64` drops to ring 3 through the HAL `iretq` primitive
+  and issues a genuine ring-3 → ring-0 `syscall`, exercising the entry stub's
+  `swapgs` and kernel-stack switch end-to-end. Extend it (or a sibling of
+  `syscall_dispatch_qemu`) to assert the kernel ran on `rsp0`, not the user
+  stack, and `gs` was kernel-side during dispatch. Host test:
+  `install_kernel_rsp0` rejects a non-canonical / user-range `rsp0`
+  (fail-closed).
 - **`sysret` non-canonical RIP → #GP in ring 0 (CVE-2012-0217).** QEMU test:
   return to user with a non-canonical saved RIP; assert the fault is taken in
   user context / handled, never as a user-controlled kernel #GP. *Dedicated
@@ -197,8 +212,13 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   `kernel/syscall/tests/fuzz_args.rs::pointer_shaped_user_ptr_inputs_are_handled_deterministically`
   drives every `UserPtr`-bearing syscall with pointer-shaped adversarial bases
   (null / kernel-half / non-canonical hole / top-of-space) and pins the
-  null-rejection + no-panic invariant. Full per-access fault handling — wiring
-  `validate_user_buffer` into the live `copy_from_user` path — is Stage-6.
+  null-rejection + no-panic invariant. *Arch-neutral copy landed:*
+  `kernel/mem/src/uaccess.rs` (`copy_in`/`copy_out`) walks the caller's address
+  space one page at a time, rejecting any page missing `USER` or the required
+  read/write permission fail-closed (host-tested via `HostPageTable` /
+  `SimPhysMap`). The remaining per-access **hardware** fault trap — taking a
+  real `#PF` mid-copy on a concurrently-unmapped page — is Stage-6 (it needs
+  the live x86_64 fault path).
 - **Side-channel transition barriers (§19.1; Spectre/MDS/L1TF).** Conformance
   assertions the charter already mandates: syscall-entry barrier present
   (`lfence`), context-switch buffer flush present (`verw`), and
@@ -215,9 +235,10 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   zero-on-free info-leak, DMA descriptor fuzzing, slab metadata fault-injection,
   audit-log chain-tamper. All map to named CVE classes against already-landed
   code.
-- **Highest yield but Stage-6-gated:** SMEP/SMAP/WP enforcement,
-  `copy_from_user` TOCTOU/pointer validation, KPTI. Write the
-  conformance/spec tests now as the gate; implement in Stage 6.
+- **Highest yield but Stage-6-gated:** SMEP/SMAP/WP enforcement, the
+  `copy_from_user` hardware fault trap (the arch-neutral page-walk validator
+  has already landed; §5), KPTI. Write the conformance/spec tests now as the
+  gate; implement in Stage 6.
 - **Regression-guard, not bug-finding:** the side-channel barrier /
   `is_release_ready` honesty tests.
 - **What these tests cannot prove:** they validate the *detector*, not that
