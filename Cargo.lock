@@ -472,12 +472,16 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-api",
+ "rustos-fdt",
  "rustos-log",
 ]
 
 [[package]]
 name = "rustos-arch-api"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-arch-riscv64"
@@ -485,6 +489,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-api",
+ "rustos-fdt",
  "rustos-log",
 ]
 
@@ -723,6 +728,10 @@ dependencies = [
  "rustos-log",
  "rustos-virtio",
 ]
+
+[[package]]
+name = "rustos-fdt"
+version = "0.0.0"
 
 [[package]]
 name = "rustos-files"

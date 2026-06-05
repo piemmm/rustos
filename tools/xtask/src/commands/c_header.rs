@@ -43,18 +43,20 @@ use std::path::Path;
 
 use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
-    DriverKind, DriverManifest, Duration64, Errno, IpcMessageHeader, KernelMemoryStats, KeyInput,
-    LibraryScope, LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode,
-    NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    DriverKind, DriverManifest, Duration64, Errno, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
+    HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryScope,
+    LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
+    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
     ProcessStartHeader, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
     StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES,
     DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE,
-    LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
     MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
@@ -293,6 +295,160 @@ fn generate_random() -> String {
 
     out.push_str("#endif /* ROS_RANDOM_H */\n");
     out
+}
+
+/// `rustos_hwtree.h` — the architecture-neutral hardware tree (`AGENTS.md`
+/// §18.1).
+///
+/// Declares the hardware-tree version, the root-parent sentinel, the array
+/// bounds, the packed little-endian `*_WIRE_LEN` of each record, the
+/// closed device-class / match-kind / resource-kind enumerations as
+/// `ROS_HW_*` macros, and the `#[repr(C)]` record layouts as typedefs.
+/// Every numeric value is read from `lib/abi`; only the C spelling lives
+/// here.
+fn generate_hwtree() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Architecture-neutral hardware tree (AGENTS.md sec.18.1).");
+    out.push_str("#ifndef ROS_HWTREE_H\n#define ROS_HWTREE_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Hardware-tree ABI version. */\n");
+    let _ = writeln!(out, "#define ROS_HWTREE_VERSION {HWTREE_VERSION_V1}u");
+    out.push_str("/* Parent id marking a node with no parent (a tree root). */\n");
+    let _ = writeln!(out, "#define ROS_HW_NODE_ROOT {HW_NODE_ROOT}u");
+    out.push('\n');
+
+    out.push_str("/* Array bounds. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_HW_COMPATIBLE_MAX ((uintptr_t){HW_COMPATIBLE_MAX}u)"
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_HW_NODE_MAX_MATCH_KEYS ((uintptr_t){HW_NODE_MAX_MATCH_KEYS}u)"
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_HW_NODE_MAX_RESOURCES ((uintptr_t){HW_NODE_MAX_RESOURCES}u)"
+    );
+    out.push('\n');
+
+    out.push_str("/* Packed little-endian wire sizes, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_HW_MATCH_KEY_WIRE_LEN {}u",
+        HwMatchKey::WIRE_LEN
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_HW_RESOURCE_WIRE_LEN {}u",
+        HwResource::WIRE_LEN
+    );
+    let _ = writeln!(out, "#define ROS_HW_NODE_WIRE_LEN {}u", HwNode::WIRE_LEN);
+    out.push('\n');
+
+    hwtree_enum_macros(&mut out);
+    hwtree_structs(&mut out);
+
+    out.push_str("#endif /* ROS_HWTREE_H */\n");
+    out
+}
+
+/// Emit the closed device-class / match-kind / resource-kind enumerations
+/// as `ROS_HW_*` macros, reading every value from `lib/abi`.
+fn hwtree_enum_macros(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str("/* Device classes (uint16_t). */\n");
+    for (name, class) in [
+        ("ROOT", HwDeviceClass::Root),
+        ("BUS", HwDeviceClass::Bus),
+        ("CPU", HwDeviceClass::Cpu),
+        ("MEMORY", HwDeviceClass::Memory),
+        ("TIMER", HwDeviceClass::Timer),
+        ("INTERRUPT_CONTROLLER", HwDeviceClass::InterruptController),
+        ("DISPLAY", HwDeviceClass::Display),
+        ("INPUT", HwDeviceClass::Input),
+        ("NETWORK", HwDeviceClass::Network),
+        ("STORAGE", HwDeviceClass::Storage),
+        ("SERIAL", HwDeviceClass::Serial),
+        ("OTHER", HwDeviceClass::Other),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_HW_CLASS_{name} ((uint16_t){}u)",
+            class.as_u16()
+        );
+    }
+    out.push('\n');
+
+    out.push_str("/* Match-key kinds (uint16_t). */\n");
+    for (name, kind) in [
+        ("COMPATIBLE", HwMatchKind::Compatible),
+        ("PCI", HwMatchKind::Pci),
+        ("USB", HwMatchKind::Usb),
+        ("VIRTIO", HwMatchKind::Virtio),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_HW_MATCH_{name} ((uint16_t){}u)",
+            kind.as_u16()
+        );
+    }
+    out.push('\n');
+
+    out.push_str("/* Resource kinds (uint16_t). */\n");
+    for (name, kind) in [
+        ("MMIO", HwResourceKind::Mmio),
+        ("IRQ", HwResourceKind::Irq),
+        ("PORT", HwResourceKind::Port),
+        ("DMA", HwResourceKind::Dma),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define ROS_HW_RES_{name} ((uint16_t){}u)",
+            kind.as_u16()
+        );
+    }
+    out.push('\n');
+}
+
+/// Emit the `#[repr(C)]` hardware-tree record layouts as C typedefs.
+fn hwtree_structs(out: &mut String) {
+    out.push_str(
+        "/* One match key on a node. Mirrors the #[repr(C)] layout; the packed\n\
+         * little-endian wire size is ROS_HW_MATCH_KEY_WIRE_LEN. */\n\
+         typedef struct ros_hw_match_key {\n\
+         \x20   uint16_t kind;\n\
+         \x20   uint8_t compatible_len;\n\
+         \x20   uint16_t vendor;\n\
+         \x20   uint16_t product;\n\
+         \x20   uint32_t class_code;\n\
+         \x20   uint8_t compatible[ROS_HW_COMPATIBLE_MAX];\n\
+         } ros_hw_match_key_t;\n\n",
+    );
+    out.push_str(
+        "/* One resource a node exposes, as a capability-grant request. */\n\
+         typedef struct ros_hw_resource {\n\
+         \x20   uint16_t kind;\n\
+         \x20   uint16_t capability;\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint64_t base;\n\
+         \x20   uint64_t length;\n\
+         } ros_hw_resource_t;\n\n",
+    );
+    out.push_str(
+        "/* One node in the hardware tree. Mirrors the #[repr(C)] layout; the\n\
+         * packed little-endian wire size is ROS_HW_NODE_WIRE_LEN. */\n\
+         typedef struct ros_hw_node {\n\
+         \x20   uint32_t id;\n\
+         \x20   uint32_t parent;\n\
+         \x20   uint16_t device_class;\n\
+         \x20   uint8_t match_key_count;\n\
+         \x20   uint8_t resource_count;\n\
+         \x20   ros_hw_match_key_t match_keys[ROS_HW_NODE_MAX_MATCH_KEYS];\n\
+         \x20   ros_hw_resource_t resources[ROS_HW_NODE_MAX_RESOURCES];\n\
+         } ros_hw_node_t;\n\n",
+    );
 }
 
 /// `rustos_ipc.h` — the IPC message header and port-name wire types
@@ -1592,6 +1748,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
+    out.push_str("#include \"rustos_hwtree.h\"\n");
     out.push_str("#include \"rustos_ipc.h\"\n");
     out.push_str("#include \"rustos_stdinfo.h\"\n");
     out.push_str("#include \"rustos_manifest.h\"\n");
@@ -1629,6 +1786,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_random.h",
             body: generate_random(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_hwtree.h",
+            body: generate_hwtree(),
         },
         GeneratedHeader {
             file_name: "rustos_ipc.h",
@@ -1773,6 +1934,7 @@ mod tests {
             "rustos_capability.h",
             "rustos_time.h",
             "rustos_random.h",
+            "rustos_hwtree.h",
             "rustos_ipc.h",
             "rustos_stdinfo.h",
             "rustos_manifest.h",
@@ -1872,6 +2034,49 @@ mod tests {
             )),
             "request max: {h}"
         );
+    }
+
+    #[test]
+    fn hwtree_header_pins_enums_and_layout() {
+        let h = body("rustos_hwtree.h");
+        assert!(h.contains("#ifndef ROS_HWTREE_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // Values are read from lib/abi, never re-typed: assert they match.
+        assert!(h.contains(&format!("#define ROS_HWTREE_VERSION {HWTREE_VERSION_V1}u")));
+        assert!(h.contains(&format!("#define ROS_HW_NODE_ROOT {HW_NODE_ROOT}u")));
+        assert!(
+            h.contains(&format!(
+                "#define ROS_HW_NODE_WIRE_LEN {}u",
+                HwNode::WIRE_LEN
+            )),
+            "node wire len: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_HW_CLASS_NETWORK ((uint16_t){}u)",
+                HwDeviceClass::Network.as_u16()
+            )),
+            "device class macro: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_HW_MATCH_PCI ((uint16_t){}u)",
+                HwMatchKind::Pci.as_u16()
+            )),
+            "match kind macro: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_HW_RES_IRQ ((uint16_t){}u)",
+                HwResourceKind::Irq.as_u16()
+            )),
+            "resource kind macro: {h}"
+        );
+        assert!(h.contains("typedef struct ros_hw_node {"), "node struct");
+        // The flat record structs mirror their #[repr(C)] layout exactly,
+        // so their wire size equals their in-memory size.
+        assert_eq!(core::mem::size_of::<HwMatchKey>(), HwMatchKey::WIRE_LEN);
+        assert_eq!(core::mem::size_of::<HwResource>(), HwResource::WIRE_LEN);
     }
 
     #[test]

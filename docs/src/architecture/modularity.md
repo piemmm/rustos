@@ -48,13 +48,17 @@ riscv64 image together the same way.
 ## The Arch HAL (`kernel/arch/api`)
 
 The §17.2 architecture surface lives in its own crate, `kernel/arch/api`
-(`rustos-arch-api`). It is `no_std` and dependency-free, so the kernel
-can name the HAL without inheriting an architecture, and a port can
-implement the HAL without naming a concrete kernel crate — the two sides
-meet only here. Today the crate carries the scheduler-facing slice of
-the surface (`CpuId`, `SchedulerArch`); the remaining HAL primitives
-(context switch, MMU/TLB, timer, interrupt entry/exit, per-CPU storage,
-boot discovery) migrate here as the §17 burn-down advances.
+(`rustos-arch-api`). It is `no_std` and names a single `lib/*`
+dependency — `rustos-abi`, itself `no_std`, dependency-free, and
+allocator-free — so the kernel can name the HAL without inheriting an
+architecture, and a port can implement the HAL without naming a concrete
+kernel crate — the two sides meet only here. Today the crate carries the
+scheduler-facing slice (`CpuId`, `SchedulerArch`), the §19.1
+side-channel slice, the §19.10 memory-tagging slice, the user-entry
+slice, and the early-boot platform-discovery slice (`PlatformDiscovery`,
+below); the remaining HAL primitives (context switch, MMU/TLB, timer,
+interrupt entry/exit, per-CPU storage) migrate here as the §17 burn-down
+advances.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -82,12 +86,28 @@ HAL traits so it names no concrete port:
   target) a panic-free no-op equivalent, and `core_class` total — it
   returns a stable, valid class for every `CpuId`, including an
   out-of-range one.
-- `conformance::run_all(arch, side_channel, memory_tagging)` runs that
-  suite **and** the §19.1 side-channel vertical
-  (`sidechannel::conformance`) and the §19.10 memory-tagging vertical
-  (`memtag::conformance`) over the same port's handles. Each port
-  implements the three traits on distinct types (`*Arch`, `SideChannel`,
-  `MemoryTags`), so the suite takes one reference per trait.
+- `conformance::run_all(arch, side_channel, memory_tagging, discovery)`
+  runs that suite **and** the §19.1 side-channel vertical
+  (`sidechannel::conformance`), the §19.10 memory-tagging vertical
+  (`memtag::conformance`), and the §18 platform-discovery vertical
+  (`platform::conformance`) over the same port's handles. Each port
+  implements the four traits on distinct types (`*Arch`, `SideChannel`,
+  `MemoryTags`, and a discoverer), so the suite takes one reference per
+  trait.
+
+### Early-boot platform discovery
+
+The `PlatformDiscovery` slice normalises each target's native hardware
+source into the single `lib/abi` hardware tree (`hwtree`, §18.1/§18.2):
+x86_64 reads the ACPI MADT (`AcpiDiscovery`), riscv64 and aarch64 read a
+flattened device tree (`FdtDiscovery`, on the shared `lib/fdt` parser),
+and wasm32 queries the JavaScript host (`HostCapabilityDiscovery`). A
+discoverer pushes root-first `HwNode`s into a caller-owned `HwNodeSink`,
+so the trait chooses no allocator (the kernel collects on the stack, the
+device manager into a growable buffer). `platform::conformance::run`
+asserts the contract — at least one node, exactly one root, unique ids,
+every non-root parent emitted before its child, every device class
+decodable, and a full sink surfaced rather than silently dropped.
 
 The api crate's own `tests/conformance.rs` drives the harness over an
 in-test double (it cannot name a concrete port without inverting the

@@ -1,0 +1,26 @@
+[package]
+name = "rustos-fdt"
+description = "RustOS shared flattened-device-tree (FDT/DTB) reader: the one device-tree parser every architecture port builds its platform discovery on (AGENTS.md §2.2 / §18.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# `test-fixtures` exposes the `fixture` module — a minimal in-memory DTB
+# builder — so the architecture ports' discovery tests drive the same
+# fixture as this crate's own parser tests rather than re-rolling a second
+# builder (`AGENTS.md` §2.2). It pulls `alloc`, so it is off by default and
+# enabled only in the dependent crates' [dev-dependencies].
+default = []
+test-fixtures = []
+
+[dependencies]

@@ -32,7 +32,10 @@
 //! is host-run and deterministic, exactly like the scheduler-policy
 //! suite (`AGENTS.md` §7 — no flaky tests).
 
-use crate::{memtag, sidechannel, CpuId, MemoryTagging, SchedulerArch, SideChannelMitigation};
+use crate::{
+    memtag, platform, sidechannel, CpuId, MemoryTagging, PlatformDiscovery, SchedulerArch,
+    SideChannelMitigation,
+};
 
 /// Run the [`SchedulerArch`] contract suite against `arch`.
 ///
@@ -56,25 +59,28 @@ pub fn run_scheduler_arch<A: SchedulerArch + ?Sized>(arch: &A) {
 /// Run the entire migrated Arch HAL conformance vertical against a port.
 ///
 /// Combines the [`SchedulerArch`] contract ([`run_scheduler_arch`]) with
-/// the §19.1 side-channel vertical and the §19.10 memory-tagging
-/// vertical already defined in this crate, each over the matching port
-/// handle.
+/// the §19.1 side-channel vertical, the §19.10 memory-tagging vertical,
+/// and the §18 early-boot platform-discovery vertical already defined in
+/// this crate, each over the matching port handle.
 ///
 /// # Panics
 ///
-/// Panics (failing the test) if any of the three slices fails its
+/// Panics (failing the test) if any of the four slices fails its
 /// contract; see [`run_scheduler_arch`],
-/// [`sidechannel::conformance::run_all`], and
-/// [`memtag::conformance::run_all`].
-pub fn run_all<A, S, M>(arch: &A, side_channel: &S, memory_tagging: &M)
+/// [`sidechannel::conformance::run_all`],
+/// [`memtag::conformance::run_all`], and
+/// [`platform::conformance::run`].
+pub fn run_all<A, S, M, P>(arch: &A, side_channel: &S, memory_tagging: &M, platform_discovery: &P)
 where
     A: SchedulerArch + ?Sized,
     S: SideChannelMitigation + ?Sized,
     M: MemoryTagging + ?Sized,
+    P: PlatformDiscovery + ?Sized,
 {
     run_scheduler_arch(arch);
     sidechannel::conformance::run_all(side_channel);
     memtag::conformance::run_all(memory_tagging);
+    platform::conformance::run(platform_discovery);
 }
 
 /// `current_cpu` is stable for the duration of a call (`AGENTS.md`
@@ -137,9 +143,11 @@ fn core_class_is_total<A: SchedulerArch + ?Sized>(arch: &A) {
 mod tests {
     use super::*;
     use crate::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
+    use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use crate::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
     use crate::CoreClass;
     use core::sync::atomic::{AtomicU64, Ordering};
+    use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 
     /// A faithful host stub of a [`SchedulerArch`] port: a fixed CPU id,
     /// a monotonic tick counter, and a best-effort `send_ipi`.
@@ -178,6 +186,16 @@ mod tests {
         fn context_switch_barrier(&self) {}
     }
 
+    struct StubDiscovery;
+
+    impl PlatformDiscovery for StubDiscovery {
+        fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
+            sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
+            sink.emit(HwNode::new(1, 0, HwDeviceClass::Cpu))?;
+            Ok(())
+        }
+    }
+
     struct StubMemTags;
 
     impl MemoryTagging for StubMemTags {
@@ -210,7 +228,7 @@ mod tests {
     #[test]
     fn run_all_accepts_an_honest_port() {
         let arch = StubArch::default();
-        run_all(&arch, &StubSideChannel, &StubMemTags);
+        run_all(&arch, &StubSideChannel, &StubMemTags, &StubDiscovery);
     }
 
     /// A port whose `core_class` panics on an out-of-range CPU violates

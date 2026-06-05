@@ -110,6 +110,16 @@ pub mod percpu;
 /// the `drivers/input/ps2` i8042 driver consumes — both reached only
 /// through `&dyn` (`AGENTS.md` §17.2 / §17.4).
 pub mod pio;
+/// x86_64 implementation of the Arch HAL early-boot platform-discovery
+/// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
+/// §18.2): the ACPI MADT → [`rustos_abi::hwtree`] normalisation built on
+/// the [`acpi`] parser.
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
+/// §2.3).
+#[cfg(feature = "sched-arch")]
+pub mod platform;
 pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;

@@ -22,25 +22,32 @@
 //! §17.2): the [`EnterUser`] trait and the architecture-neutral
 //! [`UserEntry`] register state that drops a freshly built process image
 //! into user mode via the port's native transition (`sret` on riscv64,
-//! `eret` on aarch64, `iretq` on x86_64). It also hosts the **§17.2
+//! `eret` on aarch64, `iretq` on x86_64) — and the **early-boot
+//! platform-discovery** slice (`AGENTS.md` §17.2 / §18.1/§18.2): the
+//! [`PlatformDiscovery`] trait that normalises a target's native
+//! hardware source into the [`rustos_abi::hwtree`] hardware tree, plus
+//! its [`platform::conformance`] vertical. It also hosts the **§17.2
 //! conformance vertical** ([`conformance`]): the harness every port runs
 //! over its real HAL handles so parity is *enforced* rather than asserted
 //! by inspection (`plans/WIRING.md`). The remaining HAL surface
 //! enumerated by
 //! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
-//! shootdown, timer programming, interrupt entry/exit, per-CPU
-//! storage, and early-boot platform discovery) is migrated here as the
+//! shootdown, timer programming, interrupt entry/exit, and per-CPU
+//! storage) is migrated here as the
 //! §17 burn-down advances; see `PLAN.md`. Until a primitive lives here
 //! it stays in its current owning crate, and the move is tracked, not
 //! silently duplicated (`AGENTS.md` §2.2).
 //!
-//! # Why `no_std` and dependency-free
+//! # Why `no_std` and dependency-light
 //!
-//! §17.4 permits `kernel/arch/api` to depend on `lib/*` only. The
-//! crate is `no_std` and pulls in nothing so that an architecture port
-//! implementing the HAL acquires no transitive edge to a concrete
-//! kernel crate, and so the architecture-neutral kernel can name the
-//! HAL without inheriting an arch dependency.
+//! §17.4 permits `kernel/arch/api` to depend on `lib/*` only. The crate
+//! is `no_std` and names a single `lib/*` dependency — `rustos_abi`,
+//! itself `no_std`, dependency-free, and allocator-free — so the
+//! [`PlatformDiscovery`] slice can speak in the one hardware-tree ABI
+//! rather than re-defining it (`AGENTS.md` §2.2). An architecture port
+//! implementing the HAL therefore still acquires no transitive edge to a
+//! concrete kernel crate, and the architecture-neutral kernel can name
+//! the HAL without inheriting an arch dependency.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -48,6 +55,7 @@
 
 pub mod conformance;
 pub mod memtag;
+pub mod platform;
 pub mod sidechannel;
 pub mod userentry;
 
@@ -62,6 +70,10 @@ pub use memtag::{
 };
 
 pub use userentry::{EnterUser, UserEntry};
+
+pub use platform::{
+    conformance as platform_conformance, DiscoveryError, HwNodeSink, PlatformDiscovery,
+};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

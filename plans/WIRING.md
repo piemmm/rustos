@@ -182,7 +182,19 @@ The gate everything else is measured against.
   port's host tests run it over their handle. Document the suite in
   `docs/src/architecture/modularity.md`.
 
-### Stage W1 — Early-boot platform discovery HAL + aarch64 FDT
+### Stage W1 — Early-boot platform discovery HAL + aarch64 FDT — ✅ landed
+
+**Landed:** `lib/abi::hwtree` (the §18.1 hardware-tree ABI: `HwDeviceClass`,
+`HwMatchKey`, `HwResource` as capability-grant requests, `HwNode`; pinned
+`WIRE_LEN` + generated `rustos_hwtree.h`). `PlatformDiscovery` + its
+`platform::conformance` vertical live in `kernel/arch/api` and are folded
+into `conformance::run_all` (now four handles). The shared FDT parser was
+extracted to `lib/fdt` (one parser, §2.2) with a feature-gated DTB fixture;
+riscv64's `fdt` re-exports it, aarch64 gained a `fdt` query layer (PSCI
+`hvc`/`smc` + generic-timer PPI) — the W6 prerequisite. Per-port impls:
+x86_64 `AcpiDiscovery`, riscv64/aarch64 `FdtDiscovery`, wasm32
+`HostCapabilityDiscovery`; every port's `passes_arch_hal_conformance_suite`
+drives a real discovery handle.
 
 - Define `PlatformDiscovery` in `kernel/arch/api`, producing
   `lib/abi::hwtree` nodes (§18.1). Migrate x86_64 `acpi` and riscv64

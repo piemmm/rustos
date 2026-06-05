@@ -14,8 +14,10 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use rustos_arch_api::conformance;
 use rustos_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
+use rustos_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
 use rustos_arch_api::{CpuId, SchedulerArch};
 
@@ -53,6 +55,16 @@ impl SideChannelMitigation for DoubleSideChannel {
     fn context_switch_barrier(&self) {}
 }
 
+struct DoubleDiscovery;
+
+impl PlatformDiscovery for DoubleDiscovery {
+    fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
+        sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
+        sink.emit(HwNode::new(1, 0, HwDeviceClass::Cpu))?;
+        Ok(())
+    }
+}
+
 struct DoubleMemTags;
 
 impl MemoryTagging for DoubleMemTags {
@@ -73,5 +85,5 @@ impl MemoryTagging for DoubleMemTags {
 #[test]
 fn arch_hal_conformance_suite_runs() {
     let arch = DoubleArch::default();
-    conformance::run_all(&arch, &DoubleSideChannel, &DoubleMemTags);
+    conformance::run_all(&arch, &DoubleSideChannel, &DoubleMemTags, &DoubleDiscovery);
 }

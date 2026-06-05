@@ -46,6 +46,15 @@ extern "C" {
     /// Emit `len` bytes starting at `ptr` to the host console
     /// (`console.log`). The bytes are UTF-8; the host decodes them.
     fn rustos_host_console_write(ptr: *const u8, len: usize);
+
+    /// Number of logical processors the host advertises
+    /// (`navigator.hardwareConcurrency`), the wasm32 analogue of the
+    /// CPU count a bare-metal port reads from ACPI/FDT. At least `1`.
+    fn rustos_host_logical_processors() -> u32;
+
+    /// Whether the host environment exposes a display surface (a canvas)
+    /// the desktop could render to: `1` if present, `0` otherwise.
+    fn rustos_host_has_display() -> u32;
 }
 
 /// Read the host monotonic clock in fractional milliseconds.
@@ -86,4 +95,20 @@ pub fn host_console_write(bytes: &[u8]) {
     // `(ptr, len)` names exactly its valid range; the host copies the
     // bytes out synchronously and retains no pointer past return.
     unsafe { rustos_host_console_write(bytes.as_ptr(), bytes.len()) }
+}
+
+/// Number of logical processors the host advertises (at least `1`).
+#[must_use]
+pub fn host_logical_processors() -> u32 {
+    // SAFETY: a pure host import taking no arguments; the glue returns
+    // `navigator.hardwareConcurrency` clamped to at least 1.
+    unsafe { rustos_host_logical_processors() }
+}
+
+/// Whether the host exposes a display surface.
+#[must_use]
+pub fn host_has_display() -> bool {
+    // SAFETY: a pure host import taking no arguments; the glue returns
+    // `1` when a canvas display is available, `0` otherwise.
+    unsafe { rustos_host_has_display() != 0 }
 }

@@ -499,10 +499,21 @@ mod tests {
     #[test]
     fn passes_arch_hal_conformance_suite() {
         let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        // One enabled Local APIC + one I/O APIC, the minimal MADT the
+        // discovery suite needs (`AGENTS.md` §18.2). The entry bytes are a
+        // fixed array (LocalApic 8 bytes + IoApic 12 bytes) so the test
+        // names no allocator type.
+        let entries: [u8; 20] = [
+            0, 8, 0, 0, 1, 0, 0, 0, // LocalApic: uid 0, apic 0, enabled
+            1, 12, 2, 0, 0x00, 0x00, 0xC0, 0xFE, 0, 0, 0, 0, // IoApic @0xFEC00000
+        ];
+        let madt = crate::acpi::tests::build_madt(0xFEE0_0000, 0x1, &entries);
+        let discovery = crate::platform::AcpiDiscovery::new(&madt);
         rustos_arch_api::conformance::run_all(
             &arch,
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),
+            &discovery,
         );
     }
 

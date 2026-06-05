@@ -275,10 +275,14 @@ mod tests {
     #[test]
     fn passes_arch_hal_conformance_suite() {
         let arch = Aarch64Arch::new(0, 1_000);
+        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
+        let discovery = crate::platform::FdtDiscovery::new(fdt);
         rustos_arch_api::conformance::run_all(
             &arch,
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),
+            &discovery,
         );
     }
 }

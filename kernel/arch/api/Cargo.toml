@@ -15,9 +15,17 @@ workspace = true
 path = "src/lib.rs"
 
 # The Arch HAL is the §17.4 boundary between the architecture-neutral
-# kernel and the per-target ports. It is deliberately `no_std` and free
-# of any kernel-subsystem dependency: §17.4 permits `kernel/arch/api`
-# to name `lib/*` only, so the ports that implement it (and the kernel
+# kernel and the per-target ports. It is deliberately `no_std` and names
+# no kernel-subsystem dependency: §17.4 permits `kernel/arch/api` to
+# name `lib/*` only, so the ports that implement it (and the kernel
 # crates that consume it) never acquire a transitive edge to a concrete
 # kernel crate through the HAL.
+#
+# - `rustos-abi` is a `lib/*` crate (no_std, dependency-free, no
+#   allocator). It is named here so the `PlatformDiscovery` slice
+#   (`AGENTS.md` §17.2 / §18.1) can speak in the single hardware-tree
+#   ABI (`rustos_abi::hwtree`) rather than re-defining the node types
+#   (§2.2). The edge `kernel/arch/api -> lib/abi` is permitted by §17.4
+#   and pulls no kernel dependency or `#[global_allocator]` in.
 [dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

@@ -75,6 +75,10 @@ core::arch::global_asm!(include_str!("vectors.s"));
 pub mod context;
 pub mod exceptions;
 pub mod fault;
+/// aarch64 device-tree access: the aarch64-specific `virt`-board queries
+/// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
+/// [`rustos_fdt`] parser (`AGENTS.md` §2.2 / §18.2).
+pub mod fdt;
 pub mod gic;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
@@ -83,6 +87,11 @@ pub mod kernel_arch;
 /// honestly `Pending` on the Stage 6 MTE enable (see the module docs).
 pub mod memtag;
 pub mod paging;
+/// aarch64 implementation of the Arch HAL early-boot platform-discovery
+/// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
+/// §18.2): the FDT → [`rustos_abi::hwtree`] normalisation built on the
+/// [`fdt`] reader.
+pub mod platform;
 pub mod preempt;
 pub mod qemu_exit;
 /// aarch64 implementation of the Arch HAL side-channel mitigation

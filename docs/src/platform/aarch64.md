@@ -148,3 +148,19 @@ The host-side argv contract lives in `tools/qemu/src/aarch64.rs`:
 -semihosting-config enable=on,target=native -m 256M -smp N -kernel <elf>`,
 with virtio-mmio block/net devices and `ramfb` attached on demand
 (mirroring the riscv64 `virt` backend).
+
+## Platform discovery (hardware tree)
+
+The aarch64 port implements the Arch HAL `PlatformDiscovery` slice
+(`AGENTS.md` §17.2 / §18.2) in `kernel/arch/aarch64::platform`, reading
+the flattened device tree the `virt` board hands the kernel. The
+device-tree *parser* is the shared `lib/fdt` crate (one parser for every
+arch, §2.2); `kernel/arch/aarch64::fdt` layers the aarch64-specific
+queries on it: the first `/memory` region, the `/psci` `method`
+(`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up will
+call), and the generic-timer per-CPU interrupt (PPI) number from
+`/timer`. `FdtDiscovery` emits a root node, a `Memory` node carrying the
+RAM window, and a `Timer` node carrying its PPI as a capability-gated
+(`CAP_IRQ_BIND`) IRQ resource. The reader is host-tested against the
+shared DTB fixture and exercised by the port's
+`passes_arch_hal_conformance_suite`.

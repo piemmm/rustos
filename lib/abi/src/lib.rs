@@ -20,6 +20,7 @@ pub mod appinfo;
 pub mod capability;
 pub mod driver;
 pub mod error;
+pub mod hwtree;
 pub mod input;
 pub mod ipc;
 pub(crate) mod le;
@@ -48,6 +49,10 @@ pub use driver::{
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
 pub use error::Errno;
+pub use hwtree::{
+    HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HWTREE_VERSION_V1,
+    HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+};
 pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
     KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,

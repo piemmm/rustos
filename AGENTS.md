@@ -178,6 +178,12 @@ rustos/
 │   │                    #   vectorised cursor shapes rasterised onto a raster
 │   │                    #   Surface + replaceable cursor sets keyed by the
 │   │                    #   theme's CursorKind (§10, §17.4).
+│   ├── fdt/             # Shared flattened-device-tree (FDT/DTB) reader: the
+│   │                    #   one device-tree parser the aarch64 + riscv64
+│   │                    #   ports build their §18.2 platform discovery on
+│   │                    #   (memory map, riscv timebase, generic property
+│   │                    #   lookup), with a feature-gated DTB test fixture.
+│   │                    #   One parser, not one per arch (§2.2).
 │   ├── font/            # Shared text rasterisation: a built-in monospace
 │   │                    #   bitmap font + glyph blitter onto a raster Surface
 │   │                    #   for the taskbar and apps (§16.4, §17.4).
@@ -924,7 +930,15 @@ as non-negotiable as §2.
   context switch, MMU/page-table primitives, TLB shootdown, IPI,
   timer, interrupt entry/exit, atomics/fences, per-CPU storage, and
   early-boot platform discovery. Adding to this surface requires a
-  PLAN.md entry and updates this section.
+  PLAN.md entry and updates this section. The slices migrated into
+  `kernel/arch/api` so far are `SchedulerArch` (per-CPU id, ticks, IPI,
+  `core_class`), `SideChannelMitigation` (§19.1), `MemoryTagging`
+  (§19.10), `EnterUser` (user entry), and `PlatformDiscovery` — the
+  early-boot platform-discovery slice that normalises each target's
+  native source (ACPI / FDT / host query) into the `lib/abi` hardware
+  tree (`hwtree`, §18.1/§18.2); each carries a conformance vertical in
+  `kernel/arch/api`. The remaining primitives are migrated as the §17
+  burn-down advances (`plans/WIRING.md`).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the

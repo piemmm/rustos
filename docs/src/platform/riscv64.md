@@ -381,3 +381,17 @@ qemu-system-riscv64 -M virt -no-reboot -display none -serial stdio \
 A clean boot prints the phase timeline and `id=4004 kernel boot
 completed`, after which the `SiFive` Test finisher exits QEMU with
 status `0`.
+
+## Platform discovery (hardware tree)
+
+The riscv64 port implements the Arch HAL `PlatformDiscovery` slice
+(`AGENTS.md` §17.2 / §18.2) in `kernel/arch/riscv64::platform`. The
+device-tree parser now lives once in the shared `lib/fdt` crate (§2.2);
+`kernel/arch/riscv64::fdt` re-exports it so the boot path and the QEMU
+integration tests keep naming `rustos_arch_riscv64::fdt::Fdt`.
+`FdtDiscovery` normalises the two facts the reader extracts — the first
+`/memory` region and the `/cpus` `timebase-frequency` — into the single
+`lib/abi` hardware tree: a root node, a `Memory` node carrying the RAM
+window as a capability-gated (`CAP_MMIO_MAP`) resource, and a `Timer`
+node. It is host-tested against the shared DTB fixture and exercised by
+the port's `passes_arch_hal_conformance_suite`.

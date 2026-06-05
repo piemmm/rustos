@@ -93,10 +93,14 @@ fn send_ipi_drops_unmapped_target_into_stray_counter() {
 #[test]
 fn passes_arch_hal_conformance_suite() {
     let arch = RiscvArch::new(0, 10_000_000);
+    let blob = crate::fdt::tests::virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
+    let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
+    let discovery = crate::platform::FdtDiscovery::new(fdt);
     rustos_arch_api::conformance::run_all(
         &arch,
         &crate::sidechannel::SideChannel::new(),
         &crate::memtag::MemoryTags::new(),
+        &discovery,
     );
 }
 

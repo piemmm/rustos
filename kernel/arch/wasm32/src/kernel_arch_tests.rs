@@ -104,9 +104,13 @@ fn send_ipi_to_unmapped_target_is_dropped_as_stray() {
 #[test]
 fn passes_arch_hal_conformance_suite() {
     let arch = WasmArch::new(0);
+    let discovery = crate::platform::HostCapabilityDiscovery::new(
+        crate::platform::HostCapabilities::new(4, true),
+    );
     rustos_arch_api::conformance::run_all(
         &arch,
         &crate::sidechannel::SideChannel::new(),
         &crate::memtag::MemoryTags::new(),
+        &discovery,
     );
 }

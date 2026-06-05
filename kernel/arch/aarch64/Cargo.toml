@@ -33,4 +33,12 @@ rustos-arch-api = { path = "../api", version = "=0.0.0" }
 # the x86_64 and riscv64 ports take. It is a `lib/*` crate, so this edge
 # is permitted by `AGENTS.md` §17.4.
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The flattened-device-tree parser is architecture-neutral and shared
+# (`AGENTS.md` §2.2); this port builds its `fdt`/`platform` discovery on it.
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# Enable the shared DTB builder for this port's `fdt`/`platform` host
+# tests (off in production builds — `[dev-dependencies]` only).
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }

@@ -511,7 +511,7 @@ const _: () = {
 };
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     extern crate std;
     use std::vec;
@@ -597,7 +597,11 @@ mod tests {
     }
 
     // Helper: build a MADT with the supplied entries appended.
-    fn build_madt(lapic: u32, flags: u32, entries: &[u8]) -> Vec<u8> {
+    //
+    // `pub(crate)` so the `platform` module's discovery tests drive the
+    // same MADT builder rather than re-rolling the table layout
+    // (`AGENTS.md` §2.2).
+    pub(crate) fn build_madt(lapic: u32, flags: u32, entries: &[u8]) -> Vec<u8> {
         let total = 44 + entries.len();
         let mut buf = vec![0u8; total];
         buf[..4].copy_from_slice(&MADT_SIGNATURE);

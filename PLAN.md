@@ -448,6 +448,32 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       instantiating `conformance::run_all` over its real `*Arch`,
       `SideChannel`, and `MemoryTags` handles. All four Tier-1 ports
       pass; documented in `docs/src/architecture/modularity.md`.
+- [x] **WIRING Stage W1 — Early-boot platform-discovery HAL + the shared
+      hardware-tree ABI.** `lib/abi/src/hwtree.rs` lands the
+      architecture-neutral hardware tree (§18.1): `HwDeviceClass`,
+      `HwMatchKey` (compatible / PCI / USB / virtio), `HwResource`
+      (MMIO / IRQ / port / DMA, each carrying the `CapabilityId` it
+      requests — no ambient authority, §4), and `HwNode` (id, parent,
+      class, bounded match-key + resource arrays), all `#[repr(C)]` with
+      pinned `WIRE_LEN` little-endian encode/decode and a generated
+      `include/rustos/rustos_hwtree.h` C view (drift-guarded by
+      `cargo xtask c-header`). `kernel/arch/api` gains the
+      `PlatformDiscovery` HAL slice (`platform.rs`): a sink-based,
+      allocation-free discoverer emitting root-first `HwNode`s, plus a
+      `platform::conformance` vertical folded into `conformance::run_all`
+      (now four handles). A new shared `lib/fdt` crate holds the one
+      flattened-device-tree parser (`AGENTS.md` §2.2) — memory region,
+      riscv `timebase-frequency`, a generic `property` lookup, and a
+      feature-gated DTB test fixture. Per-port impls: x86_64
+      `AcpiDiscovery` (MADT → Root + CPU/Local-APIC + I/O-APIC), riscv64
+      + aarch64 `FdtDiscovery` (riscv64's `fdt` re-exports `lib/fdt`;
+      aarch64 adds a `fdt` query layer with PSCI method `hvc`/`smc` +
+      generic-timer PPI, the W6 prerequisite), wasm32
+      `HostCapabilityDiscovery` (host-capability query → Root +
+      CPU-per-worker + optional display). Every port's
+      `passes_arch_hal_conformance_suite` now drives a real discovery
+      handle. Docs: `docs/src/platform/{x86_64,aarch64,riscv64}.md`,
+      `docs/src/architecture/modularity.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 
