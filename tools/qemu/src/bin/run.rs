@@ -10,7 +10,8 @@
 //! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
 //!     --kernel path/to/kernel.elf [--arch x86_64|riscv64|aarch64] [--cpus N] \
 //!     [--timeout-secs S] [--virtio-blk path/to/disk.img ...] \
-//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap] [--ramfb]
+//!     [--virtio-net] [--virtio-net-pcap path/to/capture.pcap] [--ramfb] \
+//!     [--virtio-keyboard <ready-marker> <qkeycode>]
 //! ```
 
 use std::env;
@@ -30,6 +31,7 @@ fn main() -> ExitCode {
     let mut net_pcap: Option<PathBuf> = None;
     let mut arch = Arch::X86_64;
     let mut ramfb = false;
+    let mut keyboard: Option<(String, String)> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -43,6 +45,12 @@ fn main() -> ExitCode {
                 };
             }
             "--ramfb" => ramfb = true,
+            "--virtio-keyboard" => {
+                let (Some(marker), Some(key)) = (args.next(), args.next()) else {
+                    return usage_err("--virtio-keyboard needs <ready-marker> <qkeycode>");
+                };
+                keyboard = Some((marker, key));
+            }
             "--cpus" => {
                 let Some(v) = args.next() else {
                     return usage_err("--cpus needs a value");
@@ -104,8 +112,17 @@ fn main() -> ExitCode {
     if ramfb {
         spec = spec.with_ramfb();
     }
+    if let Some((marker, key)) = keyboard {
+        spec = spec.with_virtio_keyboard(marker, key);
+    }
 
-    match Runner::run(&spec) {
+    report(Runner::run(&spec))
+}
+
+/// Translate a [`Runner::run`] result into a process exit code, printing
+/// the captured serial log on a non-pass outcome.
+fn report(result: std::io::Result<Outcome>) -> ExitCode {
+    match result {
         Ok(Outcome::Pass) => ExitCode::SUCCESS,
         Ok(Outcome::Fail { status, serial }) => {
             eprintln!("rustos-qemu-run: FAIL (qemu status {status})");
@@ -127,7 +144,7 @@ fn main() -> ExitCode {
 fn usage() -> &'static str {
     "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64|aarch64] [--cpus N] \
 [--timeout-secs S] [--virtio-blk <image> ...] [--virtio-net] \
-[--virtio-net-pcap <path>] [--ramfb]"
+[--virtio-net-pcap <path>] [--ramfb] [--virtio-keyboard <ready-marker> <qkeycode>]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {

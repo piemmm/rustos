@@ -22,9 +22,10 @@ maps to `DriverError::BufferTooSmall`.
 
 ## Shipped drivers
 
-| Driver | Crate                    | Hardware                         | Stage 4 status                 |
-|--------|--------------------------|----------------------------------|--------------------------------|
-| ps2    | `rustos-drv-input-ps2`   | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
+| Driver        | Crate                            | Hardware                         | Status                          |
+|---------------|----------------------------------|----------------------------------|---------------------------------|
+| ps2           | `rustos-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
+| virtio_input  | `rustos-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
 
 ### `rustos-drv-input-ps2`
 
@@ -82,3 +83,50 @@ matching release. The driver itself stays read-only and polled; the
 interrupt only signals *when* a byte is waiting. This shares the
 external-IRQ trap glue that `tests/integration/irq_qemu_x86_64`
 validates against the PIT.
+
+### `rustos-drv-input-virtio-input`
+
+The virtio-input driver implements `Input` over the bus-agnostic virtio
+transport from `lib/virtio`, so one source compiles against both the PCI
+and MMIO transports (the queue protocol lives once, `AGENTS.md` §2.2).
+It is the paravirtualised input device every QEMU machine type can
+present (`virtio-keyboard-device` / `virtio-mouse-device` /
+`virtio-tablet-device`) and the input class real virtio hardware
+exposes — the `virt`-board analogue of the x86 PS/2 keyboard.
+
+It consumes the device-to-driver **event queue** (queue 0). The wire
+record is `struct virtio_input_event { __le16 type; __le16 code;
+__le32 value; }` (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces,
+which `poll` maps onto the platform-neutral `InputEvent`: `EV_KEY` →
+`Key` (the evdev keycode, `value` 1 press / 0 release), `EV_REL` `REL_X`
+/ `REL_Y` → `Pointer`, and `REL_WHEEL` → `Scroll`. `EV_SYN` frame
+separators and any unmodelled `type`/`code` are consumed but surface no
+event, so the driver never fabricates a bogus one (`AGENTS.md` §2.9).
+
+`open` runs the virtio 1.1 §3.1 init sequence (negotiating only
+`VIRTIO_F_VERSION_1`, the modern split-virtqueue layout) and then
+**pre-posts a pool of device-write event buffers**, keyed by the
+descriptor head the queue assigns. A single posted buffer is not enough:
+the device fills one buffer per event of a report, so a keypress's
+`EV_KEY` *and* its trailing `EV_SYN` each need a free buffer at once.
+`poll` drains every completed event (interrupt-driven through the host's
+IRQ waiter — no busy-spin, `AGENTS.md` §2.1), decodes it, and hands each
+buffer straight back so the pool stays full. The driver allocates every
+device-visible buffer through the host `VirtioHost` DMA seam and reaches
+the device only through the `Transport` seam, so it holds no ambient
+authority (`AGENTS.md` §4 / §17.4).
+
+QEMU integration on a live device is exercised by
+`tests/integration/input_virtio_mmio_qemu_aarch64`
+(`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in `cargo xtask
+test --qemu`). It boots the aarch64 `virt` board, builds the
+virtio-MMIO transport from the embedded device tree, arms the GICv2 SPI
++ EL1 IRQ path, mints a `KernelVirtioHost`, loads this driver's signed
+`.rxe` through `rustos_drvhost::Host`, and drives it through
+load → use → unload → reload. "Use" is a **real injected key**: once the
+guest logs its event-queue-armed readiness marker, the QEMU runner
+(`tools/qemu`) attaches a `virtio-keyboard-device` and sends a key
+through the QEMU monitor (`sendkey`); the eventq IRQ fires and the
+driver decodes the press and, after reload, the matching release — the
+virtio-input analogue of the PS/2 vertical's `0xD2` injection, with the
+event originating device-side rather than guest-side.

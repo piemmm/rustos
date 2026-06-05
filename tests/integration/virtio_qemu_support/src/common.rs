@@ -27,12 +27,14 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::driver::net::Net;
 use rustos_abi::{CapabilityId, DriverManifest, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::RustFs;
+use rustos_drv_input_virtio_input::VirtioInput;
 use rustos_drv_network_virtio_net::VirtioNet;
 use rustos_drv_storage_virtio_blk::VirtioBlk;
 use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
@@ -501,5 +503,72 @@ pub fn virtio_net_ping<Tr: Transport>(
         return Err("ICMP: no echo reply from gateway");
     }
     env.log("virtio-qemu: ICMP echo round-trip verified");
+    Ok(())
+}
+
+/// Readiness marker the QEMU runner waits to see on the serial console
+/// before it injects a key. By the time the driver logs this, the
+/// virtio-input device is fully online (`DRIVER_OK`) and its event queue
+/// is set up; QEMU buffers the injected key until [`Input::poll`] posts
+/// the first device-write descriptor, so logging the marker before the
+/// first poll is race-free.
+pub const INPUT_READY_MARKER: &str = "virtio-qemu: virtio-input eventq armed";
+
+/// Bounded per-edge poll budget. The wait itself is interrupt-driven
+/// inside [`Input::poll`] (the caller's IRQ waiter parks the CPU on the
+/// eventq SPI), so this only bounds frame-marker / spurious-wake churn
+/// between the real key edges; it never spins (`AGENTS.md` §2.1).
+const MAX_INPUT_POLLS: usize = 64;
+
+/// Drain the event queue until a `Key` event with the requested `value`
+/// (`1` = press, `0` = release) is decoded, or the bounded budget is
+/// exhausted. Frame markers (`EV_SYN`, surfaced as `Ok(0)`) and any
+/// non-matching event are skipped.
+fn wait_for_key<Tr: Transport>(
+    input: &mut VirtioInput<'_, Tr>,
+    value: i32,
+) -> Result<bool, &'static str> {
+    let mut events = [InputEvent {
+        kind: InputEventKind::Key,
+        reserved0: 0,
+        code: 0,
+        value: 0,
+    }; 1];
+    for _ in 0..MAX_INPUT_POLLS {
+        let n = input.poll(&mut events).map_err(|_| "virtio-input poll")?;
+        if n >= 1 && events[0].kind == InputEventKind::Key && events[0].value == value {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// virtio-input device tail: bring the device online over `transport`,
+/// announce readiness, then decode a real injected key press followed by
+/// its release. Generic over the transport so a PCI vertical could run
+/// the identical code (`AGENTS.md` §2.2).
+///
+/// The key is injected by the QEMU runner through the monitor once it
+/// observes [`INPUT_READY_MARKER`] on the serial console — a real
+/// device→driver event, not a guest-side fabrication, which is the
+/// virtio-input analogue of the PS/2 vertical's `0xD2` output-buffer
+/// injection.
+pub fn virtio_input_keypress<Tr: Transport>(
+    env: &dyn QemuEnv,
+    transport: Tr,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    let mut input = VirtioInput::open(transport, vhost).map_err(|_| "virtio-input open")?;
+    env.log(INPUT_READY_MARKER);
+
+    if !wait_for_key(&mut input, 1)? {
+        return Err("virtio-input: no key press decoded");
+    }
+    env.log("virtio-qemu: virtio-input key press decoded");
+
+    if !wait_for_key(&mut input, 0)? {
+        return Err("virtio-input: no key release decoded");
+    }
+    env.log("virtio-qemu: virtio-input key release decoded");
     Ok(())
 }

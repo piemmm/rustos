@@ -114,7 +114,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | **`sched_drive`** (live)| ✓(stress)|    ✓    |    ✓    | ✓(browser) |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
-| input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
+| input (`ps2`/device)    |   ✓    |    ✓    |  **✗**  |  n/a   |
 | display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    |  **✗** |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 
@@ -123,13 +123,16 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
   live-scheduler task switch (W7, `sched_drive_qemu_aarch64`),
   heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`),
   the virtio blk/net MMIO verticals (W11-A), and the `ramfb`/framebuffer
-  display vertical (W11-B) landed; the input vertical (W11-B) is the
-  remaining QEMU-matrix gap. (FDT/DTB discovery is host-tested via W1/W10
-  and the W11-A/B verticals embed the canonical `virt` DTB; the runtime
-  parse of the full ARM `virt` tree is still a gap.)
+  display vertical (W11-B), and the virtio-input vertical (W11-B) landed;
+  the aarch64 QEMU matrix is now full. (FDT/DTB discovery is host-tested
+  via W1/W10 and the W11-A/B verticals embed the canonical `virt` DTB;
+  the runtime parse of the full ARM `virt` tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
-  storage HAL trait, missing input vertical.
+  storage HAL trait, missing input vertical (the next parity gap — the
+  `virtio-input` driver and its shared `virtio_input_keypress` tail are
+  already in place, so it is a riscv64 MMIO sibling of the landed aarch64
+  vertical).
 - **wasm32:** multi-worker SMP + real `MessageChannel` IPI and the
   cooperative tick wired into the live `kernel/sched` scheduler landed
   (W8, browser vertical); no user entry (sandbox-by-design), and the
@@ -678,7 +681,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - **Verified:** both verticals exit `0` under `qemu-system-aarch64 -M virt`
   (the `cargo xtask test --qemu` enrolment path).
 
-#### Stage W11-B — display vertical (aarch64) — ✅ landed; input — next
+#### Stage W11-B — display + input verticals (aarch64) — ✅ landed
 
 - **Display (landed).** aarch64 now runs the `ramfb`/framebuffer display
   vertical, the EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
@@ -701,14 +704,34 @@ stricter `is_release_ready` gate rejects any `Pending`.
   transport stays distinct. The display driver lifecycle is the per-arch
   sibling of the riscv64/x86_64 display scenarios (the established
   per-vertical pattern), differing only in the EL1 bring-up + embedded DTB.
-- **Input (remaining).** An aarch64 input vertical still fills the `input`
-  row of the §1 QEMU matrix; it reuses the same `bring_up_el1_identity_mmu`
-  + embedded-DTB path and the device-detection / driver-autoload stages in
-  `PLAN.md` §18 / Stage 4.
-- **Verified:** the display vertical exits `0` under
+- **Input (landed).** aarch64 now runs the virtio-input vertical, the
+  `virt`-board analogue of the x86 PS/2 vertical, filling the `input` row
+  of the §1 QEMU matrix: `tests/integration/input_virtio_mmio_qemu_aarch64`
+  (`rustos-test-input-virtio-mmio-qemu-aarch64`) reuses the same
+  `bring_up_el1_identity_mmu` + embedded-DTB path, builds the virtio-MMIO
+  transport, arms the GICv2 SPI, loads the signed virtio-input `.rxe`, and
+  drives `load → use → unload → reload`. Enrolled with `keyboard: Some(..)`.
+- **New driver + shared tail (§2.2).** `drivers/input/virtio_input`
+  (`rustos-drv-input-virtio-input`) implements the `Input` trait over the
+  bus-agnostic `lib/virtio` transport; the device round-trip tail
+  `virtio_input_keypress` lives in the shared `virtio_qemu_support` crate,
+  so a riscv64 MMIO sibling is a thin new bin. The driver **pre-posts a
+  pool of eventq buffers** — QEMU's virtio-input completes a buffer per
+  event of a report, so a keypress's `EV_KEY` *and* its `EV_SYN` each need
+  one in flight — and negotiates `VIRTIO_F_VERSION_1`.
+- **Real injected key (`tools/qemu`).** "Use" is a genuine device→driver
+  event, the analogue of the PS/2 `0xD2` injection: the runner attaches a
+  `virtio-keyboard-device` (`Spec::with_virtio_keyboard`), drains the
+  serial console on a background thread, and on the guest's readiness
+  marker sends `sendkey` over a private-socket QEMU monitor, holding that
+  connection open until the run ends (a readline monitor drops a command
+  on early disconnect). A `--virtio-keyboard <marker> <key>` flag exposes
+  the same on `rustos-qemu-run`.
+- **Verified:** the display and input verticals exit `0` under
   `qemu-system-aarch64 -M virt` (the `cargo xtask test --qemu` enrolment
   path). Docs: `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
-  the framebuffer driver `README.md`, `PLAN.md`, this file.
+  `docs/src/drivers/input.md`, the framebuffer + virtio-input driver
+  `README.md`s, `PLAN.md`, this file.
 
 ---
 

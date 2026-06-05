@@ -702,6 +702,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-input-virtio-input"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-virtio",
+]
+
+[[package]]
 name = "rustos-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [
@@ -1333,6 +1341,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-input-virtio-mmio-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-input-virtio-input",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-ipi-smp-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -1745,6 +1764,7 @@ dependencies = [
  "rustos-drv-bus-virtio",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+ "rustos-drv-input-virtio-input",
  "rustos-drv-network-virtio-net",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",

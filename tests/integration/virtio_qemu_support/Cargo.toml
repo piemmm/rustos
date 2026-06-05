@@ -44,6 +44,7 @@ rustos-drv-bus-pci = { path = "../../../drivers/bus/pci", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
@@ -74,6 +75,7 @@ rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
@@ -104,6 +106,7 @@ rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }

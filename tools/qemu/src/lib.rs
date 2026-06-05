@@ -49,9 +49,12 @@
 #![deny(missing_docs)]
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub mod aarch64;
@@ -166,6 +169,28 @@ pub struct NetDevice {
     pub pcap: Option<PathBuf>,
 }
 
+/// A deterministic key-injection request for an input vertical.
+///
+/// A `no_std`, non-interactive QEMU guest cannot type at itself, and the
+/// runner's stdin is `null` (`AGENTS.md` §7 — no interactivity). To make
+/// a real device→driver input event deterministic, the runner attaches a
+/// `virtio-keyboard-device` and a QEMU monitor over a private unix
+/// socket, waits for the guest to print [`ready_marker`](Self::ready_marker)
+/// on the serial console (proving the driver has the event queue armed),
+/// then sends one `sendkey` through the monitor. QEMU emits a real
+/// press+release event pair to the guest — the virtio-input analogue of
+/// the PS/2 vertical's `0xD2` output-buffer injection, with the event
+/// originating device-side rather than guest-side.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyInjection {
+    /// Serial-console substring the runner waits for before injecting.
+    /// The guest prints it once its virtio-input event queue is armed.
+    pub ready_marker: String,
+    /// QEMU `QKeyCode` name to send (e.g. `"a"`). QEMU translates it to
+    /// the guest-visible evdev keycode the driver decodes.
+    pub key: String,
+}
+
 /// Tier-1 architecture this runner can target.
 ///
 /// `X86_64` and `Riscv64` ship today; Stage 3b/3d add the remaining
@@ -253,6 +278,11 @@ pub struct Spec {
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
     pub extra_args: Vec<OsString>,
+    /// When `Some`, attach a `virtio-keyboard-device` and inject the
+    /// described key once the guest prints the readiness marker on the
+    /// serial console. `None` attaches no input device. Used by the
+    /// aarch64 virtio-input vertical; other arches ignore it today.
+    pub input_keyboard: Option<KeyInjection>,
 }
 
 impl Spec {
@@ -270,6 +300,7 @@ impl Spec {
             net_devices: Vec::new(),
             display_ramfb: false,
             extra_args: Vec::new(),
+            input_keyboard: None,
         }
     }
 
@@ -302,6 +333,7 @@ impl Spec {
             net_devices: Vec::new(),
             display_ramfb: false,
             extra_args: Vec::new(),
+            input_keyboard: None,
         }
     }
 
@@ -319,6 +351,7 @@ impl Spec {
             net_devices: Vec::new(),
             display_ramfb: false,
             extra_args: Vec::new(),
+            input_keyboard: None,
         }
     }
 
@@ -363,6 +396,24 @@ impl Spec {
     #[must_use]
     pub fn with_ramfb(mut self) -> Self {
         self.display_ramfb = true;
+        self
+    }
+
+    /// Attach a `virtio-keyboard-device` and inject `key` (a QEMU
+    /// `QKeyCode` name, e.g. `"a"`) once the guest prints `ready_marker`
+    /// on the serial console. Used by the aarch64 virtio-input vertical
+    /// to make a real device→driver input event deterministic without
+    /// guest-side interactivity (`AGENTS.md` §7).
+    #[must_use]
+    pub fn with_virtio_keyboard(
+        mut self,
+        ready_marker: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        self.input_keyboard = Some(KeyInjection {
+            ready_marker: ready_marker.into(),
+            key: key.into(),
+        });
         self
     }
 }
@@ -432,6 +483,24 @@ impl Runner {
             cmd.arg(a);
         }
 
+        // When the spec asks for key injection, attach a QEMU monitor on
+        // a private unix socket so the runner can drive `sendkey` once the
+        // guest is ready. The socket is server-side in QEMU (created at
+        // startup, well before the guest's readiness marker) and the
+        // runner connects as a client.
+        let monitor = spec
+            .input_keyboard
+            .as_ref()
+            .map(|_| MonitorSocket::reserve());
+        if let Some(mon) = &monitor {
+            cmd.arg("-chardev");
+            let mut chardev = OsString::from("socket,id=rustos-mon,server=on,wait=off,path=");
+            chardev.push(mon.path());
+            cmd.arg(chardev);
+            cmd.arg("-mon");
+            cmd.arg("chardev=rustos-mon,mode=readline");
+        }
+
         if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
             eprintln!("rustos-qemu: {cmd:?}");
         }
@@ -439,43 +508,186 @@ impl Runner {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()?;
-        let started = Instant::now();
-        let deadline = started + spec.timeout;
+        let child = cmd.spawn()?;
+        supervise(child, spec, monitor.as_ref())
+    }
+}
 
-        // Poll for completion in short ticks so the deadline is precise to
-        // the millisecond. We deliberately do *not* sleep until the deadline
-        // and then check once: that pattern adds up to `timeout` of latency
-        // for fast-failing tests, which would slow `cargo xtask ci`.
-        let tick = Duration::from_millis(25);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let serial = read_to_string(child.stdout.take());
-                let code = status.code().unwrap_or(-1);
-                return Ok(spec.arch.outcome_from_status(code, serial));
+/// Supervise a spawned QEMU child to completion: drain its serial output
+/// on a background thread, inject a key once the guest signals readiness
+/// (if requested), enforce the deadline, and assemble the [`Outcome`].
+///
+/// Split out of [`Runner::run`] so the spawn-and-validate path and the
+/// wait loop each stay within one screen.
+fn supervise(
+    mut child: Child,
+    spec: &Spec,
+    monitor: Option<&MonitorSocket>,
+) -> io::Result<Outcome> {
+    let deadline = Instant::now() + spec.timeout;
+
+    // Drain stdout on a background thread. Two reasons: a chatty guest
+    // must not deadlock on a full stdout pipe while we poll, and the
+    // key-injector needs to watch the serial stream for its readiness
+    // marker as it arrives rather than only after exit.
+    let captured = Arc::new(Mutex::new(String::new()));
+    let marker_seen = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let captured = Arc::clone(&captured);
+        let marker_seen = Arc::clone(&marker_seen);
+        let marker = spec.input_keyboard.as_ref().map(|k| k.ready_marker.clone());
+        let stdout = child.stdout.take();
+        std::thread::spawn(move || drain_stdout(stdout, &captured, marker.as_deref(), &marker_seen))
+    };
+
+    // Poll for completion in short ticks so the deadline is precise to
+    // the millisecond. We deliberately do *not* sleep until the deadline
+    // and then check once: that pattern adds up to `timeout` of latency
+    // for fast-failing tests, which would slow `cargo xtask ci`.
+    let tick = Duration::from_millis(25);
+    // `injected` starts "done" when no injection was requested.
+    let mut injected = spec.input_keyboard.is_none();
+    // Hold the monitor connection open for the rest of the run: a
+    // readline monitor discards a command if the peer disconnects
+    // before it is processed, so the stream must outlive the send.
+    let mut monitor_conn: Option<UnixStream> = None;
+    let done = loop {
+        if let Some(status) = child.try_wait()? {
+            break DoneReason::Exited(status.code().unwrap_or(-1));
+        }
+        if !injected && marker_seen.load(Ordering::Acquire) {
+            // Safe to unwrap: `injected` is only `false` when both
+            // `input_keyboard` and `monitor` are `Some`.
+            let mon = monitor.expect("monitor present for injection");
+            let key = &spec.input_keyboard.as_ref().expect("key present").key;
+            match inject_key(mon.path(), key) {
+                Ok(stream) => monitor_conn = Some(stream),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    let mut serial = captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    serial.push_str("\nrustos-qemu: key injection failed: ");
+                    serial.push_str(&e.to_string());
+                    serial.push('\n');
+                    return Ok(Outcome::Fail { status: -1, serial });
+                }
             }
-            if Instant::now() >= deadline {
-                // Strict, no-retry kill. `wait` afterwards is best
-                // effort so we don't leave a zombie behind.
-                let _ = child.kill();
-                let _ = child.wait();
-                let serial = read_to_string(child.stdout.take());
-                return Ok(Outcome::Timeout {
-                    budget: spec.timeout,
-                    serial,
-                });
+            injected = true;
+        }
+        if Instant::now() >= deadline {
+            // Strict, no-retry kill. `wait` afterwards is best
+            // effort so we don't leave a zombie behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            break DoneReason::TimedOut;
+        }
+        std::thread::sleep(tick);
+    };
+
+    // The child has exited (or been killed); the reader thread sees
+    // EOF on the closed pipe and finishes. Drop the monitor connection
+    // only now, once the run is complete.
+    drop(monitor_conn);
+    let _ = reader.join();
+    let serial = captured
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match done {
+        DoneReason::Exited(code) => Ok(spec.arch.outcome_from_status(code, serial)),
+        DoneReason::TimedOut => Ok(Outcome::Timeout {
+            budget: spec.timeout,
+            serial,
+        }),
+    }
+}
+
+/// Why the wait loop ended. Keeps serial assembly out of the loop body so
+/// the captured log is read once, after the reader thread is joined.
+enum DoneReason {
+    /// The child exited with this status code.
+    Exited(i32),
+    /// The deadline elapsed; the child was killed.
+    TimedOut,
+}
+
+/// A reserved path for QEMU's monitor unix socket.
+///
+/// The path is unique per run (process id + a monotonic counter) so
+/// parallel runs in one process (the `cargo xtask` soak) never collide.
+/// QEMU creates the socket (`server=on`); dropping this removes the
+/// socket file so a run leaves no stray socket behind.
+struct MonitorSocket {
+    path: PathBuf,
+}
+
+impl MonitorSocket {
+    fn reserve() -> Self {
+        use std::sync::atomic::AtomicU64;
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("rustos-qemu-mon-{}-{}.sock", std::process::id(), n));
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for MonitorSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Read QEMU stdout to EOF, appending every chunk to `captured` and
+/// raising `marker_seen` once `marker` (if any) has appeared in the
+/// stream so far. Best-effort: a read error simply ends the drain.
+fn drain_stdout(
+    stdout: Option<impl Read>,
+    captured: &Mutex<String>,
+    marker: Option<&str>,
+    marker_seen: &AtomicBool,
+) {
+    let Some(mut r) = stdout else { return };
+    let mut buf = [0u8; 4096];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                let chunk = String::from_utf8_lossy(&buf[..n]);
+                let mut guard = captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.push_str(&chunk);
+                if let Some(m) = marker {
+                    if !marker_seen.load(Ordering::Acquire) && guard.contains(m) {
+                        marker_seen.store(true, Ordering::Release);
+                    }
+                }
             }
-            std::thread::sleep(tick);
         }
     }
 }
 
-fn read_to_string(mut s: Option<impl Read>) -> String {
-    let mut out = String::new();
-    if let Some(r) = s.as_mut() {
-        let _ = r.read_to_string(&mut out);
-    }
-    out
+/// Send a single `sendkey <key>` command to QEMU's HMP monitor on the
+/// unix socket at `path`, returning the still-open connection. QEMU
+/// emits a real key press+release pair to the guest's input device. The
+/// HMP monitor accepts newline-terminated commands immediately, so the
+/// banner need not be read first — but the caller must keep the returned
+/// stream alive until the run ends, because a readline monitor discards
+/// the command if the peer disconnects before it is processed.
+fn inject_key(path: &Path, key: &str) -> io::Result<UnixStream> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.write_all(format!("sendkey {key}\n").as_bytes())?;
+    stream.flush()?;
+    Ok(stream)
 }
 
 /// Helper exported for downstream consumers (e.g. `cargo xtask`) that need to
@@ -553,6 +765,20 @@ mod tests {
     }
 
     #[test]
+    fn with_virtio_keyboard_records_the_injection_request() {
+        let s = Spec::for_aarch64_kernel("/tmp/k").with_virtio_keyboard("ready-marker", "a");
+        let k = s.input_keyboard.expect("keyboard injection recorded");
+        assert_eq!(k.ready_marker, "ready-marker");
+        assert_eq!(k.key, "a");
+    }
+
+    #[test]
+    fn without_virtio_keyboard_records_no_injection() {
+        let s = Spec::for_aarch64_kernel("/tmp/k");
+        assert_eq!(s.input_keyboard, None);
+    }
+
+    #[test]
     fn with_virtio_net_records_a_capture_free_interface() {
         let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_net();
         assert_eq!(s.net_devices.len(), 1);
@@ -594,6 +820,7 @@ mod tests {
             net_devices: Vec::new(),
             display_ramfb: false,
             extra_args: Vec::new(),
+            input_keyboard: None,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

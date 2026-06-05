@@ -70,6 +70,7 @@ members = [
 
     # Drivers — input
     "drivers/input/ps2",
+    "drivers/input/virtio_input",
 
     # Drivers — bus
     "drivers/bus/pci",
@@ -170,6 +171,7 @@ members = [
     "tests/integration/virtio_net_mmio_aarch64",
     "tests/integration/framebuffer_display_qemu_riscv64",
     "tests/integration/framebuffer_display_qemu_aarch64",
+    "tests/integration/input_virtio_mmio_qemu_aarch64",
     "tests/integration/timer_preempt_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_aarch64",

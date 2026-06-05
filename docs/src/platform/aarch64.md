@@ -446,4 +446,34 @@ mapping the surface through the capability-gated `KernelMmioMapper` and
 reading the presented pixels back through an independent window. It
 embeds the canonical `virt` DTB (build-time `dumpdtb`) to discover the
 `fw_cfg` base, since QEMU's aarch64 `-kernel <ELF>` path passes no DTB
-pointer. The input vertical remains the open W11-B item.
+pointer.
+
+## Input vertical (Stage W11-B)
+
+`tests/integration/input_virtio_mmio_qemu_aarch64`
+(`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` with `keyboard: Some(..)`)
+drives the virtio-input driver end-to-end on the `virt` board — the
+virtio-input analogue of the x86 PS/2 vertical, completing the `input`
+row of the QEMU matrix for aarch64. It reuses the shared
+`bring_up_el1_identity_mmu` helper, builds the virtio-MMIO transport from
+the embedded `virt` DTB, arms the device's GICv2 SPI, loads the signed
+virtio-input `.rxe` through `rustos_drvhost::Host`, and drives
+`load → use → unload → reload`.
+
+"Use" is a **real injected key**, the device-side analogue of the PS/2
+vertical's `0xD2` output-buffer injection. A `no_std`, non-interactive
+guest cannot type at itself, and virtio-input is strictly
+device→driver, so the key must originate host-side: the QEMU runner
+(`tools/qemu`) attaches a `virtio-keyboard-device`
+(`Spec::with_virtio_keyboard`), drains the serial console on a
+background thread, and — once the guest logs its event-queue-armed
+readiness marker — sends `sendkey` through a QEMU monitor on a private
+unix socket. The runner holds that monitor connection open until the run
+ends, because a readline monitor discards a command if the peer
+disconnects before it is processed. The injected key raises the eventq
+SPI, the guest's IRQ path wakes, and the driver decodes the press and —
+after reload — the matching release. Two driver-side facts make this
+work: the driver pre-posts a *pool* of eventq buffers (QEMU needs a free
+buffer for both the `EV_KEY` and its trailing `EV_SYN`), and it
+negotiates `VIRTIO_F_VERSION_1`.

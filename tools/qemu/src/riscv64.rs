@@ -220,6 +220,7 @@ mod tests {
             net_devices: Vec::new(),
             display_ramfb: false,
             extra_args: Vec::new(),
+            input_keyboard: None,
         }
     }
 

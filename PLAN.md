@@ -813,7 +813,7 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       **Carried forward (Stage W11-B):** the aarch64 display + input
       verticals (they reuse this bring-up). Docs:
       `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
-- [x] **WIRING Stage W11-B — display vertical (aarch64); input remaining.**
+- [x] **WIRING Stage W11-B — display + input verticals (aarch64).**
       aarch64 now runs the `ramfb`/framebuffer display QEMU vertical, the
       EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
       `tests/integration/framebuffer_display_qemu_aarch64`
@@ -835,10 +835,33 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       vertical embeds the canonical `virt` DTB (build-time `dumpdtb`) to
       discover the `fw_cfg` base, since QEMU's aarch64 `-kernel <ELF>` path
       passes no DTB pointer. **Verified QEMU-green:** the bin exits `0`
-      under `qemu-system-aarch64 -M virt`. **Carried forward:** the aarch64
-      **input** vertical (reuses the same bring-up). Docs:
-      `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`, the
-      framebuffer driver `README.md`, `plans/WIRING.md`.
+      under `qemu-system-aarch64 -M virt`.
+      **Input (landed).** aarch64 now also runs the virtio-input QEMU
+      vertical, the `virt`-board analogue of the x86 PS/2 vertical, filling
+      the `input` row of the QEMU matrix:
+      `tests/integration/input_virtio_mmio_qemu_aarch64`
+      (`rustos-test-input-virtio-mmio-qemu-aarch64`) reuses the same
+      `bring_up_el1_identity_mmu` + embedded-DTB path, arms the GICv2 SPI,
+      loads the signed virtio-input `.rxe`, and drives
+      `load → use → unload → reload` (`keyboard: Some(..)` enrolment). The
+      new `drivers/input/virtio_input` (`rustos-drv-input-virtio-input`)
+      implements `Input` over the bus-agnostic `lib/virtio` transport; its
+      `virtio_input_keypress` round-trip tail lives in the shared
+      `virtio_qemu_support` crate (§2.2), so a riscv64 sibling is a thin
+      new bin. The driver **pre-posts a pool of eventq buffers** (QEMU's
+      virtio-input completes a buffer per event, so a keypress's `EV_KEY`
+      and its `EV_SYN` each need one) and negotiates `VIRTIO_F_VERSION_1`.
+      "Use" is a real device→driver key: the `tools/qemu` runner attaches
+      a `virtio-keyboard-device` (`Spec::with_virtio_keyboard`), watches
+      the serial console, and on the readiness marker sends `sendkey` over
+      a private-socket QEMU monitor held open until run end (a readline
+      monitor drops a command on early disconnect); a
+      `--virtio-keyboard <marker> <key>` flag exposes the same on
+      `rustos-qemu-run`. **Verified QEMU-green:** the bin exits `0` under
+      `qemu-system-aarch64 -M virt`. Docs:
+      `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
+      `docs/src/drivers/input.md`, the framebuffer + virtio-input driver
+      `README.md`s, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

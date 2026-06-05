@@ -69,6 +69,11 @@ struct QemuTest {
     /// kernel-side test mounts it through the real driver and
     /// round-trips a read and a write.
     fs_disk: FsDisk,
+    /// When `Some((marker, key))`, attach a `virtio-keyboard-device` and
+    /// inject `key` (a QEMU `QKeyCode`) once the guest prints `marker` on
+    /// the serial console. Used by the aarch64 virtio-input vertical to
+    /// make a real device→driver input event deterministic.
+    keyboard: Option<(&'static str, &'static str)>,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -95,6 +100,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -111,6 +117,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -135,6 +142,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -160,6 +168,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
     // target QEMU round-trip for the C-callable syscall stub runtime
@@ -187,6 +196,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
     // half of the `lib/abi-sys` syscall-stub round-trip. riscv64 has no
@@ -215,6 +225,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
     // half of the `lib/abi-sys` syscall-stub round-trip. Like riscv64,
@@ -244,6 +255,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // ring-3 exercise for the Arch HAL "enter user mode" primitive
@@ -275,6 +287,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
     // crt0-linked-program spawn round-trip. The build script compiles the
@@ -305,6 +318,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
     // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
@@ -336,6 +350,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // crt0-linked-program spawn round-trip — the ring-3 analogue of the
@@ -370,6 +385,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
     // end-to-end C-program round-trip — the headline CC5 work. The build
@@ -400,6 +416,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
     // end-to-end C-program round-trip — the EL0 analogue of the riscv64
@@ -430,6 +447,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
     // end-to-end C-program round-trip — the ring-3 analogue of the
@@ -463,6 +481,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -480,6 +499,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
@@ -512,6 +532,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -537,6 +558,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
@@ -564,6 +586,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
@@ -584,6 +607,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::Fat32,
+        keyboard: None,
     },
     // Stage 5 end-to-end rustfs vertical: `rustos-test-rustfs-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
@@ -605,6 +629,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
+        keyboard: None,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
     // full real virtio-net-pci round-trip on the same shared bring-up
@@ -629,6 +654,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: true,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
@@ -648,6 +674,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -671,6 +698,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
     // multi-hart SMP deliverable. It boots the `virt` board with two
@@ -695,6 +723,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
     // deliverable — the EL1/GICv2 analogue of `ipi_smp_qemu_riscv64`. It
@@ -718,6 +747,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
@@ -748,6 +778,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
     // primitives drive the live scheduler" deliverable — the EL1/GICv2
@@ -776,6 +807,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
@@ -800,6 +832,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
@@ -823,6 +856,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
@@ -844,6 +878,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: true,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4 first-driver vertical (display class):
     // `rustos-test-framebuffer-display-qemu-riscv64` boots the riscv64
@@ -868,6 +903,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: true,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
     // framebuffer vertical): `rustos-test-vesa-qemu-x86-64` boots the
@@ -893,6 +929,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: true,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3b: `rustos-test-kernel-arch-boot-aarch64` is the aarch64
     // half of the Stage-3 "boots to init" per-sub-stage deliverable. It
@@ -911,6 +948,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
@@ -936,6 +974,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
@@ -958,6 +997,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: true,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
@@ -984,6 +1024,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: true,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -1003,6 +1044,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
@@ -1026,6 +1068,7 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
     // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
@@ -1053,6 +1096,36 @@ const TESTS: &[QemuTest] = &[
         virtio_net: false,
         ramfb: false,
         fs_disk: FsDisk::None,
+        keyboard: None,
+    },
+    // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
+    // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
+    // completing the `input` row of the §1 QEMU matrix for aarch64.
+    // `rustos-test-input-virtio-mmio-qemu-aarch64` brings the `virt` board
+    // up to EL1 (FP enable + 2 GiB identity MMU + GICv2/EL1 IRQ path,
+    // shared from `virtio_qemu_support`), builds the virtio-MMIO bus from
+    // the embedded device tree, provisions an `MmioTransport` through the
+    // capability-gated `KernelMmioMapper`, arms the device's GICv2 SPI,
+    // mints a `KernelVirtioHost`, loads the signed virtio-input `.rxe`
+    // through `rustos_drvhost::Host`, and drives it through
+    // load -> use -> unload -> reload. "Use" is a real injected key: once
+    // the guest logs the event-queue-armed readiness marker, the runner
+    // sends a key through the QEMU monitor (`sendkey`), the eventq IRQ
+    // fires, and the driver decodes the press then (after reload) the
+    // release. The runner attaches the `virtio-keyboard-device` and drives
+    // the injection; the guest never fabricates the event. Single CPU and
+    // a 60-second budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-input-virtio-mmio-qemu-aarch64",
+        binary: "rustos-test-input-virtio-mmio-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
     },
 ];
 
@@ -1196,6 +1269,12 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {
         spec = spec.with_ramfb();
+    }
+
+    // Attach a `virtio-keyboard-device` for the input vertical and let the
+    // runner inject the key once the guest signals readiness on serial.
+    if let Some((marker, key)) = t.keyboard {
+        spec = spec.with_virtio_keyboard(marker, key);
     }
 
     eprintln!(
