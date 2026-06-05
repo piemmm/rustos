@@ -103,24 +103,37 @@ rustos/
 ├── README.md            # Short orientation only. No tutorials here.
 ├── LICENSE
 ├── Cargo.toml           # Virtual workspace manifest.
+├── Cargo.lock           # Committed lockfile (§19.3 source-hash pinning).
 ├── rust-toolchain.toml  # Pinned nightly + components.
+├── rustfmt.toml         # Formatting rules (§7).
+├── clippy.toml          # Lint configuration (§7).
+├── deny.toml            # License + advisory rules for `cargo deny` (§7).
+├── supply-chain.toml    # Supply-chain pin/audit policy (§19.3).
 ├── .cargo/config.toml   # Per-target build settings.
 │
 ├── kernel/              # The microkernel. One crate per architecture-neutral
 │   ├── core/            #   subsystem. No driver code here.
 │   ├── mem/             # Allocator, paging, process isolation.
-│   ├── sched/           # SMP scheduler.
+│   ├── sched/           # SMP scheduler — pluggable (§17.1):
+│   │   ├── api/         #   SchedulerPolicy contract + conformance suite.
+│   │   ├── eevdf/       #   Concrete policy (sibling crate, §17.1).
+│   │   └── mlfq/        #   Concrete policy (sibling crate, §17.1).
 │   ├── ipc/             # Capabilities, message ports.
+│   ├── irq/             # IRQ table + per-handle wait queue: capability-gated
+│   │                    #   user-space wake-up for the irq_bind/irq_wait pair.
 │   ├── sec/             # Users, groups, capabilities, MAC.
 │   ├── syscall/         # Syscall dispatch + ABI definitions.
 │   ├── virtio/          # Arch-neutral kernel-side virtio: capability-
 │   │                    #   checked DMA/MMIO hosts, per-driver host
 │   │                    #   factory, transport-provisioning walks.
-│   └── arch/
-│       ├── x86_64/
-│       ├── aarch64/
-│       ├── riscv64/
-│       └── wasm32/
+│   ├── arch/            # Pluggable architecture backends (§17.2):
+│   │   ├── api/         #   The closed Arch HAL trait surface.
+│   │   ├── x86_64/
+│   │   ├── aarch64/
+│   │   ├── riscv64/
+│   │   └── wasm32/
+│   └── rustos-kernel/   # The microkernel binary: wires a concrete arch port
+│                        #   to kernel/core (the single §17 selection point).
 │
 ├── drivers/             # Loadable modules. One folder per device class.
 │   ├── display/
@@ -261,7 +274,10 @@ rustos/
 │   │   ├── drivers/
 │   │   ├── abi/
 │   │   ├── filesystem/
-│   │   └── platform/
+│   │   ├── platform/
+│   │   ├── desktop/
+│   │   ├── lib/
+│   │   └── userland/
 │   └── book.toml
 │
 ├── include/             # Generated C development headers for the ABI, so a
@@ -271,12 +287,24 @@ rustos/
 │                        #   `cargo xtask c-header` in CI. Do not hand-edit.
 │
 ├── tests/               # Cross-crate / integration tests only.
+│   ├── integration/     #   Cross-crate / end-to-end (QEMU) test crates.
+│   └── SECURITY.md      #   Binding adversarial-test charter (§19) for the
+│                        #   memory subsystem and CPU privilege boundary.
 │                        # Per-crate unit tests live in `src/` next to code
-│                        # (see §7).
+│                        #   (see §7).
+│
+├── plans/               # Staged sub-plans referenced by PLAN.md and this
+│                        #   charter (CCOMPAT.md, CURSES.md, WIRING.md,
+│                        #   SECURITYTESTS.md). Binding under AGENTS.md.
 │
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
-│   ├── mkimage/         # Image builders per platform.
+│   ├── mkimage/         # Image builders per platform (staged: PLAN.md
+│   │                    #   Stage 8 — not yet built).
+│   ├── cc/              # Audited, version-pinned, checksummed C toolchain
+│   │                    #   wrapper (clang + ld.lld) for the CCOMPAT C-ABI
+│   │                    #   end-to-end test. Host-only build glue (§12);
+│   │                    #   RustOS itself stays Rust-only (§1).
 │   ├── qemu/            # QEMU run scripts.
 │   └── ci/              # CI/build-host orchestration: thin wrappers around
 │                        #   cargo xtask (scheduling, logging, parallel soaks).
