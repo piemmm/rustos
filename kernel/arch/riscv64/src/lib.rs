@@ -105,6 +105,11 @@ core::arch::global_asm!(include_str!("context.s"));
 core::arch::global_asm!(include_str!("smp.s"));
 
 pub mod context;
+/// riscv64 implementation of the Arch HAL context-switch surface
+/// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
+/// architecture-neutral first-frame seeding + task switch over the
+/// bare-metal primitive in [`context`].
+pub mod context_hal;
 pub mod fault;
 pub mod fdt;
 pub mod kernel_arch;

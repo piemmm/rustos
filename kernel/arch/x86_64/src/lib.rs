@@ -75,6 +75,17 @@ pub mod apic;
 pub mod apic_timer;
 pub mod bootmemory;
 pub mod context;
+/// x86_64 implementation of the Arch HAL context-switch surface
+/// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
+/// architecture-neutral first-frame seeding + task switch over the
+/// bare-metal primitive in [`context`].
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
+/// §2.3), like the sibling `timer_hal` / `percpu_hal` HAL slices. The
+/// underlying `context` primitive itself carries no such gate.
+#[cfg(feature = "sched-arch")]
+pub mod context_hal;
 pub mod gdt;
 /// Stage 3a (c7-arch): Arch HAL [`rustos_arch_api::SchedulerArch`]
 /// implementation for x86_64.

@@ -57,9 +57,10 @@ scheduler-facing slice (`CpuId`, `SchedulerArch`), the §19.1
 side-channel slice, the §19.10 memory-tagging slice, the user-entry
 slice, the early-boot platform-discovery slice (`PlatformDiscovery`,
 below), the per-CPU storage slice (`PerCpu`, below), and the interrupt
-entry/exit slice (`IrqController` + `InterruptEntry`, below); the
-remaining HAL primitives (context switch, MMU/TLB, timer) migrate here
-as the §17 burn-down advances.
+entry/exit slice (`IrqController` + `InterruptEntry`, below), the timer
+slice (`Timer`, below), and the context-switch slice (`ContextSwitch`,
+below); the remaining HAL primitives (MMU/TLB) migrate here as the §17
+burn-down advances.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -185,6 +186,35 @@ callback fires on dispatch with the CPU it was handed and that a handle
 with no callback dispatches harmlessly. Like the interrupt verticals it
 is driven per-port (the handle is constructed per port and reaches a
 port-private callback slot), not folded into `conformance::run_all`.
+
+### Context switch
+
+The `ContextSwitch` slice gives the kernel one vocabulary for suspending
+the running task and resuming another, whose register save/restore is
+deeply architecture-specific assembly (x86_64 `context.s`, aarch64
+`x19`–`x30`, riscv64 `ra`/`s0`–`s11`). Every bare-metal port persists
+exactly one word across a switch — the kernel-stack pointer at
+suspension, with the callee-saved registers parked on the task's own
+stack in a fixed frame the switch assembly owns — so the
+architecture-neutral save area `TaskContext` is a single `#[repr(C)]`
+`u64`, layout-identical to each port's native `TaskCtx` (one definition,
+`AGENTS.md` §2.2; a const-assert in each port pins the equality).
+`ContextSwitch::prepare` seeds a never-run task's first frame (rejecting
+a null/misaligned/too-small stack fail-closed, `AGENTS.md` §2.9) and
+`ContextSwitch::switch` performs the bare-metal switch. Each bare-metal
+port exposes a `ContextSwitchHal` handle that reinterprets `TaskContext`
+as its `TaskCtx` and forwards to the existing `context` primitive, so the
+switch invoke lives in exactly one place. wasm32 has no context switch:
+each Web Worker is its own sandboxed module instance and the kernel never
+swaps register state under it, so the slice is **n/a** there (`AGENTS.md`
+§2.1 — no fake primitive). `context::conformance::run_all` asserts the
+`prepare` contract on the host (an empty context is not runnable; a
+null/misaligned/too-small stack is rejected; a good stack yields a
+runnable, in-bounds frame); like `EnterUser`, the switch itself is
+proven only on the bare-metal target (the scheduler-drive QEMU vertical),
+so it carries no host check. The vertical is driven per-port (it seeds a
+frame over a caller-supplied stack and runs over the port's real handle),
+not folded into `conformance::run_all`.
 
 ## `cargo xtask cfg-check`
 

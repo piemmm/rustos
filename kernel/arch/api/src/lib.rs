@@ -39,13 +39,18 @@
 //! scheduler-tick callback and dispatches a tick to it (the LAPIC timer,
 //! the EL1 generic timer, the SBI timer, and the wasm32
 //! `requestAnimationFrame` loop all drive it), plus its
-//! [`timer::conformance`] vertical. It also hosts
+//! [`timer::conformance`] vertical — and the **context-switch** slice
+//! (`AGENTS.md` §17.2): the [`ContextSwitch`] trait that seeds a
+//! never-run task's first frame ([`ContextSwitch::prepare`]) and performs
+//! the port's native task switch ([`ContextSwitch::switch`]) over the
+//! architecture-neutral [`TaskContext`] save area, plus its
+//! [`context::conformance`] vertical. It also hosts
 //! the **§17.2 conformance vertical** ([`conformance`]): the harness
 //! every port runs over its real HAL handles so parity is *enforced*
 //! rather than asserted by inspection (`plans/WIRING.md`). The remaining
 //! HAL surface enumerated by
-//! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, and TLB
-//! shootdown) is migrated
+//! `AGENTS.md` §17.2 (MMU/page-table primitives and TLB shootdown) is
+//! migrated
 //! here as the
 //! §17 burn-down advances; see `PLAN.md`. Until a primitive lives here
 //! it stays in its current owning crate, and the move is tracked, not
@@ -67,6 +72,7 @@
 #![deny(missing_docs)]
 
 pub mod conformance;
+pub mod context;
 pub mod irq;
 pub mod memtag;
 pub mod percpu;
@@ -96,6 +102,10 @@ pub use percpu::{conformance as percpu_conformance, PerCpu};
 pub use irq::{conformance as irq_conformance, InterruptEntry, IrqControlError, IrqController};
 
 pub use timer::{conformance as timer_conformance, TickFn, Timer};
+
+pub use context::{
+    conformance as context_conformance, ContextSwitch, PrepareError, TaskContext, TaskEntry,
+};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

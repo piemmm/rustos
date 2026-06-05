@@ -98,6 +98,20 @@ the host to partition. The same cell backs the host build, so the
 round-trip + isolation conformance verticals (`percpu::conformance`,
 folded into `passes_arch_hal_conformance_suite`) run under `cargo test`.
 
+### Context switch (`ContextSwitch`) — n/a
+
+The Arch HAL `ContextSwitch` slice (`AGENTS.md` §17.2 / `plans/WIRING.md`
+Stage W5) is **not applicable** to wasm32 and the port implements no
+`ContextSwitchHal`. A context switch saves and restores a task's CPU
+register state on its kernel stack, but a WebAssembly module has no
+addressable register file or stack pointer to swap, and each "CPU" is a
+separate Web Worker running its own module instance that the kernel never
+swaps register state under — concurrency is the cooperative
+`requestAnimationFrame` tick plus `MessageChannel` posts, not a register
+swap. Synthesising a fake switch the host cannot perform would be a fake
+primitive (`AGENTS.md` §2.1), so the slice is honestly absent here, the
+same shape as the missing paging/user-entry primitives.
+
 ### Hand-rolled host bindings
 
 The host imports in `bindings` are a plain `extern "C"` block resolved

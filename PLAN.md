@@ -562,6 +562,37 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       test. Docs: `docs/src/architecture/modularity.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
       `plans/WIRING.md`.
+- [x] **WIRING Stage W5a — Context-switch HAL.** `kernel/arch/api` gains
+      the `context` slice (`context.rs`): the architecture-neutral
+      `TaskContext` save area (a single `#[repr(C)]` `u64`,
+      layout-identical to every port's native `TaskCtx`, §2.2), the
+      `TaskEntry` alias, the fail-closed `PrepareError`, and the
+      object-safe `ContextSwitch` trait (`prepare` seeds a never-run
+      task's first frame; `unsafe switch` performs the bare-metal task
+      switch), plus a host-run `context::conformance` vertical asserting
+      the `prepare` contract (empty context not runnable; null/misaligned/
+      too-small stack rejected; good stack yields a runnable, in-bounds
+      frame). Driven **per-port** (not folded into `conformance::run_all`)
+      — the suite seeds a frame over a caller-supplied stack and runs over
+      the port's real handle, the same precedent as `irq`/`timer`. Per-port
+      impls land in a `context_hal` module (struct `ContextSwitchHal`):
+      x86_64/aarch64/riscv64 each reinterpret the neutral `TaskContext` as
+      their native `TaskCtx` (a const-assert pins the layout equality) and
+      forward to the existing `context` primitive, so the switch invoke
+      lives in one place (§2.2); the bare-metal `switch` is gated to the
+      port's freestanding target and the host build is `unreachable!`.
+      Each port carries a host `passes_context_switch_conformance` test.
+      wasm32 has no context switch (no register file/stack to swap; each
+      "CPU" is a separate Web Worker module instance), so the slice is an
+      honest **n/a** there with no `ContextSwitchHal` (§2.1 — no fake
+      primitive). The bare-metal `switch` itself, like `enter_user`, is
+      proven only under QEMU (the scheduler-drive verticals). Docs:
+      `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
+      `plans/WIRING.md`. **Remaining for W5:** the MMU/page-table
+      (`AddressSpace`/`Mmu`) + TLB-shootdown HAL traits and the
+      `kernel/mem` wiring (W5b) — the cross-CPU TLB part depends on the
+      aarch64 IPI from W6.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

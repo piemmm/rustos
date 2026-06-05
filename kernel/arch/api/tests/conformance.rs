@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use rustos_arch_api::conformance;
+use rustos_arch_api::context::{self, ContextSwitch, PrepareError, TaskContext, TaskEntry};
 use rustos_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
 use rustos_arch_api::percpu;
 use rustos_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -148,4 +149,44 @@ impl Timer for DoubleTimer {
 #[test]
 fn timer_vertical_runs_over_a_handle() {
     timer::conformance::run_all(&DoubleTimer::default());
+}
+
+/// A faithful in-test [`ContextSwitch`] double: it honours the
+/// fail-closed `prepare` contract and seeds a plausible frame. `switch`
+/// is the bare-metal-only operation and is never exercised on the host,
+/// so its body is empty (the suite calls only `prepare`).
+struct DoubleContextSwitch;
+
+/// A frame size below the conformance stack but above the too-small probe.
+const DOUBLE_FRAME_BYTES: u64 = 64;
+
+impl ContextSwitch for DoubleContextSwitch {
+    fn prepare(
+        &self,
+        ctx: &mut TaskContext,
+        stack_top: u64,
+        _entry: TaskEntry,
+        _arg: usize,
+    ) -> Result<(), PrepareError> {
+        if stack_top == 0 {
+            return Err(PrepareError::NullStack);
+        }
+        if stack_top % 16 != 0 {
+            return Err(PrepareError::Misaligned);
+        }
+        if stack_top < DOUBLE_FRAME_BYTES {
+            return Err(PrepareError::TooSmall);
+        }
+        ctx.stack_pointer = stack_top - DOUBLE_FRAME_BYTES;
+        Ok(())
+    }
+
+    unsafe fn switch(&self, _prev: *mut TaskContext, _next: *mut TaskContext) {}
+}
+
+#[test]
+fn context_switch_vertical_runs_over_a_handle() {
+    context::conformance::run_all(&DoubleContextSwitch);
+    let dynamic: &dyn ContextSwitch = &DoubleContextSwitch;
+    context::conformance::run_all(dynamic);
 }

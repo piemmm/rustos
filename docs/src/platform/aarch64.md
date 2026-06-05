@@ -245,3 +245,20 @@ forwards to the same static, so the `passes_timer_conformance` host test
 runs `timer::conformance::run_all` over a real `TimerHal`. The
 `timer_preempt_qemu_aarch64` vertical installs its tick callback through
 `TimerHal` and stays green through the HAL.
+
+## Context switch (`ContextSwitch`)
+
+The aarch64 port implements the Arch HAL `ContextSwitch` slice
+(`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W5) in
+`kernel/arch/aarch64::context_hal` (struct `ContextSwitchHal`) over the
+bare-metal task-switch primitive in `kernel/arch/aarch64::context`
+(`TaskCtx { sp }` + `context.s`'s `x19`–`x30` save/restore).
+`ContextSwitchHal::prepare` seeds a never-run task's first frame and
+`switch` performs the EL1 switch. The neutral `TaskContext` and the
+port's `TaskCtx` are both a single `#[repr(C)]` `u64`, so the handle
+reinterprets the pointer and forwards to `context` (a const-assert pins
+the layout equality); the switch invoke lives in one place (§2.2). The
+`prepare` contract is host-tested via `context::conformance::run_all`
+(`passes_context_switch_conformance`); the switch itself, like
+`enter_user`, is proven only on the bare-metal target (the scheduler-
+drive vertical), so it carries no host check (§2.1 — no fake primitive).

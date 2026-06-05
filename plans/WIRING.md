@@ -70,9 +70,9 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 `SchedulerArch` (per-CPU id, ticks, IPI, `core_class`),
 `SideChannelMitigation` (§19.1), `MemoryTagging` (§19.10),
 `EnterUser`/`UserEntry` (§17.2), `PlatformDiscovery` (W1), `PerCpu`
-(W2), `IrqController` + `InterruptEntry` (W3), and `Timer` (W4). The
-remaining slices (context switch, MMU/paging, TLB shootdown, SMP
-bring-up) are still ad-hoc inside each port — the §17.2 surface
+(W2), `IrqController` + `InterruptEntry` (W3), `Timer` (W4), and
+`ContextSwitch` (W5a). The remaining slices (MMU/paging, TLB shootdown,
+SMP bring-up) are still ad-hoc inside each port — the §17.2 surface
 `PLAN.md` flags as "migrated here as the §17 burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
@@ -83,7 +83,7 @@ bring-up) are still ad-hoc inside each port — the §17.2 surface
 | `SchedulerArch` impl              |   ✓    |    ✓    |    ✓    |   ✓    |
 | Paging / MMU primitives           |   ✓    |    ✓    |    ✓    |  n/a   |
 | Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    |   ~    |
-| Context switch                    |   ✓    |    ✓    |    ✓    |  n/a   |
+| Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
 | Interrupt controller + entry/exit |   ✓    |    ✓    |    ✓    |  n/a   |
 | **SMP secondary-CPU bring-up**    |   ✓    |  **✗**  |    ✓    | **✗**  |
@@ -308,10 +308,36 @@ constructed per port and reaches a port-private callback slot. Docs:
 
 ### Stage W5 — Context switch + MMU/paging + TLB shootdown HAL
 
-- Define `ContextSwitch`, `AddressSpace`/`Mmu`, `TlbShootdown`; migrate
-  each port's `context` + `paging` behind them and wire `AddressSpace`
-  into `kernel/mem`. Add cross-CPU TLB shootdown (depends on W6 IPI on
-  aarch64).
+#### Stage W5a — Context-switch HAL — ✅ landed
+
+**Landed:** `kernel/arch/api::context` defines the architecture-neutral
+`TaskContext` save area (a single `#[repr(C)]` `u64`, layout-identical to
+every port's native `TaskCtx`, §2.2), the `TaskEntry` alias, the
+fail-closed `PrepareError`, and the object-safe `ContextSwitch` trait
+(`prepare` seeds a never-run task's first frame; `unsafe switch` performs
+the bare-metal task switch), plus a host-run `context::conformance`
+vertical asserting the `prepare` contract (empty context not runnable;
+null/misaligned/too-small stack rejected fail-closed; good stack yields a
+runnable, in-bounds frame). Re-exported from `lib.rs` and exercised by the
+api integration `tests/conformance.rs` (`DoubleContextSwitch`). Per-port
+impls land in a `context_hal` module (struct `ContextSwitchHal`):
+x86_64/aarch64/riscv64 each reinterpret `TaskContext` as their native
+`TaskCtx` (a const-assert pins the layout equality) and forward to the
+existing `context` primitive — the switch invoke in one place (§2.2) — with
+the bare-metal `switch` gated to the freestanding target and the host
+build `unreachable!`. Each carries a host `passes_context_switch_
+conformance` test. wasm32 is an honest **n/a** (no register file/stack to
+swap; each "CPU" is a separate Web Worker module instance), no
+`ContextSwitchHal` (§2.1). The switch itself, like `enter_user`, is proven
+only under QEMU (the scheduler-drive verticals). Docs:
+`docs/src/architecture/modularity.md`,
+`docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
+
+#### Stage W5b — MMU/paging + TLB-shootdown HAL — next
+
+- Define `AddressSpace`/`Mmu`, `TlbShootdown`; migrate each port's
+  `paging` behind them and wire `AddressSpace` into `kernel/mem`. Add
+  cross-CPU TLB shootdown (depends on W6 IPI on aarch64).
 - **Deliverable:** `memory_isolation_qemu_*` verticals green through the
   HAL on every applicable port; `kernel/mem` names only the HAL trait.
 
