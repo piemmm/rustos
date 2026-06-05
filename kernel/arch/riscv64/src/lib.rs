@@ -129,6 +129,10 @@ pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 pub mod trap;
+/// riscv64 implementation of the Arch HAL "enter user mode" surface
+/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `sret`
+/// sequence that drops a built process image into U-mode.
+pub mod userentry;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod entry;

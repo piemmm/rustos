@@ -1,0 +1,57 @@
+[package]
+name = "rustos-test-enter-user-qemu-x86_64"
+description = "CCOMPAT stage CC3 QEMU exercise: boot the production rustos-kernel pipeline, build a ring-3 user address space (a user-executable alias of the lib/abi-sys ros_sys_cap_query stub plus a user stack), drop to ring 3 through the Arch HAL EnterUser (iretq) primitive, and assert the stub's real `syscall` traps back into the kernel with the expected (number, args) before qemu_exit."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the x86_64 ring-3 exercise for the Arch HAL "enter user
+# mode" primitive (`kernel/arch/x86_64/src/userentry.rs`,
+# `rustos_arch_api::EnterUser`, `AGENTS.md` §17.2) — the analogue of the
+# riscv64/aarch64 CC2 round-trips, which already reach the transition
+# through the same HAL handle. It boots the production kernel pipeline
+# and, on `AuditEvent::BootCompleted` (by which point the GDT user
+# selectors, the TSS, and `syscall`/`IA32_LSTAR` entry are installed),
+# builds a fresh address space that maps the kernel (so the CR3 switch is
+# sound) plus a *user-accessible* alias of the `ros_sys_cap_query` stub
+# page (USER, executable, not writable — W^X) and a USER read/write
+# stack, installs the syscall dispatch callback, switches CR3, and
+# `iretq`s to ring 3 through `UserMode::new().enter_user(...)`. The
+# stub's real `syscall` (`lib/abi-sys/src/trap.rs`) then traps into the
+# kernel's `IA32_LSTAR` stub and the installed callback asserts the
+# kernel-observed `(number, args)` are exactly what `ros_sys_cap_query`
+# should have marshalled into the syscall registers before flipping
+# `qemu_exit::exit_success`; any mismatch (or the `syscall` resuming in
+# ring 3 at all) flips `qemu_exit::exit_failure`. It differs from
+# `rustos-test-abi-sys-syscall-qemu`, which issues the same stub from
+# ring 0 and never crosses a privilege boundary.
+#
+# The `test-hooks` feature is on by default for this crate. Release
+# builds that enable it are rejected by the `compile_error!` guard in
+# `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail closed; §15 —
+# test affordances stay in test crates), mirroring
+# `rustos-test-abi-sys-syscall-qemu`.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-enter-user-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

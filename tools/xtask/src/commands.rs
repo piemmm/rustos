@@ -11,12 +11,14 @@ use std::time::{Duration, Instant};
 use crate::Context;
 
 mod abi_check;
+mod c_header;
 mod cfg_check;
 mod deps_check;
 mod fssoak;
 mod fuzz;
 mod linkcheck;
 mod model_check;
+mod parallel;
 mod proptest;
 mod qemu_tests;
 mod sbom;
@@ -33,6 +35,7 @@ pub enum Command {
     Fmt,
     DocsCheck,
     AbiCheck,
+    CHeader,
     DepsCheck,
     CfgCheck,
     Coverage,
@@ -56,6 +59,7 @@ impl Command {
         Command::Fmt,
         Command::DocsCheck,
         Command::AbiCheck,
+        Command::CHeader,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::Coverage,
@@ -78,6 +82,7 @@ impl Command {
             "fmt" => Command::Fmt,
             "docs-check" => Command::DocsCheck,
             "abi-check" => Command::AbiCheck,
+            "c-header" => Command::CHeader,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "coverage" => Command::Coverage,
@@ -102,6 +107,7 @@ impl Command {
             Command::Fmt => "fmt",
             Command::DocsCheck => "docs-check",
             Command::AbiCheck => "abi-check",
+            Command::CHeader => "c-header",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::Coverage => "coverage",
@@ -125,6 +131,9 @@ impl Command {
             Command::Fmt => "Check formatting (`--fix` to apply).",
             Command::DocsCheck => "Build rustdoc and the mdBook with link checking.",
             Command::AbiCheck => "Verify generated ABI artefacts match their source of truth.",
+            Command::CHeader => {
+                "Generate/verify the C ABI development header (`--write` to regenerate)."
+            }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::Coverage => "Produce a host-side coverage report via cargo-llvm-cov.",
@@ -156,6 +165,7 @@ impl Command {
             Command::Fmt => run_fmt(ctx, args),
             Command::DocsCheck => run_docs_check(ctx, args),
             Command::AbiCheck => run_abi_check(ctx, args),
+            Command::CHeader => run_c_header(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::Coverage => run_coverage(ctx, args),
@@ -560,6 +570,37 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     abi_check::check_sync(&ctx.workspace_root, &syscalls, &table)
 }
 
+fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // The C development header (`AGENTS.md` §9) is a generated view of the
+    // `lib/abi` source of truth. With no arguments this verifies the
+    // committed header is in sync (the `ci` drift guard); `--write`
+    // regenerates it, reviewed by diff like the kernel syscall table.
+    let mut write = false;
+    for arg in args {
+        if arg == "--write" {
+            write = true;
+        } else {
+            return Err(format!(
+                "c-header: unexpected argument {arg:?}; usage: cargo xtask c-header [--write]"
+            ));
+        }
+    }
+    let include_dir = ctx.workspace_root.join(c_header::DEFAULT_INCLUDE_DIR);
+    if write {
+        eprintln!(
+            "xtask: [c-header --write] {}",
+            relative(&ctx.workspace_root, &include_dir)
+        );
+        c_header::write(&ctx.workspace_root, &include_dir)
+    } else {
+        eprintln!(
+            "xtask: [c-header] {}",
+            relative(&ctx.workspace_root, &include_dir)
+        );
+        c_header::check_sync(&ctx.workspace_root, &include_dir)
+    }
+}
+
 fn run_deps_check(ctx: &Context) -> Result<(), String> {
     // §17.4 / §17.5: walk the workspace dependency graph and reject any
     // layering violation, concrete-scheduler naming outside the sanctioned
@@ -744,6 +785,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // not only the debug profile the main test phase uses.
     run_crypto_constant_time(ctx)?;
     run_abi_check(ctx, &[])?;
+    // §9: the C ABI development header is a generated view of `lib/abi`.
+    // Verify the committed copy is in sync so a `lib/abi` change cannot land
+    // without regenerating the header non-Rust programs link against.
+    run_c_header(ctx, &[])?;
     Ok(())
 }
 

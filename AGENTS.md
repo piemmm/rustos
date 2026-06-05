@@ -142,12 +142,27 @@ rustos/
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
+│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: one
+│   │                    #   export-name-pinned ros_sys_<name> per syscall
+│   │                    #   that issues the per-arch trap (syscall/svc/ecall),
+│   │                    #   panic-free, no added authority — the implementation
+│   │                    #   behind the generated C header and the curated
+│   │                    #   /System/Libraries/ "System runtime / C ABI" class
+│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC2).
 │   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── compress/        # First-party LZ (zstd-fast-style) codec. RustFS
 │   │                    #   compresses every data record with it; no external
 │   │                    #   zstd/compression dependency (§2.12, §16.4).
+│   ├── crt0/            # C-callable abi-v1 program startup/teardown object:
+│   │                    #   the per-arch _start trampoline that marshals the
+│   │                    #   kernel startup vector (rustos_abi::process) into C
+│   │                    #   argc/argv/envp, installs the §19.2 stack canary,
+│   │                    #   calls main, and routes its return through the exit
+│   │                    #   syscall — the crt0 half of the curated
+│   │                    #   /System/Libraries/ "System runtime / C ABI" class
+│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC3).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library
 │   │                    #   (plans/CURSES.md C4): client Window/pad draw model,
@@ -242,6 +257,12 @@ rustos/
 │   │   ├── filesystem/
 │   │   └── platform/
 │   └── book.toml
+│
+├── include/             # Generated C development headers for the ABI, so a
+│   └── rustos/          #   non-Rust program (C, …) can call abi-v1. Emitted
+│                        #   from the lib/abi source of truth by
+│                        #   `cargo xtask c-header --write`; verified by
+│                        #   `cargo xtask c-header` in CI. Do not hand-edit.
 │
 ├── tests/               # Cross-crate / integration tests only.
 │                        # Per-crate unit tests live in `src/` next to code
@@ -437,12 +458,54 @@ an update to this section.
   - Required capabilities.
   - Target ABI version (`abi-vN`).
   - Linked syscall interface hashes (refuse to load on mismatch).
-- The ABI is versioned. `abi-v1` once shipped is immutable. New behaviour
-  ships as `abi-v2`.
+- The ABI is versioned. `abi-v1` becomes immutable **once shipped**; new
+  behaviour then ships as `abi-v2`. **RustOS has not shipped a release, so
+  `abi-v1` is not frozen yet** — it is still mutable, and changing a `lib/abi`
+  type today is allowed (it merely requires regenerating the generated views
+  below, which the drift guards enforce). The immutability rule binds from the
+  first release onward.
 - Userland-to-kernel transitions use a single, documented syscall table per
   architecture. The table lives in `kernel/syscall/src/table.rs` and is
   generated from `lib/abi/src/syscalls.rs` — do not edit either by hand
   without updating the other; `cargo xtask abi-check` enforces this.
+- The ABI must be callable from programs not written in Rust (C, …), and
+  **all of `lib/abi` is part of that surface**, not just the syscalls. `lib/abi`
+  is the single source of truth for every type a program exchanges with the
+  kernel and with system services, and it is a public developer surface for
+  third-party programs, not only the OS. The C-language view — every public
+  `#[repr(C)]` type, every constant and enum discriminant, the syscall numbers,
+  the error codes, the capability identifiers, and a prototype per syscall
+  entry point — is **generated** from the same `lib/abi` source of truth into
+  `include/` (§3), never hand-maintained as a parallel definition (§2.2).
+  `cargo xtask c-header --write` regenerates it and `cargo xtask c-header` (run
+  by `cargo xtask ci`) fails closed if the committed header has drifted. Each
+  syscall is exported under the stable symbol `ros_sys_<name>`; the
+  user-space stub runtime pins that symbol with
+  `#[export_name = "ros_sys_<name>"]` (or `#[unsafe(no_mangle)]`) so the
+  compiler does not mangle it (`extern "C"` alone fixes only the calling
+  convention, not the symbol name). That stub runtime and the matching program
+  startup object (crt0) are an OS-provided shared library (§16.4); they only
+  marshal to the kernel and are **not** a privileged bypass — every capability
+  and input check still happens kernel-side (§5.4), and non-Rust binaries obey
+  the `rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2)
+  identically. The staged build plan for this surface is `plans/CCOMPAT.md`.
+- **C-ABI naming prefix (`ros_` / `ROS_`).** The C-visible surface is
+  namespaced with the short `ros_` prefix: exported symbols are
+  `ros_sys_<name>`, public macros are `ROS_*` (e.g. `ROS_E_*` error codes,
+  `ROS_CAP_*` capability ids, `ROS_SYS_*` syscall numbers), and `#[repr(C)]`
+  type names are `ros_<snake_case>_t`. This is the standard, correct defence
+  for C's single flat symbol namespace against hostile or sloppy third-party
+  code (§16.5 hosts non-Rust apps), and it is required because the names are
+  frozen on the first release (an unprefixed name you can never change later
+  is reckless, and `extern "C"` fixes only the calling convention, not
+  mangling, so the symbol is pinned explicitly anyway). It is not vanity:
+  Linux's bare `read`/`open` are prefix-free only because POSIX *owns* that
+  namespace, and Windows self-namespaces heavily (`Nt*`/`Zw*`/`Rtl*`); RustOS
+  has no external standard owning its names, so it self-namespaces. **The
+  prefix belongs only on the C-visible boundary** — exported symbols, public
+  macros, and `#[repr(C)]` type names. It must never creep onto internal
+  `lib/abi` Rust items, kernel-side functions, or anything that does not cross
+  the FFI line; that would be the bloat §2.3 forbids.
 
 ---
 
@@ -719,6 +782,15 @@ The permitted classes are:
   escape-sequence vocabulary it builds on (`lib/termcap`, `lib/vt`).
   It is part of the OS, so apps dynamically link it like any other
   `/System/Libraries/` library (§10 — text-mode infrastructure).
+- System runtime / C ABI: the minimal libc-equivalent that lets a
+  program **not** written in Rust call `abi-v1` (§9) — the
+  `ros_sys_<name>` syscall stubs and the program startup object
+  (crt0). It is deliberately minimal: it marshals to the kernel and
+  starts/stops the program, nothing more. It is **not** a privileged
+  path — every capability and input check happens kernel-side (§5.4),
+  and third-party native code is treated as potentially hostile (§5,
+  §19). Like every curated library it is dynamically linked, so one
+  security update covers every consumer. Staged in `plans/CCOMPAT.md`.
 
 Adding a new class of OS-provided shared library requires an update to
 this list **and** to `PLAN.md`. "Convenience" libraries are forbidden.

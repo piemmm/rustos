@@ -24,6 +24,12 @@
 //!
 //! Binaries gate on those names instead of a raw target predicate, so the
 //! instruction-set choice lives in this one audited place.
+//!
+//! It also hosts the build-time [`elf2rxe`] converter, which turns a linked
+//! PIE program ELF into the `rxe` load image the kernel spawn path consumes
+//! (used by the CCOMPAT CC3 spawn round-trips).
+
+pub mod elf2rxe;
 
 /// Cargo environment key naming the target operating system.
 const TARGET_OS_KEY: &str = "CARGO_CFG_TARGET_OS";

@@ -129,6 +129,16 @@ pub mod syscall_entry;
 /// CPUID probe the boot path consults before trusting `RDTSC` as a
 /// cross-CPU monotonic clock source (`AGENTS.md` §17.2, §19.1).
 pub mod tsc;
+/// x86_64 implementation of the Arch HAL "enter user mode" surface
+/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `iretq`
+/// sequence that drops a built process image into ring 3.
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in — so a
+/// freestanding consumer that does not need the Arch HAL compiles
+/// neither this module nor the dependency (`AGENTS.md` §2.3).
+#[cfg(feature = "sched-arch")]
+pub mod userentry;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod idt;

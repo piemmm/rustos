@@ -41,6 +41,11 @@ rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+# The Arch HAL "enter user mode" primitive (`EnterUser`, §17.2) the
+# capability-checked spawn caller (`src/spawn.rs`) reaches through. As the
+# single selection point, kernel/core may depend on the arch surface
+# (`AGENTS.md` §17.4).
+rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # The scheduler contract (`SchedulerPolicy` + vocabulary) is always
 # present; the concrete policy is feature-selected above (§17.1).
 rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }

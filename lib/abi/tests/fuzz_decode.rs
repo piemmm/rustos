@@ -26,12 +26,21 @@
 //! so it runs once regardless of the budget.
 
 use rustos_abi::input::{KeyInput, PointerInput};
+use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
     SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{AppInfoHeader, IpcMessageHeader, ManifestHeader, PortName};
+use rustos_abi::{
+    AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
+    SYSCALL_TABLE_HASH_LEN,
+};
+
+/// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
+/// is overwhelmingly unlikely to match it, so the loader fails closed long
+/// before mapping anything; the point is that no input panics.
+const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN];
 
 /// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -146,6 +155,99 @@ fn exercise(bytes: &[u8]) {
         let redecoded = PortName::from_bytes(&name.to_le_bytes())
             .expect("round-trip of an accepted port name must succeed");
         assert_eq!(name, redecoded);
+    }
+    if let Ok(lib) = NeededLibrary::decode(bytes) {
+        let redecoded = NeededLibrary::decode(&lib.to_le_bytes())
+            .expect("round-trip of an accepted needed-library record must succeed");
+        assert_eq!(lib, redecoded);
+    }
+    // The whole-image loader has no single round-trip encoder (the builder is
+    // test-only), so the contract here is the §19.6 "must not panic for any
+    // input"; an accepted image must additionally re-parse deterministically
+    // and yield resolvable needed-library references.
+    if let Ok(image) = LoadImage::parse(bytes, &FUZZ_CFI_TAG) {
+        let reparsed = LoadImage::parse(bytes, &FUZZ_CFI_TAG)
+            .expect("re-parse of an accepted load image must succeed");
+        assert_eq!(image, reparsed);
+        for name in image.needed_libraries() {
+            assert!(!name.is_empty());
+        }
+    }
+    exercise_process(bytes);
+}
+
+/// Drive the `process` startup-vector decoders on `bytes`.
+///
+/// Split out of [`exercise`] so each helper stays a single, readable unit;
+/// the contract is identical (must not panic; an accepted decode round-trips
+/// or re-parses deterministically).
+fn exercise_process(bytes: &[u8]) {
+    if let Ok(header) = ProcessStartHeader::from_bytes(bytes) {
+        let redecoded = ProcessStartHeader::from_bytes(&header.to_le_bytes())
+            .expect("round-trip of an accepted start header must succeed");
+        assert_eq!(header, redecoded);
+    }
+    if let Ok(slot) = StringSlot::from_bytes(bytes) {
+        let redecoded = StringSlot::from_bytes(&slot.to_le_bytes())
+            .expect("round-trip of an accepted string slot must succeed");
+        assert_eq!(slot, redecoded);
+    }
+    if let Ok(view) = ProcessStart::parse(bytes) {
+        // The view borrows `bytes`; re-parsing the same bytes must be
+        // deterministic, and every accepted string must resolve.
+        let reparsed = ProcessStart::parse(bytes)
+            .expect("re-parse of an accepted startup vector must succeed");
+        assert_eq!(view, reparsed);
+        for i in 0..view.arg_count() {
+            assert!(view.arg(i).is_some());
+        }
+        for i in 0..view.env_count() {
+            assert!(view.env(i).is_some());
+        }
+    }
+    exercise_process_builder(bytes);
+}
+
+/// Drive the production startup-vector *builder* on `bytes` (§19.6).
+///
+/// The fuzz bytes are split on `0xFF` into argument/environment strings and
+/// fed to [`rustos_abi::process::write_into`]; an accepted build must parse
+/// back to exactly those strings, and a rejected build (e.g. an embedded NUL)
+/// must fail closed rather than panic.
+fn exercise_process_builder(bytes: &[u8]) {
+    let mut parts: Vec<&[u8]> = bytes.split(|&b| b == 0xFF).collect();
+    // Keep the builder cheap and comfortably within the abi-v1 limits.
+    parts.truncate(8);
+    let split = parts.len() / 2;
+    let (args, env) = parts.split_at(split);
+
+    let mut seed = [0u8; 8];
+    let take = core::cmp::min(8, bytes.len());
+    seed[..take].copy_from_slice(&bytes[..take]);
+    let canary = u64::from_le_bytes(seed);
+
+    let Ok(len) = rustos_abi::process::encoded_len(args, env) else {
+        return;
+    };
+    let mut buf = vec![0u8; len];
+    let Ok(written) = rustos_abi::process::write_into(&mut buf, args, env, canary) else {
+        // A rejected build (an embedded NUL, say) is a fail-closed outcome.
+        return;
+    };
+    assert_eq!(written, len);
+    let view = ProcessStart::parse(&buf).expect("a freshly built block must parse");
+    assert_eq!(view.arg_count() as usize, args.len());
+    assert_eq!(view.env_count() as usize, env.len());
+    assert_eq!(view.canary(), canary);
+    let mut idx: u32 = 0;
+    for a in args {
+        assert_eq!(view.arg(idx), Some(*a));
+        idx += 1;
+    }
+    idx = 0;
+    for e in env {
+        assert_eq!(view.env(idx), Some(*e));
+        idx += 1;
     }
 }
 

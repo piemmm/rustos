@@ -58,6 +58,58 @@ fn leaf_attrs_select_the_right_mair_index() {
 }
 
 #[test]
+fn el0_leaf_attrs_encode_unprivileged_access() {
+    // The AP field lives in bits [7:6].
+    const AP_MASK: u64 = 0b11 << 6;
+    // Code: read-only at EL0 (AP=0b11), EL0-executable (UXN clear) but
+    // privileged-execute-never (PXN set).
+    let code = el0_code_leaf_attrs();
+    assert_eq!(code & AP_MASK, attrs::AP_RO_EL0);
+    assert_ne!(code & attrs::PXN, 0);
+    assert_eq!(code & attrs::UXN, 0);
+    assert_eq!(code & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    // It is a page descriptor (0b11) with the access flag set.
+    assert_eq!(code & 0b11, 0b11);
+    assert_ne!(code & attrs::AF, 0);
+
+    // Data: read/write at EL0 (AP=0b01), execute-never at both ELs.
+    let data = el0_data_leaf_attrs();
+    assert_eq!(data & AP_MASK, attrs::AP_RW_EL0);
+    assert_ne!(data & attrs::PXN, 0);
+    assert_ne!(data & attrs::UXN, 0);
+    assert_eq!(data & 0b11, 0b11);
+
+    // Read-only data: read-only at EL0 (AP=0b11) and execute-never at both
+    // ELs — unlike code, the page is *not* EL0-executable (UXN set).
+    let rodata = el0_rodata_leaf_attrs();
+    assert_eq!(rodata & AP_MASK, attrs::AP_RO_EL0);
+    assert_ne!(rodata & attrs::PXN, 0);
+    assert_ne!(rodata & attrs::UXN, 0);
+    assert_eq!(rodata & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_eq!(rodata & 0b11, 0b11);
+    assert_ne!(rodata & attrs::AF, 0);
+}
+
+#[test]
+fn map_4k_with_attrs_uses_the_supplied_leaf_attrs() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    let va: u64 = 96u64 << 30;
+    let pa: u64 = 0x4567_8000;
+    space
+        .map_4k_with_attrs(&POOL, va, pa, el0_code_leaf_attrs())
+        .expect("map the EL0 page");
+
+    // Walk to the leaf descriptor and confirm it carries the EL0 attrs.
+    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("va is mapped");
+    assert_eq!(phys_from_descriptor(leaf), pa);
+    assert_eq!(leaf & (0b11 << 6), attrs::AP_RO_EL0);
+    assert_eq!(leaf & attrs::UXN, 0);
+    assert_ne!(leaf & attrs::PXN, 0);
+}
+
+#[test]
 fn tcr_value_encodes_a_39_bit_region() {
     // T0SZ field (bits [5:0]) is 25 → 64 - 25 = 39-bit VA.
     assert_eq!(TCR_VALUE & 0x3F, 25);
@@ -123,6 +175,13 @@ fn map_4k_rejects_misaligned_inputs() {
 /// physical address of the leaf (block or page) that maps `va`, or
 /// `None` if no valid leaf is reached.
 fn host_translate(root_phys: u64, va: u64) -> Option<u64> {
+    host_leaf_descriptor(root_phys, va).map(phys_from_descriptor)
+}
+
+/// As [`host_translate`], but returns the full leaf *descriptor* (output
+/// address plus attributes) so a test can assert the leaf's permission
+/// bits, not just its translation.
+fn host_leaf_descriptor(root_phys: u64, va: u64) -> Option<u64> {
     let mut table = root_phys as *const u64;
     for level in 1..=LEVELS {
         let idx = table_index(va, level);
@@ -133,7 +192,7 @@ fn host_translate(root_phys: u64, va: u64) -> Option<u64> {
             return None;
         }
         if is_block(entry) || level == LEVELS {
-            return Some(phys_from_descriptor(entry));
+            return Some(entry);
         }
         table = phys_from_descriptor(entry) as *const u64;
     }

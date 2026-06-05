@@ -87,19 +87,76 @@ where
     for segment in image.segments() {
         let base = segment.relocated_vaddr(bias)?;
         let flags = map_flags_for(segment.permission);
-        for page_index in 0..segment.page_count() {
-            let page_offset = page_index
-                .checked_mul(RXE_PAGE_SIZE)
-                .ok_or(LoadError::Layout(RxeError::AddressOverflow))?;
-            let vaddr = base
-                .checked_add(page_offset)
-                .ok_or(LoadError::Layout(RxeError::AddressOverflow))?;
-            let page = Page::from_addr(VirtAddr::new(vaddr))?;
-            let frame = alloc_frame().ok_or(LoadError::OutOfFrames)?;
-            space.map(page, frame, flags)?;
-        }
+        map_region(
+            space,
+            base,
+            segment.page_count(),
+            flags,
+            &mut alloc_frame,
+            |_page_index, _frame| Ok::<(), LoadError>(()),
+        )?;
     }
     Ok(image.relocated_entry(bias)?)
+}
+
+/// Map `page_count` consecutive pages starting at `base_va`, allocating one
+/// frame per page through `alloc_frame` and mapping it with `flags`, invoking
+/// `per_page(page_index, frame)` immediately after each page is mapped.
+///
+/// This is the single page-mapping loop shared by [`map_image`] and the
+/// process-image builder ([`crate::spawn`]); the per-page hook lets the
+/// builder fill each freshly mapped frame with segment content, a zeroed
+/// stack, or the startup-vector block without duplicating the mapping
+/// arithmetic (`AGENTS.md` §2.2).
+///
+/// The error type `E` is generic so callers can thread their own richer
+/// error (e.g. [`crate::spawn::SpawnError`]) through the `per_page` hook while
+/// the mapping failures surface as [`LoadError`] converted via `E::from`.
+///
+/// # Errors
+///
+/// * [`LoadError::Layout`] (converted into `E`) if a page address overflows.
+/// * [`LoadError::OutOfFrames`] (converted into `E`) if `alloc_frame` is
+///   exhausted.
+/// * [`LoadError::PageTable`] (converted into `E`) if the table refuses a
+///   mapping.
+/// * any error `per_page` returns.
+pub(crate) fn map_region<P, A, F, E>(
+    space: &mut AddressSpace<P>,
+    base_va: u64,
+    page_count: u64,
+    flags: MapFlags,
+    alloc_frame: &mut A,
+    mut per_page: F,
+) -> Result<(), E>
+where
+    P: PageTableOps,
+    A: FnMut() -> Option<Frame>,
+    F: FnMut(u64, Frame) -> Result<(), E>,
+    E: From<LoadError>,
+{
+    for page_index in 0..page_count {
+        let page_offset = page_index
+            .checked_mul(RXE_PAGE_SIZE)
+            .ok_or(LoadError::Layout(RxeError::AddressOverflow))
+            .map_err(E::from)?;
+        let vaddr = base_va
+            .checked_add(page_offset)
+            .ok_or(LoadError::Layout(RxeError::AddressOverflow))
+            .map_err(E::from)?;
+        let page = Page::from_addr(VirtAddr::new(vaddr))
+            .map_err(LoadError::from)
+            .map_err(E::from)?;
+        let frame = alloc_frame()
+            .ok_or(LoadError::OutOfFrames)
+            .map_err(E::from)?;
+        space
+            .map(page, frame, flags)
+            .map_err(LoadError::from)
+            .map_err(E::from)?;
+        per_page(page_index, frame)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,7 +185,7 @@ mod tests {
             abi_version: ABI_VERSION_CURRENT,
             flags: LOAD_FLAG_PIE,
             segment_count: u16::try_from(segments.len()).unwrap(),
-            reserved0: 0,
+            needed_count: 0,
             entry,
             cfi_tag: TAG,
         };

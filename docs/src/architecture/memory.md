@@ -305,9 +305,10 @@ The user-space virtio driver crates carry an owned
 `DmaSlab { phys, ptr: NonNull<u8>, len, pool_id, slot, /* erased
 free shim */ }` rather than borrowing the pool on every accessor
 (Stage 4.D Item 0a). The pool exposes a single companion accessor,
-`slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError>`,
-that hands out the base pointer of `buf`'s data slots. The
-disjointness witness is the pool's slot bitmap (one slot ↔ one
+`slot_base`, which takes a `&DmaBuffer` and returns
+`Result<NonNull<u8>, DmaError>`, handing out the base pointer of the
+buffer's data slots. The disjointness witness is the pool's slot
+bitmap (one slot ↔ one
 allocation); the slab carries `(pool_id, slot, len)` so its drop
 can invoke a type-erased free shim that returns the slot to the
 pool. See [Virtio transport — DMA ownership model](../drivers/virtio.md#dma-ownership-model)

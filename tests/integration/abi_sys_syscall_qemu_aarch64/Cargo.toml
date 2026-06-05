@@ -1,0 +1,51 @@
+[package]
+name = "rustos-test-abi-sys-syscall-qemu-aarch64"
+description = "CCOMPAT stage CC2 QEMU integration test: drop to EL0 and issue the lib/abi-sys ros_sys_cap_query stub so the real aarch64 `svc` trap is exercised end-to-end and the kernel-observed (number, args) marshalling is asserted before the ARM semihosting PASS finisher."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/CCOMPAT.md` stage CC2 per-native-target QEMU
+# round-trip test for the C-callable syscall stub runtime (`lib/abi-sys`)
+# on the aarch64 `virt` board. Unlike x86_64 — whose `syscall` traps
+# identically from ring 0 — an aarch64 `svc` only reaches the kernel's
+# EL0 syscall path when raised from EL0, so this test stands up a minimal
+# EL0 context: it identity-maps the kernel (EL1) with the Stage-3 stage-1
+# primitives, aliases the `ros_sys_cap_query` stub page at a user virtual
+# address with EL0-executable attributes plus an EL0 stack, installs the
+# syscall dispatch callback, and `eret`s to EL0. The stub's real `svc`
+# (`lib/abi-sys/src/trap.rs`) then traps into the kernel EL1 vector
+# (`kernel/arch/aarch64/src/exceptions.rs` → `syscall_entry`), and the
+# installed dispatch callback asserts the marshalled `(number, args)`
+# match what `ros_sys_cap_query` should have placed in `x8`/`x0` before
+# the ARM semihosting PASS finisher; any mismatch trips a distinct
+# failure finisher.
+#
+# The `test-hooks` feature is on by default for this crate. Release builds
+# that enable it are rejected by the `compile_error!` guard in
+# `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail closed; §15 —
+# test affordances stay in test crates), mirroring
+# `rustos-test-abi-sys-syscall-qemu`.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-abi-sys-syscall-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -38,18 +38,23 @@ pub const STDINFO_VERSION_CURRENT: u32 = STDINFO_VERSION_V1;
 /// This enumeration is exhaustive by design: a new kind cannot be invented,
 /// and synonyms such as `hint`, `tip`, `notice`, `info`, `advice`, or
 /// `metadata-note` are forbidden. Pick the one canonical kind that fits.
+///
+/// The canonical wire spelling is a string (see [`StdInfoKind::as_str`]); the
+/// `#[repr(u8)]` discriminants are part of the `stdinfo-v1` surface so the C
+/// view can name each kind, and must not be re-numbered.
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum StdInfoKind {
     /// Output was hidden, skipped, filtered, truncated, or not shown.
-    Omission,
+    Omission = 0,
     /// A short, non-obvious result summary.
-    Summary,
+    Summary = 1,
     /// `stdout` structure, columns, units, or encoding.
-    Schema,
+    Schema = 2,
     /// A safe optional next action; never auto-run.
-    Suggestion,
+    Suggestion = 3,
     /// Concise environmental context needed to interpret `stdout`.
-    Context,
+    Context = 4,
 }
 
 impl StdInfoKind {
@@ -67,12 +72,17 @@ impl StdInfoKind {
 }
 
 /// Advisory severity of a record. Security events use `lib/log`, not fd 3.
+///
+/// The canonical wire spelling is a string (see [`Severity::as_str`]); the
+/// `#[repr(u8)]` discriminants are part of the `stdinfo-v1` surface so the C
+/// view can name each severity, and must not be re-numbered.
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Severity {
     /// Ordinary advisory context.
-    Info,
+    Info = 0,
     /// Diagnostic detail, suppressed unless a consumer asks for it.
-    Debug,
+    Debug = 1,
 }
 
 impl Severity {

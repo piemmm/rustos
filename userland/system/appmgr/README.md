@@ -32,9 +32,22 @@ Fails closed at the first problem (`AGENTS.md` §5.4):
 6. **Authority** — grant the **intersection** of the manifest's requested
    capabilities with the launching user's grants; ambient authority is
    forbidden (§4, §5.2), so a request is never widened.
+7. **Run image** — read the `Run` binary and validate it through
+   `rustos_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
+   expected CFI tag. This enforces the §19.2 hardening invariants (PIE,
+   W^X, CFI tag) on the entry-point binary; a malformed image or a CFI-tag
+   mismatch is refused (`AppError::RunImage`).
+8. **Needed libraries** — resolve every shared library the `Run` image
+   declares it needs (`LoadImage::needed_libraries`) under the §16.4 policy
+   below. This binds the curated *System runtime / C ABI* library a non-Rust
+   program links; an out-of-tree reference fails closed (`AppError::Library`).
+
+The pipeline is language-agnostic: a C-compiled bundle is validated
+identically to a Rust one (`plans/CCOMPAT.md` stage CC4).
 
 On success it returns a `LoadedApp` (bundle id / name / version, the `Run`
-entry-point path, and the granted `CapabilitySet`).
+entry-point path, the granted `CapabilitySet`, and the resolved needed
+libraries with their policy scope).
 
 ## Dynamic-loader policy (`AppLoader::resolve_library`)
 
@@ -47,8 +60,8 @@ component or one pointing anywhere else is refused (`AppError::Library`,
 
 Injected, so the security-relevant code is testable without a kernel:
 
-- `BundleStore` — `entries` / `read_appinfo` / `content_hash`. Backed by the
-  VFS on a running system.
+- `BundleStore` — `entries` / `read_appinfo` / `content_hash` / `read_run`.
+  Backed by the VFS on a running system.
 - `Verifier::verify(signed, signature, signer_pubkey)` — Ed25519
   verification. Backed by `lib/crypto` (§2.12).
 
@@ -65,6 +78,8 @@ Reserved `EventId` range `11000..12000`:
 - `11007 APP_STORE_ERROR` — the bundle could not be read (Warn).
 - `11008 LIBRARY_RESOLVED` — a library reference resolved within policy (Info).
 - `11009 LIBRARY_REFUSED` — a library reference violated the §16.4 policy (Warn).
+- `11010 APP_RUN_IMAGE_INVALID` — the `Run` binary is not a valid `rxe` image
+  or its CFI tag does not match the kernel's hash (Warn, §9 / §19.2).
 
 ## Layering & safety
 
@@ -75,10 +90,12 @@ in production paths (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-appmgr` (16 unit tests): the happy path with
-capability intersection; the minimal (`AppInfo` + `Run`) layout; fail-closed
-unknown-entry / missing-`Run` layouts; an undecodable manifest; an
-unsupported ABI version; a syscall-hash mismatch; a bad signature; a
-content-hash mismatch; a store error; a truncated capability body; the
-in-policy and out-of-policy library resolutions; plus the `EventId`
-range/uniqueness invariants.
+`cargo test -p rustos-appmgr`: the happy path with capability intersection;
+the minimal (`AppInfo` + `Run`) layout; fail-closed unknown-entry /
+missing-`Run` layouts; an undecodable manifest; an unsupported ABI version; a
+syscall-hash mismatch; a bad signature; a content-hash mismatch; a store
+error; a truncated capability body; the in-policy and out-of-policy library
+resolutions; the C-bundle run-image needed-library resolution (runtime from
+`/System/Libraries/` + a private bundle library), capability intersection for
+a C bundle, an out-of-tree needed library, a run-image CFI mismatch, and a
+malformed run image; plus the `EventId` range/uniqueness invariants.

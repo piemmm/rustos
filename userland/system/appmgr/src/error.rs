@@ -1,6 +1,6 @@
 //! The fail-closed error type for bundle loading.
 
-use rustos_abi::{BundleLayoutError, Errno, LibraryError};
+use rustos_abi::{BundleLayoutError, Errno, LibraryError, RxeError};
 
 /// Why a bundle could not be loaded, or a library reference resolved.
 ///
@@ -28,6 +28,10 @@ pub enum AppError {
     ContentHashMismatch,
     /// A shared-library reference violated the §16.4 dynamic-loader policy.
     Library(LibraryError),
+    /// The entry-point `Run` binary is not a valid `rxe` load image, or its
+    /// CFI tag does not match the kernel's syscall interface hash
+    /// (`AGENTS.md` §9 / §19.2); carries the underlying [`RxeError`].
+    RunImage(RxeError),
 }
 
 impl core::fmt::Display for AppError {
@@ -40,6 +44,7 @@ impl core::fmt::Display for AppError {
             Self::Signature => f.write_str("manifest signature did not verify"),
             Self::ContentHashMismatch => f.write_str("bundle contents do not match signed hash"),
             Self::Library(e) => write!(f, "shared-library reference refused: {e}"),
+            Self::RunImage(e) => write!(f, "entry-point binary refused: {e}"),
         }
     }
 }

@@ -471,12 +471,7 @@ where
         Ok(u64::from(caller.caps.has(cap)))
     }
 
-    fn cap_delegate(
-        &self,
-        caller: &CallerContext<'_>,
-        target: u64,
-        set_ptr: u64,
-    ) -> SyscallResult {
+    fn cap_delegate(&self, caller: &CallerContext<'_>, target: u64, set_ptr: u64) -> SyscallResult {
         // `set_ptr` names a fixed-size `CapabilitySet` (its 256-bit bitmap
         // as four little-endian `u64` words, `CapabilitySet::WIRE_LEN`
         // bytes) in the caller's address space. Copy it in through the
@@ -1425,7 +1420,11 @@ mod tests {
     /// caller's page 1 (`0x1000`) and register the caller's task id in
     /// `aspaces`. Mirrors `send_aspace` for the `cap_delegate` copy-in
     /// path; the page is `READ | USER` because the handler only reads it.
-    fn register_set_at_page1(aspaces: &RwLock<AddressSpaceRegistry>, task: u64, set: &CapabilitySet) {
+    fn register_set_at_page1(
+        aspaces: &RwLock<AddressSpaceRegistry>,
+        task: u64,
+        set: &CapabilitySet,
+    ) {
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &set.to_le_bytes());
         aspaces
             .write()
@@ -1477,7 +1476,11 @@ mod tests {
         // `AuditEvent` (distinct from `kernel/core`'s); no `kernel/core`
         // deferral record is announced.
         let ids = sink.event_ids();
-        assert!(ids.contains(&rustos_kernel_sec::AuditEvent::TaskCapabilitiesDelegated.id().0));
+        assert!(ids.contains(
+            &rustos_kernel_sec::AuditEvent::TaskCapabilitiesDelegated
+                .id()
+                .0
+        ));
         assert!(!ids.contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
     }
 
@@ -1512,7 +1515,10 @@ mod tests {
         );
 
         let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
-        assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Err(Errno::DelegationWiden));
+        assert_eq!(
+            h.cap_delegate(&ctx, 10, 0x1000),
+            Err(Errno::DelegationWiden)
+        );
         // The target's set is unchanged: it still holds FS_MOUNT and
         // never gained NET_RAW.
         let guard = table.read();

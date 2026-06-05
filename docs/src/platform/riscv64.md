@@ -186,6 +186,40 @@ per-site failure finisher instead (`AGENTS.md` §5.4.5 — fail closed).
 The test is enrolled in `tools/xtask/src/commands/qemu_tests.rs` (single
 CPU, 60 s budget).
 
+## CC2 `abi-sys` `ecall` round-trip QEMU vertical
+
+`tests/integration/abi_sys_syscall_qemu_riscv64` is the riscv64 half of
+the `plans/CCOMPAT.md` stage CC2 per-native-target round-trip for the
+C-callable syscall stub runtime (`lib/abi-sys`). Where x86_64 can drive
+the stub straight from ring 0 (its `syscall` traps identically from any
+privilege level), a riscv64 `ecall` only reaches the kernel's U-mode
+syscall path when raised from U-mode (`is_ecall_from_user` matches only
+`SCAUSE_ECALL_FROM_U`). The test therefore stands up a minimal U-mode
+context with the Stage-3 Sv39 primitives:
+
+1. Identity-maps the low 4 GiB (kernel code/stack, trap vector, MMIO) as
+   S-mode-only.
+2. Aliases the `ros_sys_cap_query` stub page at a high user VA with the
+   `U` bit set (`flags::USER | READ | EXEC`) and maps a small user stack
+   (`USER | READ | WRITE`). The stub is a self-contained leaf, so a
+   single-page code alias is sufficient; the identity pages carry no `U`
+   bit, so U-mode can reach only the aliased stub and its stack.
+3. Installs the syscall dispatch callback (`syscall_entry::set_dispatch_callback`),
+   points `stvec` at the trap vector (`trap::init_traps`), sets
+   `sstatus.SUM` (so the S-mode trap handler may touch the U-bit stack),
+   and `sret`s to U-mode at the aliased stub entry with the capability id
+   in `a0`.
+
+The stub's `ecall` raises an environment-call-from-U exception into the
+S-mode trap vector, which marshals `a7`/`a0`–`a5` and calls the
+callback; the callback asserts the dispatched `(number, args)` are
+exactly what `ros_sys_cap_query` should have placed in the registers
+before writing the `SiFive` Test PASS finisher. Any mismatch (or the
+`ecall` resuming in U-mode at all) trips a distinct failure finisher
+(`AGENTS.md` §5.4.5). Enrolled in `tools/xtask/src/commands/qemu_tests.rs`
+(single CPU, 60 s budget); it runs under `cargo xtask test --qemu`, not
+the host-only `cargo xtask ci` gate.
+
 ## Boot-state publication
 
 `riscv64_boot::publish` exposes the boot-state a driver-bring-up

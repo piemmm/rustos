@@ -26,7 +26,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `.cargo/config.toml` declaring per-target build flags and linker scripts.
 - `rustfmt.toml`, `clippy.toml`, `deny.toml` (license + advisory rules).
 - `tools/xtask/` with subcommands: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `docs-check`, `abi-check`, `c-header`, `deps-check`, `cfg-check`, `coverage`, `ci`,
   `image`.
 - `docs/` mdBook scaffold.
 - CI definition (`.github/workflows/ci.yml` or equivalent) running
@@ -62,11 +62,18 @@ Do **not** begin a stage before all its listed dependencies are complete.
   sources` on the bumped toolchain.
 - `tools/xtask` exposes the closed set of subcommands required by
   `AGENTS.md` §7 / §14 / §17.5: `build`, `test`, `clippy`, `fmt`,
-  `docs-check`, `abi-check`, `deps-check`, `cfg-check`, `coverage`, `ci`,
+  `docs-check`, `abi-check`, `c-header`, `deps-check`, `cfg-check`, `coverage`, `ci`,
   `image`. `abi-check` deliberately fails loudly if only one half of the
   `lib/abi/src/syscalls.rs` ↔ `kernel/syscall/src/table.rs` pair appears;
-  `deps-check` and `cfg-check` enforce the §17 modularity contracts (see
-  the §17 burn-down section below).
+  `c-header` generates (`--write`) and verifies the C ABI development
+  header(s) under `include/rustos/` from the same `lib/abi` source of truth,
+  so a non-Rust program (C, …) can call `abi-v1` and the committed header can
+  never drift (`AGENTS.md` §9). That surface is the **whole** of `lib/abi`
+  (every `#[repr(C)]` type, constant, and enum discriminant — not just the
+  syscalls) and is staged, together with the `ros_sys_*` stub runtime and
+  crt0, in `plans/CCOMPAT.md`; `deps-check` and `cfg-check`
+  enforce the §17 modularity contracts (see the §17 burn-down section
+  below).
 - `docs/` ships a mdBook scaffold (`book.toml`, `src/SUMMARY.md`,
   `introduction.md`, `contributing.md`, `architecture/overview.md`) and the
   Stage 1 per-crate `lib/*` pages.
@@ -133,9 +140,14 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - All six `lib/*` crates implemented (`abi`, `caps`, `collections`, `crypto`,
   `log`, `util`), `no_std`, with rustdoc on every public item and unit tests
   alongside the code per §7.
-- `lib/abi` ships frozen `abi-v1` types (`Errno`, `CapabilityId`,
+- `lib/abi` ships the `abi-v1` types (`Errno`, `CapabilityId`,
   `SyscallNumber`, `IpcMessageHeader`, `ManifestHeader`) plus a deterministic
-  100 000-input fuzz harness in `lib/abi/tests/fuzz_decode.rs`.
+  100 000-input fuzz harness in `lib/abi/tests/fuzz_decode.rs`. `abi-v1` is
+  **not frozen yet** — RustOS has not shipped a release, so these types remain
+  mutable; they become immutable at the first release and new behaviour then
+  ships as `abi-v2` (`AGENTS.md` §9). "Frozen" elsewhere in this plan refers to
+  the per-type stability discipline (a shipped wire layout is not widened in
+  place), not to a released `abi-v1`.
 - `lib/caps` enforces the subset-only delegation invariant; an exhaustive
   property test exercises every 2⁸ subset of the well-known capabilities.
 - `lib/crypto` exposes audited SHA-256 and Ed25519 verification only;
@@ -6596,9 +6608,66 @@ and 10 land; item 12 stays aspirational per charter §19.7/§19.8.
    and returns the relocated entry — W^X holding twice over (loader +
    `PageTableOps`). ~25 `rxe` unit tests + 4 loader tests; all `no_std`,
    clippy `-D warnings` clean. Docs: `docs/src/security/rxe_loader.md`.
-   Remaining for later stages: copying segment file contents into mapped
-   frames and stack-canary / shadow-stack selection (Stage 6 process model
-   + real arch page tables).
+   The **process-image spawn builder** (`kernel/mem/src/spawn.rs`,
+   `build_process_image`) now closes the segment-content gap: it shares one
+   page-mapping loop with `map_image` (`map_region`, §2.2), maps **and**
+   fills every segment page with its file content (zeroing the BSS tail),
+   maps a zeroed user stack, and serialises the `rustos_abi::process`
+   startup-vector block into the new address space, returning the
+   `ProcessImage` (entry / user-sp / startup-block address) an Arch HAL
+   enter-U-mode primitive consumes. Content is written kernel-side through
+   `PhysMap` (not `copy_out`) so a read-execute page can be initialised
+   without ever being user-writable; every input is validated and the
+   builder fails closed with `SpawnError`. The production startup-vector
+   builder lives in `lib/abi` (`process::encoded_len` / `process::write_into`,
+   allocation-free, fail-closed on the frozen limits, round-tripping through
+   `ProcessStart::parse`; the test helper and a new `fuzz_decode` target now
+   drive it, §2.2/§19.6). 10 spawn + 13 process-builder unit tests. Docs:
+   `docs/src/security/rxe_loader.md`. The **Arch HAL "enter user mode"
+   primitive** that consumes the `ProcessImage` has now landed for riscv64
+   and aarch64: `kernel/arch/api/src/userentry.rs` defines the
+   architecture-neutral `UserEntry { entry, stack_pointer, arg0 }` register
+   state (mirroring `ProcessImage`) and the object-safe `EnterUser` trait
+   (diverging `unsafe fn enter_user(&self, UserEntry) -> !`); all three
+   native ports implement it — riscv64 (`sret`), aarch64 (EL0 `eret`), and
+   x86_64 (`iretq` to ring 3) — with the one `asm!` definition each. The
+   riscv64/aarch64 `asm!` was lifted off the CC2 QEMU round-trips (§2.2)
+   which reach the transition through the HAL; the x86_64 `iretq` path lands
+   with its own ring-3 QEMU exercise (`tests/integration/enter_user_qemu_x86_64`,
+   enrolled in `qemu_tests.rs` + the workspace) that boots the production
+   kernel, builds a ring-3 space (a USER-exec, non-writable alias of the
+   `ros_sys_cap_query` stub — W^X — plus a USER r/w stack, via the new
+   `paging::map_4k_user`, which shares one walk with `map_4k`, §2.2), `iretq`s
+   to ring 3, and asserts the stub's real `syscall` traps back with the
+   expected `(number, args)` (PASS; deliberately-wrong expectation FAILs).
+   The CC3 **spawn round-trips** have now landed and are QEMU-proven on all
+   three native targets — riscv64
+   (`tests/integration/spawn_program_qemu_riscv64`), aarch64
+   (`tests/integration/spawn_program_qemu_aarch64`), and x86_64
+   (`tests/integration/spawn_program_qemu_x86_64`) — each PASS +
+   a deliberately-wrong-expectation FAIL: the separate PIE fixture program
+   `tests/integration/cc3_program` (links only `rustos-crt0` +
+   `rustos-abi-sys`, so no `_start` collision) is converted to an `rxe` blob
+   by `rustos_itest_harness::elf2rxe::elf_to_rxe` (taking a `load_bias` so
+   the image maps at a high `USER_BIAS` clear of the kernel identity map),
+   built into a real user (U-mode / EL0 / ring-3) address space by the
+   production capability-checked, audited spawn caller
+   `rustos_kernel_core::spawn_and_enter` (gated on the new
+   `CapabilityId::PROC_SPAWN`; audited via the `ProcessSpawned` /
+   `ProcessSpawnDenied` / `ProcessSpawnFailed` events; the cap gate + audit
+   live in the caller, **not** `kernel/mem`, §17.4), and entered through
+   the Arch HAL `EnterUser` (`sret` / EL0 `eret` / `iretq`); the program
+   parses `argv[1]` and exits with it. Each bare-metal `PageTableOps` adapter
+   is test-local (an arch-crate impl would invert §17.4 layering); the aarch64
+   adapter maps EL0 leaves via `el0_code`/`el0_rodata`/`el0_data_leaf_attrs`
+   (the new read-only-non-exec `el0_rodata_leaf_attrs` keeps `.rodata` /
+   the startup block W^X) and the test kernel enables `CPACR_EL1.FPEN`
+   before the NEON-vectorised decoder runs; the x86_64 adapter maps W^X
+   leaves via the new production `paging::map_4k_user_wx` /
+   `flags::NO_EXECUTE` and the test boots the production kernel (so the GDT
+   ring-3 selectors / TSS / `IA32_LSTAR` entry are installed) and enables
+   `IA32_EFER.NXE`. **CC3 is complete.** Remaining for the broader §19.2
+   posture: stack-canary / shadow-stack selection on real arch page tables.
 8. **§19.1 side-channel HAL trait set + conformance vertical** — *done*.
    `kernel/arch/api/src/sidechannel.rs` adds the closed side-channel
    surface: `SideChannelMitigation` (syscall entry/exit speculation
@@ -7045,6 +7114,265 @@ surface — only `lib/curses` API and a new `userland/apps/` crate.
 
 C6 (remote terminals — serial / SSH to Linux hosts) is the next stage and has
 not been started.
+
+---
+
+## CCOMPAT — C-callable `abi-v1` (full `lib/abi` header, syscall stubs, crt0)
+
+Staged build plan: `plans/CCOMPAT.md` (binding under `AGENTS.md`). It makes the
+**whole** of `lib/abi` — every public `#[repr(C)]` type, constant, and enum
+discriminant, not just the syscalls — callable from programs not written in
+Rust (C first), so `lib/abi` is a public developer surface for third-party
+programs and not only the OS (`AGENTS.md` §9). The C header is a generated
+*view* of `lib/abi` under `include/` (never a hand-maintained parallel
+definition, §2.2), guarded against drift by `cargo xtask c-header` in
+`cargo xtask ci`. Third-party native code is treated as potentially hostile
+and/or poorly written: the stub runtime is not a privileged bypass, every
+capability/input check stays kernel-side (§5.4), and C binaries obey the
+`rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2) identically.
+
+This adds the curated `/System/Libraries/` class **System runtime / C ABI**
+(`AGENTS.md` §16.4): the minimal libc-equivalent (the `ros_sys_<name>`
+syscall stubs + crt0), dynamically linked like every other curated library.
+
+**Stages** (see `plans/CCOMPAT.md` for deliverables, tests, docs):
+
+- CC1 — Full `lib/abi` C header surface (grow `cargo xtask c-header` from the
+  syscall/errno/capability seed to the whole crate). **Done:** the
+  generator now emits one header per `lib/abi` module under `include/rustos/`
+  (`rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
+  `rustos_random.h`, `rustos_ipc.h`, `rustos_stdinfo.h`, `rustos_manifest.h`,
+  `rustos_input.h`, `rustos_appinfo.h`, `rustos_rxe.h`, `rustos_sysinfo.h`,
+  `rustos_driver.h`, `rustos_syscall.h`)
+  plus the umbrella `rustos_abi.h` that `#include`s them,
+  with a tree-wide drift guard; the `time` module (`ros_time64_t` /
+  `ros_duration64_t` + constants), the `random` module (`ROS_RANDOM_FLAG_*` +
+  the `ROS_RANDOM_*_BYTES` limits), the `ipc` module
+  (`ros_ipc_message_header_t` / `ros_port_name_t` + the `ROS_IPC_*` /
+  `ROS_PORT_NAME_*` constants), the `stdinfo` module (`ROS_STDINFO_FD`, the
+  `ROS_STDINFO_VERSION_*` framing tags, and the `ROS_STDINFO_KIND_*` /
+  `ROS_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants), and the `manifest`
+  module (`ros_manifest_header_t` + the `ROS_MANIFEST_*` /
+  `ROS_SYSCALL_TABLE_HASH_LEN` constants), and the `input` module (the
+  pointer/keyboard record magics + wire sizes, the `ROS_INPUT_KIND_*` /
+  `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes, and the
+  `ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants), and the `appinfo`
+  module (`ros_appinfo_header_t` + the `ROS_APPINFO_*` / `ROS_BUNDLE_*` /
+  `ROS_MIME_*` constants, `ROS_SYSTEM_LIBRARIES_DIR`, the `ROS_BUNDLE_ENTRY_*`
+  names, and the `ROS_LIBRARY_SCOPE_*` discriminants), and the `rxe` module
+  (`ros_load_header_t` + the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` /
+  `ROS_LOAD_MAX_SEGMENTS` / `ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` /
+  `*_WIRE_LEN` constants and the `ROS_RXE_PERMISSION_*` discriminants), and the
+  `sysinfo` module (the eight wire types `ros_sysinfo_request_header_t` /
+  `ros_process_list_request_t` / `ros_process_record_t` /
+  `ros_kernel_memory_stats_t` / `ros_uptime_t` / `ros_system_identity_t` /
+  `ros_mount_list_request_t` / `ros_mount_record_t` + the `ROS_SYSINFO_*`
+  framing / query-id / registry constants, the `ROS_PROCESS_STATE_*`
+  discriminants, the `ROS_*_MAX` / `ROS_*_LEN` buffer caps, and the
+  per-record `*_WIRE_LEN` sizes), and the `driver` core
+  (`ros_driver_manifest_t` + the `ROS_DRIVER_MANIFEST_*` /
+  `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN` constants, the
+  `ROS_DRIVER_KIND_*` / `ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*`
+  discriminants, and the `ROS_DRIVER_HANDLE_NONE` sentinel), and the
+  `driver/*` submodule POD surface in `rustos_driver.h` (the
+  storage/bus/display/filesystem/input/net struct mirrors
+  `ros_block_geometry_t` / `ros_discard_capability_t` /
+  `ros_health_snapshot_t` / `ros_bus_device_t` / `ros_display_mode_t` /
+  `ros_accel_caps_t` / `ros_node_info_t` / `ros_dir_entry_t` /
+  `ros_node_times_t` / `ros_input_event_t` / `ros_mac_address_t`, the
+  `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` /
+  `ROS_NODE_ID_NONE` constants, and the `ROS_DISPLAY_FORMAT_*` /
+  `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*` discriminants), all values
+  read from `lib/abi`, are the grown modules.
+  The `capability` module needs no new header (its ids already ship in
+  `rustos_capability.h`; `CapabilityQuery` is a trait with no C form). A
+  generator completeness test pins every `lib/abi` `#[repr(C)]` type's
+  size/align and asserts it has a C `typedef`, so a new type cannot silently
+  escape the C surface (the type-surface analogue of the dense errno table).
+  The Rust-only error enums (`WindowError`, `MmioMapError`), the opaque
+  `MsiMessage`, the in-process policy records, the runtime objects, and the
+  driver-host traits carry no C form and are deliberately omitted (§2.3). CC1
+  is complete and green on the whole-project gate.
+- CC2 — `lib/abi-sys`: the C-callable `ros_sys_*` stub runtime (per-arch
+  trap stubs). **DONE — runtime + host tests + the QEMU round-trip on all
+  three native targets (x86_64, riscv64, aarch64).** The crate
+  `rustos-abi-sys` exports the eleven export-name-pinned `ros_sys_<name>`
+  functions matching the CC1 header; each marshals into the canonical
+  `[u64; SYSCALL_MAX_ARGS]` register layout (syscall numbers read from
+  `rustos_abi`, §2.2) and issues the real trap — `syscall`/`svc`/`ecall` — as
+  the §1 assembly carve-out gated on a build-script-emitted `abi_sys_trap_*`
+  cfg (so §17.2 `cfg-check` stays green). Every stub is panic-free (§2.9),
+  adds no authority (§4/§5.4), and returns the C-declared type; `exit` is
+  `-> !`. Registered as the curated `/System/Libraries/` *System runtime / C
+  ABI* class (§16.4, `experimental` tier). Host tests inject a trap seam and
+  assert marshalling + return decoding for every stub, plus a drift test
+  against `rustos_abi::SYSCALLS`. There is one QEMU round-trip per native
+  target (enrolled in `tools/xtask/src/commands/qemu_tests.rs`), each issuing
+  the `ros_sys_cap_query` stub so the **real** trap instruction runs and a
+  dispatch callback asserts the kernel-observed `(number, args)`:
+  `abi_sys_syscall_qemu` (x86_64, `syscall` from ring 0 → `IA32_LSTAR` stub),
+  `abi_sys_syscall_qemu_riscv64` (a minimal U-mode context + `sret` so the
+  `ecall` is from U-mode), and `abi_sys_syscall_qemu_aarch64` (a minimal EL0
+  context + `eret` so the `svc` is from EL0). The riscv64 trap handler already
+  routed `ecall`-from-U to `dispatch_ecall`; aarch64 gained the analogous EL0
+  `svc` dispatch wiring (`vectors.s` passes the saved frame; `exceptions.rs`
+  routes a lower-EL `svc` through the host-tested
+  `syscall_entry::syscall_frame_from_saved` → `dispatch_svc`) plus EL0 paging
+  primitives (`AP_RW_EL0`/`AP_RO_EL0`, `el0_code_leaf_attrs`/
+  `el0_data_leaf_attrs`, `map_4k_with_attrs`, with `map_4k` delegating, §2.2),
+  all host-tested. The QEMU round-trips are not in the host-only
+  `cargo xtask ci` gate; they run under `cargo xtask test --qemu`.
+- CC3 — crt0: per-native-target program startup/teardown enforcing the §19.2
+  invariants. Depends on CC2 + the Stage 6 loader. **In progress — the
+  startup-vector `abi-v1` type has landed.** The kernel→process startup vector
+  is now defined once in `lib/abi` (`process` module: `ProcessStartHeader` +
+  `StringSlot` + the fail-closed `ProcessStart::parse` view, with the
+  `PROCESS_START_MAGIC` / `PROCESS_START_MAX_*` limits), so the kernel builder
+  and crt0 will share one definition (§2.2). It is a position-independent,
+  offset-based block (argv + envp, no NUL terminators, plus a per-process §19.2
+  stack-canary seed) parsed as untrusted input (bounds/limit/embedded-NUL
+  checks, fail closed, §2.9/§19.5/§19.6) and enrolled in the `lib/abi` fuzz
+  harness. It is surfaced in the C header as `rustos_process.h`
+  (`ros_process_start_header_t` / `ros_string_slot_t` + the `ROS_PROCESS_START_*`
+  macros), pinned by the generator completeness test and documented in
+  `docs/src/abi/c-abi.md`. **The crt0 object has now landed too:** the new
+  `lib/crt0` crate (`rustos-crt0`) provides the per-native-target `_start`
+  trampoline — the §1 assembly carve-out, gated on a build-script-emitted
+  `crt0_native_*` cfg (so §17.2 `cfg-check` stays green) — which aligns the
+  stack, carves a bounded scratch region, and calls the host-testable,
+  allocation-free `build_c_runtime` that validates the startup vector and lays
+  out the C `argv`/`envp` (copying each NUL-free string + NUL-terminating it,
+  fail closed §2.9), installs the §19.2 stack canary into `__stack_chk_guard`
+  from the kernel-supplied per-process seed, calls the hosted `main`, and
+  routes its return through `ros_sys_exit`. It is the crt0 half of the curated
+  `/System/Libraries/` *System runtime / C ABI* class (§16.4, `experimental`
+  tier). The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are
+  enforced at load by `rustos_abi::rxe::LoadImage::parse` (a non-conforming
+  image is refused, not patched). **The kernel-side `build_process_image`
+  (`kernel/mem/src/spawn.rs`) and the Arch HAL "enter user mode" primitive
+  (`kernel/arch/api` `EnterUser` / `UserEntry`) have now landed on all three
+  native ports and are QEMU-proven** — riscv64 `sret`, aarch64 EL0 `eret` (the
+  inline CC2 round-trip `asm!` lifted onto the HAL, §2.2), and x86_64 `iretq`
+  to ring 3, the last with its own ring-3 QEMU exercise
+  (`tests/integration/enter_user_qemu_x86_64`, using the new
+  `paging::map_4k_user`). **The program-packaging infrastructure has now landed
+  too (chunk 1 of the round-trip):** the separate PIE fixture program
+  `tests/integration/cc3_program` (links only `rustos-crt0` + `rustos-abi-sys`,
+  so no `_start` collision; `extern crate rustos_crt0;` pulls crt0's `_start`
+  onto the link line) and the host-tested ELF→rxe converter
+  `rustos_itest_harness::elf2rxe::elf_to_rxe` (LE ELF64 `ET_DYN` → W^X `rxe`
+  segments, applying only `R_*_RELATIVE` at zero bias and failing closed on any
+  symbolic/GOT/PLT/`REL` relocation, re-encoding via the `rustos_abi::rxe`
+  encoders, §2.2; 13 host unit tests). **CC3 is complete: the spawn round-trips
+  have now landed and are QEMU-proven on all three native targets**
+  (`tests/integration/spawn_program_qemu_{riscv64,aarch64,x86_64}`, each
+  QEMU-proven PASS + a deliberately-wrong-expectation FAIL): a test-local
+  per-arch `PageTableOps` adapter over the bare-metal `paging::AddressSpace`
+  (test-local because §17.4 forbids an arch crate depending on `kernel/mem`) —
+  the aarch64 one maps EL0 leaves via
+  `el0_code`/`el0_rodata`/`el0_data_leaf_attrs` (the new read-only-non-exec
+  `el0_rodata_leaf_attrs` keeps `.rodata` / the startup block W^X) and the test
+  kernel enables `CPACR_EL1.FPEN` before the NEON-vectorised decoder runs; the
+  x86_64 one maps W^X leaves via the new production `paging::map_4k_user_wx` /
+  `flags::NO_EXECUTE` and the test boots the production kernel (GDT ring-3
+  selectors / TSS / `IA32_LSTAR` entry installed) and enables `IA32_EFER.NXE` —,
+  the capability-checked / `lib/log`-audited spawn caller
+  `rustos_kernel_core::spawn_and_enter` (gated on the new
+  `CapabilityId::PROC_SPAWN`; audited via `ProcessSpawned` /
+  `ProcessSpawnDenied` / `ProcessSpawnFailed`; in the caller not `kernel/mem`,
+  §4/§5.4/§17.4; host-tested deny + build-failure paths), and the QEMU test
+  whose `build.rs` builds the `cc3_program` blob via `elf_to_rxe` (now taking a
+  `load_bias` so the image maps clear of the kernel identity map), spawns it,
+  and asserts `exit` carries the argument. CC4 unblocks from here.
+  See `.junie/next-ccompat-prompt.md`.
+- CC4 — Loader / bundle integration for native `rxe` programs (resolve the
+  runtime only from `/System/Libraries/` or the bundle's `Libraries/`).
+  **DONE.** The `rxe` format gained a needed-shared-library table (the
+  analogue of an ELF `DT_NEEDED`): the spare `LoadHeader::reserved0` became
+  `needed_count` (wire size unchanged) followed by `NeededLibrary` records
+  (NUL-free, `LIBREF_MAX`-byte paths; `LOAD_MAX_NEEDED` cap) that
+  `LoadImage::parse` validates fail-closed and `LoadImage::needed_libraries()`
+  exposes; the decoder is fuzzed and the C header
+  (`include/rustos/rustos_rxe.h`) regenerated. The application-bundle loader
+  (`userland/system/appmgr`) gained a `read_run` seam and now, in
+  `AppLoader::load`, validates the `Run` binary through `LoadImage::parse`
+  with the kernel's syscall hash as the **expected CFI tag** (enforcing the
+  §19.2 PIE / W^X / CFI invariants on a C binary identically to a Rust one)
+  and resolves every needed library through the existing §16.4
+  `resolve_library` policy — the curated *System runtime / C ABI* runtime
+  (`/System/Libraries/`) and bundle-private libraries resolve, anything else
+  fails closed. No new ambient authority (capability intersection unchanged).
+  New audit event `APP_RUN_IMAGE_INVALID`; 6 new rxe + 5 new appmgr tests;
+  docs in `docs/src/abi/c-abi.md`, `docs/src/security/rxe_loader.md`, and the
+  appmgr `lib.rs`/`README.md`. See `.junie/next-ccompat-prompt.md`.
+- CC5 — End-to-end C program built+run under QEMU (audited toolchain wrapper,
+  §12) exercising a slice of `abi-v1` including §21 `Time64` edges; fuzz the
+  new decoders. **DONE.** The fuzz/regression sub-deliverable landed: the
+  CC3/CC4 decoders (`ProcessStart::parse` / `ProcessStartHeader` /
+  `StringSlot`, `NeededLibrary::decode`, `LoadImage::parse`) were already
+  enrolled in `lib/abi/tests/fuzz_decode.rs` (§19.6), and a seeded regression
+  corpus now backs them (`lib/abi/tests/regression_corpus.rs`): hand-crafted
+  boundary images replayed through the "must not panic + accepted decode
+  round-trips" contract plus per-validating-decoder accept/reject verdict
+  locks; `docs/src/security/fuzzing.md` documents it. The **headline** work
+  landed across **all three native Tier-1 targets**: the audited,
+  version-pinned, checksummed C toolchain wrapper `tools/cc` (`rustos-cc`,
+  wrapping `clang` + `ld.lld`, §12, 17 host tests), a genuinely C-language
+  in-tree program (`tests/integration/cc5_program/csrc/main.c`) that
+  `#include`s `include/rustos/…` and links the `ros_sys_*` runtime + crt0 via
+  the `rustos-test-cc5-program` `staticlib` shim, and the QEMU round-trips
+  `tests/integration/c_program_qemu_{riscv64,aarch64,x86_64}` (each build
+  script compiles + links the C PIE with `rustos-cc`, converts it via
+  `elf_to_rxe`, spawns it with `spawn_and_enter`; the C program checks a §21
+  `Time64` value + ipc/sysinfo headers and round-trips `cap_query`/`clock_get`,
+  exiting 99). riscv64 enters U-mode, aarch64 EL0 (with `CPACR_EL1.FPEN`),
+  x86_64 ring-3 (production pipeline + `IA32_EFER.NXE`); each is **QEMU-proven
+  PASS + a deliberately-wrong-expectation FAIL**. Docs page
+  `docs/src/abi/calling-from-c.md`. See `.junie/next-ccompat-prompt.md`.
+
+Native Tier-1 targets only (`x86_64`, `aarch64`, `riscv64`); the syscall-stub
+runtime and crt0 are out of scope for `wasm32` (no trap instruction).
+
+Done seed (current): `cargo xtask c-header` ships the surface as a per-module
+header set under `include/rustos/` — the umbrella `rustos_abi.h` plus
+`rustos_error.h` (error codes), `rustos_capability.h` (capability ids),
+`rustos_syscall.h` (syscall numbers + one prototype per syscall),
+`rustos_time.h` (`ros_time64_t` / `ros_duration64_t` + the `Time64`/
+`Duration64` constants), `rustos_random.h` (`ROS_RANDOM_FLAG_*` + the
+`ROS_RANDOM_*_BYTES` limits), `rustos_ipc.h` (`ros_ipc_message_header_t` /
+`ros_port_name_t` + the `ROS_IPC_*` / `ROS_PORT_NAME_*` constants),
+`rustos_stdinfo.h` (`ROS_STDINFO_FD` + the `ROS_STDINFO_VERSION_*` framing
+tags + the `ROS_STDINFO_KIND_*` / `ROS_STDINFO_SEVERITY_*` discriminants), and
+`rustos_manifest.h` (`ros_manifest_header_t` + the `ROS_MANIFEST_*` /
+`ROS_SYSCALL_TABLE_HASH_LEN` constants), `rustos_input.h` (the
+pointer/keyboard record magics + wire sizes + the `ROS_INPUT_KIND_*` /
+`ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*` codes + the
+`ROS_POINTER_BUTTON_*` / `ROS_KEY_*` discriminants), `rustos_appinfo.h`
+(`ros_appinfo_header_t` + the `ROS_APPINFO_*` / `ROS_BUNDLE_*` / `ROS_MIME_*`
+constants + `ROS_SYSTEM_LIBRARIES_DIR` + the `ROS_BUNDLE_ENTRY_*` names + the
+`ROS_LIBRARY_SCOPE_*` discriminants), and `rustos_rxe.h` (`ros_load_header_t`
++ the `ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` /
+`ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_*` / `*_WIRE_LEN` constants + the
+`ROS_RXE_PERMISSION_*` discriminants), and `rustos_sysinfo.h` (the eight
+System Information wire-type struct mirrors + the `ROS_SYSINFO_*` framing /
+query-id / registry constants + the `ROS_PROCESS_STATE_*` discriminants + the
+`ROS_*_MAX` / `ROS_*_LEN` buffer caps + the per-record `*_WIRE_LEN` sizes), and
+`rustos_driver.h` (the core `ros_driver_manifest_t` + the
+`ROS_DRIVER_MANIFEST_*` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` /
+`ROS_DRIVER_SIGNATURE_LEN` constants + the `ROS_DRIVER_KIND_*` /
+`ROS_BUFFER_CLASS_*` / `ROS_DRIVER_ERROR_*` discriminants + the
+`ROS_DRIVER_HANDLE_NONE` sentinel, plus the driver-class POD mirrors
+`ros_block_geometry_t` / `ros_discard_capability_t` / `ros_health_snapshot_t`
+/ `ros_bus_device_t` / `ros_display_mode_t` / `ros_accel_caps_t` /
+`ros_node_info_t` / `ros_dir_entry_t` / `ros_node_times_t` /
+`ros_input_event_t` / `ros_mac_address_t` + the `ROS_VIRTIO_PCI_*` /
+`ROS_MAC_ADDRESS_LEN` / `ROS_MOUNT_FLAG_*` / `ROS_NODE_ID_NONE` constants +
+the `ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*`
+discriminants) —
+each value read from
+`lib/abi`, guarded byte-for-byte against drift and by a completeness test that
+pins every `#[repr(C)]` type's size/align, wired into `cargo xtask ci`;
+the docs page is `docs/src/abi/c-abi.md`.
 
 ---
 

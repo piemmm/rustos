@@ -161,6 +161,309 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
+    // target QEMU round-trip for the C-callable syscall stub runtime
+    // (`lib/abi-sys`). Unlike `rustos-test-syscall-dispatch-qemu` (which
+    // drives `Dispatcher::dispatch` directly and never executes a trap),
+    // this test boots the production kernel pipeline and, on
+    // `AuditEvent::BootCompleted`, overrides the syscall dispatch callback
+    // and then *issues* the `abi-sys` `ros_sys_cap_query` stub — exercising
+    // the real x86_64 `syscall` instruction (`lib/abi-sys/src/trap.rs`) and
+    // the kernel's `IA32_LSTAR` entry stub
+    // (`kernel/arch/x86_64/src/syscall_entry.rs`) together. The installed
+    // callback asserts the kernel-observed `(number, args)` are exactly
+    // what `ros_sys_cap_query` should have marshalled into the syscall
+    // registers and flips `qemu_exit::exit_success`; any mismatch (or the
+    // `syscall` returning to its caller at all) flips
+    // `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
+    // budget matches the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu",
+        binary: "rustos-test-abi-sys-syscall-qemu",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // half of the `lib/abi-sys` syscall-stub round-trip. riscv64 has no
+    // x86_64-style "trap identically from any privilege" shortcut — the
+    // kernel routes only an `ecall` *from U-mode* to the syscall dispatch
+    // callback (`kernel/arch/riscv64/src/syscall_entry.rs`) — so this test
+    // stands up a minimal U-mode context with the Stage-3 Sv39 primitives:
+    // it identity-maps the kernel (S-mode), aliases the `ros_sys_cap_query`
+    // stub page at a user virtual address with the U bit set plus a user
+    // stack, installs the dispatch callback, sets `sstatus.SUM`, and
+    // `sret`s to U-mode. The stub's real `ecall` (`lib/abi-sys/src/trap.rs`)
+    // then traps into the kernel S-mode trap vector, and the installed
+    // callback asserts the kernel-observed `(number, args)` are exactly
+    // what `ros_sys_cap_query` should have marshalled into `a7`/`a0` before
+    // writing the `SiFive` Test PASS finisher; any mismatch (or the `ecall`
+    // resuming in U-mode at all) writes a distinct failure finisher. Single
+    // CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu-riscv64",
+        binary: "rustos-test-abi-sys-syscall-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // half of the `lib/abi-sys` syscall-stub round-trip. Like riscv64,
+    // aarch64 has no x86_64-style "trap identically from any privilege"
+    // shortcut — the kernel routes only an `svc` *from EL0* (a lower-EL
+    // synchronous exception) to the syscall dispatch callback
+    // (`kernel/arch/aarch64/src/exceptions.rs`) — so this test stands up a
+    // minimal EL0 context with the Stage-3 stage-1 primitives: it
+    // identity-maps the kernel (EL1), aliases the `ros_sys_cap_query` stub
+    // page at a user virtual address with EL0-executable attributes plus
+    // an EL0 stack, installs the dispatch callback and the EL1 vector
+    // table, and `eret`s to EL0. The stub's real `svc`
+    // (`lib/abi-sys/src/trap.rs`) then traps into the EL1 vector, and the
+    // installed callback asserts the kernel-observed `(number, args)` are
+    // exactly what `ros_sys_cap_query` should have marshalled into
+    // `x8`/`x0` before the ARM semihosting PASS finisher; any mismatch (or
+    // the `svc` resuming in EL0 at all) writes a distinct failure
+    // finisher. Single CPU suffices and the 60-second budget matches the
+    // other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-abi-sys-syscall-qemu-aarch64",
+        binary: "rustos-test-abi-sys-syscall-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // ring-3 exercise for the Arch HAL "enter user mode" primitive
+    // (`kernel/arch/x86_64/src/userentry.rs`, `rustos_arch_api::EnterUser`,
+    // `AGENTS.md` §17.2). Unlike `rustos-test-abi-sys-syscall-qemu`, which
+    // issues the same `abi-sys` stub from ring 0 (the x86_64 `syscall`
+    // traps identically from any privilege level and never crosses a
+    // boundary), this test boots the production kernel and, on
+    // `AuditEvent::BootCompleted`, builds a ring-3 address space — a
+    // user-accessible, executable, non-writable alias of the
+    // `ros_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write
+    // stack — switches CR3, and `iretq`s to ring 3 through
+    // `UserMode::new().enter_user(...)`. The stub's real `syscall`
+    // (`lib/abi-sys/src/trap.rs`) then traps back through the kernel's
+    // `IA32_LSTAR` entry stub; reaching the installed dispatch callback
+    // at all proves the `iretq` entry succeeded, and the callback asserts
+    // the kernel-observed `(number, args)` are exactly what
+    // `ros_sys_cap_query` should have marshalled into the syscall
+    // registers before flipping `qemu_exit::exit_success`; any mismatch
+    // flips `qemu_exit::exit_failure`. Single CPU suffices and the
+    // 60-second budget matches the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-enter-user-qemu-x86_64",
+        binary: "rustos-test-enter-user-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // crt0-linked-program spawn round-trip. The build script compiles the
+    // separate fixture program (`tests/integration/cc3_program`, crt0 +
+    // abi-sys) position-independent and converts it to an `rxe` blob
+    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // On boot the test stands up an Sv39 address space (identity-mapping the
+    // kernel + MMIO), activates it, installs the trap vector and a dispatch
+    // callback, then calls the production capability-checked, audited spawn
+    // caller (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`)
+    // to build the program's U-mode image — segments mapped + filled, user
+    // stack, startup-vector block — and `sret`s into it through the Arch HAL
+    // `EnterUser` primitive. The program (built via `build_process_image` at a
+    // high `USER_BIAS`) parses `argv[1]`, returns it, and crt0 routes the
+    // return through the `exit` syscall, whose `ecall` traps back through the
+    // kernel S-mode vector to the dispatch callback, which asserts the code
+    // equals the spawned decimal argument before the `SiFive` Test PASS
+    // finisher; any mismatch (or a returning spawn) writes a distinct failure
+    // finisher. Single CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-riscv64",
+        binary: "rustos-test-spawn-program-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
+    // test above. The build script compiles the separate fixture program
+    // (`tests/integration/cc3_program`, crt0 + abi-sys) position-independent
+    // and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // carrying the kernel's syscall CFI tag. On boot the test stands up a
+    // stage-1 address space (identity-mapping the kernel + MMIO, EL1),
+    // activates it, installs the EL1 vector table and a dispatch callback, then
+    // calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's EL0 image — segments mapped + filled, user stack,
+    // startup-vector block — and `eret`s into it through the Arch HAL
+    // `EnterUser` primitive. The program (built via `build_process_image` at a
+    // high `USER_BIAS`) parses `argv[1]`, returns it, and crt0 routes the
+    // return through the `exit` syscall, whose `svc` traps back through the
+    // kernel EL1 vector to the dispatch callback, which asserts the code equals
+    // the spawned decimal argument before the ARM semihosting PASS finisher;
+    // any mismatch (or a returning spawn) writes a distinct failure finisher.
+    // Single CPU suffices and the 60-second budget matches the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-aarch64",
+        binary: "rustos-test-spawn-program-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // crt0-linked-program spawn round-trip — the ring-3 analogue of the
+    // riscv64/aarch64 tests above, completing CC3. The build script compiles
+    // the separate fixture program (`tests/integration/cc3_program`, crt0 +
+    // abi-sys) position-independent and converts it to an `rxe` blob
+    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // Because the x86_64 ring-3 transition needs the GDT user selectors, the
+    // TSS, and `syscall`/`IA32_LSTAR` entry installed, the test boots the
+    // production kernel pipeline and, on `AuditEvent::BootCompleted`, enables
+    // `IA32_EFER.NXE`, builds a fresh address space (low 32 MiB identity +
+    // higher-half kernel window), switches CR3, installs a dispatch callback,
+    // then calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's ring-3 image — segments mapped + filled W^X (code RX,
+    // data RW-NX, rodata R-NX), user stack, startup-vector block — and `iretq`s
+    // into it through the Arch HAL `EnterUser` primitive. The program (built via
+    // `build_process_image` at a high `USER_BIAS`) parses `argv[1]`, returns it,
+    // and crt0 routes the return through the `exit` syscall, whose `syscall`
+    // traps back through the kernel's `IA32_LSTAR` entry stub to the dispatch
+    // callback, which asserts the code equals the spawned decimal argument
+    // before `qemu_exit::exit_success`; any mismatch (or a returning spawn)
+    // flips `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
+    // budget matches the other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-program-qemu-x86_64",
+        binary: "rustos-test-spawn-program-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // end-to-end C-program round-trip — the headline CC5 work. The build
+    // script builds the Rust crt0 + `ros_sys_*` runtime shim
+    // (`tests/integration/cc5_program`) as a PIE `staticlib`, compiles the
+    // genuinely C-language program (`cc5_program/csrc/main.c`) with the audited,
+    // version-pinned, checksummed `clang`/`ld.lld` wrapper (`tools/cc`,
+    // AGENTS.md §12), links them into one PIE image, and converts it to an `rxe`
+    // blob (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI
+    // tag. On boot the test stands up an Sv39 address space (identity-mapping
+    // the kernel + MMIO), installs the trap vector and a dispatch callback, then
+    // calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // the program's U-mode image and `sret` into it. The C program checks a
+    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
+    // services those (asserting the marshalled cap id, returning a 64-bit
+    // sentinel) and asserts the `exit` code is 99 before the `SiFive` Test PASS
+    // finisher. Proves the generated C header, the `ros_sys_*` runtime, and crt0
+    // agree with the Rust side end to end. Single CPU; 60-second run budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-riscv64",
+        binary: "rustos-test-c-program-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // end-to-end C-program round-trip — the EL0 analogue of the riscv64
+    // vertical above. The build script builds the Rust crt0 + `ros_sys_*`
+    // runtime shim (`tests/integration/cc5_program`) as a PIE `staticlib`,
+    // compiles the genuinely C-language program (`cc5_program/csrc/main.c`)
+    // with the audited, version-pinned, checksummed `clang`/`ld.lld` wrapper
+    // (`tools/cc`, AGENTS.md §12), links them into one PIE image, and converts
+    // it to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
+    // kernel's syscall CFI tag. On boot the test enables `CPACR_EL1.FPEN`,
+    // stands up a stage-1 address space (identity-mapping the kernel + MMIO,
+    // EL1), installs the EL1 vector table and a dispatch callback, then calls
+    // the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's EL0 image and `eret` into it. The C program checks a
+    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
+    // services those (asserting the marshalled cap id, returning a 64-bit
+    // sentinel) and asserts the `exit` code is 99 before the ARM semihosting
+    // PASS finisher. Single CPU; 60-second run budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-aarch64",
+        binary: "rustos-test-c-program-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // end-to-end C-program round-trip — the ring-3 analogue of the
+    // riscv64/aarch64 verticals above, completing CC5. The build script builds
+    // the Rust crt0 + `ros_sys_*` runtime shim (`tests/integration/cc5_program`)
+    // as a PIE `staticlib`, compiles the genuinely C-language program
+    // (`cc5_program/csrc/main.c`) with the audited, version-pinned, checksummed
+    // `clang`/`ld.lld` wrapper (`tools/cc`, AGENTS.md §12), links them into one
+    // PIE image, and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // carrying the kernel's syscall CFI tag. Because the x86_64 ring-3
+    // transition needs the GDT user selectors, the TSS, and `syscall`/
+    // `IA32_LSTAR` entry installed, the test boots the production kernel pipeline
+    // and, on `AuditEvent::BootCompleted`, enables `IA32_EFER.NXE`, builds a
+    // fresh address space (low 32 MiB identity + higher-half kernel window),
+    // switches CR3, installs a dispatch callback, then calls the production
+    // capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // the program's ring-3 image (W^X: code RX, data RW-NX, rodata R-NX) and
+    // `iretq` into it. The C program checks a Time64 value across the §21
+    // pre-1970/post-2038 boundaries, an ipc header, and a sysinfo header, then
+    // issues `cap_query` + `clock_get`; the callback services those (asserting
+    // the marshalled cap id, returning a 64-bit sentinel) and asserts the `exit`
+    // code is 99 before `qemu_exit::exit_success`. Single CPU; 60-second budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-x86_64",
+        binary: "rustos-test-c-program-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →
@@ -617,10 +920,40 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// §7's no-flaky-tests rule: the value of repetition is in the *runs*).
 pub fn build_all(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
-    for t in TESTS {
-        build_one(ctx, t)?;
+    // Group the enrolled packages by target triple and build each triple in a
+    // single `cargo build`. One invocation per triple (rather than one per
+    // enrolment) lets cargo compile that triple's packages concurrently and
+    // share a single build-lock acquisition, instead of serialising behind the
+    // lock once per test. The QEMU *runs* themselves stay one-at-a-time — a
+    // hard wall-clock deadline plus tick-counting guests make co-scheduled
+    // VMs flaky under TCG (§7); see `commands::parallel`.
+    for target in build_targets() {
+        let packages: Vec<&str> = TESTS
+            .iter()
+            .filter(|t| t.target == target)
+            .map(|t| t.package)
+            .collect();
+        let mut cmd = ctx.cargo();
+        cmd.args(["build", "--locked", "--target", target]);
+        for pkg in &packages {
+            cmd.args(["-p", pkg]);
+        }
+        let label = format!("test --qemu (build {target}: {} pkg)", packages.len());
+        ctx.run(&label, cmd)?;
     }
     Ok(())
+}
+
+/// The distinct target triples across the enrolled tests, in first-seen
+/// order, so each triple is built exactly once.
+fn build_targets() -> Vec<&'static str> {
+    let mut targets: Vec<&'static str> = Vec::new();
+    for t in TESTS {
+        if !targets.contains(&t.target) {
+            targets.push(t.target);
+        }
+    }
+    targets
 }
 
 /// Execute every enrolled QEMU test once. Returns the first failure.
@@ -633,12 +966,6 @@ pub fn run_once(ctx: &Context) -> Result<(), String> {
         run_one(ctx, t)?;
     }
     Ok(())
-}
-
-fn build_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
-    let mut cmd = ctx.cargo();
-    cmd.args(["build", "--locked", "-p", t.package, "--target", t.target]);
-    ctx.run(&format!("test --qemu (build {})", t.package), cmd)
 }
 
 fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
@@ -743,8 +1070,27 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_timeout, DEVELOPER_TIMEOUT_CAP};
+    use super::{build_targets, effective_timeout, DEVELOPER_TIMEOUT_CAP, TESTS};
     use std::time::Duration;
+
+    #[test]
+    fn build_targets_are_distinct_and_cover_every_enrolment() {
+        let targets = build_targets();
+        // No triple appears twice — each is built in exactly one invocation.
+        for (i, a) in targets.iter().enumerate() {
+            for b in &targets[i + 1..] {
+                assert_ne!(a, b, "duplicate build target {a}");
+            }
+        }
+        // Every enrolled test's triple is covered by the grouped build.
+        for t in TESTS {
+            assert!(
+                targets.contains(&t.target),
+                "build_targets missing {}",
+                t.target
+            );
+        }
+    }
 
     #[test]
     fn developer_machine_clamps_long_budgets_to_the_cap() {

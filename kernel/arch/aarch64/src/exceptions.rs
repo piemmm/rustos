@@ -10,19 +10,24 @@
 //!   analogue of riscv64's `sstatus.SIE` enable — kept separate from
 //!   arming the timer so the caller controls exactly when ticks begin.
 //! * `rustos_aarch64_trap_handler` dispatches an IRQ to the GIC
-//!   acknowledge → timer/SGI → end-of-interrupt handshake, and routes an
-//!   unexpected synchronous exception to the installed [`crate::fault`]
-//!   handler (or fails closed by parking the CPU).
+//!   acknowledge → timer/SGI → end-of-interrupt handshake, routes an EL0
+//!   `svc` (lower-EL synchronous exception) to the installed
+//!   [`crate::syscall_entry`] dispatch callback, and routes any other
+//!   synchronous exception to the installed [`crate::fault`] handler (or
+//!   fails closed by parking the CPU).
 //!
-//! # What is not here yet
+//! # EL0 `svc` syscall dispatch
 //!
-//! The live EL0 `svc` syscall dispatch (synchronous exception from a
-//! lower EL) is a follow-up: the argument-marshalling logic lives in
-//! [`crate::syscall_entry`] and is host-tested, but no vertical enters
-//! EL0 yet, so a synchronous exception that is not an abort fails closed
-//! here (`AGENTS.md` §5.4.5) rather than returning to an unspecified
-//! state. Wiring the saved register frame through to `dispatch_svc` is
-//! the aarch64 analogue of riscv64's remaining syscall work.
+//! The trampoline (`vectors.s`) passes the saved register frame to the
+//! handler; on a lower-EL synchronous `svc` the handler marshals the
+//! saved `x0`–`x5`/`x8` into the architecture-neutral
+//! `[u64; SYSCALL_MAX_ARGS]` layout (via
+//! [`crate::syscall_entry::syscall_frame_from_saved`]), forwards them to
+//! the installed dispatch callback, and writes the result back into the
+//! saved `x0` slot so the `eret` returns it to EL0. This is the aarch64
+//! analogue of riscv64's `ecall` dispatch; the architecture-neutral
+//! validation / capability / audit dispatcher lives in `kernel/syscall`,
+//! never re-implemented here.
 //!
 //! The handler and the CSR writes are freestanding-only; the exception
 //! *kind* constants and their classification build on the host so their
@@ -161,29 +166,66 @@ fn handle_irq() {
 }
 
 /// Rust entry invoked by the asm vector trampoline with the exception
-/// `kind`.
+/// `kind` and the saved-register-`frame` base.
+///
+/// `frame` points at the `[u64; SAVED_GPRS]` register frame the
+/// trampoline built (`x0`–`x30` at indices `0..=30`). The syscall path
+/// reads the EL0 `svc` registers from it and writes the result back into
+/// the `x0` slot; the trampoline then restores from the same frame, so
+/// `eret` returns the result to the EL0 caller.
 ///
 /// # Safety
 ///
 /// Only callable from `rustos_aarch64_trap_common`, which has saved the
-/// interrupted GP registers and tagged the exception kind. An IRQ
-/// returns (the trampoline `eret`s); a fault diverges (the installed
-/// handler or the park never returns).
+/// interrupted GP registers (so `frame` is a valid `[u64; SAVED_GPRS]`
+/// for the duration of this call) and tagged the exception kind. An IRQ
+/// or a serviced `svc` returns (the trampoline `eret`s); a fault diverges
+/// (the installed handler or the park never returns).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64) {
+unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
     if is_irq(kind) {
         handle_irq();
         return;
     }
 
     if is_sync(kind) {
-        // An unexpected synchronous exception (an abort, or an EL0 `svc`
-        // before the syscall frame wiring lands). Forward to the
-        // installed fault handler if present (the memory-isolation
-        // vertical installs one); otherwise fail closed by parking.
+        let esr = read_esr();
+
+        // An `svc` from a lower EL (AArch64) is the EL0 syscall path:
+        // marshal the saved registers into the canonical
+        // `[u64; SYSCALL_MAX_ARGS]` layout and forward to the installed
+        // dispatch callback (the architecture-neutral validation /
+        // capability / audit dispatcher lives in `kernel/syscall`). The
+        // result is written back into the saved `x0` slot so the
+        // trampoline's `eret` returns it to EL0; the PE already advanced
+        // `ELR_EL1` past the `svc`. A syscall that arrives before the
+        // binary installed a dispatcher fails closed (`AGENTS.md`
+        // §5.4.5) rather than returning an unspecified value to EL0.
+        if kind == kind::LOWER_SYNC && crate::syscall_entry::is_svc(esr) {
+            // SAFETY: `frame` is the live `[u64; SAVED_GPRS]` register
+            // frame the trampoline built; reading it for the duration of
+            // this call is sound.
+            let saved = unsafe { &*frame.cast::<[u64; crate::syscall_entry::SAVED_GPRS]>() };
+            let mut syscall_frame = crate::syscall_entry::syscall_frame_from_saved(saved);
+            if !crate::syscall_entry::dispatch_svc(&mut syscall_frame) {
+                crate::kernel_arch::halt_current_cpu();
+            }
+            // SAFETY: index 0 is the saved `x0` slot; writing the result
+            // there makes the trampoline restore the new `x0` before
+            // `eret`.
+            unsafe {
+                *frame = syscall_frame.args[0];
+            }
+            return;
+        }
+
+        // Any other synchronous exception (an abort, or a non-`svc`
+        // lower-EL fault). Forward to the installed fault handler if
+        // present (the memory-isolation vertical installs one);
+        // otherwise fail closed by parking.
         if let Some(handler) = crate::fault::fault_handler() {
-            handler(read_esr(), read_far(), read_elr());
+            handler(esr, read_far(), read_elr());
         }
         crate::kernel_arch::halt_current_cpu();
     }

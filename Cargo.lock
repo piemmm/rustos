@@ -451,6 +451,13 @@ name = "rustos-abi"
 version = "0.0.0"
 
 [[package]]
+name = "rustos-abi-sys"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
 name = "rustos-appmgr"
 version = "0.0.0"
 dependencies = [
@@ -523,6 +530,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-cc"
+version = "0.0.0"
+dependencies = [
+ "rustos-crypto",
+]
+
+[[package]]
 name = "rustos-chmod"
 version = "0.0.0"
 dependencies = [
@@ -549,6 +563,14 @@ name = "rustos-cp"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+]
+
+[[package]]
+name = "rustos-crt0"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
 ]
 
 [[package]]
@@ -773,6 +795,9 @@ version = "0.0.0"
 [[package]]
 name = "rustos-itest-harness"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-kernel"
@@ -802,6 +827,7 @@ name = "rustos-kernel-core"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-arch-api",
  "rustos-caps",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
@@ -1091,6 +1117,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-abi-sys-syscall-qemu"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-abi-sys-syscall-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-abi-sys-syscall-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-c-program-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-c-program-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-c-program-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-cc3-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi-sys",
+ "rustos-crt0",
+ "rustos-itest-harness",
+]
+
+[[package]]
+name = "rustos-test-cc5-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi-sys",
+ "rustos-crt0",
+]
+
+[[package]]
 name = "rustos-test-drvhost-qemu"
 version = "0.0.0"
 dependencies = [
@@ -1100,6 +1227,19 @@ dependencies = [
  "rustos-caps",
  "rustos-crypto",
  "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-enter-user-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-sys",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
  "rustos-itest-harness",
  "rustos-kernel",
  "rustos-log",
@@ -1337,6 +1477,51 @@ dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
  "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-test-spawn-program-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-spawn-program-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-spawn-program-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
 ]
 
 [[package]]

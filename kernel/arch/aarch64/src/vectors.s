@@ -152,7 +152,11 @@ rustos_aarch64_trap_common:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
 
-    // x0 still holds the exception kind; call the Rust handler.
+    // x0 still holds the exception kind; pass the saved-frame base in x1
+    // so the handler can read the EL0 syscall registers (x0..x8 at
+    // [sp,#0..#64]) and write the syscall result back into the x0 slot
+    // before the symmetric restore + `eret`.
+    mov     x1, sp
     bl      rustos_aarch64_trap_handler
 
     ldr     x30, [sp, #240]

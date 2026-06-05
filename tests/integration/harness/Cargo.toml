@@ -11,5 +11,12 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+# The single source of truth for the `rxe` load-image wire format, reused so
+# the ELF->rxe converter never re-encodes the header/segment layout by hand
+# (`AGENTS.md` §2.2). `rustos-abi` is `no_std` but builds on the host, which
+# is where this build-time helper runs.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
 [lib]
 path = "src/lib.rs"

@@ -20,9 +20,15 @@
 //!    *intersected* with the launching user's grants; ambient authority is
 //!    forbidden (`AGENTS.md` §4, §5.2), so the loader never widens a request.
 //!
-//! It additionally enforces the §16.4 dynamic-loader policy
-//! ([`AppLoader::resolve_library`]): a shared-library reference resolves only
-//! against the bundle's own `Libraries/` directory or `/System/Libraries/`.
+//! It additionally validates the entry-point `Run` binary through
+//! [`rustos_abi::LoadImage::parse`] (enforcing the §19.2 PIE / W^X / CFI-tag
+//! invariants on a C binary identically to a Rust one) and resolves every
+//! shared library that binary declares it needs under the §16.4
+//! dynamic-loader policy ([`AppLoader::resolve_library`]): a reference
+//! resolves only against the bundle's own `Libraries/` directory or
+//! `/System/Libraries/`. The whole pipeline is language-agnostic, so a
+//! C-compiled bundle (`plans/CCOMPAT.md` stage CC4) is judged exactly like a
+//! Rust one.
 //!
 //! # Seams
 //!

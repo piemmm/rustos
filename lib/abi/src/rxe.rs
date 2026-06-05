@@ -39,6 +39,21 @@ pub const RXE_PAGE_SIZE: u64 = 4096;
 /// work or an unbounded stack footprint.
 pub const LOAD_MAX_SEGMENTS: usize = 64;
 
+/// Maximum number of shared-library references a load image may declare.
+///
+/// Bounded so a malformed or hostile image cannot force unbounded parsing
+/// work or an unbounded fixed-array footprint in [`LoadImage`]. The
+/// references are resolved by the user-space dynamic loader under the §16.4
+/// policy (`AGENTS.md`); the kernel only validates and carries them.
+pub const LOAD_MAX_NEEDED: usize = 8;
+
+/// Maximum length, in bytes, of a single shared-library reference path.
+///
+/// Chosen to fit any absolute path under a bundle's `Libraries/` or
+/// [`crate::SYSTEM_LIBRARIES_DIR`] while still fitting a record length in a
+/// single byte.
+pub const LIBREF_MAX: usize = 255;
+
 /// Load-header flag: the image is position-independent (PIE).
 ///
 /// Required by §19.2; an image without this bit is refused so the kernel
@@ -105,6 +120,11 @@ pub enum RxeError {
     InterfaceHashMismatch,
     /// The entry point does not fall inside an executable segment.
     BadEntryPoint,
+    /// The image declares more than [`LOAD_MAX_NEEDED`] needed libraries.
+    TooManyNeeded,
+    /// A needed-library record is malformed: empty, longer than
+    /// [`LIBREF_MAX`], not NUL-free UTF-8, or its padding tail is non-zero.
+    BadNeededLibrary,
 }
 
 impl core::fmt::Display for RxeError {
@@ -126,6 +146,8 @@ impl core::fmt::Display for RxeError {
             Self::NotPositionIndependent => "rxe image is not position independent",
             Self::InterfaceHashMismatch => "rxe syscall interface hash mismatch",
             Self::BadEntryPoint => "rxe entry point outside an executable segment",
+            Self::TooManyNeeded => "rxe image declares too many needed libraries",
+            Self::BadNeededLibrary => "rxe needed-library reference is malformed",
         };
         f.write_str(message)
     }
@@ -332,8 +354,10 @@ pub struct LoadHeader {
     pub flags: u32,
     /// Number of [`Segment`] records that follow the header.
     pub segment_count: u16,
-    /// Reserved; must be zero in `abi-v1`.
-    pub reserved0: u16,
+    /// Number of [`NeededLibrary`] records that follow the segment table —
+    /// the shared libraries the image dynamically links (`AGENTS.md` §16.4).
+    /// Must not exceed [`LOAD_MAX_NEEDED`].
+    pub needed_count: u16,
     /// Image-relative entry-point virtual address.
     pub entry: u64,
     /// CFI type-tag: the SHA-256 of the syscall interface this image was
@@ -353,7 +377,7 @@ impl LoadHeader {
         out[4..8].copy_from_slice(&self.abi_version.to_le_bytes());
         out[8..12].copy_from_slice(&self.flags.to_le_bytes());
         out[12..14].copy_from_slice(&self.segment_count.to_le_bytes());
-        out[14..16].copy_from_slice(&self.reserved0.to_le_bytes());
+        out[14..16].copy_from_slice(&self.needed_count.to_le_bytes());
         out[16..24].copy_from_slice(&self.entry.to_le_bytes());
         out[24..24 + SYSCALL_TABLE_HASH_LEN].copy_from_slice(&self.cfi_tag);
         out
@@ -379,7 +403,7 @@ impl LoadHeader {
             abi_version: read_u32(bytes, 4),
             flags: read_u32(bytes, 8),
             segment_count: read_u16(bytes, 12),
-            reserved0: read_u16(bytes, 14),
+            needed_count: read_u16(bytes, 14),
             entry: read_u64(bytes, 16),
             cfi_tag,
         })
@@ -389,6 +413,91 @@ impl LoadHeader {
     #[must_use]
     pub const fn is_pie(&self) -> bool {
         self.flags & LOAD_FLAG_PIE != 0
+    }
+}
+
+/// One shared-library reference an [`LoadImage`] declares it needs at load
+/// time — the `rxe` analogue of an ELF `DT_NEEDED` entry.
+///
+/// The reference is an absolute path the user-space dynamic loader resolves
+/// under the §16.4 policy (the requesting bundle's own `Libraries/` or
+/// [`crate::SYSTEM_LIBRARIES_DIR`]); this type only carries and validates the
+/// bytes. Like [`Segment`], it is hand-serialised, so the C header exports its
+/// wire size rather than a struct mirror.
+///
+/// Construction goes through [`NeededLibrary::decode`] or
+/// [`NeededLibrary::from_reference`], so every instance holds a non-empty,
+/// NUL-free, UTF-8 path no longer than [`LIBREF_MAX`] bytes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NeededLibrary {
+    len: u8,
+    bytes: [u8; LIBREF_MAX],
+}
+
+impl NeededLibrary {
+    /// Encoded size of a [`NeededLibrary`] record on the wire.
+    pub const WIRE_LEN: usize = 1 + LIBREF_MAX;
+
+    /// Build a record from a shared-library reference path.
+    ///
+    /// # Errors
+    ///
+    /// [`RxeError::BadNeededLibrary`] if `reference` is empty, longer than
+    /// [`LIBREF_MAX`] bytes, or contains an embedded NUL.
+    pub fn from_reference(reference: &str) -> Result<Self, RxeError> {
+        let raw = reference.as_bytes();
+        if raw.is_empty() || raw.len() > LIBREF_MAX || raw.contains(&0) {
+            return Err(RxeError::BadNeededLibrary);
+        }
+        let len = u8::try_from(raw.len()).map_err(|_| RxeError::BadNeededLibrary)?;
+        let mut bytes = [0u8; LIBREF_MAX];
+        bytes[..raw.len()].copy_from_slice(raw);
+        Ok(Self { len, bytes })
+    }
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.len;
+        out[1..].copy_from_slice(&self.bytes);
+        out
+    }
+
+    /// Decode and validate a single needed-library record.
+    ///
+    /// # Errors
+    ///
+    /// * [`RxeError::BufferTooSmall`] if `bytes` is shorter than
+    ///   [`Self::WIRE_LEN`].
+    /// * [`RxeError::BadNeededLibrary`] if the length is zero or exceeds
+    ///   [`LIBREF_MAX`], the padding tail is non-zero, or the reference is
+    ///   not NUL-free UTF-8.
+    pub fn decode(bytes: &[u8]) -> Result<Self, RxeError> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(RxeError::BufferTooSmall);
+        }
+        let len = bytes[0];
+        let n = usize::from(len);
+        if n == 0 || n > LIBREF_MAX {
+            return Err(RxeError::BadNeededLibrary);
+        }
+        let mut data = [0u8; LIBREF_MAX];
+        data.copy_from_slice(&bytes[1..=LIBREF_MAX]);
+        if data[n..].iter().any(|&b| b != 0) {
+            return Err(RxeError::BadNeededLibrary);
+        }
+        let name = &data[..n];
+        if name.contains(&0) || core::str::from_utf8(name).is_err() {
+            return Err(RxeError::BadNeededLibrary);
+        }
+        Ok(Self { len, bytes: data })
+    }
+
+    /// The shared-library reference path this record carries.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
     }
 }
 
@@ -402,6 +511,8 @@ pub struct LoadImage {
     entry: u64,
     segment_count: usize,
     segments: [Segment; LOAD_MAX_SEGMENTS],
+    needed_count: usize,
+    needed: [NeededLibrary; LOAD_MAX_NEEDED],
 }
 
 /// Zero-extent placeholder used to initialise the fixed-capacity segment
@@ -412,6 +523,13 @@ const SEGMENT_PLACEHOLDER: Segment = Segment {
     file_size: 0,
     mem_size: 0,
     permission: RxePermission::ReadOnly,
+};
+
+/// Zero-length placeholder used to initialise the fixed-capacity needed-library
+/// array before [`LoadImage::parse`] overwrites the live entries.
+const NEEDED_PLACEHOLDER: NeededLibrary = NeededLibrary {
+    len: 0,
+    bytes: [0u8; LIBREF_MAX],
 };
 
 impl LoadImage {
@@ -440,7 +558,7 @@ impl LoadImage {
         if header.abi_version != ABI_VERSION_CURRENT {
             return Err(RxeError::BadAbiVersion);
         }
-        if header.flags & !LOAD_FLAG_KNOWN != 0 || header.reserved0 != 0 {
+        if header.flags & !LOAD_FLAG_KNOWN != 0 {
             return Err(RxeError::ReservedNonZero);
         }
         if !header.is_pie() {
@@ -480,10 +598,32 @@ impl LoadImage {
             *slot = segment;
         }
 
+        let needed_count = usize::from(header.needed_count);
+        if needed_count > LOAD_MAX_NEEDED {
+            return Err(RxeError::TooManyNeeded);
+        }
+        let needed_table_end = table
+            .checked_add(
+                needed_count
+                    .checked_mul(NeededLibrary::WIRE_LEN)
+                    .ok_or(RxeError::TooManyNeeded)?,
+            )
+            .ok_or(RxeError::TooManyNeeded)?;
+        if bytes.len() < needed_table_end {
+            return Err(RxeError::BufferTooSmall);
+        }
+        let mut needed = [NEEDED_PLACEHOLDER; LOAD_MAX_NEEDED];
+        for (i, slot) in needed[..needed_count].iter_mut().enumerate() {
+            let offset = table + i * NeededLibrary::WIRE_LEN;
+            *slot = NeededLibrary::decode(&bytes[offset..offset + NeededLibrary::WIRE_LEN])?;
+        }
+
         let image = Self {
             entry: header.entry,
             segment_count: count,
             segments,
+            needed_count,
+            needed,
         };
         if !image.entry_is_executable() {
             return Err(RxeError::BadEntryPoint);
@@ -501,6 +641,19 @@ impl LoadImage {
     #[must_use]
     pub fn segments(&self) -> &[Segment] {
         &self.segments[..self.segment_count]
+    }
+
+    /// The shared-library references this image declares it needs, in
+    /// declaration order.
+    ///
+    /// Each reference is resolved by the user-space dynamic loader under the
+    /// §16.4 policy (the requesting bundle's own `Libraries/` or
+    /// [`crate::SYSTEM_LIBRARIES_DIR`]); the kernel only validates and carries
+    /// them here.
+    pub fn needed_libraries(&self) -> impl Iterator<Item = &str> {
+        self.needed[..self.needed_count]
+            .iter()
+            .map(NeededLibrary::reference)
     }
 
     /// Entry point after applying a KASLR `bias`.
@@ -573,6 +726,7 @@ mod tests {
     extern crate alloc;
     use super::*;
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     const TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0x5A; SYSCALL_TABLE_HASH_LEN];
@@ -624,38 +778,47 @@ mod tests {
 
     struct Builder {
         flags: u32,
-        reserved0: u16,
+        needed_count_override: Option<u16>,
         entry: u64,
         cfi_tag: [u8; SYSCALL_TABLE_HASH_LEN],
         magic: u32,
         abi_version: u32,
         segments: Vec<RawSeg>,
+        needed: Vec<String>,
     }
 
     impl Builder {
         fn new() -> Self {
             Self {
                 flags: LOAD_FLAG_PIE,
-                reserved0: 0,
+                needed_count_override: None,
                 entry: 0,
                 cfi_tag: TAG,
                 magic: LOAD_MAGIC,
                 abi_version: ABI_VERSION_CURRENT,
                 segments: Vec::new(),
+                needed: Vec::new(),
             }
         }
         fn seg(mut self, s: RawSeg) -> Self {
             self.segments.push(s);
             self
         }
+        fn needed(mut self, reference: &str) -> Self {
+            self.needed.push(reference.into());
+            self
+        }
         fn build(&self) -> Vec<u8> {
             let count = u16::try_from(self.segments.len()).expect("segment count fits u16");
+            let needed_count = self.needed_count_override.unwrap_or_else(|| {
+                u16::try_from(self.needed.len()).expect("needed count fits u16")
+            });
             let header = LoadHeader {
                 magic: self.magic,
                 abi_version: self.abi_version,
                 flags: self.flags,
                 segment_count: count,
-                reserved0: self.reserved0,
+                needed_count,
                 entry: self.entry,
                 cfi_tag: self.cfi_tag,
             };
@@ -663,6 +826,13 @@ mod tests {
             bytes.extend_from_slice(&header.to_le_bytes());
             for s in &self.segments {
                 bytes.extend_from_slice(&s.encode());
+            }
+            for n in &self.needed {
+                bytes.extend_from_slice(
+                    &NeededLibrary::from_reference(n)
+                        .expect("needed reference fits")
+                        .to_le_bytes(),
+                );
             }
             bytes
         }
@@ -682,6 +852,7 @@ mod tests {
     fn wire_sizes_are_frozen() {
         assert_eq!(LoadHeader::WIRE_LEN, 56);
         assert_eq!(Segment::WIRE_LEN, 40);
+        assert_eq!(NeededLibrary::WIRE_LEN, 1 + LIBREF_MAX);
     }
 
     #[test]
@@ -873,18 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_reserved_nonzero_in_header_and_segment() {
-        let header = Builder {
-            reserved0: 1,
-            ..Builder::new()
-        }
-        .seg(RawSeg::code(0x1000, 0x1000))
-        .build();
-        assert_eq!(
-            LoadImage::parse(&header, &TAG),
-            Err(RxeError::ReservedNonZero)
-        );
-
+    fn refuses_reserved_nonzero_in_segment() {
         let segment = Builder::new()
             .seg(RawSeg {
                 vaddr: 0x1000,
@@ -898,6 +1058,93 @@ mod tests {
         assert_eq!(
             LoadImage::parse(&segment, &TAG),
             Err(RxeError::ReservedNonZero)
+        );
+    }
+
+    #[test]
+    fn parses_and_round_trips_needed_libraries() {
+        let bytes = Builder {
+            entry: 0x1000,
+            ..Builder::new()
+        }
+        .seg(RawSeg::code(0x1000, 0x1000))
+        .needed("/System/Libraries/libros-sys.so")
+        .needed("/Apps/Example.app/Libraries/private.so")
+        .build();
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid");
+        let names: Vec<&str> = image.needed_libraries().collect();
+        assert_eq!(
+            names,
+            [
+                "/System/Libraries/libros-sys.so",
+                "/Apps/Example.app/Libraries/private.so",
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_image_without_needed_libraries() {
+        let image = LoadImage::parse(&valid_image(), &TAG).expect("valid");
+        assert_eq!(image.needed_libraries().count(), 0);
+    }
+
+    #[test]
+    fn refuses_too_many_needed_libraries() {
+        let count = u16::try_from(LOAD_MAX_NEEDED + 1).expect("fits u16");
+        let bytes = Builder {
+            entry: 0x1000,
+            needed_count_override: Some(count),
+            ..Builder::new()
+        }
+        .seg(RawSeg::code(0x1000, 0x1000))
+        .build();
+        assert_eq!(LoadImage::parse(&bytes, &TAG), Err(RxeError::TooManyNeeded));
+    }
+
+    #[test]
+    fn refuses_truncated_needed_table() {
+        let bytes = Builder {
+            entry: 0x1000,
+            needed_count_override: Some(1),
+            ..Builder::new()
+        }
+        .seg(RawSeg::code(0x1000, 0x1000))
+        .build();
+        assert_eq!(
+            LoadImage::parse(&bytes, &TAG),
+            Err(RxeError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn refuses_malformed_needed_record() {
+        let mut bytes = Builder {
+            entry: 0x1000,
+            needed_count_override: Some(1),
+            ..Builder::new()
+        }
+        .seg(RawSeg::code(0x1000, 0x1000))
+        .build();
+        // Append a zero-length (empty) needed record: rejected fail-closed.
+        bytes.extend_from_slice(&[0u8; NeededLibrary::WIRE_LEN]);
+        assert_eq!(
+            LoadImage::parse(&bytes, &TAG),
+            Err(RxeError::BadNeededLibrary)
+        );
+    }
+
+    #[test]
+    fn needed_library_record_round_trips() {
+        let lib = NeededLibrary::from_reference("/System/Libraries/libros-sys.so").expect("valid");
+        assert_eq!(NeededLibrary::decode(&lib.to_le_bytes()), Ok(lib));
+        assert_eq!(lib.reference(), "/System/Libraries/libros-sys.so");
+        assert_eq!(
+            NeededLibrary::from_reference(""),
+            Err(RxeError::BadNeededLibrary)
+        );
+        assert_eq!(
+            NeededLibrary::from_reference("has\0nul"),
+            Err(RxeError::BadNeededLibrary)
         );
     }
 

@@ -55,6 +55,12 @@ pub mod attrs {
     /// Access permission `0b00` (bits `[7:6]`): read/write at EL1, no EL0
     /// access. The kernel-only mapping the isolation test uses.
     pub const AP_RW_EL1: u64 = 0b00 << 6;
+    /// Access permission `0b01` (bits `[7:6]`): read/write at EL1 **and**
+    /// EL0. Used for an EL0 data mapping (e.g. a user stack).
+    pub const AP_RW_EL0: u64 = 0b01 << 6;
+    /// Access permission `0b11` (bits `[7:6]`): read-only at EL1 **and**
+    /// EL0. Used for an EL0 code mapping (executable but not writable).
+    pub const AP_RO_EL0: u64 = 0b11 << 6;
     /// Privileged execute-never (bit 53).
     pub const PXN: u64 = 1 << 53;
     /// Unprivileged execute-never (bit 54).
@@ -145,6 +151,56 @@ pub const fn normal_leaf_attrs(block: bool) -> u64 {
     } else {
         base | attrs::TABLE_OR_PAGE
     }
+}
+
+/// Lower attributes for an **EL0-executable** Normal-memory page leaf:
+/// read-only at EL1 and EL0 (`AP_RO_EL0`), privileged-execute-never
+/// (`PXN`, so EL1 cannot run user code) but *unprivileged*-executable
+/// (`UXN` clear). The output is a page descriptor (`TABLE_OR_PAGE`); EL0
+/// code is always mapped at 4 KiB granularity.
+#[must_use]
+pub const fn el0_code_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::SH_INNER
+        | attrs::AP_RO_EL0
+        | attrs::ATTR_IDX_NORMAL
+        | attrs::PXN
+}
+
+/// Lower attributes for an **EL0 read-only, non-executable** Normal-memory
+/// page leaf: read-only at EL1 and EL0 (`AP_RO_EL0`) and execute-never at
+/// both ELs (`PXN | UXN`). Used for a read-only EL0 data page — an `rxe`
+/// `ReadOnly` segment (`.rodata`) or the kernel-written process startup
+/// block — where [`el0_code_leaf_attrs`] would wrongly leave the page
+/// EL0-executable. The output is a page descriptor (`TABLE_OR_PAGE`).
+#[must_use]
+pub const fn el0_rodata_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::SH_INNER
+        | attrs::AP_RO_EL0
+        | attrs::ATTR_IDX_NORMAL
+        | attrs::PXN
+        | attrs::UXN
+}
+
+/// Lower attributes for an **EL0-writable** Normal-memory page leaf:
+/// read/write at EL1 and EL0 (`AP_RW_EL0`), execute-never at both ELs
+/// (`PXN | UXN`). Used for an EL0 data page such as a user stack. The
+/// output is a page descriptor (`TABLE_OR_PAGE`).
+#[must_use]
+pub const fn el0_data_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::SH_INNER
+        | attrs::AP_RW_EL0
+        | attrs::ATTR_IDX_NORMAL
+        | attrs::PXN
+        | attrs::UXN
 }
 
 /// Lower attributes for a kernel Device-memory leaf (MAIR index 1,
@@ -280,13 +336,33 @@ impl AddressSpace {
         Some(Self { root_phys, root })
     }
 
-    /// Map `paddr` at `vaddr` with 4 KiB granularity as Normal memory.
+    /// Map `paddr` at `vaddr` with 4 KiB granularity as Normal memory
+    /// (kernel-only, EL1 RW, execute-never at EL0).
     ///
     /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
     /// page-table-pool exhaustion or if the walk meets an existing block
     /// it would have to shatter — the isolation test maps outside the
     /// identity-mapped gigapages so that path is not exercised.
     pub fn map_4k(&mut self, pool: &'static PageTablePool, vaddr: u64, paddr: u64) -> Option<()> {
+        self.map_4k_with_attrs(pool, vaddr, paddr, normal_leaf_attrs(false))
+    }
+
+    /// Map `paddr` at `vaddr` with 4 KiB granularity using the supplied
+    /// page-leaf `leaf_attrs` (e.g. [`el0_code_leaf_attrs`] /
+    /// [`el0_data_leaf_attrs`] for an EL0 user mapping). `map_4k` is this
+    /// with the kernel-only [`normal_leaf_attrs`], so there is one walk
+    /// implementation (`AGENTS.md` §2.2).
+    ///
+    /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
+    /// page-table-pool exhaustion or if the walk meets an existing block
+    /// it would have to shatter.
+    pub fn map_4k_with_attrs(
+        &mut self,
+        pool: &'static PageTablePool,
+        vaddr: u64,
+        paddr: u64,
+        leaf_attrs: u64,
+    ) -> Option<()> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return None;
         }
@@ -299,7 +375,7 @@ impl AddressSpace {
         if (l3[i3] & attrs::VALID) != 0 {
             return None;
         }
-        l3[i3] = descriptor(paddr, normal_leaf_attrs(false));
+        l3[i3] = descriptor(paddr, leaf_attrs);
         Some(())
     }
 

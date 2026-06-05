@@ -81,6 +81,7 @@ pub mod panic;
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
 pub(crate) mod sched;
+pub mod spawn;
 pub mod syscalls;
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -100,4 +101,5 @@ pub use fs::{
 };
 pub use init::{kernel_main, InitError, Phase};
 pub use panic::{handle_panic, panic_dump, PanicContext};
+pub use spawn::{spawn_and_enter, SpawnCallerError, SpawnRequest};
 pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};

@@ -18,7 +18,11 @@
 //! slice (`AGENTS.md` §19.10): the [`MemoryTagging`] trait, its
 //! [`memtag::conformance`] vertical, and the architecture-neutral
 //! [`MemTag`] / [`next_free_tag`] tag algebra that hardens
-//! use-after-free. The remaining HAL surface
+//! use-after-free — and the **enter-user-mode** slice (`AGENTS.md`
+//! §17.2): the [`EnterUser`] trait and the architecture-neutral
+//! [`UserEntry`] register state that drops a freshly built process image
+//! into user mode via the port's native transition (`sret` on riscv64,
+//! `eret` on aarch64, `iretq` on x86_64). The remaining HAL surface
 //! enumerated by
 //! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
 //! shootdown, timer programming, interrupt entry/exit, per-CPU
@@ -41,6 +45,7 @@
 
 pub mod memtag;
 pub mod sidechannel;
+pub mod userentry;
 
 pub use sidechannel::{
     conformance as sidechannel_conformance, Mitigation, MitigationEntry, MitigationProfile,
@@ -51,6 +56,8 @@ pub use memtag::{
     conformance as memtag_conformance, next_free_tag, MemTag, MemoryTagging, Tagging, TaggingEntry,
     TaggingProfile, TAG_COUNT,
 };
+
+pub use userentry::{EnterUser, UserEntry};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///
