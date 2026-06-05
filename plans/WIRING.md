@@ -114,7 +114,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | **`sched_drive`** (live)| ✓(stress)|    ✓    |    ✓    | ✓(browser) |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
-| input (`ps2`/device)    |   ✓    |    ✓    |  **✗**  |  n/a   |
+| input (`ps2`/device)    |   ✓    |    ✓    |    ✓    |  n/a   |
 | display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    |  **✗** |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 
@@ -127,12 +127,12 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
   the aarch64 QEMU matrix is now full. (FDT/DTB discovery is host-tested
   via W1/W10 and the W11-A/B verticals embed the canonical `virt` DTB;
   the runtime parse of the full ARM `virt` tree is still a gap.)
-- **riscv64:** closest to parity; live-scheduler task switch is wired
-  (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
-  storage HAL trait, missing input vertical (the next parity gap — the
-  `virtio-input` driver and its shared `virtio_input_keypress` tail are
-  already in place, so it is a riscv64 MMIO sibling of the landed aarch64
-  vertical).
+- **riscv64:** closest to parity; the input vertical landed
+  (`input_virtio_mmio_qemu_riscv64`, the riscv64 MMIO sibling of the
+  aarch64 vertical reusing the same `virtio-input` driver and shared
+  `virtio_input_keypress` tail), so the riscv64 QEMU matrix is now full.
+  Remaining: the live-scheduler task switch is wired
+  (`sched_drive_qemu_riscv64`) but not fully exercised.
 - **wasm32:** multi-worker SMP + real `MessageChannel` IPI and the
   cooperative tick wired into the live `kernel/sched` scheduler landed
   (W8, browser vertical); no user entry (sandbox-by-design), and the
@@ -732,6 +732,39 @@ stricter `is_release_ready` gate rejects any `Pending`.
   path). Docs: `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
   `docs/src/drivers/input.md`, the framebuffer + virtio-input driver
   `README.md`s, `PLAN.md`, this file.
+
+#### Stage W11-C — input vertical (riscv64) — ✅ landed
+
+The last riscv64 §1 QEMU-matrix gap. riscv64 now runs the
+**virtio-input** MMIO vertical — the `virt`-board sibling of the aarch64
+input vertical — filling the `input` row for riscv64; the riscv64 matrix
+is now full.
+
+- **New vertical, thin by design (§2.2).**
+  `tests/integration/input_virtio_mmio_qemu_riscv64`
+  (`rustos-test-input-virtio-mmio-qemu-riscv64`) reuses the exact
+  `imp_mmio` bring-up the riscv64 blk/net verticals run (DTB virtio-MMIO
+  walk, `CAP_MMIO_MAP`-gated `MmioTransport`, PLIC source + S-mode trap
+  dispatch, `KernelVirtioHost`), then loads the signed virtio-input `.rxe`
+  and drives `load → use → unload → reload`. It differs from the net
+  sibling only in the device id (`18`, virtio-input) and the resolver
+  binding the image to `rustos_drv_input_virtio_input::register`; the
+  `virtio_input_keypress` key-decode tail is the same shared
+  `virtio_qemu_support` code the aarch64 vertical runs. No new driver and
+  no new shared scaffolding were needed — the W11-B work left this a thin
+  bin, exactly as planned. Enrolled with `keyboard: Some(..)`.
+- **Real injected key (`tools/qemu`).** The runner's monitor key-injection
+  path (drain serial → on readiness marker `sendkey` over a private-socket
+  QEMU monitor held open until run end) is architecture-neutral; the only
+  riscv64 runner change is the `virtio-keyboard-device` attach in the
+  riscv64 argv builder (`tools/qemu/src/riscv64.rs`), with matching argv
+  unit tests. The same `rustos-qemu-run --arch riscv64 --virtio-keyboard
+  <marker> <key>` flag drives it by hand.
+- **Verified:** the bin exits `0` under `qemu-system-riscv64 -M virt`
+  (the `cargo xtask test --qemu` enrolment path; also reproducible via
+  `rustos-qemu-run --arch riscv64 --virtio-keyboard "<marker>" a`). Docs:
+  `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
+  virtio-input driver `README.md`, `PLAN.md`, this file.
 
 ---
 

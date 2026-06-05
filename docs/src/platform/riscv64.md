@@ -298,6 +298,32 @@ architecture-neutral `KernelVirtioFactory` and the PCI/MMIO provisioning
 walks so both the x86_64 (PCI) and riscv64 (MMIO) verticals reuse the
 same code; it depends on no `kernel/arch/*` port (`AGENTS.md` §2.2, §6).
 
+## virtio-input QEMU vertical
+
+`tests/integration/input_virtio_mmio_qemu_riscv64` is the `input`-class
+sibling of the blk/net MMIO verticals — the riscv64 analogue of the
+aarch64 `input_virtio_mmio_qemu_aarch64` vertical and the MMIO analogue
+of the x86_64 PS/2 vertical. It reuses the exact `imp_mmio` bring-up
+above, then instead of a storage or network round-trip it loads the
+signed virtio-input `.rxe` and decodes a real injected key. The
+device-id (`18`, virtio-input) and the resolver binding the loaded image
+to `rustos_drv_input_virtio_input::register` are the only per-vertical
+specifics; the `virtio_input_keypress` key-decode tail is the same shared
+`virtio_qemu_support` code the aarch64 vertical runs (`AGENTS.md` §2.2).
+
+"Use" is a **real injected key**, the device-side analogue of the PS/2
+vertical's `0xD2` output-buffer injection. A `no_std`, non-interactive
+guest cannot type at itself, and virtio-input is strictly
+device→driver, so the key originates host-side: the QEMU runner
+attaches a `virtio-keyboard-device` (`Spec::with_virtio_keyboard`),
+drains the serial console on a background thread, and — once the guest
+logs its event-queue-armed readiness marker — sends `sendkey` through a
+QEMU monitor on a private unix socket. The injected key raises the
+device's PLIC source, the guest's S-mode trap path wakes, and the driver
+decodes the press and — after reload — the matching release. The runner
+monitor-injection path is architecture-neutral; only the riscv64 argv
+builder's `virtio-keyboard-device` attach is new here.
+
 ## Board model: `virt`
 
 The runner targets QEMU's generic `virt` board (`qemu-system-riscv64 -M
@@ -362,7 +388,9 @@ stdio`, `-m {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-bios default`,
 `-drive if=none,format=raw,id=blkN,file=…` +
 `-device virtio-blk-device,drive=blkN` pair per backing image, plus one
 `-netdev user,id=netN` + `-device virtio-net-device,netdev=netN` pair
-(and an optional `-object filter-dump`) per network interface — is
+(and an optional `-object filter-dump`) per network interface, plus a
+single `-device virtio-keyboard-device` when an input vertical requests
+key injection — is
 asserted by host unit tests in `tools/qemu/src/riscv64.rs::tests`. They
 use the same pure `build_argv` helper pattern as the x86_64 backend, so
 they run without spawning QEMU. The `Spec::for_riscv64_kernel`,
@@ -373,10 +401,12 @@ interface creep).
 
 ## Manual debugging
 
-The `rustos-qemu-run` wrapper is x86_64-only today; riscv64 runs go
-through `Runner::run` or `cargo xtask test --qemu` (which builds and
-launches the enrolled `rustos-test-kernel-arch-boot-riscv64` bin for
-`riscv64gc-unknown-none-elf`). A run can also be reproduced by hand:
+The `rustos-qemu-run` wrapper takes `--arch riscv64` (e.g. the input
+vertical reproduces with `rustos-qemu-run --arch riscv64
+--virtio-keyboard "<marker>" a`); riscv64 runs also go through
+`Runner::run` or `cargo xtask test --qemu` (which builds and launches
+the enrolled riscv64 bins for `riscv64gc-unknown-none-elf`). A run can
+also be reproduced by hand:
 
 ```text
 qemu-system-riscv64 -M virt -no-reboot -display none -serial stdio \

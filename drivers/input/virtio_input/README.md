@@ -13,7 +13,7 @@ transports in `drivers/bus/virtio` (the queue protocol lives once, in
 
 | Platform | Transport          | Device                         | Status                        |
 |----------|--------------------|--------------------------------|-------------------------------|
-| any      | virtio-MMIO / PCI  | virtio-input (device id 18)    | mock-host + aarch64 QEMU vertical |
+| any      | virtio-MMIO / PCI  | virtio-input (device id 18)    | mock-host + aarch64 & riscv64 QEMU verticals |
 
 This driver consumes the device-to-driver **event queue** (queue 0). It
 does not program the driver-to-device **status queue** (queue 1): that
@@ -66,7 +66,8 @@ virtio 1.1 §3.1 init sequence (reset → ACKNOWLEDGE → DRIVER →
 features → `FEATURES_OK` → event-queue setup → `DRIVER_OK`);
 `VirtioInput::close` resets the device (the unload step). Reloading is
 constructing a fresh instance over the same transport, which the
-aarch64 QEMU vertical exercises through load → use → unload → reload.
+aarch64 and riscv64 QEMU verticals exercise through
+load → use → unload → reload.
 
 ### Polling model
 
@@ -91,19 +92,22 @@ in-process `MockTransport`/`MockHost` doubles:
 - Frame-marker (`EV_SYN`) and unmodelled-event discard.
 - `open` → `close` (load → unload) round-trip.
 
-The QEMU integration vertical
-`tests/integration/input_virtio_mmio_qemu_aarch64`
-(`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in `cargo xtask
-test --qemu`) boots the production kernel on the aarch64 `virt` board,
-builds the virtio-MMIO transport from the device tree, arms the GICv2
-SPI + EL1 IRQ path, loads this driver's signed `.rxe` through
-`rustos_drvhost::Host`, and drives it through load → use → unload →
+Two QEMU integration verticals — `input_virtio_mmio_qemu_aarch64`
+(`rustos-test-input-virtio-mmio-qemu-aarch64`) and
+`input_virtio_mmio_qemu_riscv64`
+(`rustos-test-input-virtio-mmio-qemu-riscv64`), both enrolled in `cargo
+xtask test --qemu` — boot the production kernel on the aarch64 /
+riscv64 `virt` board, build the virtio-MMIO transport from the device
+tree, arm the device IRQ path (aarch64 GICv2 SPI + EL1 / riscv64 PLIC
+source + S-mode trap), load this driver's signed `.rxe` through
+`rustos_drvhost::Host`, and drive it through load → use → unload →
 reload. "Use" is made deterministic by a real injected key: the QEMU
 runner attaches a `virtio-keyboard-device`, waits for the guest to log
 the event-queue-armed readiness marker on the serial console, then
 sends a key through the QEMU monitor (`sendkey`); the guest's eventq
 IRQ fires and the driver decodes the resulting press and, after reload,
-the matching release.
+the matching release. Both verticals run the same driver source and the
+same shared `virtio_input_keypress` key-decode tail (`AGENTS.md` §2.2).
 
 ## Public surface
 

@@ -862,6 +862,25 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
       `docs/src/drivers/input.md`, the framebuffer + virtio-input driver
       `README.md`s, `plans/WIRING.md`.
+      **Input — riscv64 sibling (landed, WIRING Stage W11-C).** riscv64
+      now also runs the virtio-input vertical, filling the last `input`
+      row of the QEMU matrix:
+      `tests/integration/input_virtio_mmio_qemu_riscv64`
+      (`rustos-test-input-virtio-mmio-qemu-riscv64`) is the thin MMIO
+      sibling promised above — it reuses the exact `imp_mmio` riscv64
+      bring-up (DTB virtio-MMIO walk, PLIC source + S-mode trap dispatch,
+      `KernelVirtioHost`) the blk/net verticals run, and the same
+      `rustos-drv-input-virtio-input` driver and shared
+      `virtio_input_keypress` tail the aarch64 vertical runs (§2.2),
+      differing only in the device id (`18`) and resolver. No new driver
+      or shared scaffolding was needed. The runner's monitor
+      key-injection is architecture-neutral; the only runner change is the
+      `virtio-keyboard-device` attach in the riscv64 argv builder
+      (`tools/qemu/src/riscv64.rs`) with matching argv unit tests.
+      **Verified QEMU-green:** the bin exits `0` under
+      `qemu-system-riscv64 -M virt`. Docs:
+      `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
+      virtio-input driver `README.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

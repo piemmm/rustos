@@ -1352,6 +1352,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-input-virtio-mmio-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-input-virtio-input",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-ipi-smp-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

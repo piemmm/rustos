@@ -200,6 +200,14 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
             argv.push(filter);
         }
     }
+
+    // Attach a virtio-mmio keyboard for the input vertical. The runner
+    // (not this builder) drives the actual key through the QEMU monitor
+    // once the guest signals readiness; here we only present the device.
+    if spec.input_keyboard.is_some() {
+        argv.push("-device".into());
+        argv.push("virtio-keyboard-device".into());
+    }
     argv
 }
 
@@ -414,6 +422,27 @@ mod tests {
             !argv.iter().any(|a| a.starts_with("user,id=net")),
             "a network-free spec must not attach a user netdev"
         );
+    }
+
+    #[test]
+    fn argv_without_keyboard_attaches_no_input_device() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a == "virtio-keyboard-device"),
+            "an input-free spec must not attach a virtio-keyboard device"
+        );
+    }
+
+    #[test]
+    fn argv_attaches_keyboard_when_input_requested() {
+        let mut spec = fixture_spec(1);
+        spec.input_keyboard = Some(crate::KeyInjection {
+            ready_marker: "ready".into(),
+            key: "a".into(),
+        });
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
     }
 
     #[test]

@@ -1127,6 +1127,36 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
     },
+    // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
+    // the `virt`-board virtio-input MMIO analogue of the aarch64 input
+    // vertical, completing the `input` row of the §1 QEMU matrix for
+    // riscv64. `rustos-test-input-virtio-mmio-qemu-riscv64` boots the
+    // `virt`-board pipeline, builds the virtio-MMIO bus from the device
+    // tree, provisions an `MmioTransport` through the capability-gated
+    // `KernelMmioMapper`, arms the device's PLIC source + S-mode trap
+    // path, mints a `KernelVirtioHost`, loads the signed virtio-input
+    // `.rxe` through `rustos_drvhost::Host`, and drives it through
+    // load -> use -> unload -> reload. "Use" is a real injected key: once
+    // the guest logs the event-queue-armed readiness marker, the runner
+    // sends a key through the QEMU monitor (`sendkey`), the eventq IRQ
+    // fires, and the driver decodes the press then (after reload) the
+    // release. The runner attaches the `virtio-keyboard-device` and drives
+    // the injection; the guest never fabricates the event. The driver and
+    // the shared `virtio_input_keypress` tail are the same code the
+    // aarch64 vertical runs (`AGENTS.md` §2.2). Single CPU and a 60-second
+    // budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-input-virtio-mmio-qemu-riscv64",
+        binary: "rustos-test-input-virtio-mmio-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
+    },
 ];
 
 /// Rust target triple for the riscv64 enrolments; selects the

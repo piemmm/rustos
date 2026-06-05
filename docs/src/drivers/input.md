@@ -130,3 +130,12 @@ through the QEMU monitor (`sendkey`); the eventq IRQ fires and the
 driver decodes the press and, after reload, the matching release — the
 virtio-input analogue of the PS/2 vertical's `0xD2` injection, with the
 event originating device-side rather than guest-side.
+
+The riscv64 `virt`-board sibling
+`tests/integration/input_virtio_mmio_qemu_riscv64`
+(`rustos-test-input-virtio-mmio-qemu-riscv64`, also enrolled in `cargo
+xtask test --qemu`) drives the same driver and the same shared
+`virtio_input_keypress` key-decode tail over the riscv64 MMIO bring-up
+(PLIC source + S-mode trap path), so a single driver source covers the
+`input` row of the QEMU matrix on x86_64 (PS/2), aarch64, and riscv64
+(`AGENTS.md` §2.2).
