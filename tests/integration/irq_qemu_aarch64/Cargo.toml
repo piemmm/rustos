@@ -1,0 +1,47 @@
+[package]
+name = "rustos-test-irq-qemu-aarch64"
+description = "WIRING Stage W3-B QEMU integration test: a device IRQ (the PL031 RTC, a GICv2 SPI) routed through GICv2 SPI target-routing + the EL1 IRQ path reaches a Rust handler and drives the kernel/irq IrqTable mask-before-wake path on the aarch64 virt board."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# WIRING Stage W3-B deliverable (`plans/WIRING.md` §3): the aarch64
+# device-IRQ QEMU vertical, the EL1/GICv2-SPI analogue of
+# `tests/integration/irq_qemu_x86_64`. It links the `rustos-arch-aarch64`
+# port plus the kernel-neutral `rustos-kernel-irq` table, arms the PL031
+# RTC (the `virt` board's GICv2 SPI 2 / INTID 34), routes that SPI to CPU 0
+# through the new `gic::route_spi` (`GICD_ITARGETSR`), and proves the
+# device interrupt reaches a Rust handler through the EL1 IRQ vector + the
+# set-once `exceptions::set_device_irq_dispatch` hook, which forwards it to
+# `IrqTable::fire` over a `GicController` bridge. PASS once the waiter
+# observes `WaitStep::Ready` and the GIC line re-reads masked (the
+# mask-before-wake invariant, `docs/src/security/irq.md`).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it
+# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1
+# — no hacks; §5.4.5 — fail closed), mirroring the other aarch64 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-irq-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -98,16 +98,27 @@ system-register/assembly/MMIO operations to the freestanding target.
 
 ## QEMU verticals
 
-Four freestanding integration binaries cover the Stage-3 per-sub-stage
-checklist (plus the CCOMPAT CC2 syscall round-trip) on the `virt` board;
-each links only the arch port and reports its result through the
-semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
+Five freestanding integration binaries cover the Stage-3 per-sub-stage
+checklist (plus the CCOMPAT CC2 syscall round-trip and the Stage W3-B
+device-IRQ vertical) on the `virt` board; each links only the arch port
+and reports its result through the semihosting finisher. They are
+enrolled in `cargo xtask test --qemu`.
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
   trampoline reaches `kernel_main` at EL1 and logs over the PL011 UART.
 - `rustos-test-timer-preempt-qemu-aarch64` — **timer interrupt drives
   the scheduler**: arms the EL1 physical timer at 100 Hz and confirms the
   GICv2 IRQ path drives the `preempt` callback ≥ 20 times.
+- `rustos-test-irq-qemu-aarch64` — **a device IRQ reaches a Rust
+  handler** (Stage W3-B): binds the PL031 RTC's GICv2 SPI (INTID 34) in a
+  kernel-neutral `rustos_kernel_irq::IrqTable`, routes that SPI to CPU 0
+  through `gic::route_spi` (`GICD_ITARGETSR`), installs a set-once
+  device-IRQ dispatcher (`exceptions::set_device_irq_dispatch`) that
+  forwards the line to `IrqTable::fire` over a `GicController` bridge,
+  and arms the RTC match. When it fires, the GIC delivers the SPI to EL1
+  and the dispatcher masks the line + sets the wait flag; the test then
+  asserts the GIC enable bit re-reads masked (mask-before-wake,
+  `docs/src/security/irq.md`) before the PASS finisher.
 - `rustos-test-memory-isolation-qemu-aarch64` — **memory-isolation test
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
@@ -198,5 +209,22 @@ reject an INTID above `MAX_INTID` with `IrqControlError::OutOfRange`;
 the spurious INTID (`1023`) mapping to `None`. The
 `gic_controller_passes_arch_hal_irq_conformance` host test drives both
 conformance verticals over a real `GicController` on a mock MMIO (INTID
-42 valid, 2000 out of range). Routing a *device* SPI through the EL1 IRQ
-path to a Rust handler under QEMU is the follow-up Stage W3-B landing.
+42 valid, 2000 out of range).
+
+### Device-IRQ delivery (Stage W3-B)
+
+GICv2 shared-peripheral interrupts (SPIs, INTID `>= MIN_SPI_INTID`) reset
+to *no* CPU target, so a device interrupt is never delivered until its
+`GICD_ITARGETSR` byte names a CPU. `Gicv2::route_spi(intid, cpu_targets)`
+(and the freestanding `gic::route_spi` wrapper) writes that byte — the
+SPI analogue of the x86_64 IO-APIC redirection-entry destination — and
+skips SGIs/PPIs, whose target bytes are read-only and banked per CPU. On
+the IRQ path, `exceptions::handle_irq` dispatches the timer PPI to the
+scheduler-tick path and forwards **any other** acknowledged INTID to a
+set-once device-IRQ dispatcher published through
+`exceptions::set_device_irq_dispatch` (the EL1 analogue of riscv64's
+`set_trap_dispatch`); the GIC `EOIR` handshake stays in the vector path.
+The `route_spi` register arithmetic, the `MIN_SPI_INTID` boundary, and
+the fail-closed set-once dispatch slot are host-tested; the
+`rustos-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
+EL1 → dispatcher → `IrqTable::fire` path end-to-end under QEMU.

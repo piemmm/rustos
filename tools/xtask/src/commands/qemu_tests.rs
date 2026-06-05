@@ -903,6 +903,33 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
+    // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
+    // `rustos-test-irq-qemu-aarch64` installs the EL1 vectors, brings up the
+    // GICv2, builds a kernel-neutral `rustos_kernel_irq::IrqTable`, binds the
+    // PL031 RTC's shared-peripheral interrupt (INTID 34), routes that SPI to
+    // CPU 0 through the new `gic::route_spi` (`GICD_ITARGETSR`), installs a
+    // set-once device-IRQ dispatcher (`exceptions::set_device_irq_dispatch`)
+    // that forwards the line to `IrqTable::fire` over a `GicController`
+    // bridge, arms the RTC match, and unmasks IRQs. When the RTC fires, the
+    // GIC delivers the SPI to EL1, the dispatcher masks the line and sets the
+    // wait flag, and the main loop observes `WaitStep::Ready`; it then
+    // re-reads the GIC enable bit and asserts the line is masked (the
+    // mask-before-wake invariant, `docs/src/security/irq.md`) before the ARM
+    // semihosting PASS finisher. A regression that fails to route, deliver,
+    // or mask never reaches PASS, so the run times out. Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-irq-qemu-aarch64",
+        binary: "rustos-test-irq-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
 ];
 
 /// Rust target triple for the riscv64 enrolments; selects the

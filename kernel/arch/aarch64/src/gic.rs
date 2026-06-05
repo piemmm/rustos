@@ -49,6 +49,13 @@ const GICD_ISENABLER: usize = 0x100;
 const GICD_ICENABLER: usize = 0x180;
 /// `GICD_IPRIORITYR<n>` — priority, one byte per interrupt (base 0x400).
 const GICD_IPRIORITYR: usize = 0x400;
+/// `GICD_ITARGETSR<n>` — interrupt processor targets, one byte per
+/// interrupt (base 0x800). The byte is a CPU-interface bitmask: bit `c`
+/// routes the interrupt to CPU `c`. The first 32 bytes (SGIs/PPIs) are
+/// read-only and banked per CPU; only the SPI bytes (INTID `>= 32`) are
+/// writable, which is why [`Gicv2::route_spi`] is the SPI-only routing
+/// primitive (GICv2 spec §4.3.12).
+const GICD_ITARGETSR: usize = 0x800;
 /// `GICD_SGIR` — software-generated interrupt control (offset 0xF00).
 const GICD_SGIR: usize = 0xF00;
 
@@ -97,6 +104,19 @@ pub const fn isenabler_offset(intid: u32) -> usize {
 #[must_use]
 pub const fn isenabler_bit(intid: u32) -> u32 {
     1 << (intid % 32)
+}
+
+/// Lowest GICv2 INTID that is a shared peripheral interrupt (SPI). INTIDs
+/// `0..32` are SGIs/PPIs whose `GICD_ITARGETSR` bytes are read-only and
+/// banked per CPU; only `>= MIN_SPI_INTID` may be routed with
+/// [`Gicv2::route_spi`] (GICv2 spec §2.2.1).
+pub const MIN_SPI_INTID: u32 = 32;
+
+/// Byte offset of the `GICD_ITARGETSR` register for interrupt `intid`
+/// (one byte per INTID).
+#[must_use]
+pub const fn itargetsr_offset(intid: u32) -> usize {
+    GICD_ITARGETSR + intid as usize
 }
 
 /// Byte offset of the `GICD_ICENABLER` word covering interrupt `intid`.
@@ -162,6 +182,23 @@ impl<M: GicMmio> Gicv2<M> {
     pub fn disable_intid(&self, intid: u32) {
         self.mmio
             .gicd_write(icenabler_offset(intid), isenabler_bit(intid));
+    }
+
+    /// Route shared-peripheral interrupt `intid` to the CPU interfaces
+    /// named in `cpu_targets` (a bitmask: bit `c` selects CPU `c`).
+    ///
+    /// SPIs reset to *no* target on the GICv2, so a device's SPI is
+    /// never delivered until its `GICD_ITARGETSR` byte names a CPU;
+    /// this is the SPI analogue of the x86_64 IO-APIC redirection
+    /// entry's destination field. INTIDs below [`MIN_SPI_INTID`] are
+    /// SGIs/PPIs whose target bytes are read-only and banked per CPU, so
+    /// the routing write is skipped for them (a no-op rather than a
+    /// silently-ignored read-only store — `AGENTS.md` §5.4.5).
+    pub fn route_spi(&self, intid: u32, cpu_targets: u8) {
+        if intid >= MIN_SPI_INTID {
+            self.mmio
+                .gicd_write_byte(itargetsr_offset(intid), cpu_targets);
+        }
     }
 
     /// Read `GICC_IAR` to acknowledge the highest-priority pending
@@ -337,6 +374,22 @@ pub unsafe fn enable_ppi(intid: u32) {
     unsafe { volatile_gic() }.enable_intid(intid);
 }
 
+/// Route shared-peripheral interrupt `intid` to the CPU interfaces named
+/// in `cpu_targets` (bit `c` selects CPU `c`).
+///
+/// SPIs reset to no target on the GICv2, so this must be called for a
+/// device SPI before it can be delivered (see [`Gicv2::route_spi`]).
+///
+/// # Safety
+///
+/// The distributor must already be enabled ([`init`]); the fixed
+/// `virt`-board windows are mapped and owned by the kernel.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn route_spi(intid: u32, cpu_targets: u8) {
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.route_spi(intid, cpu_targets);
+}
+
 /// Read `GICC_IAR` to acknowledge and activate the highest-priority
 /// pending interrupt, returning its INTID (which may be
 /// [`SPURIOUS_INTID`]).
@@ -407,6 +460,30 @@ mod tests {
         assert_eq!(icenabler_offset(0), 0x180);
         assert_eq!(icenabler_offset(30), 0x180);
         assert_eq!(icenabler_offset(32), 0x184);
+    }
+
+    #[test]
+    fn itargetsr_offset_is_one_byte_per_intid() {
+        // SPI 2 on the `virt` board (the PL031 RTC) is INTID 34.
+        assert_eq!(itargetsr_offset(34), 0x800 + 34);
+        assert_eq!(itargetsr_offset(MIN_SPI_INTID), 0x800 + 32);
+    }
+
+    #[test]
+    fn route_spi_writes_the_target_byte_for_an_spi() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // Route INTID 34 to CPU 0 (target-list bit 0).
+        gic.route_spi(34, 0b0000_0001);
+        assert_eq!(gic.mmio.gicd_read(itargetsr_offset(34)), 0b0000_0001);
+    }
+
+    #[test]
+    fn route_spi_skips_sgis_and_ppis() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // INTID 30 is the timer PPI: its target byte is read-only and
+        // banked, so `route_spi` must not write it.
+        gic.route_spi(30, 0b0000_0001);
+        assert_eq!(gic.mmio.gicd_read(itargetsr_offset(30)), 0);
     }
 
     /// In-memory GICv2 register file: distributor and CPU-interface

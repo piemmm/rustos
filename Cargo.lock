@@ -1320,6 +1320,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-irq-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-irq",
+ "rustos-kernel-sec",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-irq-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

@@ -251,7 +251,7 @@ phase:
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
 | `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
-| `aarch64`    | GIC `ICACTIVE` / distributor mask                                                                      | Not wired; `UnsupportedController` installed. |
+| `aarch64`    | `tests/integration/irq_qemu_aarch64::GicBridge` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Implemented and QEMU-validated** (Stage W3-B). The GICv2 SPI target-routing (`gic::route_spi` → `GICD_ITARGETSR`), the device-IRQ dispatch hook, and the `GicBridge` (incl. mask-before-wake through `IrqTable`) are host-tested; `tests/integration/irq_qemu_aarch64` drives a live PL031-RTC SPI (INTID 34) end-to-end and asserts both `WaitStep::Ready` and the post-fire masked enable bit. The boot path does not yet arm device IRQs; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
@@ -431,6 +431,85 @@ the set-once dispatch slot build on the host so their unit tests run
 under `cargo test`; the trap vector, `init_traps`, the handler, and
 `VolatilePlicMmio` are gated to `riscv64-unknown-none-elf`.
 
+### aarch64 GICv2 device-IRQ glue (Stage W3-B)
+
+The aarch64 port supplies the same `IrqController` seam through a
+GICv2, plus the EL1 IRQ vector path that turns a device's
+shared-peripheral interrupt (SPI) into an `IrqTable::fire`. The GICv2
+driver and exception glue are a pure Arch HAL implementation and own no
+`kernel/irq` dependency (`AGENTS.md` §17.2); the `IrqController` bridge
+(`GicBridge`) lives downstream in `tests/integration/irq_qemu_aarch64`,
+mirroring riscv64's `PlicIrqController`. The boot-to-`BootCompleted`
+slice does not yet arm a device IRQ (the timer PPI has its own path), so
+the QEMU vertical is the first consumer.
+
+1. **SPI target-routing.** GICv2 SPIs reset to *no* CPU target, so a
+   device interrupt is never delivered until its `GICD_ITARGETSR` byte
+   names a CPU. `kernel/arch/aarch64::gic::Gicv2::route_spi(intid,
+   cpu_targets)` writes that byte — the SPI analogue of the x86_64
+   IO-APIC redirection-entry destination field. INTIDs below
+   `MIN_SPI_INTID` (32) are SGIs/PPIs whose target bytes are read-only
+   and banked per CPU, so the routing write is skipped for them (a
+   no-op rather than a silently-ignored read-only store).
+2. **Mask-before-wake.** The HAL `GicController::mask` clears the
+   source's distributor enable bit (`ICENABLER`) and issues a
+   `core::sync::atomic::fence` with `Ordering::SeqCst`. The downstream
+   `GicBridge::mask` forwards here. The fence pairs with the SeqCst
+   load `IrqTable::try_wait_step` performs on `ready`, so every CPU
+   that observes `ready = true` also observes the masked line.
+3. **EL1 IRQ vector.** `kernel/arch/aarch64::exceptions` installs the
+   EL1 vector table (`VBAR_EL1`) and, on an IRQ, acknowledges the GIC
+   (`IAR`). The timer PPI dispatches to the scheduler-tick path; **any
+   other** acknowledged INTID is a device interrupt and is forwarded to
+   the set-once device-IRQ dispatcher. The GIC end-of-interrupt
+   handshake (`EOIR`) stays in the vector path.
+4. **Dispatch.** `exceptions::set_device_irq_dispatch` publishes a
+   one-shot `extern "C" fn(u32)` into a fail-closed (set-once)
+   `AtomicUsize` slot — the EL1 analogue of riscv64's
+   `set_trap_dispatch`. The installed dispatcher services the device
+   source and forwards the line to `IrqTable::fire` (mask-before-wake)
+   over the `GicBridge`.
+
+The `GICD_ITARGETSR` arithmetic, the `MIN_SPI_INTID` boundary, and the
+set-once dispatch slot build on the host so their unit tests run under
+`cargo test`; the `route_spi` free function, `init_vectors`, the IRQ
+handler, and `VolatileGicMmio` are gated to `aarch64-unknown-none`.
+
+### aarch64 QEMU validation (Stage W3-B)
+
+`tests/integration/irq_qemu_aarch64` is the end-to-end regression bound
+for the aarch64 device-IRQ path — the EL1/SPI analogue of the x86_64
+crate above. The freestanding `aarch64-unknown-none` kernel binary:
+
+1. Builds a kernel-neutral `IrqTable` and binds the PL031 RTC's GICv2
+   SPI (INTID 34 = `MIN_SPI_INTID + 2`) against the synthesised
+   `TaskId(0)`, then publishes a pointer to the table for the
+   interrupt-context dispatcher.
+2. Installs the `rtc_dispatch` device-IRQ dispatcher via
+   `set_device_irq_dispatch` (which forwards to `IrqTable::fire` over
+   the `GicBridge`), installs the EL1 vectors, and brings up the GICv2.
+3. Routes the RTC SPI to CPU 0 (`gic::route_spi`), enables it at the
+   distributor, arms the RTC match register one tick (~1 s) out, and
+   unmasks IRQs at the PE.
+4. Parks on `wfi` and spin-polls `IrqTable::try_wait_step`. When the
+   RTC fires, the GIC delivers the SPI to EL1 → the vector
+   acknowledges and calls `rtc_dispatch` → the dispatcher clears the
+   RTC and calls `IrqTable::fire(34, &BRIDGE)` → the bridge masks the
+   line + SeqCst-fences → `ready` flips → `try_wait_step` observes
+   `WaitStep::Ready`.
+5. Re-reads `GICD_ISENABLER` for INTID 34 and asserts the enable bit
+   is clear — the load-bearing evidence that the mask write reached the
+   distributor MMIO before the wake.
+6. Flips `qemu_exit::exit_success`. Any deviation — `bind` refusal,
+   duplicate dispatcher, `WaitStep::TimedOut`/`NotFound`, or an
+   un-masked line — flips `qemu_exit::exit_failure`; a line that never
+   fires never reaches PASS, so the run times out (the documented
+   fail-loud behaviour).
+
+The crate is enrolled in `tools/xtask::commands::qemu_tests::TESTS`
+with a 60 s budget. `cargo xtask test --qemu` builds and runs it
+alongside the other freestanding integration crates.
+
 ### Test coverage
 
 * `kernel/irq` ships 18 unit tests covering bind / duplicate
@@ -461,5 +540,14 @@ under `cargo test`; the trap vector, `init_traps`, the handler, and
   code as a synchronous exception and other interrupt causes), the
   `sie`/`sstatus`/`scause` bit constants, and the set-once
   fail-closed semantics of the trap-dispatch slot.
-* `tests/integration/irq_qemu_x86_64` is the QEMU-validated
-  end-to-end regression bound described above.
+* `kernel/arch/aarch64::gic` adds host tests for the `GICD_ITARGETSR`
+  offset arithmetic, the `MIN_SPI_INTID` boundary, `route_spi` writing
+  the target byte for an SPI, and `route_spi` skipping SGIs/PPIs
+  (read-only banked target bytes), on top of the existing
+  `GicController` mask/claim conformance coverage.
+* `kernel/arch/aarch64::exceptions` adds host tests for the set-once
+  device-IRQ dispatch slot: fail-closed on a second install and the
+  installed-fn address round-trip.
+* `tests/integration/irq_qemu_x86_64` and
+  `tests/integration/irq_qemu_aarch64` are the QEMU-validated
+  end-to-end regression bounds described above.

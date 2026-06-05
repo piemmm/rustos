@@ -66,6 +66,89 @@ pub const fn is_sync(kind: u64) -> bool {
     matches!(kind, kind::CUR_SPX_SYNC | kind::LOWER_SYNC)
 }
 
+// --- Device-IRQ dispatch hook -------------------------------------
+//
+// The timer PPI ([`crate::preempt::TIMER_PPI`]) has its own dedicated
+// path; every *other* acknowledged INTID (a device's shared-peripheral
+// interrupt routed through the GIC by [`crate::gic::route_spi`]) is
+// forwarded to a set-once dispatch callback the binary installs. This
+// mirrors riscv64's `trap::set_trap_dispatch` external-interrupt seam:
+// the callback claims/services the source and forwards it to
+// `rustos_kernel_irq::IrqTable::fire` (which masks the GIC line before
+// the waiter observes the wake — `docs/src/security/irq.md`), while the
+// GIC end-of-interrupt handshake stays in [`handle_irq`]. The slot is
+// set-once, backed by an atomic so the IRQ path reads it without a lock
+// (`AGENTS.md` §2.1 — no global mutable state; this is an immutable,
+// publish-once pointer).
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Signature of the installed device-IRQ dispatcher, invoked from the
+/// IRQ path with the acknowledged GIC INTID. Like the timer callback it
+/// is a bare `extern "C" fn` (no captured environment) so it is safe to
+/// call from interrupt context.
+pub type DeviceIrqDispatchFn = extern "C" fn(u32);
+
+/// Slot holding the installed dispatcher as a raw function pointer
+/// (`0` = none).
+static DEVICE_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
+
+/// Failure modes of [`set_device_irq_dispatch`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SetDispatchError {
+    /// A dispatcher was already published; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1).
+    AlreadyInstalled,
+}
+
+/// Install the device-IRQ dispatcher.
+///
+/// # Errors
+///
+/// [`SetDispatchError::AlreadyInstalled`] on the second publish.
+pub fn set_device_irq_dispatch(cb: DeviceIrqDispatchFn) -> Result<(), SetDispatchError> {
+    let raw = cb as usize;
+    DEVICE_IRQ_DISPATCH_FN
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetDispatchError::AlreadyInstalled)
+}
+
+/// Address of the installed device-IRQ dispatcher (`0` if none).
+/// Test/diagnostic observer.
+#[must_use]
+pub fn device_irq_dispatch_addr() -> usize {
+    DEVICE_IRQ_DISPATCH_FN.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn clear_device_irq_dispatch_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a dispatcher.
+    // Production code never clears the slot (`AGENTS.md` §2.1).
+    DEVICE_IRQ_DISPATCH_FN.store(0, Ordering::Release);
+}
+
+/// Invoke the installed device-IRQ dispatcher with `intid`, if any.
+///
+/// A device interrupt that arrives before the binary installed a
+/// dispatcher is left unserviced here (the GIC line stays active until
+/// [`handle_irq`]'s end-of-interrupt); the boot path installs the
+/// dispatcher before routing any device SPI, so this is not reached in
+/// practice (`AGENTS.md` §5.4.5 — fail closed rather than guess).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn dispatch_device_irq(intid: u32) {
+    let raw = DEVICE_IRQ_DISPATCH_FN.load(Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `DeviceIrqDispatchFn` through `set_device_irq_dispatch`;
+        // function pointers are `usize`-sized so the transmute is
+        // lossless, and the callback carries no captured environment.
+        let cb: DeviceIrqDispatchFn =
+            unsafe { core::mem::transmute::<usize, DeviceIrqDispatchFn>(raw) };
+        cb(intid);
+    }
+}
+
 // --- Freestanding vector install + dispatch -----------------------
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -159,8 +242,14 @@ fn handle_irq() {
     if intid == crate::preempt::TIMER_PPI {
         // Single-CPU slice: the boot CPU is logical CPU 0.
         crate::preempt::on_timer_interrupt(0);
+    } else {
+        // Any other acknowledged INTID is a device interrupt (a GIC SPI
+        // routed by `crate::gic::route_spi`); forward it to the installed
+        // device-IRQ dispatcher (which services the source and runs the
+        // `kernel/irq` mask-before-wake path).
+        dispatch_device_irq(intid);
     }
-    // Complete every acknowledged interrupt (timer, SGI/IPI, or other)
+    // Complete every acknowledged interrupt (timer, SGI/IPI, or device)
     // so the CPU interface does not wedge with an active priority.
     crate::gic::end_of_interrupt(intid);
 }
@@ -263,5 +352,29 @@ mod tests {
         assert_eq!(kind::CUR_SPX_IRQ, 5);
         assert_eq!(kind::LOWER_SYNC, 8);
         assert_eq!(kind::LOWER_IRQ, 9);
+    }
+
+    extern "C" fn host_device_dispatch(_intid: u32) {}
+
+    #[test]
+    fn set_device_irq_dispatch_fails_closed_on_second_install() {
+        clear_device_irq_dispatch_for_tests();
+        set_device_irq_dispatch(host_device_dispatch).expect("first install");
+        assert_eq!(
+            set_device_irq_dispatch(host_device_dispatch),
+            Err(SetDispatchError::AlreadyInstalled)
+        );
+        clear_device_irq_dispatch_for_tests();
+    }
+
+    #[test]
+    fn device_irq_dispatch_addr_round_trips_installed_fn() {
+        clear_device_irq_dispatch_for_tests();
+        set_device_irq_dispatch(host_device_dispatch).expect("install");
+        assert_eq!(
+            device_irq_dispatch_addr(),
+            host_device_dispatch as *const () as usize
+        );
+        clear_device_irq_dispatch_for_tests();
     }
 }

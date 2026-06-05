@@ -107,7 +107,7 @@ discovery) is still ad-hoc inside each port — the §17.2 surface
 | **`ipi_smp`**           | ✓(stress)|  **✗**  |    ✓    |  **✗** |
 | **`sched_drive`** (live)| ✓(stress)|  **✗**  |    ✓    |  **✗** |
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
-| `irq`                   |   ✓    |  **✗**  |    ✓    |  n/a   |
+| `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
 | display (`vesa`/fb)     |   ✓    |  **✗**  |    ✓    |  **✗** |
 | `virtio` blk/net        | ✓(pci) |  **✗**  | ✓(mmio) |  n/a   |
@@ -255,16 +255,27 @@ its real controller on a mock MMIO. Docs:
 `docs/src/architecture/modularity.md`, `docs/src/security/irq.md`,
 platform pages, `AGENTS.md` §17.2, `PLAN.md`.
 
-#### Stage W3-B — aarch64 device-IRQ QEMU vertical
+#### Stage W3-B — aarch64 device-IRQ QEMU vertical — ✅ landed
 
-- **aarch64: add an `irq_qemu_aarch64` vertical** matching
-  `irq_qemu_x86_64` (a device IRQ routed through the GIC reaches a Rust
-  handler). Needs GICv2 SPI target-routing, a dispatch hook in
-  `exceptions::handle_irq`, a `kernel/irq` bridge over `GicController`,
-  and the QEMU harness, enrolled in
-  `tools/xtask/src/commands/qemu_tests.rs`.
-- **Deliverable:** the new aarch64 IRQ vertical is QEMU-green. Docs:
-  `docs/src/security/irq.md`, `docs/src/platform/aarch64.md`.
+**Landed:** `tests/integration/irq_qemu_aarch64` is the EL1/SPI analogue
+of `irq_qemu_x86_64`. It binds the PL031 RTC's GICv2 SPI (INTID 34) in a
+kernel-neutral `rustos_kernel_irq::IrqTable`, routes that SPI to CPU 0
+through the new `gic::route_spi` (`GICD_ITARGETSR`, SPI-only; SGIs/PPIs
+skipped because their target bytes are read-only/banked), installs a
+set-once device-IRQ dispatcher via the new
+`exceptions::set_device_irq_dispatch` hook (`handle_irq` now forwards any
+non-timer INTID to it, EOI unchanged), and forwards the line to
+`IrqTable::fire` over a downstream `GicController`→`kernel_irq`
+`IrqController` bridge (`GicBridge`, in the test crate — the arch port
+keeps no `kernel/irq` dep, §17.2). On the RTC firing, the GIC delivers
+the SPI to EL1, the dispatcher masks the line + sets the wait flag, the
+main loop observes `WaitStep::Ready`, and the test asserts the GIC
+enable bit re-reads masked (mask-before-wake). New host tests cover the
+`GICD_ITARGETSR` arithmetic, `MIN_SPI_INTID` boundary, `route_spi`
+SPI-write + SGI/PPI-skip, and the fail-closed set-once dispatch slot.
+Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (60 s, single CPU)
+and QEMU-green. Docs: `docs/src/security/irq.md`,
+`docs/src/platform/aarch64.md`.
 
 ### Stage W4 — Timer-programming HAL
 

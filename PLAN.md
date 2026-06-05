@@ -516,13 +516,28 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       over its real controller on a mock MMIO. Docs:
       `docs/src/architecture/modularity.md`, `docs/src/security/irq.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64}.md`, `AGENTS.md` §17.2.
-- [ ] **WIRING Stage W3-B — aarch64 device-IRQ QEMU vertical.** Route a
+- [x] **WIRING Stage W3-B — aarch64 device-IRQ QEMU vertical.** Routed a
       device SPI through the GICv2 + EL1 IRQ path to a Rust handler under
-      QEMU (`irq_qemu_aarch64`, matching `irq_qemu_x86_64`): SPI
-      target-routing + the dispatch hook in `exceptions::handle_irq`, a
-      `kernel/irq` bridge, and the QEMU harness, enrolled in
-      `tools/xtask/src/commands/qemu_tests.rs`. Split out of W3 to keep
-      W3-A a host-gated, low-risk landing.
+      QEMU. `tests/integration/irq_qemu_aarch64` (the EL1/SPI analogue of
+      `irq_qemu_x86_64`) binds the PL031 RTC's GICv2 SPI (INTID 34) in a
+      kernel-neutral `rustos_kernel_irq::IrqTable`, routes it to CPU 0 via
+      the new `gic::route_spi` (`GICD_ITARGETSR`, SPI-only — SGIs/PPIs
+      skipped because their target bytes are read-only/banked), installs a
+      set-once device-IRQ dispatcher through the new
+      `exceptions::set_device_irq_dispatch` hook (`handle_irq` forwards any
+      non-timer INTID to it; EOI unchanged), and forwards the line to
+      `IrqTable::fire` over a downstream `GicController`→`kernel_irq`
+      `IrqController` bridge (`GicBridge`, in the test crate — the arch
+      port keeps no `kernel/irq` dep, §17.2). On the RTC firing, the
+      dispatcher masks the GIC line + sets the wait flag, the loop observes
+      `WaitStep::Ready`, and the test asserts the enable bit re-reads masked
+      (mask-before-wake). New host tests cover the `GICD_ITARGETSR`
+      arithmetic, `MIN_SPI_INTID` boundary, `route_spi` SPI-write +
+      SGI/PPI-skip, and the fail-closed set-once dispatch slot. Enrolled in
+      `tools/xtask/src/commands/qemu_tests.rs` (60 s, single CPU) and
+      QEMU-green. Docs: `docs/src/security/irq.md`,
+      `docs/src/platform/aarch64.md`. Split out of W3 to keep W3-A a
+      host-gated, low-risk landing.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 
