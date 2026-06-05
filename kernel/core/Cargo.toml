@@ -34,8 +34,8 @@ test-arch = ["rustos-kernel-sched-api/test-arch"]
 [dependencies]
 # Stage 2.6 dependency rules (issue brief): kernel/core may depend on
 # every kernel/* crate that has landed (Stages 2.1–2.5) and on the
-# shared lib/* crates `abi`, `caps`, `crypto`, `log`, and `util`.
-# Nothing else.
+# shared lib/* crates `abi`, `caps`, `crypto`, `log`, `rng`, and `util`
+# (`AGENTS.md` §17.4 — kernel/* may depend on lib/*). Nothing else.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
@@ -56,6 +56,14 @@ rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The kernel's single cryptographic random subsystem (`AGENTS.md` §22):
+# `KernelState` composes a `rustos_rng::OutputReserve` and the `random_get`
+# syscall serves bytes from it.
+rustos-rng = { path = "../../lib/rng", version = "=0.0.0" }
+# Audited volatile-wipe for the kernel staging buffer `random_get` copies
+# CSPRNG output through on its way to user memory (`AGENTS.md` §22 — zeroed
+# on consumption; §2.12 — never hand-roll the wipe).
+zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the

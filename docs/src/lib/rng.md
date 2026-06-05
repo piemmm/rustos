@@ -108,11 +108,17 @@ running the DRBG on every call:
   enumerates; the generator state is wiped on drop via `zeroize`.
 
 The reserve does not hand bytes to userland by itself: the production
-`kernel/core` `random_get` handler enforces the request cap today and
-announces the deferral of the per-CPU reserve + user-memory copy-out
-(increment D.4 of `PLAN.md` Stage 7's staged copy path — the last
-remaining consumer now that `ipc_send`, `ipc_recv`, and `cap_delegate`
-are wired), rather than stubbing randomness (§15.1).
+`kernel/core` `random_get` handler (increment D.4 of `PLAN.md` Stage 7's
+staged copy path) composes an `OutputReserve` into `KernelState` behind
+a `RandomReserve` trait object, enforces the request cap, draws CSPRNG
+output in fixed kernel-staging chunks, and copies each chunk into the
+caller's buffer through the `copy_to_user` boundary, wiping the staging
+afterwards (§22). The reserve boots **unseeded** over a `NullEntropy`
+source, so a draw fails closed with `Errno::EntropyNotReady` until the
+platform-RNG `EntropySource` (§17.2 — still pending) re-seeds it; a
+faulting buffer maps to `BadAddress`. With D.4 in, every consumer of the
+staged copy path (`ipc_send`, `ipc_recv`, `cap_delegate`, `random_get`)
+is wired.
 
 ## Fast, non-cryptographic generator
 

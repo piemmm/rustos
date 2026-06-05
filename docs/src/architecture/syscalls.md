@@ -146,6 +146,7 @@ re-validates arguments — the dispatcher does that first.
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
+| `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot
@@ -215,9 +216,11 @@ one extra audit record — `SYSCALL_FEATURE_UNAVAILABLE` (id 4020, see
 `kernel/core::audit`) — so an external consumer can tell apart
 "handler rejected because the call failed" from "handler rejected
 because the backing subsystem is intentionally inert" (`AGENTS.md`
-§15.1 — announce the deferral, never stub). That record is now emitted
-by `random_get` alone; `ipc_send`, `ipc_recv`, and `cap_delegate` no
-longer emit it. The dispatcher's standard `SYSCALL_HANDLER_REJECTED`
+§15.1 — announce the deferral, never stub). With `random_get` now wired
+(increment D.4), **no handler emits it**: every consumer of the
+user-memory copy path runs its real backing subsystem. The id stays
+reserved in `kernel/core::audit` for a future deferral. The dispatcher's
+standard `SYSCALL_HANDLER_REJECTED`
 record is *also* emitted for syscalls whose `SyscallSpec::audit == true`
 (`ipc_send`, `cap_delegate`); `cap_delegate` additionally records the
 delegate decision itself through `CapTable` (`TASK_CAPABILITIES_DELEGATED`
@@ -264,8 +267,17 @@ bridge lives in `kernel/core`, so the decoupled dispatcher
 `cap_delegate` — it copies the 32-byte `CapabilitySet` in (a faulting
 pointer or absent address space maps to `BadAddress`) and runs the
 `CapTable` delegate path (`AGENTS.md` §5.2: a widening request is
-`DelegationWiden`, an unknown target is `NotFound`). Only `random_get`
-(D.4) remains.
+`DelegationWiden`, an unknown target is `NotFound`). **D.4 landed
+`random_get`**: it draws CSPRNG output from the `rustos_rng::OutputReserve`
+composed into `KernelState` (`rng: RwLock<Box<dyn RandomReserve + Send +
+Sync>>`) and copies it into the caller's buffer through the same
+`copy_to_user` boundary, fixed-staging-buffer chunk at a time. Before the
+platform-RNG entropy seam (`AGENTS.md` §17.2) seeds the reserve it is
+unseeded, so a draw fails closed with `EntropyNotReady` (`AGENTS.md` §22 —
+never weak bytes) rather than stubbing; a faulting buffer or absent
+address space maps to `BadAddress`. With D.4 in, the whole staged
+user-memory copy path is wired; only increment E (the per-arch live
+page-fault fix-up + publishing the input ports) remains.
 
 ## Dispatcher contract
 

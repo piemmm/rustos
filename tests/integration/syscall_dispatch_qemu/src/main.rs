@@ -96,6 +96,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
+    use alloc::boxed::Box;
     use rustos_abi::{CapabilityId, SyscallNumber};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
@@ -103,7 +104,10 @@ mod kernel {
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_kernel_core::{AddressSpaceRegistry, IrqRouting, KernelSyscallHandlers};
+
+    use rustos_kernel_core::{
+        AddressSpaceRegistry, BootReserve, IrqRouting, KernelSyscallHandlers, RandomReserve,
+    };
     use rustos_kernel_ipc::PortRegistry;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig, TaskAction};
@@ -325,6 +329,12 @@ mod kernel {
         // neither of which reaches the user-memory copy path, so the
         // registry boots empty and is never resolved against.
         let aspace_registry = RwLock::new(AddressSpaceRegistry::new());
+        // Kernel random output reserve, composed exactly as production
+        // `kernel/core::init` does. This test exercises `cap_query` and
+        // `exit`, neither of which reaches `random_get`, so the reserve
+        // boots unseeded and is never drawn from.
+        let rng: RwLock<Box<dyn RandomReserve + Send + Sync>> =
+            RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>);
 
         let handlers: KernelSyscallHandlers<'_, BinArch> = KernelSyscallHandlers::new(
             &sched,
@@ -335,6 +345,7 @@ mod kernel {
             &irq_controller,
             &port_registry,
             &aspace_registry,
+            &rng,
         );
         let dispatcher = Dispatcher::new(&handlers, &INNER_SINK);
         let caller = CallerContext {

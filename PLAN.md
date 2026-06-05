@@ -5923,9 +5923,43 @@ subsystem (§2.1). Each session lands one increment and updates
     `lib/caps` codec tests (round-trip, little-endian layout, short buffer →
     `BufferTooSmall`, trailing-byte tolerance). Docs
     `docs/src/architecture/syscalls.md` + module rustdoc. No `unsafe`, no
-    `unwrap`/`expect`/`panic!` in production paths. **Still open in D:**
-    **D.4** `random_get` — needs the RNG `OutputReserve` composed into
-    `KernelState`.
+    `unwrap`/`expect`/`panic!` in production paths.
+  - **D.4 — Compose the RNG output reserve into `KernelState` + wire
+    `random_get`. DONE (increment).** `kernel/core` gains a `random` module:
+    the object-safe **`RandomReserve`** seam (`draw(out, non_blocking)`) with a
+    blanket impl over `rustos_rng::OutputReserve<E, N>` (choosing the fallible
+    `fill` or the blocking `fill_blocking`), an unseeded **`NullEntropy`** boot
+    source, the **`BootReserve`** alias, and **`reserve_errno`** (every
+    `ReserveError` fails closed to `Errno::EntropyNotReady`). `KernelState`
+    composes `rng: RwLock<Box<dyn RandomReserve + Send + Sync>>` — boxed so the
+    handler is not generic over the entropy source — booting **unseeded** over
+    `NullEntropy`, and the borrow is threaded into `KernelDispatchHook` /
+    `KernelSyscallHandlers` as the ninth argument. **`random_get`** now bounds
+    `len` (over-cap → `LengthOutOfRange`; `len == 0` → `Ok(0)`), resolves the
+    caller's address space via `with_caller_aspace`, draws CSPRNG output in
+    fixed `RANDOM_STAGE_CHUNK` (256-byte) stack chunks (no per-call heap
+    allocation that could OOM, §4), copies each chunk into the caller's buffer
+    through the validated `copy_to_user` boundary
+    (`rustos_kernel_mem::copy_out`), and zeroises the staging buffer (§22). An
+    unseeded reserve (or any entropy shortage) fails closed with
+    `EntropyNotReady` — never weak bytes (§22 / §5.4); a faulting buffer or a
+    caller with no registered address space collapses onto `BadAddress` via the
+    shared `copy_fault_errno` (§19.1). The `feature = random_output_reserve`
+    deferral audit — the last `SyscallFeatureUnavailable` emitter — is retired;
+    the now-dead `audit_feature_unavailable` helper is removed (the audit-event
+    id stays reserved for a future deferral). 4 new `random`-module tests + 5
+    new/reworked `random_get` `syscalls` tests (over-cap → `LengthOutOfRange`;
+    zero-len → `Ok(0)`; unseeded → `EntropyNotReady` with no deferral audit;
+    seeded → copies 32 non-zero bytes out; no aspace → `BadAddress`; faulting →
+    `BadAddress`); the 35 handler-test call sites thread the new `rng` borrow.
+    142 `rustos-kernel-core` tests pass. `kernel/core` gains a `rustos-rng` +
+    `zeroize` dependency (§17.4 — kernel/* may depend on lib/*). Docs
+    `docs/src/architecture/{syscalls,kernel,memory}.md`, `docs/src/lib/rng.md`,
+    `docs/src/platform/x86_64.md` + module rustdoc. **With D.4, the whole
+    staged user-memory copy path (D.1–D.4) is wired.** No `unsafe`, no
+    `unwrap`/`expect`/`panic!` in production paths. **Still pending:** the
+    platform-RNG `EntropySource` (§17.2) that re-seeds the reserve — the same
+    seam the encrypted-swap key is drawn from (Stage 8).
 - **E — Per-architecture live `copy_from_user` fault fix-up + publish the input
   ports.** The page-fault recovery path each arch port needs so a faulting user
   access returns an error instead of trapping (the Stage-6 item

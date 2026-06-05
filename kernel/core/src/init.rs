@@ -38,6 +38,7 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
+use crate::random::{BootReserve, RandomReserve};
 use crate::syscalls::KernelDispatchHook;
 
 /// Ordered identifier of every subsystem init phase orchestrated by
@@ -380,6 +381,14 @@ fn run_phases<A: KernelArch>(
         caps: RwLock::new(CapTable::new()),
         ipc: RwLock::new(PortRegistry::new()),
         aspaces: RwLock::new(AddressSpaceRegistry::new()),
+        // The kernel random output reserve boots **unseeded** over the
+        // `NullEntropy` source (`AGENTS.md` §22): a reserve always
+        // exists, but `random_get` fails closed with `EntropyNotReady`
+        // until the platform-RNG entropy seam (§17.2) re-seeds it — the
+        // same seam the encrypted-swap key is drawn from (§4), still
+        // pending. Boxed as a `dyn RandomReserve` so the boot reserve and
+        // a later seeded one share one field type.
+        rng: RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>),
         arch,
         audit_sink,
         irq: irq_table,
@@ -410,6 +419,7 @@ fn run_phases<A: KernelArch>(
             state.irq_controller,
             &state.ipc,
             &state.aspaces,
+            &state.rng,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
@@ -484,6 +494,18 @@ pub(crate) struct KernelState<A: KernelArch> {
     // populated by the spawner and withdrawn on `exit` once those call
     // sites reach it.
     pub(crate) aspaces: RwLock<AddressSpaceRegistry>,
+    /// The kernel's single cryptographic random output reserve
+    /// (`AGENTS.md` §22). The `KernelDispatchHook` borrows it so
+    /// `random_get` draws CSPRNG output from it before copying the
+    /// bytes into the caller's buffer. It boots **unseeded** over the
+    /// [`NullEntropy`](crate::random::NullEntropy) source, so a draw fails closed with
+    /// [`rustos_abi::Errno::EntropyNotReady`] until the platform-RNG
+    /// entropy seam (`AGENTS.md` §17.2) re-seeds the boxed reserve in
+    /// place. Held type-erased behind a `Box<dyn RandomReserve>` and
+    /// wrapped in the same reader-preferring `RwLock` as `caps` / `ipc`
+    /// / `aspaces` (the draw takes the write guard because the reserve
+    /// mutates its buffer as it serves, `AGENTS.md` §2.1).
+    pub(crate) rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
     pub(crate) arch: Arc<A>,
     /// Audit sink the dispatch hook emits security-relevant records
     /// through. Held here so the hook borrows it for the lifetime of

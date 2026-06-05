@@ -839,8 +839,10 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-kernel-syscall",
  "rustos-log",
+ "rustos-rng",
  "rustos-sync",
  "rustos-util",
+ "zeroize",
 ]
 
 [[package]]

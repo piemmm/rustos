@@ -77,6 +77,7 @@ pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
 pub mod panic;
+pub mod random;
 // The single scheduler selection point (`AGENTS.md` §17.1). Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
@@ -101,5 +102,6 @@ pub use fs::{
 };
 pub use init::{kernel_main, InitError, Phase};
 pub use panic::{handle_panic, panic_dump, PanicContext};
+pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use spawn::{spawn_and_enter, SpawnCallerError, SpawnRequest};
 pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};

@@ -212,7 +212,9 @@ accessor in `kernel/core` is deliberate: the decoupled dispatcher
 (`kernel/syscall`) reaches user memory without ever depending on
 `kernel/mem` (`AGENTS.md` §17.4). The handler-side copies that consume
 it (`ipc_send` / `ipc_recv` / `cap_delegate` / `random_get` through
-`copy_in` / `copy_out`) are increment D (see `PLAN.md`). Because the
+`copy_in` / `copy_out`) are increment D, now **fully landed** (D.1–D.4;
+`random_get` draws from the `rustos_rng::OutputReserve` composed into
+`KernelState` and copies it out, see `PLAN.md`). Because the
 copy entry points already accept `&dyn UserAddressSpace`, the pair that
 `with_caller_aspace` yields drives them directly, with no concrete
 `AddressSpace<P>` re-erasure at the boundary.

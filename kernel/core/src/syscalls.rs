@@ -42,37 +42,29 @@
 //! closed with `NotFound` (a real lookup miss; the dispatcher's
 //! standard pipeline audits it).
 //!
-//! `ipc_send` (increment D.1), `ipc_recv` (D.2), and `cap_delegate`
-//! (D.3) of `PLAN.md` Stage 7's "User-memory copy path" are **fully
-//! wired**: each stages its payload through the validated
-//! [`rustos_kernel_mem::copy_in`] / [`rustos_kernel_mem::copy_out`]
-//! boundary ([`KernelSyscallHandlers::with_caller_aspace`] →
-//! `copy_fault_errno`) and then runs the backing subsystem
-//! ([`rustos_kernel_ipc::Port::send`] / `recv_with`, the `CapTable`
-//! delegate path). A faulting user pointer — or a caller with no
-//! registered address space — fails closed with [`Errno::BadAddress`]
-//! (the RustOS `EFAULT`), never an oracle that distinguishes the cause
-//! (`AGENTS.md` §19.1).
+//! Every consumer of `PLAN.md` Stage 7's "User-memory copy path" is now
+//! **fully wired**: `ipc_send` (increment D.1), `ipc_recv` (D.2),
+//! `cap_delegate` (D.3), and `random_get` (D.4) each move their bytes
+//! through the validated [`rustos_kernel_mem::copy_in`] /
+//! [`rustos_kernel_mem::copy_out`] boundary
+//! ([`KernelSyscallHandlers::with_caller_aspace`] → `copy_fault_errno`)
+//! and then run the backing subsystem ([`rustos_kernel_ipc::Port::send`]
+//! / `recv_with`, the `CapTable` delegate path, and the kernel random
+//! output reserve [`crate::random::RandomReserve`]). A faulting user
+//! pointer — or a caller with no registered address space — fails closed
+//! with [`Errno::BadAddress`] (the RustOS `EFAULT`), never an oracle
+//! that distinguishes the cause (`AGENTS.md` §19.1).
 //!
-//! The remaining copy-path consumer still needs its own increment;
-//! `random_get` needs the kernel RNG output reserve composed into
-//! `KernelState` and the matching copy-out work (increment D.4), so it
-//! returns a stable errno plus a
-//! [`AuditEvent::SyscallFeatureUnavailable`] record per `AGENTS.md`
-//! §15.1 — *announce the deferral, never stub*:
+//! `random_get` draws CSPRNG output from the reserve composed into
+//! `KernelState` and copies it out (`AGENTS.md` §22). Before the reserve
+//! is seeded it is **not ready**, so the draw fails closed with
+//! [`Errno::EntropyNotReady`] rather than returning weak bytes — the
+//! reserve is seeded once the platform-RNG entropy seam (§17.2) lands.
+//! The only remaining lookup-miss deferral is an unbound IPC endpoint:
 //!
-//! | Syscall              | Condition            | Errno            | Reason |
-//! |----------------------|----------------------|------------------|--------|
-//! | `ipc_send`/`ipc_recv` | endpoint unbound     | `NotFound`       | No port is bound to the endpoint in the [`PortRegistry`]; a real lookup miss. |
-//! | `random_get`         | always               | `NotImplemented` | The kernel RNG output reserve and the copy-out path it would write through have not landed (increment D.4). |
-//!
-//! The deferred-feature branch still goes through the dispatcher's
-//! standard audit pipeline (the `RANDOM_GET` entry is
-//! `spec.audit = true`) and **additionally** emits the
-//! `SyscallFeatureUnavailable` record so a downstream consumer can
-//! tell apart "handler rejected because the call failed" from
-//! "handler rejected because the backing subsystem is intentionally
-//! inert".
+//! | Syscall               | Condition        | Errno      | Reason |
+//! |-----------------------|------------------|------------|--------|
+//! | `ipc_send`/`ipc_recv` | endpoint unbound | `NotFound` | No port is bound to the endpoint in the [`PortRegistry`]; a real lookup miss the dispatcher's standard pipeline audits. |
 //!
 //! # No ambient authority
 //!
@@ -94,11 +86,15 @@ use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers,
 use rustos_log::{Field, Sink};
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
+use zeroize::Zeroize;
+
+use alloc::boxed::Box;
 
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
+use crate::random::{reserve_errno, RandomReserve};
 
 /// Production [`SyscallHandlers`] implementation.
 ///
@@ -142,6 +138,19 @@ where
     /// (`AGENTS.md` §17.4); increment D wires the deferred `ipc_send` /
     /// `ipc_recv` / `cap_delegate` / `random_get` copies through it.
     aspaces: &'a RwLock<AddressSpaceRegistry>,
+    /// The kernel's single cryptographic random output reserve
+    /// ([`crate::random::RandomReserve`], `AGENTS.md` §22), consulted by
+    /// `random_get` to draw CSPRNG output before copying it into the
+    /// caller's buffer. Held type-erased behind a `Box` so the handler
+    /// is not generic over the reserve's entropy source — the concrete
+    /// platform-RNG seam (§17.2) is installed by re-seeding the boxed
+    /// reserve, never by changing this borrow's type. Wrapped in the
+    /// same reader-preferring [`RwLock`] as `caps` / `ipc` / `aspaces`
+    /// so the kernel composes every per-task registry under one
+    /// lock-ordering policy; drawing takes the write guard because the
+    /// reserve mutates its buffer as it serves (`AGENTS.md` §2.1 — the
+    /// reserve owns no lock of its own).
+    rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -177,6 +186,7 @@ where
         irq_controller: &'a (dyn IrqController + Sync),
         ipc: &'a RwLock<PortRegistry>,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
+        rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
     ) -> Self {
         Self {
             sched,
@@ -187,6 +197,7 @@ where
             irq_controller,
             ipc,
             aspaces,
+            rng,
         }
     }
 
@@ -241,35 +252,6 @@ where
         let (space, physmap) = registry.resolve(caller.task_id)?;
         Some(f(space, physmap))
     }
-
-    /// Emit one [`AuditEvent::SyscallFeatureUnavailable`] record.
-    ///
-    /// The handler's deferred-feature branches call this *before*
-    /// returning their stable [`Errno`] so an audit-sink observer
-    /// sees the precise reason without having to correlate against
-    /// the dispatcher's standard `SyscallHandlerRejected` emission.
-    fn audit_feature_unavailable(&self, caller: &CallerContext<'_>, feature: &'static str) {
-        let mut task_buf = [0u8; 16];
-        let ev = AuditEvent::SyscallFeatureUnavailable;
-        rustos_log::log(
-            self.audit,
-            &rustos_log::Event {
-                level: rustos_log::Level::Error,
-                id: ev.id(),
-                message: ev.message(),
-                fields: &[
-                    Field {
-                        key: "task",
-                        value: format_hex_u64(caller.task_id.0, &mut task_buf),
-                    },
-                    Field {
-                        key: "feature",
-                        value: feature,
-                    },
-                ],
-            },
-        );
-    }
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
@@ -285,6 +267,20 @@ where
 fn copy_fault_errno(_err: UaccessError) -> Errno {
     Errno::BadAddress
 }
+
+/// Size of the kernel staging buffer `random_get` draws CSPRNG output
+/// into before copying it into the caller's buffer.
+///
+/// `random_get` cannot hand the reserve the caller's user pointer (the
+/// reserve fills a kernel slice; user memory is reached only through the
+/// validated [`copy_out`] boundary), so it draws into this fixed stack
+/// buffer and copies it out one chunk at a time. A fixed size avoids a
+/// per-call heap allocation whose failure path could OOM (`AGENTS.md`
+/// §4); the buffer is wiped after use (`AGENTS.md` §22 — zeroed on
+/// consumption). 256 bytes serves the common small request in a single
+/// iteration while keeping the on-stack cost trivial; a larger request
+/// simply loops.
+const RANDOM_STAGE_CHUNK: usize = 256;
 
 impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
@@ -617,25 +613,72 @@ where
     fn random_get(
         &self,
         caller: &CallerContext<'_>,
-        _buf: u64,
+        buf: u64,
         len: usize,
-        _flags: RandomFlags,
+        flags: RandomFlags,
     ) -> SyscallResult {
-        // Bound the work one call may request (AGENTS.md §22 — a caller
-        // needing more issues further requests). This part of the
-        // contract is enforceable today, before the reserve is wired.
+        // Bound the work one call may request (`AGENTS.md` §22 — a caller
+        // needing more issues further requests).
         if len > RANDOM_REQUEST_MAX_BYTES {
             return Err(Errno::LengthOutOfRange);
         }
-        // The kernel output reserve (`rustos_rng::OutputReserve`, §22) and
-        // the user-memory copy-out path it would write through are not yet
-        // wired into `KernelState` (the per-CPU reserve and its entropy
-        // seam land alongside the Stage 6 user-memory work, the same
-        // prerequisite `cap_delegate` defers on). Announce the deferral
-        // rather than stub randomness (AGENTS.md §15.1) — never return
-        // weak or zero bytes (§5.4 fail closed).
-        self.audit_feature_unavailable(caller, "random_output_reserve");
-        Err(Errno::NotImplemented)
+        // A zero-length request draws nothing and writes nothing; it
+        // succeeds without consulting the reserve or the caller's buffer.
+        if len == 0 {
+            return Ok(0);
+        }
+
+        // A non-blocking caller must never wait for the RNG to be seeded
+        // (`AGENTS.md` §22); it fails closed with `EntropyNotReady`
+        // instead. The flag has no effect once the reserve is seeded —
+        // generation never waits for fresh entropy.
+        let non_blocking = flags.is_non_blocking();
+
+        // Resolve the caller's address space once and stream the bytes
+        // out under its read guard. The reserve produces CSPRNG output
+        // into a fixed kernel staging buffer — never a per-call heap
+        // allocation whose failure path could OOM (`AGENTS.md` §4) — and
+        // each chunk is copied into the caller's buffer through the
+        // validated `copy_out` boundary, then the staging is wiped
+        // (`AGENTS.md` §22 — zeroed on consumption). The whole draw runs
+        // under the reserve's write guard so one request observes a
+        // contiguous stream from a single generator.
+        let outcome = self.with_caller_aspace(caller, |space, physmap| {
+            let mut reserve = self.rng.write();
+            let mut staging = [0u8; RANDOM_STAGE_CHUNK];
+            let mut offset = 0usize;
+            while offset < len {
+                let take = core::cmp::min(staging.len(), len - offset);
+                let chunk = &mut staging[..take];
+                if let Err(e) = reserve.draw(chunk, non_blocking) {
+                    staging.zeroize();
+                    return Err(reserve_errno(e));
+                }
+                // The destination is the caller pointer advanced by the
+                // bytes already delivered. A pointer that overflows the
+                // address space fails closed as `BadAddress` rather than
+                // wrapping (`AGENTS.md` §5.4).
+                let Some(addr) = buf.checked_add(offset as u64) else {
+                    staging.zeroize();
+                    return Err(Errno::BadAddress);
+                };
+                if let Err(e) = copy_out(space, physmap, VirtAddr::new(addr), chunk) {
+                    staging.zeroize();
+                    return Err(copy_fault_errno(e));
+                }
+                offset += take;
+            }
+            // Wipe the staging buffer once the request is fully served
+            // (`AGENTS.md` §22 — the kernel copy of the output never
+            // lingers).
+            staging.zeroize();
+            Ok(offset as u64)
+        });
+        // A caller with no registered address space (a kernel task, or
+        // one withdrawn on `exit`) collapses onto the same fail-closed
+        // `BadAddress` every copy-path handler returns (`AGENTS.md` §5.4
+        // / §19.1).
+        outcome.unwrap_or(Err(Errno::BadAddress))
     }
 }
 
@@ -748,6 +791,7 @@ where
         irq_controller: &'a (dyn IrqController + Sync),
         ipc: &'a RwLock<PortRegistry>,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
+        rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -759,6 +803,7 @@ where
                 irq_controller,
                 ipc,
                 aspaces,
+                rng,
             ),
             sched,
             caps,
@@ -867,6 +912,9 @@ mod tests {
     };
     use rustos_kernel_sec::{TaskCapabilities, UserId};
     use rustos_log::{set_max_level, Level};
+    use rustos_rng::{EntropyError, EntropySource, OutputReserve};
+
+    use crate::random::BootReserve;
 
     fn install_trace_filter() {
         // The global log filter defaults to `Error`; `SyscallFeatureUnavailable`
@@ -901,6 +949,43 @@ mod tests {
     fn make_sched(arch: Arc<TestArch>) -> Scheduler<TestArch> {
         let cfg = SchedulerConfig::defaults_for(1);
         Scheduler::new(cfg, arch).expect("scheduler builds")
+    }
+
+    /// Deterministic stand-in entropy source for the `random_get`
+    /// copy-out tests (not real entropy): a counter expanded so a seeded
+    /// reserve's output is reproducible and non-zero.
+    struct TestEntropy(u64);
+
+    impl EntropySource for TestEntropy {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            for byte in out.iter_mut() {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                *byte = self.0.to_le_bytes()[4];
+            }
+            Ok(())
+        }
+    }
+
+    /// The **unseeded** boot reserve every generic handler test composes:
+    /// those tests never call `random_get`, so the reserve's state is
+    /// irrelevant — what matters is that the handler receives its ninth
+    /// borrow exactly as production does (`KernelState`).
+    fn unseeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
+        RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>)
+    }
+
+    /// A reserve **seeded** from the deterministic [`TestEntropy`] source,
+    /// ready to serve the `random_get` copy-out tests with reproducible
+    /// non-zero bytes.
+    fn seeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
+        let mut reserve = OutputReserve::<TestEntropy>::new();
+        reserve
+            .seed(TestEntropy(0x00C0_FFEE))
+            .expect("the deterministic source seeds");
+        RwLock::new(Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>)
     }
 
     /// Bind an unrestricted port at `endpoint` into `registry`.
@@ -941,6 +1026,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(0xDEAD, &[], sink);
@@ -949,7 +1035,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.yield_now(&ctx), Err(Errno::NotFound));
     }
 
@@ -963,6 +1051,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -978,7 +1067,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let r = h.exit(&ctx, 0);
         // Scheduler half returns `NoSuchTask` → `NotFound`.
         assert_eq!(r, Err(Errno::NotFound));
@@ -996,6 +1087,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(1, &[CapabilityId::FS_MOUNT], sink);
@@ -1004,7 +1096,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.cap_query(&ctx, CapabilityId::FS_MOUNT), Ok(1));
         assert_eq!(h.cap_query(&ctx, CapabilityId::DRV_KERNEL), Ok(0));
     }
@@ -1022,6 +1116,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -1030,7 +1125,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::NotFound));
         // The endpoint never resolved, so the handler did not announce
@@ -1087,6 +1184,7 @@ mod tests {
         let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(2), space, physmap)
@@ -1100,7 +1198,9 @@ mod tests {
         };
 
         register_port(&ipc, 1, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, payload.len()), Ok(0));
         // The deferral audit is gone now that the copy-in path is live.
@@ -1128,6 +1228,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(2), space, physmap)
@@ -1141,7 +1242,9 @@ mod tests {
         };
 
         register_port(&ipc, 1, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         // Page 2 (`0x2000`) is unmapped in the caller's space.
         assert_eq!(h.ipc_send(&ctx, 1, 0x2000, 4), Err(Errno::BadAddress));
         assert!(
@@ -1162,6 +1265,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -1171,7 +1275,9 @@ mod tests {
         };
 
         register_port(&ipc, 1, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 4), Err(Errno::BadAddress));
         assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
     }
@@ -1188,6 +1294,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -1198,7 +1305,9 @@ mod tests {
 
         // `register_port` binds a port with `max_payload == 64`.
         register_port(&ipc, 1, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.ipc_send(&ctx, 1, 0x1000, 65), Err(Errno::MessageTooLarge));
         assert!(ipc.read().lookup(EndpointId(1)).expect("bound").is_empty());
     }
@@ -1214,6 +1323,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(3, &[], sink);
@@ -1222,7 +1332,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 8), Err(Errno::NotFound));
         assert!(sink.event_ids().is_empty());
@@ -1257,6 +1369,7 @@ mod tests {
         // the test can read the bytes back through `copy_in`.
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(3), space, physmap)
@@ -1272,7 +1385,9 @@ mod tests {
         register_port(&ipc, 1, sink);
         let payload = [0xDEu8, 0xAD, 0xBE, 0xEF];
         enqueue(&ipc, 1, &payload, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
 
         assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Ok(payload.len() as u64));
         // The dequeue committed: the mailbox is now empty.
@@ -1301,6 +1416,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(3), space, physmap)
@@ -1314,7 +1430,9 @@ mod tests {
         };
 
         register_port(&ipc, 1, sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::WouldBlock));
     }
 
@@ -1332,6 +1450,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(3), space, physmap)
@@ -1346,7 +1465,9 @@ mod tests {
 
         register_port(&ipc, 1, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
 
         // A 2-byte buffer cannot hold the 4-byte message.
         assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 2), Err(Errno::BufferTooSmall));
@@ -1367,6 +1488,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(3), space, physmap)
@@ -1381,7 +1503,9 @@ mod tests {
 
         register_port(&ipc, 1, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
 
         // Page 2 (`0x2000`) is unmapped in the caller's space.
         assert_eq!(h.ipc_recv(&ctx, 1, 0x2000, 64), Err(Errno::BadAddress));
@@ -1401,6 +1525,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(3, &[], sink);
@@ -1411,7 +1536,9 @@ mod tests {
 
         register_port(&ipc, 1, sink);
         enqueue(&ipc, 1, &[1, 2, 3, 4], sink);
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.ipc_recv(&ctx, 1, 0x1000, 64), Err(Errno::BadAddress));
         assert_eq!(ipc.read().lookup(EndpointId(1)).expect("bound").len(), 1);
     }
@@ -1447,6 +1574,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -1461,7 +1589,9 @@ mod tests {
         };
         register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Ok(0));
 
@@ -1496,6 +1626,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -1514,7 +1645,9 @@ mod tests {
             &caps_with(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]),
         );
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(
             h.cap_delegate(&ctx, 10, 0x1000),
             Err(Errno::DelegationWiden)
@@ -1538,6 +1671,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(4, &[CapabilityId::USER_ADMIN], sink);
@@ -1547,7 +1681,9 @@ mod tests {
         };
         register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.cap_delegate(&ctx, 999, 0x1000), Err(Errno::NotFound));
     }
 
@@ -1563,6 +1699,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -1576,7 +1713,9 @@ mod tests {
         };
         register_set_at_page1(&aspaces, 4, &caps_with(&[CapabilityId::FS_MOUNT]));
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.cap_delegate(&ctx, 10, 0x2000), Err(Errno::BadAddress));
         // The target's set is untouched.
         assert!(table
@@ -1599,6 +1738,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -1612,7 +1752,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.cap_delegate(&ctx, 10, 0x1000), Err(Errno::BadAddress));
     }
 
@@ -1627,6 +1769,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -1640,7 +1783,9 @@ mod tests {
             caps: &caller_caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
 
         // Hit: revoke FS_MOUNT from task 10.
         assert_eq!(h.cap_revoke(&ctx, 10, CapabilityId::FS_MOUNT), Ok(0));
@@ -1674,6 +1819,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -1682,7 +1828,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         let raw = h.irq_bind(&ctx, 5).expect("bind succeeds");
         assert_ne!(raw, 0, "fresh handle must not be IrqHandle::INVALID");
@@ -1716,6 +1864,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -1724,7 +1873,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(h.irq_bind(&ctx, 100), Err(Errno::OutOfRange));
     }
 
@@ -1740,6 +1891,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
@@ -1748,7 +1900,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let _ = h.irq_bind(&ctx, 5).expect("first bind ok");
         assert_eq!(h.irq_bind(&ctx, 5), Err(Errno::OutOfRange));
     }
@@ -1765,6 +1919,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
@@ -1773,7 +1928,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         assert_eq!(
             h.irq_wait(&ctx, IrqHandle::from_raw(0xDEAD_BEEF), 0),
             Err(Errno::NotFound)
@@ -1791,6 +1948,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
@@ -1799,7 +1957,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let raw = h.irq_bind(&ctx, 5).expect("bind");
         assert_eq!(
             h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0),
@@ -1832,6 +1992,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController; // syscall handler does not invoke `fire`
         let permissive = PermissiveController;
@@ -1841,7 +2002,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let raw = h.irq_bind(&ctx, 5).expect("bind");
         // Fire externally against the permissive controller (the
         // arch-port's trap path uses the controller borrowed by
@@ -1864,6 +2027,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(9, &[CapabilityId::IRQ_BIND], sink);
@@ -1872,7 +2036,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let _ = h.irq_bind(&ctx, 5).expect("bind 5");
         let _ = h.irq_bind(&ctx, 6).expect("bind 6");
         assert_eq!(irq.len(), 2);
@@ -1895,6 +2061,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
@@ -1903,7 +2070,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let a = h.clock_get(&ctx).expect("first read");
         let b = h.clock_get(&ctx).expect("second read");
         // Full resolution: consecutive single-tick reads are distinct.
@@ -1923,6 +2092,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[], sink);
@@ -1931,7 +2101,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let g = rustos_abi::COARSE_CLOCK_GRANULARITY_NS;
 
         // Stage a known raw reading; the next `monotonic_ns` returns
@@ -1964,6 +2136,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let hires = make_caps_record(6, &[CapabilityId::TIME_HIRES], sink);
@@ -1977,7 +2150,9 @@ mod tests {
             caps: &plain,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
 
         arch.set_monotonic_ns(7_000);
         let raw = h.clock_get(&hires_ctx).expect("hires read"); // 7_001
@@ -1989,7 +2164,8 @@ mod tests {
     }
 
     /// `random_get` refuses an over-large request up front with
-    /// `LengthOutOfRange`, before any deferral audit is emitted.
+    /// `LengthOutOfRange`, before it consults the reserve or the
+    /// caller's buffer.
     #[test]
     fn random_get_rejects_request_above_cap() {
         install_trace_filter();
@@ -1999,6 +2175,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(11, &[], sink);
@@ -2007,7 +2184,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(
             h.random_get(
@@ -2018,16 +2197,16 @@ mod tests {
             ),
             Err(Errno::LengthOutOfRange)
         );
-        // Refused before reaching the deferred-feature branch.
+        // Refused before consulting the reserve or the caller's buffer.
         assert!(sink.event_ids().is_empty());
     }
 
-    /// An in-range `random_get` defers the (unlanded) output-reserve /
-    /// user-memory copy-out, announcing the deferral exactly like
-    /// `cap_delegate` rather than returning weak or zero bytes
-    /// (`AGENTS.md` §15.1, §22).
+    /// A zero-length `random_get` succeeds with `0` without consulting
+    /// the reserve or the caller's buffer — it returns before
+    /// `with_caller_aspace`, so even an unseeded reserve and an
+    /// unregistered caller are fine.
     #[test]
-    fn random_get_defers_reserve_and_audits_feature_unavailable() {
+    fn random_get_zero_len_is_ok_without_touching_reserve() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -2035,6 +2214,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(12, &[], sink);
@@ -2043,15 +2223,163 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.random_get(&ctx, 0x1000, 0, RandomFlags::empty()), Ok(0));
+    }
+
+    /// `random_get` against the **unseeded** boot reserve fails closed
+    /// with `EntropyNotReady` (`AGENTS.md` §22 — never weak bytes before
+    /// the RNG is seeded), even with a perfectly writable buffer, and
+    /// emits no `SyscallFeatureUnavailable` deferral.
+    #[test]
+    fn random_get_unseeded_reserve_is_entropy_not_ready() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(12), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(12, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(12),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         sink.clear();
         assert_eq!(
-            h.random_get(&ctx, 0x4000, 32, RandomFlags::NON_BLOCKING),
-            Err(Errno::NotImplemented)
+            h.random_get(&ctx, 0x1000, 32, RandomFlags::NON_BLOCKING),
+            Err(Errno::EntropyNotReady)
+        );
+        assert!(!sink
+            .event_ids()
+            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
+    }
+
+    /// `random_get` against a **seeded** reserve copies the requested
+    /// bytes into the caller's buffer and returns the count — the
+    /// increment-D.4 wiring of the output-reserve copy-out path. The
+    /// bytes land at the caller's pointer (CSPRNG output is non-zero
+    /// w.h.p.) and no deferral is announced.
+    #[test]
+    fn random_get_copies_bytes_out_from_seeded_reserve() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = seeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(12), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(12, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(12),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        sink.clear();
+        assert_eq!(h.random_get(&ctx, 0x1000, 32, RandomFlags::empty()), Ok(32));
+        assert!(!sink
+            .event_ids()
+            .contains(&AuditEvent::SyscallFeatureUnavailable.id().0));
+        // The bytes landed at the caller's pointer and are not all zero
+        // (a seeded CSPRNG never returns an all-zero block here).
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 32];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_ne!(delivered, [0u8; 32], "the reserve wrote real output");
+    }
+
+    /// `random_get` from a seeded reserve but a caller with no registered
+    /// address space fails closed with `BadAddress` (the RustOS
+    /// `EFAULT`) — the same code every copy-path handler returns
+    /// (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn random_get_without_registered_aspace_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = seeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(12, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(12),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            sink.event_ids(),
-            alloc::vec![AuditEvent::SyscallFeatureUnavailable.id().0]
+            h.random_get(&ctx, 0x1000, 32, RandomFlags::empty()),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// `random_get` with a faulting user pointer fails closed with
+    /// `BadAddress`: page 2 (`0x2000`) is unmapped in the caller's space,
+    /// so the copy-out cannot deliver.
+    #[test]
+    fn random_get_with_faulting_pointer_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = seeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(12), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(12, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(12),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.random_get(&ctx, 0x2000, 32, RandomFlags::empty()),
+            Err(Errno::BadAddress)
         );
     }
 
@@ -2088,6 +2416,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(5), user_space(1, 9), sim_map())
@@ -2100,7 +2429,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         // The closure sees the caller's own address space: page 1
         // resolves to frame 9 with the flags it was mapped with.
         let resolved = h.with_caller_aspace(&ctx, |space, _physmap| space.translate(page(1)));
@@ -2123,6 +2454,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(6, &[], sink);
@@ -2131,7 +2463,9 @@ mod tests {
             caps: &caps,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let mut ran = false;
         let resolved = h.with_caller_aspace(&ctx, |_space, _physmap| {
             ran = true;
@@ -2153,6 +2487,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
         aspaces
             .write()
             .register(SecTaskId(1), user_space(1, 100), sim_map())
@@ -2174,7 +2509,9 @@ mod tests {
             caps: &caps2,
         };
 
-        let h = KernelSyscallHandlers::new(&sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
         let frame1 = h
             .with_caller_aspace(&ctx1, |space, _| space.translate(page(1)).map(|(f, _)| f))
             .expect("task 1 resolves");
