@@ -1,0 +1,51 @@
+[package]
+name = "rustos-test-c-program-qemu-riscv64"
+description = "CCOMPAT stage CC5 QEMU integration test: build a real C program (tests/integration/cc5_program/csrc/main.c) with the audited clang/ld.lld wrapper (tools/cc), link it against the Rust crt0 + ros_sys_* runtime staticlib into a PIE image, convert it to an rxe blob, spawn it on the riscv64 virt board with rustos_kernel_core::spawn_and_enter, and assert the program's abi-v1 checks + syscall round-trips pass (exit code 99). Proves the generated C header, the syscall stub runtime, and crt0 agree with the Rust side end to end."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/CCOMPAT.md` stage CC5 riscv64 round-trip: a genuinely
+# C-compiled program, linked against the curated System runtime / C ABI class
+# (crt0 + the `ros_sys_*` stubs) via the `rustos-test-cc5-program` staticlib
+# shim, runs end to end. The build script compiles `csrc/main.c` with the
+# audited `rustos-cc` wrapper (version-pinned + checksummed clang/ld.lld), links
+# a PIE image, and converts it to an `rxe` blob carrying the kernel's compiled-in
+# syscall CFI tag. On boot the test stands up an Sv39 address space, installs the
+# trap vector + a dispatch callback that services the program's `cap_query` /
+# `clock_get` round-trips, then spawns the program through the production
+# capability-checked, audited `rustos_kernel_core::spawn_and_enter`. The
+# program's `exit` syscall traps back; the callback asserts the exit code is 99
+# (every abi-v1 check + round-trip passed) before the `SiFive` Test PASS finisher.
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the CC3 round-trip tests.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-c-program-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-cc = { path = "../../../tools/cc", version = "=0.0.0" }

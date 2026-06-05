@@ -530,6 +530,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-cc"
+version = "0.0.0"
+dependencies = [
+ "rustos-crypto",
+]
+
+[[package]]
 name = "rustos-chmod"
 version = "0.0.0"
 dependencies = [
@@ -1146,12 +1153,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-c-program-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-cc3-program"
 version = "0.0.0"
 dependencies = [
  "rustos-abi-sys",
  "rustos-crt0",
  "rustos-itest-harness",
+]
+
+[[package]]
+name = "rustos-test-cc5-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi-sys",
+ "rustos-crt0",
 ]
 
 [[package]]

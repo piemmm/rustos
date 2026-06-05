@@ -664,9 +664,57 @@ manifest/syscall-hash mismatch.
 
 ### Stage CC5 — End-to-end C program + fuzzing
 
-**Status: in progress — the fuzz/regression deliverable has landed; the
-audited C toolchain wrapper, the in-tree C program, and the QEMU round-trip
-are still outstanding.** **Depends on** CC1–CC4 (all done).
+**Status: in progress — fuzz/regression done; the audited C toolchain wrapper,
+the in-tree C program, and the **riscv64** QEMU round-trip have now landed
+(this session, below). The aarch64 + x86_64 C-program round-trips remain (they
+follow the same shape, as CC3 did).** **Depends on** CC1–CC4 (all done).
+
+**What landed this session (the headline — riscv64 vertical).**
+- **Audited C toolchain wrapper `tools/cc` (`rustos-cc`).** A host-only,
+  `#![forbid(unsafe_code)]` wrapper around `clang` + `ld.lld` (`AGENTS.md` §12
+  — no unaudited shell-out). It version-pins both tools (fails closed unless
+  they report `REQUIRED_CLANG_VERSION` / `REQUIRED_LLD_VERSION`, currently
+  `18.1.3`), SHA-256-checksums each resolved binary with the audited
+  `lib/crypto` (recorded for the build transcript; verified against an optional
+  `RUSTOS_CC_*_SHA256` pin), and exposes pure, unit-tested argv builders for a
+  freestanding/PIC/canary-protected compile and a hardened-PIE
+  (`-pie --gc-sections -z noexecstack`) link, over a closed `CTarget` set of
+  the three native Tier-1 targets. 17 host unit tests; clippy `-D warnings`
+  clean. RustOS stays Rust-only (§1) — this only *hosts* a C program.
+- **A real in-tree C program.** `tests/integration/cc5_program/csrc/main.c` is
+  written in C, `#include`s `include/rustos/…`, and exercises a representative
+  slice of `abi-v1`: a `Time64` value across the §21 pre-1970 / post-2038
+  boundaries, an `ipc` message header, a `sysinfo` request header, and two real
+  syscall round-trips (`cap_query`, `clock_get`). It links the curated *System
+  runtime / C ABI* class (crt0 + the `ros_sys_*` stubs) via a sibling Rust
+  `staticlib` shim (`tests/integration/cc5_program/src/lib.rs`,
+  `rustos-test-cc5-program`) that `extern crate`s `rustos-crt0` + `rustos-abi-sys`
+  so `_start` / `ros_sys_*` / `__stack_chk_guard` land in one `.a`.
+- **The riscv64 QEMU round-trip.** `tests/integration/c_program_qemu_riscv64`
+  (`rustos-test-c-program-qemu-riscv64`, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs` + the workspace `Cargo.toml`). Its
+  `build.rs` builds the shim `staticlib` PIE (`-Z build-std` +
+  `relocation-model=pie`), compiles `main.c` with `rustos-cc`, links one PIE
+  ELF (carrying **only** `R_RISCV_RELATIVE` relocations, W^X-clean), and
+  converts it to an `rxe` blob via `elf_to_rxe` stamped with the kernel's
+  `SYSCALL_TABLE_HASH`. The kernel-side test reuses the CC3 spawn machinery
+  (`spawn_and_enter` under `CAP_PROC_SPAWN`, the Sv39 `PageTableOps` adapter)
+  and installs a dispatch callback that services `cap_query`(asserting the
+  marshalled cap id)→`1` / `clock_get`→a 64-bit sentinel and asserts the `exit`
+  code is `99`. **QEMU-proven PASS**, and a deliberately-wrong expectation
+  **verified FAIL** ("C program exited with the wrong code"). Not in the
+  host-only `cargo xtask ci` gate; runs under `cargo xtask test --qemu`.
+- **No new `lib/abi` decoder** was introduced (the C chunk reuses
+  `LoadImage::parse` / `ProcessStart`; `elf_to_rxe` lives in the test harness),
+  so the existing fuzz harness + regression corpus already cover it — nothing
+  new to enroll (`AGENTS.md` §19.6).
+- **Docs:** new `docs/src/abi/calling-from-c.md` worked-example guide (wired
+  into the mdBook `SUMMARY.md`); the PIE link script is the architecture-neutral
+  one the CC3 fixture already owns (reused, not duplicated, §2.2).
+
+**Still outstanding:** the aarch64 + x86_64 C-program round-trips (the EL0 /
+ring-3 analogues, reusing `cc5_program` + `rustos-cc` + `elf_to_rxe` exactly as
+CC3's verticals did).
 
 **What landed this stage (fuzz/regression).** The CC3/CC4 decoders
 (`ProcessStart::parse`, `ProcessStartHeader::from_bytes`,

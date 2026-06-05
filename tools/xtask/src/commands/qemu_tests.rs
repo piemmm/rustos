@@ -371,6 +371,36 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
+    // end-to-end C-program round-trip — the headline CC5 work. The build
+    // script builds the Rust crt0 + `ros_sys_*` runtime shim
+    // (`tests/integration/cc5_program`) as a PIE `staticlib`, compiles the
+    // genuinely C-language program (`cc5_program/csrc/main.c`) with the audited,
+    // version-pinned, checksummed `clang`/`ld.lld` wrapper (`tools/cc`,
+    // AGENTS.md §12), links them into one PIE image, and converts it to an `rxe`
+    // blob (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI
+    // tag. On boot the test stands up an Sv39 address space (identity-mapping
+    // the kernel + MMIO), installs the trap vector and a dispatch callback, then
+    // calls the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // the program's U-mode image and `sret` into it. The C program checks a
+    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
+    // services those (asserting the marshalled cap id, returning a 64-bit
+    // sentinel) and asserts the `exit` code is 99 before the `SiFive` Test PASS
+    // finisher. Proves the generated C header, the `ros_sys_*` runtime, and crt0
+    // agree with the Rust side end to end. Single CPU; 60-second run budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-riscv64",
+        binary: "rustos-test-c-program-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

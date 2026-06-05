@@ -7314,11 +7314,20 @@ syscall stubs + crt0), dynamically linked like every other curated library.
   corpus now backs them (`lib/abi/tests/regression_corpus.rs`): hand-crafted
   boundary images replayed through the "must not panic + accepted decode
   round-trips" contract plus per-validating-decoder accept/reject verdict
-  locks; `docs/src/security/fuzzing.md` documents it. **Still outstanding:**
-  the audited, version-pinned, checksummed C toolchain wrapper under `tools/`
-  (in the spirit of §12), the minimal in-tree C program that `#include`s
-  `include/rustos/…` + links the `ros_sys_*` runtime + crt0, and the QEMU
-  round-trip exercising a representative `abi-v1` slice. See
+  locks; `docs/src/security/fuzzing.md` documents it. The **headline** work has
+  now landed too, on **riscv64**: the audited, version-pinned, checksummed C
+  toolchain wrapper `tools/cc` (`rustos-cc`, wrapping `clang` + `ld.lld`, §12,
+  17 host tests), a genuinely C-language in-tree program
+  (`tests/integration/cc5_program/csrc/main.c`) that `#include`s
+  `include/rustos/…` and links the `ros_sys_*` runtime + crt0 via the
+  `rustos-test-cc5-program` `staticlib` shim, and the QEMU round-trip
+  `tests/integration/c_program_qemu_riscv64` (build script compiles + links the
+  C PIE with `rustos-cc`, converts it via `elf_to_rxe`, spawns it with
+  `spawn_and_enter`; the C program checks a §21 `Time64` value + ipc/sysinfo
+  headers and round-trips `cap_query`/`clock_get`, exiting 99 — **QEMU-proven
+  PASS + a deliberately-wrong-expectation FAIL**). New docs page
+  `docs/src/abi/calling-from-c.md`. **Still outstanding:** the aarch64 + x86_64
+  C-program round-trips (the EL0 / ring-3 analogues, same shape as CC3). See
   `.junie/next-ccompat-prompt.md`.
 
 Native Tier-1 targets only (`x86_64`, `aarch64`, `riscv64`); the syscall-stub
