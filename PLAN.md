@@ -223,7 +223,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
       proptest fairness test in `lib/sync/tests/rwlock_fairness.rs`,
       decision tree in `docs/src/architecture/sync.md`.
 - [x] 2.2 — `kernel/mem`: buddy/bitmap `FrameAllocator` honouring a typed
-      `BootMemoryMap`, per-process `AddressSpace<P: PageTableOps>` with a
+      `BootMemoryMap`, per-process `AddressSpace<P: PageTable>` (the Arch
+      HAL `mmu::AddressSpace + tlb::TlbShootdown` bound alias; W5b-2) with a
       `HostPageTable` test double behind `#[cfg(test)]`, kernel `Slab`
       with guard pages on both sides, `alloc_sensitive` / `free_sensitive`
       zero-on-free backed by `zeroize`, and `Result<_, AllocError>` on every
@@ -618,11 +619,17 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       gates which HAL *modules* compile). Docs:
       `docs/src/architecture/modularity.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
-      `plans/WIRING.md`. **Remaining for W5 (W5b-2):** wire `kernel/mem`'s
-      allocator-backed per-process `AddressSpace<P>` onto the HAL trait
-      (replacing `kernel/mem`'s local `PageTableOps`) and add the
-      `TlbShootdown` slice (per-page local invalidation + cross-CPU
-      shootdown, the latter depending on the aarch64 IPI from W6).
+      `plans/WIRING.md`. **W5b-2 (done):** extended the MMU HAL trait with
+      `translate`/`unmap` (+ `MapError::NotMapped`), added the
+      `TlbShootdown` per-page-invalidation slice (each with a host
+      conformance vertical), folded `kernel/mem`'s per-process
+      `AddressSpace<P>` onto `P: mmu::AddressSpace + TlbShootdown` (the
+      `PageTable` bound alias) and **removed** its local `PageTableOps`
+      trait, renamed every consumer + the six `{spawn,c}_program_qemu_*`
+      crates (deleting their `*UserPageTable` adapters). **Remaining
+      (W5b-3):** back the per-port page tables with `kernel/mem`'s frame
+      allocator instead of the static `PageTablePool` (via a HAL
+      frame-source seam, §17.4); cross-CPU TLB shootdown stays W6.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

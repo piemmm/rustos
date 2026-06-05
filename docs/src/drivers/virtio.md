@@ -245,7 +245,7 @@ links `kernel/{mem,sec,irq}`, which a driver crate may not
 and the audit `Sink` `S`:
 
 ```rust
-pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
+pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
     /* RefCell<DmaPool<'a, P>>, &'a TaskCapabilities, &'a S,
        fresh PoolId, monotonic slot counter, live-slot table,
        &'a IrqTable, IrqHandle, &'a dyn IrqWaiter */

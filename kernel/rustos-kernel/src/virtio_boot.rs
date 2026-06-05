@@ -27,7 +27,7 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_virtio::PciTransport;
 use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
-use rustos_kernel_mem::{FrameAllocator, MmioMap, PageTableOps, PhysMap, VirtAddr};
+use rustos_kernel_mem::{FrameAllocator, MmioMap, PageTable, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_virtio::kernel_mmio::KernelMmioMapper;
 use rustos_log::Sink;
@@ -42,7 +42,7 @@ use rustos_kernel_virtio::virtio_pci_walk::{provision_virtio_pci, VirtioPciWalkE
 /// it mints live only for the duration of the `body` closure passed to
 /// [`provision_and_run`]. `P` is the page-table backend shared by the
 /// MMIO map and each minted per-driver address space.
-pub struct VirtioBootConfig<'k, 'p, P: PageTableOps> {
+pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
     /// PCI bus the device is provisioned from, reached only through the
     /// frozen [`VirtioPciBus`] ABI seam.
     pub bus: &'k dyn VirtioPciBus,
@@ -114,7 +114,7 @@ pub fn provision_and_run<P, F, R>(
     body: impl FnOnce(&mut Host<'_>, &PciTransport) -> R,
 ) -> Result<R, VirtioPciWalkError>
 where
-    P: PageTableOps,
+    P: PageTable,
     F: Fn() -> P,
 {
     let VirtioBootConfig {

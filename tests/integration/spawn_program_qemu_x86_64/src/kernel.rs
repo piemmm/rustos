@@ -13,10 +13,7 @@ use rustos_arch_x86_64::{qemu_exit, syscall_entry};
 use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
 use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
-use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, Frame, MapFlags, Page, PageTableError, PageTableOps, PhysAddr,
-    UserStack,
-};
+use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_log::{log, Event, EventId, Level, Sink};
 
@@ -113,66 +110,6 @@ struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
         cap == CapabilityId::PROC_SPAWN
-    }
-}
-
-/// A `PageTableOps` adapter over the x86_64 [`paging::AddressSpace`].
-///
-/// `kernel/mem`'s `build_process_image` is generic over a [`PageTableOps`]
-/// backend; this is the bare-metal x86_64 backend the round-trip needs. It
-/// lives in the test crate rather than `kernel/arch/x86_64` because §17.4
-/// forbids an architecture crate from depending on `kernel/mem` (where the
-/// trait lives); the test crate may depend on both. The `unsafe` page-table
-/// walk stays encapsulated in `paging`; this adapter only translates flags
-/// and routes calls (`AGENTS.md` §2.10).
-struct X86UserPageTable {
-    arch: paging::AddressSpace,
-    pool: &'static paging::PageTablePool,
-}
-
-impl X86UserPageTable {
-    fn new(arch: paging::AddressSpace, pool: &'static paging::PageTablePool) -> Self {
-        Self { arch, pool }
-    }
-}
-
-impl PageTableOps for X86UserPageTable {
-    fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
-        let vaddr = page.start().as_u64();
-        let paddr = frame.start().as_u64();
-        // `build_process_image` always sets `MapFlags::USER`. W^X: a code
-        // segment is `EXEC` (RX, non-writable); data is `WRITE` (RW,
-        // non-executable); read-only data is neither (R, non-executable). The
-        // NX bit is honoured because `run_round_trip` enabled `IA32_EFER.NXE`.
-        let writable = flags.contains(MapFlags::WRITE);
-        let executable = flags.contains(MapFlags::EXEC);
-        self.arch
-            .map_4k_user_wx(self.pool, vaddr, paddr, writable, executable)
-            .ok_or(PageTableError::AllocFailed(
-                rustos_kernel_mem::AllocError::OutOfMemory,
-            ))
-    }
-
-    fn unmap(&mut self, _page: Page) -> Result<Frame, PageTableError> {
-        // The spawn builder never unmaps; refusing keeps the adapter minimal.
-        Err(PageTableError::NotMapped)
-    }
-
-    fn translate(&self, _page: Page) -> Option<(Frame, MapFlags)> {
-        // The spawn builder never translates; it only maps and fills.
-        None
-    }
-
-    fn flush(&mut self, page: Page) {
-        // The address space is already active, so a freshly inserted leaf needs
-        // a local TLB invalidation for its virtual address.
-        let vaddr = page.start().as_u64();
-        // SAFETY: `invlpg` is the documented single-page TLB-invalidate
-        // instruction; it touches only the cached translation for `vaddr`,
-        // which we have just (re)mapped. No Rust spelling exists.
-        unsafe {
-            core::arch::asm!("invlpg [{addr}]", addr = in(reg) vaddr, options(nostack, preserves_flags));
-        }
     }
 }
 
@@ -295,7 +232,11 @@ fn run_round_trip() -> ! {
     //    physmap offsets a frame's physical address back to its higher-half
     //    kernel virtual address (the static's own address), so the builder's
     //    kernel-side fill writes land in the right place.
-    let mut space = AddressSpace::new(X86UserPageTable::new(arch, &PAGE_TABLE_POOL));
+    // The arch `paging::AddressSpace` implements the Arch HAL page-table
+    // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
+    // `kernel/mem` façade drives it with no per-test adapter (`AGENTS.md`
+    // §2.2; the Stage W5b-2 wiring removed the old `PageTableOps` shim).
+    let mut space = AddressSpace::new(arch);
     let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30);
     let request = SpawnRequest {
         image: &image,

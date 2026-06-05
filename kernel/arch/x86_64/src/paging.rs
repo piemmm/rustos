@@ -20,15 +20,22 @@
 //!   identity-maps the first 32 MiB of physical memory, add an extra
 //!   4 KiB mapping, switch CR3.
 //!
-//! When Stage 3a lands the proper allocator-backed page-table type, this
-//! module becomes the `unsafe`-correctness bedrock for `kernel/mem`'s
-//! `PageTableOps` impl. The current API is intentionally a strict subset
-//! so that promotion does not require interface creep (`AGENTS.md` §2.4).
+//! It implements the Arch HAL page-table surface
+//! ([`rustos_arch_api::mmu::AddressSpace`] +
+//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives. The
+//! page-table *walk* (`map_page` / `translate` / `unmap`) recovers
+//! intermediate tables through the low identity map and so is only valid
+//! on the bare-metal target; like [`AddressSpace::activate`] it is proven
+//! by the `memory_isolation` QEMU vertical, not a host conformance test
+//! (the host build of those methods is `unreachable!`). The bit math is
+//! a strict subset so promotion does not require interface creep
+//! (`AGENTS.md` §2.4).
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+use rustos_arch_api::tlb::TlbShootdown;
 
 /// Size of a single x86_64 page-table page.
 pub const PAGE_SIZE: usize = 4096;
@@ -455,6 +462,112 @@ impl MmuAddressSpace for AddressSpace {
         }
     }
 
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        // The four-level walk is only valid on the bare-metal target (it
+        // recovers tables through the low identity map), exactly like
+        // `map_page`; on the host it is unreachable.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+            let e4 = self.pml4[i4];
+            if e4 & flags::PRESENT == 0 {
+                return None;
+            }
+            // SAFETY: a present entry holds a low identity-mapped table
+            // address `ensure_child` wrote (the same round-trip
+            // `leaf_present` relies on).
+            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e3 = pdpt[i3];
+            if e3 & flags::PRESENT == 0 {
+                return None;
+            }
+            if e3 & flags::HUGE != 0 {
+                return Some((
+                    resolved_page(e3 & ADDR_MASK, vaddr, 30),
+                    page_flags_from_pte(e3),
+                ));
+            }
+            // SAFETY: as above — a present non-huge PDPT entry's address
+            // is a live identity-mapped PD.
+            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e2 = pd[i2];
+            if e2 & flags::PRESENT == 0 {
+                return None;
+            }
+            if e2 & flags::HUGE != 0 {
+                return Some((
+                    resolved_page(e2 & ADDR_MASK, vaddr, 21),
+                    page_flags_from_pte(e2),
+                ));
+            }
+            // SAFETY: as above — a present non-huge PD entry's address is
+            // a live identity-mapped PT.
+            let pt = unsafe { &*((e2 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e1 = pt[i1];
+            if e1 & flags::PRESENT == 0 {
+                return None;
+            }
+            Some((e1 & ADDR_MASK, page_flags_from_pte(e1)))
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = vaddr;
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
+    }
+
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+            // Navigate to the 4 KiB PT leaf without allocating. A missing
+            // level or a huge-page leaf means there is no 4 KiB leaf to
+            // tear down here — fail closed (per-page unmap never shatters
+            // a huge page).
+            let e4 = self.pml4[i4];
+            if e4 & flags::PRESENT == 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present entry → identity-mapped PDPT (see `translate`).
+            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e3 = pdpt[i3];
+            if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present non-huge PDPT entry → identity-mapped PD.
+            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
+            let e2 = pd[i2];
+            if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
+                return Err(MapError::NotMapped);
+            }
+            // SAFETY: present non-huge PD entry → identity-mapped PT, and
+            // `&mut self` makes the exclusive borrow of the leaf sound.
+            let pt = unsafe { &mut *((e2 & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
+            let e1 = pt[i1];
+            if e1 & flags::PRESENT == 0 {
+                return Err(MapError::NotMapped);
+            }
+            pt[i1] = 0;
+            Ok(e1 & ADDR_MASK)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = vaddr;
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
+    }
+
     fn root_phys(&self) -> u64 {
         self.pml4_phys
     }
@@ -473,6 +586,59 @@ impl MmuAddressSpace for AddressSpace {
             unreachable!("CR3 activation is only meaningful on the x86_64 bare-metal target")
         }
     }
+}
+
+impl TlbShootdown for AddressSpace {
+    fn flush_page(&mut self, vaddr: u64) {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // SAFETY: `invlpg` invalidates the calling CPU's TLB entry for
+            // the page containing the operand address; it touches no
+            // memory and only discards a cached translation. No Rust
+            // spelling exists.
+            unsafe {
+                core::arch::asm!(
+                    "invlpg [{addr}]",
+                    addr = in(reg) vaddr,
+                    options(nostack, preserves_flags),
+                );
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            // The host has no TLB to invalidate; a flush is vacuous.
+            let _ = vaddr;
+        }
+    }
+}
+
+/// Decode an x86_64 leaf PTE's permission bits back into the neutral
+/// [`PageFlags`]. Present implies readable; `WRITABLE`/`USER` map
+/// directly; executability is the inverse of the `NO_EXECUTE` bit. Only
+/// compiled on the bare-metal target where the page-table walk runs.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn page_flags_from_pte(pte: u64) -> PageFlags {
+    let mut out = PageFlags::READ;
+    if pte & flags::WRITABLE != 0 {
+        out = out | PageFlags::WRITE;
+    }
+    if pte & flags::USER != 0 {
+        out = out | PageFlags::USER;
+    }
+    if pte & flags::NO_EXECUTE == 0 {
+        out = out | PageFlags::EXEC;
+    }
+    out
+}
+
+/// 4 KiB-aligned physical address `vaddr` resolves to under a leaf whose
+/// region starts at `leaf_base` and spans `1 << region_shift` bytes
+/// (30 = 1 GiB PDPT leaf, 21 = 2 MiB PD leaf, 12 = 4 KiB PT leaf). Only
+/// compiled on the bare-metal target.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
+    let region_mask = (1u64 << region_shift) - 1;
+    (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

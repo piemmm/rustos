@@ -6,18 +6,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use rustos_arch_aarch64::paging::{
-    self, el0_code_leaf_attrs, el0_data_leaf_attrs, el0_rodata_leaf_attrs,
-};
+use rustos_arch_aarch64::paging;
 use rustos_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode, SERIAL_SINK,
 };
 use rustos_bumpalloc::BumpAllocator;
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
-use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, Frame, MapFlags, Page, PageTableError, PageTableOps, PhysAddr,
-    UserStack,
-};
+use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_log::{log, Event, EventId, Level};
 
@@ -130,86 +125,6 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// A `PageTableOps` adapter over the aarch64 stage-1 [`paging::AddressSpace`].
-///
-/// `kernel/mem`'s `build_process_image` is generic over a [`PageTableOps`]
-/// backend; this is the bare-metal aarch64 backend the round-trip needs. It
-/// lives in the test crate rather than `kernel/arch/aarch64` because §17.4
-/// forbids an architecture crate from depending on `kernel/mem` (where the
-/// trait lives); the test crate may depend on both. The `unsafe` stage-1 walk
-/// and `TTBR0`/TLB sequencing stay encapsulated in `paging`; this adapter only
-/// translates flags and routes calls (`AGENTS.md` §2.10).
-struct AarchUserPageTable {
-    arch: paging::AddressSpace,
-    pool: &'static paging::PageTablePool,
-}
-
-impl AarchUserPageTable {
-    fn new(arch: paging::AddressSpace, pool: &'static paging::PageTablePool) -> Self {
-        Self { arch, pool }
-    }
-}
-
-/// Translate the architecture-neutral [`MapFlags`] into the EL0 stage-1 page
-/// leaf attributes. `build_process_image` always sets [`MapFlags::USER`], so
-/// every mapping this adapter receives is an EL0 mapping; the executable /
-/// writable bits pick the matching leaf-attribute helper (W^X: code is
-/// read-only-executable, data is read/write-non-executable, read-only data is
-/// read-only-non-executable).
-fn to_el0_attrs(flags: MapFlags) -> u64 {
-    if flags.contains(MapFlags::EXEC) {
-        el0_code_leaf_attrs()
-    } else if flags.contains(MapFlags::WRITE) {
-        el0_data_leaf_attrs()
-    } else {
-        el0_rodata_leaf_attrs()
-    }
-}
-
-impl PageTableOps for AarchUserPageTable {
-    fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
-        let vaddr = page.start().as_u64();
-        let paddr = frame.start().as_u64();
-        self.arch
-            .map_4k_with_attrs(self.pool, vaddr, paddr, to_el0_attrs(flags))
-            .ok_or(PageTableError::AllocFailed(
-                rustos_kernel_mem::AllocError::OutOfMemory,
-            ))
-    }
-
-    fn unmap(&mut self, _page: Page) -> Result<Frame, PageTableError> {
-        // The spawn builder never unmaps; refusing keeps the adapter minimal.
-        Err(PageTableError::NotMapped)
-    }
-
-    fn translate(&self, _page: Page) -> Option<(Frame, MapFlags)> {
-        // The spawn builder never translates; it only maps and fills.
-        None
-    }
-
-    fn flush(&mut self, page: Page) {
-        // The address space is already active, so a freshly inserted leaf needs
-        // a local TLB invalidation by virtual address. `tlbi vaae1` takes the
-        // VA shifted right by 12 (the page number); `dsb`/`isb` order the
-        // invalidation before the next access.
-        let va_page = page.start().as_u64() >> 12;
-        // SAFETY: `tlbi vaae1` is the documented stage-1 by-VA TLB-invalidate
-        // instruction; it touches no memory and only invalidates the cached
-        // translation for the page we have just (re)mapped. No Rust spelling
-        // exists.
-        unsafe {
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi vaae1, {va}",
-                "dsb ish",
-                "isb",
-                va = in(reg) va_page,
-                options(nostack, preserves_flags),
-            );
-        }
-    }
-}
-
 /// The syscall dispatch callback the program's `exit` `svc` reaches.
 ///
 /// Asserts the program terminated through `exit` with [`EXPECTED_EXIT`], then
@@ -309,7 +224,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // 3. Build the EL0 image into the (active) address space and enter it
     //    through the production capability-checked, audited spawn caller.
-    let mut space = AddressSpace::new(AarchUserPageTable::new(arch, &PAGE_TABLE_POOL));
+    // The arch `paging::AddressSpace` implements the Arch HAL page-table
+    // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
+    // `kernel/mem` façade drives it with no per-test adapter (`AGENTS.md`
+    // §2.2; the Stage W5b-2 wiring removed the old `PageTableOps` shim).
+    let mut space = AddressSpace::new(arch);
     let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
     let request = SpawnRequest {
         image: &image,

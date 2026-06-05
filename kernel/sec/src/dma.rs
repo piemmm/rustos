@@ -23,7 +23,7 @@
 //! No `unsafe`, no `unwrap`, no `panic!`: see `AGENTS.md` §2.9 / §2.10.
 
 use rustos_abi::{CapabilityId, Errno};
-use rustos_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTableOps};
+use rustos_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTable};
 use rustos_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
@@ -97,7 +97,7 @@ impl From<DmaError> for DmaGateError {
 ///   [`CapabilityId::MEM_DMA`].
 /// * [`DmaGateError::Pool`] — propagated from the pool (out of
 ///   memory, oversized request, etc.).
-pub fn alloc_dma<P: PageTableOps, S: Sink + ?Sized>(
+pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
     pool: &mut DmaPool<'_, P>,
     caller: &TaskCapabilities,
     requested: usize,
@@ -170,7 +170,7 @@ pub fn alloc_dma<P: PageTableOps, S: Sink + ?Sized>(
 /// # Errors
 ///
 /// See [`alloc_dma`].
-pub fn free_dma<P: PageTableOps, S: Sink + ?Sized>(
+pub fn free_dma<P: PageTable, S: Sink + ?Sized>(
     pool: &mut DmaPool<'_, P>,
     caller: &TaskCapabilities,
     buf: DmaBuffer,

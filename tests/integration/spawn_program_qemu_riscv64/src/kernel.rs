@@ -12,10 +12,7 @@ use rustos_arch_riscv64::{
 };
 use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
-use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, Frame, MapFlags, Page, PageTableError, PageTableOps, PhysAddr,
-    UserStack,
-};
+use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_log::{log, Event, EventId, Level};
 
@@ -118,79 +115,6 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// A `PageTableOps` adapter over the riscv64 Sv39 [`paging::AddressSpace`].
-///
-/// `kernel/mem`'s `build_process_image` is generic over a [`PageTableOps`]
-/// backend; this is the bare-metal riscv64 backend the round-trip needs. It
-/// lives in the test crate rather than `kernel/arch/riscv64` because §17.4
-/// forbids an architecture crate from depending on `kernel/mem` (where the
-/// trait lives); the test crate may depend on both. The `unsafe` Sv39 walk and
-/// `satp`/TLB sequencing stay encapsulated in `paging`; this adapter only
-/// translates flags and routes calls (`AGENTS.md` §2.10).
-struct RiscvUserPageTable {
-    arch: paging::AddressSpace,
-    pool: &'static paging::PageTablePool,
-}
-
-impl RiscvUserPageTable {
-    fn new(arch: paging::AddressSpace, pool: &'static paging::PageTablePool) -> Self {
-        Self { arch, pool }
-    }
-}
-
-/// Translate the architecture-neutral [`MapFlags`] into Sv39 permission bits.
-/// `map_4k` adds the `VALID`/`ACCESSED`/`DIRTY` bits itself.
-fn to_sv39_flags(flags: MapFlags) -> u64 {
-    let mut f = 0;
-    if flags.contains(MapFlags::READ) {
-        f |= paging::flags::READ;
-    }
-    if flags.contains(MapFlags::WRITE) {
-        f |= paging::flags::WRITE;
-    }
-    if flags.contains(MapFlags::EXEC) {
-        f |= paging::flags::EXEC;
-    }
-    if flags.contains(MapFlags::USER) {
-        f |= paging::flags::USER;
-    }
-    f
-}
-
-impl PageTableOps for RiscvUserPageTable {
-    fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
-        let vaddr = page.start().as_u64();
-        let paddr = frame.start().as_u64();
-        self.arch
-            .map_4k(self.pool, vaddr, paddr, to_sv39_flags(flags))
-            .ok_or(PageTableError::AllocFailed(
-                rustos_kernel_mem::AllocError::OutOfMemory,
-            ))
-    }
-
-    fn unmap(&mut self, _page: Page) -> Result<Frame, PageTableError> {
-        // The spawn builder never unmaps; refusing keeps the adapter minimal.
-        Err(PageTableError::NotMapped)
-    }
-
-    fn translate(&self, _page: Page) -> Option<(Frame, MapFlags)> {
-        // The spawn builder never translates; it only maps and fills.
-        None
-    }
-
-    fn flush(&mut self, page: Page) {
-        // The address space is already active, so a freshly inserted leaf needs
-        // a local TLB shootdown for its virtual address (`sfence.vma {addr}`).
-        let vaddr = page.start().as_u64();
-        // SAFETY: `sfence.vma` is the documented Sv39 TLB-flush instruction; it
-        // touches no memory and only invalidates the cached translation for
-        // `vaddr`, which we have just (re)mapped. No Rust spelling exists.
-        unsafe {
-            core::arch::asm!("sfence.vma {addr}, zero", addr = in(reg) vaddr, options(nostack, preserves_flags));
-        }
-    }
-}
-
 /// The syscall dispatch callback the program's `exit` `ecall` reaches.
 ///
 /// Asserts the program terminated through `exit` with [`EXPECTED_EXIT`], then
@@ -271,7 +195,11 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
 
     // 3. Build the U-mode image into the (active) address space and enter it
     //    through the production capability-checked, audited spawn caller.
-    let mut space = AddressSpace::new(RiscvUserPageTable::new(arch, &PAGE_TABLE_POOL));
+    // The arch `paging::AddressSpace` implements the Arch HAL page-table
+    // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
+    // `kernel/mem` façade drives it with no per-test adapter (`AGENTS.md`
+    // §2.2; the Stage W5b-2 wiring removed the old `PageTableOps` shim).
+    let mut space = AddressSpace::new(arch);
     let physmap = DirectPhysMap::identity(u64::from(u32::MAX) + 1); // 4 GiB
     let request = SpawnRequest {
         image: &image,

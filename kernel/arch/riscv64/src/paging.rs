@@ -1,7 +1,9 @@
 //! Sv39 page-table primitives for the riscv64 memory-isolation test.
 //!
 //! This module is the riscv64 analogue of `kernel/arch/x86_64::paging`.
-//! It operates one level *below* `kernel/mem`'s `PageTableOps`: it
+//! It implements the Arch HAL page-table surface
+//! ([`rustos_arch_api::mmu::AddressSpace`] +
+//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives: it
 //! supplies the architectural mechanism the memory-isolation QEMU
 //! vertical needs — two Sv39 page-table hierarchies that disagree about
 //! a single virtual address, so the MMU faults a process that reaches
@@ -27,6 +29,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+use rustos_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
@@ -372,6 +375,37 @@ fn sv39_flags(flags: PageFlags) -> u64 {
     bits
 }
 
+/// Decode an Sv39 leaf PTE's permission bits back into the neutral
+/// [`PageFlags`] (the inverse of [`sv39_flags`]). riscv64 has no
+/// page-table Device attribute, so [`PageFlags::DEVICE`] is not
+/// recoverable from a leaf and is never reported.
+fn page_flags_from_sv39(pte: u64) -> PageFlags {
+    let mut out = PageFlags::empty();
+    if pte & flags::READ != 0 {
+        out = out | PageFlags::READ;
+    }
+    if pte & flags::WRITE != 0 {
+        out = out | PageFlags::WRITE;
+    }
+    if pte & flags::EXEC != 0 {
+        out = out | PageFlags::EXEC;
+    }
+    if pte & flags::USER != 0 {
+        out = out | PageFlags::USER;
+    }
+    out
+}
+
+/// 4 KiB-aligned physical address `vaddr` resolves to under a leaf whose
+/// region starts at `leaf_base` and spans `1 << region_shift` bytes
+/// (30 = gigapage, 21 = megapage, 12 = 4 KiB). The page offset is
+/// dropped so the result is always page-aligned (the HAL `translate`
+/// contract reports the 4 KiB page base).
+fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
+    let region_mask = (1u64 << region_shift) - 1;
+    (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
+}
+
 impl MmuAddressSpace for AddressSpace {
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {
@@ -390,6 +424,75 @@ impl MmuAddressSpace for AddressSpace {
             .ok_or(MapError::PoolExhausted)
     }
 
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        let e2 = self.root[vpn_index(vaddr, 2)];
+        if (e2 & flags::VALID) == 0 {
+            return None;
+        }
+        if pte_is_leaf(e2) {
+            return Some((
+                resolved_page(phys_from_pte(e2), vaddr, 30),
+                page_flags_from_sv39(e2),
+            ));
+        }
+        // SAFETY: a present non-leaf entry holds a PPN `ensure_child`
+        // wrote from `phys_of(&[u64; 512])`; identity mapping makes that
+        // physical address directly dereferenceable (the same round-trip
+        // `leaf_present` relies on).
+        let l1 = unsafe { &*(phys_from_pte(e2) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e1 = l1[vpn_index(vaddr, 1)];
+        if (e1 & flags::VALID) == 0 {
+            return None;
+        }
+        if pte_is_leaf(e1) {
+            return Some((
+                resolved_page(phys_from_pte(e1), vaddr, 21),
+                page_flags_from_sv39(e1),
+            ));
+        }
+        // SAFETY: as above — a present non-leaf L1 entry's PPN is a valid
+        // identity-mapped table address.
+        let l0 = unsafe { &*(phys_from_pte(e1) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e0 = l0[vpn_index(vaddr, 0)];
+        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
+            return None;
+        }
+        Some((phys_from_pte(e0), page_flags_from_sv39(e0)))
+    }
+
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // Navigate to the 4 KiB leaf without allocating. A missing level
+        // or a large-page leaf encountered on the way means there is no
+        // 4 KiB leaf to tear down here — fail closed (the per-page unmap
+        // path never shatters a gigapage/megapage).
+        let e2 = self.root[vpn_index(vaddr, 2)];
+        if (e2 & flags::VALID) == 0 || pte_is_leaf(e2) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: a present non-leaf entry's PPN is an identity-mapped
+        // table address (see `translate`); `&mut self` makes the
+        // exclusive borrow sound.
+        let l1 = unsafe { &mut *(phys_from_pte(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let e1 = l1[vpn_index(vaddr, 1)];
+        if (e1 & flags::VALID) == 0 || pte_is_leaf(e1) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: as above — a present non-leaf L1 entry's PPN is a valid
+        // identity-mapped table address.
+        let l0 = unsafe { &mut *(phys_from_pte(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let i0 = vpn_index(vaddr, 0);
+        let e0 = l0[i0];
+        if (e0 & flags::VALID) == 0 || !pte_is_leaf(e0) {
+            return Err(MapError::NotMapped);
+        }
+        let paddr = phys_from_pte(e0);
+        l0[i0] = 0;
+        Ok(paddr)
+    }
+
     fn root_phys(&self) -> u64 {
         self.root_phys
     }
@@ -406,6 +509,30 @@ impl MmuAddressSpace for AddressSpace {
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
             unreachable!("Sv39 activation is only meaningful on the riscv64 bare-metal target")
+        }
+    }
+}
+
+impl TlbShootdown for AddressSpace {
+    fn flush_page(&mut self, vaddr: u64) {
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            // SAFETY: `sfence.vma {addr}, zero` is the documented Sv39
+            // single-page TLB invalidation; it touches no memory and only
+            // discards the cached translation for `vaddr`. No Rust
+            // spelling exists.
+            unsafe {
+                core::arch::asm!(
+                    "sfence.vma {addr}, zero",
+                    addr = in(reg) vaddr,
+                    options(nostack, preserves_flags),
+                );
+            }
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            // The host has no TLB to invalidate; a flush is vacuous.
+            let _ = vaddr;
         }
     }
 }

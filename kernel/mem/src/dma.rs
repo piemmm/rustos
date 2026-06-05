@@ -83,7 +83,7 @@ use crate::error::AllocError;
 use crate::frame::{Frame, FrameAllocator, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
-use crate::vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
+use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
 
 /// Errors specific to [`DmaPool`].
 ///
@@ -198,7 +198,7 @@ impl DmaBuffer {
 
 /// Per-process DMA pool.
 ///
-/// `DmaPool<P>` is generic over a [`PageTableOps`] implementation so
+/// `DmaPool<P>` is generic over a [`PageTable`] implementation so
 /// it can be exercised by `crate::HostPageTable` in unit tests and
 /// driven by the architecture page-table types from `kernel/arch/*` in
 /// production.
@@ -207,7 +207,7 @@ impl DmaBuffer {
 /// `CapabilityId::MEM_DMA`; the capability check itself lives in
 /// `kernel/sec::dma` so this crate stays free of the `rustos-abi`
 /// dependency.
-pub struct DmaPool<'a, P: PageTableOps> {
+pub struct DmaPool<'a, P: PageTable> {
     address_space: AddressSpace<P>,
     base: VirtAddr,
     capacity_pages: usize,
@@ -250,7 +250,7 @@ struct Record {
     start_frame: Frame,
 }
 
-impl<'a, P: PageTableOps> DmaPool<'a, P> {
+impl<'a, P: PageTable> DmaPool<'a, P> {
     /// Construct a new pool managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
     ///

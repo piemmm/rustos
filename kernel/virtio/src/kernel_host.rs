@@ -57,7 +57,7 @@ use core::ptr::NonNull;
 
 use rustos_abi::{DriverError, IrqHandle};
 use rustos_kernel_irq::{block_until_ready, IrqTable, IrqWaiter};
-use rustos_kernel_mem::{DmaBuffer, DmaPool, PageTableOps};
+use rustos_kernel_mem::{DmaBuffer, DmaPool, PageTable};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
 use rustos_log::Sink;
@@ -83,7 +83,7 @@ use rustos_virtio::{DmaSlab, PoolId, VirtioHost};
 /// Every slab re-enters the host through its free shim on drop, so
 /// all outstanding slabs must be dropped before the host (and the
 /// [`DmaPool`] it owns) is dropped.
-pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
+pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
     pool: RefCell<DmaPool<'a, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
@@ -107,7 +107,7 @@ pub struct KernelVirtioHost<'a, P: PageTableOps, S: Sink + ?Sized> {
     waiter: &'a dyn IrqWaiter,
 }
 
-impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
+impl<'a, P: PageTable, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
     /// Take ownership of a [`DmaPool`] behind a capability-checking
     /// host.
     ///
@@ -200,7 +200,7 @@ impl<'a, P: PageTableOps, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
 ///   slab will then have been double-freed, which is `Drop`'s
 ///   responsibility to avoid — see [`DmaSlab::drop`] running exactly
 ///   once).
-unsafe fn slab_free_shim<P: PageTableOps, S: Sink + ?Sized>(
+unsafe fn slab_free_shim<P: PageTable, S: Sink + ?Sized>(
     pool: *const (),
     slot: usize,
     _len: usize,
@@ -224,7 +224,7 @@ unsafe fn slab_free_shim<P: PageTableOps, S: Sink + ?Sized>(
     }
 }
 
-impl<P: PageTableOps, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
+impl<P: PageTable, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if size == 0 {
             return Err(DriverError::BufferTooSmall);

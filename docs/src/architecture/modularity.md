@@ -228,17 +228,23 @@ three-level stage-1 table programmed into `TTBR0_EL1` with `SCTLR_EL1.M`.
 once at the HAL boundary into native PTE bits — one vocabulary, `AGENTS.md`
 §2.2), failing closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/
 `InvalidFlags`, `AGENTS.md` §2.9) and rejecting a W^X-violating write+exec
-leaf (`AGENTS.md` §19.2). `AddressSpace::root_phys` reports the
-root-table physical address, and `AddressSpace::activate` makes the space
-the live translation regime (and performs the port's coarse TLB flush).
-Each port implements the trait on its existing `paging::AddressSpace`,
-translating `PageFlags` into native leaf attributes and forwarding
-`activate` to its gated `switch` primitive, so the page-table walk and
-the register write each live in exactly one place.
+leaf (`AGENTS.md` §19.2). `AddressSpace::translate` is the read-only
+inverse — a walk that decodes a leaf back to its physical page and
+`PageFlags`, or `None` — and `AddressSpace::unmap` tears a 4 KiB leaf
+down and returns its frame (failing closed with `NotMapped` on an absent
+or large-page address). `AddressSpace::root_phys` reports the root-table
+physical address, and `AddressSpace::activate` makes the space the live
+translation regime (and performs the port's coarse TLB flush). Each port
+implements the trait on its existing `paging::AddressSpace`, translating
+`PageFlags` to and from native leaf attributes and forwarding `activate`
+to its gated `switch` primitive, so the page-table walk and the register
+write each live in exactly one place.
 
-`mmu::conformance::run_all` asserts the `map_page` contract on the host
-(a non-null root; misaligned addresses rejected; a good mapping accepted;
-a double mapping refused), driven per-port — the suite needs a
+`mmu::conformance::run_all` asserts the full map lifecycle on the host
+(a non-null root; misaligned addresses rejected; a good mapping accepted
+and then translating back to its frame; a double mapping refused; an
+unmap returning the frame and then translating to nothing; a second
+unmap failing closed), driven per-port — the suite needs a
 port-constructed address space and a port-specific mappable address pair,
 the same reason the `irq`/`timer` verticals stand apart. riscv64 and
 aarch64 run it over their real `AddressSpace` (their walk recovers tables
@@ -253,12 +259,31 @@ three `memory_isolation_qemu_*` verticals build their victim/attacker
 spaces through this trait, so the §4 "isolation is enforced by hardware"
 property is proven *through the HAL*.
 
-This is the `plans/WIRING.md` Stage W5b-1 slice: the bootstrap page-table
-primitive lifted behind the HAL. Wiring `kernel/mem`'s allocator-backed
-per-process address space onto the trait, and the per-page + cross-CPU
-TLB shootdown (whose aarch64 half depends on the Stage W6 IPI), are the
-tracked Stage W5b-2 / W6 follow-ups, not duplicated here (`AGENTS.md`
+### TLB shootdown
+
+The `TlbShootdown` slice (`kernel/arch/api::tlb`) gives the kernel one
+name for per-CPU single-page TLB invalidation, whose instruction differs
+per target: x86_64 `invlpg`, aarch64 `tlbi vaae1is` (with `dsb`/`isb`
+barriers), riscv64 `sfence.vma`. `kernel/mem`'s per-process map/unmap
+path calls `TlbShootdown::flush_page` after editing a leaf so the next
+access re-walks the updated table. A flush only ever *discards* cached
+state, so it is infallible by construction; `tlb::conformance::run_all`
+proves the observable half on the host (object-safe, panic-free for any
+address, including misaligned and zero) for every port — the real
+instruction is exercised by the spawn / `memory_isolation` QEMU
+verticals. The *cross-CPU* shootdown depends on the Stage W6 aarch64
+directed IPI and is a tracked follow-up, not stubbed here (`AGENTS.md`
 §2.2).
+
+This is the `plans/WIRING.md` Stage W5b lineage: Stage W5b-1 lifted the
+bootstrap page-table primitive behind the HAL; Stage W5b-2 folded
+`kernel/mem`'s `AddressSpace` onto the `mmu::AddressSpace` +
+`TlbShootdown` traits (removing its local `PageTableOps` trait) and added
+the `translate`/`unmap`/`flush_page` surface and the per-page TLB
+shootdown. Backing the per-port page tables with `kernel/mem`'s frame
+allocator instead of the static `PageTablePool` is the tracked Stage
+W5b-3 follow-up, and cross-CPU shootdown is W6 — neither is duplicated
+here (`AGENTS.md` §2.2).
 
 ## `cargo xtask cfg-check`
 

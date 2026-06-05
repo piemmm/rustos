@@ -34,7 +34,7 @@
 use core::cell::RefCell;
 
 use rustos_abi::{MmioMapError, MmioMapper, RegisterWindow};
-use rustos_kernel_mem::{MmioError, MmioMap, PageTableOps};
+use rustos_kernel_mem::{MmioError, MmioMap, PageTable};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::mmio::{map_mmio, MmioGateError};
 use rustos_log::Sink;
@@ -45,13 +45,13 @@ use rustos_log::Sink;
 /// exercised by `kernel/mem::HostPageTable` in unit tests and by the
 /// architecture page-table types in production) and the audit
 /// [`Sink`] implementation `S`.
-pub struct KernelMmioMapper<'a, 'p, P: PageTableOps, S: Sink + ?Sized> {
+pub struct KernelMmioMapper<'a, 'p, P: PageTable, S: Sink + ?Sized> {
     map: RefCell<&'a mut MmioMap<'p, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
 }
 
-impl<'a, 'p, P: PageTableOps, S: Sink + ?Sized> KernelMmioMapper<'a, 'p, P, S> {
+impl<'a, 'p, P: PageTable, S: Sink + ?Sized> KernelMmioMapper<'a, 'p, P, S> {
     /// Wrap a borrowed [`MmioMap`] in a capability-checking mapper.
     ///
     /// `caller` is the [`TaskCapabilities`] of the bus-driver task;
@@ -78,7 +78,7 @@ impl<'a, 'p, P: PageTableOps, S: Sink + ?Sized> KernelMmioMapper<'a, 'p, P, S> {
     }
 }
 
-impl<P: PageTableOps, S: Sink + ?Sized> MmioMapper for KernelMmioMapper<'_, '_, P, S> {
+impl<P: PageTable, S: Sink + ?Sized> MmioMapper for KernelMmioMapper<'_, '_, P, S> {
     fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
         let region = {
             let mut map = self.map.borrow_mut();

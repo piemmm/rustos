@@ -54,9 +54,9 @@ refused (`RxeError::SegmentNotReadable`); unknown flag bits are refused
 therefore unrepresentable.
 
 The `kernel/mem` `map_flags_for` translation reinforces this: it never
-emits `MapFlags::WRITE | MapFlags::EXEC`, and the underlying
-`PageTableOps` independently rejects that combination, so W^X holds
-twice over.
+emits `MapFlags::WRITE | MapFlags::EXEC`, and the underlying Arch HAL
+page table (`rustos_arch_api::mmu::AddressSpace`) independently rejects
+that combination (`MapError::InvalidFlags`), so W^X holds twice over.
 
 ## PIE + KASLR
 

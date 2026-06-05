@@ -167,6 +167,11 @@ pub enum MapError {
     /// The requested [`PageFlags`] are not representable on this port
     /// (e.g. a W^X-violating write+exec leaf, `AGENTS.md` §19.2).
     InvalidFlags,
+    /// The target virtual address has no live 4 KiB leaf to operate on
+    /// (reported by [`AddressSpace::unmap`] when asked to tear down an
+    /// address that was never mapped); the port refuses rather than
+    /// fabricating a frame (`AGENTS.md` §2.9).
+    NotMapped,
 }
 
 /// The per-process / bootstrap address-space handle an architecture port
@@ -197,6 +202,28 @@ pub trait AddressSpace {
     /// mapping (`AGENTS.md` §2.9).
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError>;
 
+    /// Translate `vaddr` to the physical page it maps and the leaf's
+    /// [`PageFlags`], or `None` when `vaddr` has no live 4 KiB leaf.
+    ///
+    /// A read-only page-table walk: it never installs or mutates a
+    /// mapping. The returned physical address is the 4 KiB leaf base
+    /// (`vaddr`'s page offset is *not* re-applied); the flags are the
+    /// neutral permission set the leaf carries, decoded back from the
+    /// port's native page-table-entry bits at the HAL boundary
+    /// (`AGENTS.md` §2.2).
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)>;
+
+    /// Tear down the 4 KiB mapping for `vaddr` and return the physical
+    /// page it resolved to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
+    /// or [`MapError::NotMapped`] if `vaddr` has no live 4 KiB leaf. The
+    /// port leaves the address space unchanged on either error and never
+    /// fabricates a frame (`AGENTS.md` §2.9).
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError>;
+
     /// Physical address of this space's root translation table — the
     /// value programmed into `CR3` / `satp` / `TTBR0_EL1`.
     fn root_phys(&self) -> u64;
@@ -221,7 +248,8 @@ pub trait AddressSpace {
 /// against its real [`AddressSpace`]. The suite is portable — it names
 /// only the trait — and runs on the host, exactly like the sibling
 /// [`crate::context::conformance`] and [`crate::timer::conformance`]
-/// verticals. It exercises only [`AddressSpace::map_page`] and
+/// verticals. It exercises [`AddressSpace::map_page`],
+/// [`AddressSpace::translate`], [`AddressSpace::unmap`], and
 /// [`AddressSpace::root_phys`] (pure walk/encoding math);
 /// [`AddressSpace::activate`] is proven by each port's `memory_isolation`
 /// QEMU vertical (see the module docs).
@@ -242,8 +270,11 @@ pub mod conformance {
     ///
     /// Panics (failing the test) if the root-table address is zero, if a
     /// misaligned address is *not* rejected fail-closed, if a good
-    /// mapping is refused, or if a second mapping of the same page is
-    /// *not* rejected.
+    /// mapping is refused, if a second mapping of the same page is *not*
+    /// rejected, if the mapping does not then translate back to its
+    /// physical page, or if the round-trip map → translate → unmap →
+    /// translate-again lifecycle does not fail closed on the torn-down
+    /// page.
     pub fn run_all<A: AddressSpace + ?Sized>(space: &mut A, va: u64, pa: u64) {
         const PAGE: u64 = 4096;
         assert!(
@@ -253,7 +284,9 @@ pub mod conformance {
         root_table_is_non_null(space);
         rejects_misaligned_vaddr(space, va, pa);
         rejects_misaligned_paddr(space, va, pa);
-        maps_a_good_page_then_refuses_a_double_map(space, va, pa);
+        unmapped_address_does_not_translate(space, va);
+        maps_translates_then_refuses_a_double_map(space, va, pa);
+        unmaps_then_translates_to_nothing(space, va, pa);
     }
 
     /// A constructed address space already carries its root table, so its
@@ -284,9 +317,21 @@ pub mod conformance {
         );
     }
 
-    /// A good address pair maps once; a second map of the same page is
-    /// refused rather than silently clobbering the first.
-    fn maps_a_good_page_then_refuses_a_double_map<A: AddressSpace + ?Sized>(
+    /// An address with no live leaf translates to nothing rather than
+    /// fabricating a frame (`AGENTS.md` §2.9).
+    fn unmapped_address_does_not_translate<A: AddressSpace + ?Sized>(space: &A, va: u64) {
+        assert_eq!(
+            space.translate(va),
+            None,
+            "an address with no live leaf must not translate"
+        );
+    }
+
+    /// A good address pair maps once and then translates back to its
+    /// physical page with the permissions it was mapped with; a second
+    /// map of the same page is refused rather than silently clobbering
+    /// the first.
+    fn maps_translates_then_refuses_a_double_map<A: AddressSpace + ?Sized>(
         space: &mut A,
         va: u64,
         pa: u64,
@@ -294,10 +339,43 @@ pub mod conformance {
         space
             .map_page(va, pa, PageFlags::READ | PageFlags::WRITE)
             .expect("a page-aligned, in-range mapping must succeed");
+        let (mapped_pa, flags) = space
+            .translate(va)
+            .expect("a freshly mapped page must translate");
+        assert_eq!(mapped_pa, pa, "translate must report the mapped frame");
+        assert!(
+            flags.contains(PageFlags::READ) && flags.contains(PageFlags::WRITE),
+            "translate must report the permissions the leaf was mapped with"
+        );
         assert_eq!(
             space.map_page(va, pa, PageFlags::READ | PageFlags::WRITE),
             Err(MapError::AlreadyMapped),
             "mapping the same page twice must be refused"
+        );
+    }
+
+    /// The page mapped above unmaps once (returning its frame), then no
+    /// longer translates, and a second unmap fails closed with
+    /// [`MapError::NotMapped`] — the map/unmap lifecycle is symmetric.
+    fn unmaps_then_translates_to_nothing<A: AddressSpace + ?Sized>(
+        space: &mut A,
+        va: u64,
+        pa: u64,
+    ) {
+        assert_eq!(
+            space.unmap(va),
+            Ok(pa),
+            "unmapping a live page must return its frame"
+        );
+        assert_eq!(
+            space.translate(va),
+            None,
+            "an unmapped page must no longer translate"
+        );
+        assert_eq!(
+            space.unmap(va),
+            Err(MapError::NotMapped),
+            "unmapping an absent page must fail closed"
         );
     }
 
@@ -308,12 +386,14 @@ pub mod conformance {
 
         /// A faithful host double: it honours the same fail-closed
         /// contract a real port owes and records the single page the
-        /// suite maps so the double-map check has something to collide
-        /// with. `activate` is never exercised on the host, so its body
-        /// is empty (the suite calls only `map_page` / `root_phys`).
+        /// suite maps (its frame and flags) so the double-map, translate,
+        /// and unmap checks have something to collide with / recover.
+        /// `activate` is never exercised on the host, so its body is
+        /// empty (the suite calls only `map_page` / `translate` / `unmap`
+        /// / `root_phys`).
         #[derive(Default)]
         struct CellAddressSpace {
-            mapped: Option<u64>,
+            mapped: Option<(u64, u64, PageFlags)>,
         }
 
         impl AddressSpace for CellAddressSpace {
@@ -329,11 +409,31 @@ pub mod conformance {
                 if flags.is_write_exec() {
                     return Err(MapError::InvalidFlags);
                 }
-                if self.mapped == Some(vaddr) {
+                if matches!(self.mapped, Some((v, _, _)) if v == vaddr) {
                     return Err(MapError::AlreadyMapped);
                 }
-                self.mapped = Some(vaddr);
+                self.mapped = Some((vaddr, paddr, flags));
                 Ok(())
+            }
+
+            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+                match self.mapped {
+                    Some((v, pa, flags)) if v == vaddr => Some((pa, flags)),
+                    _ => None,
+                }
+            }
+
+            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+                if vaddr & 0xFFF != 0 {
+                    return Err(MapError::Misaligned);
+                }
+                match self.mapped {
+                    Some((v, pa, _)) if v == vaddr => {
+                        self.mapped = None;
+                        Ok(pa)
+                    }
+                    _ => Err(MapError::NotMapped),
+                }
             }
 
             fn root_phys(&self) -> u64 {
@@ -366,6 +466,14 @@ pub mod conformance {
             ) -> Result<(), MapError> {
                 // Bug: never validates alignment and never collides.
                 Ok(())
+            }
+
+            fn translate(&self, _vaddr: u64) -> Option<(u64, PageFlags)> {
+                None
+            }
+
+            fn unmap(&mut self, _vaddr: u64) -> Result<u64, MapError> {
+                Err(MapError::NotMapped)
             }
 
             fn root_phys(&self) -> u64 {

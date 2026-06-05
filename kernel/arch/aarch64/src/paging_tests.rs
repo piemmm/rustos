@@ -217,6 +217,20 @@ fn passes_mmu_conformance() {
 }
 
 #[test]
+fn passes_tlb_conformance() {
+    use rustos_arch_api::tlb;
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // The host has no TLB, so `flush_page` is a vacuous no-op here; the
+    // suite proves it is object-safe and panic-free for any address (the
+    // real `tlbi` is exercised by the spawn QEMU vertical).
+    tlb::conformance::run_all(&mut space, 64u64 << 30);
+    let mut dynamic = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let erased: &mut dyn tlb::TlbShootdown = &mut dynamic;
+    tlb::conformance::run_all(erased, 64u64 << 30);
+}
+
+#[test]
 fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
     use rustos_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();

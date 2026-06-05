@@ -1,7 +1,9 @@
 //! AArch64 stage-1 page-table primitives for the memory-isolation test.
 //!
 //! This module is the aarch64 analogue of `kernel/arch/{x86_64,riscv64}::paging`.
-//! It operates one level *below* `kernel/mem`'s `PageTableOps`: it
+//! It implements the Arch HAL page-table surface
+//! ([`rustos_arch_api::mmu::AddressSpace`] +
+//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives: it
 //! supplies the architectural mechanism the memory-isolation QEMU
 //! vertical needs — two stage-1 translation hierarchies that disagree
 //! about a single virtual address, so the MMU faults a process that
@@ -30,6 +32,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+use rustos_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
@@ -515,6 +518,75 @@ impl MmuAddressSpace for AddressSpace {
             .ok_or(MapError::PoolExhausted)
     }
 
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        let e1 = self.root[table_index(vaddr, 1)];
+        if (e1 & attrs::VALID) == 0 {
+            return None;
+        }
+        if is_block(e1) {
+            return Some((
+                resolved_page(phys_from_descriptor(e1), vaddr, 30),
+                page_flags_from_leaf(e1),
+            ));
+        }
+        // SAFETY: a present table descriptor holds an output address
+        // `ensure_child` wrote from `phys_of(&[u64; 512])`; identity
+        // mapping makes that physical address directly dereferenceable
+        // (the same round-trip `leaf_present` relies on).
+        let l2 = unsafe { &*(phys_from_descriptor(e1) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e2 = l2[table_index(vaddr, 2)];
+        if (e2 & attrs::VALID) == 0 {
+            return None;
+        }
+        if is_block(e2) {
+            return Some((
+                resolved_page(phys_from_descriptor(e2), vaddr, 21),
+                page_flags_from_leaf(e2),
+            ));
+        }
+        // SAFETY: as above — a present L2 table descriptor's output
+        // address is a valid identity-mapped table.
+        let l3 = unsafe { &*(phys_from_descriptor(e2) as *const [u64; ENTRIES_PER_TABLE]) };
+        let e3 = l3[table_index(vaddr, 3)];
+        if (e3 & attrs::VALID) == 0 {
+            return None;
+        }
+        Some((phys_from_descriptor(e3), page_flags_from_leaf(e3)))
+    }
+
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // Navigate to the 4 KiB page leaf without allocating. A missing
+        // level or a block leaf encountered on the way means there is no
+        // 4 KiB leaf to tear down here — fail closed (the per-page unmap
+        // path never shatters a block).
+        let e1 = self.root[table_index(vaddr, 1)];
+        if (e1 & attrs::VALID) == 0 || is_block(e1) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: a present table descriptor's output address is an
+        // identity-mapped table (see `translate`); `&mut self` makes the
+        // exclusive borrow sound.
+        let l2 = unsafe { &mut *(phys_from_descriptor(e1) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let e2 = l2[table_index(vaddr, 2)];
+        if (e2 & attrs::VALID) == 0 || is_block(e2) {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: as above — a present L2 table descriptor's output
+        // address is a valid identity-mapped table.
+        let l3 = unsafe { &mut *(phys_from_descriptor(e2) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let i3 = table_index(vaddr, 3);
+        let e3 = l3[i3];
+        if (e3 & attrs::VALID) == 0 {
+            return Err(MapError::NotMapped);
+        }
+        let paddr = phys_from_descriptor(e3);
+        l3[i3] = 0;
+        Ok(paddr)
+    }
+
     fn root_phys(&self) -> u64 {
         self.root_phys
     }
@@ -531,6 +603,36 @@ impl MmuAddressSpace for AddressSpace {
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
             unreachable!("stage-1 activation is only meaningful on the aarch64 bare-metal target")
+        }
+    }
+}
+
+impl TlbShootdown for AddressSpace {
+    fn flush_page(&mut self, vaddr: u64) {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            // SAFETY: `tlbi vaae1is` invalidates the inner-shareable TLB
+            // entries for the page named by its operand (VA[55:12], all
+            // ASIDs); the `dsb`/`isb` barriers order the invalidation and
+            // make it visible before the next translation. It touches no
+            // memory and only discards a cached translation. No Rust
+            // spelling exists.
+            let va_page = vaddr >> 12;
+            unsafe {
+                core::arch::asm!(
+                    "dsb ishst",
+                    "tlbi vaae1is, {page}",
+                    "dsb ish",
+                    "isb",
+                    page = in(reg) va_page,
+                    options(nostack, preserves_flags),
+                );
+            }
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            // The host has no TLB to invalidate; a flush is vacuous.
+            let _ = vaddr;
         }
     }
 }
@@ -572,6 +674,43 @@ fn phys_of(table: &[u64; ENTRIES_PER_TABLE]) -> u64 {
     // owns, because the boot trampoline runs with the MMU off and the
     // gigapage identity map preserves it.
     table.as_ptr() as u64
+}
+
+/// Decode a stage-1 leaf (block or page) descriptor's attributes back
+/// into the neutral [`PageFlags`] (the inverse of
+/// [`AddressSpace::leaf_attrs_for`]). A valid leaf is always readable;
+/// the AP field decides writability and EL0 reachability, the
+/// execute-never bit for the leaf's privilege level decides
+/// executability, and the `MAIR` attribute index decides Device.
+fn page_flags_from_leaf(desc: u64) -> PageFlags {
+    let mut out = PageFlags::READ;
+    let ap = desc & (0b11 << 6);
+    let user = ap == attrs::AP_RW_EL0 || ap == attrs::AP_RO_EL0;
+    if ap == attrs::AP_RW_EL1 || ap == attrs::AP_RW_EL0 {
+        out = out | PageFlags::WRITE;
+    }
+    if user {
+        out = out | PageFlags::USER;
+        if desc & attrs::UXN == 0 {
+            out = out | PageFlags::EXEC;
+        }
+    } else if desc & attrs::PXN == 0 {
+        out = out | PageFlags::EXEC;
+    }
+    if desc & attrs::ATTR_IDX_DEVICE != 0 {
+        out = out | PageFlags::DEVICE;
+    }
+    out
+}
+
+/// 4 KiB-aligned physical address `vaddr` resolves to under a leaf whose
+/// region starts at `leaf_base` and spans `1 << region_shift` bytes
+/// (30 = L1 block, 21 = L2 block, 12 = L3 page). The page offset is
+/// dropped so the result is page-aligned (the HAL `translate` contract
+/// reports the 4 KiB page base).
+fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
+    let region_mask = (1u64 << region_shift) - 1;
+    (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
 }
 
 #[cfg(test)]

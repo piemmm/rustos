@@ -2,7 +2,9 @@
 //!
 //! This crate is **architecture-neutral**. Anything that touches a real
 //! page table, a TLB, or a CPU control register lives in `kernel/arch/*`
-//! and is plugged in through the [`PageTableOps`] trait.
+//! and is plugged in through the Arch HAL page-table surface
+//! (`rustos_arch_api::mmu::AddressSpace` + `rustos_arch_api::tlb::TlbShootdown`),
+//! re-exported here behind the [`PageTable`] bound alias.
 //!
 //! The four public layers, top to bottom:
 //!
@@ -14,10 +16,10 @@
 //!    both sides of every slab (`AGENTS.md` §4: "Guard pages around
 //!    kernel slabs").
 //! 3. [`vmm`] — per-process [`AddressSpace`], generic over a
-//!    [`PageTableOps`] implementation. The architecture crates supply the
-//!    real implementation in Stage 3; a `HostPageTable` test double is
-//!    provided here, gated behind `#[cfg(test)]`, so this crate is fully
-//!    host-testable.
+//!    [`PageTable`] backend (a port's HAL page-table implementation).
+//!    The architecture crates supply the real implementation; a
+//!    `HostPageTable` test double is provided here, gated behind
+//!    `#[cfg(test)]`, so this crate is fully host-testable.
 //! 4. [`frame`] — physical [`FrameAllocator`], a buddy/bitmap hybrid that
 //!    respects bootloader-supplied reserve regions described by a
 //!    [`BootMemoryMap`].
@@ -76,7 +78,7 @@ pub use swap::{
 };
 pub use uaccess::{copy_in, copy_out, UaccessError};
 pub use vmm::{
-    AddressSpace, MapFlags, Page, PageTableError, PageTableOps, UserAddressSpace, VirtAddr,
+    AddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace, VirtAddr,
 };
 
 #[cfg(any(test, feature = "host-tests"))]

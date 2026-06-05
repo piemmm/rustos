@@ -44,7 +44,7 @@ use core::ptr::NonNull;
 
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 use crate::phys::PhysMap;
-use crate::vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
+use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
 
 /// Errors specific to [`MmioMap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -143,12 +143,12 @@ struct Record {
 
 /// Per-process MMIO register-window mapper.
 ///
-/// Generic over [`PageTableOps`] so the same code is exercised by
+/// Generic over [`PageTable`] so the same code is exercised by
 /// `crate::HostPageTable` in unit tests and driven by the
 /// architecture page-table types in production. The `'a` lifetime
 /// bounds the borrow of the direct physical map the mapper resolves
 /// register pointers through.
-pub struct MmioMap<'a, P: PageTableOps> {
+pub struct MmioMap<'a, P: PageTable> {
     address_space: AddressSpace<P>,
     base: VirtAddr,
     capacity_pages: usize,
@@ -161,7 +161,7 @@ pub struct MmioMap<'a, P: PageTableOps> {
     phys: &'a dyn PhysMap,
 }
 
-impl<'a, P: PageTableOps> MmioMap<'a, P> {
+impl<'a, P: PageTable> MmioMap<'a, P> {
     /// Construct a mapper managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
     ///

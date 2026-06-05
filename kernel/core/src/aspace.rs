@@ -13,7 +13,7 @@
 //! # Why trait objects
 //!
 //! [`rustos_kernel_mem::AddressSpace`] is generic over its
-//! [`PageTableOps`](rustos_kernel_mem::PageTableOps) backend, so the
+//! [`PageTable`](rustos_kernel_mem::PageTable) backend, so the
 //! kernel cannot hold a `BTreeMap<TaskId, AddressSpace<P>>` for a
 //! single `P` — different tasks may run on different architecture page
 //! tables, and the orchestrator that composes this registry into

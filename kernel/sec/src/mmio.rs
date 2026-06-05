@@ -21,7 +21,7 @@
 //! No `unsafe`, no `unwrap`, no `panic!` (`AGENTS.md` §2.9 / §2.10).
 
 use rustos_abi::{CapabilityId, Errno};
-use rustos_kernel_mem::{MmioError, MmioMap, MmioRegion, PageTableOps};
+use rustos_kernel_mem::{MmioError, MmioMap, MmioRegion, PageTable};
 use rustos_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
@@ -83,7 +83,7 @@ impl From<MmioError> for MmioGateError {
 ///   [`CapabilityId::MMIO_MAP`].
 /// * [`MmioGateError::Map`] — propagated from the mapper (malformed
 ///   region, no virtual space, etc.).
-pub fn map_mmio<P: PageTableOps, S: Sink + ?Sized>(
+pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
     map: &mut MmioMap<'_, P>,
     caller: &TaskCapabilities,
     phys_base: u64,
@@ -162,7 +162,7 @@ pub fn map_mmio<P: PageTableOps, S: Sink + ?Sized>(
 /// # Errors
 ///
 /// See [`map_mmio`].
-pub fn unmap_mmio<P: PageTableOps, S: Sink + ?Sized>(
+pub fn unmap_mmio<P: PageTable, S: Sink + ?Sized>(
     map: &mut MmioMap<'_, P>,
     caller: &TaskCapabilities,
     region: MmioRegion,

@@ -222,6 +222,19 @@ fn passes_mmu_conformance() {
 }
 
 #[test]
+fn passes_tlb_conformance() {
+    use rustos_arch_api::tlb;
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    // The host has no TLB, so `flush_page` is a vacuous no-op here; the
+    // suite proves it is object-safe and panic-free for any address (the
+    // real `sfence.vma` is exercised by the spawn QEMU vertical).
+    tlb::conformance::run_all(&mut space, 100u64 << 30);
+    let mut dynamic = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    let erased: &mut dyn tlb::TlbShootdown = &mut dynamic;
+    tlb::conformance::run_all(erased, 100u64 << 30);
+}
+
+#[test]
 fn map_page_translates_neutral_flags_and_walks() {
     use rustos_arch_api::mmu::{self, PageFlags};
     let pool = fresh_pool();

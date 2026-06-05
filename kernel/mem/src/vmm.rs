@@ -1,15 +1,23 @@
 //! Virtual-memory manager — per-process address space.
 //!
 //! `kernel/mem` is architecture-neutral. The actual page-table format
-//! (4-level x86_64, 4-level aarch64, Sv48 riscv64, WASM linear memory)
-//! is implemented in `kernel/arch/*` (Stage 3) and plugged in through
-//! the [`PageTableOps`] trait.
+//! (4-level x86_64, 4-level aarch64, Sv39 riscv64, WASM linear memory)
+//! is implemented in `kernel/arch/*` and plugged in through the Arch HAL
+//! page-table surface — [`rustos_arch_api::mmu::AddressSpace`] for the
+//! map / translate / unmap walk and [`rustos_arch_api::tlb::TlbShootdown`]
+//! for the per-page TLB invalidation. `kernel/mem` names **only** those
+//! HAL traits; it no longer defines its own page-table trait
+//! (`AGENTS.md` §2.2 — one vocabulary; `plans/WIRING.md` Stage W5b-2).
 //!
-//! [`AddressSpace`] is a *thin* generic façade over a [`PageTableOps`]
+//! [`AddressSpace`] is a *thin* generic façade over a port's HAL
+//! [`rustos_arch_api::mmu::AddressSpace`] (`+ TlbShootdown`)
 //! implementation. It owns the page-table object, exposes
-//! capability-checked map / unmap / translate operations, and tracks
-//! the high-level mapping ranges (so leak-checking and double-mapping
-//! detection can be done independently of the arch).
+//! capability-checked map / unmap / translate operations in
+//! `kernel/mem`'s own [`Page`] / [`Frame`] / [`MapFlags`] currency
+//! (bridged to the HAL's `u64` / [`rustos_arch_api::mmu::PageFlags`]
+//! vocabulary at the boundary), and tracks the high-level mapping ranges
+//! (so leak-checking and double-mapping detection can be done
+//! independently of the arch).
 //!
 //! # Host-testability
 //!
@@ -21,8 +29,11 @@
 use alloc::collections::BTreeMap;
 use core::fmt;
 
+use rustos_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
+use rustos_arch_api::tlb::TlbShootdown;
+
 use crate::error::AllocError;
-use crate::frame::{Frame, PAGE_SHIFT, PAGE_SIZE};
+use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 
 // `bitflags_like!` — a tiny in-crate macro that synthesises just enough of
 // the well-known `bitflags` crate to avoid adding a dependency for one
@@ -188,53 +199,87 @@ impl From<AllocError> for PageTableError {
     }
 }
 
-/// Architecture trait the Stage 3 crates implement.
+/// The page-table backend a [`AddressSpace`] drives.
 ///
-/// Every method takes `&mut self` because, in a real implementation,
-/// writing a page-table entry requires exclusive access to the table
-/// and a TLB flush. The trait is **not** marked `Send` / `Sync` — the
-/// containing [`AddressSpace`] is responsible for serialising callers
-/// (today via the type system, tomorrow via a `SpinLock`).
-pub trait PageTableOps {
-    /// Map `page` → `frame` with `flags`.
-    ///
-    /// # Errors
-    ///
-    /// - [`PageTableError::AlreadyMapped`] if `page` is already in use.
-    /// - [`PageTableError::InvalidFlags`] if the flags combination is
-    ///   not representable.
-    /// - [`PageTableError::AllocFailed`] for an underlying OOM while
-    ///   allocating page-table levels.
-    fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError>;
+/// `kernel/mem` no longer defines its own page-table trait: the backend
+/// is exactly the Arch HAL [`rustos_arch_api::mmu::AddressSpace`] (the
+/// map / translate / unmap walk) plus [`TlbShootdown`] (the per-page
+/// invalidation the map/unmap path issues), held together by this alias
+/// so the bound is written once (`AGENTS.md` §2.2 / §2.3). Every
+/// architecture port implements both traits; the in-crate
+/// `HostPageTable` double implements them too so the façade stays
+/// host-testable.
+pub trait PageTable: HalAddressSpace + TlbShootdown {}
 
-    /// Tear down the mapping for `page` and return the frame that was
-    /// mapped there.
-    ///
-    /// # Errors
-    ///
-    /// [`PageTableError::NotMapped`] if `page` has no live mapping.
-    fn unmap(&mut self, page: Page) -> Result<Frame, PageTableError>;
+impl<T: HalAddressSpace + TlbShootdown> PageTable for T {}
 
-    /// Translate `page` to `(frame, flags)`.
-    ///
-    /// Returns `None` if `page` is not currently mapped. This is
-    /// deliberately not an error: read-only translation is the most
-    /// common operation and the caller typically has fallback logic.
-    fn translate(&self, page: Page) -> Option<(Frame, MapFlags)>;
+/// Translate `kernel/mem`'s [`MapFlags`] into the HAL's neutral
+/// [`PageFlags`] permission set (one decode at the boundary,
+/// `AGENTS.md` §2.2). `kernel/mem`'s `NO_CACHE` is the HAL's `DEVICE`
+/// (uncached / strongly-ordered) attribute.
+fn to_page_flags(flags: MapFlags) -> PageFlags {
+    let mut out = PageFlags::empty();
+    if flags.contains(MapFlags::READ) {
+        out = out | PageFlags::READ;
+    }
+    if flags.contains(MapFlags::WRITE) {
+        out = out | PageFlags::WRITE;
+    }
+    if flags.contains(MapFlags::EXEC) {
+        out = out | PageFlags::EXEC;
+    }
+    if flags.contains(MapFlags::USER) {
+        out = out | PageFlags::USER;
+    }
+    if flags.contains(MapFlags::NO_CACHE) {
+        out = out | PageFlags::DEVICE;
+    }
+    out
+}
 
-    /// Flush the TLB entry for `page` on the current CPU. The trait
-    /// default is `()`: the host test double has no TLB. Architecture
-    /// implementations override this with an `invlpg` / `tlbi` / sfence
-    /// as appropriate.
-    fn flush(&mut self, _page: Page) {}
+/// Inverse of [`to_page_flags`]: decode a HAL [`PageFlags`] leaf back
+/// into `kernel/mem`'s [`MapFlags`] currency (`AGENTS.md` §2.2).
+fn from_page_flags(flags: PageFlags) -> MapFlags {
+    let mut out = MapFlags::empty();
+    if flags.contains(PageFlags::READ) {
+        out = out | MapFlags::READ;
+    }
+    if flags.contains(PageFlags::WRITE) {
+        out = out | MapFlags::WRITE;
+    }
+    if flags.contains(PageFlags::EXEC) {
+        out = out | MapFlags::EXEC;
+    }
+    if flags.contains(PageFlags::USER) {
+        out = out | MapFlags::USER;
+    }
+    if flags.contains(PageFlags::DEVICE) {
+        out = out | MapFlags::NO_CACHE;
+    }
+    out
+}
+
+/// Map a HAL [`MapError`] onto `kernel/mem`'s [`PageTableError`] at the
+/// boundary. A pool-exhaustion failure becomes the allocator's
+/// [`AllocError::OutOfMemory`], so callers see one OOM type
+/// (`AGENTS.md` §2.2).
+fn from_map_error(err: MapError) -> PageTableError {
+    match err {
+        MapError::Misaligned => PageTableError::Misaligned,
+        MapError::AlreadyMapped => PageTableError::AlreadyMapped,
+        MapError::InvalidFlags => PageTableError::InvalidFlags,
+        MapError::PoolExhausted => PageTableError::AllocFailed(AllocError::OutOfMemory),
+        MapError::NotMapped => PageTableError::NotMapped,
+    }
 }
 
 /// Per-process virtual address space.
 ///
-/// `AddressSpace` is generic over `P: PageTableOps`. The arch crates
-/// provide one (`X86PageTable`, `Aarch64PageTable`, …); this crate's
-/// tests use `HostPageTable`.
-pub struct AddressSpace<P: PageTableOps> {
+/// `AddressSpace` is generic over `P: PageTable` — the Arch HAL
+/// page-table backend (a port's [`rustos_arch_api::mmu::AddressSpace`]
+/// `+ TlbShootdown`). The arch crates provide one (their `paging`
+/// `AddressSpace`); this crate's tests use `HostPageTable`.
+pub struct AddressSpace<P: PageTable> {
     table: P,
     /// Live mappings observed by this layer.
     ///
@@ -244,7 +289,7 @@ pub struct AddressSpace<P: PageTableOps> {
     live: BTreeMap<Page, MapFlags>,
 }
 
-impl<P: PageTableOps> AddressSpace<P> {
+impl<P: PageTable> AddressSpace<P> {
     /// Construct a new address space wrapping `table`.
     ///
     /// The supplied table is expected to be empty. We do not assert it,
@@ -258,39 +303,52 @@ impl<P: PageTableOps> AddressSpace<P> {
         }
     }
 
-    /// Map `page` → `frame`, recording the mapping.
+    /// Map `page` → `frame`, recording the mapping and flushing the
+    /// page's stale TLB entry on the calling CPU.
     ///
     /// # Errors
     ///
-    /// Propagates [`PageTableError`] from the underlying
-    /// [`PageTableOps`].
+    /// [`PageTableError::AlreadyMapped`] if this layer already records a
+    /// mapping for `page`; otherwise propagates the bridged HAL
+    /// [`MapError`] from [`rustos_arch_api::mmu::AddressSpace::map_page`].
     pub fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
         if self.live.contains_key(&page) {
             return Err(PageTableError::AlreadyMapped);
         }
-        self.table.map(page, frame, flags)?;
+        let vaddr = page.start().as_u64();
+        self.table
+            .map_page(vaddr, frame.start().as_u64(), to_page_flags(flags))
+            .map_err(from_map_error)?;
         self.live.insert(page, flags);
-        self.table.flush(page);
+        self.table.flush_page(vaddr);
         Ok(())
     }
 
     /// Tear down the mapping at `page` and return the frame that was
-    /// mapped there.
+    /// mapped there, flushing the page's TLB entry on the calling CPU.
     ///
     /// # Errors
     ///
-    /// [`PageTableError::NotMapped`] if no mapping is recorded.
+    /// [`PageTableError::NotMapped`] if `page` has no live mapping.
     pub fn unmap(&mut self, page: Page) -> Result<Frame, PageTableError> {
-        let frame = self.table.unmap(page)?;
+        let vaddr = page.start().as_u64();
+        let paddr = self.table.unmap(vaddr).map_err(from_map_error)?;
         self.live.remove(&page);
-        self.table.flush(page);
-        Ok(frame)
+        self.table.flush_page(vaddr);
+        Ok(Frame::containing(PhysAddr::new(paddr)))
     }
 
     /// Translate `page` to `(frame, flags)`, or `None` if unmapped.
     #[must_use]
     pub fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
-        self.table.translate(page)
+        self.table
+            .translate(page.start().as_u64())
+            .map(|(paddr, flags)| {
+                (
+                    Frame::containing(PhysAddr::new(paddr)),
+                    from_page_flags(flags),
+                )
+            })
     }
 
     /// Number of live mappings in this address space.
@@ -311,7 +369,7 @@ impl<P: PageTableOps> AddressSpace<P> {
 
 /// Object-safe, read-only view of a task's user address space.
 ///
-/// [`AddressSpace`] is generic over its [`PageTableOps`] backend, so the
+/// [`AddressSpace`] is generic over its [`PageTable`] backend, so the
 /// kernel cannot hold one address space per task — each potentially a
 /// different architecture's page table — behind a single concrete type.
 /// `UserAddressSpace` erases that backend down to the *one* operation the
@@ -339,7 +397,7 @@ pub trait UserAddressSpace {
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)>;
 }
 
-impl<P: PageTableOps> UserAddressSpace for AddressSpace<P> {
+impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
         AddressSpace::translate(self, page)
     }
@@ -351,19 +409,22 @@ impl<P: PageTableOps> UserAddressSpace for AddressSpace<P> {
 
 /// A pure-software page table used only in unit and integration tests.
 ///
-/// It tracks `(Page, Frame, MapFlags)` triples in a [`BTreeMap`]. No
-/// CPU page-table writes happen. The point is to exercise every code
-/// path in [`AddressSpace`] on host hardware (`AGENTS.md` §7 — all
-/// algorithms that do not need hardware must be host-tested).
+/// It tracks `vaddr → (paddr, `[`PageFlags`]`)` entries in a
+/// [`BTreeMap`], implementing the Arch HAL
+/// [`rustos_arch_api::mmu::AddressSpace`] + [`TlbShootdown`] surface in
+/// pure software. No CPU page-table writes happen. The point is to
+/// exercise every code path in [`AddressSpace`] on host hardware
+/// (`AGENTS.md` §7 — all algorithms that do not need hardware must be
+/// host-tested).
 ///
 /// Visible to downstream crates only behind the `host-tests` cargo
 /// feature so production kernel builds never link the test double.
 #[cfg(any(test, feature = "host-tests"))]
 #[derive(Debug, Default)]
 pub struct HostPageTable {
-    entries: BTreeMap<Page, (Frame, MapFlags)>,
-    /// Counts how many times [`PageTableOps::flush`] has been called,
-    /// so tests can assert the TLB-flush discipline is correct.
+    entries: BTreeMap<u64, (u64, PageFlags)>,
+    /// Counts how many times [`TlbShootdown::flush_page`] has been
+    /// called, so tests can assert the TLB-flush discipline is correct.
     pub(crate) flush_count: usize,
 }
 
@@ -380,35 +441,51 @@ impl HostPageTable {
 }
 
 #[cfg(any(test, feature = "host-tests"))]
-impl PageTableOps for HostPageTable {
-    fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
-        // Reject the obviously-bad combination W^X violation: a
-        // simultaneous write+exec request. Real arches can do it but
-        // RustOS's default policy is W^X (security default per
-        // `AGENTS.md` §2.7).
-        if flags.contains(MapFlags::WRITE) && flags.contains(MapFlags::EXEC) {
-            return Err(PageTableError::InvalidFlags);
+impl HalAddressSpace for HostPageTable {
+    fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
+        if vaddr & (PAGE_SIZE as u64 - 1) != 0 || paddr & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err(MapError::Misaligned);
         }
-        if self.entries.contains_key(&page) {
-            return Err(PageTableError::AlreadyMapped);
+        // RustOS's default leaf policy is W^X (`AGENTS.md` §19.2): a
+        // simultaneous write+exec leaf is refused, mirroring what a real
+        // port does at the HAL boundary.
+        if flags.is_write_exec() {
+            return Err(MapError::InvalidFlags);
         }
-        self.entries.insert(page, (frame, flags));
+        if self.entries.contains_key(&vaddr) {
+            return Err(MapError::AlreadyMapped);
+        }
+        self.entries.insert(vaddr, (paddr, flags));
         Ok(())
     }
 
-    fn unmap(&mut self, page: Page) -> Result<Frame, PageTableError> {
-        let (frame, _) = self
-            .entries
-            .remove(&page)
-            .ok_or(PageTableError::NotMapped)?;
-        Ok(frame)
+    fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+        self.entries.get(&vaddr).copied()
     }
 
-    fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
-        self.entries.get(&page).copied()
+    fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+        if vaddr & (PAGE_SIZE as u64 - 1) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        let (paddr, _) = self.entries.remove(&vaddr).ok_or(MapError::NotMapped)?;
+        Ok(paddr)
     }
 
-    fn flush(&mut self, _page: Page) {
+    fn root_phys(&self) -> u64 {
+        // The double has no real root table; a non-zero sentinel keeps
+        // it honouring the `root_phys` contract (non-null once built).
+        PAGE_SIZE as u64
+    }
+
+    unsafe fn activate(&self) {
+        // The host double never activates a translation regime; the
+        // façade only ever calls map/translate/unmap on it.
+    }
+}
+
+#[cfg(any(test, feature = "host-tests"))]
+impl TlbShootdown for HostPageTable {
+    fn flush_page(&mut self, _vaddr: u64) {
         self.flush_count += 1;
     }
 }

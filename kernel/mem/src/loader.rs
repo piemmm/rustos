@@ -9,7 +9,7 @@
 //!
 //! W^X holds twice over: the loader never constructs a writable-and-
 //! executable [`MapFlags`] (a [`RxePermission`] cannot be both), and the
-//! underlying [`PageTableOps`] independently rejects any such combination
+//! underlying [`PageTable`] backend independently rejects any such combination
 //! (`AGENTS.md` §4 / §19.2). Frame allocation is injected as a closure so
 //! this module stays free of any particular allocator and is fully
 //! host-testable.
@@ -17,7 +17,7 @@
 use rustos_abi::rxe::{LoadImage, RxeError, RxePermission, RXE_PAGE_SIZE};
 
 use crate::frame::{Frame, PAGE_SIZE};
-use crate::vmm::{AddressSpace, MapFlags, Page, PageTableError, PageTableOps, VirtAddr};
+use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
 
 /// The `rxe` page size must match the kernel frame size; the per-page
 /// mapping loop below relies on the two being identical.
@@ -81,7 +81,7 @@ pub fn map_image<P, A>(
     mut alloc_frame: A,
 ) -> Result<u64, LoadError>
 where
-    P: PageTableOps,
+    P: PageTable,
     A: FnMut() -> Option<Frame>,
 {
     for segment in image.segments() {
@@ -130,7 +130,7 @@ pub(crate) fn map_region<P, A, F, E>(
     mut per_page: F,
 ) -> Result<(), E>
 where
-    P: PageTableOps,
+    P: PageTable,
     A: FnMut() -> Option<Frame>,
     F: FnMut(u64, Frame) -> Result<(), E>,
     E: From<LoadError>,

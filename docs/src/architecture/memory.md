@@ -2,9 +2,10 @@
 
 Architecture-neutral, host-testable physical and virtual memory
 management. Delivered by Stage 2.2 of `PLAN.md`. The architecture
-crates (`kernel/arch/*`, Stage 3) supply the only piece this crate
-does not implement: the real page-table writer behind
-[`PageTableOps`](#3-virtual-memory--page-table-operations).
+crates (`kernel/arch/*`) supply the only piece this crate
+does not implement: the real page-table writer behind the Arch HAL
+page-table surface
+([`PageTable`](#3-virtual-memory--page-table-operations)).
 
 ## Layered design
 
@@ -15,7 +16,7 @@ does not implement: the real page-table writer behind
                 ├──────────────────────────────────────────────┤
                 │   slab — fixed-size objects + guard pages    │
                 ├──────────────────────────────────────────────┤
-                │   vmm — `AddressSpace<P: PageTableOps>`      │
+                │   vmm — `AddressSpace<P: PageTable>`         │
                 ├──────────────────────────────────────────────┤
                 │   frame — buddy + bitmap physical allocator  │
                 └──────────────────────────────────────────────┘
@@ -87,25 +88,31 @@ next caller.
 
 ## 3. Virtual memory & page-table operations
 
-[`AddressSpace<P: PageTableOps>`] is the per-process virtual address
+[`AddressSpace<P: PageTable>`] is the per-process virtual address
 space. It owns a page-table object and serialises `map` / `unmap` /
 `translate` through it.
 
-The [`PageTableOps`] trait is the architecture boundary:
+The architecture boundary is the Arch HAL page-table surface, not a
+`kernel/mem`-local trait: [`PageTable`] is merely the bound alias
+`rustos_arch_api::mmu::AddressSpace + rustos_arch_api::tlb::TlbShootdown`,
+so `kernel/mem` names only the HAL vocabulary (`AGENTS.md` §2.2,
+`plans/WIRING.md` Stage W5b-2). The HAL surface the façade drives:
 
 | Method | Description |
 | --- | --- |
-| `map(page, frame, flags)` | Install a translation. |
-| `unmap(page)` | Tear it down, return the frame. |
-| `translate(page)` | Read-only lookup. Returns `Option`, never errors. |
-| `flush(page)` | TLB flush for the current CPU (no-op on host). |
+| `map_page(vaddr, paddr, flags)` | Install a 4 KiB translation. |
+| `unmap(vaddr)` | Tear it down, return the physical page. |
+| `translate(vaddr)` | Read-only walk. Returns `Option`, never errors. |
+| `root_phys()` | Physical address of the root translation table. |
+| `flush_page(vaddr)` | Per-CPU TLB invalidation (no-op on host). |
 
-The arch crates land their `X86PageTable`, `Aarch64PageTable`, …
-implementations in Stage 3. To keep `kernel/mem` fully host-testable
-today the crate ships a `HostPageTable` test double behind
-`#[cfg(test)]`: a `BTreeMap`-backed implementation that, additionally,
-enforces W^X (rejects `WRITE | EXEC` mappings) so the security
-default is exercised in tests.
+The façade bridges its own `Page` / `Frame` / `MapFlags` currency to the
+HAL's `u64` / `PageFlags` at the boundary. Each arch crate's `paging`
+`AddressSpace` implements the HAL traits directly. To keep `kernel/mem`
+fully host-testable the crate ships a `HostPageTable` test double behind
+`#[cfg(test)]`: a `BTreeMap`-backed implementation of the same HAL
+traits that, additionally, enforces W^X (rejects `WRITE | EXEC`
+mappings) so the security default is exercised in tests.
 
 `MapFlags` is a small `bitflags`-style set:
 `READ | WRITE | EXEC | USER | NO_CACHE`. Architecture code translates
@@ -460,5 +467,5 @@ cryptographic layer they are required to route through.
   `lib/sync`.
 
 [`BootMemoryMap`]: ../../rustos_kernel_mem/struct.BootMemoryMap.html
-[`AddressSpace<P: PageTableOps>`]: ../../rustos_kernel_mem/struct.AddressSpace.html
-[`PageTableOps`]: ../../rustos_kernel_mem/trait.PageTableOps.html
+[`AddressSpace<P: PageTable>`]: ../../rustos_kernel_mem/struct.AddressSpace.html
+[`PageTable`]: ../../rustos_kernel_mem/trait.PageTable.html

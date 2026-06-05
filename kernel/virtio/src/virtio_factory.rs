@@ -13,7 +13,7 @@
 //!
 //! The factory trait [`VirtioHostFactory`] is owned by the bus-agnostic
 //! `lib/virtio` host seam, but a concrete implementation has to mention
-//! the kernel-side generics (`P: PageTableOps`, the audit [`Sink`], the
+//! the kernel-side generics (`P: PageTable`, the audit [`Sink`], the
 //! [`IrqWaiter`] seam) and depend on the `kernel-host` build of
 //! `drivers/bus/virtio`. Because both `drvhost` and this crate depend
 //! only on the `lib/virtio` seam — never on each other — the userland
@@ -38,7 +38,7 @@ use crate::kernel_host::KernelVirtioHost;
 use rustos_abi::driver::VirtioHost;
 use rustos_abi::{CapabilityId, CapabilityQuery, IrqHandle};
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
-use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTableOps, PhysMap, VirtAddr};
+use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTable, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 use rustos_virtio::{PoolId, VirtioHostFactory};
@@ -89,7 +89,7 @@ pub struct KernelVirtioFactoryConfig<'k> {
 /// address space.
 pub struct KernelVirtioFactory<'k, P, F>
 where
-    P: PageTableOps,
+    P: PageTable,
     F: Fn() -> P,
 {
     config: KernelVirtioFactoryConfig<'k>,
@@ -98,7 +98,7 @@ where
 
 impl<'k, P, F> KernelVirtioFactory<'k, P, F>
 where
-    P: PageTableOps,
+    P: PageTable,
     F: Fn() -> P,
 {
     /// Build a factory from its borrowed [`KernelVirtioFactoryConfig`]
@@ -117,7 +117,7 @@ where
 
 impl<P, F> VirtioHostFactory for KernelVirtioFactory<'_, P, F>
 where
-    P: PageTableOps,
+    P: PageTable,
     F: Fn() -> P,
 {
     fn mint<'r>(&'r self, granted: &dyn CapabilityQuery) -> Option<Box<dyn VirtioHost + 'r>> {

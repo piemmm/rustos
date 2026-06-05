@@ -32,7 +32,7 @@ use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery};
 use rustos_arch_api::{EnterUser, UserEntry};
 use rustos_kernel_mem::{
-    build_process_image, AddressSpace, Frame, PageTableOps, PhysMap, SpawnError, UserStack,
+    build_process_image, AddressSpace, Frame, PageTable, PhysMap, SpawnError, UserStack,
 };
 use rustos_log::{Event, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
@@ -140,7 +140,7 @@ pub unsafe fn spawn_and_enter<P, A, E>(
     alloc_frame: A,
 ) -> Result<core::convert::Infallible, SpawnCallerError>
 where
-    P: PageTableOps,
+    P: PageTable,
     A: FnMut() -> Option<Frame>,
     E: EnterUser,
 {

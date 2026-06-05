@@ -49,14 +49,19 @@
 //! mapping ([`AddressSpace::map_page`]), reports the root-table physical
 //! address ([`AddressSpace::root_phys`]), and activates the translation
 //! regime ([`AddressSpace::activate`]) over the neutral [`PageFlags`]
-//! permission set, plus its [`mmu::conformance`] vertical. It also hosts
-//! the **§17.2 conformance vertical** ([`conformance`]): the harness
-//! every port runs over its real HAL handles so parity is *enforced*
-//! rather than asserted by inspection (`plans/WIRING.md`). The remaining
-//! HAL surface enumerated by `AGENTS.md` §17.2 — per-page and cross-CPU
-//! TLB shootdown (the cross-CPU half depends on the aarch64 IPI from
-//! Stage W6) and SMP secondary-core bring-up — is migrated here as the
-//! §17 burn-down advances; see `PLAN.md` / `plans/WIRING.md`. Until a
+//! permission set, plus its [`mmu::conformance`] vertical — and the
+//! **TLB-shootdown** slice (`AGENTS.md` §17.2): the [`TlbShootdown`]
+//! trait whose [`TlbShootdown::flush_page`] the per-process map/unmap
+//! path drives to invalidate one CPU's stale cached translation
+//! (`invlpg` / `tlbi vae1is` / `sfence.vma`), plus its
+//! [`tlb::conformance`] vertical. It also hosts the **§17.2 conformance
+//! vertical** ([`conformance`]): the harness every port runs over its
+//! real HAL handles so parity is *enforced* rather than asserted by
+//! inspection (`plans/WIRING.md`). The remaining HAL surface enumerated
+//! by `AGENTS.md` §17.2 — *cross-CPU* TLB shootdown (the local per-page
+//! half lives here now; the cross-CPU half depends on the aarch64 IPI
+//! from Stage W6) and SMP secondary-core bring-up — is migrated here as
+//! the §17 burn-down advances; see `PLAN.md` / `plans/WIRING.md`. Until a
 //! primitive lives here it stays in its current owning crate, and the
 //! move is tracked, not silently duplicated (`AGENTS.md` §2.2).
 //!
@@ -84,6 +89,7 @@ pub mod percpu;
 pub mod platform;
 pub mod sidechannel;
 pub mod timer;
+pub mod tlb;
 pub mod userentry;
 
 pub use sidechannel::{
@@ -113,6 +119,8 @@ pub use context::{
 };
 
 pub use mmu::{conformance as mmu_conformance, AddressSpace, MapError, PageFlags};
+
+pub use tlb::{conformance as tlb_conformance, TlbShootdown};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

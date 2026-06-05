@@ -52,7 +52,7 @@ use crate::frame::{Frame, PAGE_SIZE};
 use crate::loader::{map_flags_for, map_region, LoadError};
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
-use crate::vmm::{AddressSpace, MapFlags, PageTableOps};
+use crate::vmm::{AddressSpace, MapFlags, PageTable};
 
 /// Where, and how large, a spawned process's initial user stack is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +167,7 @@ fn map_and_fill<P, A>(
     alloc_frame: &mut A,
 ) -> Result<(), SpawnError>
 where
-    P: PageTableOps,
+    P: PageTable,
     A: FnMut() -> Option<Frame>,
 {
     let page = PAGE_SIZE as u64;
@@ -227,7 +227,7 @@ pub fn build_process_image<P, A>(
     mut alloc_frame: A,
 ) -> Result<ProcessImage, SpawnError>
 where
-    P: PageTableOps,
+    P: PageTable,
     A: FnMut() -> Option<Frame>,
 {
     let page = PAGE_SIZE as u64;
