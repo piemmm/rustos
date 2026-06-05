@@ -145,6 +145,8 @@ members = [
     "tests/integration/cc3_program",
     "tests/integration/cc5_program",
     "tests/integration/c_program_qemu_riscv64",
+    "tests/integration/c_program_qemu_aarch64",
+    "tests/integration/c_program_qemu_x86_64",
     "tests/integration/spawn_program_qemu_riscv64",
     "tests/integration/spawn_program_qemu_aarch64",
     "tests/integration/spawn_program_qemu_x86_64",

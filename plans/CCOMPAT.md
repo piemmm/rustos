@@ -664,10 +664,12 @@ manifest/syscall-hash mismatch.
 
 ### Stage CC5 — End-to-end C program + fuzzing
 
-**Status: in progress — fuzz/regression done; the audited C toolchain wrapper,
-the in-tree C program, and the **riscv64** QEMU round-trip have now landed
-(this session, below). The aarch64 + x86_64 C-program round-trips remain (they
-follow the same shape, as CC3 did).** **Depends on** CC1–CC4 (all done).
+**Status: DONE — fuzz/regression, the audited C toolchain wrapper, the in-tree
+C program, and the QEMU round-trips on **all three native Tier-1 targets**
+(riscv64, aarch64, x86_64) have all landed. The aarch64 (EL0) and x86_64
+(ring-3) C-program round-trips followed the same shape as CC3, reusing
+`cc5_program` + `rustos-cc` + `elf_to_rxe`; each is QEMU-proven PASS plus a
+deliberately-wrong-expectation FAIL.** **Depended on** CC1–CC4 (all done).
 
 **What landed this session (the headline — riscv64 vertical).**
 - **Audited C toolchain wrapper `tools/cc` (`rustos-cc`).** A host-only,
@@ -712,9 +714,23 @@ follow the same shape, as CC3 did).** **Depends on** CC1–CC4 (all done).
   into the mdBook `SUMMARY.md`); the PIE link script is the architecture-neutral
   one the CC3 fixture already owns (reused, not duplicated, §2.2).
 
-**Still outstanding:** the aarch64 + x86_64 C-program round-trips (the EL0 /
-ring-3 analogues, reusing `cc5_program` + `rustos-cc` + `elf_to_rxe` exactly as
-CC3's verticals did).
+**The aarch64 + x86_64 C-program round-trips (the EL0 / ring-3 analogues)** now
+landed too, reusing `cc5_program` + `rustos-cc` + `elf_to_rxe` exactly as CC3's
+verticals did:
+- **aarch64** (`tests/integration/c_program_qemu_aarch64`): `CTarget::Aarch64`
+  (clang `--target=aarch64-unknown-elf`, no extra `-march`/`-mabi` needed), the
+  EL0 `PageTableOps` adapter + `CPACR_EL1.FPEN` enable copied from the CC3
+  aarch64 spawn test, the shared `cap_query`/`clock_get`/`exit` dispatch
+  callback, and the linked PIE carrying only `R_AARCH64_RELATIVE` relocs.
+- **x86_64** (`tests/integration/c_program_qemu_x86_64`): the ring-3 analogue —
+  boots the production kernel pipeline (GDT user selectors / TSS / `IA32_LSTAR`),
+  enables `IA32_EFER.NXE`, reuses the CC3 x86_64 spawn test's ring-3 setup +
+  `PageTableOps` adapter; `CTarget::X86_64` (`-mno-red-zone`), PIE carrying only
+  `R_X86_64_RELATIVE` relocs.
+
+Both are enrolled in `tools/xtask/src/commands/qemu_tests.rs` + the workspace
+`Cargo.toml`, and each is **QEMU-proven PASS** plus a deliberately-wrong
+expectation **verified FAIL** ("C program exited with the wrong code").
 
 **What landed this stage (fuzz/regression).** The CC3/CC4 decoders
 (`ProcessStart::parse`, `ProcessStartHeader::from_bytes`,

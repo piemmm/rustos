@@ -1153,6 +1153,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-c-program-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-c-program-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -1162,6 +1178,22 @@ dependencies = [
  "rustos-bumpalloc",
  "rustos-cc",
  "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-c-program-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-cc",
+ "rustos-itest-harness",
+ "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",

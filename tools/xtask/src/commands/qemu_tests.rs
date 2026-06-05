@@ -401,6 +401,69 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
+    // end-to-end C-program round-trip — the EL0 analogue of the riscv64
+    // vertical above. The build script builds the Rust crt0 + `ros_sys_*`
+    // runtime shim (`tests/integration/cc5_program`) as a PIE `staticlib`,
+    // compiles the genuinely C-language program (`cc5_program/csrc/main.c`)
+    // with the audited, version-pinned, checksummed `clang`/`ld.lld` wrapper
+    // (`tools/cc`, AGENTS.md §12), links them into one PIE image, and converts
+    // it to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
+    // kernel's syscall CFI tag. On boot the test enables `CPACR_EL1.FPEN`,
+    // stands up a stage-1 address space (identity-mapping the kernel + MMIO,
+    // EL1), installs the EL1 vector table and a dispatch callback, then calls
+    // the production capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // build the program's EL0 image and `eret` into it. The C program checks a
+    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
+    // services those (asserting the marshalled cap id, returning a 64-bit
+    // sentinel) and asserts the `exit` code is 99 before the ARM semihosting
+    // PASS finisher. Single CPU; 60-second run budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-aarch64",
+        binary: "rustos-test-c-program-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
+    // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
+    // end-to-end C-program round-trip — the ring-3 analogue of the
+    // riscv64/aarch64 verticals above, completing CC5. The build script builds
+    // the Rust crt0 + `ros_sys_*` runtime shim (`tests/integration/cc5_program`)
+    // as a PIE `staticlib`, compiles the genuinely C-language program
+    // (`cc5_program/csrc/main.c`) with the audited, version-pinned, checksummed
+    // `clang`/`ld.lld` wrapper (`tools/cc`, AGENTS.md §12), links them into one
+    // PIE image, and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // carrying the kernel's syscall CFI tag. Because the x86_64 ring-3
+    // transition needs the GDT user selectors, the TSS, and `syscall`/
+    // `IA32_LSTAR` entry installed, the test boots the production kernel pipeline
+    // and, on `AuditEvent::BootCompleted`, enables `IA32_EFER.NXE`, builds a
+    // fresh address space (low 32 MiB identity + higher-half kernel window),
+    // switches CR3, installs a dispatch callback, then calls the production
+    // capability-checked, audited spawn caller
+    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // the program's ring-3 image (W^X: code RX, data RW-NX, rodata R-NX) and
+    // `iretq` into it. The C program checks a Time64 value across the §21
+    // pre-1970/post-2038 boundaries, an ipc header, and a sysinfo header, then
+    // issues `cap_query` + `clock_get`; the callback services those (asserting
+    // the marshalled cap id, returning a 64-bit sentinel) and asserts the `exit`
+    // code is 99 before `qemu_exit::exit_success`. Single CPU; 60-second budget.
+    QemuTest {
+        package: "rustos-test-c-program-qemu-x86_64",
+        binary: "rustos-test-c-program-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+    },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →

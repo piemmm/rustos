@@ -123,20 +123,25 @@ how the runtime library is resolved.
 
 ## Proving it end to end
 
-The CC5 QEMU test (`rustos-test-c-program-qemu-riscv64`) runs the program above
-on the riscv64 `virt` board. Its build script builds the crt0 + `ros_sys_*`
-runtime shim (`tests/integration/cc5_program`) as a position-independent
-`staticlib`, compiles `main.c` with `rustos-cc`, links one PIE image, and
-converts it to an `rxe` blob carrying the kernel's compiled-in syscall CFI tag.
-On boot the test spawns the program through the production capability-checked,
-audited `rustos_kernel_core::spawn_and_enter` and installs a dispatch callback
-that services the program's `cap_query` / `clock_get` round-trips and asserts
-the `exit` code. A pass means the generated header, the syscall stub runtime,
-and crt0 agree with the kernel — for genuinely C-compiled code.
+The CC5 QEMU tests run the program above on **all three native Tier-1
+targets**: `rustos-test-c-program-qemu-riscv64` (riscv64 `virt`, U-mode),
+`rustos-test-c-program-qemu-aarch64` (aarch64 `virt`, EL0), and
+`rustos-test-c-program-qemu-x86_64` (x86_64, ring 3). Each build script builds
+the crt0 + `ros_sys_*` runtime shim (`tests/integration/cc5_program`) as a
+position-independent `staticlib`, compiles `main.c` with `rustos-cc`, links one
+PIE image (`CTarget::Riscv64` / `Aarch64` / `X86_64`), and converts it to an
+`rxe` blob carrying the kernel's compiled-in syscall CFI tag. On boot the test
+spawns the program through the production capability-checked, audited
+`rustos_kernel_core::spawn_and_enter` and installs a dispatch callback that
+services the program's `cap_query` / `clock_get` round-trips and asserts the
+`exit` code. A pass means the generated header, the syscall stub runtime, and
+crt0 agree with the kernel — for genuinely C-compiled code.
 
-It runs under `cargo xtask test --qemu` (not the host-only `cargo xtask ci`
-gate). The aarch64 and x86_64 verticals follow the same shape and land as later
-chunks.
+The aarch64 vertical first enables `CPACR_EL1.FPEN` (the NEON-vectorised
+decoder runs at EL1); the x86_64 vertical boots the production kernel pipeline
+(GDT user selectors / TSS / `IA32_LSTAR`) and enables `IA32_EFER.NXE` so the
+W^X No-Execute leaf bit is honoured. They run under `cargo xtask test --qemu`
+(not the host-only `cargo xtask ci` gate).
 
 ## Security posture
 
