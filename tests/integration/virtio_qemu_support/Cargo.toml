@@ -69,7 +69,7 @@ rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
@@ -100,7 +100,7 @@ rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features
 rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }

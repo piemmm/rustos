@@ -21,7 +21,7 @@
 
 use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
-use rustos_util::dtb::Dtb;
+use rustos_fdt::Fdt;
 
 use crate::transport::MmioRead;
 
@@ -47,18 +47,18 @@ const REG_VENDOR_ID: u64 = 0x00C;
 
 /// The MMIO bus driver instance.
 ///
-/// Bound to a parsed [`Dtb`] (`'dtb`) and a [`MmioRead`] reader; the
+/// Bound to a parsed [`Fdt`] (`'dtb`) and a [`MmioRead`] reader; the
 /// type is `pub(crate)` per `AGENTS.md` §8 and reached from outside
 /// only via `dyn Bus`.
 pub struct Mmio<'dtb, T: MmioRead> {
-    dtb: Dtb<'dtb>,
+    dtb: Fdt<'dtb>,
     reader: T,
 }
 
 impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     /// Construct an [`Mmio`] over a pre-parsed device-tree blob and
     /// volatile reader.
-    pub const fn new(dtb: Dtb<'dtb>, reader: T) -> Self {
+    pub const fn new(dtb: Fdt<'dtb>, reader: T) -> Self {
         Self { dtb, reader }
     }
 

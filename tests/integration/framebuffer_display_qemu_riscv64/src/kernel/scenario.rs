@@ -19,13 +19,13 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
 use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+use rustos_fdt::Fdt;
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::KernelMmioMapper;
 use rustos_log::{Event, EventId, Level, Sink};
 use rustos_test_riscv64_boot::published_dtb;
-use rustos_util::dtb::Dtb;
 
 use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 
@@ -206,7 +206,7 @@ pub fn run() {
     };
     // SAFETY: as above; `dtb_len` is the blob's self-described size.
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, dtb_len) };
-    let Ok(dtb) = Dtb::parse(dtb_bytes) else {
+    let Ok(dtb) = Fdt::new(dtb_bytes) else {
         fail("DTB parse");
     };
 

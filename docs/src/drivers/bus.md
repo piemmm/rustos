@@ -102,13 +102,15 @@ implementation that the driver host wires up after `register`.
 
 ### DTB iterator
 
-The boot DTB is parsed once through `rustos_util::dtb::Dtb`. The
-parser is the shared `lib/util` module promoted in Stage 4 once two
-callers materialised (this driver and the future platform-discovery
-code); it validates the FDT v17 header, refuses span-out-of-range
-blobs, and never panics. The MMIO driver walks every node, filters
-on `compatible = "virtio,mmio"`, reads `reg = <base length>`, then
-probes the four-register identifier window through the volatile
+The boot DTB is parsed once through `rustos_fdt::Fdt`. This is the
+single shared device-tree parser in the workspace (`AGENTS.md`
+§2.2): the architecture ports' platform discovery, the QEMU
+verticals, and this driver all walk the `virt` tree through it. It
+validates the FDT header, bounds-checks every read, and never
+panics. The MMIO driver walks every node with `Fdt::nodes`, filters
+on `compatible = "virtio,mmio"` (`Node::is_compatible`), reads
+`reg = <base length>` (`Node::property` + `Property::read_be_u64`),
+then probes the four-register identifier window through the volatile
 reader.
 
 ### Volatile read seam

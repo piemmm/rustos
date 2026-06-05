@@ -28,6 +28,7 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
 use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+use rustos_fdt::Fdt;
 use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
@@ -36,7 +37,6 @@ use rustos_kernel_virtio::KernelMmioMapper;
 use rustos_test_virtio_qemu_support::{
     bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv,
 };
-use rustos_util::dtb::Dtb;
 
 use crate::fixture::{DTB_BLOB, FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -186,7 +186,7 @@ fn run_scenario() -> ! {
     // 1. Parse the embedded device tree (QEMU's aarch64 `-kernel <ELF>`
     //    path passes no DTB pointer, so the blob is embedded at build
     //    time — see `build.rs`).
-    let Ok(dtb) = Dtb::parse(DTB_BLOB) else {
+    let Ok(dtb) = Fdt::new(DTB_BLOB) else {
         env.fail("DTB parse");
     };
 

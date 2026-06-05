@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 
 [lints]
 workspace = true

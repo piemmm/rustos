@@ -766,6 +766,47 @@ is now full.
   `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
   virtio-input driver `README.md`, `PLAN.md`, this file.
 
+#### Stage W12 — one device-tree parser (`lib/fdt` node API) — ✅ landed
+
+The workspace carried **two** flattened-device-tree parsers: the shared
+`lib/fdt` reader (header + path-property + memory/timebase/`each_cpu`
+queries) and a second, full node-iteration parser in `lib/util/dtb`
+(`Dtb`/`Node`/`Property`) that `drivers/bus/mmio` and the QEMU verticals
+walked the `virt` tree through. That is the duplication `AGENTS.md` §2.2
+forbids. W12 folds the two into one: `lib/fdt` now owns the generic
+node-iteration API for the full ARM/riscv `virt` tree, and the duplicate
+is deleted.
+
+- **`lib/fdt` node API (the full `virt` tree).** Added `Fdt::nodes()`
+  yielding `Node` handles with `is_compatible`, `property`/`properties`,
+  `name`/`depth`, and `Property::{read_be_u32,read_be_u64,iter_strings}` —
+  the surface every consumer needs to enumerate `virtio,mmio` / `fw_cfg` /
+  `plic` nodes and read their `reg`/`interrupts`/`riscv,ndev` cells. The
+  walk reuses the existing token primitives (`read_node_name`/`read_prop`/
+  `string_at`, refactored into shared free functions — one implementation,
+  §2.2), is allocation-free, bounds-checks every read, and fails closed:
+  the iterator yields `Err(FdtError)` and stops on a malformed token, and
+  out-of-range cell reads return `FdtError::OutOfBounds` (§2.9). Verified
+  against the real 1 MiB QEMU `virt` DTB during development; covered by new
+  host tests (virtio-mmio slot enumeration with `reg`+`interrupts`,
+  `is_compatible` true/false/absent, fail-closed reads, malformed-token
+  fail-closed).
+- **All consumers migrated; duplicate deleted (§2.2).**
+  `drivers/bus/mmio` (`enumerate`/`lib`/`tests`) and the verticals
+  `virtio_qemu_support` (`imp_mmio` riscv64 PLIC + `imp_mmio_aarch64`
+  GICv2 SPI), `fwcfg`, and `framebuffer_display_qemu_{aarch64,riscv64}`
+  now parse through `rustos_fdt::Fdt`; their `rustos-util` dependency was
+  swapped for `rustos-fdt`. `lib/util/src/dtb.rs` and `pub mod dtb` are
+  removed (`lib/util` retains only `fmt`). The aarch64 IPI/SMP vertical's
+  named `hvc` conduit is unaffected — that is QEMU's no-DTB-pointer ELF
+  boot, not a parser gap, and the production path already discovers the
+  conduit through `lib/fdt`.
+- **Verified:** `lib/fdt` (17) and `rustos-drv-bus-mmio` (13) host tests
+  pass; every migrated vertical compiles for `aarch64-unknown-none` and
+  `riscv64gc-unknown-none-elf` (the `itest_*` cfgs under which the code is
+  active). Docs: `docs/src/drivers/bus.md`, `lib/util` crate docs, `PLAN.md`,
+  this file. No `lib/abi` change, so no ABI / C-header drift.
+
 ---
 
 ## 4. Definition of done (per stage and overall) — `AGENTS.md` §7

@@ -33,6 +33,7 @@ use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
+use rustos_fdt::Fdt;
 use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{
@@ -46,7 +47,6 @@ use rustos_kernel_virtio::{
     KernelVirtioHost,
 };
 use rustos_log::{Event, EventId, Level, Sink};
-use rustos_util::dtb::Dtb;
 use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
@@ -255,7 +255,7 @@ pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
 /// equals `slot_base`. The `virt` board's virtio-MMIO nodes carry a
 /// three-cell `interrupts` triplet `<type number flags>` where `type == 0`
 /// (SPI); the GIC INTID is then [`MIN_SPI_INTID`]` + number`.
-fn device_spi_number(dtb: &Dtb<'_>, slot_base: u64) -> Option<u32> {
+fn device_spi_number(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     for node in dtb.nodes() {
         let node = node.ok()?;
         if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
@@ -410,7 +410,7 @@ impl IrqWaiter for WfiWaiter {
 /// QEMU failure through `env`.
 fn arm_external_irq(
     env: &AArch64QemuEnv,
-    dtb: &Dtb<'_>,
+    dtb: &Fdt<'_>,
     slot_base: u64,
 ) -> (&'static IrqTable, IrqHandle, u32) {
     let Some(number) = device_spi_number(dtb, slot_base) else {
@@ -472,7 +472,7 @@ where
     env.log(cfg.start_msg);
 
     // 1. Parse the embedded device-tree blob.
-    let Ok(dtb) = Dtb::parse(dtb_bytes) else {
+    let Ok(dtb) = Fdt::new(dtb_bytes) else {
         env.fail("DTB parse");
     };
 

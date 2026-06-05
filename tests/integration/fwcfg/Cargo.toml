@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 
 [lib]
 path = "src/lib.rs"

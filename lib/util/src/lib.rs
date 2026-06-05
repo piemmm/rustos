@@ -11,11 +11,10 @@
 //! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
 //!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
 //!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
-//! * [`dtb`] — flat device-tree (FDT v17) parser. Promoted from
-//!   `drivers/bus/mmio` in Stage 4 once a second caller (later
-//!   platform code that reads the boot DTB handed in by the kernel
-//!   boot capability) materialised; consumed by `drivers/bus/mmio`
-//!   and the platform-discovery code shipped alongside it.
+//!
+//! The flat device-tree (FDT) parser that once lived here has been folded
+//! into the single shared `lib/fdt` reader, which now owns the generic
+//! node-iteration API every device-tree consumer uses (`AGENTS.md` §2.2).
 //!
 //! Promoting code into this crate requires a `PLAN.md` note documenting
 //! the two-or-more concrete callers.
@@ -24,5 +23,4 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-pub mod dtb;
 pub mod fmt;

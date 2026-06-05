@@ -21,6 +21,7 @@ use rustos_arch_riscv64::{qemu_exit, trap, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
+use rustos_fdt::Fdt;
 use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
@@ -33,7 +34,6 @@ use rustos_kernel_virtio::{
 };
 use rustos_log::{Event, EventId, Level, Sink};
 use rustos_test_riscv64_boot::{published_dtb, published_memory_map, PlicIrqController};
-use rustos_util::dtb::Dtb;
 use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 /// Re-export so the verticals name the concrete transport for the shared
@@ -166,7 +166,7 @@ struct PlicInfo {
 }
 
 /// Find the PLIC's register base and source count in `dtb`.
-fn plic_info(dtb: &Dtb<'_>) -> Option<PlicInfo> {
+fn plic_info(dtb: &Fdt<'_>) -> Option<PlicInfo> {
     for node in dtb.nodes() {
         let node = node.ok()?;
         if !node.is_compatible(PLIC_COMPATIBLE) {
@@ -182,7 +182,7 @@ fn plic_info(dtb: &Dtb<'_>) -> Option<PlicInfo> {
 
 /// Find the PLIC interrupt source of the `virtio,mmio` slot whose `reg`
 /// base equals `slot_base` (its single `interrupts` cell).
-fn device_interrupt(dtb: &Dtb<'_>, slot_base: u64) -> Option<u32> {
+fn device_interrupt(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     for node in dtb.nodes() {
         let node = node.ok()?;
         if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
@@ -315,7 +315,7 @@ impl IrqWaiter for WfiWaiter {
 /// verticals own this path. Any failure flips QEMU failure via `env`.
 fn arm_external_irq(
     env: &MmioEnv,
-    dtb: &Dtb<'_>,
+    dtb: &Fdt<'_>,
     slot_base: u64,
 ) -> (
     &'static IrqTable,
@@ -392,7 +392,7 @@ where
     let dtb_len = unsafe { dtb_total_size(dtb_ptr) };
     // SAFETY: as above; `dtb_len` is the blob's self-described size.
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, dtb_len) };
-    let Ok(dtb) = Dtb::parse(dtb_bytes) else {
+    let Ok(dtb) = Fdt::new(dtb_bytes) else {
         env.fail("DTB parse");
     };
 

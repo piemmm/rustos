@@ -162,18 +162,6 @@ impl<'a> Fdt<'a> {
         Self::new(blob)
     }
 
-    /// Read the NUL-terminated string at `nameoff` in the strings block.
-    fn string_at(&self, nameoff: usize) -> Option<&'a [u8]> {
-        let start = self.strings_off.checked_add(nameoff)?;
-        if nameoff >= self.strings_size {
-            return None;
-        }
-        let block_end = self.strings_off + self.strings_size;
-        let region = self.blob.get(start..block_end)?;
-        let len = region.iter().position(|&b| b == 0)?;
-        Some(&region[..len])
-    }
-
     /// Locate the first `/memory` node's first `reg` entry, returning
     /// `(base, size)` in bytes.
     ///
@@ -428,19 +416,7 @@ impl<'a> Fdt<'a> {
     /// Read a NUL-terminated node name at `*pos`, advancing `*pos` past the
     /// 4-byte-aligned end of the name.
     fn read_node_name(&self, pos: &mut usize, struct_end: usize) -> Result<&'a [u8], FdtError> {
-        let region = self.blob.get(*pos..struct_end).ok_or(FdtError::Malformed)?;
-        let len = region
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or(FdtError::Malformed)?;
-        let name = &region[..len];
-        // Advance past the name + NUL, rounded up to a 4-byte boundary.
-        let consumed = align_up(len + 1, 4);
-        *pos = pos.checked_add(consumed).ok_or(FdtError::Malformed)?;
-        if *pos > struct_end {
-            return Err(FdtError::Malformed);
-        }
-        Ok(name)
+        read_node_name(self.blob, pos, struct_end)
     }
 
     /// Read an `FDT_PROP` body at `*pos` (`len`, `nameoff`, then the padded
@@ -451,17 +427,339 @@ impl<'a> Fdt<'a> {
         pos: &mut usize,
         struct_end: usize,
     ) -> Result<(&'a [u8], &'a [u8]), FdtError> {
-        let len = be_u32(self.blob, *pos).ok_or(FdtError::Malformed)? as usize;
-        let nameoff = be_u32(self.blob, *pos + 4).ok_or(FdtError::Malformed)? as usize;
-        let value_start = pos.checked_add(8).ok_or(FdtError::Malformed)?;
-        let value_end = value_start.checked_add(len).ok_or(FdtError::Malformed)?;
-        if value_end > struct_end {
-            return Err(FdtError::Malformed);
+        read_prop(
+            self.blob,
+            self.strings_off,
+            self.strings_size,
+            pos,
+            struct_end,
+        )
+    }
+
+    /// Iterate every node of the tree in document order.
+    ///
+    /// Each item is a [`Node`] handle exposing the node's properties
+    /// ([`Node::property`] / [`Node::is_compatible`]). The iterator yields
+    /// `Err(FdtError)` and then stops if it meets a malformed token, so a
+    /// hostile blob fails closed rather than silently under-enumerating
+    /// (`AGENTS.md` §2.9). This is the generic walk the bus enumerators and
+    /// the QEMU verticals discover the `virt` tree through — one parser for
+    /// every consumer (`AGENTS.md` §2.2).
+    #[must_use]
+    pub fn nodes(&self) -> NodeIter<'a> {
+        NodeIter {
+            blob: self.blob,
+            strings_off: self.strings_off,
+            strings_size: self.strings_size,
+            struct_end: self.struct_off + self.struct_size,
+            pos: self.struct_off,
+            depth: 0,
         }
-        let value = &self.blob[value_start..value_end];
-        let name = self.string_at(nameoff).ok_or(FdtError::Malformed)?;
-        *pos = align_up(value_end, 4);
-        Ok((name, value))
+    }
+}
+
+/// Read the NUL-terminated string at `nameoff` in a strings block of
+/// `[strings_off, strings_off + strings_size)` within `blob`.
+fn string_at(
+    blob: &[u8],
+    strings_off: usize,
+    strings_size: usize,
+    nameoff: usize,
+) -> Option<&[u8]> {
+    let start = strings_off.checked_add(nameoff)?;
+    if nameoff >= strings_size {
+        return None;
+    }
+    let block_end = strings_off.checked_add(strings_size)?;
+    let region = blob.get(start..block_end)?;
+    let len = region.iter().position(|&b| b == 0)?;
+    Some(&region[..len])
+}
+
+/// Read a NUL-terminated node name at `*pos`, advancing `*pos` past the
+/// 4-byte-aligned end of the name.
+fn read_node_name<'a>(
+    blob: &'a [u8],
+    pos: &mut usize,
+    struct_end: usize,
+) -> Result<&'a [u8], FdtError> {
+    let region = blob.get(*pos..struct_end).ok_or(FdtError::Malformed)?;
+    let len = region
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(FdtError::Malformed)?;
+    let name = &region[..len];
+    // Advance past the name + NUL, rounded up to a 4-byte boundary.
+    let consumed = align_up(len + 1, 4);
+    *pos = pos.checked_add(consumed).ok_or(FdtError::Malformed)?;
+    if *pos > struct_end {
+        return Err(FdtError::Malformed);
+    }
+    Ok(name)
+}
+
+/// Read an `FDT_PROP` body at `*pos` (`len`, `nameoff`, then the padded
+/// value), advancing `*pos` past it. Returns the property name and value
+/// slice.
+fn read_prop<'a>(
+    blob: &'a [u8],
+    strings_off: usize,
+    strings_size: usize,
+    pos: &mut usize,
+    struct_end: usize,
+) -> Result<(&'a [u8], &'a [u8]), FdtError> {
+    let len = be_u32(blob, *pos).ok_or(FdtError::Malformed)? as usize;
+    let nameoff = be_u32(blob, *pos + 4).ok_or(FdtError::Malformed)? as usize;
+    let value_start = pos.checked_add(8).ok_or(FdtError::Malformed)?;
+    let value_end = value_start.checked_add(len).ok_or(FdtError::Malformed)?;
+    if value_end > struct_end {
+        return Err(FdtError::Malformed);
+    }
+    let value = &blob[value_start..value_end];
+    let name = string_at(blob, strings_off, strings_size, nameoff).ok_or(FdtError::Malformed)?;
+    *pos = align_up(value_end, 4);
+    Ok((name, value))
+}
+
+/// Iterator over the nodes of an [`Fdt`] in document order, produced by
+/// [`Fdt::nodes`].
+#[derive(Clone)]
+pub struct NodeIter<'a> {
+    blob: &'a [u8],
+    strings_off: usize,
+    strings_size: usize,
+    struct_end: usize,
+    pos: usize,
+    depth: u32,
+}
+
+impl<'a> Iterator for NodeIter<'a> {
+    type Item = Result<Node<'a>, FdtError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.pos >= self.struct_end {
+                return None;
+            }
+            let Some(token) = be_u32(self.blob, self.pos) else {
+                return Some(Err(FdtError::Malformed));
+            };
+            self.pos += 4;
+            match token {
+                FDT_NOP => {}
+                FDT_END => return None,
+                FDT_BEGIN_NODE => {
+                    let name = match read_node_name(self.blob, &mut self.pos, self.struct_end) {
+                        Ok(n) => n,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let depth = self.depth;
+                    self.depth += 1;
+                    // Properties precede child nodes in a valid blob
+                    // (Devicetree Spec v0.4 §5.4.2), so the returned node's
+                    // `PropIter` starting here stops at the first child.
+                    return Some(Ok(Node {
+                        blob: self.blob,
+                        strings_off: self.strings_off,
+                        strings_size: self.strings_size,
+                        struct_end: self.struct_end,
+                        name,
+                        depth,
+                        props_pos: self.pos,
+                    }));
+                }
+                FDT_END_NODE => {
+                    self.depth = match self.depth.checked_sub(1) {
+                        Some(d) => d,
+                        None => return Some(Err(FdtError::Malformed)),
+                    };
+                }
+                FDT_PROP => {
+                    if let Err(e) = read_prop(
+                        self.blob,
+                        self.strings_off,
+                        self.strings_size,
+                        &mut self.pos,
+                        self.struct_end,
+                    ) {
+                        return Some(Err(e));
+                    }
+                }
+                _ => return Some(Err(FdtError::Malformed)),
+            }
+        }
+    }
+}
+
+/// A single device-tree node visited by [`NodeIter`].
+#[derive(Copy, Clone)]
+pub struct Node<'a> {
+    blob: &'a [u8],
+    strings_off: usize,
+    strings_size: usize,
+    struct_end: usize,
+    name: &'a [u8],
+    depth: u32,
+    props_pos: usize,
+}
+
+impl<'a> Node<'a> {
+    /// The node's unit-name bytes (e.g. `b"virtio_mmio@a000000"`); empty
+    /// for the root node.
+    #[must_use]
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// Depth within the tree; the root node is `0`.
+    #[must_use]
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Iterate this node's immediate properties (not those of children).
+    #[must_use]
+    pub fn properties(&self) -> PropIter<'a> {
+        PropIter {
+            blob: self.blob,
+            strings_off: self.strings_off,
+            strings_size: self.strings_size,
+            struct_end: self.struct_end,
+            pos: self.props_pos,
+        }
+    }
+
+    /// Return the property named `name`, if present.
+    #[must_use]
+    pub fn property(&self, name: &str) -> Option<Property<'a>> {
+        self.properties().find_map(|p| match p {
+            Ok(p) if p.name == name.as_bytes() => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `true` iff this node's `compatible` property lists `target` as one
+    /// of its NUL-separated strings.
+    #[must_use]
+    pub fn is_compatible(&self, target: &str) -> bool {
+        match self.property("compatible") {
+            Some(p) => p.iter_strings().any(|s| s == target.as_bytes()),
+            None => false,
+        }
+    }
+}
+
+/// Iterator over the properties immediately under a [`Node`].
+#[derive(Clone)]
+pub struct PropIter<'a> {
+    blob: &'a [u8],
+    strings_off: usize,
+    strings_size: usize,
+    struct_end: usize,
+    pos: usize,
+}
+
+impl<'a> Iterator for PropIter<'a> {
+    type Item = Result<Property<'a>, FdtError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.pos >= self.struct_end {
+                return None;
+            }
+            let Some(token) = be_u32(self.blob, self.pos) else {
+                return Some(Err(FdtError::Malformed));
+            };
+            self.pos += 4;
+            match token {
+                FDT_NOP => {}
+                FDT_PROP => {
+                    return Some(
+                        read_prop(
+                            self.blob,
+                            self.strings_off,
+                            self.strings_size,
+                            &mut self.pos,
+                            self.struct_end,
+                        )
+                        .map(|(name, value)| Property { name, value }),
+                    );
+                }
+                // Properties stop at the first non-property boundary: a
+                // child node, the end of this node, or the end of block.
+                FDT_BEGIN_NODE | FDT_END_NODE | FDT_END => return None,
+                _ => return Some(Err(FdtError::Malformed)),
+            }
+        }
+    }
+}
+
+/// A single property of a [`Node`].
+#[derive(Copy, Clone)]
+pub struct Property<'a> {
+    name: &'a [u8],
+    value: &'a [u8],
+}
+
+impl<'a> Property<'a> {
+    /// The property name bytes (e.g. `b"reg"`, `b"compatible"`).
+    #[must_use]
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// The raw property payload (big-endian on the wire).
+    #[must_use]
+    pub fn value(&self) -> &'a [u8] {
+        self.value
+    }
+
+    /// Iterate the NUL-separated strings inside a stringlist property such
+    /// as `compatible`.
+    #[must_use]
+    pub fn iter_strings(&self) -> StringList<'a> {
+        StringList { rem: self.value }
+    }
+
+    /// Read a single big-endian `u32` at `offset` inside the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError::OutOfBounds`] if `offset + 4` exceeds the value
+    /// length.
+    pub fn read_be_u32(&self, offset: usize) -> Result<u32, FdtError> {
+        be_u32(self.value, offset).ok_or(FdtError::OutOfBounds)
+    }
+
+    /// Read a single big-endian `u64` (two cells) at `offset` inside the
+    /// value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError::OutOfBounds`] if `offset + 8` exceeds the value
+    /// length.
+    pub fn read_be_u64(&self, offset: usize) -> Result<u64, FdtError> {
+        read_cells(self.value, offset, 2).ok_or(FdtError::OutOfBounds)
+    }
+}
+
+/// Iterator over the NUL-separated strings inside a stringlist property.
+#[derive(Clone)]
+pub struct StringList<'a> {
+    rem: &'a [u8],
+}
+
+impl<'a> Iterator for StringList<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.rem.is_empty() {
+            return None;
+        }
+        let nul = self.rem.iter().position(|&b| b == 0)?;
+        let (head, tail) = self.rem.split_at(nul);
+        self.rem = tail.get(1..).unwrap_or(&[]);
+        Some(head)
     }
 }
 
@@ -701,5 +999,112 @@ mod tests {
             fdt.property_u64(&[b"chosen"], b"two-cell"),
             Some(0x0123_4567_89ab_cdef)
         );
+    }
+
+    #[test]
+    fn nodes_enumerate_and_read_virtio_mmio_slots() {
+        // A `virt`-shaped tree: two virtio-MMIO transports and an
+        // unrelated `/memory` node, mirroring the QEMU `virt` layout the
+        // bus enumerator walks.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        for (i, base) in [0x0a00_0000u64, 0x0a00_0200].iter().enumerate() {
+            let name = alloc::format!("virtio_mmio@{base:x}");
+            b.begin_node(&name);
+            b.prop("compatible", b"virtio,mmio\0");
+            let mut reg = Vec::new();
+            reg.extend_from_slice(&base.to_be_bytes());
+            reg.extend_from_slice(&0x200u64.to_be_bytes());
+            b.prop("reg", &reg);
+            let mut irq = Vec::new();
+            let irq_number = 0x10 + u32::try_from(i).expect("slot index fits u32");
+            for cell in [0u32, irq_number, 0x04] {
+                irq.extend_from_slice(&cell.to_be_bytes());
+            }
+            b.prop("interrupts", &irq);
+            b.end_node();
+        }
+        b.begin_node("memory@40000000");
+        b.prop("device_type", b"memory\0");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+
+        let mut slots: Vec<(u64, u64, u32)> = Vec::new();
+        for node in fdt.nodes() {
+            let node = node.expect("node parses");
+            if !node.is_compatible("virtio,mmio") {
+                continue;
+            }
+            let reg = node.property("reg").expect("reg present");
+            let base = reg.read_be_u64(0).expect("base");
+            let len = reg.read_be_u64(8).expect("len");
+            let irq = node
+                .property("interrupts")
+                .expect("interrupts present")
+                .read_be_u32(4)
+                .expect("irq cell");
+            slots.push((base, len, irq));
+        }
+        assert_eq!(
+            slots,
+            [(0x0a00_0000, 0x200, 0x10), (0x0a00_0200, 0x200, 0x11)]
+        );
+    }
+
+    #[test]
+    fn node_is_compatible_false_for_absent_or_mismatched() {
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut saw_psci = false;
+        let mut saw_virtio = false;
+        for node in fdt.nodes() {
+            let node = node.expect("node parses");
+            saw_psci |= node.is_compatible("arm,psci-1.0");
+            saw_virtio |= node.is_compatible("virtio,mmio");
+        }
+        assert!(saw_psci);
+        assert!(!saw_virtio);
+        // The root node has no `compatible` and no arbitrary property.
+        let root = fdt.nodes().next().expect("root present").expect("ok");
+        assert!(!root.is_compatible("anything"));
+        assert!(root.property("missing").is_none());
+    }
+
+    #[test]
+    fn property_reads_fail_closed_past_the_value_end() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("dev");
+        b.prop("reg", &0x1234u32.to_be_bytes());
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let dev = fdt
+            .nodes()
+            .find_map(|n| {
+                let n = n.ok()?;
+                (n.name() == b"dev").then_some(n)
+            })
+            .expect("dev node");
+        let reg = dev.property("reg").expect("reg present");
+        assert_eq!(reg.read_be_u32(0), Ok(0x1234));
+        assert_eq!(reg.read_be_u64(0).err(), Some(FdtError::OutOfBounds));
+        assert_eq!(reg.read_be_u32(4).err(), Some(FdtError::OutOfBounds));
+    }
+
+    #[test]
+    fn nodes_fail_closed_on_malformed_token() {
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let mut corrupt = blob.clone();
+        // Overwrite the first structure-block token with an unknown value
+        // (the structure block begins at the 40-byte header end).
+        corrupt[40..44].copy_from_slice(&0x00ff_ff00u32.to_be_bytes());
+        let fdt = Fdt::new(&corrupt).expect("header still valid");
+        assert!(matches!(fdt.nodes().next(), Some(Err(FdtError::Malformed))));
     }
 }

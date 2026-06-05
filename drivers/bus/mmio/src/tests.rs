@@ -26,7 +26,7 @@ use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
 };
-use rustos_util::dtb::Dtb;
+use rustos_fdt::Fdt;
 
 use crate::enumerate::{Mmio, VIRTIO_MMIO_DEFAULT_VENDOR, VIRTIO_MMIO_MAGIC};
 use crate::transport::MmioRead;
@@ -204,7 +204,7 @@ fn register_requires_drv_load_capability() {
 #[test]
 fn virt_enumeration_matches_exact_device_list() {
     let blob = build_virt_dtb(4);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     // Slot 0: virtio-net (DeviceID = 1).
     // Slot 1: virtio-blk (DeviceID = 2).
     // Slots 2..3: empty (DeviceID == 0).
@@ -247,7 +247,7 @@ fn virt_enumeration_matches_exact_device_list() {
 #[test]
 fn short_buffer_yields_buffer_too_small() {
     let blob = build_virt_dtb(4);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let mut regs: Vec<(u64, u32)> = Vec::new();
     regs.extend_from_slice(&slot(0x0A00_0000, 1, 0x554D_4551, 2));
     regs.extend_from_slice(&slot(0x0A00_0200, 2, 0x554D_4551, 2));
@@ -269,7 +269,7 @@ fn short_buffer_yields_buffer_too_small() {
 #[test]
 fn slot_without_magic_is_skipped() {
     let blob = build_virt_dtb(2);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let regs: Vec<(u64, u32)> = vec![
         // Wrong magic on slot 0: skipped silently.
         (0x0A00_0000, 0xDEAD_BEEF),
@@ -297,7 +297,7 @@ fn slot_without_magic_is_skipped() {
 #[test]
 fn empty_dtb_enumerates_to_zero() {
     let blob = build_virt_dtb(0);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
     let mut out = [BusDevice {
         vendor: 0,
@@ -312,7 +312,7 @@ fn empty_dtb_enumerates_to_zero() {
 #[test]
 fn map_slot_window_hands_off_to_kernel_mapper() {
     let blob = build_virt_dtb(4);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let regs: Vec<(u64, u32)> = slot(0x0A00_0200, 2, 0x554D_4551, 2).to_vec();
     let bus = Mmio::new(dtb, FakeMmio { regs });
     let mapper = MockMapper::new(true);
@@ -329,7 +329,7 @@ fn map_slot_window_hands_off_to_kernel_mapper() {
 #[test]
 fn map_slot_window_reports_not_found_for_unknown_base() {
     let blob = build_virt_dtb(2);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
     let mapper = MockMapper::new(true);
     // No slot is laid out at this address.
@@ -342,7 +342,7 @@ fn map_slot_window_reports_not_found_for_unknown_base() {
 #[test]
 fn map_slot_window_propagates_capability_denial() {
     let blob = build_virt_dtb(2);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
     // Mapper without CAP_MMIO_MAP: the hand-off surfaces the refusal.
     let mapper = MockMapper::new(false);
@@ -419,7 +419,7 @@ fn virtio_mmio_aperture_spans_all_slots() {
     // Four slots on the canonical 0x0200 grid, each 0x200 long, span
     // [0x0A00_0000, 0x0A00_0800).
     let blob = build_virt_dtb(4);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     let span = crate::virtio_mmio_aperture(&dtb)
         .expect("aperture ok")
         .expect("some slots");
@@ -429,7 +429,7 @@ fn virtio_mmio_aperture_spans_all_slots() {
 #[test]
 fn virtio_mmio_aperture_none_without_slots() {
     let blob = build_virt_dtb(0);
-    let dtb = Dtb::parse(&blob).expect("DTB parses");
+    let dtb = Fdt::new(&blob).expect("DTB parses");
     assert_eq!(
         crate::virtio_mmio_aperture(&dtb).expect("aperture ok"),
         None

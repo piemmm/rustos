@@ -2099,11 +2099,11 @@ follow-up is its own thread and is now also complete.
   through the FFFFFFFF/read-back/restore probe; BAR mapping is
   deferred to Stage 4.D where virtio-blk / virtio-net route the
   request through the driver host's memory capability. The MMIO
-  walker iterates the boot DTB through `rustos_util::dtb` (a new
-  shared parser promoted into `lib/util` once a second caller
-  materialised per `AGENTS.md` §2.3 / §6 — the consumers today
-  are this driver and the future platform-discovery code that
-  reads the same boot blob). Tests: 12 host-side unit tests for
+  walker iterates the boot DTB through `rustos_fdt` (the single
+  shared device-tree parser; the WIRING burn-down later folded the
+  one-off `lib/util/dtb` parser into `lib/fdt` so the arch ports,
+  the QEMU verticals, and this driver all walk the `virt` tree
+  through one reader per `AGENTS.md` §2.2). Tests: 12 host-side unit tests for
   the PCI driver (including the exact `q35` device-list
   assertion, capability-walker, BAR-sizing probe, and
   `register` capability gate) and 6 for the MMIO driver

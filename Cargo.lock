@@ -623,7 +623,7 @@ name = "rustos-drv-bus-mmio"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-util",
+ "rustos-fdt",
 ]
 
 [[package]]
@@ -809,7 +809,7 @@ version = "0.0.0"
 name = "rustos-itest-fwcfg"
 version = "0.0.0"
 dependencies = [
- "rustos-util",
+ "rustos-fdt",
 ]
 
 [[package]]
@@ -1298,6 +1298,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
+ "rustos-fdt",
  "rustos-itest-fwcfg",
  "rustos-itest-harness",
  "rustos-kernel-mem",
@@ -1305,7 +1306,6 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-test-virtio-qemu-support",
- "rustos-util",
 ]
 
 [[package]]
@@ -1320,6 +1320,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
+ "rustos-fdt",
  "rustos-itest-fwcfg",
  "rustos-itest-harness",
  "rustos-kernel-mem",
@@ -1327,7 +1328,6 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-test-riscv64-boot",
- "rustos-util",
 ]
 
 [[package]]
@@ -1779,6 +1779,7 @@ dependencies = [
  "rustos-drv-network-virtio-net",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
+ "rustos-fdt",
  "rustos-itest-harness",
  "rustos-kernel",
  "rustos-kernel-irq",
@@ -1790,7 +1791,6 @@ dependencies = [
  "rustos-test-fat32-image",
  "rustos-test-riscv64-boot",
  "rustos-test-rustfs-image",
- "rustos-util",
  "rustos-virtio",
 ]
 

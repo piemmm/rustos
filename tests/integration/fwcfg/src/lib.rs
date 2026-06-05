@@ -36,7 +36,7 @@ use alloc::vec;
 use core::ptr;
 use core::sync::atomic::{compiler_fence, Ordering};
 
-use rustos_util::dtb::Dtb;
+use rustos_fdt::Fdt;
 
 /// `FW_CFG_SIGNATURE` selector key; reading four bytes yields `QEMU`.
 pub const KEY_SIGNATURE: u16 = 0x0000;
@@ -360,7 +360,7 @@ impl MmioDma {
     /// # Errors
     ///
     /// [`MmioDmaError::NotFound`] if no compatible node is present.
-    pub fn from_dtb(dtb: &Dtb<'_>) -> Result<Self, MmioDmaError> {
+    pub fn from_dtb(dtb: &Fdt<'_>) -> Result<Self, MmioDmaError> {
         for node in dtb.nodes() {
             let Ok(node) = node else {
                 continue;

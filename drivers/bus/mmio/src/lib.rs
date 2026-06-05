@@ -4,10 +4,10 @@
 //! (QEMU's `aarch64 -M virt` and `riscv64 -M virt` machines). The
 //! flat device-tree blob — handed to the driver host by the kernel
 //! boot capability — is the single source of truth for slot
-//! addresses; the parser used to walk it lives in
-//! [`rustos_util::dtb`] so the future platform-discovery code can
-//! reuse it without copy-paste (`AGENTS.md` §2.3 / §6, satisfying
-//! the two-caller rule today).
+//! addresses; the parser used to walk it is the shared
+//! [`rustos_fdt`] reader every architecture port and QEMU vertical
+//! discovers the `virt` tree through, so there is exactly one
+//! device-tree parser in the workspace (`AGENTS.md` §2.2 / §18.2).
 //!
 //! Per the issue spec for Stage 4 the driver only enumerates; it
 //! never enables a slot. Reading the small per-slot register window
@@ -40,7 +40,7 @@
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
-use rustos_util::dtb::Dtb;
+use rustos_fdt::Fdt;
 
 pub(crate) mod enumerate;
 pub(crate) mod transport;
@@ -116,7 +116,7 @@ impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
 /// [`DriverError::DeviceFault`] if a `virtio,mmio` node carries a
 /// malformed `reg` property — failing closed exactly as
 /// [`enumerate::Mmio::enumerate_into`] does.
-fn virtio_mmio_aperture(dtb: &Dtb<'_>) -> Result<Option<(u64, u64)>, DriverError> {
+fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError> {
     let mut lo: Option<u64> = None;
     let mut hi: Option<u64> = None;
     for node in dtb.nodes() {
@@ -168,7 +168,7 @@ fn virtio_mmio_aperture(dtb: &Dtb<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// The single volatile reader the constructor mints is confined to that
 /// aperture and performs only bounds-checked volatile loads.
 pub unsafe fn virtio_mmio_bus_from_dtb(dtb: &[u8]) -> Result<impl VirtioMmioBus + '_, DriverError> {
-    let parsed = Dtb::parse(dtb).map_err(|_| DriverError::DeviceFault)?;
+    let parsed = Fdt::new(dtb).map_err(|_| DriverError::DeviceFault)?;
     let (base, len) = virtio_mmio_aperture(&parsed)?.ok_or(DriverError::NotFound)?;
     // SAFETY: the function-level contract guarantees `[base, base+len)`
     // is the identity-mapped, exclusively-owned virtio-MMIO aperture the
