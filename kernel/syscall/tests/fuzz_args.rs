@@ -61,6 +61,21 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
+/// PRNG streams within one harness.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 /// xor-shift* PRNG. Deterministic, fast, and zero-allocation; not used
 /// for anything except generating fuzz inputs.
 struct Rng(u64);
@@ -254,7 +269,7 @@ fn fuzz_dispatcher_matches_mirror() {
         caps: &caps,
     };
 
-    let mut rng = Rng::new(0xCAFE_F00D_DEAD_BEEF);
+    let mut rng = Rng::new(seed(0xCAFE_F00D_DEAD_BEEF));
     let mut accepted = 0u64;
     let mut rejected = 0u64;
     let deadline = fuzz_deadline();

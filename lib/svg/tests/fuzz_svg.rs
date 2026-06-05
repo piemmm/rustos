@@ -47,6 +47,21 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
+/// PRNG streams within one harness.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 /// Low byte of `x`, without a narrowing `as` cast.
 fn low_byte(x: u64) -> u8 {
     x.to_le_bytes()[0]
@@ -67,8 +82,9 @@ fn decode_never_panics(bytes: &[u8]) {
 fn decode_never_panics_for_any_input() {
     let deadline = budget();
 
-    // A fixed-seed LCG drives every draw, so a failure reproduces exactly.
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    // The LCG seed comes from `seed()`: fixed under a plain `cargo test`
+    // (reproducible), fresh per soak run under `cargo xtask fuzz`.
+    let mut state: u64 = seed(0x9E37_79B9_7F4A_7C15);
     let mut next = || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)

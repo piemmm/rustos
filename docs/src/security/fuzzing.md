@@ -14,10 +14,14 @@ concession; the nightly soak is where the real coverage comes from.
 RustOS does not pull in an external fuzz runner. §19.6 explicitly
 sanctions an "equivalent in-tree harness", and `AGENTS.md` §2.12
 ("roll your own") makes that the default: every dependency widens the
-trusted computing base. Each harness is therefore an ordinary,
-deterministic `cargo test` integration test driven by a small, seeded,
-allocation-free PRNG. A fixed seed makes any failure reproducible — a
-flaky fuzz target is a bug (`AGENTS.md` §7).
+trusted computing base. Each harness is therefore an ordinary
+`cargo test` integration test driven by a small, seeded,
+allocation-free PRNG. The seed is chosen by the orchestrator (see
+[Seeding](#seeding-deterministic-ci-progressing-soaks) below): fixed for
+a plain `cargo test` so the smoke sweep is reproducible, and fresh per
+run under `cargo xtask fuzz` so consecutive soaks explore new inputs
+instead of replaying the same stream. A flaky fuzz target is a bug
+(`AGENTS.md` §7).
 
 Five harnesses exist today:
 
@@ -67,14 +71,41 @@ cargo xtask fuzz --soak     # ≥ 24 h per harness (nightly)
 cargo xtask fuzz --list     # list the registered harnesses
 cargo xtask fuzz --target fuzz_decode   # run one harness
 cargo xtask fuzz --secs 5   # custom budget (local iteration / tests)
+cargo xtask fuzz --seed 42  # reproduce a logged run's input stream
 ```
 
 The orchestrator exports `RUSTOS_FUZZ_BUDGET_SECS`. A harness reads it
 and, when it is a positive value, keeps drawing fresh inputs from the
 *same continuing* PRNG stream until the budget elapses; when it is unset
-the harness runs the fixed smoke sweep. Because the seed is fixed, a
-crash at draw *N* is reproducible regardless of how far a given machine
-got within the budget.
+the harness runs the fixed smoke sweep.
+
+## Seeding: deterministic CI, progressing soaks
+
+A budget alone is not enough. If every run started the PRNG from the
+same fixed seed, a 24 h soak would merely replay the first *N* inputs of
+the identical stream the previous soak already explored — running longer
+would find nothing new (`AGENTS.md` §2.1 forbids that kind of
+busy-work). So the orchestrator also chooses a **per-harness seed** and
+exports it as `RUSTOS_FUZZ_SEED`:
+
+* By default it draws a *fresh* seed for each harness from host entropy
+  (wall-clock time, pid, a monotonic counter — see
+  `tools/xtask/src/commands/seed.rs`), so two soaks never run the same
+  stream and coverage genuinely progresses night after night.
+* `--seed N` instead derives a *deterministic* per-harness seed from
+  `N`, so a crash a soak reported can be replayed exactly.
+
+Every run logs the seed it picked (it is part of each job's label), so a
+non-deterministic soak stays reproducible: feed the logged value back
+via `--seed`. A plain `cargo test` leaves `RUSTOS_FUZZ_SEED` unset and
+each harness falls back to its built-in constant, keeping the normal
+suite fully deterministic. This is a *test-input* seed, not a security
+seed; it deliberately does not go through `lib/crypto`/`lib/rng` (those
+govern the kernel CSPRNG, §22).
+
+The stateful proptest models (`AGENTS.md` §19.7) follow the identical
+pattern through `cargo xtask proptest --seed N` and
+`RUSTOS_PROPTEST_SEED`.
 
 ## CI integration
 

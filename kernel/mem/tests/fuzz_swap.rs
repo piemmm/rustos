@@ -143,9 +143,25 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for the input driver. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. Only the page/tamper draw is
+/// reseeded — the swap key and nonce material stay fixed so the harness
+/// keeps exercising the same crypto state across runs.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 #[test]
 fn fuzz_swap_restore_is_fail_closed() {
-    let mut rng = Rng::new(0xF00D_5A4E_1234_BEEF);
+    let mut rng = Rng::new(seed(0xF00D_5A4E_1234_BEEF));
     let device = MockBackend::new(SLOTS);
     let key = SwapKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
     let mut swap = EncryptedSwap::activate(device.clone(), key, &mut RngEntropy(Rng::new(2)))

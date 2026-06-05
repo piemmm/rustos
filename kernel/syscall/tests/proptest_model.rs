@@ -21,9 +21,12 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.7)
 //!
-//! A plain `cargo test` runs [`SMOKE_CASES`] sequences; `cargo xtask
-//! proptest` exports `RUSTOS_PROPTEST_BUDGET_SECS` and [`drive`] repeats
-//! batches from the same deterministic RNG until the budget elapses.
+//! A plain `cargo test` runs [`SMOKE_CASES`] sequences from proptest's fixed
+//! deterministic RNG; `cargo xtask proptest` exports
+//! `RUSTOS_PROPTEST_BUDGET_SECS` and [`drive`] repeats batches until the budget
+//! elapses. The orchestrator also exports `RUSTOS_PROPTEST_SEED`
+//! ([`seeded_rng`]): a fresh seed each run so soaks draw new programs (§2.1),
+//! or a logged value via `--seed` to reproduce one.
 
 use core::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -128,6 +131,37 @@ fn budget_deadline() -> Option<Instant> {
     Some(Instant::now() + Duration::from_secs(secs))
 }
 
+/// The `ChaCha` RNG `drive` runs from.
+///
+/// `cargo xtask proptest` exports `RUSTOS_PROPTEST_SEED` so each soak run
+/// draws fresh programs (`AGENTS.md` §19.7 / §2.1) while a logged seed still
+/// reproduces a counterexample; a plain `cargo test` leaves it unset and uses
+/// proptest's fixed deterministic RNG, keeping the smoke sweep reproducible.
+fn seeded_rng() -> TestRng {
+    match std::env::var("RUSTOS_PROPTEST_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(seed) => TestRng::from_seed(RngAlgorithm::ChaCha, &expand_seed(seed)),
+        None => TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    }
+}
+
+/// Expand a 64-bit seed into proptest's 32-byte `ChaCha` seed via `SplitMix64`.
+fn expand_seed(seed: u64) -> [u8; 32] {
+    let mut state = seed;
+    let mut bytes = [0u8; 32];
+    for chunk in bytes.chunks_mut(8) {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        chunk.copy_from_slice(&z.to_le_bytes());
+    }
+    bytes
+}
+
 fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCaseError>) {
     let deadline = budget_deadline();
     let cases = if deadline.is_some() {
@@ -140,8 +174,7 @@ fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCa
         failure_persistence: None,
         ..Config::default()
     };
-    let mut runner =
-        TestRunner::new_with_rng(config, TestRng::deterministic_rng(RngAlgorithm::ChaCha));
+    let mut runner = TestRunner::new_with_rng(config, seeded_rng());
     loop {
         if let Err(err) = runner.run(&strategy, &check) {
             panic!("proptest stateful model found a counterexample: {err}");

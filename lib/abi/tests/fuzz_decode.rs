@@ -68,6 +68,21 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
+/// PRNG streams within one harness.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 /// Drive every ABI decoder on `bytes`.
 ///
 /// Returns silently. The contract is "must not panic for any input"; a
@@ -286,7 +301,7 @@ impl Lcg {
 
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = Lcg::new(0xCAFE_F00D_DEAD_BEEF);
+    let mut rng = Lcg::new(seed(0xCAFE_F00D_DEAD_BEEF));
     let mut buf = [0u8; 256];
     let deadline = budget();
     loop {

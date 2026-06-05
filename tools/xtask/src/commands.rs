@@ -22,6 +22,7 @@ mod parallel;
 mod proptest;
 mod qemu_tests;
 mod sbom;
+mod seed;
 mod spec_review;
 mod supply_chain;
 mod wasm_tests;

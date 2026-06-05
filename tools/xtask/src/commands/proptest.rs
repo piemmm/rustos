@@ -11,10 +11,14 @@
 //! Each [`Model`] names an existing `cargo test` integration harness
 //! (`tests/proptest_model.rs`). The orchestrator exports
 //! `RUSTOS_PROPTEST_BUDGET_SECS`, which the harness reads to keep running
-//! batches from its deterministic proptest RNG until the budget elapses (a
-//! plain `cargo test` leaves the variable unset and runs the fast
-//! fixed-case sweep instead). A model that finds a counterexample, hangs,
-//! or otherwise fails its invariant fails the command — §19.7 fails closed.
+//! batches from its proptest RNG until the budget elapses (a plain `cargo
+//! test` leaves the variable unset and runs the fast fixed-case sweep
+//! instead). It also exports a per-model RNG seed (`commands::seed`): by
+//! default a *fresh* seed each run, so two soaks never replay the same
+//! programs (§2.1); with `--seed N`, a deterministic seed that reproduces a
+//! logged counterexample. The chosen seed is logged with each job. A model
+//! that finds a counterexample, hangs, or otherwise fails its invariant
+//! fails the command — §19.7 fails closed.
 //!
 //! Adding a model means adding a [`Model`] here, never teaching `ci` about
 //! it directly.
@@ -23,6 +27,7 @@ use std::ffi::OsString;
 use std::time::Duration;
 
 use crate::commands::parallel::{self, Job};
+use crate::commands::seed;
 use crate::Context;
 
 /// One in-tree stateful proptest model the orchestrator knows how to run.
@@ -101,6 +106,12 @@ pub struct Options {
     /// Override the per-model budget in seconds (`--secs <n>`); CI never
     /// passes it — it exists for the orchestrator's own tests and local runs.
     pub secs: Option<u64>,
+    /// Reproduce an earlier run by fixing its proptest RNG seed (`--seed <n>`).
+    ///
+    /// Unset (the default, including in `ci`) draws a fresh per-model seed each
+    /// run, so consecutive soaks explore new programs (§19.7, §2.1). Setting it
+    /// replays the exact sequence the orchestrator logged for a counterexample.
+    pub seed: Option<u64>,
 }
 
 /// Parse `proptest` arguments. `--quick` is the default when neither budget
@@ -114,6 +125,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
     let mut only: Option<String> = None;
     let mut list = false;
     let mut secs: Option<u64> = None;
+    let mut seed: Option<u64> = None;
 
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -143,10 +155,21 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                     .ok_or_else(|| format!("proptest: `--secs` expects a u64, got {value:?}"))?;
                 secs = Some(parsed);
             }
+            "--seed" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "proptest: `--seed` requires a number".to_string())?;
+                let parsed = value
+                    .to_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .ok_or_else(|| format!("proptest: `--seed` expects a u64, got {value:?}"))?;
+                seed = Some(parsed);
+            }
             other => {
                 return Err(format!(
                     "proptest: unexpected argument {other:?}; usage: \
-                     cargo xtask proptest [--quick | --soak] [--target NAME] [--secs N] [--list]"
+                     cargo xtask proptest [--quick | --soak] [--target NAME] [--secs N] \
+                     [--seed N] [--list]"
                 ));
             }
         }
@@ -157,6 +180,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
         only,
         list,
         secs,
+        seed,
     })
 }
 
@@ -209,7 +233,8 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     // and fails closed (`commands::parallel`).
     let jobs: Vec<Job> = models
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(i, m)| {
             let mut cmd = ctx.cargo();
             cmd.args([
                 "test",
@@ -222,7 +247,17 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
                 "--nocapture",
             ]);
             cmd.env("RUSTOS_PROPTEST_BUDGET_SECS", budget.as_secs().to_string());
-            let label = format!("proptest {} ({} s)", m.name, budget.as_secs());
+            // Each model reseeds its proptest RNG from this value instead of a
+            // fixed seed, so a fresh seed (the default) makes every soak draw
+            // new programs while `--seed N` reproduces a logged counterexample
+            // (§19.7, §2.1). The seed is in the label so it reaches the log.
+            let job_seed = seed::job_seed(opts.seed, i);
+            cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
+            let label = format!(
+                "proptest {} ({} s, seed {job_seed})",
+                m.name,
+                budget.as_secs()
+            );
             Job::new(label, cmd)
         })
         .collect();
@@ -294,6 +329,26 @@ mod tests {
     fn secs_requires_a_number() {
         assert!(parse(&argv(&["--secs", "soon"])).is_err());
         assert!(parse(&argv(&["--secs"])).is_err());
+    }
+
+    #[test]
+    fn seed_defaults_to_none_so_each_run_is_fresh() {
+        // No `--seed` means a fresh seed per run, so consecutive soaks draw
+        // new programs (§19.7, §2.1).
+        let opts = parse(&argv(&[])).expect("empty args parse");
+        assert_eq!(opts.seed, None);
+    }
+
+    #[test]
+    fn seed_override_parses() {
+        let opts = parse(&argv(&["--seed", "98765"])).expect("seed parses");
+        assert_eq!(opts.seed, Some(98765));
+    }
+
+    #[test]
+    fn seed_requires_a_number() {
+        assert!(parse(&argv(&["--seed", "later"])).is_err());
+        assert!(parse(&argv(&["--seed"])).is_err());
     }
 
     #[test]

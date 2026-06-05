@@ -71,6 +71,21 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
+/// PRNG streams within one harness.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 /// Build a `'static` `MockHost` the queue can borrow for the process.
 fn static_host() -> &'static MockHost {
     Box::leak(Box::new(MockHost::new()))
@@ -78,7 +93,7 @@ fn static_host() -> &'static MockHost {
 
 #[test]
 fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
-    let mut rng = Rng::new(0xB1C7_DEAD_F00D_5A4E);
+    let mut rng = Rng::new(seed(0xB1C7_DEAD_F00D_5A4E));
     let mut t = MockTransport::new(1, QUEUE_SIZE, 0, 0);
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, QUEUE_SIZE).expect("queue setup");

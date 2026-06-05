@@ -91,6 +91,21 @@ fn within_budget(deadline: Option<std::time::Instant>) -> bool {
     matches!(deadline, Some(end) if std::time::Instant::now() < end)
 }
 
+/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
+/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
+/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
+/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
+/// PRNG streams within one harness.
+fn seed(salt: u64) -> u64 {
+    match std::env::var("RUSTOS_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(env) => env ^ salt,
+        None => salt,
+    }
+}
+
 /// xor-shift* PRNG. Deterministic, fast, zero-allocation.
 struct Rng(u64);
 impl Rng {
@@ -154,7 +169,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
         usize::try_from(u64::from(MAX_PAYLOAD).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN)))
             .expect("the port's payload bound fits usize on every supported target");
 
-    let mut rng = Rng::new(0xDEAD_BEEF_F00D_CAFE);
+    let mut rng = Rng::new(seed(0xDEAD_BEEF_F00D_CAFE));
     let mut accepted = 0u64;
     let mut denied_caps = 0u64;
     let mut denied_size = 0u64;
@@ -252,7 +267,7 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
     let port = authorised_port(&sink);
     port.destroy(&sink);
 
-    let mut rng = Rng::new(0x0BAD_F00D_1234_5678);
+    let mut rng = Rng::new(seed(0x0BAD_F00D_1234_5678));
     for _ in 0..10_000 {
         // Even a sender holding every capability cannot send to a closed
         // port — destruction wins over authority (`AGENTS.md` §5.4 fail

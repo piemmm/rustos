@@ -1,8 +1,8 @@
 //! `cargo xtask fuzz` — drive the in-tree fuzz harnesses (`AGENTS.md` §19.6).
 //!
 //! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): the
-//! per-crate harnesses are deterministic, seeded, allocation-free Rust tests
-//! that §19.6 explicitly sanctions as the "equivalent in-tree harness". This
+//! per-crate harnesses are seeded, allocation-free Rust tests that §19.6
+//! explicitly sanctions as the "equivalent in-tree harness". This
 //! orchestrator is the single place that runs every such harness for a
 //! wall-clock budget, so a PR and a nightly soak share one definition of the
 //! target set.
@@ -11,8 +11,12 @@
 //! orchestrator exports `RUSTOS_FUZZ_BUDGET_SECS`, which the harness reads to
 //! keep drawing fresh inputs from its continuing PRNG stream until the budget
 //! elapses (a plain `cargo test` leaves the variable unset and runs the fast,
-//! fixed-iteration smoke sweep instead). A harness that crashes, hangs, or
-//! fails its invariant fails the command — §19.6 fails closed.
+//! fixed-iteration smoke sweep instead). It also exports a per-harness PRNG
+//! seed (`commands::seed`): by default a *fresh* seed each run, so two soaks
+//! never replay the same input stream (§2.1); with `--seed N`, a deterministic
+//! seed that reproduces a logged crash. The chosen seed is logged with each
+//! job. A harness that crashes, hangs, or fails its invariant fails the
+//! command — §19.6 fails closed.
 //!
 //! Adding a harness means adding a [`Target`] here, never teaching `ci`
 //! about it directly. The §19.6 burn-down now covers the wire decoders,
@@ -23,6 +27,7 @@ use std::ffi::OsString;
 use std::time::Duration;
 
 use crate::commands::parallel::{self, Job};
+use crate::commands::seed;
 use crate::Context;
 
 /// One in-tree fuzz harness the orchestrator knows how to run.
@@ -138,6 +143,13 @@ pub struct Options {
     /// Exists so the orchestrator's own unit tests and local smoke runs do
     /// not have to wait the full budget; CI never passes it.
     pub secs: Option<u64>,
+    /// Reproduce an earlier run by fixing its PRNG seed (`--seed <n>`).
+    ///
+    /// Unset (the default, including in `ci`) draws a fresh per-harness seed
+    /// each run, so consecutive soaks explore new inputs (§19.6, §2.1).
+    /// Setting it replays the exact stream the orchestrator logged for a
+    /// reported crash.
+    pub seed: Option<u64>,
 }
 
 /// Parse `fuzz` arguments. `--quick` is the default when neither budget flag
@@ -151,6 +163,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
     let mut only: Option<String> = None;
     let mut list = false;
     let mut secs: Option<u64> = None;
+    let mut seed: Option<u64> = None;
 
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -180,10 +193,21 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
                     .ok_or_else(|| format!("fuzz: `--secs` expects a u64, got {value:?}"))?;
                 secs = Some(parsed);
             }
+            "--seed" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "fuzz: `--seed` requires a number".to_string())?;
+                let parsed = value
+                    .to_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .ok_or_else(|| format!("fuzz: `--seed` expects a u64, got {value:?}"))?;
+                seed = Some(parsed);
+            }
             other => {
                 return Err(format!(
                     "fuzz: unexpected argument {other:?}; usage: \
-                     cargo xtask fuzz [--quick | --soak] [--target NAME] [--secs N] [--list]"
+                     cargo xtask fuzz [--quick | --soak] [--target NAME] [--secs N] \
+                     [--seed N] [--list]"
                 ));
             }
         }
@@ -194,6 +218,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
         only,
         list,
         secs,
+        seed,
     })
 }
 
@@ -250,7 +275,8 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
     // parallelism and fails closed (`commands::parallel`).
     let jobs: Vec<Job> = targets
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let mut cmd = ctx.cargo();
             // `--test <name>` runs exactly that integration harness; `--exact`
             // is unnecessary because the test binary contains only fuzz fns.
@@ -265,7 +291,13 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
                 "--nocapture",
             ]);
             cmd.env("RUSTOS_FUZZ_BUDGET_SECS", budget.as_secs().to_string());
-            let label = format!("fuzz {} ({} s)", t.test, budget.as_secs());
+            // Each harness reads this seed instead of its built-in constant,
+            // so a fresh seed (the default) makes every soak explore new
+            // inputs while `--seed N` reproduces a logged crash exactly
+            // (§19.6, §2.1). The seed is in the label so it reaches the log.
+            let job_seed = seed::job_seed(opts.seed, i);
+            cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
+            let label = format!("fuzz {} ({} s, seed {job_seed})", t.test, budget.as_secs());
             Job::new(label, cmd)
         })
         .collect();
@@ -344,6 +376,26 @@ mod tests {
     fn secs_requires_a_number() {
         assert!(parse(&argv(&["--secs", "soon"])).is_err());
         assert!(parse(&argv(&["--secs"])).is_err());
+    }
+
+    #[test]
+    fn seed_defaults_to_none_so_each_run_is_fresh() {
+        // No `--seed` means the orchestrator draws a fresh seed per run, so
+        // consecutive soaks explore new inputs (§19.6, §2.1).
+        let opts = parse(&argv(&[])).expect("empty args parse");
+        assert_eq!(opts.seed, None);
+    }
+
+    #[test]
+    fn seed_override_parses() {
+        let opts = parse(&argv(&["--seed", "12345"])).expect("seed parses");
+        assert_eq!(opts.seed, Some(12345));
+    }
+
+    #[test]
+    fn seed_requires_a_number() {
+        assert!(parse(&argv(&["--seed", "later"])).is_err());
+        assert!(parse(&argv(&["--seed"])).is_err());
     }
 
     #[test]
