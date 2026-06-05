@@ -120,6 +120,12 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   (`satp_sv39`), a `.bss` `PageTablePool`, and an `AddressSpace` that
   identity-maps the low gigabytes with 1 GiB leaves, adds 4 KiB mappings
   through `map_4k`, and activates via `satp` + `sfence.vma` in `switch`.
+  The `AddressSpace` draws its tables through the Arch HAL
+  `PageTableFrames` seam (Stage W5b-3): the `.bss` `PageTablePool` is the
+  boot/bootstrap source, and a real per-process space is backed by
+  `kernel/mem`'s `FrameTableSource` over the frame allocator. The pool's
+  identity `phys_of` lets the `frames::conformance` suite run on the host
+  (`passes_frames_conformance`).
   This is the architectural mechanism the memory-isolation vertical
   exercises: two hierarchies disagreeing on one VA so the MMU faults a
   cross-address-space access (`AGENTS.md` §4; see *Memory-isolation QEMU

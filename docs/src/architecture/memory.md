@@ -118,6 +118,24 @@ mappings) so the security default is exercised in tests.
 `READ | WRITE | EXEC | USER | NO_CACHE`. Architecture code translates
 these into native page-table bits during Stage 3.
 
+**Backing a port's page tables with the frame allocator
+(`FrameTableSource`).** A port's `AddressSpace` is built from 4 KiB
+page-table frames it draws through the Arch HAL `PageTableFrames` seam
+(`rustos_arch_api::frames`). The boot/bootstrap source is the static
+`PageTablePool` each port ships; the production source is
+[`FrameTableSource`], which draws a physical frame from the
+`FrameAllocator`, maps it to a CPU view through the direct
+[`PhysMap`] (§3b), zeroes it, and hands the port a `TableFrame`
+(physical address + `'static` entry view). A frame outside the direct
+map is returned to the allocator and the request fails closed
+(`AGENTS.md` §2.9), never synthesising a pointer. This keeps the §17.4
+one-way edge intact — `kernel/arch/*` names only the HAL trait, never
+`kernel/mem` — while a real per-process address space's tables come from
+ordinary reclaimable RAM rather than a fixed `.bss` pool
+(`plans/WIRING.md` Stage W5b-3). Host tests run the HAL
+`frames::conformance` suite over `FrameTableSource` and assert each
+table is drawn from the allocator, zeroed, and distinct.
+
 ## 3a. User-memory copy (`uaccess`)
 
 A syscall handler is handed a raw user pointer (`ptr`, `len`) and must

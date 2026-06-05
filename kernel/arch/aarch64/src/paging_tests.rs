@@ -231,6 +231,20 @@ fn passes_tlb_conformance() {
 }
 
 #[test]
+fn passes_frames_conformance() {
+    use rustos_arch_api::frames::{self, PageTableFrames};
+    // The static pool is the boot/bootstrap `PageTableFrames` source; its
+    // `phys_of` is the identity map (kernel memory), so the suite runs on
+    // the host. A fresh pool hands out `POOL_SIZE` frames before failing
+    // closed; a second pool exercises the object-safe erasure.
+    static POOL: PageTablePool = PageTablePool::new();
+    static POOL2: PageTablePool = PageTablePool::new();
+    frames::conformance::run_all(&POOL, super::POOL_SIZE);
+    let erased: &dyn PageTableFrames = &POOL2;
+    assert!(erased.alloc_table().is_some());
+}
+
+#[test]
 fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
     use rustos_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();

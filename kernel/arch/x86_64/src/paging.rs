@@ -34,6 +34,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::frames::{PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
@@ -161,6 +162,17 @@ impl PageTablePool {
     }
 }
 
+impl PageTableFrames for PageTablePool {
+    fn alloc_table(&self) -> Option<TableFrame> {
+        let entries = self.alloc()?;
+        // The static pool is a higher-half kernel image; `phys_of`
+        // recovers the physical address the MMU needs (`AGENTS.md`
+        // §17.2 / `plans/WIRING.md` W5b-3 — the bootstrap frame source).
+        let phys = phys_of(entries);
+        Some(TableFrame { phys, entries })
+    }
+}
+
 /// An address space built on a freshly-allocated PML4.
 ///
 /// The constructor identity-maps the first 32 MiB with 2 MiB huge pages
@@ -173,10 +185,13 @@ impl PageTablePool {
 pub struct AddressSpace {
     pml4_phys: u64,
     pml4: &'static mut [u64; ENTRIES_PER_TABLE],
-    /// The pool the page-table walk allocates intermediate tables from,
-    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
-    /// install mappings without the caller re-supplying it.
-    pool: &'static PageTablePool,
+    /// The frame source the page-table walk allocates intermediate
+    /// tables from, retained so the [`rustos_arch_api::mmu::AddressSpace`]
+    /// HAL impl can install mappings without the caller re-supplying it.
+    /// The static [`PageTablePool`] is the boot/bootstrap source; a real
+    /// per-process space is built over the `kernel/mem` frame-allocator
+    /// source (`plans/WIRING.md` W5b-3).
+    frames: &'static dyn PageTableFrames,
 }
 
 impl AddressSpace {
@@ -184,15 +199,20 @@ impl AddressSpace {
     ///
     /// # Errors
     ///
-    /// Returns `None` if the page-table pool is exhausted.
-    pub fn new_identity_first_32mib(pool: &'static PageTablePool) -> Option<Self> {
-        let pml4 = pool.alloc()?;
-        let pdpt = pool.alloc()?;
-        let pd = pool.alloc()?;
-
-        let pml4_phys = phys_of(pml4);
-        let pdpt_phys = phys_of(pdpt);
-        let pd_phys = phys_of(pd);
+    /// Returns `None` if the frame source is exhausted.
+    pub fn new_identity_first_32mib(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        let TableFrame {
+            phys: pml4_phys,
+            entries: pml4,
+        } = frames.alloc_table()?;
+        let TableFrame {
+            phys: pdpt_phys,
+            entries: pdpt,
+        } = frames.alloc_table()?;
+        let TableFrame {
+            phys: pd_phys,
+            entries: pd,
+        } = frames.alloc_table()?;
 
         pml4[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
         pdpt[0] = pd_phys | flags::PRESENT | flags::WRITABLE;
@@ -207,10 +227,14 @@ impl AddressSpace {
         // -2 GiB window at KERNEL_VMA_BASE onto physical [0, 1 GiB) with
         // 2 MiB huge pages — the same first-GiB identity PD the trampoline
         // reuses, covering the whole kernel image.
-        let pdpt_high = pool.alloc()?;
-        let pd_high = pool.alloc()?;
-        let pdpt_high_phys = phys_of(pdpt_high);
-        let pd_high_phys = phys_of(pd_high);
+        let TableFrame {
+            phys: pdpt_high_phys,
+            entries: pdpt_high,
+        } = frames.alloc_table()?;
+        let TableFrame {
+            phys: pd_high_phys,
+            entries: pd_high,
+        } = frames.alloc_table()?;
         let hi_i4 = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
         let hi_i3 = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
         pml4[hi_i4] = pdpt_high_phys | flags::PRESENT | flags::WRITABLE;
@@ -222,7 +246,7 @@ impl AddressSpace {
         Some(Self {
             pml4_phys,
             pml4,
-            pool,
+            frames,
         })
     }
 
@@ -283,12 +307,12 @@ impl AddressSpace {
     /// the identity-mapped range so this is not exercised here).
     pub fn map_4k(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(pool, vaddr, paddr, writable, false, false)
+        self.map_4k_inner(frames, vaddr, paddr, writable, false, false)
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
@@ -303,12 +327,12 @@ impl AddressSpace {
     /// page.
     pub fn map_4k_user(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(pool, vaddr, paddr, writable, true, false)
+        self.map_4k_inner(frames, vaddr, paddr, writable, true, false)
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
@@ -326,13 +350,13 @@ impl AddressSpace {
     /// page-table-pool exhaustion or if the walk hits an existing huge page.
     pub fn map_4k_user_wx(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         writable: bool,
         executable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(pool, vaddr, paddr, writable, true, !executable)
+        self.map_4k_inner(frames, vaddr, paddr, writable, true, !executable)
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
@@ -343,7 +367,7 @@ impl AddressSpace {
     /// every level without the bit, so ring 3 cannot reach it.
     fn map_4k_inner(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         writable: bool,
@@ -369,11 +393,11 @@ impl AddressSpace {
         let i2 = ((vaddr >> 21) & 0x1FF) as usize;
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
 
-        let pdpt = ensure_child(self.pml4, i4, pool)?;
+        let pdpt = ensure_child(self.pml4, i4, frames)?;
         if user {
             self.pml4[i4] |= flags::USER;
         }
-        let pd = ensure_child(pdpt, i3, pool)?;
+        let pd = ensure_child(pdpt, i3, frames)?;
         if user {
             pdpt[i3] |= flags::USER;
         }
@@ -384,7 +408,7 @@ impl AddressSpace {
         if (pd[i2] & flags::HUGE) != 0 {
             return None;
         }
-        let pt = ensure_child(pd, i2, pool)?;
+        let pt = ensure_child(pd, i2, frames)?;
         if user {
             pd[i2] |= flags::USER;
         }
@@ -441,13 +465,13 @@ impl MmuAddressSpace for AddressSpace {
             if self.leaf_present(vaddr) {
                 return Err(MapError::AlreadyMapped);
             }
-            let pool = self.pool;
+            let frames = self.frames;
             let writable = flags.contains(PageFlags::WRITE);
             let result = if flags.contains(PageFlags::USER) {
                 let executable = flags.contains(PageFlags::EXEC);
-                self.map_4k_user_wx(pool, vaddr, paddr, writable, executable)
+                self.map_4k_user_wx(frames, vaddr, paddr, writable, executable)
             } else {
-                self.map_4k(pool, vaddr, paddr, writable)
+                self.map_4k(frames, vaddr, paddr, writable)
             };
             // Alignment and prior-mapping are ruled out, so the only
             // remaining failure is page-table-pool exhaustion.
@@ -455,9 +479,9 @@ impl MmuAddressSpace for AddressSpace {
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // `self.pool` is read only by the bare-metal walk above; touch
-            // it here so the host build does not flag the field unused.
-            let _ = (vaddr, paddr, flags, self.pool);
+            // `self.frames` is read only by the bare-metal walk above;
+            // touch it here so the host build does not flag it unused.
+            let _ = (vaddr, paddr, flags, self.frames);
             unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
         }
     }
@@ -643,7 +667,7 @@ fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
 // reference does not borrow from `parent` (it points at a freshly
-// alloc'd table from `pool`, or at a sibling table recovered through
+// alloc'd table from `frames`, or at a sibling table recovered through
 // the identity map). `mut_from_ref` / `mut_from_immut` clippy lint
 // flags this shape because the function does not return a borrow of
 // `parent`'s lifetime — which is exactly the documented contract.
@@ -651,25 +675,24 @@ fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
 fn ensure_child(
     parent: &mut [u64; ENTRIES_PER_TABLE],
     idx: usize,
-    pool: &'static PageTablePool,
+    frames: &'static dyn PageTableFrames,
 ) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
     let entry = parent[idx];
     if entry & flags::PRESENT != 0 {
         // Existing child — recover the `&mut` from the physical address.
         // Identity mapping makes phys = virt here.
         let phys = entry & 0x000F_FFFF_FFFF_F000;
-        // SAFETY: every entry that has PRESENT set was inserted by
-        // `ensure_child`/`new_identity_first_32mib` with a physical
-        // address that came from `phys_of(&mut [u64; 512])`, so the
-        // round-trip is valid; identity mapping means we can dereference
-        // the physical address directly.
+        // SAFETY: every entry that has PRESENT set was inserted below (or
+        // by `new_identity_first_32mib`) with a physical address that came
+        // from a `TableFrame`, so the round-trip is valid; identity
+        // mapping means we can dereference the physical address directly.
         let child: &'static mut [u64; ENTRIES_PER_TABLE] =
             unsafe { &mut *(phys as usize as *mut [u64; ENTRIES_PER_TABLE]) };
         Some(child)
     } else {
-        let child = pool.alloc()?;
-        parent[idx] = phys_of(child) | flags::PRESENT | flags::WRITABLE;
-        Some(child)
+        let TableFrame { phys, entries } = frames.alloc_table()?;
+        parent[idx] = phys | flags::PRESENT | flags::WRITABLE;
+        Some(entries)
     }
 }
 

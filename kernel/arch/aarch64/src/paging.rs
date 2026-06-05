@@ -31,6 +31,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::frames::{PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
@@ -296,6 +297,18 @@ impl PageTablePool {
     }
 }
 
+impl PageTableFrames for PageTablePool {
+    fn alloc_table(&self) -> Option<TableFrame> {
+        let entries = self.alloc()?;
+        // The kernel's own memory is identity-mapped (MMU-off boot then a
+        // gigapage identity map), so a table's virtual address is its
+        // physical address (`AGENTS.md` §17.2 / `plans/WIRING.md` W5b-3 —
+        // the bootstrap frame source).
+        let phys = phys_of(entries);
+        Some(TableFrame { phys, entries })
+    }
+}
+
 /// A stage-1 address space built on a freshly-allocated L1 root table.
 ///
 /// The constructor identity-maps the low `gigabytes` GiB of physical
@@ -308,10 +321,13 @@ impl PageTablePool {
 pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
-    /// The pool the page-table walk allocates intermediate tables from,
-    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
-    /// install mappings without the caller re-supplying it.
-    pool: &'static PageTablePool,
+    /// The frame source the page-table walk allocates intermediate
+    /// tables from, retained so the [`rustos_arch_api::mmu::AddressSpace`]
+    /// HAL impl can install mappings without the caller re-supplying it.
+    /// The static [`PageTablePool`] is the boot/bootstrap source; a real
+    /// per-process space is built over the `kernel/mem` frame-allocator
+    /// source (`plans/WIRING.md` W5b-3).
+    frames: &'static dyn PageTableFrames,
 }
 
 impl AddressSpace {
@@ -326,11 +342,17 @@ impl AddressSpace {
     ///
     /// Returns `None` if `gigabytes` is out of range or the page-table
     /// pool is exhausted.
-    pub fn new_identity_gigapages(pool: &'static PageTablePool, gigabytes: usize) -> Option<Self> {
+    pub fn new_identity_gigapages(
+        frames: &'static dyn PageTableFrames,
+        gigabytes: usize,
+    ) -> Option<Self> {
         if gigabytes == 0 || gigabytes > ENTRIES_PER_TABLE {
             return None;
         }
-        let root = pool.alloc()?;
+        let TableFrame {
+            phys: root_phys,
+            entries: root,
+        } = frames.alloc_table()?;
         for (i, slot) in root.iter_mut().take(gigabytes).enumerate() {
             let paddr = (i as u64) << 30;
             // GiB 0 holds device MMIO (UART, GIC); the rest is RAM.
@@ -341,11 +363,10 @@ impl AddressSpace {
             };
             *slot = descriptor(paddr, leaf);
         }
-        let root_phys = phys_of(root);
         Some(Self {
             root_phys,
             root,
-            pool,
+            frames,
         })
     }
 
@@ -390,8 +411,13 @@ impl AddressSpace {
     /// page-table-pool exhaustion or if the walk meets an existing block
     /// it would have to shatter — the isolation test maps outside the
     /// identity-mapped gigapages so that path is not exercised.
-    pub fn map_4k(&mut self, pool: &'static PageTablePool, vaddr: u64, paddr: u64) -> Option<()> {
-        self.map_4k_with_attrs(pool, vaddr, paddr, normal_leaf_attrs(false))
+    pub fn map_4k(
+        &mut self,
+        frames: &'static dyn PageTableFrames,
+        vaddr: u64,
+        paddr: u64,
+    ) -> Option<()> {
+        self.map_4k_with_attrs(frames, vaddr, paddr, normal_leaf_attrs(false))
     }
 
     /// Map `paddr` at `vaddr` with 4 KiB granularity using the supplied
@@ -405,7 +431,7 @@ impl AddressSpace {
     /// it would have to shatter.
     pub fn map_4k_with_attrs(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         leaf_attrs: u64,
@@ -417,8 +443,8 @@ impl AddressSpace {
         let i2 = table_index(vaddr, 2);
         let i3 = table_index(vaddr, 3);
 
-        let l2 = ensure_child(self.root, i1, pool)?;
-        let l3 = ensure_child(l2, i2, pool)?;
+        let l2 = ensure_child(self.root, i1, frames)?;
+        let l3 = ensure_child(l2, i2, frames)?;
         if (l3[i3] & attrs::VALID) != 0 {
             return None;
         }
@@ -511,10 +537,10 @@ impl MmuAddressSpace for AddressSpace {
         if self.leaf_present(vaddr) {
             return Err(MapError::AlreadyMapped);
         }
-        let pool = self.pool;
+        let frames = self.frames;
         // Alignment and prior-mapping are already ruled out, so the only
-        // remaining failure from the walk is page-table-pool exhaustion.
-        self.map_4k_with_attrs(pool, vaddr, paddr, Self::leaf_attrs_for(flags))
+        // remaining failure from the walk is frame-source exhaustion.
+        self.map_4k_with_attrs(frames, vaddr, paddr, Self::leaf_attrs_for(flags))
             .ok_or(MapError::PoolExhausted)
     }
 
@@ -638,14 +664,14 @@ impl TlbShootdown for AddressSpace {
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
-// reference points at a freshly-alloc'd table from `pool` or at a
+// reference points at a freshly-alloc'd table from `frames` or at a
 // sibling recovered through the identity map, never a borrow of
 // `parent` — exactly the shape `mut_from_ref` flags.
 #[allow(clippy::mut_from_ref)]
 fn ensure_child(
     parent: &mut [u64; ENTRIES_PER_TABLE],
     idx: usize,
-    pool: &'static PageTablePool,
+    frames: &'static dyn PageTableFrames,
 ) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
     let entry = parent[idx];
     if (entry & attrs::VALID) != 0 {
@@ -656,16 +682,16 @@ fn ensure_child(
         }
         let phys = phys_from_descriptor(entry);
         // SAFETY: every non-block valid entry was inserted below with an
-        // output address derived from `phys_of(&mut [u64; 512])`, so the
-        // round-trip is valid; identity mapping means the physical
-        // address is also the address we dereference.
+        // output address derived from a `TableFrame`, so the round-trip
+        // is valid; identity mapping means the physical address is also
+        // the address we dereference.
         let child: &'static mut [u64; ENTRIES_PER_TABLE] =
             unsafe { &mut *(phys as *mut [u64; ENTRIES_PER_TABLE]) };
         Some(child)
     } else {
-        let child = pool.alloc()?;
-        parent[idx] = table_descriptor(phys_of(child));
-        Some(child)
+        let TableFrame { phys, entries } = frames.alloc_table()?;
+        parent[idx] = table_descriptor(phys);
+        Some(entries)
     }
 }
 

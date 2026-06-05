@@ -626,10 +626,20 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `AddressSpace<P>` onto `P: mmu::AddressSpace + TlbShootdown` (the
       `PageTable` bound alias) and **removed** its local `PageTableOps`
       trait, renamed every consumer + the six `{spawn,c}_program_qemu_*`
-      crates (deleting their `*UserPageTable` adapters). **Remaining
-      (W5b-3):** back the per-port page tables with `kernel/mem`'s frame
-      allocator instead of the static `PageTablePool` (via a HAL
-      frame-source seam, §17.4); cross-CPU TLB shootdown stays W6.
+      crates (deleting their `*UserPageTable` adapters). **W5b-3 (done):**
+      added the `PageTableFrames` HAL frame-source slice
+      (`kernel/arch/api::frames`: `TableFrame` currency + a host
+      `frames::conformance` vertical), made each port's `PageTablePool`
+      implement it and rewired every port `AddressSpace::new_*`/`map_4k*`/
+      `ensure_child` onto a `&'static dyn PageTableFrames` (the static pool
+      stays the boot/bootstrap source, coercing unchanged at the QEMU
+      call sites), and added `kernel/mem`'s production `FrameTableSource`
+      that backs the tables with the `FrameAllocator` over the direct
+      `PhysMap` (fail-closed off-map, §17.4 one-way edge kept). riscv64 +
+      aarch64 run `passes_frames_conformance` on the host; `kernel/mem`
+      runs the suite over `FrameTableSource`; x86_64's higher-half pool is
+      proven through the `memory_isolation` QEMU vertical. **Remaining:**
+      cross-CPU TLB shootdown stays W6.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

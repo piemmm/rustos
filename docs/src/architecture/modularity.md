@@ -275,15 +275,45 @@ verticals. The *cross-CPU* shootdown depends on the Stage W6 aarch64
 directed IPI and is a tracked follow-up, not stubbed here (`AGENTS.md`
 §2.2).
 
+### Page-table frame source
+
+A port's `AddressSpace` is built from 4 KiB page-table frames — the root
+table and every intermediate table a mapping walk allocates. The
+`PageTableFrames` slice (`kernel/arch/api::frames`) is the seam a port
+draws those frames through: `alloc_table` hands back a `TableFrame`
+carrying both the frame's physical address (for the parent PTE / root
+register) and a zeroed `'static` view of its 512 entries. A port never
+owns the storage and never computes the physical/virtual relationship
+itself; the source does. This keeps the §17.4 one-way edge intact — a
+port names only the HAL trait, never `kernel/mem` — while letting the
+caller decide where the frames come from.
+
+There are two implementations of the one trait (parallel impls, not
+duplication, `AGENTS.md` §2.2 carve-out). The static `PageTablePool`
+each port ships is the boot/bootstrap source. The production source is
+`kernel/mem`'s `FrameTableSource`, which draws a physical frame from the
+buddy `FrameAllocator`, maps it through the kernel direct map
+(`PhysMap`), zeroes it, and fails closed — returning the frame to the
+allocator — if the frame falls outside the direct map (`AGENTS.md`
+§2.9). `frames::conformance::run_all` proves the contract on the host
+(a fresh frame is zeroed, page-aligned, distinct from earlier frames,
+and the source eventually fails closed with `None`): riscv64 and aarch64
+run it over their real `PageTablePool` (their `phys_of` is the identity
+map, so it is host-runnable) and `kernel/mem` runs it over
+`FrameTableSource`; x86_64's pool derives `phys` by subtracting the
+higher-half base, so its pool is proven through the `memory_isolation`
+QEMU vertical instead (the same honest asymmetry the MMU slice carries).
+
 This is the `plans/WIRING.md` Stage W5b lineage: Stage W5b-1 lifted the
 bootstrap page-table primitive behind the HAL; Stage W5b-2 folded
 `kernel/mem`'s `AddressSpace` onto the `mmu::AddressSpace` +
 `TlbShootdown` traits (removing its local `PageTableOps` trait) and added
 the `translate`/`unmap`/`flush_page` surface and the per-page TLB
-shootdown. Backing the per-port page tables with `kernel/mem`'s frame
-allocator instead of the static `PageTablePool` is the tracked Stage
-W5b-3 follow-up, and cross-CPU shootdown is W6 — neither is duplicated
-here (`AGENTS.md` §2.2).
+shootdown; Stage W5b-3 added the `PageTableFrames` frame-source seam and
+the `FrameTableSource` allocator backing above, so a real per-process
+address space's tables come from the frame allocator while the static
+`PageTablePool` stays the boot/bootstrap source. Cross-CPU shootdown is
+W6 — not duplicated here (`AGENTS.md` §2.2).
 
 ## `cargo xtask cfg-check`
 

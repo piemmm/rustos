@@ -72,11 +72,12 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 `EnterUser`/`UserEntry` (§17.2), `PlatformDiscovery` (W1), `PerCpu`
 (W2), `IrqController` + `InterruptEntry` (W3), `Timer` (W4),
 `ContextSwitch` (W5a), the MMU `AddressSpace` page-table trait
-(map/translate/unmap — W5b-1/W5b-2), and the per-page `TlbShootdown`
-slice (W5b-2). The remaining slices (allocator-backed paging in the ports
-— W5b-3, cross-CPU TLB shootdown — W6, SMP bring-up) are still ad-hoc
-inside each port — the §17.2 surface `PLAN.md` flags as "migrated here as
-the §17 burn-down advances".
+(map/translate/unmap — W5b-1/W5b-2), the per-page `TlbShootdown`
+slice (W5b-2), and the `PageTableFrames` page-table frame-source slice
+(allocator-backed port tables via `FrameTableSource` — W5b-3). The
+remaining slices (cross-CPU TLB shootdown — W6, SMP bring-up) are still
+ad-hoc inside each port — the §17.2 surface `PLAN.md` flags as "migrated
+here as the §17 burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
 
@@ -152,8 +153,8 @@ docs + §17.2 of `AGENTS.md` when each lands):
 - `ContextSwitch` — the `TaskCtx` + `switch` primitive.
 - `AddressSpace` / `Mmu` + `TlbShootdown` — page-table primitives wired
   into `kernel/mem` (map/translate/unmap + per-page local invalidation —
-  ✅ W5b-2); allocator-backed port tables (W5b-3) + cross-CPU TLB
-  invalidation (W6) remain.
+  ✅ W5b-2); allocator-backed port tables via the `PageTableFrames`
+  frame-source seam (✅ W5b-3); cross-CPU TLB invalidation (W6) remains.
 - `Smp` — secondary-CPU start + directed IPI (INIT-SIPI-SIPI / PSCI
   `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn).
 
@@ -405,16 +406,35 @@ HAL *modules* compile). Docs:
   `kernel/arch/*` depending on `kernel/mem`); it lands as its own
   fully-gated increment.
 
-#### Stage W5b-3 — allocator-backed per-port page tables — next
+#### Stage W5b-3 — allocator-backed per-port page tables — ✅ landed
 
-- Replace each port's static `PageTablePool` with frames drawn from
-  `kernel/mem`'s `FrameAllocator`, injected through a new HAL frame-source
-  trait in `kernel/arch/api` (so `kernel/arch/*` keeps its one-way edge
-  and never depends on `kernel/mem`, §17.4). The static pool stays as the
-  boot/bootstrap `impl` of that seam.
-- **Deliverable:** per-process page tables allocate their internal tables
-  from the kernel frame allocator; the `memory_isolation_qemu_*` and
-  spawn verticals stay green; no `cfg(target_arch …)` leaks.
+- Added the **`PageTableFrames`** HAL frame-source slice
+  (`kernel/arch/api::frames`): `alloc_table` hands back a `TableFrame`
+  (physical address + zeroed `'static` entry view) so a port owns neither
+  the storage nor the phys/virt relationship, plus the host
+  `frames::conformance` vertical (fresh frame zeroed, page-aligned,
+  distinct, fails closed with `None`).
+- Each port's `PageTablePool` now `impl PageTableFrames` (the
+  boot/bootstrap source), and every port `AddressSpace::new_*` /
+  `map_4k*` / `ensure_child` takes a `&'static dyn PageTableFrames` —
+  `phys_of` moved into the pool's impl. The `&'static PageTablePool` the
+  QEMU/spawn crates pass coerces to the trait object unchanged, so those
+  verticals stay green with no edits.
+- Added `kernel/mem`'s production **`FrameTableSource`**: it draws a
+  physical frame from the `FrameAllocator`, maps it through the direct
+  `PhysMap`, zeroes it, hands back a `TableFrame`, and fails closed
+  (returning the frame) for a frame outside the direct map. §17.4 is kept
+  — `kernel/mem` depends on `kernel/arch/api`, never the reverse.
+- riscv64 + aarch64 run `passes_frames_conformance` on the host (identity
+  `phys_of`); `kernel/mem` runs the suite over `FrameTableSource`;
+  x86_64's higher-half pool is proven through the `memory_isolation` QEMU
+  vertical (the honest asymmetry the MMU slice already carries).
+- **Deliverable met:** a per-process address space's internal tables come
+  from the kernel frame allocator via the seam; the `memory_isolation_qemu_*`
+  and spawn verticals stay green; no `cfg(target_arch …)` leaks. Docs:
+  `docs/src/architecture/{modularity,memory}.md`,
+  `docs/src/platform/riscv64.md`, `PLAN.md`.
+- **Carried forward to W6:** cross-CPU TLB shootdown.
 
 ### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI ⭐
 

@@ -28,6 +28,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use rustos_arch_api::frames::{PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
@@ -172,6 +173,17 @@ impl PageTablePool {
     }
 }
 
+impl PageTableFrames for PageTablePool {
+    fn alloc_table(&self) -> Option<TableFrame> {
+        let entries = self.alloc()?;
+        // Sv39 runs identity-mapped for the kernel's own memory, so the
+        // table's virtual address is its physical address (`AGENTS.md`
+        // §17.2 / `plans/WIRING.md` W5b-3 — the bootstrap frame source).
+        let phys = phys_of(entries);
+        Some(TableFrame { phys, entries })
+    }
+}
+
 /// An Sv39 address space built on a freshly-allocated root table.
 ///
 /// The constructor identity-maps the low `gigabytes` GiB of physical
@@ -182,10 +194,13 @@ impl PageTablePool {
 pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
-    /// The pool the page-table walk allocates intermediate tables from,
-    /// retained so the [`rustos_arch_api::mmu::AddressSpace`] HAL impl can
-    /// install mappings without the caller re-supplying it.
-    pool: &'static PageTablePool,
+    /// The frame source the page-table walk allocates intermediate
+    /// tables from, retained so the [`rustos_arch_api::mmu::AddressSpace`]
+    /// HAL impl can install mappings without the caller re-supplying it.
+    /// The static [`PageTablePool`] is the boot/bootstrap source; a real
+    /// per-process space is built over the `kernel/mem` frame-allocator
+    /// source (`plans/WIRING.md` W5b-3).
+    frames: &'static dyn PageTableFrames,
 }
 
 impl AddressSpace {
@@ -200,12 +215,17 @@ impl AddressSpace {
     ///
     /// Returns `None` if `gigabytes` is out of range or the page-table
     /// pool is exhausted.
-    pub fn new_identity_gigapages(pool: &'static PageTablePool, gigabytes: usize) -> Option<Self> {
+    pub fn new_identity_gigapages(
+        frames: &'static dyn PageTableFrames,
+        gigabytes: usize,
+    ) -> Option<Self> {
         if gigabytes == 0 || gigabytes > ENTRIES_PER_TABLE {
             return None;
         }
-        let root = pool.alloc()?;
-        let root_phys = phys_of(root);
+        let TableFrame {
+            phys: root_phys,
+            entries: root,
+        } = frames.alloc_table()?;
         let leaf = flags::VALID
             | flags::READ
             | flags::WRITE
@@ -219,7 +239,7 @@ impl AddressSpace {
         Some(Self {
             root_phys,
             root,
-            pool,
+            frames,
         })
     }
 
@@ -265,7 +285,7 @@ impl AddressSpace {
     /// not exercised.
     pub fn map_4k(
         &mut self,
-        pool: &'static PageTablePool,
+        frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
         flags: u64,
@@ -277,8 +297,8 @@ impl AddressSpace {
         let i1 = vpn_index(vaddr, 1);
         let i0 = vpn_index(vaddr, 0);
 
-        let l1 = ensure_child(self.root, i2, pool)?;
-        let l0 = ensure_child(l1, i1, pool)?;
+        let l1 = ensure_child(self.root, i2, frames)?;
+        let l0 = ensure_child(l1, i1, frames)?;
         if pte_is_leaf(l0[i0]) {
             return None;
         }
@@ -417,10 +437,10 @@ impl MmuAddressSpace for AddressSpace {
         if self.leaf_present(vaddr) {
             return Err(MapError::AlreadyMapped);
         }
-        let pool = self.pool;
+        let frames = self.frames;
         // Alignment and prior-mapping are already ruled out, so the only
-        // remaining failure from the walk is page-table-pool exhaustion.
-        self.map_4k(pool, vaddr, paddr, sv39_flags(flags))
+        // remaining failure from the walk is frame-source exhaustion.
+        self.map_4k(frames, vaddr, paddr, sv39_flags(flags))
             .ok_or(MapError::PoolExhausted)
     }
 
@@ -538,14 +558,14 @@ impl TlbShootdown for AddressSpace {
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
-// reference points at a freshly-alloc'd table from `pool` or at a
+// reference points at a freshly-alloc'd table from `frames` or at a
 // sibling recovered through the identity map, never a borrow of
 // `parent` — exactly the shape `mut_from_ref` flags.
 #[allow(clippy::mut_from_ref)]
 fn ensure_child(
     parent: &mut [u64; ENTRIES_PER_TABLE],
     idx: usize,
-    pool: &'static PageTablePool,
+    frames: &'static dyn PageTableFrames,
 ) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
     let entry = parent[idx];
     if (entry & flags::VALID) != 0 {
@@ -556,17 +576,17 @@ fn ensure_child(
         }
         let phys = phys_from_pte(entry);
         // SAFETY: every non-leaf valid entry was inserted below with a
-        // PPN derived from `phys_of(&mut [u64; 512])`, so the round-trip
-        // is valid; identity mapping means the physical address is also
-        // the address we dereference.
+        // PPN derived from a `TableFrame`, so the round-trip is valid;
+        // identity mapping means the physical address is also the address
+        // we dereference.
         let child: &'static mut [u64; ENTRIES_PER_TABLE] =
             unsafe { &mut *(phys as *mut [u64; ENTRIES_PER_TABLE]) };
         Some(child)
     } else {
-        let child = pool.alloc()?;
+        let TableFrame { phys, entries } = frames.alloc_table()?;
         // Non-leaf (table pointer): valid set, R/W/X clear.
-        parent[idx] = pte_from_phys(phys_of(child), flags::VALID);
-        Some(child)
+        parent[idx] = pte_from_phys(phys, flags::VALID);
+        Some(entries)
     }
 }
 

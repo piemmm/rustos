@@ -54,7 +54,13 @@
 //! trait whose [`TlbShootdown::flush_page`] the per-process map/unmap
 //! path drives to invalidate one CPU's stale cached translation
 //! (`invlpg` / `tlbi vae1is` / `sfence.vma`), plus its
-//! [`tlb::conformance`] vertical. It also hosts the **§17.2 conformance
+//! [`tlb::conformance`] vertical — and the **page-table frame-source**
+//! slice (`AGENTS.md` §17.2, `plans/WIRING.md` W5b-3): the
+//! [`PageTableFrames`] trait a port draws its root and intermediate
+//! tables from (as [`TableFrame`]s), so a real per-process address space
+//! is backed by the `kernel/mem` frame allocator while the static
+//! `PageTablePool` stays the boot/bootstrap source, plus its
+//! [`frames::conformance`] vertical. It also hosts the **§17.2 conformance
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
 //! inspection (`plans/WIRING.md`). The remaining HAL surface enumerated
@@ -82,6 +88,7 @@
 
 pub mod conformance;
 pub mod context;
+pub mod frames;
 pub mod irq;
 pub mod memtag;
 pub mod mmu;
@@ -119,6 +126,10 @@ pub use context::{
 };
 
 pub use mmu::{conformance as mmu_conformance, AddressSpace, MapError, PageFlags};
+
+pub use frames::{
+    conformance as frames_conformance, PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES,
+};
 
 pub use tlb::{conformance as tlb_conformance, TlbShootdown};
 
