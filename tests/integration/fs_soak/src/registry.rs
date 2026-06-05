@@ -1,6 +1,7 @@
 //! The closed registry of soak filesystems and the per-target runner.
 
-use std::time::{Duration, Instant};
+use std::env;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use rustos_abi::DriverError;
@@ -8,7 +9,7 @@ use rustos_drv_fs_ext4::Ext4;
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
-use crate::{exercise, RamBlock};
+use crate::{exercise, random_exercise, RamBlock};
 
 /// Volume key the soak formats and remounts rustfs with. `RustFS` is
 /// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5), so the
@@ -32,10 +33,15 @@ impl EntropySource for SoakEntropy {
     }
 }
 
-/// The three filesystems the soak exercises, in registry order. The
-/// single source of truth for `cargo xtask fssoak --list` and the
-/// `soak.sh` fan-out, so neither hard-codes the list (§2.2).
-pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32"];
+/// The soak targets, in registry order. The single source of truth for
+/// `cargo xtask fssoak --list` and the `soak.sh` fan-out, so neither
+/// hard-codes the list (§2.2).
+///
+/// `rustfs`/`ext4`/`fat32` run the deterministic, fixed-sequence
+/// [`exercise`]; `rustfs-random` runs the randomized, model-checked
+/// [`random_exercise`] over rustfs, taking a different path on every
+/// launch (its start seed is drawn from entropy).
+pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32", "rustfs-random"];
 
 /// A filesystem the soak can format on a [`RamBlock`] and remount,
 /// reached only through the frozen [`FilesystemRead`]/[`FilesystemWrite`]
@@ -117,11 +123,57 @@ pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(),
         "rustfs" => run::<RustFs<RamBlock>>(device_bytes, budget_secs),
         "ext4" => run::<Ext4<RamBlock>>(device_bytes, budget_secs),
         "fat32" => run::<Fat32<RamBlock>>(device_bytes, budget_secs),
+        "rustfs-random" => run_random::<RustFs<RamBlock>>(device_bytes, budget_secs),
         other => Err(format!(
             "fssoak: unknown filesystem `{other}`; known: {}",
             TARGETS.join(", ")
         )),
     }
+}
+
+/// Pick the randomized soak's *start* seed. It is drawn from platform
+/// entropy (wall-clock time mixed with the process id) so the run takes a
+/// different path on every launch — the issue's core requirement — unless
+/// `RUSTOS_FSSOAK_SEED` pins it, which lets a failure be replayed exactly.
+fn random_start_seed() -> u64 {
+    if let Some(seed) = env::var("RUSTOS_FSSOAK_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return seed;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    // Compose without a truncating cast: seconds scaled into the nanosecond
+    // range, plus the sub-second nanos, mixed with the pid.
+    let time_mix = now
+        .as_secs()
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(u64::from(now.subsec_nanos()));
+    let pid_mix = u64::from(std::process::id()).rotate_left(32);
+    // One SplitMix64 round so adjacent launches don't share low bits.
+    let mut z = time_mix ^ pid_mix;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Drive [`random_exercise`] for one filesystem until the budget elapses,
+/// from an entropy-derived start seed (printed for reproducibility).
+fn run_random<F: SoakFs>(device_bytes: u64, budget_secs: u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(budget_secs);
+    let mut seed = random_start_seed();
+    println!("fssoak rustfs-random: start seed {seed:#x} (set RUSTOS_FSSOAK_SEED to replay)");
+    loop {
+        random_exercise::<F>(device_bytes, seed)?;
+        // SplitMix64-style advance: deterministic, full-period.
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        if budget_secs == 0 || Instant::now() >= deadline {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Drive [`exercise()`] for one filesystem until the budget elapses.

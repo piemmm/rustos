@@ -33,6 +33,38 @@ The exerciser is deterministic: a per-iteration seed drives the content
 and a SplitMix64-style advance, so any failure reproduces from the seed
 printed in the error.
 
+## The randomized `rustfs-random` target
+
+Alongside the fixed-sequence exerciser, a fourth target —
+`rustfs-random` — drives rustfs through a **randomized, model-checked**
+body (`random_exercise`). A filesystem is a critical system, so it must
+be known to work for *any* operation order, not just one scripted path;
+this target exercises the filesystem **in a different manner on every
+launch**:
+
+- Each step the RNG picks one of create-file, create-dir, write, append,
+  extend (a write past the end, leaving a zero-filled gap),
+  truncate-grow, truncate-shrink, remove-file, remove-empty-directory,
+  logical move (copy the bytes to a fresh name and unlink the source —
+  there is no native rename in `abi-v1`), or read-verify, across a tree
+  of nested directories.
+- Every mutation is mirrored into a byte-exact **oracle model** (each
+  path's exact expected bytes, plus the live directory set). The random
+  data written *is* the validatable content — the model records exactly
+  what every file must read back as — and the filesystem's result is
+  asserted against the model after each step.
+- Periodically (and once at the end) the body flushes, remounts, and
+  re-verifies the **whole** volume: every file's size and bytes and
+  every directory's listing must match the model after a fresh `open()`.
+- Fail-closed negative probes (`Busy`, `LengthOutOfRange`, `NotFound`)
+  are interleaved and must not mutate state (§5.4 / §2.9).
+
+The target's **start** seed is drawn from platform entropy (wall-clock
+time mixed with the process id), so each launch takes a new path. Set
+`RUSTOS_FSSOAK_SEED` to pin the start seed and replay a failure exactly;
+the start seed is printed at launch and every error is tagged with the
+reproducing seed.
+
 ## The `NoSpace` signal
 
 A genuinely full volume is reported as `DriverError::NoSpace` (POSIX
@@ -44,7 +76,7 @@ cleanly rather than papering over a driver gap.
 ## Running it
 
 ```
-cargo xtask fssoak --list             # the registry (rustfs/ext4/fat32)
+cargo xtask fssoak --list             # the registry (rustfs/ext4/fat32/rustfs-random)
 cargo xtask fssoak --quick            # per-PR / smoke budget, ≥ 5 s each
 cargo xtask fssoak --soak             # nightly budget, ≥ 24 h each
 cargo xtask fssoak --target ext4 --secs 30
@@ -59,13 +91,14 @@ runs a single smoke iteration on a 320 MiB device (above FAT32's
 
 ## Parallelism
 
-The nightly soak runs the three filesystems **in parallel**, one job
-and one log each, through `tools/ci/soak.sh`'s `fssoak` kind (also part
-of `all`), sharing the soak's wall-clock budget alongside the fuzz,
-proptest, and repeated-test jobs. The registry is the single source of
-truth — `soak.sh` enumerates `cargo xtask fssoak --list` and never
-hard-codes the filesystem list. Three ≥ 1 GiB volumes in parallel need
-≥ 3 GiB of runner RAM.
+The nightly soak runs every target **in parallel**, one job and one log
+each, through `tools/ci/soak.sh`'s `fssoak` kind (also part of `all`),
+sharing the soak's wall-clock budget alongside the fuzz, proptest, and
+repeated-test jobs. The registry is the single source of truth —
+`soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
+the filesystem list, so `rustfs-random` runs concurrently with the
+fixed-sequence `rustfs`/`ext4`/`fat32` jobs. Each ≥ 1 GiB volume in
+flight needs its own GiB of runner RAM.
 
 ## Block-size note
 

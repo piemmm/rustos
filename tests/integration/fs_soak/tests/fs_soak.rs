@@ -50,7 +50,14 @@ fn soak_fat32() {
     run("fat32");
 }
 
+/// The randomized, model-checked rustfs soak: a different operation path
+/// on every launch, run in parallel with the others under `soak.sh`.
 #[test]
-fn registry_lists_the_three_filesystems() {
-    assert_eq!(TARGETS, &["rustfs", "ext4", "fat32"]);
+fn soak_rustfs_random() {
+    run("rustfs-random");
+}
+
+#[test]
+fn registry_lists_every_soak_target() {
+    assert_eq!(TARGETS, &["rustfs", "ext4", "fat32", "rustfs-random"]);
 }

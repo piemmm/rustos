@@ -128,10 +128,11 @@ if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
         [ -n "$m" ] && launch "proptest-$m" proptest "$m"
     done < <(enumerate proptest)
 fi
-# The filesystems.md filesystem soak: one job per filesystem (rustfs,
-# ext4, fat32), each formatting a ≥1 GiB RAM volume and exercising it for
-# the per-job budget. The registry (`cargo xtask fssoak --list`) is the
-# single source of truth, so this never hard-codes the filesystem list.
+# The filesystems.md filesystem soak: one job per registered target
+# (rustfs, ext4, fat32, and the randomized rustfs-random), each
+# formatting a ≥1 GiB RAM volume and exercising it for the per-job
+# budget. The registry (`cargo xtask fssoak --list`) is the single
+# source of truth, so this never hard-codes the filesystem list.
 if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] && launch "fssoak-$f" fssoak "$f"

@@ -15,16 +15,24 @@
 //!
 //! The exerciser is deterministic: a per-iteration seed drives a small
 //! LCG so any failure reproduces from its seed.
+//!
+//! Alongside that fixed-sequence body, [`random_exercise`] drives a
+//! genuinely *randomized*, model-checked op mix (create/move/delete/
+//! extend/truncate in a different order every run) against a byte-exact
+//! oracle, registered as the `rustfs-random` soak target so it runs in
+//! parallel with the others (`tools/ci/soak.sh`).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod exercise;
 mod ramblock;
+mod random;
 mod registry;
 
 pub use exercise::exercise;
 pub use ramblock::RamBlock;
+pub use random::random_exercise;
 pub use registry::{run_target, SoakFs, TARGETS};
 
 /// Minimum soak device size, in bytes: 1 GiB (`.junie/filesystems.md`).

@@ -70,6 +70,11 @@ pub const TARGETS: &[Target] = &[
         test_fn: "soak_fat32",
         description: "fat32: format + integrity + extremes",
     },
+    Target {
+        name: "rustfs-random",
+        test_fn: "soak_rustfs_random",
+        description: "rustfs: randomized, model-checked op mix (new path each run)",
+    },
 ];
 
 /// How long to run each filesystem's soak.
@@ -310,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_the_three_filesystems() {
-        for required in ["rustfs", "ext4", "fat32"] {
+    fn registry_covers_every_soak_target() {
+        for required in ["rustfs", "ext4", "fat32", "rustfs-random"] {
             assert!(
                 TARGETS.iter().any(|t| t.name == required),
                 "missing required soak target {required}"
