@@ -48,9 +48,10 @@ static ALLOCATOR: BumpAllocator =
 /// Exit code the C program returns when every abi-v1 check and both syscall
 /// round-trips pass (`csrc/main.c` `EXIT_OK`).
 const EXPECTED_EXIT: u64 = 99;
-/// Capability id the program queries (`csrc/main.c` `PROBE_CAP`); the callback
-/// asserts the marshalled argument equals it.
-const PROBE_CAP: u64 = 4;
+/// Capability id the program queries (`csrc/main.c` `PROBE_CAP`, which names
+/// `ROS_CAP_DRV_KERNEL`); the callback asserts the marshalled argument equals
+/// it. Derived from the same `lib/abi` source of truth, never a bare literal.
+const PROBE_CAP: u64 = CapabilityId::DRV_KERNEL.as_u16() as u64;
 /// Sentinel `clock_get` returns to the program (`csrc/main.c`
 /// `CLOCK_SENTINEL`), exercising full 64-bit result marshalling.
 const CLOCK_SENTINEL: u64 = 0x0123_4567_89ab_cdef;

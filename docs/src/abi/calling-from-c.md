@@ -39,6 +39,7 @@ example. It includes the headers and exercises a representative slice of
 
 ```c
 #include <stdint.h>
+#include "rustos/rustos_capability.h"
 #include "rustos/rustos_syscall.h"
 #include "rustos/rustos_time.h"
 #include "rustos/rustos_ipc.h"
@@ -61,8 +62,9 @@ int main(int argc, char **argv, char **envp) {
         return 82;
     }
 
-    /* Two real syscalls. The kernel re-checks every argument on the far side. */
-    if (ros_sys_cap_query(4) != 1u) {
+    /* Two real syscalls. The kernel re-checks every argument on the far side.
+       The capability id is a named constant from the header, not a bare literal. */
+    if (ros_sys_cap_query(ROS_CAP_DRV_KERNEL) != 1u) {
         return 84;
     }
     return (ros_sys_clock_get() != 0u) ? 0 : 85;

@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include "rustos/rustos_capability.h"
 #include "rustos/rustos_syscall.h"
 #include "rustos/rustos_time.h"
 #include "rustos/rustos_ipc.h"
@@ -40,9 +41,9 @@
 #define EXIT_CAP 84
 #define EXIT_CLOCK 85
 
-/* Capability id the program queries; the kernel callback asserts it observed
- * exactly this argument and answers "held" (1). */
-#define PROBE_CAP ((uint16_t)4u)
+/* Capability id the program queries; the kernel callback asserts it saw
+ * exactly this argument and answers "held". */
+#define PROBE_CAP ROS_CAP_DRV_KERNEL
 
 /* Sentinel value the kernel callback returns from clock_get, chosen to use
  * the full 64-bit width so the round-trip exercises u64 result marshalling. */

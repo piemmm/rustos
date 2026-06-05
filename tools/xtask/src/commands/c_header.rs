@@ -188,14 +188,20 @@ fn generate_capability() -> String {
     use std::fmt::Write as _;
     let mut out = banner("Capability identifiers (AGENTS.md sec.5.2).");
     out.push_str("#ifndef ROS_CAPABILITY_H\n#define ROS_CAPABILITY_H\n\n");
-    out.push_str("/* Capability identifiers (AGENTS.md sec.5.2). */\n");
-    let _ = writeln!(out, "#define ROS_CAPABILITY_ID_MAX {CAPABILITY_ID_MAX}u");
+    out.push_str("#include <stdint.h>\n\n");
+    out.push_str(
+        "/* Capability identifiers (uint16_t, the canonical CapabilityId width;\n   AGENTS.md sec.5.2). Each id carries its type so call sites need no cast. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_CAPABILITY_ID_MAX ((uint16_t){CAPABILITY_ID_MAX}u)"
+    );
     for raw in 1..=CAPABILITY_ID_MAX {
         if let Some(name) = CapabilityId::from_raw(raw)
             .ok()
             .and_then(CapabilityId::name)
         {
-            let _ = writeln!(out, "#define ROS_{name} {raw}u");
+            let _ = writeln!(out, "#define ROS_{name} ((uint16_t){raw}u)");
         }
     }
     out.push_str("\n#endif /* ROS_CAPABILITY_H */\n");
@@ -1796,7 +1802,11 @@ mod tests {
     fn capability_header_has_ids() {
         let h = body("rustos_capability.h");
         assert!(h.contains("#ifndef ROS_CAPABILITY_H"), "guard present");
-        assert!(h.contains("#define ROS_CAP_USER_ADMIN 5u"), "capability");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        assert!(
+            h.contains("#define ROS_CAP_USER_ADMIN ((uint16_t)5u)"),
+            "capability id carries its canonical uint16_t type: {h}"
+        );
     }
 
     #[test]
