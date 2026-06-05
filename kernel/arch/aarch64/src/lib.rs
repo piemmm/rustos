@@ -87,6 +87,10 @@ pub mod kernel_arch;
 /// honestly `Pending` on the Stage 6 MTE enable (see the module docs).
 pub mod memtag;
 pub mod paging;
+/// aarch64 implementation of the Arch HAL per-CPU storage surface
+/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the `TPIDR_EL1`
+/// system-register read/write the per-CPU anchor is reached through.
+pub mod percpu_hal;
 /// aarch64 implementation of the Arch HAL early-boot platform-discovery
 /// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
 /// §18.2): the FDT → [`rustos_abi::hwtree`] normalisation built on the

@@ -103,6 +103,17 @@ pub mod kernel_arch;
 pub mod memtag;
 pub mod multiboot2;
 pub mod percpu;
+/// x86_64 implementation of the Arch HAL per-CPU storage surface
+/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the GS-base MSR
+/// (`IA32_GS_BASE`) read/write the per-CPU anchor is reached through.
+/// Distinct from [`percpu`], which owns the per-CPU GDT/IDT/IST-stack
+/// bring-up the GS base points at.
+///
+/// Gated on `sched-arch` — the feature that pulls in the
+/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
+/// §2.3).
+#[cfg(feature = "sched-arch")]
+pub mod percpu_hal;
 /// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit
 /// [`rustos_abi::PortIo`] backend the `drivers/bus/pci` bus driver
 /// consumes for PCI configuration access, and the 8-bit

@@ -12,14 +12,15 @@
 //! [`rustos_arch_api::conformance`] suite over its real `*Arch`,
 //! `SideChannel`, and `MemoryTags` handles.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use rustos_arch_api::conformance;
 use rustos_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
+use rustos_arch_api::percpu;
 use rustos_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CpuId, PerCpu, SchedulerArch};
 
 #[derive(Default)]
 struct DoubleArch {
@@ -65,6 +66,20 @@ impl PlatformDiscovery for DoubleDiscovery {
     }
 }
 
+#[derive(Default)]
+struct DoublePerCpu {
+    base: AtomicUsize,
+}
+
+impl PerCpu for DoublePerCpu {
+    fn read_self_base(&self) -> usize {
+        self.base.load(Ordering::Relaxed)
+    }
+    unsafe fn write_self_base(&self, base: usize) {
+        self.base.store(base, Ordering::Relaxed);
+    }
+}
+
 struct DoubleMemTags;
 
 impl MemoryTagging for DoubleMemTags {
@@ -85,5 +100,16 @@ impl MemoryTagging for DoubleMemTags {
 #[test]
 fn arch_hal_conformance_suite_runs() {
     let arch = DoubleArch::default();
-    conformance::run_all(&arch, &DoubleSideChannel, &DoubleMemTags, &DoubleDiscovery);
+    conformance::run_all(
+        &arch,
+        &DoubleSideChannel,
+        &DoubleMemTags,
+        &DoubleDiscovery,
+        &DoublePerCpu::default(),
+    );
+}
+
+#[test]
+fn per_cpu_isolation_vertical_runs_over_two_handles() {
+    percpu::conformance::run_isolation(&DoublePerCpu::default(), &DoublePerCpu::default());
 }

@@ -55,10 +55,10 @@ architecture, and a port can implement the HAL without naming a concrete
 kernel crate — the two sides meet only here. Today the crate carries the
 scheduler-facing slice (`CpuId`, `SchedulerArch`), the §19.1
 side-channel slice, the §19.10 memory-tagging slice, the user-entry
-slice, and the early-boot platform-discovery slice (`PlatformDiscovery`,
-below); the remaining HAL primitives (context switch, MMU/TLB, timer,
-interrupt entry/exit, per-CPU storage) migrate here as the §17 burn-down
-advances.
+slice, the early-boot platform-discovery slice (`PlatformDiscovery`,
+below), and the per-CPU storage slice (`PerCpu`, below); the remaining
+HAL primitives (context switch, MMU/TLB, timer, interrupt entry/exit)
+migrate here as the §17 burn-down advances.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -86,14 +86,15 @@ HAL traits so it names no concrete port:
   target) a panic-free no-op equivalent, and `core_class` total — it
   returns a stable, valid class for every `CpuId`, including an
   out-of-range one.
-- `conformance::run_all(arch, side_channel, memory_tagging, discovery)`
-  runs that suite **and** the §19.1 side-channel vertical
+- `conformance::run_all(arch, side_channel, memory_tagging, discovery,
+  per_cpu)` runs that suite **and** the §19.1 side-channel vertical
   (`sidechannel::conformance`), the §19.10 memory-tagging vertical
-  (`memtag::conformance`), and the §18 platform-discovery vertical
-  (`platform::conformance`) over the same port's handles. Each port
-  implements the four traits on distinct types (`*Arch`, `SideChannel`,
-  `MemoryTags`, and a discoverer), so the suite takes one reference per
-  trait.
+  (`memtag::conformance`), the §18 platform-discovery vertical
+  (`platform::conformance`), and the per-CPU storage round-trip vertical
+  (`percpu::conformance`) over the same port's handles. Each port
+  implements the five traits on distinct types (`*Arch`, `SideChannel`,
+  `MemoryTags`, a discoverer, and `PerCpuStorage`), so the suite takes
+  one reference per trait.
 
 ### Early-boot platform discovery
 
@@ -116,6 +117,22 @@ in-test double (it cannot name a concrete port without inverting the
 `kernel_arch::tests::passes_arch_hal_conformance_suite`, which
 instantiates `conformance::run_all` over its real handles. All four
 Tier-1 ports pass.
+
+### Per-CPU storage
+
+The `PerCpu` slice reads and writes the calling CPU's per-CPU base word —
+the lock-free anchor the kernel resolves its CPU-local state from. Each
+port drives the native mechanism behind the one trait: x86_64 the GS-base
+MSR (`IA32_GS_BASE`), aarch64 `TPIDR_EL1`, riscv64 the `tp` thread
+pointer, and wasm32 a worker-local slot (each Web Worker owns its own
+module instance, so the slot is private to it without host coordination).
+The stored word is opaque to the trait — the kernel chooses whether it
+holds a per-CPU control-block address or a dense `CpuId`.
+`percpu::conformance::run_all` asserts the word round-trips unchanged at
+full pointer width (folded into `conformance::run_all`), and
+`percpu::conformance::run_isolation` asserts one CPU's word is
+independent of another's — driven over two handles, since a single
+handle cannot express the per-CPU property.
 
 ## `cargo xtask cfg-check`
 

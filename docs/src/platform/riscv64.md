@@ -395,3 +395,17 @@ integration tests keep naming `rustos_arch_riscv64::fdt::Fdt`.
 window as a capability-gated (`CAP_MMIO_MAP`) resource, and a `Timer`
 node. It is host-tested against the shared DTB fixture and exercised by
 the port's `passes_arch_hal_conformance_suite`.
+
+## Per-CPU storage (`tp`)
+
+The riscv64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`
+§17.2) in `kernel/arch/riscv64::percpu_hal` over the **`tp`**
+(thread-pointer) register — the conventional RISC-V per-hart anchor that
+`boot.s` and `smp.s` already seed with the SBI-handed hart id before
+entering Rust. `PerCpuStorage::read_self_base` / `write_self_base` are a
+single `mv`-from / `mv`-to `tp`; the word is opaque (the kernel decides
+whether it holds the hart id or a per-hart control-block address). On the
+host build there is no `tp`, so the handle backs the word with an
+in-handle cell solely for the round-trip + isolation conformance
+verticals (`percpu::conformance`), folded into the port's
+`passes_arch_hal_conformance_suite`.

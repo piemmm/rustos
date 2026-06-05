@@ -88,8 +88,9 @@ fn send_ipi_drops_unmapped_target_into_stray_counter() {
 }
 
 /// §17.2 / W0: the port passes the shared Arch HAL conformance vertical
-/// over its real `SchedulerArch`, `SideChannel`, and `MemoryTags`
-/// handles (`plans/WIRING.md` Stage W0).
+/// over its real `SchedulerArch`, `SideChannel`, `MemoryTags`,
+/// discovery, and per-CPU storage handles (`plans/WIRING.md` Stage W0 /
+/// W2).
 #[test]
 fn passes_arch_hal_conformance_suite() {
     let arch = RiscvArch::new(0, 10_000_000);
@@ -101,6 +102,7 @@ fn passes_arch_hal_conformance_suite() {
         &crate::sidechannel::SideChannel::new(),
         &crate::memtag::MemoryTags::new(),
         &discovery,
+        &crate::percpu_hal::PerCpuStorage::new(),
     );
 }
 

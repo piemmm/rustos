@@ -16,25 +16,35 @@
 //!   panic-free for every input including an out-of-range [`CpuId`]).
 //! * [`run_all`] — the whole HAL slice migrated so far: it runs
 //!   [`run_scheduler_arch`] **and** the §19.1 side-channel vertical
-//!   ([`sidechannel::conformance::run_all`])
-//!   and the §19.10 memory-tagging vertical
-//!   ([`memtag::conformance::run_all`])
+//!   ([`sidechannel::conformance::run_all`]),
+//!   the §19.10 memory-tagging vertical
+//!   ([`memtag::conformance::run_all`]),
+//!   the §18 platform-discovery vertical
+//!   ([`platform::conformance::run`]),
+//!   and the per-CPU storage round-trip vertical
+//!   ([`percpu::conformance::run_all`])
 //!   over the same port's handles.
 //!
-//! # Why three handles
+//! # Why one handle per trait
 //!
-//! Each port implements the three HAL traits on distinct types (the
+//! Each port implements the HAL traits on distinct types (the
 //! `*Arch` scheduler handle, the `SideChannel` handle, the `MemoryTags`
-//! handle), so [`run_all`] takes one reference per trait rather than
-//! assuming a single god-object. The suite names only the traits — never
+//! handle, the discovery handle, the per-CPU storage handle), so
+//! [`run_all`] takes one reference per trait rather than assuming a
+//! single god-object. The suite names only the traits — never
 //! a concrete port — so the same source is a valid acceptance test for
 //! every present and future architecture (`AGENTS.md` §17.2 / §2.2). It
 //! is host-run and deterministic, exactly like the scheduler-policy
 //! suite (`AGENTS.md` §7 — no flaky tests).
+//!
+//! The per-CPU *isolation* property (one CPU's word is independent of
+//! another's) needs two handles, which a single-handle [`run_all`] cannot
+//! express; each port drives [`percpu::conformance::run_isolation`] over
+//! two handles in its own suite.
 
 use crate::{
-    memtag, platform, sidechannel, CpuId, MemoryTagging, PlatformDiscovery, SchedulerArch,
-    SideChannelMitigation,
+    memtag, percpu, platform, sidechannel, CpuId, MemoryTagging, PerCpu, PlatformDiscovery,
+    SchedulerArch, SideChannelMitigation,
 };
 
 /// Run the [`SchedulerArch`] contract suite against `arch`.
@@ -60,27 +70,36 @@ pub fn run_scheduler_arch<A: SchedulerArch + ?Sized>(arch: &A) {
 ///
 /// Combines the [`SchedulerArch`] contract ([`run_scheduler_arch`]) with
 /// the §19.1 side-channel vertical, the §19.10 memory-tagging vertical,
-/// and the §18 early-boot platform-discovery vertical already defined in
-/// this crate, each over the matching port handle.
+/// the §18 early-boot platform-discovery vertical, and the per-CPU
+/// storage round-trip vertical already defined in this crate, each over
+/// the matching port handle.
 ///
 /// # Panics
 ///
-/// Panics (failing the test) if any of the four slices fails its
+/// Panics (failing the test) if any of the five slices fails its
 /// contract; see [`run_scheduler_arch`],
 /// [`sidechannel::conformance::run_all`],
-/// [`memtag::conformance::run_all`], and
-/// [`platform::conformance::run`].
-pub fn run_all<A, S, M, P>(arch: &A, side_channel: &S, memory_tagging: &M, platform_discovery: &P)
-where
+/// [`memtag::conformance::run_all`],
+/// [`platform::conformance::run`], and
+/// [`percpu::conformance::run_all`].
+pub fn run_all<A, S, M, P, C>(
+    arch: &A,
+    side_channel: &S,
+    memory_tagging: &M,
+    platform_discovery: &P,
+    per_cpu: &C,
+) where
     A: SchedulerArch + ?Sized,
     S: SideChannelMitigation + ?Sized,
     M: MemoryTagging + ?Sized,
     P: PlatformDiscovery + ?Sized,
+    C: PerCpu + ?Sized,
 {
     run_scheduler_arch(arch);
     sidechannel::conformance::run_all(side_channel);
     memtag::conformance::run_all(memory_tagging);
     platform::conformance::run(platform_discovery);
+    percpu::conformance::run_all(per_cpu);
 }
 
 /// `current_cpu` is stable for the duration of a call (`AGENTS.md`
@@ -145,8 +164,8 @@ mod tests {
     use crate::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
     use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use crate::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
-    use crate::CoreClass;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use crate::{CoreClass, PerCpu};
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 
     /// A faithful host stub of a [`SchedulerArch`] port: a fixed CPU id,
@@ -196,6 +215,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StubPerCpu {
+        base: AtomicUsize,
+    }
+
+    impl PerCpu for StubPerCpu {
+        fn read_self_base(&self) -> usize {
+            self.base.load(Ordering::Relaxed)
+        }
+        unsafe fn write_self_base(&self, base: usize) {
+            self.base.store(base, Ordering::Relaxed);
+        }
+    }
+
     struct StubMemTags;
 
     impl MemoryTagging for StubMemTags {
@@ -228,7 +261,13 @@ mod tests {
     #[test]
     fn run_all_accepts_an_honest_port() {
         let arch = StubArch::default();
-        run_all(&arch, &StubSideChannel, &StubMemTags, &StubDiscovery);
+        run_all(
+            &arch,
+            &StubSideChannel,
+            &StubMemTags,
+            &StubDiscovery,
+            &StubPerCpu::default(),
+        );
     }
 
     /// A port whose `core_class` panics on an out-of-range CPU violates

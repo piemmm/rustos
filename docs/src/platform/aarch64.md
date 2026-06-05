@@ -164,3 +164,17 @@ RAM window, and a `Timer` node carrying its PPI as a capability-gated
 (`CAP_IRQ_BIND`) IRQ resource. The reader is host-tested against the
 shared DTB fixture and exercised by the port's
 `passes_arch_hal_conformance_suite`.
+
+## Per-CPU storage (`TPIDR_EL1`)
+
+The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`
+§17.2) in `kernel/arch/aarch64::percpu_hal` over the **`TPIDR_EL1`**
+system register — the EL1-private thread pointer the kernel uses as its
+per-CPU anchor (the EL0 `TPIDR_EL0` belongs to user TLS and is never
+touched). `PerCpuStorage::read_self_base` / `write_self_base` are a
+single `mrs` / `msr TPIDR_EL1`; the word is opaque (the kernel decides
+whether it holds a per-CPU control-block address or a dense `CpuId`). On
+the host build there is no `TPIDR_EL1`, so the handle backs the word with
+an in-handle cell solely for the round-trip + isolation conformance
+verticals (`percpu::conformance`), folded into the port's
+`passes_arch_hal_conformance_suite`.

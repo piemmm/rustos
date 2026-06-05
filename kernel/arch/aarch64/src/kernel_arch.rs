@@ -270,8 +270,9 @@ mod tests {
     }
 
     /// §17.2 / W0: the port passes the shared Arch HAL conformance
-    /// vertical over its real `SchedulerArch`, `SideChannel`, and
-    /// `MemoryTags` handles (`plans/WIRING.md` Stage W0).
+    /// vertical over its real `SchedulerArch`, `SideChannel`,
+    /// `MemoryTags`, discovery, and per-CPU storage handles
+    /// (`plans/WIRING.md` Stage W0 / W2).
     #[test]
     fn passes_arch_hal_conformance_suite() {
         let arch = Aarch64Arch::new(0, 1_000);
@@ -283,6 +284,7 @@ mod tests {
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),
             &discovery,
+            &crate::percpu_hal::PerCpuStorage::new(),
         );
     }
 }

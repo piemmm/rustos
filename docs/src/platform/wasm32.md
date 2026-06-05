@@ -36,6 +36,7 @@ wasm target.
 | Module          | Role                                                              |
 | --------------- | ----------------------------------------------------------------- |
 | `kernel_arch`   | `WasmArch` — the `SchedulerArch` impl + `performance.now()` clock. |
+| `percpu_hal`    | `PerCpuStorage` — the `PerCpu` per-CPU storage slice (worker slot). |
 | `preempt`       | `requestAnimationFrame` cooperative tick + `MessageChannel` IPI.   |
 | `isolation`     | WASM-linear-memory isolation model (the "MMU" analogue).          |
 | `syscall_entry` | Host-call argument marshalling + dispatch callback.               |
@@ -66,6 +67,20 @@ of that boundary: a `MemoryRegion` names one worker's span, and an
 `AddressSpace` rejects any access outside its region with a `WasmFault`
 (the wasm32 equivalent of a page fault). This is the same isolation
 guarantee the bare-metal ports get from hardware page tables.
+
+### Per-CPU storage (worker slot)
+
+The `percpu_hal` module implements the Arch HAL `PerCpu` slice
+(`AGENTS.md` §17.2). A WebAssembly module has no per-CPU register, but a
+"CPU" here is a Web Worker context and each worker runs its **own module
+instance with its own linear memory**, so a word the instance owns is
+already private to that worker. `PerCpuStorage` is therefore that
+worker-local slot — `read_self_base` / `write_self_base` load/store an
+in-handle cell, with no host call, because the per-worker instance
+boundary provides the isolation a shared register would otherwise need
+the host to partition. The same cell backs the host build, so the
+round-trip + isolation conformance verticals (`percpu::conformance`,
+folded into `passes_arch_hal_conformance_suite`) run under `cargo test`.
 
 ### Hand-rolled host bindings
 

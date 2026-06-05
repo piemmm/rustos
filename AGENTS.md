@@ -933,12 +933,15 @@ as non-negotiable as §2.
   PLAN.md entry and updates this section. The slices migrated into
   `kernel/arch/api` so far are `SchedulerArch` (per-CPU id, ticks, IPI,
   `core_class`), `SideChannelMitigation` (§19.1), `MemoryTagging`
-  (§19.10), `EnterUser` (user entry), and `PlatformDiscovery` — the
+  (§19.10), `EnterUser` (user entry), `PlatformDiscovery` — the
   early-boot platform-discovery slice that normalises each target's
   native source (ACPI / FDT / host query) into the `lib/abi` hardware
-  tree (`hwtree`, §18.1/§18.2); each carries a conformance vertical in
-  `kernel/arch/api`. The remaining primitives are migrated as the §17
-  burn-down advances (`plans/WIRING.md`).
+  tree (`hwtree`, §18.1/§18.2) — and `PerCpu`, the per-CPU storage slice
+  that reads/writes the calling CPU's per-CPU base word (GS base on
+  x86_64, `TPIDR_EL1` on aarch64, `tp` on riscv64, a worker slot on
+  wasm32); each carries a conformance vertical in `kernel/arch/api`. The
+  remaining primitives are migrated as the §17 burn-down advances
+  (`plans/WIRING.md`).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the

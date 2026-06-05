@@ -514,6 +514,7 @@ mod tests {
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),
             &discovery,
+            &crate::percpu_hal::PerCpuStorage::new(),
         );
     }
 

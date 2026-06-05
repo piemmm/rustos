@@ -88,7 +88,7 @@ discovery) is still ad-hoc inside each port — the §17.2 surface
 | **SMP secondary-CPU bring-up**    |   ✓    |  **✗**  |    ✓    | **✗**  |
 | **IPI delivery (real cores)**     |   ✓    |  **✗**  |    ✓    | **✗**  |
 | **Early-boot platform discovery** | ✓ ACPI | **✗** FDT| ✓ FDT  |  ~ JS  |
-| Per-CPU storage HAL               |   ✓    |    ~    |    ~    |   ~    |
+| Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
 | Live `kernel/sched` task switch   |   ✓    |  **✗**  |    ~    | **✗**  |
@@ -208,9 +208,22 @@ drives a real discovery handle.
   HAL trait; aarch64 `fdt` host unit tests + the conformance vertical
   pass. Docs: `docs/src/platform/{aarch64,riscv64,x86_64}.md`, §18 pages.
 
-### Stage W2 — Per-CPU storage HAL
+### Stage W2 — Per-CPU storage HAL — ✅ landed
 
-- Define `PerCpu`; implement over x86_64 GS-base (`percpu`), aarch64
+**Landed:** `kernel/arch/api::percpu` defines `PerCpu`
+(`read_self_base` / `unsafe write_self_base` over an opaque,
+full-pointer-width per-CPU base word) with a `percpu::conformance`
+vertical — a single-handle `run_all` round-trip check (folded into
+`conformance::run_all`, now **five** handles) and a two-handle
+`run_isolation` check. Per-port impls live in a `percpu_hal` module
+(struct `PerCpuStorage`): x86_64 GS-base MSR (`IA32_GS_BASE`,
+`sched-arch`-gated), aarch64 `TPIDR_EL1`, riscv64 `tp`, wasm32
+worker-local slot. Every port's `passes_arch_hal_conformance_suite`
+drives a real `PerCpuStorage`; each port also carries host round-trip +
+isolation tests. Docs: `docs/src/platform/{x86_64,aarch64,riscv64,
+wasm32}.md`, `docs/src/architecture/modularity.md`.
+
+- Define `PerCpu`; implement over x86_64 GS-base, aarch64
   `TPIDR_EL1`, riscv64 `tp`, wasm32 worker slot.
 - **Deliverable:** the kernel reads CPU-local state through the HAL on
   every port; conformance vertical asserts round-trip + isolation.

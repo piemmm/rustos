@@ -114,6 +114,11 @@ pub mod kernel_arch;
 /// so the port declares it an honest `Unsupported` (see the module docs).
 pub mod memtag;
 pub mod paging;
+/// riscv64 implementation of the Arch HAL per-CPU storage surface
+/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the `tp`
+/// (thread-pointer) register read/write the per-hart anchor is reached
+/// through.
+pub mod percpu_hal;
 /// riscv64 implementation of the Arch HAL early-boot platform-discovery
 /// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
 /// §18.2): the FDT → [`rustos_abi::hwtree`] normalisation built on the

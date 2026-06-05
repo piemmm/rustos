@@ -474,6 +474,21 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `passes_arch_hal_conformance_suite` now drives a real discovery
       handle. Docs: `docs/src/platform/{x86_64,aarch64,riscv64}.md`,
       `docs/src/architecture/modularity.md`.
+- [x] **WIRING Stage W2 — Per-CPU storage HAL.** `kernel/arch/api` gains
+      the `PerCpu` slice (`percpu.rs`): `read_self_base` /
+      `unsafe write_self_base` over an opaque, full-pointer-width per-CPU
+      base word, plus a `percpu::conformance` vertical — a single-handle
+      `run_all` round-trip check (folded into `conformance::run_all`,
+      now five handles) and a two-handle `run_isolation` check (one
+      CPU's word independent of another's). Per-port impls land in a
+      `percpu_hal` module (struct `PerCpuStorage`): x86_64 over the
+      GS-base MSR (`IA32_GS_BASE`, `sched-arch`-gated), aarch64 over
+      `TPIDR_EL1`, riscv64 over the `tp` thread pointer, wasm32 over a
+      worker-local slot (each Web Worker owns its own module instance).
+      Each port's `passes_arch_hal_conformance_suite` now also drives a
+      real `PerCpuStorage`, and each carries host round-trip + isolation
+      tests. Docs: `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
+      `docs/src/architecture/modularity.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 
