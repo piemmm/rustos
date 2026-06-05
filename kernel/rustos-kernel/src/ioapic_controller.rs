@@ -342,6 +342,36 @@ impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
     }
 }
 
+/// The §17.2 Arch HAL view of the IO-APIC controller
+/// (`plans/WIRING.md` Stage W3).
+///
+/// `IoApicController` already implements the consumer-side
+/// [`rustos_kernel_irq::IrqController`] the IRQ table calls during a
+/// wake; this impl additionally exposes it through the HAL
+/// [`rustos_arch_api::IrqController`] so the architecture-neutral kernel
+/// can name one interrupt-controller surface across every port
+/// (`AGENTS.md` §2.2). Both `mask` and `unmask` delegate to the existing
+/// IO-APIC logic; the only error the IO-APIC controller produces is
+/// "no such addressable line", which maps to
+/// [`rustos_arch_api::IrqControlError::OutOfRange`].
+///
+/// x86_64 is a **vectored** architecture — the IDT vector identifies the
+/// source and end-of-interrupt is a single LAPIC write that names no
+/// line — so it deliberately does **not** implement
+/// [`rustos_arch_api::InterruptEntry`]; there is no claim register to
+/// model, and faking one would be a fake primitive (`AGENTS.md` §2.1).
+impl<M: IoApicMmio + Send + 'static> rustos_arch_api::IrqController for IoApicController<M> {
+    fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        <Self as IrqController>::mask(self, line)
+            .map_err(|_| rustos_arch_api::IrqControlError::OutOfRange)
+    }
+
+    fn unmask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        self.unmask(line)
+            .map_err(|_| rustos_arch_api::IrqControlError::OutOfRange)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +523,21 @@ mod tests {
         controller.program_pin(27, 0x41, 2, true).expect("block 1");
         assert!(!mmio0.snapshot().is_empty(), "block 0 received writes");
         assert!(!mmio1.snapshot().is_empty(), "block 1 received writes");
+    }
+
+    /// §17.2 / W3: the IO-APIC controller passes the shared Arch HAL
+    /// interrupt-controller conformance vertical over its real handle
+    /// (`plans/WIRING.md` Stage W3). GSI 7 is programmed (so it is an
+    /// addressable, maskable line); GSI 99 is above the single block's
+    /// range. x86_64 is vectored, so there is no `InterruptEntry` handle
+    /// to drive.
+    #[test]
+    fn ioapic_controller_passes_arch_hal_irq_conformance() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        controller
+            .program_pin(7, 0x30, 0xAB, true)
+            .expect("program the line so it is addressable");
+        rustos_arch_api::irq::conformance::run_controller(&controller, 7, 99);
     }
 
     /// Stage 4.D Item 2-tail.2 — the mask-before-wake regression

@@ -489,6 +489,40 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       real `PerCpuStorage`, and each carries host round-trip + isolation
       tests. Docs: `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
       `docs/src/architecture/modularity.md`.
+- [x] **WIRING Stage W3-A — Interrupt-controller + interrupt-entry HAL
+      (traits + per-port migration).** `kernel/arch/api` gains the
+      interrupt slice (`irq.rs`): the `IrqController` trait (`mask` /
+      `unmask`, fail-closed with `IrqControlError::OutOfRange`) and the
+      `InterruptEntry` trait (the `claim` → `complete` prologue/epilogue),
+      each with a host-run `irq::conformance` vertical (`run_controller`
+      mask/unmask round-trip + fail-closed, `run_entry` claim/complete
+      drain-terminates) plus accept/reject self-test doubles. These
+      verticals are driven **per-port** (not folded into
+      `conformance::run_all`, which stays at five handles): the controller
+      check needs a port-specific valid/invalid line pair and
+      `InterruptEntry` is implemented by only the claim-based ports — the
+      same precedent as `percpu::conformance::run_isolation`. Per-port
+      impls: riscv64 `PlicController` (forwarding to its inherent
+      mask/unmask + PLIC claim/complete, source 0 → `None`); aarch64
+      `GicController` over a new host-testable `GicMmio` seam + `Gicv2<M>`
+      driver (`ISENABLER`/`ICENABLER` masking + `SeqCst` fence,
+      `IAR`/`EOIR` claim/complete, spurious → `None`) — the freestanding
+      `init`/`enable_ppi`/`acknowledge`/`end_of_interrupt`/`send_sgi` free
+      functions are now thin wrappers over the driver, so there is one
+      MMIO path (§2.2); x86_64 `IoApicController` (downstream in
+      `kernel/rustos-kernel`, the `alloc`-bearing controller) implements
+      `IrqController` only — x86_64 is vectored, so no `InterruptEntry`
+      (no claim register, §2.1). Each port carries a host conformance test
+      over its real controller on a mock MMIO. Docs:
+      `docs/src/architecture/modularity.md`, `docs/src/security/irq.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64}.md`, `AGENTS.md` §17.2.
+- [ ] **WIRING Stage W3-B — aarch64 device-IRQ QEMU vertical.** Route a
+      device SPI through the GICv2 + EL1 IRQ path to a Rust handler under
+      QEMU (`irq_qemu_aarch64`, matching `irq_qemu_x86_64`): SPI
+      target-routing + the dispatch hook in `exceptions::handle_irq`, a
+      `kernel/irq` bridge, and the QEMU harness, enrolled in
+      `tools/xtask/src/commands/qemu_tests.rs`. Split out of W3 to keep
+      W3-A a host-gated, low-risk landing.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

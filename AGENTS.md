@@ -939,8 +939,12 @@ as non-negotiable as §2.
   tree (`hwtree`, §18.1/§18.2) — and `PerCpu`, the per-CPU storage slice
   that reads/writes the calling CPU's per-CPU base word (GS base on
   x86_64, `TPIDR_EL1` on aarch64, `tp` on riscv64, a worker slot on
-  wasm32); each carries a conformance vertical in `kernel/arch/api`. The
-  remaining primitives are migrated as the §17 burn-down advances
+  wasm32) — and the interrupt entry/exit slice: `IrqController`
+  (controller line masking) and `InterruptEntry` (the claim/complete
+  prologue/epilogue, implemented by the claim-based ports — riscv64 PLIC,
+  aarch64 GICv2; vectored x86_64 implements `IrqController` only); each
+  carries a conformance vertical in `kernel/arch/api`. The remaining
+  primitives are migrated as the §17 burn-down advances
   (`plans/WIRING.md`).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No

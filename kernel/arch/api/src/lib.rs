@@ -30,13 +30,17 @@
 //! slice (`AGENTS.md` §17.2): the [`PerCpu`] trait that reads and writes
 //! the calling CPU's per-CPU base word (GS base on x86_64, `TPIDR_EL1`
 //! on aarch64, `tp` on riscv64, a per-worker slot on wasm32), plus its
-//! [`percpu::conformance`] round-trip + isolation vertical. It also hosts
+//! [`percpu::conformance`] round-trip + isolation vertical — and the
+//! **interrupt entry/exit** slice (`AGENTS.md` §17.2): the
+//! [`IrqController`] line-masking trait and the [`InterruptEntry`]
+//! claim/complete prologue/epilogue every claim-based port exposes, plus
+//! their [`irq::conformance`] verticals. It also hosts
 //! the **§17.2 conformance vertical** ([`conformance`]): the harness
 //! every port runs over its real HAL handles so parity is *enforced*
 //! rather than asserted by inspection (`plans/WIRING.md`). The remaining
 //! HAL surface enumerated by
 //! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
-//! shootdown, timer programming, and interrupt entry/exit) is migrated
+//! shootdown, and timer programming) is migrated
 //! here as the
 //! §17 burn-down advances; see `PLAN.md`. Until a primitive lives here
 //! it stays in its current owning crate, and the move is tracked, not
@@ -58,6 +62,7 @@
 #![deny(missing_docs)]
 
 pub mod conformance;
+pub mod irq;
 pub mod memtag;
 pub mod percpu;
 pub mod platform;
@@ -81,6 +86,8 @@ pub use platform::{
 };
 
 pub use percpu::{conformance as percpu_conformance, PerCpu};
+
+pub use irq::{conformance as irq_conformance, InterruptEntry, IrqControlError, IrqController};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

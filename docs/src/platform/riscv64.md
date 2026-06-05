@@ -409,3 +409,18 @@ host build there is no `tp`, so the handle backs the word with an
 in-handle cell solely for the round-trip + isolation conformance
 verticals (`percpu::conformance`), folded into the port's
 `passes_arch_hal_conformance_suite`.
+
+## Interrupt controller (PLIC)
+
+The riscv64 port implements the Arch HAL `IrqController` and
+`InterruptEntry` slices (`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W3)
+on `kernel/arch/riscv64::plic::PlicController`, the same controller the
+downstream `kernel/irq` bridge already drives. `IrqController::mask` /
+`unmask` forward to the inherent priority-zero masking (mapping
+`PlicError::SourceOutOfRange` to `IrqControlError::OutOfRange`), and
+`InterruptEntry::claim` / `complete` forward to the PLIC claim/complete
+register pair — PLIC source `0` ("no interrupt pending") maps to `None`.
+Because the controller already abstracts its registers behind the
+host-testable `PlicMmio` seam, the `plic_controller_passes_arch_hal_irq_conformance`
+host test drives `irq::conformance::run_controller` (source 8 valid, 32
+out of range) and `run_entry` over a real `PlicController` on a mock MMIO.

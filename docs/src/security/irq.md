@@ -255,6 +255,27 @@ phase:
 | `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
+There are two `IrqController` traits and they are deliberately
+distinct. The one in this section is the **consumer-side**
+`rustos_kernel_irq::IrqController` (just `mask`) that `IrqTable::fire`
+calls during a wake. Separately, the §17.2 Arch HAL
+(`rustos_arch_api`, `plans/WIRING.md` Stage W3) defines an
+architecture-facing `IrqController` (`mask` + `unmask`, fail-closed with
+`IrqControlError::OutOfRange`) and an `InterruptEntry` (the `claim` →
+`complete` prologue/epilogue) so the architecture-neutral kernel can name
+one controller surface across every port. Each port implements the HAL
+traits over its real controller behind an MMIO seam — riscv64
+`PlicController` (`PlicMmio`), aarch64 `GicController` (`GicMmio`,
+`ICENABLER`/`ISENABLER` masking + `IAR`/`EOIR`), and x86_64
+`IoApicController` (`IoApicMmio`) — and runs the host
+`irq::conformance::run_controller` (+ `run_entry` for the claim-based
+ports) vertical over it. x86_64 is **vectored** and implements
+`IrqController` only (no claim register to model, so no `InterruptEntry`,
+`AGENTS.md` §2.1). The downstream `kernel/irq` bridge each port's boot
+pipeline installs forwards the consumer-side `mask` to the same
+controller, so the arch port still owns no `kernel/irq` dependency
+(`AGENTS.md` §17.2).
+
 The kernel binary records one `KERNEL_PHASE_STARTED` /
 `KERNEL_PHASE_READY` pair with `phase = "irq"` strictly between
 the `sched` and `syscall` phase markers. The kernel/core init

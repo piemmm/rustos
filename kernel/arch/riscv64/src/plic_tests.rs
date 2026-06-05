@@ -134,3 +134,16 @@ fn claim_and_complete_round_trip_the_claim_register() {
     // Complete writes the source back to the same register.
     assert_eq!(c.plic.mmio.read32(regs::claim(1)), 8);
 }
+
+/// §17.2 / W3: the PLIC controller passes the shared Arch HAL
+/// interrupt-controller + interrupt-entry conformance verticals over its
+/// real handle (`plans/WIRING.md` Stage W3). Source `8` is addressable on
+/// a `max_source = 31` controller; `32` is out of range. The empty mock
+/// reports no pending interrupt, exercising the [`InterruptEntry`] drain's
+/// terminating path.
+#[test]
+fn plic_controller_passes_arch_hal_irq_conformance() {
+    let c = controller(31);
+    rustos_arch_api::irq::conformance::run_controller(&c, 8, 32);
+    rustos_arch_api::irq::conformance::run_entry(&c);
+}

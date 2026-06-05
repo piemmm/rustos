@@ -56,9 +56,10 @@ kernel crate — the two sides meet only here. Today the crate carries the
 scheduler-facing slice (`CpuId`, `SchedulerArch`), the §19.1
 side-channel slice, the §19.10 memory-tagging slice, the user-entry
 slice, the early-boot platform-discovery slice (`PlatformDiscovery`,
-below), and the per-CPU storage slice (`PerCpu`, below); the remaining
-HAL primitives (context switch, MMU/TLB, timer, interrupt entry/exit)
-migrate here as the §17 burn-down advances.
+below), the per-CPU storage slice (`PerCpu`, below), and the interrupt
+entry/exit slice (`IrqController` + `InterruptEntry`, below); the
+remaining HAL primitives (context switch, MMU/TLB, timer) migrate here
+as the §17 burn-down advances.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -133,6 +134,32 @@ full pointer width (folded into `conformance::run_all`), and
 `percpu::conformance::run_isolation` asserts one CPU's word is
 independent of another's — driven over two handles, since a single
 handle cannot express the per-CPU property.
+
+### Interrupt entry/exit
+
+The interrupt slice gives the kernel one vocabulary for the programmable
+interrupt controllers that differ entirely at the register level — the
+x86_64 IO-APIC, the aarch64 GICv2, the riscv64 PLIC. `IrqController`
+masks and unmasks a controller line (the load-bearing mask-before-wake
+primitive of the user-space IRQ contract, `docs/src/security/irq.md`),
+validating every line and failing closed (`IrqControlError::OutOfRange`)
+on a stray one. `InterruptEntry` is the claim → complete prologue/
+epilogue a *claim-based* controller exposes: riscv64 maps it onto the
+PLIC claim/complete pair and aarch64 onto the GICv2 `IAR`/`EOIR`
+handshake (spurious reads map to `None`). x86_64 is **vectored** — the
+IDT vector already identifies the source and end-of-interrupt is a single
+LAPIC write that names no line — so it implements `IrqController` only
+and deliberately omits `InterruptEntry`; inventing a claim register it
+lacks would be a fake primitive (`AGENTS.md` §2.1). Each port wraps its
+MMIO behind a seam (`PlicMmio` / `GicMmio` / `IoApicMmio`) so the whole
+controller is host-testable, and drives
+`irq::conformance::run_controller` (mask/unmask round-trip + fail-closed)
+and, where applicable, `irq::conformance::run_entry` (claim/complete
+drain terminates) over its real handle. These verticals are driven
+per-port rather than folded into `conformance::run_all`: the controller
+check needs a port-specific valid/invalid line pair and `InterruptEntry`
+is implemented by only a subset of ports — the same reason
+`percpu::conformance::run_isolation` stands apart.
 
 ## `cargo xtask cfg-check`
 

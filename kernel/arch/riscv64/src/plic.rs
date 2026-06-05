@@ -342,6 +342,47 @@ impl<M: PlicMmio> PlicController<M> {
     }
 }
 
+impl<M: PlicMmio + Send + Sync> rustos_arch_api::IrqController for PlicController<M> {
+    /// Mask `line` (a PLIC source) by dropping its priority to zero,
+    /// forwarding to the inherent [`PlicController::mask`].
+    ///
+    /// This is the §17.2 HAL view of the mask-before-wake primitive the
+    /// downstream `kernel/irq` bridge already forwards to; exposing it
+    /// through the trait lets the architecture-neutral kernel name one
+    /// controller surface across every port (`AGENTS.md` §2.2) without
+    /// the arch port acquiring a `kernel/irq` dependency.
+    fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        PlicController::mask(self, line)
+            .map_err(|PlicError::SourceOutOfRange| rustos_arch_api::IrqControlError::OutOfRange)
+    }
+
+    /// Unmask `line` by restoring its delivering priority, forwarding to
+    /// the inherent [`PlicController::unmask`].
+    fn unmask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        PlicController::unmask(self, line)
+            .map_err(|PlicError::SourceOutOfRange| rustos_arch_api::IrqControlError::OutOfRange)
+    }
+}
+
+impl<M: PlicMmio + Send + Sync> rustos_arch_api::InterruptEntry for PlicController<M> {
+    /// Claim the highest-priority pending source for this context.
+    ///
+    /// The PLIC reports source `0` ("no interrupt pending") when nothing
+    /// is pending; the HAL surface maps that to [`None`]
+    /// (`AGENTS.md` §17.2).
+    fn claim(&self) -> Option<u32> {
+        match PlicController::claim(self) {
+            0 => None,
+            source => Some(source),
+        }
+    }
+
+    /// Signal completion of `line` to the PLIC's claim register.
+    fn complete(&self, line: u32) {
+        PlicController::complete(self, line);
+    }
+}
+
 /// Bare-metal [`PlicMmio`] over a fixed PLIC base address.
 ///
 /// Compiled only for the freestanding riscv64 target; host builds use

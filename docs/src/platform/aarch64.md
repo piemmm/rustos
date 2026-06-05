@@ -178,3 +178,25 @@ the host build there is no `TPIDR_EL1`, so the handle backs the word with
 an in-handle cell solely for the round-trip + isolation conformance
 verticals (`percpu::conformance`), folded into the port's
 `passes_arch_hal_conformance_suite`.
+
+## Interrupt controller (GICv2)
+
+The aarch64 port implements the Arch HAL `IrqController` and
+`InterruptEntry` slices (`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W3)
+on `kernel/arch/aarch64::gic::GicController`. The GICv2 register logic
+was lifted behind a host-testable `GicMmio` seam (mirroring riscv64's
+`PlicMmio`, §2.2): a low-level `Gicv2<M>` driver carries the one MMIO
+path — enable/disable (`ISENABLER`/`ICENABLER`), priority, `init`,
+acknowledge (`IAR`), end-of-interrupt (`EOIR`), and SGI raise — and the
+freestanding `init`/`enable_ppi`/`acknowledge`/`end_of_interrupt`/
+`send_sgi` free functions are now thin wrappers over a
+`Gicv2<VolatileGicMmio>`, so there is no duplicate register logic.
+`IrqController::mask` / `unmask` clear / set the distributor enable bit
+(mask pairs the write with a `SeqCst` fence for mask-before-wake) and
+reject an INTID above `MAX_INTID` with `IrqControlError::OutOfRange`;
+`InterruptEntry::claim` / `complete` are the `IAR`/`EOIR` handshake, with
+the spurious INTID (`1023`) mapping to `None`. The
+`gic_controller_passes_arch_hal_irq_conformance` host test drives both
+conformance verticals over a real `GicController` on a mock MMIO (INTID
+42 valid, 2000 out of range). Routing a *device* SPI through the EL1 IRQ
+path to a Rust handler under QEMU is the follow-up Stage W3-B landing.

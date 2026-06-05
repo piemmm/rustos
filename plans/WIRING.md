@@ -230,14 +230,41 @@ wasm32}.md`, `docs/src/architecture/modularity.md`.
 
 ### Stage W3 — Interrupt controller + entry/exit HAL
 
-- Define `IrqController` + `InterruptEntry`. Migrate x86_64
-  (`apic`/`idt`/`irq`/`interrupts`), aarch64 (`gic`/`exceptions`),
-  riscv64 (`plic`/`trap`) behind them.
+Split into two landings to keep the host-gated trait work separate from
+the larger aarch64 QEMU-device work.
+
+#### Stage W3-A — traits + per-port migration — ✅ landed
+
+**Landed:** `kernel/arch/api::irq` defines `IrqController` (`mask` /
+`unmask`, fail-closed `IrqControlError::OutOfRange`) and `InterruptEntry`
+(the `claim` → `complete` prologue/epilogue), each with a host-run
+`irq::conformance` vertical (`run_controller`, `run_entry`) + accept/
+reject self-tests. Driven **per-port** (not folded into the five-handle
+`conformance::run_all`): the controller check needs a port-specific
+valid/invalid line pair and `InterruptEntry` is only on the claim-based
+ports — the `percpu::run_isolation` precedent. Per-port impls: riscv64
+`PlicController` (inherent mask/unmask + PLIC claim/complete, source 0 →
+`None`); aarch64 `GicController` over a new host-testable `GicMmio` seam +
+`Gicv2<M>` driver (`ISENABLER`/`ICENABLER` + `SeqCst` fence, `IAR`/`EOIR`,
+spurious → `None`) with the freestanding `init`/`enable_ppi`/`…`/
+`send_sgi` free functions now thin wrappers over the driver (one MMIO
+path, §2.2); x86_64 `IoApicController` (downstream, `alloc`-bearing)
+implements `IrqController` only — vectored, no claim register, so no
+`InterruptEntry` (§2.1). Each port carries a host conformance test over
+its real controller on a mock MMIO. Docs:
+`docs/src/architecture/modularity.md`, `docs/src/security/irq.md`,
+platform pages, `AGENTS.md` §17.2, `PLAN.md`.
+
+#### Stage W3-B — aarch64 device-IRQ QEMU vertical
+
 - **aarch64: add an `irq_qemu_aarch64` vertical** matching
   `irq_qemu_x86_64` (a device IRQ routed through the GIC reaches a Rust
-  handler).
-- **Deliverable:** uniform IRQ surface; the new aarch64 IRQ vertical is
-  QEMU-green. Docs: `docs/src/security/irq.md`, platform pages.
+  handler). Needs GICv2 SPI target-routing, a dispatch hook in
+  `exceptions::handle_irq`, a `kernel/irq` bridge over `GicController`,
+  and the QEMU harness, enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`.
+- **Deliverable:** the new aarch64 IRQ vertical is QEMU-green. Docs:
+  `docs/src/security/irq.md`, `docs/src/platform/aarch64.md`.
 
 ### Stage W4 — Timer-programming HAL
 

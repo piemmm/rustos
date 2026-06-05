@@ -71,6 +71,11 @@ rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so
 # no architecture port duplicates them (`AGENTS.md` §2.2).
 rustos-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
+# The Arch HAL surface (`AGENTS.md` §17.2): the kernel binary names
+# `rustos_arch_api::IrqController` so the production `IoApicController`
+# implements the same interrupt-controller HAL trait every port does
+# (`plans/WIRING.md` Stage W3).
+rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 rustos-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 # Stage 4.D Item 2-tail.4: the kernel-binary `VirtioHostFactory` lives
 # in `kernel/virtio` (the `KernelVirtioFactory`); it mints a per-driver

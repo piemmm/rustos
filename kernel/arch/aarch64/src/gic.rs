@@ -31,7 +31,6 @@
 //! functions, unit-tested on the host; the MMIO reads/writes are gated
 //! to the freestanding aarch64 target.
 
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use rustos_arch_api::CpuId;
 
 /// MMIO base of the GICv2 distributor on the `virt` board.
@@ -42,33 +41,34 @@ pub const GICC_BASE: usize = 0x0801_0000;
 
 /// `GICD_CTLR` — distributor control (offset 0x000). Bit 0 enables
 /// forwarding of pending interrupts to the CPU interfaces.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICD_CTLR: usize = 0x000;
 /// `GICD_ISENABLER<n>` — set-enable, one bit per interrupt (base 0x100).
 const GICD_ISENABLER: usize = 0x100;
+/// `GICD_ICENABLER<n>` — clear-enable, one bit per interrupt (base
+/// 0x180). Writing a `1` disables (masks) the corresponding interrupt.
+const GICD_ICENABLER: usize = 0x180;
 /// `GICD_IPRIORITYR<n>` — priority, one byte per interrupt (base 0x400).
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICD_IPRIORITYR: usize = 0x400;
 /// `GICD_SGIR` — software-generated interrupt control (offset 0xF00).
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICD_SGIR: usize = 0xF00;
 
 /// `GICC_CTLR` — CPU-interface control (offset 0x000). Bit 0 enables
 /// signalling of interrupts to the CPU.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICC_CTLR: usize = 0x000;
 /// `GICC_PMR` — interrupt priority mask (offset 0x004). Only interrupts
 /// of higher priority (numerically lower) than this are signalled.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICC_PMR: usize = 0x004;
 /// `GICC_IAR` — interrupt acknowledge (offset 0x00C). A read returns the
 /// INTID of the highest-priority pending interrupt and activates it.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICC_IAR: usize = 0x00C;
 /// `GICC_EOIR` — end of interrupt (offset 0x010). Writing the INTID read
 /// from `GICC_IAR` deactivates it.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const GICC_EOIR: usize = 0x010;
+
+/// Highest addressable GICv2 INTID. INTIDs `1020..=1023` are reserved by
+/// the spec (1023 is [`SPURIOUS_INTID`]); a controller rejects anything
+/// above this as out of range (`AGENTS.md` §5.4.5 — fail closed).
+pub const MAX_INTID: u32 = 1019;
 
 /// Mask isolating the INTID from a `GICC_IAR` read (bits `[9:0]`; the
 /// upper bits carry the source CPU for SGIs).
@@ -99,26 +99,214 @@ pub const fn isenabler_bit(intid: u32) -> u32 {
     1 << (intid % 32)
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-mod mmio {
-    use super::{GICC_BASE, GICD_BASE};
+/// Byte offset of the `GICD_ICENABLER` word covering interrupt `intid`.
+/// Parallel layout to [`isenabler_offset`]; the bit position is shared
+/// ([`isenabler_bit`]).
+#[must_use]
+pub const fn icenabler_offset(intid: u32) -> usize {
+    GICD_ICENABLER + ((intid / 32) as usize) * 4
+}
 
-    pub(super) fn gicd_write(off: usize, val: u32) {
-        // SAFETY: `off` addresses a distributor register within the
-        // fixed `virt`-board GICv2 MMIO window; a 32-bit store.
-        unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u32, val) }
+/// Volatile access to a GICv2 distributor + CPU-interface register pair.
+///
+/// The production implementation is `VolatileGicMmio` (freestanding
+/// only); host tests substitute an in-memory mock. Modelled on riscv64's
+/// `PlicMmio` seam so the whole controller control-flow is host-testable
+/// (`AGENTS.md` §2.2 — one MMIO path, no duplicate register logic).
+pub trait GicMmio {
+    /// Read the distributor register at byte offset `off`.
+    fn gicd_read(&self, off: usize) -> u32;
+    /// Write the distributor 32-bit register at byte offset `off`.
+    fn gicd_write(&self, off: usize, val: u32);
+    /// Write the distributor byte register at byte offset `off` (the
+    /// byte-addressable priority registers).
+    fn gicd_write_byte(&self, off: usize, val: u8);
+    /// Read the CPU-interface register at byte offset `off`.
+    fn gicc_read(&self, off: usize) -> u32;
+    /// Write the CPU-interface register at byte offset `off`.
+    fn gicc_write(&self, off: usize, val: u32);
+}
+
+/// Low-level GICv2 register driver over a [`GicMmio`] seam.
+///
+/// Holds no policy: it exposes the raw enable/disable/priority/ack/EOI
+/// operations and leaves range validation and the mask-before-wake fence
+/// to [`GicController`].
+pub struct Gicv2<M: GicMmio> {
+    mmio: M,
+}
+
+impl<M: GicMmio> Gicv2<M> {
+    /// Bind a driver to `mmio`.
+    pub const fn new(mmio: M) -> Self {
+        Self { mmio }
     }
 
-    pub(super) fn gicc_read(off: usize) -> u32 {
+    /// Enable the distributor and this CPU's interface and open the
+    /// priority mask so every priority is signalled.
+    pub fn init(&self) {
+        self.mmio.gicc_write(GICC_PMR, 0xFF);
+        self.mmio.gicc_write(GICC_CTLR, 1);
+        self.mmio.gicd_write(GICD_CTLR, 1);
+    }
+
+    /// Give `intid` a mid-range priority and set its enable bit.
+    pub fn enable_intid(&self, intid: u32) {
+        self.mmio
+            .gicd_write_byte(GICD_IPRIORITYR + intid as usize, 0x80);
+        self.mmio
+            .gicd_write(isenabler_offset(intid), isenabler_bit(intid));
+    }
+
+    /// Clear `intid`'s enable bit, masking it at the distributor.
+    pub fn disable_intid(&self, intid: u32) {
+        self.mmio
+            .gicd_write(icenabler_offset(intid), isenabler_bit(intid));
+    }
+
+    /// Read `GICC_IAR` to acknowledge the highest-priority pending
+    /// interrupt, returning its INTID (which may be [`SPURIOUS_INTID`]).
+    #[must_use]
+    pub fn acknowledge(&self) -> u32 {
+        self.mmio.gicc_read(GICC_IAR) & IAR_INTID_MASK
+    }
+
+    /// Write `GICC_EOIR` to deactivate `intid`.
+    pub fn end_of_interrupt(&self, intid: u32) {
+        self.mmio.gicc_write(GICC_EOIR, intid);
+    }
+
+    /// Raise SGI INTID 0 on the CPUs named in `target`'s target-list bit.
+    pub fn send_sgi(&self, target: CpuId) {
+        let bit = u8::try_from(target)
+            .ok()
+            .and_then(|c| 1u8.checked_shl(u32::from(c)));
+        if let Some(target_list) = bit {
+            self.mmio.gicd_write(GICD_SGIR, sgir_value(0, target_list));
+        }
+    }
+}
+
+/// GICv2 controller: the policy layer over [`Gicv2`].
+///
+/// Validates every INTID against `max_intid` and fails closed
+/// (`AGENTS.md` §5.4.5) before touching a register. Implements the
+/// §17.2 Arch HAL [`rustos_arch_api::IrqController`] (line masking) and
+/// [`rustos_arch_api::InterruptEntry`] (the claim/complete handshake).
+pub struct GicController<M: GicMmio> {
+    gic: Gicv2<M>,
+    max_intid: u32,
+}
+
+impl<M: GicMmio> GicController<M> {
+    /// Build a controller over `gic` whose highest valid INTID is
+    /// `max_intid` (inclusive, clamped to [`MAX_INTID`]).
+    #[must_use]
+    pub const fn new(gic: Gicv2<M>, max_intid: u32) -> Self {
+        let max_intid = if max_intid > MAX_INTID {
+            MAX_INTID
+        } else {
+            max_intid
+        };
+        Self { gic, max_intid }
+    }
+
+    /// Inclusive upper bound on accepted INTIDs.
+    #[must_use]
+    pub const fn max_intid(&self) -> u32 {
+        self.max_intid
+    }
+
+    const fn in_range(&self, intid: u32) -> bool {
+        intid <= self.max_intid
+    }
+}
+
+impl<M: GicMmio + Send + Sync> rustos_arch_api::IrqController for GicController<M> {
+    /// Mask `line` by clearing its distributor enable bit, then emit a
+    /// `SeqCst` fence so the masked state is globally visible before a
+    /// waiter observes `ready = true` (`docs/src/security/irq.md`).
+    fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        if !self.in_range(line) {
+            return Err(rustos_arch_api::IrqControlError::OutOfRange);
+        }
+        self.gic.disable_intid(line);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Unmask `line` by setting its distributor enable bit (priority is
+    /// left at the mid value [`Gicv2::enable_intid`] installs).
+    fn unmask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        if !self.in_range(line) {
+            return Err(rustos_arch_api::IrqControlError::OutOfRange);
+        }
+        self.gic.enable_intid(line);
+        Ok(())
+    }
+}
+
+impl<M: GicMmio + Send + Sync> rustos_arch_api::InterruptEntry for GicController<M> {
+    /// Acknowledge the active interrupt, mapping the GICv2
+    /// [`SPURIOUS_INTID`] ("nothing pending") to [`None`]
+    /// (`AGENTS.md` §17.2).
+    fn claim(&self) -> Option<u32> {
+        match self.gic.acknowledge() {
+            SPURIOUS_INTID => None,
+            intid => Some(intid),
+        }
+    }
+
+    /// End-of-interrupt for `line`.
+    fn complete(&self, line: u32) {
+        self.gic.end_of_interrupt(line);
+    }
+}
+
+/// Bare-metal [`GicMmio`] over the fixed `virt`-board GICv2 windows.
+///
+/// Compiled only for the freestanding aarch64 target; host builds use
+/// the in-memory mock in the test module.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub struct VolatileGicMmio;
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+impl GicMmio for VolatileGicMmio {
+    fn gicd_read(&self, off: usize) -> u32 {
+        // SAFETY: `off` addresses a distributor register within the
+        // fixed `virt`-board GICv2 MMIO window.
+        unsafe { core::ptr::read_volatile((GICD_BASE + off) as *const u32) }
+    }
+    fn gicd_write(&self, off: usize, val: u32) {
+        // SAFETY: as `gicd_read`, but a 32-bit store.
+        unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u32, val) }
+    }
+    fn gicd_write_byte(&self, off: usize, val: u8) {
+        // SAFETY: the byte-addressable priority register for the INTID
+        // inside the distributor window; QEMU honours the byte store.
+        unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u8, val) }
+    }
+    fn gicc_read(&self, off: usize) -> u32 {
         // SAFETY: `off` addresses a CPU-interface register within the
         // fixed `virt`-board GICv2 MMIO window.
         unsafe { core::ptr::read_volatile((GICC_BASE + off) as *const u32) }
     }
-
-    pub(super) fn gicc_write(off: usize, val: u32) {
+    fn gicc_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicc_read`, but a 32-bit store.
         unsafe { core::ptr::write_volatile((GICC_BASE + off) as *mut u32, val) }
     }
+}
+
+/// Construct the production driver over the fixed `virt`-board windows.
+///
+/// # Safety
+///
+/// The GICv2 distributor + CPU interface must be mapped at the fixed
+/// `virt`-board bases ([`GICD_BASE`] / [`GICC_BASE`]), identity-mapped
+/// and exclusively owned by the kernel.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+const unsafe fn volatile_gic() -> Gicv2<VolatileGicMmio> {
+    Gicv2::new(VolatileGicMmio)
 }
 
 /// Enable the distributor and the calling CPU's interface, and open the
@@ -131,12 +319,9 @@ mod mmio {
 /// `virt` board; calling it elsewhere is a kernel bug.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init() {
-    // Enable the CPU interface and open the priority mask to the lowest
-    // priority so no interrupt is masked by priority.
-    mmio::gicc_write(GICC_PMR, 0xFF);
-    mmio::gicc_write(GICC_CTLR, 1);
-    // Enable the distributor (group 0 forwarding).
-    mmio::gicd_write(GICD_CTLR, 1);
+    // SAFETY: bring-up context — the fixed `virt`-board windows are
+    // mapped and owned by the kernel.
+    unsafe { volatile_gic() }.init();
 }
 
 /// Enable private-peripheral / shared interrupt `intid` and give it a
@@ -148,16 +333,8 @@ pub unsafe fn init() {
 /// INTID lets it reach the CPU once its source is armed.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn enable_ppi(intid: u32) {
-    // Mid priority (0x80) so the open PMR (0xFF) signals it.
-    let prio_off = GICD_IPRIORITYR + intid as usize;
-    // Priority registers are byte-accessible; QEMU's model honours a
-    // byte store here.
-    // SAFETY: `prio_off` is the priority byte for `intid` in the
-    // distributor window.
-    unsafe {
-        core::ptr::write_volatile((GICD_BASE + prio_off) as *mut u8, 0x80);
-    }
-    mmio::gicd_write(isenabler_offset(intid), isenabler_bit(intid));
+    // SAFETY: as `init` — the fixed windows are mapped and owned.
+    unsafe { volatile_gic() }.enable_intid(intid);
 }
 
 /// Read `GICC_IAR` to acknowledge and activate the highest-priority
@@ -166,14 +343,16 @@ pub unsafe fn enable_ppi(intid: u32) {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn acknowledge() -> u32 {
-    mmio::gicc_read(GICC_IAR) & IAR_INTID_MASK
+    // SAFETY: the fixed windows are mapped and owned by the kernel.
+    unsafe { volatile_gic() }.acknowledge()
 }
 
 /// Write `GICC_EOIR` to deactivate the interrupt `intid` previously
 /// returned by [`acknowledge`].
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn end_of_interrupt(intid: u32) {
-    mmio::gicc_write(GICC_EOIR, intid);
+    // SAFETY: the fixed windows are mapped and owned by the kernel.
+    unsafe { volatile_gic() }.end_of_interrupt(intid);
 }
 
 /// Raise software-generated interrupt INTID 0 on `target`.
@@ -183,13 +362,8 @@ pub fn end_of_interrupt(intid: u32) {
 /// SGI.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn send_sgi(target: CpuId) {
-    // One bit per CPU in the target list; clamp to the 8-bit field.
-    let bit = u8::try_from(target)
-        .ok()
-        .and_then(|c| 1u8.checked_shl(u32::from(c)));
-    if let Some(target_list) = bit {
-        mmio::gicd_write(GICD_SGIR, sgir_value(0, target_list));
-    }
+    // SAFETY: the fixed windows are mapped and owned by the kernel.
+    unsafe { volatile_gic() }.send_sgi(target);
 }
 
 #[cfg(test)]
@@ -226,5 +400,106 @@ mod tests {
     fn iar_mask_and_spurious_match_gicv2_spec() {
         assert_eq!(IAR_INTID_MASK, 0x3FF);
         assert_eq!(SPURIOUS_INTID, 1023);
+    }
+
+    #[test]
+    fn icenabler_offset_parallels_isenabler() {
+        assert_eq!(icenabler_offset(0), 0x180);
+        assert_eq!(icenabler_offset(30), 0x180);
+        assert_eq!(icenabler_offset(32), 0x184);
+    }
+
+    /// In-memory GICv2 register file: distributor and CPU-interface
+    /// windows are independent, so the mock keeps a map per window and
+    /// serves the last value written to a register on a subsequent read.
+    struct MockGicMmio {
+        gicd: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
+        gicc: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
+    }
+
+    impl MockGicMmio {
+        fn new() -> Self {
+            Self {
+                gicd: std::sync::Mutex::new(std::collections::HashMap::new()),
+                gicc: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl GicMmio for MockGicMmio {
+        fn gicd_read(&self, off: usize) -> u32 {
+            *self.gicd.lock().unwrap().get(&off).unwrap_or(&0)
+        }
+        fn gicd_write(&self, off: usize, val: u32) {
+            self.gicd.lock().unwrap().insert(off, val);
+        }
+        fn gicd_write_byte(&self, off: usize, val: u8) {
+            self.gicd.lock().unwrap().insert(off, u32::from(val));
+        }
+        fn gicc_read(&self, off: usize) -> u32 {
+            *self.gicc.lock().unwrap().get(&off).unwrap_or(&0)
+        }
+        fn gicc_write(&self, off: usize, val: u32) {
+            self.gicc.lock().unwrap().insert(off, val);
+        }
+    }
+
+    #[test]
+    fn enable_intid_sets_priority_and_enable_bit() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        gic.enable_intid(42);
+        assert_eq!(gic.mmio.gicd_read(GICD_IPRIORITYR + 42), 0x80);
+        assert_eq!(
+            gic.mmio.gicd_read(isenabler_offset(42)) & isenabler_bit(42),
+            isenabler_bit(42)
+        );
+    }
+
+    #[test]
+    fn disable_intid_sets_clear_enable_bit() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        gic.disable_intid(42);
+        assert_eq!(
+            gic.mmio.gicd_read(icenabler_offset(42)) & isenabler_bit(42),
+            isenabler_bit(42)
+        );
+    }
+
+    #[test]
+    fn acknowledge_masks_off_the_source_cpu_bits() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // A real IAR carries the source CPU in the upper bits for an SGI;
+        // `acknowledge` returns only the INTID field.
+        gic.mmio.gicc_write(GICC_IAR, (0b101 << 10) | 0x2A);
+        assert_eq!(gic.acknowledge(), 0x2A);
+    }
+
+    #[test]
+    fn controller_clamps_max_intid_to_the_spec_ceiling() {
+        let c = GicController::new(Gicv2::new(MockGicMmio::new()), u32::MAX);
+        assert_eq!(c.max_intid(), MAX_INTID);
+    }
+
+    /// §17.2 / W3: the GIC controller passes the shared Arch HAL
+    /// interrupt-controller + interrupt-entry conformance verticals over
+    /// its real handle (`plans/WIRING.md` Stage W3). INTID 42 is an
+    /// addressable SPI; 2000 is above [`MAX_INTID`]. The mock's `GICC_IAR`
+    /// is seeded with [`SPURIOUS_INTID`] so the [`InterruptEntry`] drain
+    /// terminates ("nothing pending").
+    #[test]
+    fn gic_controller_passes_arch_hal_irq_conformance() {
+        use rustos_arch_api::{InterruptEntry, IrqController};
+
+        let c = GicController::new(Gicv2::new(MockGicMmio::new()), 1019);
+        c.gic.mmio.gicc_write(GICC_IAR, SPURIOUS_INTID);
+
+        rustos_arch_api::irq::conformance::run_controller(&c, 42, 2000);
+        rustos_arch_api::irq::conformance::run_entry(&c);
+
+        // Object-safe behind `&dyn`, the way the kernel reaches it.
+        let dyn_ctrl: &dyn IrqController = &c;
+        assert_eq!(dyn_ctrl.mask(42), Ok(()));
+        let dyn_entry: &dyn InterruptEntry = &c;
+        assert_eq!(dyn_entry.claim(), None);
     }
 }
