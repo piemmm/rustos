@@ -268,4 +268,17 @@ mod tests {
         arch.send_ipi(u32::try_from(MAX_CPUS).unwrap());
         assert_eq!(arch.host_stray_ipi_count(), 1);
     }
+
+    /// §17.2 / W0: the port passes the shared Arch HAL conformance
+    /// vertical over its real `SchedulerArch`, `SideChannel`, and
+    /// `MemoryTags` handles (`plans/WIRING.md` Stage W0).
+    #[test]
+    fn passes_arch_hal_conformance_suite() {
+        let arch = Aarch64Arch::new(0, 1_000);
+        rustos_arch_api::conformance::run_all(
+            &arch,
+            &crate::sidechannel::SideChannel::new(),
+            &crate::memtag::MemoryTags::new(),
+        );
+    }
 }

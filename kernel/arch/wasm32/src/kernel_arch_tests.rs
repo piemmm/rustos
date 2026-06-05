@@ -97,3 +97,16 @@ fn send_ipi_to_unmapped_target_is_dropped_as_stray() {
     assert_eq!(arch.host_stray_ipi_count(), 1);
     assert_eq!(arch.host_ipi_count(5), 0);
 }
+
+/// §17.2 / W0: the port passes the shared Arch HAL conformance vertical
+/// over its real `SchedulerArch`, `SideChannel`, and `MemoryTags`
+/// handles (`plans/WIRING.md` Stage W0).
+#[test]
+fn passes_arch_hal_conformance_suite() {
+    let arch = WasmArch::new(0);
+    rustos_arch_api::conformance::run_all(
+        &arch,
+        &crate::sidechannel::SideChannel::new(),
+        &crate::memtag::MemoryTags::new(),
+    );
+}

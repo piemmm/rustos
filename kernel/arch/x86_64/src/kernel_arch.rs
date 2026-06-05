@@ -493,6 +493,19 @@ mod tests {
         assert_eq!(arch.core_class(u32::MAX), CoreClass::Performance);
     }
 
+    /// §17.2 / W0: the port passes the shared Arch HAL conformance
+    /// vertical over its real `SchedulerArch`, `SideChannel`, and
+    /// `MemoryTags` handles (`plans/WIRING.md` Stage W0).
+    #[test]
+    fn passes_arch_hal_conformance_suite() {
+        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        rustos_arch_api::conformance::run_all(
+            &arch,
+            &crate::sidechannel::SideChannel::new(),
+            &crate::memtag::MemoryTags::new(),
+        );
+    }
+
     /// Compile-time proof that [`halt`] has the `-> !` signature
     /// required by `KernelArch::halt`. Calling it would block the
     /// test runner; coercing the function pointer is enough to

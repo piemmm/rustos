@@ -87,5 +87,18 @@ fn send_ipi_drops_unmapped_target_into_stray_counter() {
     assert_eq!(arch.host_ipi_count(4), 0);
 }
 
+/// §17.2 / W0: the port passes the shared Arch HAL conformance vertical
+/// over its real `SchedulerArch`, `SideChannel`, and `MemoryTags`
+/// handles (`plans/WIRING.md` Stage W0).
+#[test]
+fn passes_arch_hal_conformance_suite() {
+    let arch = RiscvArch::new(0, 10_000_000);
+    rustos_arch_api::conformance::run_all(
+        &arch,
+        &crate::sidechannel::SideChannel::new(),
+        &crate::memtag::MemoryTags::new(),
+    );
+}
+
 /// Compile-time proof that `RiscvArch` implements [`SchedulerArch`].
 const _IS_SCHED_ARCH: fn(&RiscvArch) -> CpuId = <RiscvArch as SchedulerArch>::current_cpu;

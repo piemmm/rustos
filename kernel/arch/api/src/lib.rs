@@ -22,7 +22,10 @@
 //! §17.2): the [`EnterUser`] trait and the architecture-neutral
 //! [`UserEntry`] register state that drops a freshly built process image
 //! into user mode via the port's native transition (`sret` on riscv64,
-//! `eret` on aarch64, `iretq` on x86_64). The remaining HAL surface
+//! `eret` on aarch64, `iretq` on x86_64). It also hosts the **§17.2
+//! conformance vertical** ([`conformance`]): the harness every port runs
+//! over its real HAL handles so parity is *enforced* rather than asserted
+//! by inspection (`plans/WIRING.md`). The remaining HAL surface
 //! enumerated by
 //! `AGENTS.md` §17.2 (context switch, MMU/page-table primitives, TLB
 //! shootdown, timer programming, interrupt entry/exit, per-CPU
@@ -43,6 +46,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod conformance;
 pub mod memtag;
 pub mod sidechannel;
 pub mod userentry;

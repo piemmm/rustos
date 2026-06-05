@@ -427,6 +427,28 @@ Do **not** begin a stage before all its listed dependencies are complete.
 **Dependencies:** Stage 2 (interface-level; implementations land in parallel
 sub-stages).
 
+**Cross-arch parity burn-down:** bringing `aarch64`, `riscv64`, and
+`wasm32` up to (at least) `x86_64` level — finishing the §17.2 Arch HAL
+migration, aarch64 SMP/FDT, live-scheduler wiring, and the QEMU vertical
+parity sweep — is staged in `plans/WIRING.md` (continuation prompt
+`.junie/next-wiring-prompt.md`).
+
+- [x] **WIRING Stage W0 — Arch HAL conformance harness (all ports).**
+      `kernel/arch/api` gains a `conformance` module (the architecture
+      analogue of the `kernel/sched/api` policy suite): the
+      `SchedulerArch` contract checks (`current_cpu` stable, `ticks_now`
+      monotonic non-decreasing, `send_ipi`-to-self/stray a panic-free
+      no-op, `core_class` total over every `CpuId`) and a `run_all`
+      that also drives the existing §19.1 `sidechannel::conformance`
+      and §19.10 `memtag::conformance` verticals over the same port's
+      handles. `kernel/arch/api/tests/conformance.rs` runs the harness
+      over an in-test double (the api crate cannot name a concrete port
+      without inverting §17.4); each of the four ports grows a
+      `kernel_arch::tests::passes_arch_hal_conformance_suite` host test
+      instantiating `conformance::run_all` over its real `*Arch`,
+      `SideChannel`, and `MemoryTags` handles. All four Tier-1 ports
+      pass; documented in `docs/src/architecture/modularity.md`.
+
 Each sub-stage delivers one architecture. They share the same checklist:
 
 - Boot stub (minimal assembly, justified per `AGENTS.md` §1).

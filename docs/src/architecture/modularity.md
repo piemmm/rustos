@@ -68,6 +68,35 @@ into the downstream Tooling crate `tests/integration/riscv64_boot` —
 the riscv64 analogue of how x86_64 keeps that pipeline in `rustos-kernel`.
 Both ports now name only `kernel/arch/api` + `lib/*`.
 
+### Arch HAL conformance vertical
+
+Parity between ports is *enforced*, not asserted by inspection
+(`plans/WIRING.md` Stage W0). `kernel/arch/api` carries a
+`conformance` module — the architecture analogue of the
+`kernel/sched/api` policy conformance suite — written purely against the
+HAL traits so it names no concrete port:
+
+- `conformance::run_scheduler_arch(arch)` checks the `SchedulerArch`
+  contract: `current_cpu` stable across back-to-back calls, `ticks_now`
+  monotonically non-decreasing, `send_ipi` to self (and to a stray
+  target) a panic-free no-op equivalent, and `core_class` total — it
+  returns a stable, valid class for every `CpuId`, including an
+  out-of-range one.
+- `conformance::run_all(arch, side_channel, memory_tagging)` runs that
+  suite **and** the §19.1 side-channel vertical
+  (`sidechannel::conformance`) and the §19.10 memory-tagging vertical
+  (`memtag::conformance`) over the same port's handles. Each port
+  implements the three traits on distinct types (`*Arch`, `SideChannel`,
+  `MemoryTags`), so the suite takes one reference per trait.
+
+The api crate's own `tests/conformance.rs` drives the harness over an
+in-test double (it cannot name a concrete port without inverting the
+§17.4 layering). The real per-port coverage lives in each
+`kernel/arch/<target>` crate's host test
+`kernel_arch::tests::passes_arch_hal_conformance_suite`, which
+instantiates `conformance::run_all` over its real handles. All four
+Tier-1 ports pass.
+
 ## `cargo xtask cfg-check`
 
 Scans every workspace `.rs` file and fails if a `cfg` predicate names
