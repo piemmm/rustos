@@ -75,6 +75,17 @@ impl MemBlock {
         });
         self
     }
+
+    /// Model the backing device being enlarged underneath a live mount (an
+    /// admin growing the partition / logical volume / virtual disk): extend
+    /// the store with fresh zeroed blocks and report the larger count. Used to
+    /// exercise online [`RustFs::grow`].
+    fn enlarge_to(&mut self, new_block_count: u64) {
+        assert!(new_block_count >= self.block_count, "enlarge cannot shrink");
+        self.store
+            .resize(self.block_size as usize * as_usize(new_block_count), 0);
+        self.block_count = new_block_count;
+    }
 }
 
 impl Block for MemBlock {
@@ -3863,4 +3874,245 @@ fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
         ff,
         "the constant block round-trips"
     );
+}
+
+#[test]
+fn names_up_to_255_bytes_round_trip() {
+    // §13: the maximum name length matches ext4 (255 bytes). A maximum-length
+    // name is creatable, lookable, enumerable, and survives a remount.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let name = alloc::vec![b'n'; NAME_MAX];
+    assert_eq!(name.len(), 255);
+    fs.create(root, &name, NodeKind::RegularFile)
+        .expect("create a 255-byte name");
+    let body = alloc::vec![0x9u8; 1000];
+    assert_eq!(fs.write_at(root, &name, 0, &body), Ok(1000));
+
+    let mut name_out = alloc::vec![0u8; NAME_MAX];
+    let entry = fs
+        .read_dir(root, 0, &mut name_out)
+        .expect("read_dir")
+        .expect("one entry");
+    assert_eq!(entry.name_len, NAME_MAX);
+    assert_eq!(&name_out[..entry.name_len], &name[..]);
+
+    let bytes = fs.into_block().bytes();
+    let mut reopened =
+        RustFs::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
+    let node = reopened
+        .lookup(reopened.root(), &name)
+        .expect("lookup after remount");
+    assert_eq!(read_all(&mut reopened, node, 1000), body);
+}
+
+#[test]
+fn a_name_longer_than_255_bytes_is_rejected() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let too_long = alloc::vec![b'x'; NAME_MAX + 1];
+    assert_eq!(
+        fs.create(root, &too_long, NodeKind::RegularFile),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn names_use_the_ext4_charset_rejecting_only_slash_and_nul() {
+    // §13: RustFS allows every byte ext4 allows in a name — anything except `/`
+    // and NUL — and reserves only `.` and `..`.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let legal: [&[u8]; 7] = [
+        b"hello world",
+        b"file.name.tar.gz",
+        b".hidden",
+        b"..prefixed",
+        b"caf\xc3\xa9",        // UTF-8
+        &[0x01u8, 0x1f, b'a'], // control bytes other than NUL
+        b"\xff\xfe",           // arbitrary high bytes
+    ];
+    for name in legal {
+        fs.create(root, name, NodeKind::RegularFile)
+            .unwrap_or_else(|e| panic!("ext4-legal name {name:?} rejected: {e:?}"));
+        assert!(fs.lookup(root, name).is_ok(), "{name:?} must be present");
+    }
+    // The two forbidden bytes and the two reserved names.
+    assert_eq!(
+        fs.create(root, b"a/b", NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create(root, &[b'a', 0u8, b'b'], NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create(root, b".", NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create(root, b"..", NodeKind::RegularFile),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn names_are_case_sensitive() {
+    // §13: names are compared byte-for-byte, so casing distinguishes entries.
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"File", NodeKind::RegularFile)
+        .expect("File");
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("file");
+    fs.create(root, b"FILE", NodeKind::RegularFile)
+        .expect("FILE");
+    let a = fs.lookup(root, b"File").expect("File");
+    let b = fs.lookup(root, b"file").expect("file");
+    let c = fs.lookup(root, b"FILE").expect("FILE");
+    assert_ne!(a, b);
+    assert_ne!(a, c);
+    assert_ne!(b, c);
+    assert_eq!(fs.lookup(root, b"fIle"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn directory_entries_span_multiple_blocks_on_a_512_byte_volume() {
+    // A 512-byte block holds a single 263-byte dirent slot, so a directory with
+    // several entries spans several blocks. Every entry stays retrievable and
+    // enumerable, and the layout survives a remount.
+    let mut fs = fmt(512, 256, 64);
+    let root = fs.root();
+    let names: [&[u8]; 6] = [
+        b"alpha", b"bravo", b"charlie", b"delta", b"echo", b"foxtrot",
+    ];
+    for n in names {
+        fs.create(root, n, NodeKind::RegularFile).expect("create");
+    }
+    for n in names {
+        assert!(fs.lookup(root, n).is_ok(), "{n:?} must be present");
+    }
+    let mut seen = 0u64;
+    let mut idx = 0u64;
+    let mut buf = alloc::vec![0u8; NAME_MAX];
+    while fs
+        .read_dir(root, idx, &mut buf)
+        .expect("read_dir")
+        .is_some()
+    {
+        seen += 1;
+        idx += 1;
+    }
+    assert_eq!(seen, names.len() as u64, "every entry enumerates back");
+}
+
+/// Allocate files of one data block each until the volume is full.
+fn fill_until_no_space(fs: &mut RustFs<MemBlock>) {
+    let root = fs.root();
+    let body = alloc::vec![0x42u8; 256];
+    let mut idx = 0u64;
+    loop {
+        let name = alloc::format!("fill{idx}");
+        if fs
+            .create(root, name.as_bytes(), NodeKind::RegularFile)
+            .is_err()
+        {
+            break;
+        }
+        match fs.write_at(root, name.as_bytes(), 0, &body) {
+            Ok(_) => idx += 1,
+            Err(DriverError::NoSpace) => break,
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        assert!(idx < 100_000, "the small volume must fill");
+    }
+}
+
+#[test]
+fn grow_extends_a_mounted_volume_online() {
+    // A 256-block volume is grown to fill a device enlarged to 1024 blocks
+    // underneath the live mount. No remount is needed and existing data is
+    // intact; the larger size is durable.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0x33u8; 4096];
+    assert_eq!(fs.write_at(root, b"keep", 0, &body), Ok(4096));
+    assert_eq!(fs.total_blocks, 256);
+    fill_until_no_space(&mut fs);
+
+    // The device is enlarged underneath the mount; grow folds in the new tail.
+    fs.block_mut().enlarge_to(1024);
+    let added = fs.grow().expect("grow");
+    assert_eq!(added, 1024 - 256);
+    assert_eq!(fs.total_blocks, 1024);
+
+    // The grown space is immediately usable, without a remount.
+    fs.create(root, b"after_grow", NodeKind::RegularFile)
+        .expect("create after grow");
+    assert_eq!(
+        fs.write_at(root, b"after_grow", 0, &body),
+        Ok(4096),
+        "the new blocks are allocatable"
+    );
+
+    // Original data is intact and the larger size survives a remount.
+    let node = fs.lookup(root, b"keep").expect("keep lookup");
+    assert_eq!(read_all(&mut fs, node, 4096), body);
+    let bytes = fs.into_block().bytes();
+    let mut reopened =
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("reopen");
+    assert_eq!(reopened.total_blocks, 1024, "the grown size is durable");
+    let node = reopened.lookup(reopened.root(), b"keep").expect("lookup");
+    assert_eq!(read_all(&mut reopened, node, 4096), body);
+    // Already spanning the whole device: a further grow is a no-op.
+    assert_eq!(reopened.grow(), Ok(0));
+}
+
+#[test]
+fn grow_is_a_noop_when_the_device_has_not_grown() {
+    let mut fs = fmt(512, 256, 32);
+    assert_eq!(fs.total_blocks, 256);
+    assert_eq!(fs.grow(), Ok(0), "no extra device space means no growth");
+    assert_eq!(fs.total_blocks, 256);
+}
+
+#[test]
+fn grow_refuses_an_online_shrink() {
+    // If the device reports fewer blocks than the committed filesystem size,
+    // grow refuses rather than truncating live data (fail-closed).
+    let mut fs = fmt(512, 256, 32);
+    fs.block.block_count = 128;
+    assert_eq!(fs.grow(), Err(DriverError::Unsupported));
+    assert_eq!(fs.total_blocks, 256, "the committed size is untouched");
+}
+
+#[test]
+fn open_rejects_a_committed_size_larger_than_the_device() {
+    // A volume formatted for 256 blocks presented on a device that now claims
+    // only 200 blocks (a truncated device) refuses to mount.
+    let fs = fmt(512, 256, 32);
+    let bytes = fs.into_block().bytes();
+    let truncated = MemBlock::from_bytes(bytes, 512, 200);
+    assert!(matches!(
+        RustFs::open(truncated, &TEST_KEY),
+        Err(DriverError::BadMagic)
+    ));
+}
+
+#[test]
+fn a_volume_smaller_than_the_device_mounts_and_leaves_the_tail_unused() {
+    // Format a 256-block volume, then present the same image on a larger
+    // (1024-block) device. It mounts at its committed size; the surplus tail is
+    // simply unused until a grow.
+    let fs = fmt(512, 256, 32);
+    let mut bytes = fs.into_block().bytes();
+    bytes.resize(512 * 1024, 0);
+    let mut reopened =
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("reopen larger");
+    assert_eq!(reopened.total_blocks, 256, "mounts at the committed size");
+    let added = reopened.grow().expect("grow into the surplus");
+    assert_eq!(added, 1024 - 256);
+    assert_eq!(reopened.total_blocks, 1024);
 }

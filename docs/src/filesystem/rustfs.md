@@ -60,13 +60,24 @@ inode number (see the next section); inode 1 is the root directory. Each
 inode names the root of its own **extent tree**, which maps a file's logical
 block offset to a physical run `(start, length)` — so a file can span the
 whole volume and a large contiguous write collapses to a single extent
-record. Directories are block-addressed payloads of 64-byte slots (`inode`,
-`name_len`, name) reached through the same extent map; the entry names are
-encrypted at rest and the block reserves the same 28-byte crypto trailer at
-its tail (see [Encryption](#encryption)). `.` and `..` are stored on disk and
-hidden from `read_dir`. The inode record also stores the four §21
+record. Directories are block-addressed payloads of fixed-width **263-byte
+slots** (an 8-byte header — a 4-byte `inode` number and 4-byte `name_len` —
+plus a maximum-length 255-byte name) reached through the same extent map; the
+entry names are encrypted at rest and the block reserves the same 28-byte
+crypto trailer at its tail (see [Encryption](#encryption)). Names follow
+ext4's rules — 1..=255 bytes, with `/` and NUL the only forbidden bytes —
+and are compared byte-for-byte, so they are **case-sensitive**; a directory
+grows by whole copy-on-write blocks as entries are added (one slot per
+512-byte block, fourteen per 4096-byte block). `.` and `..` are stored on disk
+and hidden from `read_dir`. The inode record also stores the four §21
 timestamps. A volume written by a different format version is refused rather
 than misread.
+
+The volume's committed block count is pinned in the superblock and may be
+smaller than the backing device; `RustFs::grow` extends a mounted volume to
+fill an enlarged device online and in place, folding the new free tail blocks
+into the pool and committing the larger size in one atomic transaction (online
+shrink is not offered). See [`rustfs-spec.md` §13](./rustfs-spec.md).
 
 > **Stage 5 of the [specification](./rustfs-spec.md).** The volume is a
 > complete, mountable copy-on-write filesystem whose metadata scales through

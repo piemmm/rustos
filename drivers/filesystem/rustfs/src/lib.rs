@@ -125,10 +125,20 @@ const MIN_BLOCK_SIZE: usize = 512;
 
 /// Fixed on-disk size of one inode record, in bytes.
 const INODE_SIZE: usize = 256;
-/// Fixed on-disk size of one directory slot, in bytes.
-const DIRENT_SIZE: usize = 64;
-/// Bytes available for a name inside a directory slot.
-const NAME_MAX: usize = DIRENT_SIZE - 8;
+/// Per-slot directory-entry header: the 4-byte inode number followed by the
+/// 4-byte name length.
+const DIRENT_HEADER: usize = 8;
+/// Longest directory-entry name, in bytes. This matches the ext4 limit so a
+/// name that is valid on ext4 (`drivers/filesystem/ext4`) is valid here, and
+/// vice versa. Names are raw bytes compared exactly, so they are
+/// case-sensitive (`docs/src/filesystem/rustfs-spec.md` §13).
+const NAME_MAX: usize = 255;
+/// Fixed on-disk size of one directory slot, in bytes: the [`DIRENT_HEADER`]
+/// plus room for a maximum-length name. A fixed-width slot keeps directory
+/// scanning, insertion, and removal O(1) per slot with no in-block
+/// compaction — the deliberate speed/simplicity trade the copy-on-write
+/// directory block design relies on (`docs/src/filesystem/rustfs-spec.md` §13).
+const DIRENT_SIZE: usize = DIRENT_HEADER + NAME_MAX;
 
 /// Maximum number of inline ACL entries stored in an inode.
 const ACL_MAX: usize = 8;
@@ -549,6 +559,14 @@ impl<B: Block> RustFs<B> {
     /// Consume the filesystem and return the backing block device.
     pub fn into_block(self) -> B {
         self.block
+    }
+
+    /// Mutable access to the backing block device, for tests that need to
+    /// model the device changing underneath a live mount (e.g. enlarging it
+    /// to exercise [`Self::grow`]).
+    #[cfg(test)]
+    pub(crate) fn block_mut(&mut self) -> &mut B {
+        &mut self.block
     }
 
     /// Create `dst_name` in directory `dir` as a **reflink** of the existing
@@ -1140,18 +1158,13 @@ impl<B: Block> RustFs<B> {
 
         fs.begin();
         let now = (fs.clock)();
-        let bs = fs.block_size;
         let mut root = Inode::empty(KIND_DIR, Security::new(0o755, 0, 0), now);
         root.nlink = 2;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for byte in &mut buf[HEADER_LEN..bs] {
-            *byte = 0;
-        }
-        put_dirent(&mut buf, 0, ROOT_INO, b".");
-        put_dirent(&mut buf, 1, ROOT_INO, b"..");
-        let db = fs.cow_meta(0, &mut buf, BlockType::Directory, u64::from(ROOT_INO), 0)?;
-        fs.extent_assign(&mut root, ROOT_INO, 0, db)?;
-        root.size = bs as u64;
+        // Insert "." and ".." through the normal directory-insertion path so
+        // they occupy as many directory blocks as the device's block size
+        // requires (a 512-byte block holds only a single 263-byte slot).
+        fs.add_entry(&mut root, ROOT_INO, ROOT_INO, b".")?;
+        fs.add_entry(&mut root, ROOT_INO, ROOT_INO, b"..")?;
         fs.write_inode(ROOT_INO, &root)?;
         // mkfs stores a device-health baseline: the initial clean snapshot the
         // next mount compares against (`docs/src/filesystem/rustfs-spec.md`
@@ -1201,10 +1214,19 @@ impl<B: Block> RustFs<B> {
             let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf) else {
                 continue;
             };
-            if sb.block_size as usize != fs.block_size || sb.total_blocks != fs.total_blocks {
+            // The superblock pins the *filesystem's* committed block count,
+            // which may be smaller than the backing device when the device
+            // was enlarged but the volume not yet grown ([`Self::grow`]).
+            // Accept any committed size that fits within the device; reject
+            // one that claims more blocks than the device has (a truncated or
+            // corrupt device) or one too small to hold the reserved region.
+            if sb.block_size as usize != fs.block_size
+                || sb.total_blocks > fs.total_blocks
+                || sb.total_blocks <= RING_BLOCKS + 8
+            {
                 continue;
             }
-            if sb.root_phys < RING_BLOCKS || sb.root_phys >= fs.total_blocks {
+            if sb.root_phys < RING_BLOCKS || sb.root_phys >= sb.total_blocks {
                 continue;
             }
             if fs
@@ -1223,6 +1245,9 @@ impl<B: Block> RustFs<B> {
         fs.generation = sb.generation;
         fs.root_phys = sb.root_phys;
         fs.ring_pos = best_slot + 1;
+        // Operate within the committed filesystem size, which may be smaller
+        // than the backing device (the surplus tail is unused until a grow).
+        fs.adopt_total_blocks(sb.total_blocks);
 
         let root = fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
         fs.inode_tree_root = root.inode_tree_root;
@@ -1240,6 +1265,95 @@ impl<B: Block> RustFs<B> {
         // authoritative).
         fs.rebuild_dedupe_index()?;
         Ok(fs)
+    }
+
+    /// Resize the rebuildable in-memory free-block bitmap and per-block
+    /// transaction-private markers to span exactly `total` blocks, and set the
+    /// volume's working block count. The free bitmap and `txn_private` vector
+    /// are derived state (§4), so growing them simply adds zeroed (free, not
+    /// private) words for the new blocks and shrinking them drops the tail.
+    /// The allocation cursors are reset into the new range so the next walk
+    /// stays in bounds.
+    fn adopt_total_blocks(&mut self, total: u64) {
+        self.total_blocks = total;
+        let words = as_usize(total.div_ceil(64));
+        self.free.resize(words, 0);
+        self.txn_private.resize(as_usize(total), false);
+        self.alloc_cursor = RING_BLOCKS;
+        self.meta_cursor = total.saturating_sub(1);
+    }
+
+    /// Grow the mounted volume to fill an enlarged backing device, online and
+    /// in place (`docs/src/filesystem/rustfs-spec.md` §15).
+    ///
+    /// The committed filesystem size is pinned in the superblock and may be
+    /// smaller than the device — for example after an administrator enlarges
+    /// the underlying partition, logical volume, or virtual disk. `grow`
+    /// re-reads the device geometry, folds the newly available tail blocks
+    /// into the free pool, and commits a new superblock recording the larger
+    /// size. It returns the number of blocks added (`0` when the volume
+    /// already spans the whole device).
+    ///
+    /// The new blocks start life free, so no existing data moves and the
+    /// operation is a single atomic transaction: a crash before the commit
+    /// point leaves the previous (smaller) committed size selected on the next
+    /// mount, never a torn geometry (§14). The grown space is usable
+    /// immediately, without remounting.
+    ///
+    /// Online *shrink* is deliberately not offered: it would require
+    /// relocating any live blocks out of the truncated tail first, which a
+    /// mounted volume cannot do safely in place. A device that has shrunk
+    /// below the committed size is rejected.
+    ///
+    /// This is an inherent driver operation, not part of a frozen
+    /// `Filesystem*` ABI trait, so it does not widen a shipped interface
+    /// (`AGENTS.md` §2.4).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the handle is read-only, the device
+    ///   block size has changed, or the device is now *smaller* than the
+    ///   committed filesystem size (an attempted online shrink).
+    /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
+    ///   unrecoverable failure while committing the new size (fail-closed,
+    ///   `AGENTS.md` §5.4 / §2.9) — the in-memory geometry is restored so the
+    ///   handle stays consistent with the still-committed on-disk size.
+    pub fn grow(&mut self) -> Result<u64, DriverError> {
+        if self.read_only {
+            return Err(DriverError::Unsupported);
+        }
+        let geo = self.block.geometry()?;
+        if geo.block_size as usize != self.block_size {
+            return Err(DriverError::Unsupported);
+        }
+        let new_total = geo.block_count;
+        if new_total < self.total_blocks {
+            return Err(DriverError::Unsupported);
+        }
+        if new_total == self.total_blocks {
+            return Ok(0);
+        }
+        let old_total = self.total_blocks;
+        let old_free_count = self.free_count;
+        let old_meta_cursor = self.meta_cursor;
+        let added = new_total - old_total;
+        self.adopt_total_blocks(new_total);
+        // The newly adopted tail blocks are all free.
+        self.free_count = old_free_count.saturating_add(added);
+        self.begin();
+        match self.commit() {
+            Ok(()) => Ok(added),
+            Err(err) => {
+                // The commit did not publish: undo this transaction's
+                // allocations and restore the previous in-memory geometry so
+                // the handle still matches the committed on-disk size.
+                self.rollback();
+                self.adopt_total_blocks(old_total);
+                self.free_count = old_free_count;
+                self.meta_cursor = old_meta_cursor;
+                Err(err)
+            }
+        }
     }
 
     /// Establish the working key set by unwrapping the master key with
@@ -2320,11 +2434,26 @@ impl<B: Block> RustFs<B> {
         Ok(ino)
     }
 
+    /// Validate a single path-component name against the rules `RustFS` shares
+    /// with ext4 (`drivers/filesystem/ext4`,
+    /// `docs/src/filesystem/rustfs-spec.md` §13):
+    ///
+    /// * it is non-empty and at most [`NAME_MAX`] (255) bytes long;
+    /// * it is neither `.` nor `..` (the VFS owns those, §16);
+    /// * it contains no path separator (`/`) and no NUL byte — exactly the two
+    ///   bytes ext4 forbids in a name. Every other byte is allowed verbatim,
+    ///   and names are compared byte-for-byte, so they are case-sensitive.
+    ///
+    /// Fails closed (`AGENTS.md` §5.4 / §2.9): an invalid name is rejected
+    /// before any directory state is touched.
     fn check_name(name: &[u8]) -> Result<(), DriverError> {
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(DriverError::LengthOutOfRange);
         }
-        if name == b"." || name == b".." || name.contains(&b'/') {
+        if name == b"." || name == b".." {
+            return Err(DriverError::Unsupported);
+        }
+        if name.contains(&b'/') || name.contains(&0u8) {
             return Err(DriverError::Unsupported);
         }
         Ok(())
@@ -2370,7 +2499,6 @@ impl<B: Block> RustFs<B> {
         if self.dir_lookup(&dir_inode, name)?.is_some() {
             return Err(DriverError::Busy);
         }
-        let bs = self.block_size as u64;
         let (kind_val, mode) = match kind {
             NodeKind::Directory => (KIND_DIR, 0o755),
             NodeKind::RegularFile => (KIND_FILE, 0o644),
@@ -2381,15 +2509,11 @@ impl<B: Block> RustFs<B> {
         }
         let child_ino = self.alloc_inode(&child)?;
         if kind_val == KIND_DIR {
-            let mut buf = [0u8; MAX_BLOCK_SIZE];
-            for byte in &mut buf[HEADER_LEN..self.block_size] {
-                *byte = 0;
-            }
-            put_dirent(&mut buf, 0, child_ino, b".");
-            put_dirent(&mut buf, 1, dir_ino, b"..");
-            let db = self.cow_meta(0, &mut buf, BlockType::Directory, u64::from(child_ino), 0)?;
-            self.extent_assign(&mut child, child_ino, 0, db)?;
-            child.size = bs;
+            // Insert "." and ".." through the normal insertion path so they
+            // span as many directory blocks as the block size needs (a
+            // 512-byte block holds only a single 263-byte slot).
+            self.add_entry(&mut child, child_ino, child_ino, b".")?;
+            self.add_entry(&mut child, child_ino, dir_ino, b"..")?;
             self.write_inode(child_ino, &child)?;
             dir_inode.nlink += 1;
         }

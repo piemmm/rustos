@@ -110,8 +110,33 @@ root of its own copy-on-write **extent tree** mapping a logical block offset
 to a physical run `(start, length)`, so a file can span the whole volume and
 a contiguous write stays a single record. Both are the one generic B-tree in
 `src/btree.rs` (`AGENTS.md` §2.2). Directories are block-addressed payloads of
-64-byte slots reached through the extent map; `.`/`..` are stored on disk and
-hidden from `read_dir`.
+fixed-width **263-byte slots** (an 8-byte header — 4-byte inode number, 4-byte
+name length — plus a maximum-length 255-byte name) reached through the extent
+map; `.`/`..` are stored on disk and hidden from `read_dir`.
+
+## Names (`rustfs-spec.md` §13)
+
+Directory-entry names match ext4's rules so a name valid on one is valid on the
+other: **1..=255 bytes**, with `/` and NUL the only forbidden bytes (every
+other byte, including arbitrary UTF-8, is stored verbatim) and `.`/`..`
+reserved. Names are compared **byte-for-byte**, so they are **case-sensitive**
+(`File`, `file`, and `FILE` are three distinct entries); RustFS does no
+case-folding or normalisation. A directory grows by whole copy-on-write blocks
+as entries are added (a 512-byte block holds one slot, a 4096-byte block holds
+fourteen), so `.`/`..` span as many blocks as the block size requires.
+
+## Online resize (`rustfs-spec.md` §13)
+
+A volume's committed block count is pinned in the superblock and may be smaller
+than its backing device (e.g. after an admin enlarges the partition, logical
+volume, or virtual disk); a volume mounts at its committed size and leaves any
+surplus device tail unused. `RustFs::grow` extends a *mounted* volume to fill an
+enlarged device, online and in place: it re-reads the device geometry, folds the
+new (free) tail blocks into the free pool, and commits a new superblock
+recording the larger size in one atomic transaction — no data moves, the space
+is usable immediately without a remount, and a crash before the commit point
+leaves the previous committed size selected on the next mount. A device that has
+shrunk below the committed size is rejected (online shrink is not offered).
 
 ## Compression (`rustfs-spec.md` §6, §10)
 

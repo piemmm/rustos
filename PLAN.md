@@ -4584,6 +4584,28 @@ with zeroes vs reflink, truncate up/down, reflink preserving holes, scrub +
 check, compression bypass, encrypted-volume no-plaintext). Docs: spec §2/§6/§19,
 `docs/src/filesystem/rustfs.md`, and the crate `README.md`.
 
+**Long names, ext4 charset, case sensitivity & online resize (spec §13) —
+DONE.** The directory format moved from a fixed 64-byte slot (≤56-byte names)
+to a fixed **263-byte slot** (an 8-byte header + a maximum-length **255-byte**
+name), so names now match ext4's limit. `check_name` enforces the ext4 rules —
+1..=255 bytes, `/` and NUL the only forbidden bytes, `.`/`..` reserved — and
+names are compared byte-for-byte, so they are **case-sensitive** (no
+case-folding/normalisation; that is VFS policy). Because a 512-byte block now
+holds a single slot, `format`/`create_inner` insert `.`/`..` through the normal
+`add_entry` path so a directory spans as many copy-on-write blocks as the block
+size needs (§2.2 — one insertion path). Online **grow** (`RustFs::grow`)
+decouples the committed block count (pinned in the superblock) from the device
+size: `open` adopts the committed size and leaves a surplus device tail unused,
+and `grow` re-reads the device geometry, folds the new free tail into the pool,
+and commits the larger size in one atomic transaction — data never moves, the
+space is usable without a remount, and a crash before commit keeps the old size
+(§14). Online shrink is rejected. `abi-v1` is not frozen, so the on-disk
+directory format changed in place (no new format version). 10 new unit tests
+(255-byte names round-trip + remount, oversize rejection, ext4 charset incl.
+NUL/`/`/`.`/`..`, case sensitivity, 512-byte multi-block directories, online
+grow + remount + idempotence, online-shrink rejection, over-device mount
+rejection). Docs: spec §13, `docs/src/filesystem/rustfs.md`, crate `README.md`.
+
 ---
 
 ## Stage 6 — Userland Foundations

@@ -486,6 +486,45 @@ RustFS must enforce:
 - RustOS-forbidden top-level names rejected on the system volume;
 - fail-closed behaviour.
 
+### Directory-entry names
+
+RustFS directory-entry names match ext4's rules so a name valid on one is
+valid on the other:
+
+- a name is **1..=255 bytes** long (the ext4 maximum);
+- the only forbidden bytes are the path separator `/` and NUL — every other
+  byte is stored verbatim, so arbitrary UTF-8 and high bytes are allowed;
+- `.` and `..` are reserved for the VFS and are not creatable as names;
+- names are compared **byte-for-byte**, so they are **case-sensitive**
+  (`File`, `file`, and `FILE` are three distinct entries); RustFS performs no
+  case-folding or Unicode normalisation — that policy, if any, belongs to the
+  VFS.
+
+A directory block is an array of **fixed-width 263-byte slots** (an 8-byte
+header — 4-byte inode number, 4-byte name length — plus room for a
+maximum-length 255-byte name). A fixed slot keeps directory lookup, insertion,
+and removal O(1) per slot with no in-block compaction. The slot count per block
+follows the block size (1 on a 512-byte block, 14 on a 4096-byte block); a
+directory grows by whole copy-on-write blocks as entries are added, so `.` and
+`..` span as many blocks as the block size requires.
+
+### Online resize (grow)
+
+A volume's committed block count is pinned in the superblock and may be
+**smaller** than its backing device — for example after an administrator
+enlarges the underlying partition, logical volume, or virtual disk. Mount
+operates at the committed size and leaves any surplus device tail unused.
+
+`RustFs::grow` extends a *mounted* volume to fill an enlarged device, online
+and in place: it re-reads the device geometry, folds the newly available tail
+blocks (which start free) into the free pool, and commits a new superblock
+recording the larger size in a single atomic transaction. No existing data
+moves, the new space is usable immediately without a remount, and a crash
+before the commit point leaves the previous (smaller) committed size selected
+on the next mount (§14). A device that has *shrunk* below the committed size is
+rejected: online shrink would require relocating live tail blocks first and is
+not offered.
+
 ---
 
 ## 14. Crash consistency
