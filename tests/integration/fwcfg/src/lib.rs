@@ -14,11 +14,17 @@
 //! transport is the only deliberate parallel-implementation difference,
 //! not duplicated logic).
 //!
+//! The two `virt` boards (riscv64 and aarch64) expose `fw_cfg`
+//! identically, so the MMIO transport itself ([`MmioDma`]) lives here too
+//! and serves both display verticals; only the x86 I/O-port transport is
+//! genuinely distinct and stays in its own vertical (`AGENTS.md` §2.2).
+//!
 //! The client assumes the staging structure and the data buffers live in
 //! identity-mapped RAM, so a buffer's virtual address is the physical
-//! address QEMU's DMA engine reads/writes. Both display verticals run
+//! address QEMU's DMA engine reads/writes. Every display vertical runs
 //! under that assumption (riscv64 `virt` boots with paging off; the
-//! x86_64 boot identity-maps the bottom 4 GiB).
+//! aarch64 `virt` vertical brings up a 2 GiB identity MMU; the x86_64
+//! boot identity-maps the bottom 4 GiB).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -29,6 +35,8 @@ extern crate alloc;
 use alloc::vec;
 use core::ptr;
 use core::sync::atomic::{compiler_fence, Ordering};
+
+use rustos_util::dtb::Dtb;
 
 /// `FW_CFG_SIGNATURE` selector key; reading four bytes yields `QEMU`.
 pub const KEY_SIGNATURE: u16 = 0x0000;
@@ -313,6 +321,80 @@ impl RamfbConfig {
         cfg[20..24].copy_from_slice(&self.height.to_be_bytes());
         cfg[24..28].copy_from_slice(&self.stride.to_be_bytes());
         cfg
+    }
+}
+
+/// `compatible` string the Arm/riscv `virt` boards' `fw_cfg` node
+/// advertises.
+const FW_CFG_MMIO_COMPATIBLE: &str = "qemu,fw-cfg-mmio";
+
+/// Offset of the 64-bit big-endian DMA address register from the
+/// `fw_cfg` MMIO base (the Arm/riscv `virt`-board layout).
+const DMA_REG_OFFSET: u64 = 16;
+
+/// MMIO [`DmaAddressRegister`] transport over a `virt`-board `fw_cfg`
+/// device.
+///
+/// The Arm/riscv `virt` boards expose `fw_cfg` identically — a
+/// `qemu,fw-cfg-mmio` node whose `reg` base carries the 64-bit
+/// big-endian DMA address register at `base + 16` — so this one
+/// transport serves both the riscv64 and aarch64 display verticals
+/// (`AGENTS.md` §2.2; x86 uses the distinct I/O-port transport). The
+/// base is discovered from the device tree, and the guest runs with the
+/// `fw_cfg` aperture identity-mapped, so the default identity
+/// [`DmaAddressRegister::to_physical`] is correct.
+pub struct MmioDma {
+    base: u64,
+}
+
+/// Failure modes locating the `fw_cfg` MMIO device.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MmioDmaError {
+    /// No `qemu,fw-cfg-mmio` node in the device tree.
+    NotFound,
+}
+
+impl MmioDma {
+    /// Locate the `fw_cfg` device in `dtb` and return a transport.
+    ///
+    /// # Errors
+    ///
+    /// [`MmioDmaError::NotFound`] if no compatible node is present.
+    pub fn from_dtb(dtb: &Dtb<'_>) -> Result<Self, MmioDmaError> {
+        for node in dtb.nodes() {
+            let Ok(node) = node else {
+                continue;
+            };
+            if !node.is_compatible(FW_CFG_MMIO_COMPATIBLE) {
+                continue;
+            }
+            let Some(reg) = node.property("reg") else {
+                continue;
+            };
+            let Ok(base) = reg.read_be_u64(0) else {
+                continue;
+            };
+            return Ok(Self { base });
+        }
+        Err(MmioDmaError::NotFound)
+    }
+}
+
+impl DmaAddressRegister for MmioDma {
+    fn write_dma_address(&self, dma_phys: u64) {
+        let high = u32::try_from(dma_phys >> 32).unwrap_or(0);
+        let low = (dma_phys & 0xFFFF_FFFF) as u32;
+        // SAFETY: `base + DMA_REG_OFFSET` is the `fw_cfg` DMA address
+        // register read from the device tree and identity-mapped on the
+        // `virt` board; both halves are 4-byte aligned. The big-endian
+        // register expects the most-significant half first (at `+0`),
+        // then the least-significant half (at `+4`), whose write triggers
+        // the operation; a little-endian `to_be()` store lands the bytes
+        // the big-endian register expects.
+        unsafe {
+            ptr::write_volatile((self.base + DMA_REG_OFFSET) as *mut u32, high.to_be());
+            ptr::write_volatile((self.base + DMA_REG_OFFSET + 4) as *mut u32, low.to_be());
+        }
     }
 }
 

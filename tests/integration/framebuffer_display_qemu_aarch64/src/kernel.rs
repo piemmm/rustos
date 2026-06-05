@@ -1,11 +1,21 @@
-//! The framebuffer-display scenario driven on the `BootCompleted` edge.
+//! Freestanding (`aarch64-unknown-none`) half of the
+//! framebuffer-display QEMU vertical.
 //!
-//! Synthesises a `ramfb` framebuffer device, publishes its geometry as a
-//! [`FramebufferConfig`] boot hand-off, then loads the signed
-//! framebuffer display `.rxe` and drives it through `load -> use ->
-//! unload -> reload`, reading the presented pixels back through the
-//! capability-gated [`KernelMmioMapper`] to prove they reach the
-//! scan-out surface QEMU consumes.
+//! The device-agnostic EL1 bring-up (FP enable + 2 GiB identity MMU +
+//! vectors), the `AArch64QemuEnv` serial/semihosting seam, and the
+//! one-shot boot harness all live in the shared
+//! `rustos-test-virtio-qemu-support` crate (`AGENTS.md` §2.2); the
+//! `fw_cfg`/`ramfb` DMA client lives in `rustos-itest-fwcfg`. This module
+//! supplies only what is unique to the aarch64 display vertical: programming
+//! `ramfb` from the embedded `virt` DTB and driving the framebuffer
+//! driver through `load -> use -> unload -> reload`, reading the presented
+//! pixels back through the capability-gated [`KernelMmioMapper`] to prove
+//! they reach the scan-out surface QEMU consumes.
+//!
+//! The `fw_cfg`/`ramfb` bring-up is test-harness-specific (it synthesises
+//! the device QEMU scans out), mirroring how the virtio verticals own
+//! their GICv2 + EL1 bring-up in the test support crate rather than in
+//! production kernel code.
 
 extern crate alloc;
 
@@ -14,22 +24,21 @@ use core::ptr;
 
 use rustos_abi::driver::display::{Display, DisplayFormat};
 use rustos_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
-use rustos_arch_riscv64::{qemu_exit, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
 use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::KernelMmioMapper;
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_test_riscv64_boot::published_dtb;
+use rustos_test_virtio_qemu_support::{
+    bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv,
+};
 use rustos_util::dtb::Dtb;
 
-use rustos_itest_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
-
-use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
+use crate::fixture::{DTB_BLOB, FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
 // --- Framebuffer geometry --------------------------------------------
 
@@ -50,20 +59,18 @@ const FB_BYTES: usize = (STRIDE * HEIGHT) as usize;
 /// reached through the identity map, so this only keys the slot bitmap).
 const MMIO_VBASE: u64 = 0x6000_0000;
 /// Capacity in pages of the register-window map: the surface is
-/// `FB_BYTES` (4 pages) and the vertical mints three windows
-/// (two driver loads + one verification), each bracketed by two guard
-/// pages, so 32 pages leaves comfortable headroom.
+/// `FB_BYTES` (4 pages) and the vertical mints three windows (two driver
+/// loads + one verification), each bracketed by two guard pages, so 32
+/// pages leaves comfortable headroom.
 const MMIO_CAP_PAGES: usize = 32;
 
-/// Upper bound of the boot identity map (the bottom 4 GiB); the `virt`
-/// board's RAM and the framebuffer surface both sit well inside it.
+/// Upper bound of the boot identity map exposed to the MMIO mapper (the
+/// bottom 4 GiB); the `virt` board's RAM and the framebuffer surface both
+/// sit well inside it (and inside the 2 GiB the MMU actually maps).
 const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// Synthetic owner task id for the driver context.
-const TASK: TaskId = TaskId(0xFB0);
-
-/// Milestone breadcrumb event id.
-const MILESTONE_ID: EventId = EventId(9200);
+const TASK: TaskId = TaskId(0xFB1);
 
 // --- Static scan-out surface -----------------------------------------
 
@@ -80,24 +87,6 @@ static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 /// Physical (identity) base address of [`FRAMEBUFFER`].
 fn framebuffer_phys() -> u64 {
     ptr::addr_of!(FRAMEBUFFER) as u64
-}
-
-// --- Logging / failure -----------------------------------------------
-
-/// Emit an info-level breadcrumb on the serial sink.
-fn log(msg: &str) {
-    SERIAL_SINK.write_event(&Event {
-        level: Level::Info,
-        id: MILESTONE_ID,
-        message: msg,
-        fields: &[],
-    });
-}
-
-/// Log `msg` and flip QEMU to failure. Never returns.
-fn fail(msg: &str) -> ! {
-    log(msg);
-    qemu_exit::exit_failure(1)
 }
 
 // --- Host plumbing ---------------------------------------------------
@@ -161,15 +150,15 @@ fn make_frame(salt: u8) -> Vec<u8> {
 
 /// Map a fresh window over the surface and confirm its first `FB_BYTES`
 /// bytes equal `expected`. Never returns on mismatch.
-fn verify_surface(mapper: &dyn MmioMapper, phys_base: u64, expected: &[u8]) {
+fn verify_surface(env: &dyn QemuEnv, mapper: &dyn MmioMapper, phys_base: u64, expected: &[u8]) {
     let Ok(window) = mapper.map_window(phys_base, FB_BYTES) else {
-        fail("verify: map_window failed");
+        env.fail("verify: map_window failed");
     };
     // Compare word-by-word over the whole surface.
     let mut off = 0;
     while off < FB_BYTES {
         let Ok(got) = window.read_u32(off) else {
-            fail("verify: window read out of bounds");
+            env.fail("verify: window read out of bounds");
         };
         let want = u32::from_le_bytes([
             expected[off],
@@ -178,7 +167,7 @@ fn verify_surface(mapper: &dyn MmioMapper, phys_base: u64, expected: &[u8]) {
             expected[off + 3],
         ]);
         if got != want {
-            fail("verify: surface pixel mismatch");
+            env.fail("verify: surface pixel mismatch");
         }
         off += 4;
     }
@@ -186,33 +175,24 @@ fn verify_surface(mapper: &dyn MmioMapper, phys_base: u64, expected: &[u8]) {
 
 // --- Scenario entry --------------------------------------------------
 
-/// Drive the whole vertical. Returns on success; the caller then signals
-/// QEMU success. Every failure flips QEMU failure with a breadcrumb.
-pub fn run() {
-    log("framebuffer-qemu: scenario start");
+/// Drive the whole vertical, then report success through the ARM
+/// semihosting finisher. Never returns. Every failure flips QEMU failure
+/// with a breadcrumb.
+fn run_scenario() -> ! {
+    let env = AArch64QemuEnv;
+    bring_up_el1_identity_mmu(&env);
+    env.log("framebuffer-qemu: scenario start");
 
-    // 1. Parse the published device tree.
-    let Some(dtb_ptr) = published_dtb() else {
-        fail("no published DTB");
-    };
-    // SAFETY: `dtb_ptr` is the verbatim OpenSBI `a1` the boot pipeline
-    // published; it addresses a valid flattened device tree that lives
-    // for the life of the guest. The first 8 bytes carry the FDT header
-    // whose `totalsize` bounds the blob.
-    let dtb_len = unsafe {
-        let header = dtb_ptr as *const u8;
-        let bytes = core::slice::from_raw_parts(header, 8);
-        u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize
-    };
-    // SAFETY: as above; `dtb_len` is the blob's self-described size.
-    let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, dtb_len) };
-    let Ok(dtb) = Dtb::parse(dtb_bytes) else {
-        fail("DTB parse");
+    // 1. Parse the embedded device tree (QEMU's aarch64 `-kernel <ELF>`
+    //    path passes no DTB pointer, so the blob is embedded at build
+    //    time — see `build.rs`).
+    let Ok(dtb) = Dtb::parse(DTB_BLOB) else {
+        env.fail("DTB parse");
     };
 
     // 2. Bring up fw_cfg and program ramfb (the framebuffer device).
     let Ok(dma) = MmioDma::from_dtb(&dtb) else {
-        fail("no fw_cfg device in DTB");
+        env.fail("no fw_cfg device in DTB");
     };
     let fw = FwCfg::new(dma);
     let ramfb = RamfbConfig {
@@ -224,21 +204,23 @@ pub fn run() {
         stride: STRIDE,
     };
     if fw.program_ramfb(&ramfb).is_err() {
-        fail("fw_cfg: ramfb programming failed");
+        env.fail("fw_cfg: ramfb programming failed");
     }
-    log("framebuffer-qemu: ramfb programmed");
+    env.log("framebuffer-qemu: ramfb programmed");
 
-    // 3. Assemble the parsed-geometry boot hand-off and drive the
-    //    capability-gated driver lifecycle against it.
-    let phys_base = framebuffer_phys();
+    // 3. Assemble the geometry hand-off and drive the capability-gated
+    //    driver lifecycle against it.
     let config = FramebufferConfig {
-        phys_base,
+        phys_base: framebuffer_phys(),
         width_px: WIDTH,
         height_px: HEIGHT,
         stride_bytes: STRIDE,
         format: DisplayFormat::Bgra8888,
     };
-    drive_lifecycle(config);
+    drive_lifecycle(&env, config);
+
+    env.log("framebuffer-qemu: driver unloaded after device reuse");
+    env.succeed()
 }
 
 /// Build the capability-checked [`KernelMmioMapper`], load the signed
@@ -246,12 +228,14 @@ pub fn run() {
 /// reload` against the surface `config` describes, verifying the
 /// presented pixels reach the scan-out memory after each `present`.
 /// Every failure flips QEMU failure with a breadcrumb.
-fn drive_lifecycle(config: FramebufferConfig) {
+fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
+    let audit = env.audit_sink();
+
     // Capability-checked kernel MMIO mapper over the boot identity map.
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, audit);
     let phys = DirectPhysMap::identity(IDENTITY_LIMIT);
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
@@ -259,9 +243,9 @@ fn drive_lifecycle(config: FramebufferConfig) {
         MMIO_CAP_PAGES,
         &phys,
     ) else {
-        fail("MMIO map construct");
+        env.fail("MMIO map construct");
     };
-    let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
+    let mapper = KernelMmioMapper::new(&mut mmio, &caller, audit);
 
     // Driver-host view for `Framebuffer::open` (CAP_MMIO_MAP granted).
     let mut open_grants = CapabilitySet::empty();
@@ -273,7 +257,7 @@ fn drive_lifecycle(config: FramebufferConfig) {
 
     // Load the signed `.rxe` through the driver host (the §8 gate).
     let Ok(pubkey) = Ed25519PublicKey::from_bytes(&TRUSTED_SIGNER_PUBKEY) else {
-        fail("trust anchor decode");
+        env.fail("trust anchor decode");
     };
     let trusted = [pubkey];
     let mut load_caps = CapabilitySet::empty();
@@ -286,38 +270,44 @@ fn drive_lifecycle(config: FramebufferConfig) {
         accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
         source: &source,
         resolver: &resolver,
-        sink: &SERIAL_SINK,
+        sink: audit,
         virtio_host_factory: None,
     });
     let Ok(h1) = host.load("/System/Drivers/framebuffer.rxe", &load_caps) else {
-        fail("signed .rxe load");
+        env.fail("signed .rxe load");
     };
     if host.loaded_count() != 1 || host.snapshot().first().map(|s| s.handle) != Some(h1) {
-        fail("loaded state after load");
+        env.fail("loaded state after load");
     }
 
     // use: open the surface and present a frame, then verify the pixels
     // reached the scan-out memory.
-    present_and_verify(&fb_host, &mapper, config, &make_frame(0x00), "first");
-    log("framebuffer-qemu: first frame presented and verified");
+    present_and_verify(env, &fb_host, &mapper, config, &make_frame(0x00), "first");
+    env.log("framebuffer-qemu: first frame presented and verified");
 
     // unload -> reload through the host.
     let Ok(h2) = host.reload(h1, &load_caps) else {
-        fail("signed .rxe reload");
+        env.fail("signed .rxe reload");
     };
     if h2 == h1 || host.loaded_count() != 1 {
-        fail("loaded state after reload");
+        env.fail("loaded state after reload");
     }
 
     // use again after reload: present a distinct frame and verify.
-    present_and_verify(&fb_host, &mapper, config, &make_frame(0xA5), "reloaded");
-    log("framebuffer-qemu: reloaded frame presented and verified");
+    present_and_verify(
+        env,
+        &fb_host,
+        &mapper,
+        config,
+        &make_frame(0xA5),
+        "reloaded",
+    );
+    env.log("framebuffer-qemu: reloaded frame presented and verified");
 
     // unload: tear the driver down cleanly.
     if host.unload(h2).is_err() || host.loaded_count() != 0 {
-        fail("driver unload");
+        env.fail("driver unload");
     }
-    log("framebuffer-qemu: driver unloaded after device reuse");
 }
 
 /// Open the framebuffer through `fb_host`, present `frame`, drop the
@@ -325,6 +315,7 @@ fn drive_lifecycle(config: FramebufferConfig) {
 /// scan-out surface via an independent window. `phase` names the step
 /// in any failure breadcrumb.
 fn present_and_verify(
+    env: &dyn QemuEnv,
     fb_host: &FramebufferHost<'_>,
     mapper: &dyn MmioMapper,
     config: FramebufferConfig,
@@ -333,14 +324,14 @@ fn present_and_verify(
 ) {
     {
         let Ok(mut fb) = Framebuffer::open(fb_host, config) else {
-            fail(phase_msg(phase, "Framebuffer::open"));
+            env.fail(phase_msg(phase, "Framebuffer::open"));
         };
         if fb.present(frame).is_err() {
-            fail(phase_msg(phase, "present"));
+            env.fail(phase_msg(phase, "present"));
         }
         // `fb` drops here, releasing its window handle (the quiesce step).
     }
-    verify_surface(mapper, config.phys_base, frame);
+    verify_surface(env, mapper, config.phys_base, frame);
 }
 
 /// Pick a `&'static str` breadcrumb for `(phase, op)` without an
@@ -353,3 +344,5 @@ fn phase_msg(phase: &str, op: &str) -> &'static str {
         _ => "present (reloaded)",
     }
 }
+
+define_mmio_boot_harness_aarch64!(run_scenario);

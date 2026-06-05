@@ -395,12 +395,15 @@ The device-agnostic bring-up lives in the shared
 `tests/integration/virtio_qemu_support` crate's `imp_mmio_aarch64` module
 (behind `cfg(itest_aarch64)`), and the device round-trip *tails* are the
 same shared code the riscv64 and x86_64 verticals run (`AGENTS.md` §2.2).
-The module owns only what is unique to the EL1 bring-up:
+The module owns only what is unique to the EL1 bring-up. The FP-enable
+and MMU steps are shared as one public helper,
+`bring_up_el1_identity_mmu`, reused by both the virtio scenario and the
+display vertical (`AGENTS.md` §2.2):
 
 - **FP/SIMD enable.** The `virt` board enters EL1 with
   `CPACR_EL1.FPEN` trapping Advanced-SIMD/FP; the compiler emits NEON
   register moves for the struct copies in the driver/DMA stack, so the
-  scenario sets `FPEN = 0b11` first (a trapped access otherwise faults
+  helper sets `FPEN = 0b11` first (a trapped access otherwise faults
   with `ESR_EL1` EC `0x07`). riscv64 gets the equivalent FP enable from
   its boot pipeline.
 - **Stage-1 MMU.** It brings up a 2 GiB identity map through
@@ -422,5 +425,25 @@ at build time by `qemu-system-aarch64 ... dumpdtb` (gated to the
 aarch64-none target), and hands those bytes to the scenario; the
 virtio-MMIO transport bases and SPIs in that blob are the stable
 `virt`-board layout, independent of which transport slot the backing
-device lands on. The display and input verticals (Stage W11-B) reuse this
-bring-up.
+device lands on.
+
+## Display vertical (Stage W11-B)
+
+`tests/integration/framebuffer_display_qemu_aarch64`
+(`rustos-test-framebuffer-display-qemu-aarch64`, enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` with `ramfb: true`) drives the
+framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
++ `ramfb` analogue of the riscv64 framebuffer-display vertical. It reuses
+the shared `bring_up_el1_identity_mmu` helper above and the **same**
+shared `fw_cfg` MMIO transport (`rustos-itest-fwcfg`'s `MmioDma`) the
+riscv64 vertical uses — the two `virt` boards expose `fw_cfg` identically,
+so there is one transport, not two (`AGENTS.md` §2.2). The vertical
+programs QEMU's `ramfb` over `fw_cfg` so a static guest-RAM surface
+becomes a real scan-out framebuffer, assembles the geometry as a
+`FramebufferConfig`, loads the signed framebuffer `.rxe` through
+`rustos_drvhost::Host`, and drives `load → use → unload → reload`,
+mapping the surface through the capability-gated `KernelMmioMapper` and
+reading the presented pixels back through an independent window. It
+embeds the canonical `virt` DTB (build-time `dumpdtb`) to discover the
+`fw_cfg` base, since QEMU's aarch64 `-kernel <ELF>` path passes no DTB
+pointer. The input vertical remains the open W11-B item.

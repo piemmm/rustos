@@ -115,16 +115,17 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |  **✗**  |  **✗**  |  n/a   |
-| display (`vesa`/fb)     |   ✓    |  **✗**  |    ✓    |  **✗** |
+| display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    |  **✗** |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the
   live-scheduler task switch (W7, `sched_drive_qemu_aarch64`),
   heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`),
-  and the virtio blk/net MMIO verticals (W11-A) landed; missing input /
-  display verticals (W11-B). (FDT/DTB discovery is host-tested via W1/W10
-  and the W11-A verticals embed the canonical `virt` DTB; the runtime
+  the virtio blk/net MMIO verticals (W11-A), and the `ramfb`/framebuffer
+  display vertical (W11-B) landed; the input vertical (W11-B) is the
+  remaining QEMU-matrix gap. (FDT/DTB discovery is host-tested via W1/W10
+  and the W11-A/B verticals embed the canonical `virt` DTB; the runtime
   parse of the full ARM `virt` tree is still a gap.)
 - **riscv64:** closest to parity; live-scheduler task switch is wired
   (`sched_drive_qemu_riscv64`) but not fully exercised, no per-CPU
@@ -677,15 +678,37 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - **Verified:** both verticals exit `0` under `qemu-system-aarch64 -M virt`
   (the `cargo xtask test --qemu` enrolment path).
 
-#### Stage W11-B — display + input verticals (aarch64) — next
+#### Stage W11-B — display vertical (aarch64) — ✅ landed; input — next
 
-- Remaining for full §1-matrix parity: an aarch64 display vertical
-  (a `ramfb`/framebuffer analogue of `framebuffer_display_qemu_riscv64`)
-  and an aarch64 input vertical. These reuse the W11-A `imp_mmio_aarch64`
-  bring-up (FP + MMU identity map + embedded DTB) and the device-detection
-  / driver-autoload stages in `PLAN.md` §18 / Stage 4.
-- **Deliverable:** the `display` and `input` rows of the §1 QEMU matrix
-  filled for aarch64, each QEMU-green and enrolled.
+- **Display (landed).** aarch64 now runs the `ramfb`/framebuffer display
+  vertical, the EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
+  `tests/integration/framebuffer_display_qemu_aarch64`
+  (`rustos-test-framebuffer-display-qemu-aarch64`) programs QEMU's `ramfb`
+  over `fw_cfg`, assembles the geometry as a `FramebufferConfig`, loads
+  the signed framebuffer `.rxe` through `rustos_drvhost::Host`, and drives
+  `load → use → unload → reload` (mapping the surface through the
+  capability-gated `KernelMmioMapper` and reading the presented pixels
+  back through an independent window). QEMU-green and enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs` (`ramfb: true`).
+- **Shared, not duplicated (§2.2).** The W11-A EL1 FP-enable + 2 GiB
+  identity-MMU bring-up was extracted into a public
+  `bring_up_el1_identity_mmu(&dyn QemuEnv)` (and the env type made public
+  as `AArch64QemuEnv`), reused by both the virtio scenario and the display
+  vertical. The `fw_cfg` MMIO transport (`MmioDma`) is byte-identical on
+  the riscv64 and aarch64 `virt` boards, so it was moved into the shared
+  `rustos-itest-fwcfg` crate and now serves both display verticals (the
+  riscv64 vertical's local copy was deleted); only the x86_64 IOport
+  transport stays distinct. The display driver lifecycle is the per-arch
+  sibling of the riscv64/x86_64 display scenarios (the established
+  per-vertical pattern), differing only in the EL1 bring-up + embedded DTB.
+- **Input (remaining).** An aarch64 input vertical still fills the `input`
+  row of the §1 QEMU matrix; it reuses the same `bring_up_el1_identity_mmu`
+  + embedded-DTB path and the device-detection / driver-autoload stages in
+  `PLAN.md` §18 / Stage 4.
+- **Verified:** the display vertical exits `0` under
+  `qemu-system-aarch64 -M virt` (the `cargo xtask test --qemu` enrolment
+  path). Docs: `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
+  the framebuffer driver `README.md`, `PLAN.md`, this file.
 
 ---
 

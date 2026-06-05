@@ -800,6 +800,9 @@ version = "0.0.0"
 [[package]]
 name = "rustos-itest-fwcfg"
 version = "0.0.0"
+dependencies = [
+ "rustos-util",
+]
 
 [[package]]
 name = "rustos-itest-harness"
@@ -1275,6 +1278,26 @@ dependencies = [
  "rustos-drvhost",
  "rustos-itest-harness",
  "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "rustos-test-framebuffer-display-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-display-framebuffer",
+ "rustos-drvhost",
+ "rustos-itest-fwcfg",
+ "rustos-itest-harness",
+ "rustos-kernel-mem",
+ "rustos-kernel-sec",
+ "rustos-kernel-virtio",
+ "rustos-log",
+ "rustos-test-virtio-qemu-support",
+ "rustos-util",
 ]
 
 [[package]]

@@ -22,7 +22,6 @@
 //! verticals own their PLIC + trap bring-up in the test support crate
 //! rather than in production kernel code.
 
-mod fwcfg;
 mod scenario;
 
 use core::panic::PanicInfo;

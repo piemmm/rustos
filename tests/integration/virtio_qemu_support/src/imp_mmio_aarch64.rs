@@ -163,9 +163,13 @@ const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
 
 /// aarch64 [`QemuEnv`]: serial breadcrumbs over the PL011 UART sink, exit
 /// through the ARM semihosting `SYS_EXIT` finisher.
-struct MmioEnv;
+///
+/// Public so freestanding aarch64 `virt`-board verticals beyond the
+/// virtio scenario (e.g. the framebuffer-display vertical) reuse the
+/// same serial-breadcrumb + semihosting-exit seam (`AGENTS.md` §2.2).
+pub struct AArch64QemuEnv;
 
-impl QemuEnv for MmioEnv {
+impl QemuEnv for AArch64QemuEnv {
     fn log(&self, msg: &str) {
         SERIAL_SINK.write_event(&Event {
             level: Level::Info,
@@ -187,6 +191,62 @@ impl QemuEnv for MmioEnv {
     fn audit_sink(&self) -> &'static dyn Sink {
         &SERIAL_SINK
     }
+}
+
+// --- EL1 bring-up ----------------------------------------------------
+
+/// Bring the `virt`-board PE up to the state the rest of every aarch64
+/// vertical assumes: FP/SIMD enabled at EL1 and the stage-1 MMU on with a
+/// 2 GiB identity map (GiB 0 Device, GiB 1 RAM Normal-cacheable).
+///
+/// The `virt` board enters EL1 with `CPACR_EL1.FPEN` trapping
+/// Advanced-SIMD/FP and the MMU off (every access Device-typed, so the
+/// atomics/unaligned accesses the driver/DMA/sync stack relies on abort).
+/// Both must be fixed before any non-trivial code runs, so this is the
+/// first thing each vertical does (riscv64 gets the equivalent from its
+/// boot pipeline). Shared by the virtio-MMIO scenario and the
+/// framebuffer-display vertical (`AGENTS.md` §2.2). A failed map build
+/// fails closed through `env`; on success the PE is running translated
+/// and FP-enabled when it returns.
+pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
+    // Enable FP/SIMD at EL1 before anything else: the compiler emits NEON
+    // register moves for struct copies, which would otherwise trap (ESR
+    // EC 0x07).
+    // SAFETY: `CPACR_EL1` is the EL1 architectural FP/SIMD-trap control;
+    // writing `FPEN = 0b11` is the documented "do not trap" encoding and
+    // touches no memory. The `isb` makes the change effective before the
+    // next FP instruction.
+    unsafe {
+        let mut cpacr: u64;
+        core::arch::asm!("mrs {}, CPACR_EL1", out(reg) cpacr, options(nomem, nostack));
+        cpacr |= 0b11 << 20;
+        core::arch::asm!(
+            "msr CPACR_EL1, {}",
+            "isb",
+            in(reg) cpacr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    // SAFETY: install the EL1 vectors first so any synchronous abort is
+    // taken to the EL1 handler (which fails closed by parking, `AGENTS.md`
+    // §2.9) instead of escalating, then switch: the identity map covers
+    // this code, the boot stack, the static heap/DMA pool (all RAM), and
+    // the device MMIO.
+    unsafe {
+        exceptions::init_vectors();
+    }
+    let Some(space) = ArchAddressSpace::new_identity_gigapages(&PT_POOL, IDENTITY_GIB) else {
+        env.fail("boot identity map build");
+    };
+    // SAFETY: `space` identity-maps `pc`, `sp`, the heap/DMA statics, and
+    // the device MMIO windows (see `new_identity_gigapages`). The tables
+    // live in the `'static` `PT_POOL`, so they outlive this diverging
+    // function and the MMU keeps reading them.
+    unsafe {
+        space.switch();
+    }
+    core::mem::forget(space);
 }
 
 // --- Device-tree helper ----------------------------------------------
@@ -349,7 +409,7 @@ impl IrqWaiter for WfiWaiter {
 /// enable the SPI on CPU 0, and unmask IRQs at the PE. Any failure flips
 /// QEMU failure through `env`.
 fn arm_external_irq(
-    env: &MmioEnv,
+    env: &AArch64QemuEnv,
     dtb: &Dtb<'_>,
     slot_base: u64,
 ) -> (&'static IrqTable, IrqHandle, u32) {
@@ -407,57 +467,9 @@ pub fn run_virtio_mmio_scenario<F>(
 where
     F: FnOnce(&dyn QemuEnv, MmioTransport, &dyn VirtioHost) -> Result<(), &'static str>,
 {
-    let env = MmioEnv;
-
-    // Enable FP/SIMD at EL1 before anything else: the `virt` board enters
-    // EL1 with `CPACR_EL1.FPEN` trapping Advanced-SIMD/FP, and the
-    // compiler emits NEON register moves for the struct copies in the
-    // bring-up below, which would otherwise trap (ESR EC 0x07). Setting
-    // `FPEN = 0b11` disables the trap. (riscv64 gets the equivalent FP
-    // enable from its boot pipeline.)
-    // SAFETY: `CPACR_EL1` is the EL1 architectural FP/SIMD-trap control;
-    // writing `FPEN = 0b11` is the documented "do not trap" encoding and
-    // touches no memory. The `isb` makes the change effective before the
-    // next FP instruction.
-    unsafe {
-        let mut cpacr: u64;
-        core::arch::asm!("mrs {}, CPACR_EL1", out(reg) cpacr, options(nomem, nostack));
-        cpacr |= 0b11 << 20;
-        core::arch::asm!(
-            "msr CPACR_EL1, {}",
-            "isb",
-            in(reg) cpacr,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-
+    let env = AArch64QemuEnv;
+    bring_up_el1_identity_mmu(&env);
     env.log(cfg.start_msg);
-
-    // 0. Enable the stage-1 MMU with a 2 GiB identity map (GiB 0 Device,
-    //    RAM Normal-cacheable). The `virt` board enters EL1 with the MMU
-    //    off, where every access is Device-typed — atomics (LDXR/STXR)
-    //    and unaligned accesses the driver/DMA/sync stack relies on then
-    //    abort. Mapping RAM as Normal memory is the precondition for the
-    //    rest of the bring-up (riscv64 gets this from its boot pipeline).
-    // SAFETY: install the EL1 vectors first so any synchronous abort is
-    // taken to the EL1 handler (which fails closed by parking, `AGENTS.md`
-    // §2.9) instead of escalating, then switch: the identity map covers
-    // this code, the boot stack, the static heap/DMA pool (all RAM), and
-    // the device MMIO.
-    unsafe {
-        exceptions::init_vectors();
-    }
-    let Some(space) = ArchAddressSpace::new_identity_gigapages(&PT_POOL, IDENTITY_GIB) else {
-        env.fail("boot identity map build");
-    };
-    // SAFETY: `space` identity-maps `pc`, `sp`, the heap/DMA statics, and
-    // the device MMIO windows (see `new_identity_gigapages`). The tables
-    // live in the `'static` `PT_POOL`, so they outlive this diverging
-    // function and the MMU keeps reading them.
-    unsafe {
-        space.switch();
-    }
-    core::mem::forget(space);
 
     // 1. Parse the embedded device-tree blob.
     let Ok(dtb) = Dtb::parse(dtb_bytes) else {

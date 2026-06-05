@@ -11,6 +11,7 @@ capability discovered and handed to the driver host.
 | Platform              | Surface source                  | Stage 4 status            |
 |-----------------------|---------------------------------|----------------------------|
 | aarch64 (Raspberry Pi)| VideoCore mailbox framebuffer   | mock-host tests only       |
+| aarch64 `virt`        | QEMU `ramfb`                    | mock-host + QEMU vertical   |
 | riscv64 `virt`        | QEMU `ramfb`                    | mock-host + QEMU vertical   |
 | x86_64 (UEFI)         | GOP linear frame buffer         | mock-host tests only       |
 | wasm32                | browser canvas (via host)       | mock-host tests only       |
@@ -84,6 +85,15 @@ loads the signed framebuffer `.rxe` through `rustos_drvhost::Host`
 second independently-mapped window reads the pixels back to confirm
 they reached the scan-out memory QEMU consumes. See
 `docs/src/drivers/display.md`.
+
+`tests/integration/framebuffer_display_qemu_aarch64`
+(`rustos-test-framebuffer-display-qemu-aarch64`, also enrolled) is the
+aarch64 `virt`-board sibling: it drives the same driver over the
+EL1/GICv2 path, reusing the shared aarch64 bring-up and the **same**
+shared `fw_cfg` MMIO transport the riscv64 vertical uses (the two `virt`
+boards expose `fw_cfg` identically — one transport, not two, `AGENTS.md`
+§2.2), embedding the canonical `virt` device tree because QEMU's aarch64
+`-kernel <ELF>` path passes no DTB pointer.
 
 ## Public surface
 

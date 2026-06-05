@@ -959,6 +959,32 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
     },
+    // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
+    // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
+    // vertical. `rustos-test-framebuffer-display-qemu-aarch64` brings the
+    // `virt` board up to EL1 (FP enable + 2 GiB identity MMU + vectors,
+    // shared from `virtio_qemu_support`), programs QEMU's `ramfb` over the
+    // shared `fw_cfg` MMIO DMA interface so a static guest-RAM surface
+    // becomes a real scan-out framebuffer, assembles the geometry as a
+    // `FramebufferConfig`, then loads the signed framebuffer display
+    // `.rxe` through `rustos_drvhost::Host` and drives it through
+    // load -> use -> unload -> reload. "Use" maps the surface through the
+    // capability-gated `KernelMmioMapper` and `present`s a frame; a second
+    // independently-mapped window reads the pixels back to confirm they
+    // reached the scan-out memory. Any deviation flips the ARM semihosting
+    // failure finisher. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-framebuffer-display-qemu-aarch64",
+        binary: "rustos-test-framebuffer-display-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: true,
+        fs_disk: FsDisk::None,
+    },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
     // per-sub-stage deliverable. It installs the EL1 vectors, brings up

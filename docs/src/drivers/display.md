@@ -45,7 +45,7 @@ partial (§2.9).
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
-| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 `ramfb` QEMU vertical |
+| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals |
 | vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
 | rpi_hvs      | `rustos-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
 
@@ -98,6 +98,21 @@ PLIC/trap bring-up rather than placing it in the production kernel.
 The `fw_cfg` DMA protocol itself lives once in the shared
 `rustos-itest-fwcfg` crate; this vertical supplies only the riscv64
 MMIO transport (`AGENTS.md` §2.2).
+
+`tests/integration/framebuffer_display_qemu_aarch64`
+(`rustos-test-framebuffer-display-qemu-aarch64`, enrolled in `cargo
+xtask test --qemu`) is the aarch64 `virt`-board sibling of the riscv64
+vertical, driving the same driver against a **real** emulated `ramfb`
+framebuffer over the EL1/GICv2 path. It reuses the shared aarch64
+bring-up (`rustos-test-virtio-qemu-support`'s FP-enable + 2 GiB identity
+MMU + EL1 vectors) and the **same** shared `fw_cfg` MMIO transport
+(`rustos-itest-fwcfg`'s `MmioDma`) the riscv64 vertical uses — the two
+`virt` boards expose `fw_cfg` identically, so there is one transport,
+not two (`AGENTS.md` §2.2). Because QEMU's aarch64 `-kernel <ELF>` path
+passes no DTB pointer, the vertical embeds the canonical `virt` device
+tree (dumped at build time) to discover the `fw_cfg` base. The driver
+lifecycle, `ramfb` programming, and pixel read-back are otherwise the
+riscv64 scenario's siblings.
 
 ### `rustos-drv-display-vesa`
 

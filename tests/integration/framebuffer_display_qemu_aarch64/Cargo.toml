@@ -1,0 +1,42 @@
+[package]
+name = "rustos-test-framebuffer-display-qemu-aarch64"
+description = "Stage W11-B display vertical: bring up the aarch64 virt-board (FP enable + 2 GiB identity MMU + EL1 vectors, shared from virtio_qemu_support), synthesise a real linear framebuffer with QEMU ramfb (programmed over the shared fw_cfg-MMIO DMA interface), assemble the geometry as a FramebufferConfig, then load the signed framebuffer display `.rxe` through rustos_drvhost::Host and drive it through load -> use (Framebuffer::open + present over the capability-gated KernelMmioMapper) -> unload -> reload, verifying the presented pixels land in the ramfb scanout surface, before reporting ARM-semihosting success. The aarch64 analogue of the riscv64 framebuffer-display vertical; the fw_cfg/ramfb client and the EL1 bring-up are the same shared code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-framebuffer-display-qemu-aarch64"
+path = "src/main.rs"
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+# The freestanding bin links only on the aarch64 `virt` target; a host
+# `cargo build --workspace` compiles `src/main.rs` to an inert stub
+# (`AGENTS.md` §17.2 — the instruction-set choice lives in `build.rs`).
+# The global allocator, the EL1 bring-up, and the boot-harness macro all
+# come from the shared `rustos-test-virtio-qemu-support` crate
+# (`AGENTS.md` §2.2); this bin adds only the framebuffer driver, the
+# capability/host plumbing, and the shared fw_cfg/ramfb client.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-drv-display-framebuffer = { path = "../../../drivers/display/framebuffer", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+rustos-itest-fwcfg = { path = "../fwcfg", version = "=0.0.0" }
+rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

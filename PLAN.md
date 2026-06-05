@@ -813,6 +813,32 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       **Carried forward (Stage W11-B):** the aarch64 display + input
       verticals (they reuse this bring-up). Docs:
       `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W11-B — display vertical (aarch64); input remaining.**
+      aarch64 now runs the `ramfb`/framebuffer display QEMU vertical, the
+      EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
+      `tests/integration/framebuffer_display_qemu_aarch64`
+      (`rustos-test-framebuffer-display-qemu-aarch64`) programs QEMU's
+      `ramfb` over `fw_cfg`, assembles the geometry as a
+      `FramebufferConfig`, loads the signed framebuffer `.rxe` through
+      `rustos_drvhost::Host`, and drives `load → use → unload → reload`
+      (mapping the surface through the capability-gated `KernelMmioMapper`
+      and reading the presented pixels back through an independent window),
+      enrolled in `tools/xtask/src/commands/qemu_tests.rs` (`ramfb: true`).
+      To avoid duplication (§2.2): the W11-A EL1 FP-enable + 2 GiB
+      identity-MMU bring-up was extracted to a public
+      `bring_up_el1_identity_mmu(&dyn QemuEnv)` (env type made public as
+      `AArch64QemuEnv`), reused by the virtio scenario and the display
+      vertical; the byte-identical `fw_cfg` MMIO transport (`MmioDma`) was
+      moved into the shared `rustos-itest-fwcfg` crate and now serves both
+      the riscv64 and aarch64 display verticals (the riscv64 local copy was
+      deleted), while x86_64's IOport transport stays distinct. The
+      vertical embeds the canonical `virt` DTB (build-time `dumpdtb`) to
+      discover the `fw_cfg` base, since QEMU's aarch64 `-kernel <ELF>` path
+      passes no DTB pointer. **Verified QEMU-green:** the bin exits `0`
+      under `qemu-system-aarch64 -M virt`. **Carried forward:** the aarch64
+      **input** vertical (reuses the same bring-up). Docs:
+      `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`, the
+      framebuffer driver `README.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

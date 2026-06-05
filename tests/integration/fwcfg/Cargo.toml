@@ -1,6 +1,6 @@
 [package]
 name = "rustos-itest-fwcfg"
-description = "Transport-agnostic QEMU `fw_cfg` DMA client + `ramfb` programming helper shared by the display-class QEMU verticals (framebuffer on riscv64-MMIO, vesa on x86_64-IOport). The DMA protocol (FWCfgDmaAccess staging, file-directory scan, RAMFBCfg programming) lives here once; each vertical supplies only its transport's DMA-address-register write through the `DmaAddressRegister` seam (AGENTS.md §2.2 — no duplication, the transport is the only parallel-implementation difference)."
+description = "Transport-agnostic QEMU `fw_cfg` DMA client + `ramfb` programming helper shared by the display-class QEMU verticals (framebuffer on riscv64-MMIO and aarch64-MMIO, vesa on x86_64-IOport). The DMA protocol (FWCfgDmaAccess staging, file-directory scan, RAMFBCfg programming) lives here once; the riscv64+aarch64 `virt` boards expose fw_cfg identically so the MMIO transport (MmioDma) also lives here and serves both, while the distinct x86_64 IOport transport stays in its own vertical through the `DmaAddressRegister` seam (AGENTS.md §2.2 — no duplication, the transport is the only parallel-implementation difference)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,9 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [lib]
 path = "src/lib.rs"
