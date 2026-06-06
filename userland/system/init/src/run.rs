@@ -49,6 +49,16 @@ mod program {
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
     /// the system console, and returns [`EXIT_OK`].
     ///
+    /// The banner write is *gated*: `console_write` returns the number of
+    /// bytes the kernel accepted, so a short count means the privileged
+    /// console write did not fully land (a missing `CAP_CONSOLE_WRITE`, an
+    /// unresolved address space, or a closed-fail kernel path). PID 1 cannot
+    /// usefully proceed without the console it was spawned to drive and has
+    /// no session path to launch yet (P6d/P6e), so it parks fail-closed
+    /// rather than exiting "successfully" on a console it never reached
+    /// (`AGENTS.md` §2.9). This is a terminal park, not a retry loop
+    /// (`AGENTS.md` §2.1).
+    ///
     /// The config also names the session program `init` will launch; spawning
     /// it needs the process-spawn syscall (`plans/PI.md` P6d) and a shell
     /// (P6e), neither of which exists yet. Until then `init`'s P6b job is to
@@ -59,7 +69,12 @@ mod program {
             Ok(config) => config,
             Err(_) => return EXIT_CONFIG_INVALID,
         };
-        let _ = rustos_rt::console_write(BANNER.as_bytes());
+        let banner = BANNER.as_bytes();
+        if rustos_rt::console_write(banner) != banner.len() {
+            loop {
+                core::hint::spin_loop();
+            }
+        }
         // P6d/P6e will spawn this program as the user's session; for now its
         // presence is what the parse guarantees.
         let _session = config.session();

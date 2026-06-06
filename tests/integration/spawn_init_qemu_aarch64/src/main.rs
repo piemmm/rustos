@@ -11,19 +11,33 @@
 //! through the production capability-checked, audited spawn caller
 //! (`spawn_and_enter`, gated on `CAP_PROC_SPAWN`), emitting
 //! `AuditEvent::ProcessSpawned` (`EventId(4030)`), and `eret`s into it.
-//! `init` runs in EL0, then returns; the `rustos-rt` runtime routes the
+//! `init` runs in EL0 and writes its startup banner through the `abi-v1`
+//! `console_write` syscall, then returns; the `rustos-rt` runtime routes the
 //! return through the `exit` syscall, whose `svc` traps back through the
 //! EL1 vector to the production dispatch callback, which emits the audited
 //! `AuditEvent::SyscallInvoked` (`EventId(5000)`).
 //!
+//! ## The banner write is on the critical path
+//!
+//! `init` only returns (and so only reaches the audited `exit`) once its
+//! `console_write` reports the whole banner accepted; on a short write it
+//! parks fail-closed (`userland/system/init`). `console_write` is itself
+//! *not* audited (`lib/abi` `audit: false`), so it emits no `SyscallInvoked`
+//! of its own. The PASS finisher therefore fires only after the banner write
+//! actually landed — proving PID 1's address space resolved through the
+//! kernel-wide registry so the kernel could copy the banner out of user
+//! memory (`plans/PI.md` P6c-3 follow-up), not merely that `init` reached
+//! EL0.
+//!
 //! This binary drives the real aarch64 boot pipeline end to end on the
 //! `virt` board and replaces only the audit sink: observing
-//! `ProcessSpawned` then `SyscallInvoked` proves PID 1 reached user mode
-//! and trapped back, and flips the ARM semihosting PASS finisher. A
-//! regression that never spawns `init` or never reaches the syscall never
-//! reaches the finisher, so the run times out and the harness reports
-//! `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-//! §7).
+//! `ProcessSpawned` then `SyscallInvoked` proves PID 1 reached user mode,
+//! wrote its banner, and trapped back, and flips the ARM semihosting PASS
+//! finisher. A regression that never spawns `init`, whose banner write fails
+//! closed (so `init` parks without exiting), or that never reaches the
+//! syscall never reaches the finisher, so the run times out and the harness
+//! reports `Outcome::Timeout` — the documented fail-loud behaviour
+//! (`AGENTS.md` §7).
 //!
 //! ## Embedded `virt` device tree
 //!

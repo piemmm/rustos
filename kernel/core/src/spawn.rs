@@ -36,7 +36,7 @@ use rustos_arch_api::{EnterUser, UserEntry};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{
     build_process_image, AddressSpace, Frame, FrameAllocator, PageTable, PhysMap, SpawnError,
-    UserStack,
+    UserAddressSpace, UserStack,
 };
 use rustos_log::{Event, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
@@ -112,23 +112,32 @@ pub trait InitSpawnCtx {
     /// not be admitted, so the seam (and then `kernel_main`) halts
     /// fail-closed (`AGENTS.md` §2.9).
     ///
-    /// The new task's address space is *not* registered with the
-    /// kernel-wide [`crate::AddressSpaceRegistry`] here: that registry
-    /// stores `Send + Sync` views (it is shared across CPUs behind a lock),
-    /// and an arch port's live address space is not `Sync` while it owns a
-    /// `&'static mut` root table. PID 1 therefore reaches user mode and can
-    /// issue syscalls that do not touch user memory (e.g. `exit`); syscalls
-    /// that copy from user memory resolve no address space and fail closed
-    /// with `BadAddress` until a registry-storable address-space handle
-    /// lands (`plans/PI.md` — a follow-up to P6c-3).
+    /// `space` is the registry-storable, `Send + Sync` snapshot of PID 1's
+    /// user mappings (an arch port's *live* `AddressSpace` is not `Sync`
+    /// while it owns a `&'static mut` root table, so the seam freezes it —
+    /// [`AddressSpace::freeze`](rustos_kernel_mem::AddressSpace::freeze)),
+    /// and `physmap` is the kernel direct map backing it. They are
+    /// registered with the kernel-wide [`crate::AddressSpaceRegistry`] under
+    /// the *same* numeric id the dispatcher recovers, so PID 1's first
+    /// syscall that copies from user memory (e.g. `console_write` reading
+    /// its banner) resolves the caller's address space instead of failing
+    /// closed with `BadAddress` (`plans/PI.md` P6c-3 follow-up).
     ///
     /// # Safety
     ///
     /// The seam must have built PID 1's image into the **active** address
     /// space on the calling CPU and installed the user→kernel trap path
     /// before calling here, so PID 1's first syscall is handled rather than
-    /// faulting.
-    unsafe fn admit_init(&self, caps: CapabilitySet, enter: Box<dyn FnMut() + Send>);
+    /// faulting. `space` must faithfully describe the mappings the active
+    /// address space resolves, and `physmap` must back them, so the copy
+    /// path reads exactly the memory the program sees.
+    unsafe fn admit_init(
+        &self,
+        caps: CapabilitySet,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+        physmap: Box<dyn PhysMap + Send + Sync>,
+        enter: Box<dyn FnMut() + Send>,
+    );
 }
 
 /// Why a [`spawn_and_enter`] call did not transfer control to a new program.

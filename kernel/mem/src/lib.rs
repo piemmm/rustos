@@ -80,7 +80,8 @@ pub use swap::{
 };
 pub use uaccess::{copy_in, copy_out, UaccessError};
 pub use vmm::{
-    AddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace, VirtAddr,
+    AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace,
+    VirtAddr,
 };
 
 #[cfg(any(test, feature = "host-tests"))]

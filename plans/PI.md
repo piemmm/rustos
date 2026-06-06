@@ -477,13 +477,25 @@ on its own before the next.
     guard before dispatch, so the caps-mutating handlers (`exit`,
     `cap_delegate`, `cap_revoke` — all take `caps.write()`) no longer
     self-deadlock the writer-preference `RwLock` (a latent bug, since no
-    arch reached EL0 through the real hook before). **Deferred:** the
-    `init` banner does not yet print — `console_write`'s user-copy needs the
-    task's address space registered in the kernel-wide
-    `AddressSpaceRegistry`, but an arch `AddressSpace` is `!Sync` (owns a
-    `&'static mut` root), so it cannot be stored in the `Send+Sync`
-    registry; `console_write` fails closed with `BadAddress` until a
-    registry-storable address-space handle lands (a P6c-3 follow-up).
+    arch reached EL0 through the real hook before).
+  - **P6c-3 follow-up — registry-storable address space; the `init` banner
+    prints `[x]`.** An arch `AddressSpace<P>` is `!Sync` (owns a `&'static
+    mut` root + a non-`Sync` page-table source), so it could not be stored
+    in the `Send+Sync`, lock-shared `AddressSpaceRegistry`, and PID 1's
+    `console_write` user-copy resolved no address space and failed closed
+    with `BadAddress`. Added `AddressSpace::freeze()` → `FrozenAddressSpace`
+    in `kernel/mem`: a `Send+Sync` POD snapshot walking every live page
+    through `translate` into a `BTreeMap<Page,(Frame,MapFlags)>`, so it
+    answers the copy path's permission checks identically to the live space.
+    `InitSpawnCtx::admit_init` now also takes the boxed frozen view + boxed
+    `DirectPhysMap`; `KernelInitSpawner` registers them under
+    `SecTaskId(task_id)` in `&state.aspaces` (fail-closed on a duplicate
+    id), and the aarch64 `init_spawn` seam freezes `space` after
+    `spawn_image` and passes both. `init`'s `run.rs` now gates its `exit` on
+    a full-length `console_write` (parks fail-closed otherwise, §2.9), so
+    the `spawn_init_qemu_aarch64` vertical's PASS (keyed on the audited
+    `exit` 5000 — `console_write` is `audit:false`) now genuinely proves the
+    banner reached the console (`-M virt`, verified green).
 - **P6d — userland process-spawn syscall `[ ]`.** Add the `abi-v1`
   spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
   an embedded-program registry so `init` can launch a separate process.

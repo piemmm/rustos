@@ -365,6 +365,53 @@ impl<P: PageTable> AddressSpace<P> {
     pub fn table(&self) -> &P {
         &self.table
     }
+
+    /// Freeze this address space's live mappings into a registry-storable
+    /// [`FrozenAddressSpace`], the `Send + Sync` form the kernel-wide
+    /// address-space registry holds for the user-memory copy path.
+    ///
+    /// A production arch [`PageTable`] backend is not `Send + Sync` (it
+    /// owns a `&'static mut` root table and a non-`Sync` page-table frame
+    /// source), so a *live* `AddressSpace<P>` cannot be stored behind the
+    /// registry's shared lock. Freezing walks each live page through
+    /// [`Self::translate`] once — recording the exact `(frame, flags)` the
+    /// backend resolves rather than the bookkept flags alone — and yields a
+    /// plain, POD snapshot that answers the copy path's permission checks
+    /// identically to the source space (`AGENTS.md` §5.4).
+    #[must_use]
+    pub fn freeze(&self) -> FrozenAddressSpace {
+        let mut mappings = BTreeMap::new();
+        for &page in self.live.keys() {
+            if let Some((frame, flags)) = self.translate(page) {
+                mappings.insert(page, (frame, flags));
+            }
+        }
+        FrozenAddressSpace { mappings }
+    }
+}
+
+/// A frozen, `Send + Sync` read-only snapshot of an [`AddressSpace`]'s
+/// live user mappings.
+///
+/// Produced by [`AddressSpace::freeze`]; see that method for why a live
+/// [`AddressSpace`] cannot itself be registry-stored. The snapshot owns
+/// only `Copy` plain-old-data (`page -> (frame, flags)`), so it is
+/// unconditionally `Send + Sync` and outlives the source space.
+///
+/// It reflects the mappings present **when it was frozen**. A task whose
+/// mappings never change after spawn — the only kind RustOS spawns today,
+/// as there is no user-driven remap syscall yet — is fully described by
+/// its freeze-time snapshot; when a remap path lands it must re-register
+/// an updated snapshot rather than the registry being widened to a live
+/// mutable view (`AGENTS.md` §2.4).
+pub struct FrozenAddressSpace {
+    mappings: BTreeMap<Page, (Frame, MapFlags)>,
+}
+
+impl UserAddressSpace for FrozenAddressSpace {
+    fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
+        self.mappings.get(&page).copied()
+    }
 }
 
 /// Object-safe, read-only view of a task's user address space.
@@ -571,6 +618,65 @@ mod tests {
         assert_eq!(s.mapped_pages(), 2);
         s.unmap(p(0)).unwrap();
         assert_eq!(s.mapped_pages(), 1);
+    }
+
+    #[test]
+    fn freeze_snapshots_live_mappings_and_flags() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        s.map(
+            p(4),
+            Frame(12),
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+        )
+        .unwrap();
+        let frozen = s.freeze();
+
+        // Every mapped page resolves through the snapshot exactly as it
+        // does through the source space.
+        let (frame, flags) = frozen.translate(p(1)).expect("page 1 frozen");
+        assert_eq!(frame, Frame(9));
+        assert!(flags.contains(MapFlags::READ));
+        assert!(flags.contains(MapFlags::USER));
+        assert!(!flags.contains(MapFlags::WRITE));
+
+        let (frame, flags) = frozen.translate(p(4)).expect("page 4 frozen");
+        assert_eq!(frame, Frame(12));
+        assert!(flags.contains(MapFlags::WRITE));
+
+        // An unmapped page is absent from the snapshot.
+        assert!(frozen.translate(p(2)).is_none());
+    }
+
+    #[test]
+    fn freeze_is_a_point_in_time_snapshot() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        let frozen = s.freeze();
+        // Mutating the source after freezing does not change the snapshot.
+        s.unmap(p(1)).unwrap();
+        s.map(p(7), Frame(70), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        assert!(frozen.translate(p(1)).is_some());
+        assert!(frozen.translate(p(7)).is_none());
+    }
+
+    #[test]
+    fn freeze_of_empty_space_resolves_nothing() {
+        let s = AddressSpace::new(HostPageTable::new());
+        let frozen = s.freeze();
+        assert!(frozen.translate(p(0)).is_none());
+    }
+
+    /// A `FrozenAddressSpace` is `Send + Sync` (it owns only POD), so it can
+    /// be stored behind the kernel-wide registry's lock — the property the
+    /// live arch `AddressSpace` lacks.
+    #[test]
+    fn frozen_address_space_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FrozenAddressSpace>();
     }
 
     #[test]

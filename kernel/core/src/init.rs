@@ -30,7 +30,7 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
-use rustos_kernel_mem::{AllocError, FrameAllocator};
+use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use rustos_kernel_sched_api::{Priority, TaskAction, TaskContext};
 use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
@@ -312,6 +312,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             audit: audit_sink,
             scheduler: &state.scheduler,
             caps: &state.caps,
+            aspaces: &state.aspaces,
             arch: state.arch.as_ref(),
         };
         init.spawn_init(&ctx);
@@ -333,6 +334,7 @@ struct KernelInitSpawner<'a, A: KernelArch> {
     audit: &'static (dyn Sink + Sync),
     scheduler: &'a Scheduler<A>,
     caps: &'a RwLock<CapTable>,
+    aspaces: &'a RwLock<AddressSpaceRegistry>,
     arch: &'a A,
 }
 
@@ -345,7 +347,13 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         self.audit
     }
 
-    unsafe fn admit_init(&self, caps: CapabilitySet, mut enter: Box<dyn FnMut() + Send>) {
+    unsafe fn admit_init(
+        &self,
+        caps: CapabilitySet,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+        physmap: Box<dyn PhysMap + Send + Sync>,
+        mut enter: Box<dyn FnMut() + Send>,
+    ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
 
         // Admit PID 1 with a body that performs the user-mode transition.
@@ -368,12 +376,28 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // syscall resolves a caller context (`AGENTS.md` §5.4.1). `init`'s
         // effective set is the intersection of its user grant and manifest
         // request; the boot path passes the system grant, so use it for both
-        // bounds (uid 0 — the system user, `AGENTS.md` §5.1). The task's
-        // address space is intentionally not registered (see the
-        // `InitSpawnCtx::admit_init` doc — the arch space is not `Sync`).
-        let record =
-            TaskCapabilities::derive(SecTaskId(task_id), UserId(0), caps, caps, self.audit);
+        // bounds (uid 0 — the system user, `AGENTS.md` §5.1).
+        let sec_id = SecTaskId(task_id);
+        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
         self.caps.write().insert(record);
+
+        // Register PID 1's frozen address space + direct map under the same
+        // id, so a first syscall that copies from user memory (e.g.
+        // `console_write` reading `init`'s banner) resolves the caller's
+        // mappings instead of failing closed with `BadAddress`
+        // (`plans/PI.md` P6c-3 follow-up). A fresh task id is never already
+        // present; should registration nonetheless be refused, fail closed
+        // by returning so the seam (and `kernel_main`) halts the CPU
+        // (`AGENTS.md` §2.9) rather than entering a program whose user
+        // memory the kernel cannot reach.
+        if self
+            .aspaces
+            .write()
+            .register(sec_id, space, physmap)
+            .is_err()
+        {
+            return;
+        }
 
         // Dispatch PID 1: `step` sets the per-CPU current task to it and
         // runs the body, which transfers control to EL0 and does not return.

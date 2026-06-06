@@ -1742,14 +1742,23 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   before dispatch, so the caps-mutating handlers (`exit`,
                   `cap_delegate`, `cap_revoke`) no longer self-deadlock the
                   writer-preference `RwLock` (a latent bug, first reached
-                  here). **Deferred:** the `init` banner does not yet print
-                  — `console_write`'s user-copy needs the task's address
-                  space in the `Send+Sync` `AddressSpaceRegistry`, but an
-                  arch `AddressSpace` is `!Sync` (owns a `&'static mut`
-                  root), so it fails closed with `BadAddress` until a
-                  registry-storable handle lands (a P6c-3 follow-up).
-                  **P6d** — `CAP_PROC_SPAWN` spawn syscall;
-                  **P6e** — minimal shell `init` launches.
+                  here). **P6c-3 follow-up (landed):** an arch
+                  `AddressSpace<P>` is `!Sync` (owns a `&'static mut`
+                  root + non-`Sync` page-table source), so PID 1's
+                  `console_write` user-copy resolved no address space and
+                  failed closed with `BadAddress`. `kernel/mem` gained
+                  `AddressSpace::freeze()` → `FrozenAddressSpace`, a
+                  `Send+Sync` POD `BTreeMap<Page,(Frame,MapFlags)>` snapshot
+                  walked through `translate`; `InitSpawnCtx::admit_init` now
+                  also takes the boxed frozen view + boxed `DirectPhysMap`
+                  and `KernelInitSpawner` registers them under
+                  `SecTaskId(task_id)` in the `AddressSpaceRegistry`. The
+                  aarch64 seam freezes `space` after `spawn_image`; `init`'s
+                  `run.rs` gates its `exit` on a full-length `console_write`
+                  (parks fail-closed otherwise), so the
+                  `spawn_init_qemu_aarch64` vertical's PASS now proves the
+                  banner reached the console. **P6d** — `CAP_PROC_SPAWN`
+                  spawn syscall; **P6e** — minimal shell `init` launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
