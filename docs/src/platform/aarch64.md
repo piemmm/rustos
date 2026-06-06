@@ -99,9 +99,19 @@ The SoC's 35-bit address space aliases the peripheral and high-RAM windows;
 the firmware DTB's `/memory` node(s) report the SKU's actual extents, which
 `FdtDiscovery::first_memory_region` reads — the allocator must not assume the
 `virt` `0x4000_0000` base. Since **P3** the boot path reads that window from
-the DTB (`boot_aarch64` logs whether it was found); the live allocator +
-scheduler hand-off over the discovered map is P4/P6 (a hard-coded map would
-violate `AGENTS.md` §18.5).
+the DTB; since **P6c-1** it translates the window (plus the linker
+`__kernel_end`) into the canonical two-region `BootMemoryMap` the live
+allocator hand-off consumes — `[ram_base, __kernel_end)` reserved, the
+page-aligned remainder usable — and logs the resulting split
+(`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
+`reserved_bytes_hex`), failing closed to a status string (never a panic,
+`AGENTS.md` §2.9) on an absent or malformed window. The arithmetic is the
+host-tested `rustos_kernel::mem_map` module (the riscv64 boot pipeline's
+`build_memory_map` analogue). Handing that map to
+`kernel_core::kernel_main` is P6c-2 — it needs the MMU enabled first, since
+the allocator/scheduler atomics are UNPREDICTABLE on the MMU-off
+Device-memory the boot CPU runs on (a hard-coded map would violate
+`AGENTS.md` §18.5).
 
 ### Production kernel image (P1)
 
@@ -141,10 +151,13 @@ installs it on the handle (`with_psci_method`), logging
 conduit the board declares (`hvc` on `virt`, `smc` on the Pi) rather than
 an assumed one (see
 [SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gicv2-ipi)).
-The discovery-fed
-`kernel_core::kernel_main` hand-off (the live `BootMemoryMap` + scheduler
-over that map) is staged to P6: a hard-coded map would violate
-`AGENTS.md` §18.5.
+Since **P6c-1** it builds the canonical `BootMemoryMap` from the discovered
+`/memory` window and records its usable/reserved split (`mem_map_built` /
+`mem_map_status` / `usable_bytes_hex` / `reserved_bytes_hex`); see
+[RAM layout](#ram-layout). The discovery-fed `kernel_core::kernel_main`
+hand-off over that map (which first enables the MMU so the allocator's
+atomics run on Normal memory) is staged to P6c-2; a hard-coded map would
+violate `AGENTS.md` §18.5.
 
 ## Arch HAL boundary
 

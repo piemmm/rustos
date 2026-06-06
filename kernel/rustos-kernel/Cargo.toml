@@ -108,6 +108,12 @@ rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # firmware device tree the loader hands the kernel to discover the board
 # console base (`plans/PI.md` P2).
 rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
+# Allocation-free, panic-free integer formatting for the aarch64 boot
+# audit line's `/memory` discovery summary (`plans/PI.md` P6c-1).
+# Re-implementing it locally would duplicate `lib/util` (`AGENTS.md`
+# §2.2); the crate is the project-wide first-party formatter. Scoped to
+# the aarch64 target because only `boot_aarch64` consumes it.
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The `virtio_factory` unit tests drive a real `DmaPool` through

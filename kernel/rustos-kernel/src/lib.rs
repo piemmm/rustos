@@ -23,6 +23,7 @@
 //! | `dispatch`      | Fail-closed syscall-dispatch callback (x86_64).                                   |
 //! | `boot`          | x86_64 `boot(multiboot_info, log_sink, audit_sink)` entry point (bare-metal only).|
 //! | `boot_aarch64`  | aarch64 `boot(dtb, log_sink)` entry point (bare-metal only; `plans/PI.md` P1).     |
+//! | `mem_map`       | aarch64 `/memory` → `BootMemoryMap` builder (host-tested; `plans/PI.md` P6c-1).    |
 //!
 //! # Why this is a library, not a `[[bin]]`
 //!
@@ -102,6 +103,15 @@ pub mod serial_sink;
 // park primitives, which exist only on the bare-metal aarch64 target.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub mod boot_aarch64;
+
+// The aarch64 `/memory` → `BootMemoryMap` translation (`plans/PI.md`
+// P6c-1). The arithmetic is free of the bare-metal-only aarch64 port, so
+// it compiles — and its bounds-check unit tests run — on the CI host
+// under `cargo test` as well as on the aarch64 production build that
+// consumes it via `boot_aarch64`. Gated to exactly those two
+// configurations so it is never dead code (`AGENTS.md` §2.3).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+mod mem_map;
 
 // The build script's pure target-selection logic, compiled into the
 // host test build so its rules are unit tested (`AGENTS.md` §7).

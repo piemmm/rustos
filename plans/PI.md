@@ -408,13 +408,46 @@ on its own before the next.
   `rustos-rt` tests + 10 startup-config tests + the freestanding aarch64 build
   via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0 spawn of
   this binary is P6c.
-- **P6c — production boot reaches EL0 `[ ]`.** Wire the freestanding
+- **P6c — production boot reaches EL0 `[~]`.** Wire the freestanding
   aarch64 `rustos-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
   over the discovered `/memory` map, install the console (discovered
   framebuffer else first UART) via `with_console`, embed the `init` rxe,
   and spawn PID 1 into EL0 via the `userentry` `eret` path. Add a `-M virt`
   vertical asserting the EL0 transition + the `init` banner on the
-  discovered UART.
+  discovered UART. This is the largest P6 step — it stands up the aarch64
+  production runtime *and* the OS's first production-boot→EL0 spawn (no arch
+  reaches user mode from `kernel_main` today; `kernel_core::kernel_main`
+  halts after `BootCompleted`) — so it is landed in sub-increments, each
+  green over the whole project on its own:
+  - **P6c-1 — discovered `/memory` → `BootMemoryMap` `[x]`.** The aarch64
+    boot path turns the firmware-discovered RAM window + the linker
+    `__kernel_end` into the canonical two-region physical map the live
+    allocator hand-off consumes (reserve `[ram_base, __kernel_end)`,
+    page-align the rest usable), the riscv64 boot pipeline's
+    `build_memory_map` analogue. The bounds/overflow arithmetic lives in a
+    host-tested `rustos_kernel::mem_map` module (8 unit tests; gated to the
+    aarch64 build and `cargo test` so it is never dead code, §2.3) because
+    the bare-metal `boot_aarch64` cannot be host-compiled. The boot audit
+    line now records `mem_map_built` / `mem_map_status` /
+    `usable_bytes_hex` / `reserved_bytes_hex`, failing closed to a status
+    string (never a panic, §2.9) on an absent or malformed window. Still
+    parks: the `kernel_main` hand-off needs the MMU enabled first (P6c-2),
+    since the allocator/scheduler atomics are UNPREDICTABLE on the
+    MMU-off Device-memory the boot CPU runs on.
+  - **P6c-2 — MMU + `kernel_main` hand-off `[ ]`.** Bring up the stage-1
+    identity map (`paging::AddressSpace::new_identity_gigapages` + `switch`,
+    EL1 vectors), add the local `Aarch64BinArch` `KernelArch` wrapper
+    (orphan-rule sibling of the x86_64 `BinArch` / riscv64 `RiscvBinArch`),
+    and hand the P6c-1 `BootMemoryMap` to `kernel_core::kernel_main` so the
+    aarch64 production kernel reaches `BootCompleted` like x86_64/riscv64.
+    Assemble the production `KernelSyscallHandlers`/`KernelDispatchHook`
+    `.with_console` (discovered framebuffer else first UART) + a slot-based
+    aarch64 `production_dispatch`.
+  - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[ ]`.** Embed the
+    `init` `Run` rxe (nested PIE build), register PID 1's task/aspace/caps,
+    `spawn_and_enter` into EL0 via the `userentry` `eret` path, and add the
+    `-M virt` vertical asserting the EL0 transition + the `init` banner on
+    the discovered UART.
 - **P6d — userland process-spawn syscall `[ ]`.** Add the `abi-v1`
   spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
   an embedded-program registry so `init` can launch a separate process.

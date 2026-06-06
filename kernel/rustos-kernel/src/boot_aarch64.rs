@@ -52,6 +52,9 @@ use rustos_arch_aarch64::{console, enable_fp_el1, fdt, gic, halt_current_cpu, Aa
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use rustos_util::fmt::format_hex_u64;
+
+use crate::mem_map::{build_memory_map, region_byte_totals};
 
 /// The boot CPU's logical id. The boot trampoline parks every other CPU
 /// (`MPIDR_EL1` affinity ≠ 0) until the SMP bring-up (`plans/PI.md` P5)
@@ -74,6 +77,21 @@ const fn yes_no(value: bool) -> &'static str {
     } else {
         "false"
     }
+}
+
+extern "C" {
+    /// One byte past the end of the kernel image, including the boot heap,
+    /// defined by the board linker script (`aarch64-rpi4.ld` /
+    /// `aarch64-virt.ld`). The usable physical-memory region the allocator
+    /// receives begins at the next page boundary after this address.
+    static __kernel_end: u8;
+}
+
+/// Address of the linker-provided `__kernel_end` symbol.
+fn kernel_end_addr() -> u64 {
+    // `addr_of!` reads the marker's address without forming a reference to
+    // the zero-sized, never-dereferenced symbol.
+    core::ptr::addr_of!(__kernel_end) as u64
 }
 
 /// Boot the aarch64 kernel on the boot CPU and park.
@@ -141,11 +159,39 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
     // the park regardless; P4 wires the live timer + scheduler.
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
     let timer_present = counter_hz != 0;
-    let level = if boot_cpu_ok && timer_present {
+
+    // P6c-1: translate the firmware-discovered `/memory` window into the
+    // canonical physical-memory map the live allocator hand-off will
+    // consume (`plans/PI.md` P6c-2). The map is built and its
+    // usable/reserved split recorded here; an absent or malformed window
+    // fails closed to a status string rather than a panic
+    // (`AGENTS.md` §2.9). Wiring the map into `kernel_core::kernel_main`
+    // (which first needs the MMU enabled so the allocator's atomics run on
+    // Normal, not Device, memory) is P6c-2.
+    let (mem_status, usable_bytes, reserved_bytes) = match discovered.ram_window {
+        None => ("no_memory_window", 0, 0),
+        Some((base, size)) => match build_memory_map(base, size, kernel_end_addr()) {
+            Ok(map) => {
+                let (usable, reserved) = region_byte_totals(&map);
+                ("built", usable, reserved)
+            }
+            Err(err) => (err.as_str(), 0, 0),
+        },
+    };
+    let mem_map_built = mem_status == "built";
+
+    let level = if boot_cpu_ok && timer_present && mem_map_built {
         Level::Info
     } else {
         Level::Warn
     };
+
+    // Stack buffers for the allocation-free hex rendering of the discovered
+    // byte counts; they must outlive the `fields` slice handed to `log`.
+    let mut usable_buf = [0u8; 16];
+    let mut reserved_buf = [0u8; 16];
+    let usable_hex = format_hex_u64(usable_bytes, &mut usable_buf);
+    let reserved_hex = format_hex_u64(reserved_bytes, &mut reserved_buf);
 
     log(
         log_sink,
@@ -176,7 +222,23 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                 },
                 Field {
                     key: "ram_discovered",
-                    value: yes_no(discovered.ram),
+                    value: yes_no(discovered.ram_window.is_some()),
+                },
+                Field {
+                    key: "mem_map_built",
+                    value: yes_no(mem_map_built),
+                },
+                Field {
+                    key: "mem_map_status",
+                    value: mem_status,
+                },
+                Field {
+                    key: "usable_bytes_hex",
+                    value: usable_hex,
+                },
+                Field {
+                    key: "reserved_bytes_hex",
+                    value: reserved_hex,
                 },
                 Field {
                     key: "timer_hz_from_tree",
@@ -188,7 +250,7 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                 },
                 Field {
                     key: "next_stage",
-                    value: "pi_p6_spawn_init",
+                    value: "pi_p6c2_mmu_kernel_main",
                 },
             ],
         },
@@ -204,9 +266,10 @@ struct Discovered {
     /// A GICv2-class interrupt controller was found and its GICD/GICC
     /// bases set.
     gic: bool,
-    /// A `/memory` region was found (the RAM base/size the P4/P6 allocator
-    /// hand-off will consume).
-    ram: bool,
+    /// The `/memory` window `(base, size)` discovered from the firmware
+    /// tree, if any — the RAM extent the `BootMemoryMap` (`plans/PI.md`
+    /// P6c-1) reserves the kernel image out of and hands the allocator.
+    ram_window: Option<(u64, u64)>,
     /// The generic-timer counter frequency (Hz) to seed the handle and
     /// the P4 live timer with: the `/timer` `clock-frequency` override
     /// when the tree declares one, else the `CNTFRQ_EL0` register value.
@@ -232,7 +295,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     let mut out = Discovered {
         console: false,
         gic: false,
-        ram: false,
+        ram_window: None,
         // With no usable tree the register is the only counter-rate
         // source; P4's tree override (if any) overwrites this below.
         timer_hz: read_cntfrq(),
@@ -253,7 +316,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     };
     out.console = console::configure_from_fdt(&fdt).is_some();
     out.gic = gic::configure_from_fdt(&fdt).is_some();
-    out.ram = fdt.first_memory_region().is_some();
+    out.ram_window = fdt.first_memory_region();
     // P4: prefer the board's `/timer` `clock-frequency` over the
     // `CNTFRQ_EL0` register, so the Pi 4's 54 MHz crystal is honoured
     // when the firmware tree declares it (`AGENTS.md` §17.2 — no

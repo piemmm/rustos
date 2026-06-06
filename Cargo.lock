@@ -853,6 +853,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-sync",
+ "rustos-util",
 ]
 
 [[package]]
