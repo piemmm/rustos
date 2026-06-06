@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x10, 0x68, 0xba, 0x0f, 0xe8, 0x42, 0xf5, 0xe3, 0xe8, 0x3c, 0xf9, 0xc3, 0xa3, 0x76, 0xdb, 0xda,
-    0x2d, 0x67, 0x4f, 0x77, 0xc6, 0xea, 0x9d, 0x4f, 0xf7, 0x22, 0xd0, 0x30, 0x34, 0x06, 0xc2, 0x07,
+    0x3c, 0x76, 0x13, 0x3d, 0x78, 0x06, 0x40, 0xd9, 0xba, 0x87, 0x72, 0x4e, 0xc2, 0xa1, 0xf9, 0xcc,
+    0xcd, 0xe6, 0xd9, 0x09, 0x9c, 0xc6, 0x24, 0xff, 0x0c, 0x05, 0x81, 0x81, 0x25, 0xee, 0xa4, 0x5f,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -198,6 +198,19 @@ pub trait SyscallHandlers {
         len: usize,
         flags: RandomFlags,
     ) -> SyscallResult;
+    /// Write the `len` bytes at user pointer `buf` to the system
+    /// console, returning the number of bytes written.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::CONSOLE_WRITE`], that `buf` is non-null, and that
+    /// `len` fits in `usize`. The implementation copies the buffer
+    /// through the validated `copy_from_user` boundary (`AGENTS.md`
+    /// §5.4) and emits it to the console device installed at boot — the
+    /// detected framebuffer when present, else the first discovered UART
+    /// (`plans/PI.md` P6). A build with no console device wired must
+    /// fail closed with [`Errno::NotImplemented`] rather than silently
+    /// discarding the bytes (`AGENTS.md` §2.9).
+    fn console_write(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -342,6 +355,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 #[allow(clippy::cast_possible_truncation)]
                 let flags = RandomFlags::from_bits((args.0[2] & 0xFFFF_FFFF) as u32)?;
                 self.handlers.random_get(caller, args.0[0], len, flags)
+            }
+            SyscallNumber::CONSOLE_WRITE => {
+                let len = decode_len(args.0[1])?;
+                self.handlers.console_write(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -642,6 +659,13 @@ mod tests {
             // arguments without inventing a real reserve here.
             Ok(len as u64)
         }
+        fn console_write(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("console_write");
+            // Echo the requested length back as the byte count so the
+            // reachability test can assert the dispatcher decoded the
+            // arguments without wiring a real console here.
+            Ok(len as u64)
+        }
     }
 
     #[test]
@@ -654,7 +678,14 @@ mod tests {
     fn every_syscall_is_reachable_with_required_capability() {
         let sink = RecordingSink::new();
         // Hold every capability the abi-v1 table requires.
-        let caps = build_caps(&[CapabilityId::USER_ADMIN, CapabilityId::IRQ_BIND], &sink);
+        let caps = build_caps(
+            &[
+                CapabilityId::USER_ADMIN,
+                CapabilityId::IRQ_BIND,
+                CapabilityId::CONSOLE_WRITE,
+            ],
+            &sink,
+        );
         let ctx = CallerContext {
             task_id: TaskId(7),
             caps: &caps,

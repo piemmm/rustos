@@ -73,6 +73,7 @@ extern crate std;
 pub mod aspace;
 pub mod audit;
 pub mod bootinfo;
+pub mod console;
 pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
@@ -93,6 +94,7 @@ pub mod test_sink;
 pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
+pub use console::{ConsoleWrite, NullConsole, NULL_CONSOLE};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome,
 };

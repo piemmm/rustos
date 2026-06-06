@@ -84,6 +84,19 @@ impl SyscallNumber {
     /// yet seeded it returns [`crate::Errno::EntropyNotReady`] rather
     /// than blocking.
     pub const RANDOM_GET: Self = Self(10);
+    /// Write a byte buffer to the system console (`AGENTS.md` §10, §16.4).
+    ///
+    /// Arguments: `buf: *const u8` (user pointer), `len: usize`. Returns
+    /// the number of bytes written. The kernel copies the buffer through
+    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4) and
+    /// emits it to the system console device — the detected framebuffer
+    /// when one is present, else the first discovered UART (`plans/PI.md`
+    /// P6). This is the privileged *hardware* console, not a per-process
+    /// stdout, so it is gated by [`crate::CapabilityId::CONSOLE_WRITE`]
+    /// and granted only to the early bring-up principals (PID 1 `init`,
+    /// login, getty). A build with no console device wired fails closed
+    /// with [`crate::Errno::NotImplemented`].
+    pub const CONSOLE_WRITE: Self = Self(11);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -162,6 +175,7 @@ mod tests {
         assert_eq!(SyscallNumber::IRQ_BIND.as_u16(), 8);
         assert_eq!(SyscallNumber::IRQ_WAIT.as_u16(), 9);
         assert_eq!(SyscallNumber::RANDOM_GET.as_u16(), 10);
+        assert_eq!(SyscallNumber::CONSOLE_WRITE.as_u16(), 11);
     }
 
     #[test]

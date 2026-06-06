@@ -55,6 +55,8 @@ re-typed. New behaviour ships as `abi-v2`.
 |   7 | `clock_get`    | —                                       | `u64`   | —                       | no      |
 |   8 | `irq_bind`     | `u32 line`                              | `IrqHandle` | `CAP_IRQ_BIND`      | yes     |
 |   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
+|  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
+|  11 | `console_write`| `user_ptr`, `len`                       | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
 
 ### Capability matrix
 
@@ -66,6 +68,7 @@ is exhaustive — anything not listed below is ungated:
 | ------------------ | -------------------------- |
 | `CAP_USER_ADMIN`   | `cap_revoke`               |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
+| `CAP_CONSOLE_WRITE`| `console_write`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in

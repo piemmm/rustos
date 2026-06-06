@@ -23,7 +23,7 @@
 //! # Layout of [`ENCODED_TABLE`]
 //!
 //! For each [`SyscallSpec`], in [`SyscallNumber`] ascending order, the
-//! encoded record is a fixed-stride 26-byte tuple:
+//! encoded record is a fixed-stride 27-byte tuple:
 //!
 //! | Offset | Size | Field |
 //! |-------:|-----:|-------|
@@ -34,9 +34,9 @@
 //! |  10    |  1   | `required_capability.is_some()` (`0` or `1`) |
 //! |  11    |  2   | `required_capability` as little-endian `u16` (`0` when absent) |
 //! |  13    |  1   | `audit` (`0` or `1`) |
-//! |  14    | 12   | `name`, ASCII, right-padded with `0x00` to 12 bytes |
+//! |  14    | 13   | `name`, ASCII, right-padded with `0x00` to 13 bytes |
 //!
-//! Names exceeding 12 bytes are forbidden — the const encoder produces a
+//! Names exceeding 13 bytes are forbidden — the const encoder produces a
 //! compile error rather than silently truncate.
 
 use crate::{CapabilityId, SyscallNumber};
@@ -52,8 +52,9 @@ pub const SYSCALL_MAX_ARGS: usize = 6;
 /// Maximum length, in bytes, of the ASCII `name` of any [`SyscallSpec`].
 ///
 /// Pinned so that [`ENCODED_TABLE`] uses a fixed stride per record and the
-/// encoding is computable in a `const fn` without an allocator.
-pub const SYSCALL_NAME_MAX: usize = 12;
+/// encoding is computable in a `const fn` without an allocator. Sized to fit
+/// the longest `abi-v1` name (`console_write`, 13 bytes).
+pub const SYSCALL_NAME_MAX: usize = 13;
 
 /// Stride, in bytes, of one record inside [`ENCODED_TABLE`].
 pub const SYSCALL_ENCODED_RECORD_LEN: usize = 14 + SYSCALL_NAME_MAX;
@@ -303,6 +304,27 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_WRITE,
+        name: "console_write",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Writing to the privileged hardware console is gated
+        // (`AGENTS.md` §4 — no ambient authority): only the early
+        // bring-up principals hold `CAP_CONSOLE_WRITE`. Like the other
+        // high-volume data movers (`ipc_recv`, `random_get`) it is not
+        // audited per call, to avoid drowning the audit log.
+        required_capability: Some(CapabilityId::CONSOLE_WRITE),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -470,6 +492,14 @@ mod tests {
         assert!(bind.audit, "irq_bind must be audited");
         let wait = spec_for(SyscallNumber::IRQ_WAIT).unwrap();
         assert_eq!(wait.required_capability, Some(CapabilityId::IRQ_BIND));
+        // console_write is gated on CAP_CONSOLE_WRITE — the privileged
+        // hardware console is never ambient (`AGENTS.md` §4).
+        let console = spec_for(SyscallNumber::CONSOLE_WRITE).unwrap();
+        assert_eq!(
+            console.required_capability,
+            Some(CapabilityId::CONSOLE_WRITE)
+        );
+        assert!(!console.audit, "console_write must not audit per call");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

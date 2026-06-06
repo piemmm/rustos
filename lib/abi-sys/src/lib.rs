@@ -74,6 +74,7 @@ const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
 const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
 const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
 const NUM_RANDOM_GET: u64 = SyscallNumber::RANDOM_GET.as_u16() as u64;
+const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -251,6 +252,20 @@ pub extern "C" fn sys_random_get(buf: *mut c_void, len: usize, flags: u32) -> u6
     }
 }
 
+/// `console_write`: write `len` bytes at `buf` to the system console
+/// (`SyscallNumber::CONSOLE_WRITE`). Returns the number of bytes written.
+///
+/// Requires `CAP_CONSOLE_WRITE`; the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before touching it
+/// (`AGENTS.md` §5.4). This is the privileged hardware console, not a
+/// per-process stdout (`plans/PI.md` P6).
+#[must_use]
+#[export_name = "ros_sys_console_write"]
+pub extern "C" fn sys_console_write(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
 /// Test-only trap seam: a per-thread injectable replacement for the real trap
 /// instruction, used to assert the marshalling and return-decoding of every
 /// `ros_sys_*` stub on the host without a kernel (`plans/CCOMPAT.md` CC2
@@ -317,6 +332,7 @@ mod tests {
         (NUM_IRQ_BIND, "irq_bind", 1),
         (NUM_IRQ_WAIT, "irq_wait", 2),
         (NUM_RANDOM_GET, "random_get", 3),
+        (NUM_CONSOLE_WRITE, "console_write", 2),
     ];
 
     #[test]
@@ -456,6 +472,19 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 32);
         assert_eq!(args[2], 1);
+    }
+
+    #[test]
+    fn console_write_marshals_pointer_and_len() {
+        let mut buffer = [0u8; 8];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(8, || {
+            assert_eq!(sys_console_write(ptr, 8), 8);
+        });
+        assert_eq!(number, NUM_CONSOLE_WRITE);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 8);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

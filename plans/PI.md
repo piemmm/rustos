@@ -357,17 +357,50 @@ fixtures and the fail-closed no-`/psci` path. The Pi's `smc` conduit (via
 acceptance item (no `-M raspi4b` in QEMU — the same gap as P2/P3/P4).
 `cargo xtask cfg-check` stays clean.
 
-### P6 — Spawn `init` into EL0 on the Pi `[ ]`
+### P6 — Spawn `init` into EL0 on the Pi `[~]`
 
-- Wire the freestanding aarch64 `rustos-kernel` boot path through to
-  bringing up `kernel/{mem,ipc,sec,syscall}`, mounting a root, and
-  spawning PID 1 (`userland/system/init`) into EL0 via the existing
-  `userentry` `eret` path — the user-mode milestone the issue calls out.
+The user-mode milestone is the first time the *production* kernel reaches
+EL0 on any arch (today only per-test fixtures do, via `spawn_and_enter`),
+and the standing direction is to do it *properly*: `init` is a real Rust
+program that parses a startup config and writes its first line to the
+**console** — the detected framebuffer if any, else the first discovered
+UART. That console line needs a real syscall (there was none), and
+`init` "starting the user in a shell" needs a userland process-spawn
+syscall (there is none). So P6 is staged into chunks, each landed green
+on its own before the next.
+
+- **P6a — `console_write` `abi-v1` syscall `[x]`.** New syscall number 11
+  + `CAP_CONSOLE_WRITE` (id 18), the `SyscallSpec` row, the
+  `kernel/syscall` dispatch arm + recomputed `SYSCALL_TABLE_HASH`, the
+  `kernel/core` `ConsoleWrite` seam (boot installs the device — framebuffer
+  else first UART — defaulting to a fail-closed `NULL_CONSOLE` →
+  `NotImplemented`) + the copy-in handler, the `ros_sys_console_write`
+  C stub, and the regenerated C header. `SYSCALL_NAME_MAX` bumped 12→13
+  to fit the name. All host tests + `abi-check` + `c-header` green.
+- **P6b — `rustos-init` becomes a real program `[ ]`.** Give the
+  `rustos-init` crate a binary `Run` entry (crt0 + a thin Rust entry) that
+  parses a minimal **startup config** (host-tested) — for now the config
+  just says "open the console and start the user in a shell" — and writes
+  its first banner line through `console_write`.
+- **P6c — production boot reaches EL0 `[ ]`.** Wire the freestanding
+  aarch64 `rustos-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
+  over the discovered `/memory` map, install the console (discovered
+  framebuffer else first UART) via `with_console`, embed the `init` rxe,
+  and spawn PID 1 into EL0 via the `userentry` `eret` path. Add a `-M virt`
+  vertical asserting the EL0 transition + the `init` banner on the
+  discovered UART.
+- **P6d — userland process-spawn syscall `[ ]`.** Add the `abi-v1`
+  spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
+  an embedded-program registry so `init` can launch a separate process.
+- **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
+  `userland/shell` program on the console; `init`'s startup config
+  launches it as the user's session.
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
-`init` emits its first log line over the discovered UART; a vertical
-asserts the EL0 transition + the `init` banner. (This is the
-"boot into user mode" milestone.)
+`init` emits its first line on the console (framebuffer if present, else
+the discovered UART), then starts the user's shell; a vertical asserts the
+EL0 transition + the `init` banner. (This is the "boot into user mode"
+milestone.)
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

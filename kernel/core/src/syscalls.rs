@@ -93,6 +93,7 @@ use alloc::boxed::Box;
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
+use crate::console::{ConsoleWrite, NULL_CONSOLE};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
 use crate::random::{reserve_errno, RandomReserve};
 
@@ -151,6 +152,14 @@ where
     /// reserve mutates its buffer as it serves (`AGENTS.md` §2.1 — the
     /// reserve owns no lock of its own).
     rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
+    /// The system console sink `console_write` emits to (`AGENTS.md`
+    /// §10 / §16.4). Defaults to [`NULL_CONSOLE`] (fail closed with
+    /// [`Errno::NotImplemented`]); the boot path installs the concrete
+    /// device — the detected framebuffer, else the first discovered
+    /// UART (`plans/PI.md` P6) — through [`Self::with_console`]. Held as
+    /// a `'static` borrow because the installed console lives for the
+    /// lifetime of the running kernel, exactly like `NULL_CONSOLE`.
+    console: &'static (dyn ConsoleWrite + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -198,7 +207,29 @@ where
             ipc,
             aspaces,
             rng,
+            // Fail closed until the boot path installs a real device
+            // (`AGENTS.md` §2.9 / §5.4): an early `console_write` returns
+            // `NotImplemented` rather than silently dropping the bytes.
+            console: &NULL_CONSOLE,
         }
+    }
+
+    /// Install the system console `console_write` emits to, consuming
+    /// and returning `self`.
+    ///
+    /// Called once by the boot path after it has selected the console
+    /// device from the normalised hardware tree — the detected
+    /// framebuffer when present, else the first discovered UART
+    /// (`plans/PI.md` P6, `AGENTS.md` §18). Until this is called the
+    /// handler holds [`NULL_CONSOLE`] and `console_write` fails closed
+    /// with [`Errno::NotImplemented`]. The console must be `'static`:
+    /// the boot path leaks the device alongside `KernelState`, which
+    /// lives for the lifetime of the running kernel (`AGENTS.md` §2.1 —
+    /// no global mutable static; the install is a one-shot move).
+    #[must_use]
+    pub const fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
+        self.console = console;
+        self
     }
 
     /// Borrow the [`IrqTable`] this handler set wires `irq_bind` /
@@ -281,6 +312,18 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
 /// iteration while keeping the on-stack cost trivial; a larger request
 /// simply loops.
 const RANDOM_STAGE_CHUNK: usize = 256;
+
+/// Upper bound, in bytes, on a single `console_write` call.
+///
+/// `console_write` stages the caller's bytes in one kernel-owned buffer
+/// before handing them to the device, so an unbounded `len` would let a
+/// caller force an arbitrarily large kernel allocation whose failure
+/// path could OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The
+/// call therefore writes at most this many bytes and returns the count;
+/// a caller with more to say loops, exactly as POSIX `write` allows. A
+/// banner line is far smaller than this, so the common path never
+/// iterates.
+const CONSOLE_WRITE_MAX: usize = 4096;
 
 impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
@@ -679,6 +722,42 @@ where
         // `BadAddress` every copy-path handler returns (`AGENTS.md` §5.4
         // / §19.1).
         outcome.unwrap_or(Err(Errno::BadAddress))
+    }
+
+    fn console_write(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_CONSOLE_WRITE` and that
+        // `buf` is non-null (`UserPtr`). A zero-length write touches
+        // neither the caller's buffer nor the device.
+        if len == 0 {
+            return Ok(0);
+        }
+        // Bound the staging allocation so a hostile `len` cannot force
+        // an arbitrarily large kernel buffer (`AGENTS.md` §4). Writing a
+        // prefix and reporting the count is valid short-write behaviour;
+        // the caller loops for the remainder.
+        let take = core::cmp::min(len, CONSOLE_WRITE_MAX);
+
+        // Copy the bytes in from the caller's address space through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // touching the device. `with_caller_aspace` yields `None` when
+        // the caller has no registered address space (a kernel task, or
+        // one withdrawn on `exit`) — fail closed with the same
+        // `BadAddress` an actual fault produces, never leaking which
+        // case occurred (§19.1).
+        let mut payload = alloc::vec![0u8; take];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Hand the copied bytes to the installed console device. Until
+        // the boot path installs one the default `NULL_CONSOLE` fails
+        // closed with `NotImplemented` (`AGENTS.md` §2.9), never
+        // silently dropping the bytes.
+        self.console.write(&payload).map(|n| n as u64)
     }
 }
 
@@ -2520,5 +2599,194 @@ mod tests {
             .expect("task 2 resolves");
         assert_eq!(frame1, Some(Frame(100)));
         assert_eq!(frame2, Some(Frame(200)));
+    }
+
+    /// A console sink that records every byte handed to it, for the
+    /// `console_write` handler tests.
+    struct RecordingConsole {
+        written: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
+    }
+
+    impl RecordingConsole {
+        fn new() -> Self {
+            Self {
+                written: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+            }
+        }
+    }
+
+    impl crate::console::ConsoleWrite for RecordingConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            self.written.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    /// `console_write` copies the caller's bytes in and hands the exact
+    /// buffer to the installed console, returning the byte count.
+    #[test]
+    fn console_write_copies_in_and_emits_to_installed_console() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let banner = b"RustOS init: hello\n";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, banner);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console(console);
+
+        assert_eq!(
+            h.console_write(&ctx, 0x1000, banner.len()),
+            Ok(banner.len() as u64)
+        );
+        assert_eq!(console.written.lock().as_slice(), banner);
+    }
+
+    /// With no console installed the handler holds `NULL_CONSOLE` and
+    /// fails closed with `NotImplemented` rather than silently dropping
+    /// the bytes (`AGENTS.md` §2.9). The user copy still succeeds first.
+    #[test]
+    fn console_write_without_device_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"hi");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.console_write(&ctx, 0x1000, 2), Err(Errno::NotImplemented));
+    }
+
+    /// A zero-length `console_write` succeeds without touching the
+    /// caller's buffer or the device (so it works even with no console).
+    #[test]
+    fn console_write_zero_length_is_ok_and_inert() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No address space registered: a real copy would fail closed,
+        // but a zero-length write never reaches the copy path.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.console_write(&ctx, 0x1000, 0), Ok(0));
+    }
+
+    /// `console_write` from a caller with no registered address space
+    /// fails closed with `BadAddress`, never leaking the missing-space
+    /// case (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn console_write_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console(console);
+        assert_eq!(h.console_write(&ctx, 0x1000, 4), Err(Errno::BadAddress));
+        assert!(console.written.lock().is_empty());
+    }
+
+    /// A `len` above `CONSOLE_WRITE_MAX` writes a bounded prefix and
+    /// reports the count — POSIX short-write semantics, never an
+    /// unbounded kernel allocation (`AGENTS.md` §4).
+    #[test]
+    fn console_write_caps_length_at_console_write_max() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // One full page of readable user bytes backs the bounded copy.
+        let page_bytes = alloc::vec![0x5Au8; PAGE_SIZE];
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &page_bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console(console);
+        // Ask for more than the cap; the handler writes exactly the cap.
+        let r = h.console_write(&ctx, 0x1000, CONSOLE_WRITE_MAX + 100);
+        assert_eq!(r, Ok(CONSOLE_WRITE_MAX as u64));
+        assert_eq!(console.written.lock().len(), CONSOLE_WRITE_MAX);
     }
 }
