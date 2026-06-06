@@ -1,9 +1,20 @@
-//! GICv2 (ARM Generic Interrupt Controller) driver for the QEMU `virt`
-//! board.
+//! GICv2 (ARM Generic Interrupt Controller) driver, with the
+//! distributor / CPU-interface MMIO bases **discovered from the device
+//! tree** (`plans/PI.md` P3).
 //!
-//! The `virt` board's default interrupt controller is a GICv2 with the
-//! distributor at [`GICD_BASE`] and the per-CPU interface at
-//! [`GICC_BASE`]. This module owns the minimum surface the aarch64
+//! The aarch64 port boots on two boards whose GICv2 lives at different
+//! addresses: the QEMU `virt` board ([`DEFAULT_GICD_BASE`] /
+//! [`DEFAULT_GICC_BASE`]) and the Raspberry Pi 4's GIC-400
+//! (`0xFF84_1000` / `0xFF84_2000`). Per `AGENTS.md` §17.2 / §2.2 the
+//! difference is **discovered device-tree data**, never a `cfg(board)`
+//! fork: this module holds the runtime base pair (an atomic, default =
+//! the `virt` GICv2) the freestanding MMIO accessor reads, plus the
+//! [`find_gic`] / [`configure_from_fdt`] discovery the boot path runs
+//! over the firmware tree. The register layout is identical across the
+//! two (GIC-400 *is* a GICv2), so there is one driver, two discovered
+//! bases.
+//!
+//! This module owns the minimum surface the aarch64
 //! Stage-3 primitives need:
 //!
 //! * `init` — enable the distributor and this CPU's interface, open the
@@ -31,13 +42,144 @@
 //! functions, unit-tested on the host; the MMIO reads/writes are gated
 //! to the freestanding aarch64 target.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use rustos_arch_api::CpuId;
+use rustos_fdt::Fdt;
 
-/// MMIO base of the GICv2 distributor on the `virt` board.
-pub const GICD_BASE: usize = 0x0800_0000;
+/// MMIO base the distributor points at before any discovery runs: the
+/// QEMU `virt` board's GICv2 distributor. A board with a different GIC
+/// (the Pi 4's GIC-400) replaces this at boot from its device tree
+/// ([`configure_from_fdt`]); the default is the `virt` value, never a
+/// fabricated per-board constant (`plans/PI.md` §3 — no fresh
+/// `PI_*_BASE`).
+pub const DEFAULT_GICD_BASE: usize = 0x0800_0000;
 
-/// MMIO base of the GICv2 CPU interface on the `virt` board.
-pub const GICC_BASE: usize = 0x0801_0000;
+/// MMIO base the CPU interface points at before any discovery runs: the
+/// QEMU `virt` board's GICv2 CPU interface. See [`DEFAULT_GICD_BASE`].
+pub const DEFAULT_GICC_BASE: usize = 0x0801_0000;
+
+/// Currently-selected GICv2 distributor MMIO base. Defaults to the
+/// `virt` board; overwritten by [`configure`] / [`configure_from_fdt`]
+/// once discovery resolves the board's GIC.
+static GICD_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICD_BASE);
+/// Currently-selected GICv2 CPU-interface MMIO base. Defaults to the
+/// `virt` board.
+static GICC_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICC_BASE);
+
+/// Point the GICv2 driver at the distributor base `gicd` and CPU-
+/// interface base `gicc`.
+///
+/// Called once early in a board's boot path (after device-tree discovery
+/// resolves the GIC, before `init`). `Release`/`Acquire` ordering pairs
+/// these stores with [`current`]'s loads so the freestanding MMIO path —
+/// and any secondary CPU that brings up its interface afterwards —
+/// observes a consistent `(gicd, gicc)` pair.
+pub fn configure(distributor: usize, cpu_iface: usize) {
+    GICD_BASE.store(distributor, Ordering::Release);
+    GICC_BASE.store(cpu_iface, Ordering::Release);
+}
+
+/// The GICv2 distributor and CPU-interface MMIO bases currently in
+/// effect, as `(gicd, gicc)`.
+#[must_use]
+pub fn current() -> (usize, usize) {
+    (
+        GICD_BASE.load(Ordering::Acquire),
+        GICC_BASE.load(Ordering::Acquire),
+    )
+}
+
+/// `compatible` strings that name a GICv2-class interrupt controller this
+/// driver speaks. GIC-400 (`arm,gic-400`) is a GICv2, so it shares the
+/// register layout; the QEMU `virt` board advertises `arm,cortex-a15-gic`.
+/// An unrecognised controller is not matched, so the boot path keeps the
+/// fail-safe default rather than driving an unknown layout
+/// (`AGENTS.md` §2.9).
+const GIC_COMPATIBLES: &[&[u8]] = &[
+    b"arm,gic-400",
+    b"arm,cortex-a15-gic",
+    b"arm,cortex-a7-gic",
+    b"arm,cortex-a9-gic",
+    b"arm,gic-v2",
+];
+
+/// `true` if `compatible` names a GICv2-class controller this driver can
+/// drive (one of the recognised GICv2 `compatible` strings).
+#[must_use]
+pub fn is_gic_compatible(compatible: &[u8]) -> bool {
+    GIC_COMPATIBLES.contains(&compatible)
+}
+
+/// A GICv2 distributor + CPU-interface pair located in a flattened
+/// device tree.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct DiscoveredGic<'a> {
+    /// The `compatible` string that selected this controller (one of the
+    /// recognised GICv2 `compatible` strings); borrowed from the
+    /// device-tree blob. Used as the hardware-tree node's bind key
+    /// (`crate::platform`).
+    pub compatible: &'a [u8],
+    /// MMIO base of the distributor (the GIC node's first `reg` region).
+    pub gicd_base: u64,
+    /// MMIO base of the CPU interface (the node's second `reg` region).
+    pub gicc_base: u64,
+}
+
+/// Locate the GICv2 interrupt controller in `fdt`.
+///
+/// Walks the tree for the first node whose `compatible` names a
+/// GICv2-class controller ([`is_gic_compatible`]) and reads its `reg`:
+/// region 0 is the distributor, region 1 the CPU interface. Both boards
+/// this port serves describe the GIC with 2 address + 2 size cells, so
+/// the distributor base is at byte offset 0 and the CPU-interface base at
+/// offset 16 (the same `reg` layout the console reader assumes). Returns
+/// `None` if the tree is malformed or carries no recognised GIC (the
+/// caller then keeps the [`DEFAULT_GICD_BASE`] / [`DEFAULT_GICC_BASE`]
+/// default — fail closed, `AGENTS.md` §2.9).
+#[must_use]
+pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
+    for node in fdt.nodes() {
+        // A malformed token ends enumeration; a GIC found before it still
+        // counts, otherwise we fail closed.
+        let Ok(node) = node else { break };
+        let Some(compatible) = node.property("compatible") else {
+            continue;
+        };
+        let Some(matched) = compatible.iter_strings().find(|s| is_gic_compatible(s)) else {
+            continue;
+        };
+        let Some(reg) = node.property("reg") else {
+            continue;
+        };
+        let (Ok(distributor), Ok(cpu_iface)) = (reg.read_be_u64(0), reg.read_be_u64(16)) else {
+            continue;
+        };
+        return Some(DiscoveredGic {
+            compatible: matched,
+            gicd_base: distributor,
+            gicc_base: cpu_iface,
+        });
+    }
+    None
+}
+
+/// Discover the GIC in `fdt` and point the driver at it.
+///
+/// Returns the [`DiscoveredGic`] that was applied, or `None` (leaving the
+/// previous configuration untouched) when the tree carries no recognised
+/// GIC or a base does not fit a `usize`.
+#[must_use]
+pub fn configure_from_fdt<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
+    let found = find_gic(fdt)?;
+    // A device MMIO base always fits a `usize` on the 64-bit targets this
+    // port serves; `try_from` keeps the conversion honest — fail closed
+    // rather than truncate (`AGENTS.md` §2.9).
+    let distributor = usize::try_from(found.gicd_base).ok()?;
+    let cpu_iface = usize::try_from(found.gicc_base).ok()?;
+    configure(distributor, cpu_iface);
+    Some(found)
+}
 
 /// `GICD_CTLR` — distributor control (offset 0x000). Bit 0 enables
 /// forwarding of pending interrupts to the CPU interfaces.
@@ -300,10 +442,14 @@ impl<M: GicMmio + Send + Sync> rustos_arch_api::InterruptEntry for GicController
     }
 }
 
-/// Bare-metal [`GicMmio`] over the fixed `virt`-board GICv2 windows.
+/// Bare-metal [`GicMmio`] over the **discovered** GICv2 windows.
 ///
-/// Compiled only for the freestanding aarch64 target; host builds use
-/// the in-memory mock in the test module.
+/// A zero-sized handle: each access reads the distributor / CPU-interface
+/// base [`current`] holds at that moment (an atomic load), so the driver
+/// always targets the discovered base and the handle stays
+/// const-constructible (it can live in a `static`, the way the IRQ-table
+/// bridge does). Compiled only for the freestanding aarch64 target; host
+/// builds use the in-memory mock in the test module.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct VolatileGicMmio;
 
@@ -311,36 +457,36 @@ pub struct VolatileGicMmio;
 impl GicMmio for VolatileGicMmio {
     fn gicd_read(&self, off: usize) -> u32 {
         // SAFETY: `off` addresses a distributor register within the
-        // fixed `virt`-board GICv2 MMIO window.
-        unsafe { core::ptr::read_volatile((GICD_BASE + off) as *const u32) }
+        // discovered GICv2 MMIO window the kernel owns.
+        unsafe { core::ptr::read_volatile((current().0 + off) as *const u32) }
     }
     fn gicd_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicd_read`, but a 32-bit store.
-        unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u32, val) }
+        unsafe { core::ptr::write_volatile((current().0 + off) as *mut u32, val) }
     }
     fn gicd_write_byte(&self, off: usize, val: u8) {
         // SAFETY: the byte-addressable priority register for the INTID
         // inside the distributor window; QEMU honours the byte store.
-        unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u8, val) }
+        unsafe { core::ptr::write_volatile((current().0 + off) as *mut u8, val) }
     }
     fn gicc_read(&self, off: usize) -> u32 {
         // SAFETY: `off` addresses a CPU-interface register within the
-        // fixed `virt`-board GICv2 MMIO window.
-        unsafe { core::ptr::read_volatile((GICC_BASE + off) as *const u32) }
+        // discovered GICv2 MMIO window the kernel owns.
+        unsafe { core::ptr::read_volatile((current().1 + off) as *const u32) }
     }
     fn gicc_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicc_read`, but a 32-bit store.
-        unsafe { core::ptr::write_volatile((GICC_BASE + off) as *mut u32, val) }
+        unsafe { core::ptr::write_volatile((current().1 + off) as *mut u32, val) }
     }
 }
 
-/// Construct the production driver over the fixed `virt`-board windows.
+/// Construct the production driver over the discovered GICv2 windows.
 ///
 /// # Safety
 ///
-/// The GICv2 distributor + CPU interface must be mapped at the fixed
-/// `virt`-board bases ([`GICD_BASE`] / [`GICC_BASE`]), identity-mapped
-/// and exclusively owned by the kernel.
+/// The GICv2 distributor + CPU interface must be mapped at the
+/// discovered bases ([`current`]), identity-mapped and exclusively owned
+/// by the kernel.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const unsafe fn volatile_gic() -> Gicv2<VolatileGicMmio> {
     Gicv2::new(VolatileGicMmio)
@@ -578,5 +724,73 @@ mod tests {
         assert_eq!(dyn_ctrl.mask(42), Ok(()));
         let dyn_entry: &dyn InterruptEntry = &c;
         assert_eq!(dyn_entry.claim(), None);
+    }
+
+    #[test]
+    fn gic_compatible_matches_gicv2_class_controllers() {
+        // The QEMU `virt` board and the Pi 4's GIC-400 are both GICv2.
+        assert!(is_gic_compatible(b"arm,cortex-a15-gic"));
+        assert!(is_gic_compatible(b"arm,gic-400"));
+        // A GICv3 redistributor layout is *not* this driver's; fail closed.
+        assert!(!is_gic_compatible(b"arm,gic-v3"));
+        assert!(!is_gic_compatible(b""));
+    }
+
+    #[test]
+    fn finds_gic_400_bases_in_a_raspi_tree() {
+        // The Pi-shaped fixture carries a GIC-400 at the BCM2711 bases.
+        let blob = rustos_fdt::fixture::raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let gic = find_gic(&fdt).expect("a GIC is present");
+        assert_eq!(gic.gicd_base, 0xff84_1000);
+        assert_eq!(gic.gicc_base, 0xff84_2000);
+    }
+
+    #[test]
+    fn finds_gicv2_bases_in_a_virt_tree() {
+        // The `virt`-shaped fixture carries the GICv2 at the default bases.
+        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let gic = find_gic(&fdt).expect("a GIC is present");
+        assert_eq!(usize::try_from(gic.gicd_base).unwrap(), DEFAULT_GICD_BASE);
+        assert_eq!(usize::try_from(gic.gicc_base).unwrap(), DEFAULT_GICC_BASE);
+    }
+
+    #[test]
+    fn no_gic_in_a_gicless_tree_is_none() {
+        // A tree with only the two console UARTs (no `intc` node) yields
+        // no GIC — the boot path then keeps the fail-safe default.
+        let mut b = rustos_fdt::fixture::DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("serial@9000000");
+        b.prop_str("compatible", "arm,pl011");
+        let mut reg = std::vec::Vec::new();
+        reg.extend_from_slice(&0x0900_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0x1000u64.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(find_gic(&fdt), None);
+    }
+
+    #[test]
+    fn configure_from_fdt_applies_the_discovered_bases() {
+        // Drive the global config through a Pi-shaped FDT and read it
+        // back. This test owns the global GIC base slot for its duration;
+        // the other tests here either exercise pure helpers (`find_gic`)
+        // or the mock MMIO, so there is no cross-test interference.
+        let blob = rustos_fdt::fixture::raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let applied = configure_from_fdt(&fdt).expect("GIC discovered");
+        assert_eq!(applied.gicd_base, 0xff84_1000);
+        assert_eq!(current(), (0xff84_1000, 0xff84_2000));
+
+        // Restore the default so the process-global slot is left as other
+        // code expects (defence-in-depth; nothing else reads it on host).
+        configure(DEFAULT_GICD_BASE, DEFAULT_GICC_BASE);
     }
 }

@@ -191,7 +191,8 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
 
 /// A Raspberry-Pi-shaped aarch64 tree carrying the two console UARTs the
 /// Pi exposes — a PrimeCell PL011 (`arm,pl011`) and a BCM2835 AUX
-/// mini-UART (`brcm,bcm2835-aux-uart`) — plus a `/psci` (`smc`) node and a
+/// mini-UART (`brcm,bcm2835-aux-uart`) — a GIC-400 interrupt controller
+/// (`arm,gic-400`) at the BCM2711 bases, plus a `/psci` (`smc`) node and a
 /// 1 GiB `/memory@0` node.
 ///
 /// `pl011_base` and `miniuart_base` are the ARM *physical* MMIO bases the
@@ -219,6 +220,16 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
         reg.extend_from_slice(&size.to_be_bytes());
         reg
     };
+
+    // GIC-400 (a GICv2) at the fixed BCM2711 bases: distributor
+    // `0xFF84_1000`, CPU interface `0xFF84_2000`. Two `reg` regions, the
+    // layout the aarch64 GIC discovery reads.
+    b.begin_node("interrupt-controller@40041000");
+    b.prop_str("compatible", "arm,gic-400");
+    let mut gic_reg = reg_pair(0xff84_1000, 0x1000);
+    gic_reg.extend_from_slice(&reg_pair(0xff84_2000, 0x2000));
+    b.prop("reg", &gic_reg);
+    b.end_node();
 
     if pl011_base != 0 {
         b.begin_node(&alloc::format!("serial@{pl011_base:x}"));
@@ -254,6 +265,19 @@ pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) ->
     b.begin_node("psci");
     b.prop_str("compatible", "arm,psci-1.0");
     b.prop_str("method", psci_method);
+    b.end_node();
+
+    // GICv2 interrupt controller (`intc@8000000` on the real `virt`
+    // board): distributor `0x0800_0000`, CPU interface `0x0801_0000`,
+    // each a 0x10000 window. Two `reg` regions, the layout the aarch64
+    // GIC discovery reads.
+    b.begin_node("intc@8000000");
+    b.prop_str("compatible", "arm,cortex-a15-gic");
+    let mut gic_reg = Vec::new();
+    for cell in [0x0800_0000u64, 0x1_0000, 0x0801_0000, 0x1_0000] {
+        gic_reg.extend_from_slice(&cell.to_be_bytes());
+    }
+    b.prop("reg", &gic_reg);
     b.end_node();
 
     b.begin_node("timer");

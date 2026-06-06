@@ -45,6 +45,19 @@
 //! below. The runtime FDT-discovery path itself is exercised by W1's
 //! tests, not re-proved here.
 //!
+//! ## GICv2 base discovery (PI Stage P3)
+//!
+//! Before `gic::init`, the boot core **poisons** the runtime GICv2 base
+//! and then reads the GICD/GICC bases from the canonical `virt` device
+//! tree embedded at build time (`gic::configure_from_fdt`), asserting the
+//! base moved off the poison value to the `virt` GICv2 distributor base.
+//! Every subsequent GIC access on both cores — `gic::init`, the directed
+//! SGI, and the CPU interface the secondary brings up — targets that
+//! discovered base, so the IPI this test delivers is the runtime proof
+//! the discovered base works (`plans/PI.md` P3). The board tree is
+//! embedded, not read from `x0`, for the same reason as the PSCI conduit
+//! above: QEMU's ELF `-kernel` boot hands no DTB pointer.
+//!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-aarch64` port (the SMP path needs no
@@ -69,7 +82,13 @@ mod kernel {
         SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
+    use rustos_fdt::Fdt;
     use rustos_log::{log, Event, EventId, Level};
+
+    // The canonical QEMU `virt` device tree, dumped and embedded at build
+    // time (`build.rs`): the GICv2 bases are read from it (P3), proving
+    // the IPI is delivered over a *discovered* base, not a constant.
+    include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// `u32` sentinel for "no IPI callback has fired yet".
     const NO_CPU: u32 = u32::MAX;
@@ -103,6 +122,15 @@ mod kernel {
     const FAIL_WRONG_CPU: u16 = 2;
     /// Failure finisher code: `CNTFRQ_EL0` reported a zero frequency.
     const FAIL_ZERO_FREQ: u16 = 3;
+    /// Failure finisher code: the GICv2 bases were not discovered from the
+    /// embedded `virt` device tree (P3).
+    const FAIL_GIC_NOT_DISCOVERED: u16 = 4;
+
+    /// A deliberately-wrong GICv2 distributor/CPU-interface base installed
+    /// before discovery runs. It is **not** the `virt` GICv2 base, so a
+    /// later successful IPI delivery can only mean discovery overwrote it
+    /// with the base read from the device tree.
+    const POISON_GIC_BASE: usize = 0xdead_0000;
 
     /// Set to `1` by the secondary core once its vector table, GICv2
     /// interface, and IPI SGI enable are in place.
@@ -189,6 +217,23 @@ mod kernel {
         let arch =
             Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR])
                 .with_psci_method(VIRT_PSCI_METHOD);
+
+        // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
+        // the runtime base, then read the GICD/GICC bases from the
+        // embedded `virt` device tree. Every later GIC access on both
+        // cores (`gic::init`, the directed SGI, the CPU interface the
+        // secondary brings up) goes through this discovered base, so a
+        // delivered IPI is the runtime proof the discovered base works.
+        gic::configure(POISON_GIC_BASE, POISON_GIC_BASE);
+        let discovered = match Fdt::new(DTB_BLOB) {
+            Ok(fdt) => gic::configure_from_fdt(&fdt),
+            Err(_) => None,
+        };
+        // The base must have moved off the poison value to the `virt`
+        // GICv2 distributor base read from the tree.
+        if discovered.is_none() || gic::current().0 != gic::DEFAULT_GICD_BASE {
+            qemu_exit::exit_failure(FAIL_GIC_NOT_DISCOVERED);
+        }
 
         // Bring up the boot core's GICv2 distributor so the directed SGI
         // it later raises is forwarded to the CPU interfaces.

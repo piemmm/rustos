@@ -97,8 +97,11 @@ board uses `0x4000_0000`). The four SKUs and the high-memory window:
 
 The SoC's 35-bit address space aliases the peripheral and high-RAM windows;
 the firmware DTB's `/memory` node(s) report the SKU's actual extents, which
-`FdtDiscovery::first_memory_region` reads and feeds to `kernel/mem` (P3) — the
-allocator must not assume the `virt` `0x4000_0000` base.
+`FdtDiscovery::first_memory_region` reads — the allocator must not assume the
+`virt` `0x4000_0000` base. Since **P3** the boot path reads that window from
+the DTB (`boot_aarch64` logs whether it was found); the live allocator +
+scheduler hand-off over the discovered map is P4/P6 (a hard-coded map would
+violate `AGENTS.md` §18.5).
 
 ### Production kernel image (P1)
 
@@ -128,10 +131,13 @@ Since P2 the console base is **device-tree-discovered**: `kernel_main`
 calls `rustos_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
 before its first log line, so the console points at whatever UART the
 firmware tree describes (see [Board-discovered console](#board-discovered-console)).
-The discovery-fed `kernel_core::kernel_main` hand-off (a real
-`BootMemoryMap` + IRQ routing) is staged to P3: only the GIC-400 wiring
-and the Pi RAM map can honestly supply it (a hard-coded map would violate
-`AGENTS.md` §18.5).
+Since **P3** it also points the GICv2 driver at the discovered GICD/GICC
+bases (`gic::configure_from_fdt`) and reads the `/memory` window, logging
+`gic_discovered` / `ram_discovered` (see
+[Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
+The discovery-fed `kernel_core::kernel_main` hand-off (the live
+`BootMemoryMap` + scheduler over that map) is staged to P4/P6: a
+hard-coded map would violate `AGENTS.md` §18.5.
 
 ## Arch HAL boundary
 
@@ -209,6 +215,34 @@ genuine firmware tree; the Pi's specific console base and the mini-UART
 register layout are covered by host unit tests against the `rustos_fdt`
 `raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
 peripheral stages.
+
+## Board-discovered interrupt controller
+
+The GICv2 distributor (`GICD`) and CPU-interface (`GICC`) MMIO bases are
+**discovered from the firmware device tree**, not hard-wired (`plans/PI.md`
+P3). The host-testable `gic` module holds the active `(gicd, gicc)` pair as
+an atomic (the pre-discovery default is the `virt` GICv2 base
+`0x0800_0000` / `0x0801_0000`), and the freestanding `VolatileGicMmio`
+accessor reads it on every register access — so a single GICv2 driver
+drives both the `virt` board and the Pi 4's **GIC-400** (`arm,gic-400`,
+`0xFF84_1000` / `0xFF84_2000`) with no `cfg(board)` fork. GIC-400 *is* a
+GICv2, so only the bases move (`AGENTS.md` §2.2). `gic::find_gic` /
+`configure_from_fdt` walk the shared `lib/fdt` reader for the first node
+whose `compatible` names a GICv2-class controller and read its `reg`
+(region 0 = distributor, region 1 = CPU interface); an unrecognised or
+absent controller leaves the fail-safe default in place (`AGENTS.md`
+§2.9). `platform::FdtDiscovery` emits an `InterruptController` `HwNode`
+carrying the discovered `compatible` bind key and both register windows as
+capability-gated MMIO resources.
+
+The runtime walk is MMU-off-safe for the same byte-wise reason as the
+console (`plans/PI.md` W17), and is CI-proven on `virt`: the
+`rustos-test-ipi-smp-qemu-aarch64` vertical **poisons** the GIC base, then
+discovers it from the embedded `virt` tree before `gic::init`, so the
+delivered IPI exercises the *discovered* base. The Pi 4's specific GIC-400
+bases are covered by host unit tests against the `raspi_like_arm` fixture
+and are an on-metal acceptance item (no `raspi4b` in QEMU — the same gap
+as the console).
 
 ## Result protocol
 
@@ -296,11 +330,14 @@ through the semihosting finisher. They are enrolled in
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
 - `rustos-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
-  (Stage W6): the boot core starts core 1 through `smp::start_secondary`
-  (PSCI `CPU_ON`), waits for it to bring up its GICv2 interface and
-  enable the IPI SGI, then delivers a directed IPI through
-  `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ path runs
-  the IPI callback with core 1's id. Runs with `--cpus 2`.
+  (Stage W6) **over a discovered GIC base** (PI Stage P3): the boot core
+  first poisons the GICv2 base and rediscovers it from the embedded
+  `virt` device tree (`gic::configure_from_fdt`), then starts core 1
+  through `smp::start_secondary` (PSCI `CPU_ON`), waits for it to bring up
+  its GICv2 interface and enable the IPI SGI, then delivers a directed IPI
+  through `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ
+  path runs the IPI callback with core 1's id — so the IPI is delivered
+  over the *discovered* base. Runs with `--cpus 2`.
 - `rustos-test-sched-drive-qemu-aarch64` — **the arch primitives drive
   the live scheduler** (Stage W7): the EL1/GICv2 analogue of
   `rustos-test-sched-drive-qemu-riscv64`. With interrupts off it performs
@@ -361,11 +398,14 @@ queries on it: the first `/memory` region, the `/psci` `method`
 and the generic-timer per-CPU interrupt (PPI) number from
 `/timer`. `FdtDiscovery` emits a root node, a `Memory` node carrying the
 RAM window, a `Timer` node carrying its PPI as a capability-gated
-(`CAP_IRQ_BIND`) IRQ resource, and (PI Stage P2) a `Serial` node carrying
-the discovered console UART's `compatible` bind key and its `reg` as an
-MMIO resource. The reader is host-tested against the shared DTB fixtures
-(including the `raspi_like_arm` Pi-shaped tree) and exercised by the
-port's `passes_arch_hal_conformance_suite`.
+(`CAP_IRQ_BIND`) IRQ resource, (PI Stage P3) an `InterruptController`
+node carrying the GICv2's `compatible` bind key and its GICD/GICC
+register windows as MMIO resources, and (PI Stage P2) a `Serial` node
+carrying the discovered console UART's `compatible` bind key and its
+`reg` as an MMIO resource. The reader is host-tested against the shared
+DTB fixtures (including the `raspi_like_arm` Pi-shaped tree, which now
+carries a GIC-400 node) and exercised by the port's
+`passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 
@@ -393,6 +433,10 @@ acknowledge (`IAR`), end-of-interrupt (`EOIR`), and SGI raise — and the
 freestanding `init`/`enable_ppi`/`acknowledge`/`end_of_interrupt`/
 `send_sgi` free functions are now thin wrappers over a
 `Gicv2<VolatileGicMmio>`, so there is no duplicate register logic.
+`VolatileGicMmio` reads the **discovered** GICD/GICC bases
+(`gic::current`) on every access, so the same driver serves the `virt`
+GICv2 and the Pi 4's GIC-400 (see
+[Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
 `IrqController::mask` / `unmask` clear / set the distributor enable bit
 (mask pairs the write with a `SeqCst` fence for mask-before-wake) and
 reject an INTID above `MAX_INTID` with `IrqControlError::OutOfRange`;

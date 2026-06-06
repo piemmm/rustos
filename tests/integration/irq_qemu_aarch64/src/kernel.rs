@@ -158,9 +158,10 @@ fn rtc_clear() {
 /// is unmasked). Reads `GICD_ISENABLER` directly — the evidence path for
 /// the mask-before-wake assertion.
 fn gic_line_enabled(intid: u32) -> bool {
-    let off = gic::GICD_BASE + gic::isenabler_offset(intid);
-    // SAFETY: `off` is a distributor register within the fixed
-    // `virt`-board GICv2 window; a 32-bit read has no side effects.
+    let off = gic::current().0 + gic::isenabler_offset(intid);
+    // SAFETY: `off` is a distributor register within the discovered
+    // GICv2 distributor window (the `virt` default here); a 32-bit read
+    // has no side effects.
     let word = unsafe { core::ptr::read_volatile(off as *const u32) };
     word & gic::isenabler_bit(intid) != 0
 }

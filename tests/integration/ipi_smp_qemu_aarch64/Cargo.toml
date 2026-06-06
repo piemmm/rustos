@@ -32,6 +32,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

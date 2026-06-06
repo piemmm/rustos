@@ -18,12 +18,22 @@
 //! fail-closed (`AGENTS.md` §2.9 — never silently reset).
 //!
 //! The discovery-fed hand-off to [`rustos_kernel_core::kernel_main`] is
-//! **staged**, not stubbed: it requires a real `BootMemoryMap` and IRQ
-//! routing, which only the device-tree discovery and GIC-400 wiring of
-//! `plans/PI.md` P2/P3 can honestly supply (fabricating a hardware map
-//! would violate `AGENTS.md` §18.5). Those stages add the QEMU verticals
-//! that *prove* the runtime path; the GIC-400 bases + memory map land in
-//! P3.
+//! **staged**, not stubbed: bringing up the live allocator + scheduler
+//! over the discovered map is `plans/PI.md` P4/P6 (fabricating a hardware
+//! map would violate `AGENTS.md` §18.5). Those stages add the QEMU
+//! verticals that *prove* the runtime path.
+//!
+//! # P3: board-discovered interrupt controller + RAM window
+//!
+//! [`boot`] also points the GICv2 driver at the distributor / CPU-
+//! interface bases the firmware tree describes
+//! ([`rustos_arch_aarch64::gic::configure_from_fdt`]) — the QEMU `virt`
+//! GICv2 or the Pi 4's GIC-400 — and reads the `/memory` window
+//! (`first_memory_region`), so neither the interrupt-controller base nor
+//! the RAM base is the `virt` assumption any longer. The byte-wise FDT
+//! reader makes both walks MMU-off-safe (`plans/PI.md` W17); a missing or
+//! malformed tree leaves the fail-safe `virt` defaults in place
+//! (`AGENTS.md` §2.9).
 //!
 //! # P2: board-discovered console
 //!
@@ -38,7 +48,7 @@
 //! `virt` default in place (`AGENTS.md` §2.9 — fail closed).
 
 use rustos_arch_aarch64::kernel_arch::read_cntfrq;
-use rustos_arch_aarch64::{console, enable_fp_el1, halt_current_cpu, Aarch64Arch};
+use rustos_arch_aarch64::{console, enable_fp_el1, gic, halt_current_cpu, Aarch64Arch};
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -69,9 +79,9 @@ const fn yes_no(value: bool) -> &'static str {
 /// Boot the aarch64 kernel on the boot CPU and park.
 ///
 /// `dtb` is the device-tree pointer the firmware/loader handed the boot
-/// CPU (preserved verbatim by `boot.s`). P1 records whether it is
-/// present; P2/P3 parse it through `FdtDiscovery` for the console base,
-/// the GIC-400 bases, and the memory map.
+/// CPU (preserved verbatim by `boot.s`). P2/P3 parse it for the console
+/// base, the GICv2/GIC-400 bases, and the `/memory` window; the live
+/// allocator + scheduler hand-off over that map is P4/P6.
 ///
 /// `log_sink` is the `&'static` console sink the binary installs (the
 /// port's PL011-backed [`rustos_arch_aarch64::SERIAL_SINK`] in
@@ -94,12 +104,14 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
         enable_fp_el1();
     }
 
-    // Point the console at the UART the firmware device tree describes,
-    // before any log line is emitted (P2). The FDT reader is byte-wise, so
-    // this is safe with the MMU still off (`plans/PI.md` W17). A null,
-    // unreadable, or console-less tree leaves the `virt` PL011 default in
-    // place (fail closed, `AGENTS.md` §2.9).
-    let console_discovered = configure_console(dtb);
+    // Discover the board from the firmware device tree before any log
+    // line is emitted: point the console at the UART, the GICv2 driver at
+    // the discovered GICD/GICC bases, and read the `/memory` window (P2 +
+    // P3). The FDT reader is byte-wise, so every walk is safe with the MMU
+    // still off (`plans/PI.md` W17). A null, unreadable, or incomplete
+    // tree leaves the `virt` defaults in place (fail closed,
+    // `AGENTS.md` §2.9).
+    let discovered = configure_from_dtb(dtb);
 
     // Construct the architecture handle — the single §17.1/§17.2
     // concrete-arch selection point for the kernel image. The counter
@@ -142,11 +154,19 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                 },
                 Field {
                     key: "console_discovered",
-                    value: yes_no(console_discovered),
+                    value: yes_no(discovered.console),
+                },
+                Field {
+                    key: "gic_discovered",
+                    value: yes_no(discovered.gic),
+                },
+                Field {
+                    key: "ram_discovered",
+                    value: yes_no(discovered.ram),
                 },
                 Field {
                     key: "next_stage",
-                    value: "pi_p3_gic_and_memory_map",
+                    value: "pi_p4_timer_and_scheduler",
                 },
             ],
         },
@@ -155,15 +175,33 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
     halt_current_cpu()
 }
 
-/// Point the console at the UART described by the device tree at `dtb`,
-/// returning whether a recognised console was discovered.
+/// What the boot path resolved from the firmware device tree.
+struct Discovered {
+    /// A recognised console UART was found and the console base/model set.
+    console: bool,
+    /// A GICv2-class interrupt controller was found and its GICD/GICC
+    /// bases set.
+    gic: bool,
+    /// A `/memory` region was found (the RAM base/size the P4/P6 allocator
+    /// hand-off will consume).
+    ram: bool,
+}
+
+/// Discover the board from the device tree at `dtb`: point the console
+/// and the GICv2 driver at their discovered bases and read the `/memory`
+/// window. Each field reports whether that fact was found.
 ///
-/// A null pointer, an unreadable/invalid blob, or a tree carrying no
-/// recognised console all leave the pre-discovery `virt` PL011 default
-/// untouched (fail closed, `AGENTS.md` §2.9).
-fn configure_console(dtb: u64) -> bool {
+/// A null pointer, an unreadable/invalid blob, or a tree missing a fact
+/// leaves the corresponding pre-discovery `virt` default untouched (fail
+/// closed, `AGENTS.md` §2.9).
+fn configure_from_dtb(dtb: u64) -> Discovered {
+    let mut out = Discovered {
+        console: false,
+        gic: false,
+        ram: false,
+    };
     if dtb == 0 {
-        return false;
+        return out;
     }
     // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
     // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
@@ -172,7 +210,10 @@ fn configure_console(dtb: u64) -> bool {
     // bogus pointer fails the magic check and returns `Err` rather than
     // faulting on structured data.
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
-        return false;
+        return out;
     };
-    console::configure_from_fdt(&fdt).is_some()
+    out.console = console::configure_from_fdt(&fdt).is_some();
+    out.gic = gic::configure_from_fdt(&fdt).is_some();
+    out.ram = fdt.first_memory_region().is_some();
+    out
 }

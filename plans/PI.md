@@ -243,7 +243,7 @@ covered by the host unit tests against the `raspi_like_arm` fixture, and
 printing on real Pi PL011 silicon is an on-metal acceptance item for the
 Arc C peripheral stages (where the real firmware populates `x0`).
 
-### P3 — GIC-400 from the tree + Pi RAM map `[ ]`
+### P3 — GIC-400 from the tree + Pi RAM map `[x]`
 
 - The GICv2 driver register layout already matches GIC-400; thread the
   GICD/GICC bases from `FdtDiscovery` instead of the `virt` constants
@@ -257,6 +257,32 @@ Arc C peripheral stages (where the real firmware populates `x0`).
 (or a new `-M raspi4b` analogue) run over **discovered** GIC bases and
 Pi RAM, GICv2 IRQs + SGIs deliver, and `cargo xtask cfg-check` confirms no
 board constants leaked outside the arch crate.
+
+**Landed.** The fixed `gic::{GICD_BASE,GICC_BASE}` constants are gone:
+`gic` now holds the active `(gicd, gicc)` pair as an atomic (default = the
+`virt` GICv2 `0x0800_0000`/`0x0801_0000`) that the freestanding
+`VolatileGicMmio` reads on every access, with `gic::find_gic` /
+`configure_from_fdt` over `lib/fdt` selecting the first GICv2-class
+controller (`arm,gic-400`, `arm,cortex-a15-gic`, …) and reading its two
+`reg` regions. `platform::FdtDiscovery` emits an `InterruptController`
+`HwNode` carrying the discovered `compatible` bind key + both register
+windows (`HwDeviceClass::InterruptController` already existed — no ABI
+change). The `lib/fdt` `virt_like_arm` / `raspi_like_arm` fixtures grew a
+GIC node (virt `arm,cortex-a15-gic`; Pi `arm,gic-400` @ `0xFF84_1000`/
+`0xFF84_2000`); host tests cover the GIC discovery, the `HwNode`, and the
+fail-closed no-GIC path. `boot_aarch64` parses the `x0` DTB once and
+points the console **and** the GIC driver at their discovered bases and
+reads the `/memory` window, logging `gic_discovered` / `ram_discovered`
+(the live allocator + `kernel_core::kernel_main` hand-off over that map is
+deliberately staged to P4/P6 — a hard-coded map would violate §18.5).
+**Runtime proof on `-M virt`:** the `ipi_smp_qemu_aarch64` vertical now
+**poisons** the GIC base, rediscovers it from the embedded `virt` DTB
+before `gic::init`, and asserts it moved to the `virt` GICv2 base, so the
+delivered IPI exercises the *discovered* base (`irq_qemu_aarch64` likewise
+reads `gic::current()`); both PASS. `cargo xtask cfg-check` stays clean
+(no board constant leaked outside the arch crate). The Pi's specific
+GIC-400 bases are host-unit-tested + an on-metal item (no `raspi4b` in
+QEMU — the same gap as P2).
 
 ### P4 — Generic timer + live scheduler on the Pi `[ ]`
 

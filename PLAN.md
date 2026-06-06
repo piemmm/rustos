@@ -1595,6 +1595,35 @@ Each sub-stage delivers one architecture. They share the same checklist:
               Pi's specific base / mini-UART layout are host-unit-tested
               against the fixture and are on-metal acceptance items for the
               Arc C peripheral stages.
+        - [x] **P3 — GIC-400 from the tree + Pi RAM map.** The fixed
+              `gic::{GICD_BASE,GICC_BASE}` constants are gone: `gic` holds
+              the active `(gicd, gicc)` pair as an atomic (default = the
+              `virt` GICv2 `0x0800_0000`/`0x0801_0000`) that the
+              freestanding `VolatileGicMmio` reads on every access, plus
+              `find_gic` / `configure_from_fdt` over `lib/fdt` selecting
+              the first GICv2-class controller (`arm,gic-400`,
+              `arm,cortex-a15-gic`, …) and reading its two `reg` regions.
+              `platform::FdtDiscovery` emits an `InterruptController`
+              `HwNode` (compatible bind key + GICD/GICC MMIO windows;
+              `HwDeviceClass::InterruptController` already existed — no ABI
+              change). The `lib/fdt` `virt_like_arm` / `raspi_like_arm`
+              fixtures grew a GIC node (virt `arm,cortex-a15-gic`; Pi
+              `arm,gic-400` @ `0xFF84_1000`/`0xFF84_2000`); host tests
+              cover the discovery, the `HwNode`, and the fail-closed
+              no-GIC path. `boot_aarch64` parses the `x0` DTB once and
+              points the console **and** the GIC driver at their
+              discovered bases and reads the `/memory` window (logging
+              `gic_discovered` / `ram_discovered`); the live allocator +
+              `kernel_core::kernel_main` hand-off over that map is staged
+              to P4/P6 (a hard-coded map would violate §18.5). The
+              `ipi_smp_qemu_aarch64` vertical now **poisons** the GIC base,
+              rediscovers it from the embedded `virt` DTB before
+              `gic::init`, and asserts it moved to the `virt` GICv2 base,
+              so the delivered IPI runs over the *discovered* base
+              (`irq_qemu_aarch64` likewise reads `gic::current()`); both
+              **verified green under QEMU on this host**, and `cargo xtask
+              cfg-check` stays clean. The Pi's specific GIC-400 bases are
+              host-unit-tested + an on-metal item (no `raspi4b` in QEMU).
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
