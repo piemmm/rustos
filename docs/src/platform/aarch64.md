@@ -100,6 +100,38 @@ the firmware DTB's `/memory` node(s) report the SKU's actual extents, which
 `FdtDiscovery::first_memory_region` reads and feeds to `kernel/mem` (P3) — the
 allocator must not assume the `virt` `0x4000_0000` base.
 
+### Production kernel image (P1)
+
+The production aarch64 kernel is the `rustos-kernel` binary built for
+`aarch64-unknown-none`. Its boot artefacts are the one legitimate per-board
+fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
+
+- **Linker script** `kernel/arch/aarch64/link/aarch64-rpi4.ld` places the
+  image at the firmware load address `0x8_0000`. It is identical to
+  `aarch64-virt.ld` (used by the QEMU `virt` per-test bins) save for the
+  origin address. `kernel/rustos-kernel/build.rs` selects it for the
+  `aarch64-unknown-none` target; the pure target→linker/`kernel_isa`
+  selection logic lives in the host-unit-tested `src/build_support.rs`, so
+  the crate body never names `target_arch` (cfg-check clean).
+- **Boot stub** `boot.s` is board-independent. Before touching the shared
+  boot stack it parks every CPU whose `MPIDR_EL1` affinity is non-zero in a
+  `wfe` loop — correct on the Pi (all four cores released at reset) and a
+  no-op on `virt` (secondaries held in firmware until PSCI). The boot CPU
+  drops EL2→EL1 (if entered at EL2, as the Pi firmware does) and tail-calls
+  `kernel_main(dtb)`.
+- **`kernel_main(dtb)`** enables FP/SIMD via `rustos_arch_aarch64::enable_fp_el1`,
+  constructs `Aarch64Arch` (the single `AGENTS.md` §17.1/§17.2 concrete-arch
+  selection point for the image), records a boot audit line over the
+  console, and parks fail-closed.
+
+At P1 the console still uses the port's PL011 base (P2 makes it
+device-tree-discovered) and the discovery-fed `kernel_core::kernel_main`
+hand-off is deliberately staged to P2/P3: it needs a real `BootMemoryMap`
+and IRQ routing, which only device-tree discovery and the GIC-400 wiring
+can honestly supply (a hard-coded map would violate `AGENTS.md` §18.5). The
+`-M raspi4b` runtime vertical that proves the boot path lands in P2, once
+the console base is discovered.
+
 ## Arch HAL boundary
 
 Like x86_64 and riscv64, `kernel/arch/aarch64` is a pure Arch HAL

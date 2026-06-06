@@ -28,7 +28,7 @@ use rustos_arch_aarch64::gic::{
     self, GicController, Gicv2, VolatileGicMmio, MAX_INTID, MIN_SPI_INTID,
 };
 use rustos_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use rustos_arch_aarch64::{exceptions, qemu_exit, SERIAL_SINK};
+use rustos_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
 use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
@@ -212,20 +212,10 @@ pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
     // Enable FP/SIMD at EL1 before anything else: the compiler emits NEON
     // register moves for struct copies, which would otherwise trap (ESR
     // EC 0x07).
-    // SAFETY: `CPACR_EL1` is the EL1 architectural FP/SIMD-trap control;
-    // writing `FPEN = 0b11` is the documented "do not trap" encoding and
-    // touches no memory. The `isb` makes the change effective before the
-    // next FP instruction.
+    // SAFETY: this is the boot CPU, called once, before any FP/SIMD
+    // instruction executes (see `enable_fp_el1`).
     unsafe {
-        let mut cpacr: u64;
-        core::arch::asm!("mrs {}, CPACR_EL1", out(reg) cpacr, options(nomem, nostack));
-        cpacr |= 0b11 << 20;
-        core::arch::asm!(
-            "msr CPACR_EL1, {}",
-            "isb",
-            in(reg) cpacr,
-            options(nomem, nostack, preserves_flags),
-        );
+        enable_fp_el1();
     }
 
     // SAFETY: install the EL1 vectors first so any synchronous abort is

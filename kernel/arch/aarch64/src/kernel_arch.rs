@@ -437,6 +437,48 @@ pub fn read_cntfrq() -> u64 {
     hz
 }
 
+/// Enable Advanced SIMD / floating-point at EL1 (`CPACR_EL1.FPEN = 0b11`,
+/// do-not-trap), followed by an `isb` so the change is in effect before
+/// the next instruction.
+///
+/// The boot trampoline (`boot.s`) leaves FP/SIMD trapping, so any code
+/// the compiler lowers to NEON — a vectorised `memcpy`/`memcmp`, the
+/// `rxe` decoder, the log formatter — would otherwise take an
+/// undefined-instruction synchronous exception (`ESR_EL1.EC = 0x07`)
+/// with no vectors installed and hang the core. Every freestanding
+/// aarch64 kernel calls this once on the boot CPU before running any
+/// code that may use FP. This is the single definition of the enable
+/// sequence (`AGENTS.md` §2.2 — no duplication); the boot consumers and
+/// the QEMU verticals all call it.
+///
+/// # Safety
+///
+/// Must run on the boot CPU once, before any FP/SIMD instruction
+/// executes. It writes one architectural EL1 control register and
+/// grants no cross-privilege authority; it is safe to call from EL1
+/// kernel context and a no-op to call again.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn enable_fp_el1() {
+    // `CPACR_EL1.FPEN` is bits [21:20]; `0b11` means "do not trap FP/SIMD
+    // at EL0 or EL1".
+    const FPEN_NO_TRAP: u64 = 0b11 << 20;
+    // SAFETY: read-modify-write of `CPACR_EL1` (the EL1 FP/SIMD trap
+    // control) followed by `isb`. Per this function's contract it runs
+    // on the boot CPU before any FP instruction; the write only relaxes
+    // a trap and confers no authority.
+    unsafe {
+        core::arch::asm!(
+            "mrs {t}, CPACR_EL1",
+            "orr {t}, {t}, {fpen}",
+            "msr CPACR_EL1, {t}",
+            "isb",
+            t = out(reg) _,
+            fpen = in(reg) FPEN_NO_TRAP,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 /// Park the calling CPU forever on `wfi` with interrupts disabled.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn park() -> ! {

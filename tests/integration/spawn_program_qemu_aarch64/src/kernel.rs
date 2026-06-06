@@ -8,7 +8,8 @@ use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
 use rustos_arch_aarch64::paging;
 use rustos_arch_aarch64::{
-    exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode, SERIAL_SINK,
+    enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, syscall_entry,
+    userentry::UserMode, SERIAL_SINK,
 };
 use rustos_bumpalloc::BumpAllocator;
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
@@ -178,23 +179,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Enable FP/SIMD at EL1 before running any code that may use it: the `rxe`
     // decoder and `build_process_image`'s fills compile to vectorised
-    // (NEON) `memcpy`/`memcmp`, which trap as an undefined instruction
-    // (ESR EC=0x7) unless `CPACR_EL1.FPEN` is set. The boot trampoline leaves
-    // FP trapped, so each freestanding kernel that uses FP enables it itself.
-    // SAFETY: writing `CPACR_EL1.FPEN = 0b11` (do-not-trap) followed by `isb`
-    // is the documented enable sequence; it runs once on the boot CPU before
-    // any FP/SIMD instruction executes and grants no cross-privilege
-    // authority.
+    // (NEON) `memcpy`/`memcmp`, which trap as an undefined instruction unless
+    // `CPACR_EL1.FPEN` is set, which the boot trampoline leaves trapped.
+    // SAFETY: this is the boot CPU, called once, before any FP/SIMD
+    // instruction executes (see `enable_fp_el1`).
     unsafe {
-        core::arch::asm!(
-            "mrs {t}, CPACR_EL1",
-            "orr {t}, {t}, {fpen}",
-            "msr CPACR_EL1, {t}",
-            "isb",
-            t = out(reg) _,
-            fpen = in(reg) 0b11u64 << 20,
-            options(nostack, preserves_flags),
-        );
+        enable_fp_el1();
     }
 
     note(

@@ -18,7 +18,7 @@
 
 // --- Freestanding production bin (`x86_64-unknown-none`) -----------
 
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 mod kernel {
     use core::panic::PanicInfo;
 
@@ -76,11 +76,65 @@ mod kernel {
     }
 }
 
+// --- Freestanding production bin (`aarch64-unknown-none`, Raspberry
+//     Pi 4) -------------------------------------------------------
+//
+// `plans/PI.md` Stage P1. A thin wrapper around
+// [`rustos_kernel::boot_aarch64::boot`]: it supplies the
+// `#[global_allocator]`, the `#[panic_handler]`, and the
+// `extern "C" fn kernel_main(dtb)` symbol the aarch64 boot trampoline
+// (`rustos_arch_aarch64`'s `boot.s` → `entry.rs`) calls, then hands off
+// to the boot pipeline with the port's PL011-backed console sink.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+mod kernel {
+    use core::panic::PanicInfo;
+
+    use rustos_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
+    use rustos_kernel::boot_aarch64;
+    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::BumpAllocator;
+
+    /// Static boot heap for the bump allocator.
+    ///
+    /// `static mut` because the bump allocator hands out disjoint slices
+    /// via an `AtomicUsize` cursor; the storage is otherwise never
+    /// aliased. It lives in `.bss` (zeroed by the boot trampoline). This
+    /// is the boot-heap arena — the one `static mut` the binary needs
+    /// (`AGENTS.md` §2).
+    static mut HEAP: Heap = Heap::ZERO;
+
+    /// Global allocator backed by [`HEAP`].
+    ///
+    /// SAFETY: the allocator is constructed from `HEAP`'s base pointer in
+    /// `const` context; the pointer is page-aligned (`Heap` is
+    /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
+    /// of the binary because `HEAP` is a `static`. The allocator is not
+    /// exposed through any other API, satisfying `BumpAllocator::new`'s
+    /// uniqueness requirement.
+    #[global_allocator]
+    static ALLOCATOR: BumpAllocator =
+        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+
+    /// Forward to the shared aarch64 panic bridge (parks the CPU).
+    #[panic_handler]
+    fn rustos_kernel_panic_aarch64(info: &PanicInfo<'_>) -> ! {
+        handle_panic_via_serial(info)
+    }
+
+    /// The symbol the aarch64 boot trampoline calls (via
+    /// `rustos_arch_aarch64_main`). Hands the verbatim DTB pointer and
+    /// the production PL011 console sink to the boot pipeline.
+    #[no_mangle]
+    pub extern "C" fn kernel_main(dtb: u64) -> ! {
+        boot_aarch64::boot(dtb, &SERIAL_SINK)
+    }
+}
+
 // --- Host stub -----------------------------------------------------
 //
 // On host triples (`cargo build --workspace` / `cargo test`) the
 // crate's binary half has nothing to run: the freestanding kernel
-// builds only for `x86_64-unknown-none`. The host stub keeps the
+// builds only for the bare-metal targets. The host stub keeps the
 // crate compilable on the host so the workspace `cargo build` /
 // `cargo test` invocations the rest of the project does succeed.
 #[cfg(not(freestanding))]

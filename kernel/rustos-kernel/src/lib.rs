@@ -1,21 +1,28 @@
 //! RustOS microkernel binary support library (Stage 3a (c7-bin)).
 //!
-//! This is the library half of the `rustos-kernel` crate. It carries
-//! every piece of the x86_64 boot pipeline that is reusable across the
-//! production binary (`src/main.rs`) and the QEMU integration test
-//! (`tests/integration/kernel_arch_boot`). Pulling the pipeline into a
-//! library is the only way to satisfy `AGENTS.md` §2.2 (no
-//! duplication) without leaking the test-only audit-observer sink into
-//! the production binary through Cargo feature unification.
+//! This is the library half of the `rustos-kernel` crate. It carries the
+//! per-instruction-set boot pipelines that are reusable across the
+//! production binary (`src/main.rs`) and the QEMU integration tests.
+//! Pulling a pipeline into a library is the only way to satisfy
+//! `AGENTS.md` §2.2 (no duplication) without leaking the test-only
+//! audit-observer sink into the production binary through Cargo feature
+//! unification.
+//!
+//! The build script (`build.rs`) selects the pipeline per instruction set
+//! via the `kernel_isa` conditional-compilation name, so the production
+//! kernel image is built for exactly one architecture at a time (the
+//! single `AGENTS.md` §17.1/§17.2 selection point): the x86_64
+//! Multiboot2/ACPI pipeline or the aarch64 (Raspberry Pi 4) boot path.
 //!
 //! # Module map
 //!
 //! | Module          | Role                                                                              |
 //! | --------------- | --------------------------------------------------------------------------------- |
 //! | [`bumpalloc`]   | Forward-only bump allocator + the `GlobalAlloc` impl shared by every bin.         |
-//! | [`arch_wrapper`]| [`BinArch`] — the in-crate `KernelArch` wrapper around `X86_64Arch`.              |
-//! | [`dispatch`]    | Fail-closed syscall-dispatch callback (Stage 2.7 will replace with a real wire-up).|
-//! | `boot`          | The `boot(multiboot_info, log_sink, audit_sink)` entry point (bare-metal only).    |
+//! | `arch_wrapper`  | `BinArch` — the in-crate `KernelArch` wrapper around `X86_64Arch` (x86_64).        |
+//! | `dispatch`      | Fail-closed syscall-dispatch callback (x86_64).                                   |
+//! | `boot`          | x86_64 `boot(multiboot_info, log_sink, audit_sink)` entry point (bare-metal only).|
+//! | `boot_aarch64`  | aarch64 `boot(dtb, log_sink)` entry point (bare-metal only; `plans/PI.md` P1).     |
 //!
 //! # Why this is a library, not a `[[bin]]`
 //!
@@ -36,10 +43,10 @@
 //! # `no_std`
 //!
 //! `no_std` is mandatory: every consumer of this library is a
-//! freestanding `x86_64-unknown-none` binary. `extern crate alloc` is
-//! pulled in because the architecture-neutral
-//! [`rustos_kernel_core::BootInfo`] hand-off type holds an
-//! `Arc<KernelArch>`.
+//! freestanding bare-metal binary (`x86_64-unknown-none` or
+//! `aarch64-unknown-none`). `extern crate alloc` is pulled in because
+//! the architecture-neutral [`rustos_kernel_core::BootInfo`] hand-off
+//! type holds an `Arc<KernelArch>`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -62,22 +69,53 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod arch_wrapper;
+// The boot pipeline is selected per instruction set by the build script
+// (`build.rs` emits the `kernel_isa` name from `CARGO_CFG_TARGET_ARCH`),
+// so the crate body never names `target_arch` inline — that decision
+// lives in the build glue (`AGENTS.md` §17.2; `cargo xtask cfg-check`).
+//
+// The x86_64 pipeline (the Multiboot2/ACPI boot path, the `BinArch`
+// `KernelArch` wrapper over `X86_64Arch`, the IO-APIC controller, the
+// virtio bring-up, the fail-closed syscall-dispatch callback) compiles
+// whenever the target instruction set is x86_64 — the CI host included,
+// so its host unit tests run under `cargo test`.
 pub mod bumpalloc;
+
+#[cfg(kernel_isa = "x86_64")]
+pub mod arch_wrapper;
+#[cfg(kernel_isa = "x86_64")]
 pub mod dispatch;
+#[cfg(kernel_isa = "x86_64")]
 pub mod ioapic_controller;
+#[cfg(kernel_isa = "x86_64")]
 pub mod virtio_boot;
 
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod boot;
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod panic_ctx;
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod serial_sink;
 
-pub use arch_wrapper::BinArch;
+// The aarch64 (Raspberry Pi 4) production boot path (`plans/PI.md` P1).
+// Freestanding-only: it links the aarch64 port's console / FP-enable /
+// park primitives, which exist only on the bare-metal aarch64 target.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub mod boot_aarch64;
+
+// The build script's pure target-selection logic, compiled into the
+// host test build so its rules are unit tested (`AGENTS.md` §7).
+#[cfg(test)]
+#[path = "build_support.rs"]
+mod build_support;
+
 pub use bumpalloc::BumpAllocator;
+
+#[cfg(kernel_isa = "x86_64")]
+pub use arch_wrapper::BinArch;
+#[cfg(kernel_isa = "x86_64")]
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
+#[cfg(kernel_isa = "x86_64")]
 pub use virtio_boot::{provision_and_run, VirtioBootConfig};
 // The architecture-neutral virtio factory and provisioning walks now
 // live in `rustos-kernel-virtio` so every architecture port can reuse
@@ -89,9 +127,9 @@ pub use rustos_kernel_virtio::{
     MAX_SLOTS,
 };
 
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use boot::{boot, BootError};
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use panic_ctx::handle_panic_via_kernel_core;
-#[cfg(freestanding)]
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use serial_sink::{SerialSink, SERIAL_SINK};

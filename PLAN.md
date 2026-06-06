@@ -1539,6 +1539,31 @@ Each sub-stage delivers one architecture. They share the same checklist:
               GICC `0xFF84_2000`), the EL2 `kernel8.img`@`0x8_0000` boot
               protocol + `config.txt` knobs, and the per-SKU RAM layout,
               so P1+ cite one source. `cargo xtask docs-check` green.
+        - [x] **P1 — Pi-4 boot stub + linker script + production aarch64
+              kernel binary.** `kernel/arch/aarch64/link/aarch64-rpi4.ld`
+              (origin `0x8_0000`) joins `aarch64-virt.ld` (the §0.2
+              boot-stub carve-out). `boot.s` parks non-boot CPUs
+              (`MPIDR_EL1` affinity ≠ 0 → `wfe`) before touching the boot
+              stack, serving both `virt` (PSCI-held secondaries) and the
+              Pi (all-core release). `kernel/rustos-kernel/build.rs` now
+              builds a freestanding **aarch64** production kernel: its
+              pure target-selection logic lives in host-unit-tested
+              `src/build_support.rs`, and it emits a build-glue
+              `kernel_isa` cfg + the per-board linker script with no
+              `cfg(target_arch)` in the crate body (cfg-check clean). The
+              x86_64 boot pipeline is gated `kernel_isa="x86_64"`; the new
+              freestanding `boot_aarch64` module + the aarch64
+              `kernel_main(dtb)` construct `Aarch64Arch` (the §17
+              selection point), bring up the console, log a boot line, and
+              park fail-closed. `cargo build -p rustos-kernel --target
+              aarch64-unknown-none` links a freestanding ELF entered at
+              `0x8_0000`. The discovery-fed `kernel_core::kernel_main`
+              hand-off (real memory map / IRQ routing) is staged to P2/P3
+              (fabricating a map would violate §18.5, and its `-M raspi4b`
+              runtime proof needs P2's console discovery). The
+              `CPACR_EL1.FPEN` enable is consolidated into
+              `rustos_arch_aarch64::enable_fp_el1()` (§2.2), adopted by
+              the production binary and the existing aarch64 verticals.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

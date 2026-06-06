@@ -826,6 +826,7 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "rustos-abi",
+ "rustos-arch-aarch64",
  "rustos-arch-api",
  "rustos-arch-x86_64",
  "rustos-bumpalloc",
