@@ -121,7 +121,16 @@ impl CapabilityToken {
         })
     }
 
-    /// Verify the token end-to-end.
+    /// Verify the token end-to-end against the principal it must apply to.
+    ///
+    /// `subject` is the task the verifier is about to apply the token to —
+    /// the calling principal, named by the kernel and never by the caller.
+    /// A token is bound at issue time to exactly one subject (the value is
+    /// inside the signed body), so applying it to any *other* task is a
+    /// replay/token-theft attempt and is refused. Without this check the
+    /// signed `subject` field would be dead state: a token minted for task
+    /// A could be presented by an unrelated task B and accepted
+    /// (`AGENTS.md` §5.4 — identify the caller, fail closed).
     ///
     /// The following checks must all pass; any failure returns the
     /// indicated [`Errno`] without leaking which one specifically (callers
@@ -131,6 +140,9 @@ impl CapabilityToken {
     /// * ABI version matches [`rustos_abi::ABI_VERSION_CURRENT`]
     ///   ⇒ [`Errno::AbiVersionUnsupported`].
     /// * Epoch matches the verifier's current epoch ⇒ [`Errno::NotFound`].
+    /// * Token's `subject` equals `subject` ⇒ [`Errno::NotFound`] (a token
+    ///   issued to another task is, as far as this principal can tell, no
+    ///   token at all).
     /// * Signature over the encoded body verifies against `authority`
     ///   ⇒ [`Errno::SignatureInvalid`].
     /// * Delegated set is a subset of the parent set the verifier is
@@ -140,11 +152,15 @@ impl CapabilityToken {
         authority: &Ed25519PublicKey,
         parent: &CapabilitySet,
         current_epoch: RevocationEpoch,
+        subject: u64,
     ) -> Result<(), Errno> {
         if self.abi_version != ABI_VERSION_CURRENT {
             return Err(Errno::AbiVersionUnsupported);
         }
         if self.epoch != current_epoch {
+            return Err(Errno::NotFound);
+        }
+        if self.subject != subject {
             return Err(Errno::NotFound);
         }
         let body = Self::signing_input(self.abi_version, self.subject, self.epoch, &self.caps);
@@ -230,9 +246,28 @@ mod tests {
             token.verify(
                 &authority_key(&signing_key()),
                 &parent_caps(),
-                RevocationEpoch(1)
+                RevocationEpoch(1),
+                7,
             ),
             Ok(()),
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_addressed_to_another_subject() {
+        // A perfectly valid, correctly-signed token issued to task 7 must
+        // not be accepted when applied to a different task: that is the
+        // token-theft / replay case the signed `subject` field exists to
+        // foreclose.
+        let token = sign(7, RevocationEpoch(1), &sample_caps());
+        assert_eq!(
+            token.verify(
+                &authority_key(&signing_key()),
+                &parent_caps(),
+                RevocationEpoch(1),
+                8,
+            ),
+            Err(Errno::NotFound),
         );
     }
 
@@ -246,7 +281,12 @@ mod tests {
         let mut parent = parent_caps();
         parent.remove(CapabilityId::DRV_LOAD); // ensure widened is strictly wider.
         assert_eq!(
-            token.verify(&authority_key(&signing_key()), &parent, RevocationEpoch(1)),
+            token.verify(
+                &authority_key(&signing_key()),
+                &parent,
+                RevocationEpoch(1),
+                7,
+            ),
             Err(Errno::DelegationWiden),
         );
     }
@@ -258,7 +298,8 @@ mod tests {
             token.verify(
                 &authority_key(&signing_key()),
                 &parent_caps(),
-                RevocationEpoch(2)
+                RevocationEpoch(2),
+                7,
             ),
             Err(Errno::NotFound),
         );
@@ -274,7 +315,8 @@ mod tests {
             token.verify(
                 &authority_key(&signing_key()),
                 &parent_caps(),
-                RevocationEpoch(1)
+                RevocationEpoch(1),
+                7,
             ),
             Err(Errno::SignatureInvalid),
         );
@@ -288,7 +330,8 @@ mod tests {
             token.verify(
                 &authority_key(&signing_key()),
                 &parent_caps(),
-                RevocationEpoch(1)
+                RevocationEpoch(1),
+                7,
             ),
             Err(Errno::AbiVersionUnsupported),
         );

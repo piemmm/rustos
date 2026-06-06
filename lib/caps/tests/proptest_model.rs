@@ -260,24 +260,34 @@ fn sign(subject: u64, epoch: RevocationEpoch, caps: &CapabilitySet) -> Capabilit
 
 #[test]
 fn token_verify_matches_error_precedence_oracle() {
-    let strategy = (id_vec(), id_vec(), 0u64..4, 0u64..4, any::<bool>());
+    // The token is always issued to subject 7; the verifier checks against
+    // a subject drawn from a small range so the mismatch path is exercised.
+    const ISSUE_SUBJECT: u64 = 7;
+    let strategy = (id_vec(), id_vec(), 0u64..4, 0u64..4, any::<bool>(), 6u64..9);
     drive(
         strategy,
-        |(caps_ids, parent_ids, issue_epoch, verify_epoch, tamper)| {
+        |(caps_ids, parent_ids, issue_epoch, verify_epoch, tamper, verify_subject)| {
             let caps = build(&caps_ids);
             let parent = build(&parent_ids);
-            let mut token = sign(7, RevocationEpoch(issue_epoch), &caps);
+            let mut token = sign(ISSUE_SUBJECT, RevocationEpoch(issue_epoch), &caps);
             if tamper {
                 let mut bytes = *token.signature.as_bytes();
                 bytes[0] ^= 0x01;
                 token.signature = Ed25519Signature::from_bytes(bytes);
             }
 
-            let res = token.verify(&authority_key(), &parent, RevocationEpoch(verify_epoch));
+            let res = token.verify(
+                &authority_key(),
+                &parent,
+                RevocationEpoch(verify_epoch),
+                verify_subject,
+            );
 
             // Mirror of `CapabilityToken::verify`'s documented precedence:
-            // abi version (always current here) → epoch → signature → subset.
-            let expected = if issue_epoch != verify_epoch {
+            // abi version (always current here) → epoch → subject →
+            // signature → subset. A stale epoch and a foreign subject are
+            // both reported as `NotFound`, so they share a branch.
+            let expected = if issue_epoch != verify_epoch || verify_subject != ISSUE_SUBJECT {
                 Err(Errno::NotFound)
             } else if tamper {
                 Err(Errno::SignatureInvalid)
