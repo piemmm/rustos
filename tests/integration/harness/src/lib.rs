@@ -92,6 +92,110 @@ pub fn emit_target_cfg() {
     }
 }
 
+/// Build the `qemu-system-aarch64` argument vector that dumps the
+/// canonical `virt`-board flattened device tree to `dtb_path` for `cpus`
+/// CPUs.
+///
+/// Split out from [`dump_aarch64_virt_dtb`] so the argument shape is
+/// unit-testable without invoking QEMU. The machine matches `tools/qemu`'s
+/// aarch64 `virt` definition (`cortex-a72`, 256 MiB); the DTB layout the
+/// verticals read from the blob (virtio-MMIO transport bases, GICv2 SPIs,
+/// the `/psci` conduit) is the stable `virt`-board layout, independent of
+/// the CPU count.
+#[must_use]
+pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32) -> Vec<String> {
+    vec![
+        "-M".to_string(),
+        format!("virt,dumpdtb={dtb_path}"),
+        "-cpu".to_string(),
+        "cortex-a72".to_string(),
+        "-m".to_string(),
+        "256M".to_string(),
+        "-smp".to_string(),
+        cpus.to_string(),
+        "-display".to_string(),
+        "none".to_string(),
+        "-no-reboot".to_string(),
+    ]
+}
+
+/// Dump the canonical QEMU `virt`-board flattened device tree for `cpus`
+/// CPUs into `OUT_DIR` and return its (trimmed) bytes, so a freestanding
+/// QEMU vertical can embed it.
+///
+/// QEMU's `-kernel <ELF>` aarch64 path treats the image as bare firmware
+/// and passes no DTB pointer to the kernel (`x0 = 0`, unlike the Linux
+/// Image protocol), so a vertical that needs the board's device tree at
+/// runtime embeds this blob instead of reading a live pointer. This lives
+/// here **once** rather than copied into every aarch64 build script
+/// (`AGENTS.md` §2.2 — no duplication).
+///
+/// QEMU's `dumpdtb` pads the blob to the machine's 1 MiB device-tree
+/// region; the bytes are passed through [`trim_fdt_to_extent`] so the
+/// embedded copy is only the meaningful FDT and a vertical that links it
+/// is not bloated by ~1 MiB of zero padding.
+///
+/// # Panics
+///
+/// Panics if `qemu-system-aarch64` cannot be spawned, exits non-zero, or
+/// the dumped file cannot be read. A build script cannot proceed without
+/// the blob, so failing loudly is correct (`AGENTS.md` §7).
+#[must_use]
+pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
+    let dtb_path = std::path::PathBuf::from(out_dir).join("virt.dtb");
+    let dtb_str = dtb_path.display().to_string();
+    let status = std::process::Command::new("qemu-system-aarch64")
+        .args(dump_virt_dtb_args(&dtb_str, cpus))
+        .status()
+        .expect("run qemu-system-aarch64 to dump the virt DTB");
+    assert!(status.success(), "qemu dumpdtb failed: {status}");
+    trim_fdt_to_extent(&std::fs::read(&dtb_path).expect("read dumped virt.dtb"))
+}
+
+/// Trim a flattened device tree to the extent its header describes,
+/// dropping any trailing padding, and rewrite the `totalsize` field to
+/// match.
+///
+/// QEMU's `dumpdtb` emits the blob padded out to the machine's 1 MiB
+/// device-tree region. A reader only needs the memory-reservation,
+/// structure, and strings blocks, so this returns the prefix up to the
+/// furthest block end (`off_dt_struct + size_dt_struct` /
+/// `off_dt_strings + size_dt_strings`) and patches `totalsize` so the
+/// trimmed copy stays self-consistent for a `totalsize`-driven reader.
+///
+/// A blob too short for the 40-byte header, with the wrong magic, or
+/// whose header offsets escape the buffer is returned unchanged — trimming
+/// is an optimisation, never a parser (`AGENTS.md` §2.9: callers still
+/// validate the result through `rustos_fdt::Fdt::new`).
+#[must_use]
+pub fn trim_fdt_to_extent(bytes: &[u8]) -> Vec<u8> {
+    const FDT_MAGIC: u32 = 0xd00d_feed;
+    let be_u32 = |off: usize| -> Option<u32> {
+        let s = bytes.get(off..off + 4)?;
+        Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let header_ok = bytes.len() >= 40 && be_u32(0) == Some(FDT_MAGIC);
+    let extent = header_ok.then(|| {
+        let struct_off = be_u32(8)? as usize;
+        let strings_off = be_u32(12)? as usize;
+        let strings_size = be_u32(32)? as usize;
+        let struct_size = be_u32(36)? as usize;
+        let struct_end = struct_off.checked_add(struct_size)?;
+        let strings_end = strings_off.checked_add(strings_size)?;
+        let end = struct_end.max(strings_end);
+        (end <= bytes.len()).then_some(end)
+    });
+    match extent.flatten() {
+        Some(end) if end < bytes.len() => {
+            let mut trimmed = bytes[..end].to_vec();
+            let total = u32::try_from(end).unwrap_or(u32::MAX).to_be_bytes();
+            trimmed[4..8].copy_from_slice(&total);
+            trimmed
+        }
+        _ => bytes.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +247,72 @@ mod tests {
                 assert!(KNOWN_CFGS.contains(&name), "{name} not declared");
             }
         }
+    }
+
+    #[test]
+    fn dump_virt_dtb_args_match_the_runner_machine() {
+        let args = dump_virt_dtb_args("/tmp/out/virt.dtb", 2);
+        assert_eq!(
+            args,
+            [
+                "-M",
+                "virt,dumpdtb=/tmp/out/virt.dtb",
+                "-cpu",
+                "cortex-a72",
+                "-m",
+                "256M",
+                "-smp",
+                "2",
+                "-display",
+                "none",
+                "-no-reboot",
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_virt_dtb_args_render_the_cpu_count() {
+        let one = dump_virt_dtb_args("d", 1);
+        let four = dump_virt_dtb_args("d", 4);
+        let smp = |a: &[String]| a[a.iter().position(|s| s == "-smp").unwrap() + 1].clone();
+        assert_eq!(smp(&one), "1");
+        assert_eq!(smp(&four), "4");
+    }
+
+    #[test]
+    fn trimming_drops_padding_and_keeps_the_tree_parseable() {
+        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        // Simulate QEMU `dumpdtb` padding the blob out to its 1 MiB region.
+        let mut padded = blob.clone();
+        padded.resize(blob.len() + 4096, 0);
+
+        let trimmed = trim_fdt_to_extent(&padded);
+        assert!(trimmed.len() < padded.len(), "padding was not dropped");
+        assert!(trimmed.len() <= blob.len());
+
+        let fdt = rustos_fdt::Fdt::new(&trimmed).expect("trimmed fdt parses");
+        assert_eq!(fdt.first_memory_region(), Some((0x4000_0000, 0x2000_0000)));
+        let method = fdt
+            .property(&[b"psci"], b"method")
+            .expect("psci method present after trim");
+        assert!(method.starts_with(b"hvc"), "psci method survived trim");
+    }
+
+    #[test]
+    fn trimming_rewrites_totalsize_to_the_trimmed_length() {
+        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "smc", 30);
+        let mut padded = blob.clone();
+        padded.resize(blob.len() + 8192, 0);
+        let trimmed = trim_fdt_to_extent(&padded);
+        let total = u32::from_be_bytes([trimmed[4], trimmed[5], trimmed[6], trimmed[7]]) as usize;
+        assert_eq!(total, trimmed.len(), "totalsize must match trimmed length");
+    }
+
+    #[test]
+    fn trimming_leaves_a_short_or_non_fdt_blob_unchanged() {
+        assert_eq!(trim_fdt_to_extent(&[1, 2, 3]), vec![1, 2, 3]);
+        let mut not_fdt = vec![0u8; 64];
+        not_fdt[0] = 0xab;
+        assert_eq!(trim_fdt_to_extent(&not_fdt), not_fdt);
     }
 }

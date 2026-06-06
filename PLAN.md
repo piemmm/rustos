@@ -1000,6 +1000,41 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `lib/abi` change, so no ABI / C-header drift. Docs:
       `docs/src/platform/wasm32.md`, `docs/src/drivers/display.md`,
       `plans/WIRING.md`.
+- [x] **WIRING Stage W17 — one trimmed aarch64 `virt` DTB embed (§2.2) +
+      close the lib/fdt-runtime-parse note.** Resolves the long-standing
+      "`lib/fdt` runtime parse of the full ARM `virt` tree" carry-forward
+      (W6/W7) and the §2.2 duplication the DTB-embedding device verticals
+      had grown. The note was stale: W12 gave `lib/fdt` the full
+      `virt`-tree node API and the W11 device verticals already parse the
+      full ARM `virt` tree **at runtime** through `rustos_fdt::Fdt` (slot
+      `reg`/`interrupts`, `fw_cfg` base) after their EL1 identity-MMU
+      bring-up. The two SMP verticals (`ipi_smp_qemu_aarch64`,
+      `cross_cpu_tlb_shootdown_qemu_aarch64`) keep naming the PSCI conduit
+      directly because they run **MMU-off by design** — with the stage-1
+      MMU disabled every access is Device memory, where an FDT walk's
+      compiler-emitted multi-byte loads fault, and they install no vectors
+      on the boot core, so the fault hangs; forcing an MMU + vectors in
+      purely to re-derive `hvc` would distort them and triplicate the
+      bring-up (§2.1/§2.3). Production conduit discovery stays the W1
+      host-tested + conformance-gated `fdt::psci_method` path. What landed:
+      the four byte-identical `dump_virt_dtb` copies in the aarch64 device
+      build scripts (`framebuffer_display`, `input_virtio_mmio`,
+      `virtio_blk_mmio`, `virtio_net_mmio`) now reuse one build-glue
+      helper, `rustos_itest_harness::dump_aarch64_virt_dtb` (with the
+      unit-testable `dump_virt_dtb_args`); and `trim_fdt_to_extent` trims
+      the 1 MiB `dumpdtb`-padded blob to the extent its FDT header
+      describes (rewriting `totalsize`), so each vertical embeds the
+      few-KiB meaningful tree instead of ~1 MiB of zero padding. The
+      trimmed blob stays a valid FDT (`rustos_fdt::Fdt::new` validates
+      against the buffer length, not `totalsize`), proven by a harness
+      round-trip unit test over the shared `rustos_fdt::fixture` builder
+      and by the device verticals parsing it at runtime. **Verified
+      QEMU-green** — `framebuffer_display_qemu_aarch64` (ramfb) and
+      `virtio_blk_mmio_aarch64` exit `0` against the trimmed DTB, and the
+      unchanged SMP verticals stay green — and **host-green**
+      (`cargo fmt --all --check`, `cargo xtask ci`, `fuzz --secs 5`,
+      `soak both --secs 10`). No `lib/abi` change → no ABI / C-header
+      drift. Docs: `docs/src/platform/aarch64.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

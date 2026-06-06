@@ -126,9 +126,14 @@ the burn-down is complete.
   heterogeneous `core_class` discovery (W10, FDT `capacity-dmips-mhz`),
   the virtio blk/net MMIO verticals (W11-A), and the `ramfb`/framebuffer
   display vertical (W11-B), and the virtio-input vertical (W11-B) landed;
-  the aarch64 QEMU matrix is now full. (FDT/DTB discovery is host-tested
-  via W1/W10 and the W11-A/B verticals embed the canonical `virt` DTB;
-  the runtime parse of the full ARM `virt` tree is still a gap.)
+  the aarch64 QEMU matrix is now full. FDT/DTB discovery is host-tested
+  via W1/W10 and the W11-A/B verticals embed the canonical `virt` DTB and
+  **parse the full ARM `virt` tree at runtime** through `rustos_fdt::Fdt`
+  (slot `reg`/`interrupts`, `fw_cfg` base) after their EL1 MMU bring-up;
+  the embed is centralised and trimmed in W17. The MMU-off SMP verticals
+  name the conduit by design (W17 — an FDT walk faults on Device memory
+  pre-MMU); production conduit discovery stays the W1 `fdt::psci_method`
+  path.
 - **riscv64:** closest to parity; the input vertical landed
   (`input_virtio_mmio_qemu_riscv64`, the riscv64 MMIO sibling of the
   aarch64 vertical reusing the same `virtio-input` driver and shared
@@ -992,6 +997,57 @@ lifecycle end-to-end against a real display surface.
   fuzz --secs 5`, and `tools/ci/soak.sh both --secs 10` all green. Docs:
   `docs/src/platform/wasm32.md`, `docs/src/drivers/display.md`,
   `PLAN.md`, this file.
+
+#### Stage W17 — one trimmed aarch64 `virt` DTB embed (§2.2) + close the lib/fdt-runtime-parse note — ✅ landed
+
+Resolves the long-standing "`lib/fdt` runtime parse of the full ARM
+`virt` tree" carry-forward (W6/W7) and the §2.2 duplication the
+DTB-embedding device verticals had grown.
+
+- **The note was stale.** W12 gave `lib/fdt` the full `virt`-tree node
+  API, and the W11 device verticals (`virtio_blk/net_mmio_aarch64`,
+  `framebuffer_display`, `input_virtio_mmio`) already **parse the full ARM
+  `virt` tree at runtime** through `rustos_fdt::Fdt` (e.g.
+  `device_spi_number` walks `virtio,mmio` `reg`/`interrupts`; the display
+  vertical reads the `fw_cfg` base) — after their EL1 identity-MMU
+  bring-up. So runtime full-tree parsing on aarch64 is already proven;
+  what remained was only the *naming* of the PSCI conduit in the two SMP
+  verticals.
+- **Why the SMP verticals legitimately name the conduit (honest §0.4
+  constraint).** `ipi_smp_qemu_aarch64` and
+  `cross_cpu_tlb_shootdown_qemu_aarch64` run **MMU-off by design** (they
+  exercise only secondary bring-up / IPI / the inner-shareable TLB
+  broadcast, and install no exception vectors on the boot core). With the
+  stage-1 MMU disabled every access is Device memory, where the FDT
+  walk's compiler-emitted multi-byte loads fault; with no vectors yet
+  installed that hangs the core. Forcing an identity MMU + vectors into
+  those minimal verticals purely to re-derive the constant `hvc` would
+  distort what they prove and duplicate the bring-up a third time
+  (§2.1/§2.3). They therefore keep naming the board conduit directly —
+  test-environment knowledge on par with the fixed two-core MPIDR layout,
+  exactly as their module docs state — and the production discovery path
+  (`fdt::psci_method`) stays host-tested + conformance-gated (W1).
+- **§2.2 consolidation that did land.** The four aarch64 device build
+  scripts had four byte-identical `dump_virt_dtb` copies. They now reuse a
+  single build-glue helper, `rustos_itest_harness::dump_aarch64_virt_dtb`
+  (with the unit-testable `dump_virt_dtb_args`), so the
+  `qemu ... dumpdtb` invocation lives in one audited place.
+- **Trimmed embed (image size).** `dumpdtb` pads the blob to the
+  machine's 1 MiB device-tree region; `trim_fdt_to_extent` now trims it to
+  the extent its FDT header describes and rewrites `totalsize`, so each
+  device vertical embeds the few-KiB meaningful tree instead of ~1 MiB of
+  zero padding. The trimmed blob stays a valid FDT (`rustos_fdt::Fdt::new`
+  validates against the buffer length, not `totalsize`), proven by a
+  harness round-trip unit test over the shared `rustos_fdt::fixture`
+  builder and by the device verticals parsing it at runtime.
+- **Verified:** the four migrated aarch64 device verticals build
+  freestanding; `framebuffer_display_qemu_aarch64` (ramfb) and
+  `virtio_blk_mmio_aarch64` are QEMU-green against the trimmed DTB; the
+  SMP verticals are unchanged and stay QEMU-green; whole-project
+  `cargo fmt --all --check`, `cargo xtask ci`, `cargo xtask fuzz --secs 5`,
+  and `tools/ci/soak.sh both --secs 10` are all green. No `lib/abi`
+  change → no ABI / C-header drift. Docs:
+  `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
 ---
 

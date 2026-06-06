@@ -817,6 +817,7 @@ name = "rustos-itest-harness"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-fdt",
 ]
 
 [[package]]

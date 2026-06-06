@@ -18,5 +18,13 @@ workspace = true
 # is where this build-time helper runs.
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
+[dev-dependencies]
+# Build a real flattened device tree (the same fixture the `lib/fdt` unit
+# tests use) so the DTB-trimming helper is proven against a genuine FDT,
+# not a hand-rolled header (`AGENTS.md` §7).
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = [
+    "test-fixtures",
+] }
+
 [lib]
 path = "src/lib.rs"

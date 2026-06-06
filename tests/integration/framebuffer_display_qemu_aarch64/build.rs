@@ -31,7 +31,6 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the other QEMU fixtures' seeds so the images
@@ -60,7 +59,7 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        dump_virt_dtb(&out_dir)
+        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()
@@ -141,34 +140,4 @@ fn main() {
 
     let path = PathBuf::from(&out_dir).join("fb_fixture.rs");
     fs::write(&path, out).expect("write fb_fixture.rs");
-}
-
-/// Dump the canonical QEMU `virt`-board flattened device tree to a file
-/// in `OUT_DIR` and return its bytes, so the freestanding bin can embed
-/// it. QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer to the
-/// kernel, so the test embeds the board's DTB instead. The machine args
-/// match the runner's (`tools/qemu` aarch64 `virt`, `cortex-a72`, 256
-/// MiB, 1 CPU); the `fw_cfg` MMIO base the test reads from it is the
-/// stable `virt`-board layout.
-fn dump_virt_dtb(out_dir: &std::ffi::OsStr) -> Vec<u8> {
-    let dtb_path = PathBuf::from(out_dir).join("virt.dtb");
-    let machine = format!("virt,dumpdtb={}", dtb_path.display());
-    let status = Command::new("qemu-system-aarch64")
-        .args([
-            "-M",
-            &machine,
-            "-cpu",
-            "cortex-a72",
-            "-m",
-            "256M",
-            "-smp",
-            "1",
-            "-display",
-            "none",
-            "-no-reboot",
-        ])
-        .status()
-        .expect("run qemu-system-aarch64 to dump the virt DTB");
-    assert!(status.success(), "qemu dumpdtb failed: {status}");
-    fs::read(&dtb_path).expect("read dumped virt.dtb")
 }

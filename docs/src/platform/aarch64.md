@@ -454,12 +454,23 @@ display vertical (`AGENTS.md` §2.2):
 
 QEMU's `-kernel <ELF>` aarch64 path treats the image as bare firmware and
 passes no DTB pointer (`x0 == 0`), unlike the riscv64 OpenSBI `a1`
-hand-off. Each vertical therefore embeds the canonical `virt` DTB, dumped
-at build time by `qemu-system-aarch64 ... dumpdtb` (gated to the
-aarch64-none target), and hands those bytes to the scenario; the
-virtio-MMIO transport bases and SPIs in that blob are the stable
-`virt`-board layout, independent of which transport slot the backing
-device lands on.
+hand-off. Each vertical therefore embeds the canonical `virt` DTB and
+hands those bytes to the scenario; the virtio-MMIO transport bases and
+SPIs in that blob are the stable `virt`-board layout, independent of
+which transport slot the backing device lands on.
+
+The dump lives in one place: `rustos_itest_harness::dump_aarch64_virt_dtb`
+(gated to the aarch64-none target) shells out to `qemu-system-aarch64 ...
+dumpdtb` so every aarch64 vertical reuses one helper rather than copying
+the invocation (`AGENTS.md` §2.2). `dumpdtb` pads the blob out to the
+machine's 1 MiB device-tree region, so the helper trims it to the extent
+its FDT header describes (`trim_fdt_to_extent`, rewriting `totalsize`)
+before it is embedded — the few-KiB meaningful tree, not ~1 MiB of zero
+padding bloating every image. The trimmed blob is still a valid FDT
+(`rustos_fdt::Fdt::new` validates against the buffer length, not
+`totalsize`), proven by a round-trip unit test over the shared
+`rustos_fdt::fixture` builder and by the device verticals parsing it at
+runtime.
 
 ## Display vertical (Stage W11-B)
 
