@@ -204,8 +204,10 @@ is tiny, fixed, and audited in one place.
 bare-metal ports' firmware hand-off. It instantiates a RustOS wasm32
 module, supplies the `env` host imports (`performance.now()`, the worker
 index, `requestAnimationFrame`, the `MessageChannel` post, the Web Worker
-spawn, and a `console.log` writer that decodes UTF-8 from the module's
-linear memory), and calls the exported `rustos_arch_wasm32_main` once. It
+spawn, a `console.log` writer that decodes UTF-8 from the module's linear
+memory, and a framebuffer-present writer that paints the module's
+RGBA8888 surface onto a canvas and reads it back), and calls the exported
+`rustos_arch_wasm32_main` once. It
 is hand-written and dependency-free, mirroring the no-`wasm-bindgen`
 policy of the Rust side.
 
@@ -242,9 +244,39 @@ vertical, the wasm32 analogue of the bare-metal QEMU verticals:
   kernel panic traps the instance and surfaces as a page error, failing
   the run loudly with no retries (`AGENTS.md` §7).
 
+### Display vertical (browser canvas)
+
+The `display` row of the parity matrix (`plans/WIRING.md` Stage W16) is a
+second browser vertical, the wasm32 analogue of
+`framebuffer_display_qemu_{riscv64,aarch64}`:
+
+- `tests/integration/framebuffer_display_wasm32` is a kernel `cdylib`
+  that, on the boot context, loads the build-time signed framebuffer
+  display `.rxe` through `rustos_drvhost::Host` (the §8 load gate) and
+  drives `load → use → unload → reload`. "Use" maps a static RGBA8888
+  surface through a capability-checked `WasmMmioMapper` — the MMU-less
+  analogue of the kernel MMIO mapper: there is no page table, so a
+  "register window" is a bounds- and `CAP_MMIO_MAP`-gated view of the one
+  surface this instance owns — and `present`s a frame. Each presented
+  frame is confirmed **twice**: through a second, independently-mapped
+  window (the bytes reached linear memory) and through the new
+  `rustos_host_present_framebuffer` host import, which paints the surface
+  onto a canvas and returns the count of pixels that survived the canvas
+  round-trip (it must equal `WIDTH × HEIGHT`). It prints `BOOT_OK` then
+  `DISPLAY_OK`; any failure traps the instance (`AGENTS.md` §2.9).
+- `tests/integration/framebuffer_display_wasm32/web/index.html` supplies
+  the real `presentFramebuffer` hook backed by an on-page `<canvas>`;
+  `web/harness.mjs` is the boot harness's sibling and reports PASS once it
+  has seen `BOOT_OK` and `DISPLAY_OK`.
+
+Both verticals are enrolled in one `VERTICALS` list in
+`tools/xtask/src/commands/wasm_tests.rs`, so `cargo xtask test --wasm`
+builds and runs both; adding a wasm32 vertical is one row there
+(`AGENTS.md` §2.2).
+
 ## Build and run
 
-The wasm32 vertical is opt-in behind `cargo xtask test --wasm`
+The wasm32 verticals are opt-in behind `cargo xtask test --wasm`
 (mirroring `test --qemu`), because it needs Node.js, puppeteer, and a
 Chrome binary:
 

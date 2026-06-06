@@ -967,6 +967,39 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `fuzz --secs 5`, `soak both --secs 10`). Docs:
       `docs/src/architecture/modularity.md`,
       `docs/src/platform/{aarch64,riscv64,wasm32}.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W16 — wasm32 framebuffer display vertical (browser
+      canvas).** The last `display`-row parity gap: wasm32 had no
+      `display` vertical, so W16 adds the browser analogue of
+      `framebuffer_display_qemu_{riscv64,aarch64}`. One new host import,
+      `rustos_host_present_framebuffer` (`kernel/arch/wasm32/src/bindings.rs`
+      + safe wrapper `host_present_framebuffer`), is supplied by
+      `web/rustos.js` (a `boot`/`runWorker` `presentFramebuffer` ctx hook,
+      headless no-op by default); it is the wasm32 scan-out analogue of a
+      bare-metal port reading its framebuffer back through an independent
+      mapping — the host paints the presented RGBA8888 surface onto a
+      canvas, reads it back, and returns the count of pixels that survived
+      the round-trip. The new vertical
+      (`tests/integration/framebuffer_display_wasm32`, a `cdylib` that is
+      inert on the host build) loads the build-time signed framebuffer
+      `.rxe` through `rustos_drvhost::Host` (the §8 gate) and drives
+      `load → use → unload → reload`; "use" maps the surface through a
+      capability-checked `WasmMmioMapper` (the MMU-less analogue of
+      `KernelMmioMapper` — a bounds- + `CAP_MMIO_MAP`-gated view of the one
+      in-memory surface) and `present`s a frame, confirmed **twice**:
+      through a second independently-mapped window (bytes reached linear
+      memory) and through the canvas round-trip (all `WIDTH×HEIGHT` pixels
+      survived). It prints `BOOT_OK` then `DISPLAY_OK`; any failure traps
+      the instance (§2.9 / §5.4.5). `DisplayFormat::Rgba8888` with opaque
+      (`0xFF`) alpha keeps the canvas premultiplied-alpha round-trip
+      lossless. `tools/xtask/.../wasm_tests.rs` was generalised to a
+      `VERTICALS` list (boot + display) so `cargo xtask test --wasm` builds
+      and runs both (§2.2). **Verified browser-green** — boot vertical
+      (`BOOT_OK ISOLATION_OK WORKER_OK IPI_RECV ticks=20 PASS`) and display
+      vertical (`BOOT_OK=true DISPLAY_OK=true PASS`) — and **host-green**
+      (`cargo xtask ci`, `fuzz --secs 5`, `soak both --secs 10`). No
+      `lib/abi` change, so no ABI / C-header drift. Docs:
+      `docs/src/platform/wasm32.md`, `docs/src/drivers/display.md`,
+      `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

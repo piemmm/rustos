@@ -45,7 +45,7 @@ partial (§2.9).
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
-| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals |
+| framebuffer  | `rustos-drv-display-framebuffer`     | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
 | rpi_hvs      | `rustos-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
 
@@ -113,6 +113,24 @@ passes no DTB pointer, the vertical embeds the canonical `virt` device
 tree (dumped at build time) to discover the `fw_cfg` base. The driver
 lifecycle, `ramfb` programming, and pixel read-back are otherwise the
 riscv64 scenario's siblings.
+
+`tests/integration/framebuffer_display_wasm32`
+(`rustos-test-framebuffer-display-wasm32`, enrolled in `cargo xtask test
+--wasm`) is the wasm32 sibling: it drives the **same** framebuffer driver
+in a real headless browser, against a static RGBA8888 surface in WASM
+linear memory. Because wasm32 has no MMU, the surface is mapped through a
+capability-checked `WasmMmioMapper` — a bounds- and `CAP_MMIO_MAP`-gated
+view of the one in-memory surface, the MMU-less analogue of
+`KernelMmioMapper`. Each presented frame is read back two ways: through a
+second independently-mapped window (the bytes reached linear memory) and
+through the new `rustos_host_present_framebuffer` host import, which
+paints the surface onto an HTML `<canvas>` and returns the count of
+pixels that survived the canvas round-trip — so the vertical proves the
+pixels reach a genuine display surface, not just memory. The signed
+`.rxe` load gate and the `load → use → unload → reload` lifecycle are the
+bare-metal verticals' siblings (`AGENTS.md` §2.2); the driver itself is
+byte-for-byte the same. See `docs/src/platform/wasm32.md` for the host
+loader and harness.
 
 ### `rustos-drv-display-vesa`
 

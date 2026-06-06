@@ -19,6 +19,10 @@
 //                                          linear memory and emit a line
 //   rustos_host_logical_processors() -> navigator.hardwareConcurrency (>= 1)
 //   rustos_host_has_display()        -> 1 if a display surface is present
+//   rustos_host_present_framebuffer(ptr, len, w, h, stride) -> paint a
+//                                          canvas from the module's linear
+//                                          memory and return the count of
+//                                          pixels that survived the round-trip
 //
 // The module exports the entry trampoline and the host callbacks
 // (`kernel/arch/wasm32/src/entry.rs`):
@@ -86,6 +90,17 @@ function makeEnv(ctx) {
     },
     rustos_host_logical_processors: () => ctx.logicalProcessors >>> 0,
     rustos_host_has_display: () => (ctx.hasDisplay ? 1 : 0),
+    rustos_host_present_framebuffer: (ptr, len, width, height, stride) => {
+      const view = new Uint8Array(
+        ctx.getInstance().exports.memory.buffer,
+        ptr,
+        len,
+      );
+      return (
+        ctx.presentFramebuffer(view, width >>> 0, height >>> 0, stride >>> 0) >>>
+        0
+      );
+    },
   };
 }
 
@@ -124,6 +139,10 @@ export async function instantiate(wasmBytes, ctx) {
  * @param {number} [hooks.logicalProcessors]  CPU count (defaults to
  *        navigator.hardwareConcurrency, clamped to >= 1).
  * @param {boolean} [hooks.hasDisplay]  whether a display surface exists.
+ * @param {(bytes: Uint8Array, width: number, height: number, stride: number) => number} [hooks.presentFramebuffer]
+ *        paint an RGBA8888 surface onto the display and return the count
+ *        of pixels that survived the canvas round-trip (defaults to a
+ *        no-op returning 0 — a headless context with no canvas).
  * @param {string|URL} [hooks.workerUrl]  the worker bootstrap module URL.
  * @returns {Promise<WebAssembly.Instance>}
  */
@@ -140,6 +159,7 @@ export async function boot(wasmBytes, hooks = {}) {
   );
   const hasDisplay =
     hooks.hasDisplay ?? typeof globalThis.OffscreenCanvas !== "undefined";
+  const presentFramebuffer = hooks.presentFramebuffer ?? (() => 0);
   const workerUrl = hooks.workerUrl ?? new URL("./worker.js", import.meta.url);
 
   // Live secondary CPUs: logical index -> { worker, port (the main end of
@@ -208,6 +228,7 @@ export async function boot(wasmBytes, hooks = {}) {
     startWorker,
     logicalProcessors,
     hasDisplay,
+    presentFramebuffer,
     onLine,
   };
 
@@ -243,6 +264,8 @@ export function runWorker() {
       startWorker: () => false,
       logicalProcessors: 1,
       hasDisplay: false,
+      // A dedicated worker drives no display surface.
+      presentFramebuffer: () => 0,
       onLine: (line) => port.postMessage({ t: "log", line }),
     };
 

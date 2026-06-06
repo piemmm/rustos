@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>RustOS wasm32 framebuffer-display vertical</title>
+<!--
+  Browser entry point for the wasm32 framebuffer-display vertical
+  (`plans/WIRING.md` — the wasm32 `display`-row parity gap). It fetches
+  the compiled kernel module (its URL is passed in the `wasm` query
+  parameter by `web/harness.mjs`), hands it to the shared host loader
+  (`kernel/arch/wasm32/web/rustos.js`, served at `/rustos.js`), and logs
+  each kernel console line to the page console. Crucially it supplies a
+  real `presentFramebuffer` hook backed by an on-page <canvas>: the
+  kernel's `rustos_host_present_framebuffer` import calls it to paint the
+  presented RGBA8888 surface and read it back, so the vertical proves the
+  pixels reach a genuine display surface. The puppeteer harness scrapes
+  the console lines to decide PASS/FAIL.
+-->
+<canvas id="fb"></canvas>
+<script type="module">
+  import { boot } from "/rustos.js";
+
+  // Paint an RGBA8888 surface onto the canvas and read it back, returning
+  // the number of pixels that survived the round-trip unchanged. Every
+  // alpha byte the kernel writes is 0xFF (fully opaque), so a correct
+  // canvas preserves all pixels exactly (no premultiplied-alpha loss).
+  function presentFramebuffer(bytes, width, height, stride) {
+    const canvas = document.getElementById("fb");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const img = ctx.createImageData(width, height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const src = y * stride + x * 4;
+        const dst = (y * width + x) * 4;
+        img.data[dst] = bytes[src];
+        img.data[dst + 1] = bytes[src + 1];
+        img.data[dst + 2] = bytes[src + 2];
+        img.data[dst + 3] = bytes[src + 3];
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    const back = ctx.getImageData(0, 0, width, height).data;
+    let matched = 0;
+    for (let i = 0; i < width * height; i += 1) {
+      const o = i * 4;
+      if (
+        back[o] === img.data[o] &&
+        back[o + 1] === img.data[o + 1] &&
+        back[o + 2] === img.data[o + 2] &&
+        back[o + 3] === img.data[o + 3]
+      ) {
+        matched += 1;
+      }
+    }
+    return matched;
+  }
+
+  const wasmUrl = new URLSearchParams(location.search).get("wasm");
+  try {
+    const bytes = await (await fetch(wasmUrl)).arrayBuffer();
+    await boot(bytes, {
+      onLine: (line) => console.log(line),
+      hasDisplay: true,
+      presentFramebuffer,
+    });
+  } catch (err) {
+    // Surface instantiation / trap failures as a recognisable line so
+    // the harness fails loudly rather than timing out blind.
+    console.log(`HARNESS_ERROR ${err && err.message ? err.message : err}`);
+  }
+</script>

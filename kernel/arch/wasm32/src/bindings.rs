@@ -63,6 +63,24 @@ extern "C" {
     /// Whether the host environment exposes a display surface (a canvas)
     /// the desktop could render to: `1` if present, `0` otherwise.
     fn rustos_host_has_display() -> u32;
+
+    /// Present `len` bytes of a `width`×`height` RGBA8888 framebuffer
+    /// surface, beginning at `ptr` in this module's linear memory and
+    /// with `stride` bytes between scanlines, to the host display
+    /// surface (a canvas). The host copies the bytes out synchronously
+    /// (it retains no pointer past return), paints them onto the canvas,
+    /// reads the painted region back, and returns the number of pixels
+    /// that survived the canvas round-trip unchanged — the wasm32
+    /// scan-out analogue of a bare-metal port reading its framebuffer
+    /// back through an independent mapping. A host with no display
+    /// surface returns `0`.
+    fn rustos_host_present_framebuffer(
+        ptr: *const u8,
+        len: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> u32;
 }
 
 /// Read the host monotonic clock in fractional milliseconds.
@@ -130,4 +148,18 @@ pub fn host_has_display() -> bool {
     // SAFETY: a pure host import taking no arguments; the glue returns
     // `1` when a canvas display is available, `0` otherwise.
     unsafe { rustos_host_has_display() != 0 }
+}
+
+/// Present the RGBA8888 framebuffer `frame` (a `width`×`height` surface
+/// with `stride` bytes per scanline) to the host display surface.
+///
+/// Returns the number of pixels the host confirmed survived the canvas
+/// round-trip unchanged; `0` if the host exposes no display.
+#[must_use]
+pub fn host_present_framebuffer(frame: &[u8], width: u32, height: u32, stride: u32) -> u32 {
+    // SAFETY: `frame` is a live slice for the duration of the call, so
+    // `(ptr, len)` names exactly its valid range; the host copies the
+    // bytes out synchronously and retains no pointer past return (the
+    // same contract as `host_console_write`).
+    unsafe { rustos_host_present_framebuffer(frame.as_ptr(), frame.len(), width, height, stride) }
 }

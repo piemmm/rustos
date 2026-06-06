@@ -1,14 +1,14 @@
 //! `cargo xtask test --wasm` implementation.
 //!
 //! The wasm32 counterpart of [`super::qemu_tests`]. Where the bare-metal
-//! verticals boot under QEMU, the wasm32 vertical boots in a real
-//! (headless) browser: this module builds the
-//! `rustos-test-kernel-arch-boot-wasm32` `cdylib` for
-//! `wasm32-unknown-unknown` and launches the puppeteer harness
-//! (`tests/integration/kernel_arch_boot_wasm32/web/harness.mjs`) against
-//! the compiled module. The harness decides PASS/FAIL from the kernel's
-//! console markers (boot, isolation, cooperative-scheduler ticks) and
-//! propagates its exit status here.
+//! verticals boot under QEMU, the wasm32 verticals boot in a real
+//! (headless) browser: this module builds each wasm32 vertical `cdylib`
+//! for `wasm32-unknown-unknown` and launches its puppeteer harness
+//! against the compiled module. Each harness decides PASS/FAIL from the
+//! kernel's console markers and propagates its exit status here. The
+//! enrolled verticals are listed in [`VERTICALS`]; adding a wasm32
+//! vertical is one row there (`AGENTS.md` §2.2 — one driver, not a
+//! per-vertical copy of the build/run glue).
 //!
 //! Kept opt-in behind `test --wasm` (mirroring `test --qemu`) because it
 //! needs `node`, `puppeteer`, and a Chrome binary; a host lacking them
@@ -19,21 +19,47 @@ use std::path::PathBuf;
 
 use crate::Context;
 
-/// Workspace package + Rust target of the wasm32 boot vertical.
-const PACKAGE: &str = "rustos-test-kernel-arch-boot-wasm32";
+/// Rust target every wasm32 vertical is built for.
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
-/// File stem cargo emits for the `cdylib` (the crate name with `-` → `_`).
-const WASM_ARTIFACT: &str = "rustos_test_kernel_arch_boot_wasm32.wasm";
-/// Harness runner, workspace-relative.
-const HARNESS: &str = "tests/integration/kernel_arch_boot_wasm32/web/harness.mjs";
 
-/// Check the browser toolchain is present and build the wasm32 module once.
+/// One enrolled wasm32 browser vertical.
+struct Vertical {
+    /// Workspace package name.
+    package: &'static str,
+    /// File stem cargo emits for the `cdylib` (the crate name, `-` → `_`).
+    artifact: &'static str,
+    /// Harness runner, workspace-relative.
+    harness: &'static str,
+}
+
+/// The wasm32 browser verticals `cargo xtask test --wasm` builds and runs,
+/// in order. Each boots the compiled module in a headless browser and
+/// scrapes its own console markers.
+const VERTICALS: &[Vertical] = &[
+    // Stage 3d + W8: boot, per-worker isolation, live scheduler ticks,
+    // multi-worker SMP + cross-context IPI.
+    Vertical {
+        package: "rustos-test-kernel-arch-boot-wasm32",
+        artifact: "rustos_test_kernel_arch_boot_wasm32.wasm",
+        harness: "tests/integration/kernel_arch_boot_wasm32/web/harness.mjs",
+    },
+    // The `display`-row parity vertical: signed framebuffer `.rxe`
+    // lifecycle presenting to a real canvas (`plans/WIRING.md`).
+    Vertical {
+        package: "rustos-test-framebuffer-display-wasm32",
+        artifact: "rustos_test_framebuffer_display_wasm32.wasm",
+        harness: "tests/integration/framebuffer_display_wasm32/web/harness.mjs",
+    },
+];
+
+/// Check the browser toolchain is present and build every wasm32
+/// vertical once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes. A host
 /// lacking `node` fails loudly here rather than skipping (`AGENTS.md` §7 —
 /// never silently skip a test).
 pub fn prepare(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [test --wasm] building the wasm32 boot vertical");
+    eprintln!("xtask: [test --wasm] building the wasm32 browser verticals");
 
     if !node_available() {
         return Err(
@@ -42,37 +68,50 @@ pub fn prepare(ctx: &Context) -> Result<(), String> {
         );
     }
 
-    build(ctx)
+    for vertical in VERTICALS {
+        build(ctx, vertical)?;
+    }
+    Ok(())
 }
 
-/// Run the wasm32 boot harness once.
+/// Run every enrolled wasm32 harness once.
 ///
 /// The caller ([`super::run_test`]) owns the repeat loop so a duration
 /// budget covers the whole matrix as a unit; this runs exactly one pass.
 pub fn run_once(ctx: &Context) -> Result<(), String> {
-    run_harness(ctx)
+    for vertical in VERTICALS {
+        run_harness(ctx, vertical)?;
+    }
+    Ok(())
 }
 
-fn build(ctx: &Context) -> Result<(), String> {
+fn build(ctx: &Context, vertical: &Vertical) -> Result<(), String> {
     let mut cmd = ctx.cargo();
-    cmd.args(["build", "--locked", "-p", PACKAGE, "--target", WASM_TARGET]);
-    ctx.run(&format!("test --wasm (build {PACKAGE})"), cmd)
+    cmd.args([
+        "build",
+        "--locked",
+        "-p",
+        vertical.package,
+        "--target",
+        WASM_TARGET,
+    ]);
+    ctx.run(&format!("test --wasm (build {})", vertical.package), cmd)
 }
 
-fn run_harness(ctx: &Context) -> Result<(), String> {
+fn run_harness(ctx: &Context, vertical: &Vertical) -> Result<(), String> {
     let wasm: PathBuf = ctx
         .target_dir()
         .join(WASM_TARGET)
         .join("debug")
-        .join(WASM_ARTIFACT);
-    let harness = ctx.workspace_root.join(HARNESS);
+        .join(vertical.artifact);
+    let harness = ctx.workspace_root.join(vertical.harness);
 
     let mut cmd = std::process::Command::new("node");
     cmd.current_dir(&ctx.workspace_root)
         .arg(&harness)
         .arg("--wasm")
         .arg(&wasm);
-    ctx.run("test --wasm (harness)", cmd)
+    ctx.run(&format!("test --wasm (harness {})", vertical.package), cmd)
 }
 
 fn node_available() -> bool {

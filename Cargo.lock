@@ -1360,6 +1360,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-framebuffer-display-wasm32"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-arch-wasm32",
+ "rustos-bumpalloc",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-drv-display-framebuffer",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-fs-soak"
 version = "0.0.0"
 dependencies = [

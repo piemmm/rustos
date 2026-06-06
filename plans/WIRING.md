@@ -116,7 +116,7 @@ the burn-down is complete.
 | `enter_user`            |   ✓    |  ~(spawn)|  ~(spawn)|  **✗** |
 | `irq`                   |   ✓    |    ✓    |    ✓    |  n/a   |
 | input (`ps2`/device)    |   ✓    |    ✓    |    ✓    |  n/a   |
-| display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    |  **✗** |
+| display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    | ✓(browser) |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 | **`cross_cpu_tlb_shootdown`** | ✓ | ✓ | ✓ | n/a |
 
@@ -137,8 +137,9 @@ the burn-down is complete.
   (`sched_drive_qemu_riscv64`) but not fully exercised.
 - **wasm32:** multi-worker SMP + real `MessageChannel` IPI and the
   cooperative tick wired into the live `kernel/sched` scheduler landed
-  (W8, browser vertical); no user entry (sandbox-by-design), and the
-  remaining verticals (display) are thin.
+  (W8, browser vertical); the framebuffer **display** vertical landed too
+  (W16, browser canvas present), so the only remaining wasm32 QEMU-matrix
+  gap is `enter_user` (sandbox-by-design — no user/kernel boundary).
 - **all ports:** the §17.2 Arch HAL conformance suite
   (`kernel/arch/api/src/conformance.rs`, run by each port's
   `passes_arch_hal_conformance_suite`) now exists and folds in the
@@ -947,6 +948,50 @@ the bring-up surface the tests exercise matches the one the kernel uses.
   `tools/ci/soak.sh both --secs 10` are all green. Docs:
   `docs/src/architecture/modularity.md`, `docs/src/platform/{aarch64,
   riscv64,wasm32}.md`, `PLAN.md`, this file.
+
+#### Stage W16 — wasm32 framebuffer display vertical (browser canvas) — ✅ landed
+
+The last `display`-row parity gap. wasm32 had no `display` vertical; W16
+adds the browser analogue of `framebuffer_display_qemu_{riscv64,aarch64}`
+so every Tier-1 target now exercises the signed framebuffer-driver
+lifecycle end-to-end against a real display surface.
+
+- **New host import (`rustos_host_present_framebuffer`).** One import
+  added to `kernel/arch/wasm32/src/bindings.rs` (+ safe wrapper
+  `host_present_framebuffer`) and supplied by `web/rustos.js`
+  (`makeEnv` + a `boot`/`runWorker` `presentFramebuffer` ctx hook,
+  defaulting to a headless no-op). It is the wasm32 scan-out analogue of
+  a bare-metal port reading its framebuffer back through an independent
+  mapping: the host paints the presented RGBA8888 surface onto a canvas,
+  reads it back, and returns the count of pixels that survived the
+  round-trip. No `lib/abi` change → no ABI / C-header drift.
+- **New vertical (`tests/integration/framebuffer_display_wasm32`).** A
+  `cdylib` (host build inert, like the bare-metal stubs) that, on the
+  boot context: loads the build-time signed framebuffer `.rxe` through
+  `rustos_drvhost::Host` (the §8 gate) and drives `load → use → unload →
+  reload`. "Use" maps the surface through a capability-checked
+  `WasmMmioMapper` (the wasm32 MMU-less analogue of `KernelMmioMapper` —
+  a bounds- + `CAP_MMIO_MAP`-gated view of the one in-memory surface) and
+  `present`s a frame, confirmed **twice**: through a second,
+  independently-mapped window (bytes reached linear memory) and through
+  the canvas round-trip (`host_present_framebuffer` returns all
+  `WIDTH×HEIGHT` pixels). Prints `BOOT_OK` then `DISPLAY_OK`; every
+  failure traps the instance (`AGENTS.md` §2.9 / §5.4.5). Uses
+  `DisplayFormat::Rgba8888` with opaque (`0xFF`) alpha so the canvas
+  premultiplied-alpha round-trip is lossless.
+- **Harness generalised (§2.2).** `web/index.html` supplies the canvas
+  `presentFramebuffer` hook; `web/harness.mjs` is the boot harness's
+  sibling (PASS on `BOOT_OK`+`DISPLAY_OK`). `tools/xtask/.../wasm_tests.rs`
+  now drives a `VERTICALS` list (boot + display) instead of one
+  hard-coded package, so `cargo xtask test --wasm` builds and runs both;
+  adding a wasm32 vertical is one row there.
+- **Verified:** `cargo xtask test --wasm` is browser-green — the boot
+  vertical (`BOOT_OK ISOLATION_OK WORKER_OK IPI_RECV ticks=20 PASS`) and
+  the new display vertical (`BOOT_OK=true DISPLAY_OK=true PASS`).
+  Whole-project `cargo fmt --all --check`, `cargo xtask ci`, `cargo xtask
+  fuzz --secs 5`, and `tools/ci/soak.sh both --secs 10` all green. Docs:
+  `docs/src/platform/wasm32.md`, `docs/src/drivers/display.md`,
+  `PLAN.md`, this file.
 
 ---
 
