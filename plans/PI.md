@@ -430,19 +430,28 @@ on its own before the next.
     the bare-metal `boot_aarch64` cannot be host-compiled. The boot audit
     line now records `mem_map_built` / `mem_map_status` /
     `usable_bytes_hex` / `reserved_bytes_hex`, failing closed to a status
-    string (never a panic, §2.9) on an absent or malformed window. Still
-    parks: the `kernel_main` hand-off needs the MMU enabled first (P6c-2),
-    since the allocator/scheduler atomics are UNPREDICTABLE on the
-    MMU-off Device-memory the boot CPU runs on.
-  - **P6c-2 — MMU + `kernel_main` hand-off `[ ]`.** Bring up the stage-1
-    identity map (`paging::AddressSpace::new_identity_gigapages` + `switch`,
-    EL1 vectors), add the local `Aarch64BinArch` `KernelArch` wrapper
-    (orphan-rule sibling of the x86_64 `BinArch` / riscv64 `RiscvBinArch`),
-    and hand the P6c-1 `BootMemoryMap` to `kernel_core::kernel_main` so the
-    aarch64 production kernel reaches `BootCompleted` like x86_64/riscv64.
-    Assemble the production `KernelSyscallHandlers`/`KernelDispatchHook`
-    `.with_console` (discovered framebuffer else first UART) + a slot-based
-    aarch64 `production_dispatch`.
+    string (never a panic, §2.9) on an absent or malformed window.
+  - **P6c-2 — MMU + `kernel_main` hand-off `[x]`.** `boot_aarch64` now
+    enables the stage-1 identity MMU (`AddressSpace::new_identity_gigapages`
+    over a static boot `PageTablePool`, 512×1 GiB — first GiB Device, rest
+    Normal — then `switch`) and installs the EL1 vectors *before* any
+    further work, so the `kernel_core` allocator/scheduler atomics run on
+    Normal memory and the full-tree `first_memory_region` FDT walk is
+    MMU-on-safe (the §watch-out hazard). It adds the local `Aarch64BinArch`
+    `KernelArch` wrapper (orphan-rule sibling of the x86_64 `BinArch` /
+    riscv64 `RiscvBinArch`), a slot-based aarch64 `production_dispatch` +
+    `DISPATCH_SLOT` (the shared arch-neutral frame-read / errno-encode /
+    slot-forward logic factored into a host-tested `dispatch_core` module,
+    §2.2), a `UartConsole` `ConsoleWrite` over the discovered UART
+    (`serial::write_console_bytes`), and hands a validated `BootInfo`
+    (`.with_console(&UART_CONSOLE)`) to `kernel_core::kernel_main` — so the
+    aarch64 production kernel reaches `BootCompleted` like x86_64/riscv64,
+    or parks fail-closed (§2.9) on an unsound hand-off. `kernel/core` grew
+    a `BootInfo.console` field + `with_console` builder (default
+    fail-closed `NULL_CONSOLE`) threaded into `KernelDispatchHook::new`. The
+    `kernel_arch_boot_aarch64` vertical now boots the *production* pipeline
+    to `AuditEvent::BootCompleted` on `-M virt` (embedded `virt` DTB; QEMU
+    passes no `x0`). `boot.rs::main` passes `&SERIAL_SINK` as both sinks.
   - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[ ]`.** Embed the
     `init` `Run` rxe (nested PIE build), register PID 1's task/aspace/caps,
     `spawn_and_enter` into EL0 via the `userentry` `eret` path, and add the

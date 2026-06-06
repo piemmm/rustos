@@ -317,6 +317,7 @@ fn run_phases<A: KernelArch>(
         scheduler_config,
         arch,
         dispatcher_callback_slot,
+        console,
         ..
     } = boot;
 
@@ -420,6 +421,7 @@ fn run_phases<A: KernelArch>(
             &state.ipc,
             &state.aspaces,
             &state.rng,
+            console,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)

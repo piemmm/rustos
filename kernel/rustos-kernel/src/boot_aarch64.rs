@@ -47,14 +47,46 @@
 //! load — `plans/PI.md` W17). A missing or malformed tree leaves the
 //! `virt` default in place (`AGENTS.md` §2.9 — fail closed).
 
+use alloc::sync::Arc;
+
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
-use rustos_arch_aarch64::{console, enable_fp_el1, fdt, gic, halt_current_cpu, Aarch64Arch};
+use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool};
+use rustos_arch_aarch64::{
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, Aarch64Arch,
+};
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
+use rustos_kernel_core::{kernel_main, BootInfo};
+use rustos_kernel_sched_api::SchedulerConfig;
+use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
+use crate::arch_wrapper_aarch64::{Aarch64BinArch, UART_CONSOLE};
+use crate::dispatch_aarch64::{production_dispatch, DISPATCH_SLOT};
 use crate::mem_map::{build_memory_map, region_byte_totals};
+
+/// Number of 1 GiB identity gigapages the boot address space maps.
+///
+/// 512 covers the whole low canonical VA range (`[0, 512 GiB)`), so the
+/// kernel image, stack, the firmware DTB, and the board MMIO window are
+/// all reachable whatever their physical addresses — the QEMU `virt`
+/// board (RAM at `0x4000_0000`, GIC/PL011 in the first GiB) and the
+/// Raspberry Pi 4 alike, with no `cfg(board)` fork (`AGENTS.md` §17.2).
+/// [`AddressSpace::new_identity_gigapages`] maps the first GiB Device
+/// (it holds the `virt` UART + GIC) and the rest Normal.
+const IDENTITY_GIGABYTES: usize = 512;
+
+/// Boot-time page-table frame source for the stage-1 identity map.
+///
+/// A single root L1 table holds all 512 gigapage block descriptors, so
+/// the pool only ever hands out one frame here. It lives in `.bss` for
+/// the lifetime of the kernel image, so `TTBR0_EL1` keeps pointing at a
+/// valid table after [`enable_mmu_and_vectors`] returns even though the
+/// transient [`AddressSpace`] handle is dropped (`AGENTS.md` §2.1 — the
+/// pool is monotonic and never freed). The real per-process page tables
+/// are built over the `kernel/mem` frame allocator at a later stage.
+static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// The boot CPU's logical id. The boot trampoline parks every other CPU
 /// (`MPIDR_EL1` affinity ≠ 0) until the SMP bring-up (`plans/PI.md` P5)
@@ -94,19 +126,53 @@ fn kernel_end_addr() -> u64 {
     core::ptr::addr_of!(__kernel_end) as u64
 }
 
-/// Boot the aarch64 kernel on the boot CPU and park.
+/// Enable the stage-1 identity MMU and install the EL1 exception
+/// vectors on the boot CPU.
+///
+/// Returns `false` (leaving the MMU off) when the boot page-table pool
+/// cannot satisfy the identity map — a fail-closed signal the caller
+/// logs and parks on rather than running `kernel_main` over un-cacheable
+/// Device memory (`AGENTS.md` §2.9).
+fn enable_mmu_and_vectors() -> bool {
+    let Some(space) = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)
+    else {
+        return false;
+    };
+    // SAFETY: `new_identity_gigapages` identity-maps `[0, 512 GiB)`, so
+    // the currently-executing `pc`, the boot stack, the firmware DTB, and
+    // the board MMIO window all keep their physical addresses — enabling
+    // the MMU does not move the ground under the running code, exactly as
+    // `AddressSpace::switch`'s contract requires. `init_vectors` then
+    // installs the EL1 vector base so a fault during the remaining
+    // bring-up is taken to a handler rather than locking up silently.
+    // Both run once, here, on the boot CPU with interrupts masked.
+    unsafe {
+        space.switch();
+        exceptions::init_vectors();
+    }
+    true
+}
+
+/// Boot the aarch64 kernel on the boot CPU and hand off to
+/// [`rustos_kernel_core::kernel_main`].
 ///
 /// `dtb` is the device-tree pointer the firmware/loader handed the boot
-/// CPU (preserved verbatim by `boot.s`). P2/P3 parse it for the console
-/// base, the GICv2/GIC-400 bases, and the `/memory` window; the live
-/// allocator + scheduler hand-off over that map is P4/P6.
+/// CPU (preserved verbatim by `boot.s`); it is parsed for the console
+/// base, the GICv2/GIC-400 bases, the `/memory` window, the generic-timer
+/// rate, and the PSCI conduit.
 ///
-/// `log_sink` is the `&'static` console sink the binary installs (the
-/// port's PL011-backed [`rustos_arch_aarch64::SERIAL_SINK`] in
-/// production).
+/// `log_sink` / `audit_sink` are the `&'static` sinks installed in the
+/// [`BootInfo`]: in production both are the port's PL011-backed
+/// [`rustos_arch_aarch64::SERIAL_SINK`]; the boot-completed QEMU vertical
+/// substitutes an audit sink that exits QEMU on `AuditEvent::BootCompleted`.
 ///
-/// Returns the bottom type: after recording the boot line it parks the
-/// CPU forever via [`halt_current_cpu`] (`AGENTS.md` §2.9 — fail closed).
+/// Returns the bottom type. On success it enters
+/// [`rustos_kernel_core::kernel_main`], which drives the init phases and
+/// itself never returns. If the handover cannot be assembled (no usable
+/// `/memory` window, the MMU could not be enabled, an unusable timer, or
+/// `BootInfo::validate` rejects the hand-off) it records the boot line
+/// and parks the CPU forever via [`halt_current_cpu`] (`AGENTS.md` §2.9 —
+/// fail closed).
 ///
 /// # SAFETY-INVARIANT
 ///
@@ -114,7 +180,11 @@ fn kernel_end_addr() -> u64 {
 /// `boot.s`'s invariants hold (EL1, interrupts masked, stack established,
 /// `.bss` zeroed). FP/SIMD is enabled here before any code that the
 /// compiler may lower to NEON runs.
-pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
+pub fn boot(
+    dtb: u64,
+    log_sink: &'static (dyn Sink + Sync),
+    audit_sink: &'static (dyn Sink + Sync),
+) -> ! {
     // Enable FP/SIMD before the log formatter (which the compiler may
     // lower to NEON) runs. SAFETY: this is the boot CPU, called once,
     // before any FP/SIMD instruction executes (see `enable_fp_el1`).
@@ -122,13 +192,21 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
         enable_fp_el1();
     }
 
-    // Discover the board from the firmware device tree before any log
-    // line is emitted: point the console at the UART, the GICv2 driver at
-    // the discovered GICD/GICC bases, and read the `/memory` window (P2 +
-    // P3). The FDT reader is byte-wise, so every walk is safe with the MMU
-    // still off (`plans/PI.md` W17). A null, unreadable, or incomplete
-    // tree leaves the `virt` defaults in place (fail closed,
-    // `AGENTS.md` §2.9).
+    // P6c-2: enable the stage-1 identity MMU and EL1 vectors *before* any
+    // further work. The `kernel_core` allocator and scheduler use atomic
+    // read-modify-write instructions, which are UNPREDICTABLE on the
+    // MMU-off Device-typed memory the boot CPU runs on; the identity map
+    // makes RAM Normal/cacheable so they behave (`plans/PI.md` P6c-2). It
+    // also makes the full-tree FDT walk below (`first_memory_region`)
+    // safe, which faults MMU-off under release optimisation
+    // (`plans/PI.md` watch-out).
+    let mmu_on = enable_mmu_and_vectors();
+
+    // Discover the board from the firmware device tree: point the console
+    // at the UART, the GICv2 driver at the discovered GICD/GICC bases, and
+    // read the `/memory` window, the timer rate, and the PSCI conduit (P2
+    // + P3 + P4 + P5). A null, unreadable, or incomplete tree leaves the
+    // `virt` defaults in place (fail closed, `AGENTS.md` §2.9).
     let discovered = configure_from_dtb(dtb);
 
     // Construct the architecture handle — the single §17.1/§17.2
@@ -153,38 +231,33 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
 
     // Sanity-check that the constructed handle reports the boot CPU, and
     // that the generic-timer frequency is usable. A zero frequency would
-    // make the monotonic clock unusable, so the line is recorded at
-    // `Warn` rather than trusting it silently (`AGENTS.md` §19.1 —
-    // record the contract, do not assume it). A single boot proceeds to
-    // the park regardless; P4 wires the live timer + scheduler.
+    // make the monotonic clock unusable.
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
     let timer_present = counter_hz != 0;
 
     // P6c-1: translate the firmware-discovered `/memory` window into the
-    // canonical physical-memory map the live allocator hand-off will
-    // consume (`plans/PI.md` P6c-2). The map is built and its
-    // usable/reserved split recorded here; an absent or malformed window
-    // fails closed to a status string rather than a panic
-    // (`AGENTS.md` §2.9). Wiring the map into `kernel_core::kernel_main`
-    // (which first needs the MMU enabled so the allocator's atomics run on
-    // Normal, not Device, memory) is P6c-2.
-    let (mem_status, usable_bytes, reserved_bytes) = match discovered.ram_window {
-        None => ("no_memory_window", 0, 0),
-        Some((base, size)) => match build_memory_map(base, size, kernel_end_addr()) {
-            Ok(map) => {
-                let (usable, reserved) = region_byte_totals(&map);
-                ("built", usable, reserved)
+    // canonical physical-memory map `kernel_core::kernel_main` consumes.
+    // An absent or malformed window fails closed to a status string
+    // rather than a panic (`AGENTS.md` §2.9); the map is retained (not
+    // just measured) so it can be moved into the `BootInfo` hand-off.
+    let map_result: Result<rustos_kernel_mem::BootMemoryMap, &'static str> =
+        match discovered.ram_window {
+            None => Err("no_memory_window"),
+            Some((base, size)) => {
+                build_memory_map(base, size, kernel_end_addr()).map_err(|err| err.as_str())
             }
-            Err(err) => (err.as_str(), 0, 0),
-        },
+        };
+    let (mem_status, usable_bytes, reserved_bytes) = match &map_result {
+        Ok(map) => {
+            let (usable, reserved) = region_byte_totals(map);
+            ("built", usable, reserved)
+        }
+        Err(status) => (*status, 0, 0),
     };
-    let mem_map_built = mem_status == "built";
+    let mem_map_built = map_result.is_ok();
+    let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
 
-    let level = if boot_cpu_ok && timer_present && mem_map_built {
-        Level::Info
-    } else {
-        Level::Warn
-    };
+    let level = if ready { Level::Info } else { Level::Warn };
 
     // Stack buffers for the allocation-free hex rendering of the discovered
     // byte counts; they must outlive the `fields` slice handed to `log`.
@@ -249,14 +322,70 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                     value: yes_no(discovered.psci_method.is_some()),
                 },
                 Field {
+                    key: "mmu_enabled",
+                    value: yes_no(mmu_on),
+                },
+                Field {
                     key: "next_stage",
-                    value: "pi_p6c2_mmu_kernel_main",
+                    value: "pi_p6c3_spawn_init_el0",
                 },
             ],
         },
     );
 
+    // Hand off to the architecture-neutral kernel core when the handover
+    // is sound; otherwise park fail-closed (`AGENTS.md` §2.9). The map is
+    // moved into `BootInfo` here, so it is built exactly once.
+    if ready {
+        if let Ok(memory_map) = map_result {
+            enter_kernel_core(arch, memory_map, log_sink, audit_sink)
+        }
+    }
+
     halt_current_cpu()
+}
+
+/// Assemble the validated [`BootInfo`] hand-off and enter
+/// [`rustos_kernel_core::kernel_main`].
+///
+/// Installs the production `svc` dispatch callback before user space can
+/// be entered (the `kernel_core` `Syscall` phase publishes the resident
+/// hook into [`DISPATCH_SLOT`]), wraps the validated [`Aarch64Arch`] in
+/// the local [`Aarch64BinArch`] `KernelArch`, and installs the
+/// discovered-UART [`UART_CONSOLE`] as the `console_write` device. A
+/// hand-off that `BootInfo::validate` rejects parks fail-closed rather
+/// than entering the core (`AGENTS.md` §2.9 / §5.4.5).
+fn enter_kernel_core(
+    arch: Aarch64Arch,
+    memory_map: rustos_kernel_mem::BootMemoryMap,
+    log_sink: &'static (dyn Sink + Sync),
+    audit_sink: &'static (dyn Sink + Sync),
+) -> ! {
+    // The arch port's `svc` trampoline fail-closes if it fires before a
+    // callback is installed, so install it before any user thread runs.
+    // No user space exists yet at P6c-2; pinning it here keeps the
+    // ordering identical to the x86_64 boot path (`AGENTS.md` §5.4.5).
+    syscall_entry::set_dispatch_callback(production_dispatch);
+
+    let arch = Arc::new(Aarch64BinArch::new(arch));
+    let boot_info = BootInfo::new(
+        BOOT_CPU,
+        1,
+        "",
+        memory_map,
+        IdentityTableBuilder::new(),
+        SchedulerConfig::defaults_for(1),
+        arch,
+        log_sink,
+        audit_sink,
+        Level::Info,
+        &DISPATCH_SLOT,
+    )
+    .with_console(&UART_CONSOLE);
+    if boot_info.validate().is_err() {
+        halt_current_cpu()
+    }
+    kernel_main(boot_info)
 }
 
 /// What the boot path resolved from the firmware device tree.

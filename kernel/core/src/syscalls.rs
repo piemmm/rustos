@@ -871,6 +871,7 @@ where
         ipc: &'a RwLock<PortRegistry>,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        console: &'static (dyn ConsoleWrite + 'static),
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -883,7 +884,8 @@ where
                 ipc,
                 aspaces,
                 rng,
-            ),
+            )
+            .with_console(console),
             sched,
             caps,
             arch,

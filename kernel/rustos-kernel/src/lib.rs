@@ -19,10 +19,13 @@
 //! | Module          | Role                                                                              |
 //! | --------------- | --------------------------------------------------------------------------------- |
 //! | [`bumpalloc`]   | Forward-only bump allocator + the `GlobalAlloc` impl shared by every bin.         |
+//! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
 //! | `arch_wrapper`  | `BinArch` — the in-crate `KernelArch` wrapper around `X86_64Arch` (x86_64).        |
 //! | `dispatch`      | Fail-closed syscall-dispatch callback (x86_64).                                   |
+//! | `arch_wrapper_aarch64` | `Aarch64BinArch` `KernelArch` wrapper + `UartConsole` (aarch64).            |
+//! | `dispatch_aarch64` | Fail-closed syscall-dispatch callback (aarch64).                              |
 //! | `boot`          | x86_64 `boot(multiboot_info, log_sink, audit_sink)` entry point (bare-metal only).|
-//! | `boot_aarch64`  | aarch64 `boot(dtb, log_sink)` entry point (bare-metal only; `plans/PI.md` P1).     |
+//! | `boot_aarch64`  | aarch64 `boot(dtb, log_sink, audit_sink)` entry point (bare-metal only; `plans/PI.md` P1).|
 //! | `mem_map`       | aarch64 `/memory` → `BootMemoryMap` builder (host-tested; `plans/PI.md` P6c-1).    |
 //!
 //! # Why this is a library, not a `[[bin]]`
@@ -82,10 +85,27 @@ extern crate std;
 // so its host unit tests run under `cargo test`.
 pub mod bumpalloc;
 
+// The architecture-neutral syscall-dispatch helpers (frame read, errno
+// encoding, slot forwarding) shared by every port's `production_dispatch`
+// callback (`AGENTS.md` §2.2). Un-gated: it names only unconditional
+// `kernel/*` + `lib/abi` deps, so it compiles on every target and the CI
+// host, where its unit tests run.
+pub mod dispatch_core;
+
 #[cfg(kernel_isa = "x86_64")]
 pub mod arch_wrapper;
 #[cfg(kernel_isa = "x86_64")]
 pub mod dispatch;
+
+// The aarch64 (Raspberry Pi 4) `KernelArch` wrapper + console device and
+// the fail-closed `svc` dispatch callback (`plans/PI.md` P6c-2). Gated on
+// the aarch64 instruction set so they link the aarch64 port; their unit
+// tests run under an aarch64-host `cargo test`, exactly as the x86_64
+// `arch_wrapper`/`dispatch` modules' tests run on the x86_64 CI host.
+#[cfg(kernel_isa = "aarch64")]
+pub mod arch_wrapper_aarch64;
+#[cfg(kernel_isa = "aarch64")]
+pub mod dispatch_aarch64;
 #[cfg(kernel_isa = "x86_64")]
 pub mod ioapic_controller;
 #[cfg(kernel_isa = "x86_64")]
@@ -123,6 +143,8 @@ pub use bumpalloc::BumpAllocator;
 
 #[cfg(kernel_isa = "x86_64")]
 pub use arch_wrapper::BinArch;
+#[cfg(kernel_isa = "aarch64")]
+pub use arch_wrapper_aarch64::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 #[cfg(kernel_isa = "x86_64")]
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
 #[cfg(kernel_isa = "x86_64")]

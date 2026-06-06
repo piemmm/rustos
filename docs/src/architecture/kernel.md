@@ -74,7 +74,7 @@ callback the arch-port installed before `syscall` was enabled
   sched ready                                       static DISPATCH_SLOT:
    │                                                DispatchCallbackSlot = new();
    ▼                                                   ▲
-  KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc,&aspaces,&rng) │ (from BootInfo)
+  KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc,&aspaces,&rng,console) │ (from BootInfo)
   Box::leak(hook)                                       │
   slot.install_dispatcher(hook)  ──publishes──────────┘ ───> production_dispatch (f5)
    │                                                   reads slot.get(),
@@ -87,7 +87,10 @@ The `Phase::Syscall` step:
 1. Builds a `KernelDispatchHook<A>` around `KernelState`'s scheduler,
    capability table, arch port, audit sink, IRQ table/controller,
    named-port registry (`ipc`), per-task address-space registry
-   (`aspaces`), and the kernel random output reserve (`rng`). The
+   (`aspaces`), the kernel random output reserve (`rng`), and the
+   system `console` device (`BootInfo::console`, the discovered
+   framebuffer or first UART the `console_write` syscall emits to;
+   defaults to the fail-closed `NULL_CONSOLE`). The
    `aspaces` registry lets a handler resolve `caller.task_id` to the
    user address space + `PhysMap` the user-memory copy path walks
    (`KernelSyscallHandlers::with_caller_aspace`, `AGENTS.md` §5.4)
@@ -170,6 +173,7 @@ stack-resident, so the panic path survives a wedged heap.
 | `audit_sink`       | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `log_level`        | `rustos_log::Level`               | Installed before the first `PhaseStarted`.    |
 | `dispatcher_callback_slot` | `&'static DispatchCallbackSlot`   | Bin-crate-owned slot; receives the production `DispatchHook` during the `syscall` phase. See below. |
+| `console`          | `&'static (dyn ConsoleWrite + 'static)` | System console the `console_write` syscall emits to; defaults to the fail-closed `NULL_CONSOLE` until the arch port installs a device via `with_console`. |
 
 `BootInfo::validate()` runs at the top of `kernel_main` and reports any
 violation as a `BootInfoError`; the kernel then logs a `PhaseFailed`

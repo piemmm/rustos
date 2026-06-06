@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-kernel-arch-boot-aarch64"
-description = "Stage 3b QEMU integration test: boot the aarch64 virt-board to a placeholder init and report PASS via ARM semihosting."
+description = "QEMU integration test (plans/PI.md P6c-2): boot the aarch64 rustos-kernel pipeline on the virt board to AuditEvent::BootCompleted and report PASS via ARM semihosting."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,20 @@ publish = false
 [lints]
 workspace = true
 
-# Freestanding "boot the aarch64 `virt` board through the arch crate's
-# trampoline and reach a placeholder init" integration test — the
-# aarch64 half of the Stage-3 "boots to init" per-sub-stage deliverable
-# (`PLAN.md` Stage 3). It links only the `rustos-arch-aarch64` port (the
-# boot path needs no `kernel/*` subsystem), logs over the PL011 UART, and
-# reports PASS through the ARM semihosting finisher. Keeping the
-# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
-# crate) prevents feature unification from leaking it into any production
-# build (`AGENTS.md` §5.4.5 — fail closed).
+# Freestanding "boot the aarch64 kernel pipeline and observe the final
+# `AuditEvent::BootCompleted` audit record" integration test — the
+# aarch64 analogue of `tests/integration/kernel_arch_boot` (x86_64) and
+# `tests/integration/kernel_arch_boot_riscv64`. It reuses the production
+# aarch64 boot pipeline through `rustos-kernel`'s library half
+# (`boot_aarch64::boot`, `plans/PI.md` P6c-2): it enables the stage-1
+# identity MMU + EL1 vectors, discovers the board from the embedded
+# `virt` device tree, hands the `BootMemoryMap` to
+# `kernel_core::kernel_main`, and only replaces the audit Sink so that
+# observing `EventId(4004)` (`AuditEvent::BootCompleted`) flips
+# `qemu_exit::exit_success`. Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on the arch crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md`
+# §5.4.5 — fail closed).
 
 [[bin]]
 name = "rustos-test-kernel-arch-boot-aarch64"
@@ -27,6 +32,13 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The production aarch64 boot pipeline lives in `rustos-kernel`'s library
+# half; this vertical reuses it verbatim and only swaps the audit sink
+# (`AGENTS.md` §2.2 — no duplication).
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+# The boot heap the `kernel_core::kernel_main` allocations (the leaked
+# `KernelState`, the scheduler) draw from.
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

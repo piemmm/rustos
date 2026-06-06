@@ -1492,7 +1492,9 @@ name = "rustos-test-kernel-arch-boot-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
+ "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kernel",
  "rustos-log",
 ]
 

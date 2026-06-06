@@ -61,6 +61,28 @@ fn putchar(byte: u8) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn putchar(_byte: u8) {}
 
+/// Write `bytes` verbatim to the currently-configured console UART,
+/// returning the number written (always `bytes.len()` — the busy-wait
+/// transmit path accepts every byte).
+///
+/// Unlike [`ConsoleWriter`] this performs **no** `\n` → `\r\n`
+/// translation: it is the raw byte sink the `console_write` syscall
+/// (`abi-v1` number 11) emits a user program's output through, so the
+/// bytes reach the device exactly as the program wrote them
+/// (`plans/PI.md` P6c-2, `AGENTS.md` §10 / §16.4). The downstream boot
+/// pipeline wraps this in a `kernel_core::ConsoleWrite` device and
+/// installs it on `BootInfo`.
+///
+/// Freestanding-only transmit (the host build's [`putchar`] is inert),
+/// so the host tests of the consuming `ConsoleWrite` adapter observe the
+/// byte count without touching MMIO.
+pub fn write_console_bytes(bytes: &[u8]) -> usize {
+    for &byte in bytes {
+        putchar(byte);
+    }
+    bytes.len()
+}
+
 /// [`core::fmt::Write`] adapter that emits each byte through the
 /// configured console, translating `\n` into `\r\n` so terminals
 /// capturing `-serial stdio` render the boot log with proper line breaks.

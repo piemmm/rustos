@@ -1716,9 +1716,30 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `target_os` only (cfg-check + §17.4 layering stay clean);
                   `Run.ld` mirrors the proven PIE link layout the userland
                   runtimes share.
-            - [ ] **P6c** — production aarch64 boot reaches EL0 + the `-M
-                  virt` banner vertical; **P6d** — `CAP_PROC_SPAWN` spawn
-                  syscall; **P6e** — minimal shell `init` launches.
+            - [~] **P6c** — production aarch64 boot reaches EL0 + the `-M
+                  virt` banner vertical (staged P6c-1/-2/-3; see
+                  `plans/PI.md`). **P6c-1** (discovered `/memory` →
+                  `BootMemoryMap`) and **P6c-2** are landed; **P6c-3**
+                  (embed `init` rxe + spawn PID 1 into EL0) remains.
+                  **P6c-2 — MMU + `kernel_main` hand-off:** `boot_aarch64`
+                  enables the stage-1 identity MMU (512×1 GiB gigapages
+                  over a static boot `PageTablePool`, then `switch`) + EL1
+                  vectors *before* discovery, adds the local
+                  `Aarch64BinArch` `KernelArch` wrapper, a slot-based
+                  aarch64 `production_dispatch`/`DISPATCH_SLOT` (shared
+                  arch-neutral logic factored into a host-tested
+                  `dispatch_core`, §2.2), a `UartConsole` `ConsoleWrite`
+                  over the discovered UART, and hands a validated
+                  `BootInfo` (`.with_console`) to
+                  `kernel_core::kernel_main` — so the aarch64 production
+                  kernel reaches `BootCompleted` like x86_64/riscv64.
+                  `kernel/core` grew a `BootInfo.console` field +
+                  `with_console` builder (fail-closed `NULL_CONSOLE`
+                  default) threaded into `KernelDispatchHook::new`. The
+                  `kernel_arch_boot_aarch64` vertical now boots the
+                  *production* pipeline to `AuditEvent::BootCompleted` on
+                  `-M virt`. **P6d** — `CAP_PROC_SPAWN` spawn syscall;
+                  **P6e** — minimal shell `init` launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

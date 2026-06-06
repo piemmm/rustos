@@ -123,10 +123,13 @@ mod kernel {
 
     /// The symbol the aarch64 boot trampoline calls (via
     /// `rustos_arch_aarch64_main`). Hands the verbatim DTB pointer and
-    /// the production PL011 console sink to the boot pipeline.
+    /// the production PL011-backed log/audit sinks to the boot pipeline.
+    /// In production both the log and audit streams go to the same serial
+    /// console; the boot-completed QEMU vertical replaces the audit sink
+    /// (see `tests/integration/kernel_arch_boot_aarch64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(dtb: u64) -> ! {
-        boot_aarch64::boot(dtb, &SERIAL_SINK)
+        boot_aarch64::boot(dtb, &SERIAL_SINK, &SERIAL_SINK)
     }
 }
 

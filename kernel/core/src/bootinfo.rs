@@ -30,6 +30,7 @@ use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Level, Sink};
 
+use crate::console::{ConsoleWrite, NULL_CONSOLE};
 use crate::dispatch_slot::DispatchCallbackSlot;
 
 /// Architecture-neutral hook the kernel core needs from a Stage 3
@@ -346,6 +347,20 @@ where
     /// "Syscall registration phase" section.
     pub dispatcher_callback_slot: &'static DispatchCallbackSlot,
 
+    /// System console the `console_write` syscall (`abi-v1` number 11)
+    /// emits to — the detected framebuffer when present, else the first
+    /// discovered UART (`plans/PI.md` P6, `AGENTS.md` §10 / §16.4).
+    ///
+    /// Defaults to [`NULL_CONSOLE`], which fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`] (`AGENTS.md` §2.9): an arch
+    /// port that has not discovered a console device leaves this default
+    /// and `console_write` announces an inert interface rather than
+    /// silently dropping the bytes. A port that has a device installs it
+    /// through [`Self::with_console`]. Held as a `'static` borrow because
+    /// the installed console lives for the lifetime of the running
+    /// kernel, exactly like the log/audit sinks.
+    pub console: &'static (dyn ConsoleWrite + 'static),
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -390,8 +405,30 @@ where
             audit_sink,
             log_level,
             dispatcher_callback_slot,
+            // Fail closed until the arch port installs a real device
+            // through `with_console` (`AGENTS.md` §2.9 / §5.4).
+            console: &NULL_CONSOLE,
             _marker: core::marker::PhantomData,
         }
+    }
+
+    /// Install the system console the `console_write` syscall emits to,
+    /// consuming and returning `self`.
+    ///
+    /// Called by an arch port's boot pipeline after it has selected the
+    /// console device from the normalised hardware tree — the detected
+    /// framebuffer when present, else the first discovered UART
+    /// (`plans/PI.md` P6, `AGENTS.md` §18). Until this is called the
+    /// handover holds [`NULL_CONSOLE`] and `console_write` fails closed
+    /// with [`rustos_abi::Errno::NotImplemented`]. The console must be
+    /// `'static`: the boot path leaks the device alongside the kernel
+    /// state, which lives for the lifetime of the running kernel
+    /// (`AGENTS.md` §2.1 — the install is a one-shot move, not a global
+    /// mutable static).
+    #[must_use]
+    pub fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
+        self.console = console;
+        self
     }
 
     /// Verify the SAFETY-INVARIANTs documented on each field.

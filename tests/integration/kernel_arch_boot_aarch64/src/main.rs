@@ -1,31 +1,45 @@
-//! Stage 3b QEMU integration test: boot the aarch64 `virt` board to a
-//! placeholder init.
+//! `plans/PI.md` P6c-2 QEMU integration test: boot the aarch64 (Raspberry
+//! Pi 4) `rustos-kernel` pipeline on the `virt` board to
+//! `AuditEvent::BootCompleted` and report success to QEMU.
 //!
 //! ## What this test asserts
 //!
-//! The Stage-3 per-sub-stage checklist requires that each architecture
-//! "boots to `init`" in QEMU. This binary exercises exactly that path on
-//! the aarch64 `virt` board, end to end:
+//! `kernel_core::kernel_main` emits `AuditEvent::BootCompleted`
+//! (`EventId(4004)`) once every init phase (Log → Mem → Sec → Sched →
+//! Irq → Syscall → Ipc) has succeeded. This binary drives the real
+//! aarch64 boot pipeline — `rustos_kernel::boot_aarch64::boot` — end to
+//! end on the `virt` board:
 //!
-//! 1. The arch crate's `boot.s` trampoline drops to EL1 (if entered at
-//!    EL2), establishes a stack, zeroes `.bss`, and calls `kernel_main`
-//!    with the DTB pointer.
-//! 2. `kernel_main` logs a record over the PL011 UART (proving the
-//!    console works) and reaches the placeholder init point.
-//! 3. It reports PASS through the ARM semihosting `SYS_EXIT` finisher,
-//!    which exits QEMU with status `0` — the host runner's success
-//!    condition.
+//! 1. The arch crate's `boot.s` trampoline drops to EL1, establishes a
+//!    stack, zeroes `.bss`, and calls `kernel_main`.
+//! 2. `boot_aarch64::boot` enables the stage-1 identity MMU + EL1
+//!    vectors, discovers the board from the device tree, builds the
+//!    `BootMemoryMap`, installs the discovered-UART console + the `svc`
+//!    dispatch callback, and hands a validated `BootInfo` to
+//!    `kernel_core::kernel_main`.
+//! 3. The audit sink observes `BootCompleted` and writes the ARM
+//!    semihosting PASS finisher (`qemu_exit::exit_success`).
 //!
-//! A regression that fails to boot never reaches the finisher, so the
-//! run times out and the harness reports `Outcome::Timeout` — the
+//! A regression that fails any init phase never reaches the finisher, so
+//! the run times out and the harness reports `Outcome::Timeout` — the
 //! documented fail-loud behaviour (`AGENTS.md` §7).
+//!
+//! ## Embedded `virt` device tree
+//!
+//! QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer (`x0 = 0`),
+//! so the canonical `virt` device tree is dumped and embedded at build
+//! time (`build.rs`) and its address handed to the boot pipeline, which
+//! discovers the console / GIC / `/memory` / timer / PSCI from it exactly
+//! as it would from real firmware (`plans/PI.md` P2–P5 watch-out).
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port (the boot path needs no
-//! `kernel/*` subsystem) and supplies its own `kernel_main`. The
-//! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on the arch crate (`AGENTS.md` §5.4.5 — fail closed).
+//! It reuses the entire production aarch64 boot pipeline; only the audit
+//! Sink is replaced. Splitting the audit-observer behaviour into a
+//! separate bin (instead of a Cargo feature on the arch crate) prevents
+//! feature unification from leaking the QEMU-exit shortcut into any
+//! production build (`AGENTS.md` §5.4.5 — fail closed; the harness never
+//! decides what the kernel does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -37,48 +51,77 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use rustos_log::{log, Event, EventId, Level};
+    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kernel::boot_aarch64;
+    use rustos_log::{Event, EventId, Sink};
 
-    /// Stable audit-event ids for the QEMU transcript.
-    const BOOT_TEST_START: EventId = EventId(4210);
-    const BOOT_TEST_PASS: EventId = EventId(4211);
+    // The canonical QEMU `virt` device tree, dumped and embedded at build
+    // time (`build.rs`). The boot pipeline discovers the board from it
+    // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
+    include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
-    /// then times out and the harness reports the failure).
+    /// Static boot heap.
+    ///
+    /// Lives in `.bss` (zeroed by the boot trampoline) exactly as the
+    /// production aarch64 kernel binary's heap does: the `aarch64-virt.ld`
+    /// script brackets `.bss` with `__bss_start`/`__bss_end` and places
+    /// `__kernel_end` *after* it, so `boot_aarch64`'s `BootMemoryMap`
+    /// reserves the whole `[ram_base, __kernel_end)` span — the heap
+    /// included — and never hands a heap frame to the allocator. `static
+    /// mut` because the bump allocator hands out disjoint slices via an
+    /// atomic cursor; the storage is otherwise never aliased.
+    static mut HEAP: Heap = Heap::ZERO;
+
+    /// Global allocator backed by [`HEAP`].
+    ///
+    /// SAFETY: the page-aligned `HEAP` static outlives the binary and
+    /// the allocator is its only consumer.
+    #[global_allocator]
+    static ALLOCATOR: BumpAllocator =
+        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+
+    /// `EventId` emitted by `kernel_core::kernel_main` once every init
+    /// phase completed. Pinned by the `event_ids_are_unique` test in
+    /// `kernel/core/src/audit.rs`.
+    const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
+
+    /// Sink that replays every event through [`SERIAL_SINK`] and, on
+    /// [`BOOT_COMPLETED_EVENT_ID`], reports PASS to QEMU.
+    struct BootCompletedExitSink;
+
+    impl Sink for BootCompletedExitSink {
+        fn write_event(&self, event: &Event<'_>) {
+            // Replay through the serial sink so the QEMU transcript
+            // records the full boot timeline.
+            SerialSink::new().write_event(event);
+            if event.id == BOOT_COMPLETED_EVENT_ID {
+                qemu_exit::exit_success();
+            }
+        }
+    }
+
+    static AUDIT_SINK: BootCompletedExitSink = BootCompletedExitSink;
+
+    /// Forward to the shared aarch64 panic bridge. A panic before
+    /// `BootCompleted` parks the CPU, the run times out, and the harness
+    /// reports `Outcome::Timeout` — the documented fail-loud behaviour
+    /// (`AGENTS.md` §7).
     #[panic_handler]
-    fn rustos_boot_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn rustos_kernel_arch_boot_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
     /// trampoline calls (via `rustos_arch_aarch64_main`).
+    ///
+    /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt`
+    /// blob's address is forwarded to the production boot pipeline with
+    /// the audit-observer sink in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        log(
-            &SERIAL_SINK,
-            &Event {
-                level: Level::Info,
-                id: BOOT_TEST_START,
-                message: "aarch64 boot test: reached kernel_main at EL1",
-                fields: &[],
-            },
-        );
-
-        // Placeholder init: a real kernel would hand off to
-        // `kernel_core::kernel_main` here. The Stage-3 deliverable is
-        // only that control reaches a Rust init point with a working
-        // console, which the log above proves.
-        log(
-            &SERIAL_SINK,
-            &Event {
-                level: Level::Info,
-                id: BOOT_TEST_PASS,
-                message: "aarch64 boot test: reached placeholder init",
-                fields: &[],
-            },
-        );
-        qemu_exit::exit_success();
+        let dtb = DTB_BLOB.as_ptr() as u64;
+        boot_aarch64::boot(dtb, &SERIAL_SINK, &AUDIT_SINK)
     }
 }
 

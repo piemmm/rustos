@@ -996,13 +996,19 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
-    // Stage 3b: `rustos-test-kernel-arch-boot-aarch64` is the aarch64
-    // half of the Stage-3 "boots to init" per-sub-stage deliverable. It
-    // boots the `virt` board through the arch crate's EL1 trampoline
-    // (EL2->EL1 drop, stack, `.bss` zero), logs over the PL011 UART, and
-    // reports PASS through the ARM semihosting `SYS_EXIT` finisher.
-    // Single CPU and a 60-second budget match the other boot-then-do-
-    // fixed-work tests.
+    // PI Stage P6c-2 (`plans/PI.md`): `rustos-test-kernel-arch-boot-aarch64`
+    // boots the *production* aarch64 `rustos-kernel` pipeline
+    // (`boot_aarch64::boot`) on the `virt` board all the way to
+    // `AuditEvent::BootCompleted` — the aarch64 analogue of the x86_64
+    // `kernel-arch-boot` and the riscv64 `kernel-arch-boot-riscv64`
+    // verticals. It enables the stage-1 identity MMU + EL1 vectors,
+    // discovers the board from the embedded `virt` device tree (QEMU's
+    // aarch64 `-kernel <ELF>` path passes no `x0` DTB pointer), builds the
+    // `BootMemoryMap`, installs the discovered-UART console + `svc`
+    // dispatch callback, and hands a validated `BootInfo` to
+    // `kernel_core::kernel_main`; the audit sink reports PASS through the
+    // ARM semihosting finisher on `EventId(4004)`. Single CPU and a
+    // 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-kernel-arch-boot-aarch64",
         binary: "rustos-test-kernel-arch-boot-aarch64",

@@ -355,8 +355,16 @@ links the `rustos-kernel-sched-mlfq` policy) and reports its result
 through the semihosting finisher. They are enrolled in
 `cargo xtask test --qemu`.
 
-- `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
-  trampoline reaches `kernel_main` at EL1 and logs over the PL011 UART.
+- `rustos-test-kernel-arch-boot-aarch64` — **boots the production
+  pipeline to `BootCompleted`** (PI Stage P6c-2): drives the real
+  `rustos_kernel::boot_aarch64::boot`, which enables the stage-1 identity
+  MMU (512×1 GiB gigapages over a static boot `PageTablePool`, then
+  `switch`) + EL1 vectors, discovers the board from the embedded `virt`
+  device tree, builds the `BootMemoryMap`, installs the discovered-UART
+  `console_write` device + the `svc` dispatch callback, and hands a
+  validated `BootInfo` to `kernel_core::kernel_main`; the audit sink
+  reports PASS on `AuditEvent::BootCompleted` — the aarch64 analogue of
+  the x86_64 / riscv64 boot verticals.
 - `rustos-test-uart-console-qemu-aarch64` — **the console base is
   discovered, not hard-wired** (PI Stage P2): poisons the console base,
   then proves `console::configure_from_fdt` overwrites it with the base
