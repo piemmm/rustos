@@ -15,6 +15,25 @@ Do not "just make it work".**
 - **Language:** Rust only. No C, no C++, no assembly except where the architecture
   *strictly* requires it (boot stubs, context switches, MMU/TLB primitives). Every
   such file must be justified in a header comment and reviewed.
+  - **Every line of RustOS is written in Rust.** This is absolute and binds
+    every contributor, human or AI. The *only* exceptions are the small,
+    individually justified assembly fragments named above (CPU bring-up and
+    the MMU/TLB/context-switch primitives the silicon cannot express in
+    Rust). There are no other exceptions.
+  - **Do not write C (or C++) programs, source files, headers, or build
+    glue as part of RustOS.** The C-language surface (§9, §16.4) exists for
+    **third-party developers** who write their *own* programs against
+    `abi-v1` from *outside* this repository. It is an outward-facing
+    compatibility contract, **not** a licence to author C inside RustOS.
+    No `.c`/`.h`/`.cc`/`.cpp` file is a legitimate deliverable of any task
+    in this workspace.
+  - The committed C artefacts are the few host-only items §9/§16.4 already
+    enumerate — the **generated** headers in `include/` (emitted from the
+    `lib/abi` Rust source of truth, never hand-edited; §9), the host build
+    glue under `tools/cc/`, and the host-only C-ABI conformance fixture it
+    drives. They are produced, pinned, and audited as described there; they
+    are not an invitation to hand-write new C. If a task seems to require
+    writing C, you have misread it — stop and ask (§15.7).
 - **Targets (Tier-1):**
   - `x86_64-unknown-none` (BIOS + UEFI PCs)
   - `aarch64-unknown-none` (Raspberry Pi 3/4/5, generic ARMv8)
@@ -503,7 +522,13 @@ an update to this section.
   generated from `lib/abi/src/syscalls.rs` — do not edit either by hand
   without updating the other; `cargo xtask abi-check` enforces this.
 - The ABI must be callable from programs not written in Rust (C, …), and
-  **all of `lib/abi` is part of that surface**, not just the syscalls. `lib/abi`
+  **all of `lib/abi` is part of that surface**, not just the syscalls. This is
+  a one-way, outward-facing contract: it exists so a **third-party** developer
+  can call `abi-v1` from C (or any other language) in *their own* project. It
+  is **not** a reason to write C inside RustOS (§1). The in-tree obligation is
+  only to keep the *generated* C view (`include/`, emitted from `lib/abi`) and
+  the Rust-authored stub/`crt0` runtime correct — never to hand-author C
+  programs against it. `lib/abi`
   is the single source of truth for every type a program exchanges with the
   kernel and with system services, and it is a public developer surface for
   third-party programs, not only the OS. The C-language view — every public
@@ -712,6 +737,18 @@ You are not exempt from any rule above. In addition:
 10. If you are about to write `// HACK`, `// FIXME later`, `// works for now`,
     or `#[allow(...)]` without a justification comment — **stop**. Rework
     the change.
+11. **Write Rust, never C.** All code you produce for RustOS is Rust (§1).
+    You **MUST NOT** author C or C++ — no `.c`, `.h`, `.cc`, `.cpp`, or
+    other non-Rust source, no hand-written C headers, no C build glue. The
+    C-callable ABI (§9, §16.4) is published **for third-party developers**
+    to consume from their own projects; it is not a task for you to write C
+    here. The only non-Rust text you may ever add is one of the small,
+    individually justified assembly fragments §1 permits (CPU bring-up,
+    MMU/TLB/context-switch primitives), and only with the required header
+    justification and review. The C headers under `include/` are
+    **generated** from `lib/abi` by `cargo xtask c-header --write` — never
+    hand-write or hand-edit them (§2.2, §9). If a task appears to ask you to
+    write C, you have misunderstood it: stop and ask (§15.7).
 
 ---
 
