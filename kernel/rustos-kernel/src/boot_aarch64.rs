@@ -381,7 +381,11 @@ fn enter_kernel_core(
         Level::Info,
         &DISPATCH_SLOT,
     )
-    .with_console(&UART_CONSOLE);
+    .with_console(&UART_CONSOLE)
+    // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
+    // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
+    // invokes it to build `init`'s EL0 image and drop into user mode.
+    .with_init(&crate::init_spawn::AARCH64_INIT_SPAWN);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

@@ -944,27 +944,35 @@ where
             return DispatchOutcome::NoCallerContext;
         };
 
-        // The capability registry is read-locked for the entire
-        // dispatch so the `&TaskCapabilities` we hand to
-        // `CallerContext` remains valid for the duration of the call.
-        // The lock is reader-preferring (`kernel/sync::RwLock`); a
-        // concurrent `cap_revoke` waits behind us. AGENTS.md §5.4
-        // step 1 ("Identify the caller") explicitly forbids
-        // re-locking mid-flight to avoid a TOCTOU window between
-        // capability check and use.
-        let guard = self.caps.read();
+        // Snapshot the caller's capability record under a *briefly* held
+        // read lock, then drop the guard before dispatching. The dispatcher
+        // checks the required capability against this consistent
+        // point-in-time snapshot (`AGENTS.md` §5.4.2 — check before any
+        // state touch), so there is no TOCTOU between the snapshot and the
+        // check. Holding the read lock across the whole call instead would
+        // self-deadlock the caps-mutating handlers — `exit`, `cap_delegate`,
+        // `cap_revoke` all take `self.caps.write()`, and the
+        // writer-preference `RwLock` cannot grant a writer while this thread
+        // still holds a reader. Revocation by another CPU mid-call therefore
+        // takes effect from the caller's *next* syscall, the same
+        // credential-snapshot semantics a POSIX kernel gives a syscall in
+        // flight; the mutating handlers operate on the live table under
+        // their own write lock, so the revocation itself is not lost.
         let task_id = SecTaskId(sched_task_id);
-        let Some(caps_record) = guard.caps_for(task_id) else {
-            // Drop the guard before emitting the audit record so the
-            // sink write does not hold the read lock unnecessarily.
-            drop(guard);
-            self.audit_no_caller_context(cpu, "no_capability_record");
-            return DispatchOutcome::NoCallerContext;
+        let caps_snapshot = {
+            let guard = self.caps.read();
+            if let Some(record) = guard.caps_for(task_id) {
+                record.clone()
+            } else {
+                drop(guard);
+                self.audit_no_caller_context(cpu, "no_capability_record");
+                return DispatchOutcome::NoCallerContext;
+            }
         };
 
         let caller = CallerContext {
             task_id,
-            caps: caps_record,
+            caps: &caps_snapshot,
         };
 
         // Steps 2–5: hand off to the dispatcher, which performs the

@@ -1716,29 +1716,39 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `target_os` only (cfg-check + §17.4 layering stay clean);
                   `Run.ld` mirrors the proven PIE link layout the userland
                   runtimes share.
-            - [~] **P6c** — production aarch64 boot reaches EL0 + the `-M
-                  virt` banner vertical (staged P6c-1/-2/-3; see
-                  `plans/PI.md`). **P6c-1** (discovered `/memory` →
-                  `BootMemoryMap`) and **P6c-2** are landed; **P6c-3**
-                  (embed `init` rxe + spawn PID 1 into EL0) remains.
-                  **P6c-2 — MMU + `kernel_main` hand-off:** `boot_aarch64`
-                  enables the stage-1 identity MMU (512×1 GiB gigapages
-                  over a static boot `PageTablePool`, then `switch`) + EL1
-                  vectors *before* discovery, adds the local
-                  `Aarch64BinArch` `KernelArch` wrapper, a slot-based
-                  aarch64 `production_dispatch`/`DISPATCH_SLOT` (shared
-                  arch-neutral logic factored into a host-tested
-                  `dispatch_core`, §2.2), a `UartConsole` `ConsoleWrite`
-                  over the discovered UART, and hands a validated
-                  `BootInfo` (`.with_console`) to
-                  `kernel_core::kernel_main` — so the aarch64 production
-                  kernel reaches `BootCompleted` like x86_64/riscv64.
-                  `kernel/core` grew a `BootInfo.console` field +
-                  `with_console` builder (fail-closed `NULL_CONSOLE`
-                  default) threaded into `KernelDispatchHook::new`. The
-                  `kernel_arch_boot_aarch64` vertical now boots the
-                  *production* pipeline to `AuditEvent::BootCompleted` on
-                  `-M virt`. **P6d** — `CAP_PROC_SPAWN` spawn syscall;
+            - [x] **P6c** — production aarch64 boot reaches EL0 (staged
+                  P6c-1/-2/-3; see `plans/PI.md`). **P6c-1** (discovered
+                  `/memory` → `BootMemoryMap`), **P6c-2** (MMU +
+                  `kernel_main` hand-off), and **P6c-3** (embed `init` rxe
+                  + spawn PID 1 into EL0) are all landed.
+                  **P6c-3 — spawn PID 1 into EL0:** the `rustos-kernel`
+                  build script compiles `rustos-init-run` PIE and embeds
+                  it as an `rxe` (via `rustos_itest_harness::elf2rxe`,
+                  stamped with `SYSCALL_TABLE_HASH`). `kernel/core` gained
+                  an arch-neutral PID-1 spawn seam: `BootInfo.init` +
+                  `with_init` (invoked by `kernel_main` after
+                  `BootCompleted`) and the object-safe `InitSpawnCtx`
+                  (`frames`/`audit`/`admit_init`); `spawn_and_enter` was
+                  split so `spawn_image` is the no-enter build half. The
+                  aarch64 `init_spawn` seam builds a 2 GiB-identity user
+                  space (64 GiB bias), parses the `rxe`, and boxes the
+                  `userentry` `eret` as the scheduler task body, which
+                  `step` runs so `current_task` is set when `init`'s first
+                  `svc` traps back. The `spawn_init_qemu_aarch64` `-M virt`
+                  vertical asserts the EL0 transition (`ProcessSpawned`
+                  4030 → audited `exit` 5000 → semihosting PASS).
+                  **Locking fix:** the production `KernelDispatchHook` now
+                  snapshots the caller's caps and drops the read guard
+                  before dispatch, so the caps-mutating handlers (`exit`,
+                  `cap_delegate`, `cap_revoke`) no longer self-deadlock the
+                  writer-preference `RwLock` (a latent bug, first reached
+                  here). **Deferred:** the `init` banner does not yet print
+                  — `console_write`'s user-copy needs the task's address
+                  space in the `Send+Sync` `AddressSpaceRegistry`, but an
+                  arch `AddressSpace` is `!Sync` (owns a `&'static mut`
+                  root), so it fails closed with `BadAddress` until a
+                  registry-storable handle lands (a P6c-3 follow-up).
+                  **P6d** — `CAP_PROC_SPAWN` spawn syscall;
                   **P6e** — minimal shell `init` launches.
 
 **Stage 3c status: complete.**

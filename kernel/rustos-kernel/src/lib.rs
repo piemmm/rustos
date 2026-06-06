@@ -124,6 +124,15 @@ pub mod serial_sink;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub mod boot_aarch64;
 
+// The aarch64 PID 1 (`init`) spawn seam (`plans/PI.md` P6c-3): the
+// `rustos_kernel_core::InitSpawn` implementation `boot_aarch64` installs
+// into the `BootInfo` hand-off so `kernel_main` drops into user mode after
+// boot completes. Freestanding+aarch64-only: it links the aarch64 port's
+// page-table / `EnterUser` primitives and `include!`s the build-time `init`
+// `rxe` blob.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub mod init_spawn;
+
 // The aarch64 `/memory` → `BootMemoryMap` translation (`plans/PI.md`
 // P6c-1). The arithmetic is free of the bare-metal-only aarch64 port, so
 // it compiles — and its bounds-check unit tests run — on the CI host

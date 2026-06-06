@@ -844,6 +844,7 @@ dependencies = [
  "rustos-drv-bus-virtio",
  "rustos-drvhost",
  "rustos-fdt",
+ "rustos-itest-harness",
  "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
@@ -1654,6 +1655,17 @@ dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
  "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-test-spawn-init-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
 ]
 
 [[package]]

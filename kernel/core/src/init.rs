@@ -26,11 +26,13 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use crate::sched::{SchedError, Scheduler};
+use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
+use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator};
-use rustos_kernel_sec::{CapTable, IdentityTable};
+use rustos_kernel_sched_api::{Priority, TaskAction, TaskContext};
+use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
 use rustos_sync::RwLock;
 
@@ -39,6 +41,7 @@ use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
 use crate::random::{BootReserve, RandomReserve};
+use crate::spawn::InitSpawnCtx;
 use crate::syscalls::KernelDispatchHook;
 
 /// Ordered identifier of every subsystem init phase orchestrated by
@@ -221,6 +224,10 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     let log_sink: &'static (dyn Sink + Sync) = boot.log_sink;
     let audit_sink: &'static (dyn Sink + Sync) = boot.audit_sink;
     let arch_for_halt = Arc::clone(&boot.arch);
+    // The arch port's PID-1 spawn seam (`plans/PI.md` P6c-3), captured
+    // before `boot` is consumed by `run_phases`. `Option<&dyn _>` is
+    // `Copy`, so this is a copy of the reference, not a move.
+    let init_spawn = boot.init;
 
     // `BootStarted` / `BootCompleted` / `PhaseFailed` are audit
     // lifecycle events (`AGENTS.md` §5.4.4 — security-relevant
@@ -254,28 +261,29 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     }
 
     // Per-phase orchestration. On failure we halt via the arch port.
-    let outcome = run_phases(boot, log_sink, audit_sink);
-
-    if let Err(err) = outcome {
-        let phase = err.phase();
-        let cause = err.cause();
-        emit(
-            audit_sink,
-            Level::Error,
-            AuditEvent::PhaseFailed,
-            &[
-                Field {
-                    key: "phase",
-                    value: phase.as_str(),
-                },
-                Field {
-                    key: "cause",
-                    value: cause,
-                },
-            ],
-        );
-        arch_for_halt.halt();
-    }
+    let state = match run_phases(boot, log_sink, audit_sink) {
+        Ok(state) => state,
+        Err(err) => {
+            let phase = err.phase();
+            let cause = err.cause();
+            emit(
+                audit_sink,
+                Level::Error,
+                AuditEvent::PhaseFailed,
+                &[
+                    Field {
+                        key: "phase",
+                        value: phase.as_str(),
+                    },
+                    Field {
+                        key: "cause",
+                        value: cause,
+                    },
+                ],
+            );
+            arch_for_halt.halt();
+        }
+    };
 
     emit(
         audit_sink,
@@ -283,10 +291,98 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootCompleted,
         &[Field {
             key: "next",
-            value: "stage_2_7_syscall_registration",
+            value: "spawn_init",
         }],
     );
+
+    // Spawn PID 1 (`init`) into user mode when the arch port installed a
+    // spawn seam (`plans/PI.md` P6c-3). On success the seam diverges into
+    // the spawned program and never returns; on failure (or when no seam
+    // is installed) we fall through to the fail-closed halt below
+    // (`AGENTS.md` §2.9 — never silently reset).
+    if let Some(init) = init_spawn {
+        // The core-side registration context the seam drives: it builds
+        // the arch image (through the public `spawn_image` caller) and
+        // hands it back through `admit_init`, which registers the task with
+        // this kernel state's scheduler / capability table / address-space
+        // registry and dispatches it. Every borrow targets the leaked
+        // `KernelState`, which lives for the running kernel's lifetime.
+        let ctx = KernelInitSpawner {
+            frames: &state.frame_allocator,
+            audit: audit_sink,
+            scheduler: &state.scheduler,
+            caps: &state.caps,
+            arch: state.arch.as_ref(),
+        };
+        init.spawn_init(&ctx);
+    }
+
     arch_for_halt.halt();
+}
+
+/// The concrete [`InitSpawnCtx`] [`kernel_main`] hands the arch
+/// [`crate::InitSpawn`] seam to spawn PID 1 (`plans/PI.md` P6c-3).
+///
+/// It borrows the live kernel registries from the leaked [`KernelState`]
+/// so the seam can register the freshly built `init` task (scheduler,
+/// capability table, address-space registry) and dispatch it without ever
+/// naming the concrete scheduler or arch types itself (`AGENTS.md` §17.2 /
+/// §17.4 — the generics stay on this side of the object-safe boundary).
+struct KernelInitSpawner<'a, A: KernelArch> {
+    frames: &'a FrameAllocator,
+    audit: &'static (dyn Sink + Sync),
+    scheduler: &'a Scheduler<A>,
+    caps: &'a RwLock<CapTable>,
+    arch: &'a A,
+}
+
+impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
+    fn frames(&self) -> &FrameAllocator {
+        self.frames
+    }
+
+    fn audit(&self) -> &(dyn Sink + Sync) {
+        self.audit
+    }
+
+    unsafe fn admit_init(&self, caps: CapabilitySet, mut enter: Box<dyn FnMut() + Send>) {
+        let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
+
+        // Admit PID 1 with a body that performs the user-mode transition.
+        // `enter` diverges into EL0, so the body never reaches the trailing
+        // `TaskAction::Exit` — it is the unreachable lifecycle fallback that
+        // satisfies the `FnMut(&mut TaskContext) -> TaskAction` signature
+        // for the (impossible) case the transition ever returned.
+        let body = move |_ctx: &mut TaskContext| -> TaskAction {
+            enter();
+            TaskAction::Exit
+        };
+        let Ok(task_id) = self.scheduler.spawn(cpu, Priority::Normal, body) else {
+            // The home queue could not admit the task — fail closed: return
+            // so the seam (and then `kernel_main`) halts the CPU.
+            return;
+        };
+
+        // Register the task's caps under the *same* numeric id the
+        // dispatcher recovers (`SecTaskId(current_task)`), so PID 1's first
+        // syscall resolves a caller context (`AGENTS.md` §5.4.1). `init`'s
+        // effective set is the intersection of its user grant and manifest
+        // request; the boot path passes the system grant, so use it for both
+        // bounds (uid 0 — the system user, `AGENTS.md` §5.1). The task's
+        // address space is intentionally not registered (see the
+        // `InitSpawnCtx::admit_init` doc — the arch space is not `Sync`).
+        let record =
+            TaskCapabilities::derive(SecTaskId(task_id), UserId(0), caps, caps, self.audit);
+        self.caps.write().insert(record);
+
+        // Dispatch PID 1: `step` sets the per-CPU current task to it and
+        // runs the body, which transfers control to EL0 and does not return.
+        // SAFETY: the seam built the image into and switched to the active
+        // address space before calling here, and the EL1/trap vector is
+        // installed, so the new program's first syscall is handled (this
+        // method's contract).
+        let _ = self.scheduler.step(cpu);
+    }
 }
 
 /// Drive every init phase in [`Phase::ORDER`].

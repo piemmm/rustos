@@ -115,6 +115,19 @@ rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # the aarch64 target because only `boot_aarch64` consumes it.
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
+[build-dependencies]
+# The aarch64 build script embeds the `init` `Run` rxe so the boot path can
+# spawn PID 1 into EL0 (`plans/PI.md` P6c-3). It compiles the pure-Rust
+# `rustos-init-run` program PIE and converts the linked ELF to an `rxe` blob
+# (carrying the kernel's compiled-in syscall CFI tag) exactly as the cc3 /
+# spawn fixtures do, reusing the shared converter rather than re-rolling it
+# (`AGENTS.md` §2.2). Host-only build glue — the production kernel image stays
+# Rust-only (`AGENTS.md` §1). `rustos-kernel` is the image-assembly seam
+# (`Layer::Tooling`), so naming the harness here is not a §17.4 layering
+# violation.
+rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+
 [dev-dependencies]
 # The `virtio_factory` unit tests drive a real `DmaPool` through
 # `kernel/mem`'s in-memory `HostPageTable` test double, gated behind

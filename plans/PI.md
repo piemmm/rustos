@@ -408,7 +408,7 @@ on its own before the next.
   `rustos-rt` tests + 10 startup-config tests + the freestanding aarch64 build
   via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0 spawn of
   this binary is P6c.
-- **P6c — production boot reaches EL0 `[~]`.** Wire the freestanding
+- **P6c — production boot reaches EL0 `[x]`.** Wire the freestanding
   aarch64 `rustos-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
   over the discovered `/memory` map, install the console (discovered
   framebuffer else first UART) via `with_console`, embed the `init` rxe,
@@ -452,11 +452,38 @@ on its own before the next.
     `kernel_arch_boot_aarch64` vertical now boots the *production* pipeline
     to `AuditEvent::BootCompleted` on `-M virt` (embedded `virt` DTB; QEMU
     passes no `x0`). `boot.rs::main` passes `&SERIAL_SINK` as both sinks.
-  - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[ ]`.** Embed the
-    `init` `Run` rxe (nested PIE build), register PID 1's task/aspace/caps,
-    `spawn_and_enter` into EL0 via the `userentry` `eret` path, and add the
-    `-M virt` vertical asserting the EL0 transition + the `init` banner on
-    the discovered UART.
+  - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[x]`.** The
+    `rustos-kernel` build script compiles the pure-Rust `rustos-init-run`
+    `Run` binary PIE (its own `Run.ld`) and converts the linked ELF to an
+    embedded `rxe` blob with `rustos_itest_harness::elf2rxe` (stamped with
+    the kernel's `SYSCALL_TABLE_HASH`, biased to 64 GiB) — the same path the
+    cc3/spawn fixtures use (§2.2; host-only build glue, RustOS stays
+    Rust-only §1). `kernel/core` gained an arch-neutral PID-1 spawn seam:
+    `BootInfo.init: Option<&dyn InitSpawn>` + `with_init`, invoked by
+    `kernel_main` after `BootCompleted`; the object-safe `InitSpawnCtx`
+    (`frames`/`audit`/`admit_init`) lets the arch seam build the image
+    (`spawn_image` — the new authorise+build+`ProcessSpawned`-audit half of
+    `spawn_and_enter`, no enter) while the core registers PID 1 with the
+    scheduler + capability table and dispatches it. The aarch64
+    `init_spawn` seam builds a 2 GiB-identity user address space (64 GiB
+    bias avoids the gigapage collision), parses the embedded `rxe`, and
+    boxes the `userentry` `eret` as the scheduler task body; the body runs
+    under `step` so the per-CPU `current_task` is set when `init`'s first
+    `svc` traps back. PID 1 runs as uid 0 with `{CAP_CONSOLE_WRITE}`. The
+    `spawn_init_qemu_aarch64` `-M virt` vertical asserts the EL0 transition:
+    `ProcessSpawned` (4030) → `SyscallInvoked` (5000, `init`'s audited
+    `exit`) → semihosting PASS. **Locking fix:** the production
+    `KernelDispatchHook` now snapshots the caller's caps and drops the read
+    guard before dispatch, so the caps-mutating handlers (`exit`,
+    `cap_delegate`, `cap_revoke` — all take `caps.write()`) no longer
+    self-deadlock the writer-preference `RwLock` (a latent bug, since no
+    arch reached EL0 through the real hook before). **Deferred:** the
+    `init` banner does not yet print — `console_write`'s user-copy needs the
+    task's address space registered in the kernel-wide
+    `AddressSpaceRegistry`, but an arch `AddressSpace` is `!Sync` (owns a
+    `&'static mut` root), so it cannot be stored in the `Send+Sync`
+    registry; `console_write` fails closed with `BadAddress` until a
+    registry-storable address-space handle lands (a P6c-3 follow-up).
 - **P6d — userland process-spawn syscall `[ ]`.** Add the `abi-v1`
   spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
   an embedded-program registry so `init` can launch a separate process.

@@ -1021,6 +1021,34 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage P6c-3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-aarch64`
+    // boots the *production* aarch64 `rustos-kernel` pipeline
+    // (`boot_aarch64::boot`) on the `virt` board, then drops into PID 1
+    // (`init`) in EL0 through the `InitSpawn` seam `boot_aarch64` installs
+    // into the `BootInfo` hand-off. After `kernel_core::kernel_main` emits
+    // `AuditEvent::BootCompleted` it builds the embedded `init` (`Run`) EL0
+    // image through the capability-checked, audited `spawn_and_enter`
+    // (emitting `ProcessSpawned`, `EventId(4030)`) and `eret`s into it;
+    // `init` returns and the `rustos-rt` runtime routes the return through
+    // the audited `exit` syscall, whose `svc` traps back through the EL1
+    // vector to the production dispatch callback (emitting `SyscallInvoked`,
+    // `EventId(5000)`). The audit sink reports PASS through the ARM
+    // semihosting finisher once it has seen `ProcessSpawned` then
+    // `SyscallInvoked` — proving PID 1 reached user mode and trapped back.
+    // Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-spawn-init-qemu-aarch64",
+        binary: "rustos-test-spawn-init-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the

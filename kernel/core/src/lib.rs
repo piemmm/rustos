@@ -105,5 +105,7 @@ pub use fs::{
 pub use init::{kernel_main, InitError, Phase};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
-pub use spawn::{spawn_and_enter, SpawnCallerError, SpawnRequest};
+pub use spawn::{
+    spawn_and_enter, spawn_image, InitSpawn, InitSpawnCtx, SpawnCallerError, SpawnRequest,
+};
 pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};

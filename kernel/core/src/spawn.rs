@@ -28,16 +28,108 @@
 //! authorises the *act* of spawning, it does not widen the new program's
 //! authority.
 
+use alloc::boxed::Box;
+
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery};
 use rustos_arch_api::{EnterUser, UserEntry};
+use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{
-    build_process_image, AddressSpace, Frame, PageTable, PhysMap, SpawnError, UserStack,
+    build_process_image, AddressSpace, Frame, FrameAllocator, PageTable, PhysMap, SpawnError,
+    UserStack,
 };
 use rustos_log::{Event, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
 use crate::audit::AuditEvent;
+
+/// The architecture-specific seam that spawns PID 1 (`init`) into user
+/// mode once the kernel has finished booting.
+///
+/// Building a user address space and dropping the CPU into it is
+/// irreducibly architecture-specific — it names the port's concrete page
+/// table, its [`EnterUser`] primitive, and the direct physical map — none
+/// of which `kernel/core` can spell (`AGENTS.md` §17.2 / §17.4). So
+/// rather than teach [`crate::kernel_main`] those types, the arch port (or
+/// the kernel binary that wires it) hands the core a `&'static dyn
+/// InitSpawn` through [`crate::BootInfo::with_init`]. After every init
+/// phase has succeeded and [`AuditEvent::BootCompleted`] has been emitted,
+/// `kernel_main` invokes [`Self::spawn_init`], passing the
+/// [`InitSpawnCtx`] the core implements so the seam can build the image
+/// (arch-specific) and then register the new task (core-specific) through
+/// one object-safe boundary.
+///
+/// The implementation builds the image through the production,
+/// capability-checked, audited [`spawn_image`] caller — it is *not* a
+/// privileged bypass: the spawned program still receives only the
+/// authority its manifest requests intersected with its user's grants
+/// (`AGENTS.md` §4, §16.5).
+pub trait InitSpawn {
+    /// Build PID 1's EL0 image and hand it to [`InitSpawnCtx::admit_init`]
+    /// for registration + entry. Diverges into user mode on success;
+    /// returns only when PID 1 could not be spawned, so the caller halts
+    /// fail-closed (`AGENTS.md` §2.9).
+    ///
+    /// Called exactly once, on the boot CPU, after every init phase has
+    /// succeeded — so the MMU is enabled and the user→kernel trap path is
+    /// installed (the new program's first syscall is therefore handled
+    /// rather than faulting).
+    fn spawn_init(&self, ctx: &dyn InitSpawnCtx);
+}
+
+/// The core-side capabilities an [`InitSpawn`] seam needs to spawn PID 1:
+/// the live frame allocator and audit sink for building the image, and
+/// [`admit_init`](Self::admit_init) to register the freshly built task
+/// with the scheduler, capability table, and address-space registry and
+/// drop into it.
+///
+/// Implemented by `kernel/core` (the concrete `KernelInitSpawner`) and
+/// handed to the seam as a `&dyn InitSpawnCtx`, so the arch-specific
+/// builder and the core-specific registries meet at one object-safe
+/// boundary — neither names the other's generics (`AGENTS.md` §17.2 /
+/// §17.4).
+pub trait InitSpawnCtx {
+    /// The kernel's live physical-frame allocator, the source of the
+    /// frames the image's pages are mapped to.
+    fn frames(&self) -> &FrameAllocator;
+
+    /// The boot audit sink the build path records `ProcessSpawn*` events
+    /// through.
+    fn audit(&self) -> &(dyn Sink + Sync);
+
+    /// Register the freshly built PID 1 with the scheduler (so
+    /// `current_task` resolves the caller on its first syscall) and the
+    /// capability table (`caps`, the effective set the manifest∩user grant
+    /// produced), then dispatch it — running `enter`, which must transfer
+    /// control to EL0 and not return.
+    ///
+    /// `enter` is the arch-specific user-mode transition boxed as a
+    /// `FnMut()`: `EnterUser::enter_user` diverges, so the closure never
+    /// truly returns (its `!` coerces to `()`); modelling it as `FnMut()`
+    /// keeps this boundary free of a `dyn FnMut() -> !` bound. The task is
+    /// dispatched on the boot CPU; on the authorised path the call
+    /// diverges into the new program. It returns only if the task could
+    /// not be admitted, so the seam (and then `kernel_main`) halts
+    /// fail-closed (`AGENTS.md` §2.9).
+    ///
+    /// The new task's address space is *not* registered with the
+    /// kernel-wide [`crate::AddressSpaceRegistry`] here: that registry
+    /// stores `Send + Sync` views (it is shared across CPUs behind a lock),
+    /// and an arch port's live address space is not `Sync` while it owns a
+    /// `&'static mut` root table. PID 1 therefore reaches user mode and can
+    /// issue syscalls that do not touch user memory (e.g. `exit`); syscalls
+    /// that copy from user memory resolve no address space and fail closed
+    /// with `BadAddress` until a registry-storable address-space handle
+    /// lands (`plans/PI.md` — a follow-up to P6c-3).
+    ///
+    /// # Safety
+    ///
+    /// The seam must have built PID 1's image into the **active** address
+    /// space on the calling CPU and installed the user→kernel trap path
+    /// before calling here, so PID 1's first syscall is handled rather than
+    /// faulting.
+    unsafe fn admit_init(&self, caps: CapabilitySet, enter: Box<dyn FnMut() + Send>);
+}
 
 /// Why a [`spawn_and_enter`] call did not transfer control to a new program.
 ///
@@ -144,6 +236,62 @@ where
     A: FnMut() -> Option<Frame>,
     E: EnterUser,
 {
+    // Authorise, build the image, and emit `ProcessSpawned` — everything up
+    // to (but not including) the user-mode transition.
+    // SAFETY: `spawn_image`'s contract (the returned `UserEntry` is only
+    // entered once `space` is active and the trap path installed) is upheld
+    // by this function's own identical safety contract, discharged by the
+    // `enter_user` call below.
+    let entry = unsafe { spawn_image(caps, audit, space, physmap, request, alloc_frame)? };
+
+    // SAFETY: the function's own safety contract requires `space` to be the
+    // active address space with the trap path installed. `spawn_image`
+    // mapped `entry.pc` as a user-accessible executable page and the stack
+    // top as the exclusive top of a user-accessible writable stack in
+    // `space`, so the `UserEntry` register state satisfies
+    // `EnterUser::enter_user`'s precondition.
+    unsafe { enter.enter_user(entry) }
+}
+
+/// Authorise, audit, and build a freshly spawned process **without**
+/// entering user mode — the build half of [`spawn_and_enter`].
+///
+/// Performs the same steps 1–2 as [`spawn_and_enter`] (capability check
+/// before any state touch; [`build_process_image`]; the
+/// [`AuditEvent::ProcessSpawned`] record) and returns the [`UserEntry`]
+/// register state the caller must hand to [`EnterUser::enter_user`] to
+/// transfer control. It exists so a caller that must do work **between**
+/// building the image and entering it — register the new task with the
+/// scheduler, capability table, and address-space registry so its first
+/// syscall resolves a caller context (`plans/PI.md` P6c-3) — can interpose
+/// that work without duplicating the authorise/build/audit logic
+/// (`AGENTS.md` §2.2). [`spawn_and_enter`] is the no-interposition case:
+/// it calls this and immediately enters.
+///
+/// # Safety
+///
+/// The returned [`UserEntry`] is only meaningful once `space` is the
+/// **active** address space on the calling CPU and the user→kernel trap
+/// path is installed; entering it otherwise is unsound. Building the image
+/// itself is safe — the unsafety is deferred to the eventual
+/// [`EnterUser::enter_user`] call the caller makes with the returned value.
+///
+/// # Errors
+///
+/// Returns [`SpawnCallerError::Denied`] when the capability check fails and
+/// [`SpawnCallerError::Build`] when image construction fails.
+pub unsafe fn spawn_image<P, A>(
+    caps: &dyn CapabilityQuery,
+    audit: &dyn Sink,
+    space: &mut AddressSpace<P>,
+    physmap: &dyn PhysMap,
+    request: &SpawnRequest<'_>,
+    alloc_frame: A,
+) -> Result<UserEntry, SpawnCallerError>
+where
+    P: PageTable,
+    A: FnMut() -> Option<Frame>,
+{
     // Step 2 (AGENTS.md §5.4) — capability check before any state touch.
     if !caps.holds(CapabilityId::PROC_SPAWN) {
         emit(audit, AuditEvent::ProcessSpawnDenied, Level::Error, &[]);
@@ -187,19 +335,11 @@ where
         }],
     );
 
-    // SAFETY: the function's own safety contract requires `space` to be the
-    // active address space with the trap path installed. `build_process_image`
-    // mapped `image.entry` as a user-accessible executable page and
-    // `image.stack_top` as the exclusive top of a user-accessible writable
-    // stack in `space`, so the `UserEntry` register state satisfies
-    // `EnterUser::enter_user`'s precondition.
-    unsafe {
-        enter.enter_user(UserEntry::new(
-            image.entry,
-            image.stack_top,
-            image.start_block,
-        ))
-    }
+    Ok(UserEntry::new(
+        image.entry,
+        image.stack_top,
+        image.start_block,
+    ))
 }
 
 /// Emit one structured audit record for `event` with `fields`.

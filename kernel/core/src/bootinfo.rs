@@ -32,6 +32,7 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleWrite, NULL_CONSOLE};
 use crate::dispatch_slot::DispatchCallbackSlot;
+use crate::spawn::InitSpawn;
 
 /// Architecture-neutral hook the kernel core needs from a Stage 3
 /// arch port.
@@ -361,6 +362,21 @@ where
     /// kernel, exactly like the log/audit sinks.
     pub console: &'static (dyn ConsoleWrite + 'static),
 
+    /// Architecture-specific seam that spawns PID 1 (`init`) into user
+    /// mode once boot completes (`plans/PI.md` P6c-3).
+    ///
+    /// Defaults to `None`: a port that has no user-mode bring-up wired
+    /// yet leaves it unset and [`crate::kernel_main`] parks the boot CPU
+    /// after [`crate::AuditEvent::BootCompleted`], exactly as before. A
+    /// port that can reach user mode installs its [`InitSpawn`] through
+    /// [`Self::with_init`]; `kernel_main` then invokes it after
+    /// `BootCompleted` and the implementation diverges into the spawned
+    /// program (`AGENTS.md` §17.2 / §17.4 — the arch-specific page-table /
+    /// `EnterUser` types live in the port, not the core). Held as a
+    /// `'static` borrow because the seam lives for the lifetime of the
+    /// running kernel, like the console and the sinks.
+    pub init: Option<&'static dyn InitSpawn>,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -408,6 +424,10 @@ where
             // Fail closed until the arch port installs a real device
             // through `with_console` (`AGENTS.md` §2.9 / §5.4).
             console: &NULL_CONSOLE,
+            // No user-mode bring-up until the arch port installs an
+            // `InitSpawn` through `with_init`; `kernel_main` halts after
+            // `BootCompleted` until then (`plans/PI.md` P6c-3).
+            init: None,
             _marker: core::marker::PhantomData,
         }
     }
@@ -428,6 +448,24 @@ where
     #[must_use]
     pub fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
         self.console = console;
+        self
+    }
+
+    /// Install the [`InitSpawn`] seam [`crate::kernel_main`] invokes to
+    /// spawn PID 1 into user mode after boot completes, consuming and
+    /// returning `self` (`plans/PI.md` P6c-3).
+    ///
+    /// Called by an arch port's boot pipeline (or the kernel binary that
+    /// wires it) once it can build a user address space and reach user
+    /// mode. Until this is called the handover holds `None` and
+    /// `kernel_main` parks the boot CPU after
+    /// [`crate::AuditEvent::BootCompleted`]. The seam must be `'static`:
+    /// the boot path leaks it alongside the kernel state, which lives for
+    /// the lifetime of the running kernel (`AGENTS.md` §2.1 — the install
+    /// is a one-shot move, not a global mutable static).
+    #[must_use]
+    pub fn with_init(mut self, init: &'static dyn InitSpawn) -> Self {
+        self.init = Some(init);
         self
     }
 

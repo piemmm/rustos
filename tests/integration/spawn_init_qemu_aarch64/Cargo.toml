@@ -1,0 +1,46 @@
+[package]
+name = "rustos-test-spawn-init-qemu-aarch64"
+description = "QEMU integration test (plans/PI.md P6c-3): boot the aarch64 rustos-kernel pipeline on the virt board, spawn PID 1 (init) into EL0 through the InitSpawn seam, and report PASS via ARM semihosting once init traps back with an audited syscall."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the aarch64 kernel pipeline, then spawn PID 1 into
+# user mode" integration test — the runtime proof of `plans/PI.md` P6c-3.
+# It reuses the production aarch64 boot pipeline through `rustos-kernel`'s
+# library half (`boot_aarch64::boot`), which installs the `InitSpawn` seam
+# into the `BootInfo` hand-off; after `kernel_core::kernel_main` emits
+# `AuditEvent::BootCompleted` it builds the embedded `init` (`Run`) EL0
+# image and `eret`s into it. `init` writes its banner (best-effort) and
+# returns, which the runtime routes through the audited `exit` syscall;
+# its `svc` traps back through the EL1 vector to the production dispatch
+# callback, emitting `AuditEvent::SyscallInvoked`. This bin only swaps the
+# audit sink so observing `ProcessSpawned` (4030) then `SyscallInvoked`
+# (5000) flips `qemu_exit::exit_success` — proving PID 1 reached EL0 and
+# trapped back. Keeping the QEMU-exit shortcut in a dedicated bin (not a
+# Cargo feature on a production crate) prevents feature unification from
+# leaking it into any production build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-spawn-init-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The production aarch64 boot pipeline (with the `InitSpawn` seam) lives in
+# `rustos-kernel`'s library half; this vertical reuses it verbatim and only
+# swaps the audit sink (`AGENTS.md` §2.2 — no duplication).
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+# The boot heap the `kernel_core::kernel_main` allocations (the leaked
+# `KernelState`, the scheduler) draw from.
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
