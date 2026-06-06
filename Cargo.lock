@@ -1601,6 +1601,7 @@ dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-api",
  "rustos-bumpalloc",
+ "rustos-fdt",
  "rustos-itest-harness",
  "rustos-kernel-sched-mlfq",
  "rustos-log",

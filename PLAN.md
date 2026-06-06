@@ -1624,6 +1624,34 @@ Each sub-stage delivers one architecture. They share the same checklist:
               **verified green under QEMU on this host**, and `cargo xtask
               cfg-check` stays clean. The Pi's specific GIC-400 bases are
               host-unit-tested + an on-metal item (no `raspi4b` in QEMU).
+        - [x] **P4 — Generic timer + live scheduler on the Pi.** The
+              generic-timer counter rate is now a *discovered* board fact
+              rather than the raw register: `fdt::timer_clock_frequency`
+              reads the `/timer` node's optional `clock-frequency` override
+              (the `arm,armv?-timer` binding firmware carries when
+              `CNTFRQ_EL0` is mis-programmed) and the pure, host-tested
+              `fdt::effective_timer_hz` prefers it over `CNTFRQ_EL0` when
+              present and non-zero, else falls back to the register (a zero
+              override is treated as absent — never a 0 Hz timer, §2.9).
+              `kernel_arch::timer_frequency_hz(&fdt)` composes the two;
+              `boot_aarch64` seeds the `Aarch64Arch` clock + preempt
+              interval from it and logs `timer_hz_from_tree`.
+              `timer_clock_frequency` matches the timer node through the
+              shared `Fdt::nodes` early-returning walk (the same byte-safe
+              traversal `gic::configure_from_fdt` uses, §2.2) — **not** the
+              whole-tree `Fdt::property`/`walk` scan, which the compiler
+              widens into multi-byte loads that fault under the verticals'
+              MMU-off boot. The `sched_drive_qemu_aarch64` vertical now
+              sizes its tick interval from `timer_frequency_hz` over the
+              embedded `virt` DTB and **poisons** the GICv2 base,
+              rediscovering it (`configure_from_fdt`) before `gic::init`,
+              so the ≥ 20 timer ticks + ≥ 1 IPI that drive the live
+              `Scheduler` run over the *discovered* base + rate — **verified
+              green under QEMU on this host**. `virt` omits
+              `clock-frequency`, so the runtime path exercises the register
+              fallback while the override branch is host-unit-tested;
+              honouring the Pi's real 54 MHz crystal is an on-metal item
+              (no `raspi4b` in QEMU). `cargo xtask cfg-check` stays clean.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

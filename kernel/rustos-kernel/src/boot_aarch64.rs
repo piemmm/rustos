@@ -47,8 +47,8 @@
 //! load — `plans/PI.md` W17). A missing or malformed tree leaves the
 //! `virt` default in place (`AGENTS.md` §2.9 — fail closed).
 
-use rustos_arch_aarch64::kernel_arch::read_cntfrq;
-use rustos_arch_aarch64::{console, enable_fp_el1, gic, halt_current_cpu, Aarch64Arch};
+use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
+use rustos_arch_aarch64::{console, enable_fp_el1, fdt, gic, halt_current_cpu, Aarch64Arch};
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -115,8 +115,11 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
 
     // Construct the architecture handle — the single §17.1/§17.2
     // concrete-arch selection point for the kernel image. The counter
-    // frequency seeds the handle's monotonic clock.
-    let counter_hz = read_cntfrq();
+    // frequency seeds the handle's monotonic clock and (at P4) the live
+    // timer interval; it is the board's device-tree `clock-frequency`
+    // override when present, else the `CNTFRQ_EL0` register value
+    // (`discovered.timer_hz`).
+    let counter_hz = discovered.timer_hz;
     let arch = Aarch64Arch::new(BOOT_CPU, counter_hz);
 
     // Sanity-check that the constructed handle reports the boot CPU, and
@@ -165,6 +168,10 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                     value: yes_no(discovered.ram),
                 },
                 Field {
+                    key: "timer_hz_from_tree",
+                    value: yes_no(discovered.timer_hz_from_tree),
+                },
+                Field {
                     key: "next_stage",
                     value: "pi_p4_timer_and_scheduler",
                 },
@@ -185,6 +192,13 @@ struct Discovered {
     /// A `/memory` region was found (the RAM base/size the P4/P6 allocator
     /// hand-off will consume).
     ram: bool,
+    /// The generic-timer counter frequency (Hz) to seed the handle and
+    /// the P4 live timer with: the `/timer` `clock-frequency` override
+    /// when the tree declares one, else the `CNTFRQ_EL0` register value.
+    timer_hz: u64,
+    /// `true` when `timer_hz` came from the device-tree override rather
+    /// than the `CNTFRQ_EL0` register.
+    timer_hz_from_tree: bool,
 }
 
 /// Discover the board from the device tree at `dtb`: point the console
@@ -199,6 +213,10 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         console: false,
         gic: false,
         ram: false,
+        // With no usable tree the register is the only counter-rate
+        // source; P4's tree override (if any) overwrites this below.
+        timer_hz: read_cntfrq(),
+        timer_hz_from_tree: false,
     };
     if dtb == 0 {
         return out;
@@ -215,5 +233,11 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     out.console = console::configure_from_fdt(&fdt).is_some();
     out.gic = gic::configure_from_fdt(&fdt).is_some();
     out.ram = fdt.first_memory_region().is_some();
+    // P4: prefer the board's `/timer` `clock-frequency` over the
+    // `CNTFRQ_EL0` register, so the Pi 4's 54 MHz crystal is honoured
+    // when the firmware tree declares it (`AGENTS.md` §17.2 — no
+    // `cfg(board)` fork).
+    out.timer_hz_from_tree = fdt::timer_clock_frequency(&fdt).is_some_and(|hz| hz != 0);
+    out.timer_hz = timer_frequency_hz(&fdt);
     out
 }

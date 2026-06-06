@@ -792,10 +792,15 @@ const TESTS: &[QemuTest] = &[
     // itself a directed IPI, and drives the cooperative `step` loop until
     // every task has run. PASS once the generic-timer IRQ has driven the
     // live scheduler >= 20 times and the IPI SGI path has driven it at
-    // least once. A regression that fails to switch, dispatch, tick, or
-    // deliver the IPI either trips a dedicated failure finisher or never
-    // reaches PASS, so the run fails loudly. Single CPU (the slice brings
-    // up one core) and a 60-second budget match the other
+    // least once. PI Stage P4 (`plans/PI.md`): the tick interval is sized
+    // from the timer frequency *discovered* from the embedded `virt` DTB
+    // (`kernel_arch::timer_frequency_hz`) and the GICv2 base is poisoned
+    // then rediscovered (`gic::configure_from_fdt`) before `gic::init`, so
+    // both the timer ticks and the IPI run over discovered values, not the
+    // pre-discovery defaults. A regression that fails to switch, dispatch,
+    // tick, or deliver the IPI either trips a dedicated failure finisher or
+    // never reaches PASS, so the run fails loudly. Single CPU (the slice
+    // brings up one core) and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "rustos-test-sched-drive-qemu-aarch64",

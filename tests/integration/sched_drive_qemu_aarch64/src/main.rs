@@ -35,6 +35,22 @@
 //! explicit failure code or by the harness `Outcome::Timeout`
 //! (`AGENTS.md` §7).
 //!
+//! ## Discovered GICv2 base + timer rate (PI Stage P4)
+//!
+//! Before `gic::init`, the boot core **poisons** the runtime GICv2 base
+//! and then reads the GICD/GICC bases from the canonical `virt` device
+//! tree embedded at build time (`gic::configure_from_fdt`), asserting the
+//! base moved off the poison value to the `virt` GICv2 distributor base.
+//! The generic-timer frequency that sizes the 100 Hz tick interval is
+//! likewise taken from the tree via `kernel_arch::timer_frequency_hz`
+//! (the `/timer` `clock-frequency` override when present, else
+//! `CNTFRQ_EL0`). Every subsequent GIC access — `gic::init`, the timer
+//! PPI enable, the directed SGI — targets that discovered base, so the
+//! timer + IPI ticks that drive the live scheduler are the runtime proof
+//! the discovered base and rate work (`plans/PI.md` P4). The board tree
+//! is embedded, not read from `x0`, because QEMU's ELF `-kernel` aarch64
+//! boot hands the kernel no DTB pointer.
+//!
 //! ## How it differs from a production kernel
 //!
 //! It links the `rustos-arch-aarch64` port and the
@@ -63,15 +79,22 @@ mod kernel {
     use alloc::sync::Arc;
 
     use rustos_arch_aarch64::context::TaskCtx;
-    use rustos_arch_aarch64::kernel_arch::read_cntfrq;
+    use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
     use rustos_arch_aarch64::{
         context, exceptions, gic, halt_current_cpu, handle_panic_via_serial, preempt, qemu_exit,
         Aarch64Arch, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch};
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_fdt::Fdt;
     use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_log::{log, Event, EventId, Level};
+
+    // The canonical QEMU `virt` device tree, dumped and embedded at build
+    // time (`build.rs`): the GICv2 base and the timer frequency are read
+    // from it (P4), proving the live scheduler is driven over a
+    // *discovered* base + rate, not the pre-discovery defaults.
+    include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// The single-core slice runs logical CPU 0 on the boot core.
     const BOOT_CPU: CpuId = 0;
@@ -112,6 +135,15 @@ mod kernel {
     /// Failure finisher code: the executed-task count disagreed with the
     /// spawned count.
     const FAIL_EXEC_COUNT: u16 = 6;
+    /// Failure finisher code: the GICv2 base was not discovered from the
+    /// embedded `virt` device tree (P4).
+    const FAIL_GIC_NOT_DISCOVERED: u16 = 7;
+
+    /// A deliberately-wrong GICv2 distributor/CPU-interface base installed
+    /// before discovery runs. It is **not** the `virt` GICv2 base, so the
+    /// timer/IPI ticks the live scheduler later observes can only mean
+    /// discovery overwrote it with the base read from the device tree.
+    const POISON_GIC_BASE: usize = 0xdead_0000;
 
     /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
     /// section so the boot trampoline does not zero it and it is excluded
@@ -244,12 +276,31 @@ mod kernel {
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         note(TEST_START, "aarch64 sched-drive test: starting");
 
-        // The counter frequency feeds both the arch handle's monotonic
-        // clock and the timer interval. Fail closed (finisher) if the
-        // timer reports zero rather than dividing by it.
-        let counter_hz = read_cntfrq();
+        // P4: read the board from the embedded `virt` device tree. The
+        // counter frequency is the tree's `/timer` `clock-frequency`
+        // override when present, else `CNTFRQ_EL0` (the `virt` board
+        // omits the override, so this exercises the register fallback at
+        // runtime while the override branch is host-tested). It feeds both
+        // the arch handle's monotonic clock and the timer interval; fail
+        // closed (finisher) if it resolves to zero rather than dividing by
+        // it.
+        let Ok(fdt) = Fdt::new(DTB_BLOB) else {
+            qemu_exit::exit_failure(FAIL_GIC_NOT_DISCOVERED);
+        };
+        let counter_hz = timer_frequency_hz(&fdt);
         if counter_hz == 0 {
             qemu_exit::exit_failure(FAIL_ZERO_FREQ);
+        }
+
+        // Prove the GICv2 base is *discovered*, not assumed. Poison the
+        // runtime base, then read the GICD/GICC bases from the embedded
+        // `virt` device tree. Every later GIC access — `gic::init`, the
+        // timer PPI enable, the directed SGI — targets this discovered
+        // base, so the timer + IPI ticks the live scheduler observes are
+        // the runtime proof the discovered base works (`plans/PI.md` P4).
+        gic::configure(POISON_GIC_BASE, POISON_GIC_BASE);
+        if gic::configure_from_fdt(&fdt).is_none() || gic::current().0 != gic::DEFAULT_GICD_BASE {
+            qemu_exit::exit_failure(FAIL_GIC_NOT_DISCOVERED);
         }
 
         // 1. Real bidirectional context switch, before interrupts are

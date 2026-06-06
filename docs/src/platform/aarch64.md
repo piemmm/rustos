@@ -244,6 +244,33 @@ bases are covered by host unit tests against the `raspi_like_arm` fixture
 and are an on-metal acceptance item (no `raspi4b` in QEMU — the same gap
 as the console).
 
+## Board-discovered timer frequency
+
+The generic-timer counter rate that sizes the preemption interval is a
+**discovered board fact**, not the raw `CNTFRQ_EL0` register alone
+(`plans/PI.md` P4). `fdt::timer_clock_frequency` reads the `/timer`
+node's optional `clock-frequency` override (the standard `arm,armv?-timer`
+binding the firmware carries when `CNTFRQ_EL0` is left mis-programmed),
+and the pure, host-tested `fdt::effective_timer_hz` prefers it when
+present and non-zero, otherwise falls back to `CNTFRQ_EL0` (a zero
+override is treated as absent — never a 0 Hz timer, `AGENTS.md` §2.9).
+The freestanding `kernel_arch::timer_frequency_hz(&fdt)` composes the
+two, and `boot_aarch64` seeds the `Aarch64Arch` monotonic clock and the
+live-timer interval from it, logging `timer_hz_from_tree`. So the QEMU
+`virt` board's host-derived rate and the Raspberry Pi 4's 54 MHz crystal
+both flow through one path with no `cfg(board)` fork (`AGENTS.md`
+§17.2 / §2.2).
+
+The match uses the shared `Fdt::nodes` walk, early-returning at the
+first `arm,armv8-timer` node and reading only that node's properties —
+the same byte-safe traversal `gic::configure_from_fdt` uses, **not** the
+whole-tree `Fdt::property`/`walk` scan (which the compiler can widen into
+multi-byte loads that fault under a vertical's MMU-off boot). The `virt`
+tree omits `clock-frequency`, so the CI runtime path exercises the
+register fallback while the override branch is host-unit-tested; honouring
+the Pi's real crystal is an on-metal acceptance item (no `raspi4b` in
+QEMU — the same gap as the console / GIC).
+
 ## Result protocol
 
 The `virt` board has no `SiFive` Test device; QEMU verticals report
@@ -273,7 +300,11 @@ system-register/assembly/MMIO operations to the freestanding target.
 - **Generic-timer preemption** (`preempt`). The EL1 physical timer
   (`CNTP_*_EL0`) and its GIC PPI (INTID 30): a set-once tick callback,
   `init_local_preempt` (enable the PPI, arm `CNTP_TVAL_EL0`, enable the
-  timer), and `on_timer_interrupt` (callback → re-arm).
+  timer), and `on_timer_interrupt` (callback → re-arm). The interval is
+  sized from the **discovered** counter rate
+  (`kernel_arch::timer_frequency_hz`, PI Stage P4 — see
+  [Board-discovered timer frequency](#board-discovered-timer-frequency)),
+  not a hard-wired frequency.
 - **Interrupts** (`exceptions` + `vectors.s`, `gic`). A 16-entry EL1
   vector table (`VBAR_EL1`) routes IRQs to the GICv2 acknowledge →
   timer → end-of-interrupt handshake, an EL0 `svc` (lower-EL synchronous
@@ -348,7 +379,12 @@ through the semihosting finisher. They are enrolled in
   generic timer + IPI, spawns and dispatches a batch of tasks through the
   cooperative `step` loop, sends itself a directed IPI, and PASSes once
   the timer IRQ has driven the live scheduler ≥ 20 times and the IPI SGI
-  path has driven it at least once. Single CPU.
+  path has driven it at least once. **Over discovered values** (PI Stage
+  P4): the tick interval is sized from `kernel_arch::timer_frequency_hz`
+  read from the embedded `virt` DTB, and the GICv2 base is poisoned then
+  rediscovered (`gic::configure_from_fdt`) before `gic::init`, so the
+  ticks + IPI run over the *discovered* base and rate, not the
+  pre-discovery defaults. Single CPU.
 - `rustos-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
   (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
   the kernel (EL1), aliases the `lib/abi-sys` `ros_sys_cap_query` stub
@@ -395,8 +431,9 @@ device-tree *parser* is the shared `lib/fdt` crate (one parser for every
 arch, §2.2); `kernel/arch/aarch64::fdt` layers the aarch64-specific
 queries on it: the first `/memory` region, the `/psci` `method`
 (`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up calls),
-and the generic-timer per-CPU interrupt (PPI) number from
-`/timer`. `FdtDiscovery` emits a root node, a `Memory` node carrying the
+and the generic-timer per-CPU interrupt (PPI) number from `/timer` (plus
+that node's optional `clock-frequency` counter-rate override, PI Stage
+P4). `FdtDiscovery` emits a root node, a `Memory` node carrying the
 RAM window, a `Timer` node carrying its PPI as a capability-gated
 (`CAP_IRQ_BIND`) IRQ resource, (PI Stage P3) an `InterruptController`
 node carrying the GICv2's `compatible` bind key and its GICD/GICC

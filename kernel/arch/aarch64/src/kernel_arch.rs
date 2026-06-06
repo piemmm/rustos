@@ -437,6 +437,23 @@ pub fn read_cntfrq() -> u64 {
     hz
 }
 
+/// The generic-timer frequency (Hz) to drive preemption with, honouring
+/// the board's device tree: the `/timer` `clock-frequency` override when
+/// the firmware tree declares one ([`crate::fdt::timer_clock_frequency`]),
+/// otherwise the `CNTFRQ_EL0` register ([`read_cntfrq`]).
+///
+/// This is the boot path's single source of the counter rate
+/// (`plans/PI.md` P4): the Raspberry Pi 4's 54 MHz crystal and the QEMU
+/// `virt` board's host-derived rate both flow through here without a
+/// `cfg(board)` fork (`AGENTS.md` §17.2 / §2.2). The selection logic is
+/// the host-tested pure [`crate::fdt::effective_timer_hz`]; only the
+/// register read is target-gated.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn timer_frequency_hz(fdt: &crate::fdt::Fdt<'_>) -> u64 {
+    crate::fdt::effective_timer_hz(crate::fdt::timer_clock_frequency(fdt), read_cntfrq())
+}
+
 /// Enable Advanced SIMD / floating-point at EL1 (`CPACR_EL1.FPEN = 0b11`,
 /// do-not-trap), followed by an `isb` so the change is in effect before
 /// the next instruction.

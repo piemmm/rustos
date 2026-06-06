@@ -10,7 +10,9 @@
 //! * the `/psci` `method` — the conduit (`hvc`/`smc`) the kernel uses to
 //!   call PSCI firmware for secondary-core bring-up (the prerequisite for
 //!   aarch64 SMP, `plans/WIRING.md` Stage W6);
-//! * the generic-timer per-CPU interrupt (PPI) number from `/timer`.
+//! * the generic-timer per-CPU interrupt (PPI) number from `/timer`,
+//!   plus the optional `clock-frequency` counter-rate override that node
+//!   may carry (`plans/PI.md` P4);
 //!
 //! The normalisation of these facts into [`rustos_abi::hwtree`] nodes lives
 //! in [`crate::platform`].
@@ -72,10 +74,74 @@ pub fn timer_ppi(fdt: &Fdt<'_>) -> Option<u32> {
     ]))
 }
 
+/// Read the generic-timer counter frequency (Hz) the `/timer` node
+/// declares through its `clock-frequency` property, if any.
+///
+/// `clock-frequency` is the standard `arm,armv?-timer` override the
+/// device tree carries when firmware leaves `CNTFRQ_EL0` mis-programmed
+/// (the Linux binding honours it ahead of the register). The canonical
+/// source is still the `CNTFRQ_EL0` register (`kernel_arch::read_cntfrq`);
+/// this surfaces only the optional tree override so the boot path can
+/// prefer it. Returns `None` when the node omits the property or the
+/// value is not a single big-endian `u32`.
+#[must_use]
+pub fn timer_clock_frequency(fdt: &Fdt<'_>) -> Option<u32> {
+    // Match the generic-timer node by its `compatible` string and read
+    // `clock-frequency` from that node's own properties, via the shared
+    // `Fdt::nodes` walk — the same early-returning traversal
+    // [`crate::gic::configure_from_fdt`] uses (`AGENTS.md` §2.2). This
+    // stops at the first matching node and only ever reads that node's
+    // properties, never scanning the whole tree.
+    let node = fdt
+        .nodes()
+        .flatten()
+        .find(|node| node.is_compatible("arm,armv8-timer"))?;
+    let value = node.property("clock-frequency")?.value();
+    let bytes = value.get(0..4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Select the generic-timer frequency (Hz) to drive preemption with,
+/// preferring the device-tree `clock-frequency` override
+/// ([`timer_clock_frequency`]) when present and non-zero, otherwise the
+/// `CNTFRQ_EL0` register value `cntfrq`.
+///
+/// A zero `clock-frequency` is treated as absent (a board that declares
+/// `0` has not really told us a rate), so the register value is used
+/// rather than a divide-by-zero timer interval (`AGENTS.md` §2.9 — fail
+/// closed). Pure and host-testable: the register read is the caller's
+/// responsibility (`kernel_arch::timer_frequency_hz` composes the two on
+/// the freestanding target).
+#[must_use]
+pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) -> u64 {
+    match tree_clock_frequency {
+        Some(hz) if hz != 0 => hz as u64,
+        _ => cntfrq,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{psci_method, timer_ppi, Fdt, PsciMethod};
-    use rustos_fdt::fixture::virt_like_arm;
+    use super::{
+        effective_timer_hz, psci_method, timer_clock_frequency, timer_ppi, Fdt, PsciMethod,
+    };
+    use rustos_fdt::fixture::{virt_like_arm, DtbBuilder};
+
+    /// Build a minimal tree carrying a `/timer` node with the given
+    /// `clock-frequency` (a single big-endian `u32`), used to exercise
+    /// the P4 counter-rate override reader.
+    fn tree_with_timer_clock(hz: u32) -> std::vec::Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("timer");
+        b.prop_str("compatible", "arm,armv8-timer");
+        b.prop_u32("clock-frequency", hz);
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
 
     #[test]
     fn reads_psci_method_hvc_and_smc() {
@@ -101,5 +167,37 @@ mod tests {
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(timer_ppi(&fdt), Some(30));
         assert_eq!(fdt.first_memory_region(), Some((0x4000_0000, 0x2000_0000)));
+    }
+
+    #[test]
+    fn reads_timer_clock_frequency_when_the_node_declares_it() {
+        // The Pi 4's 54 MHz crystal is the evocative value here.
+        let blob = tree_with_timer_clock(54_000_000);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(timer_clock_frequency(&fdt), Some(54_000_000));
+    }
+
+    #[test]
+    fn timer_clock_frequency_absent_on_a_tree_without_the_property() {
+        // The `virt`-shaped fixture carries `/timer` `interrupts` but no
+        // `clock-frequency`, so the override is absent and the boot path
+        // falls back to `CNTFRQ_EL0`.
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(timer_clock_frequency(&fdt), None);
+    }
+
+    #[test]
+    fn effective_timer_hz_prefers_a_nonzero_tree_override() {
+        // A present, non-zero tree value wins over the register reading.
+        assert_eq!(effective_timer_hz(Some(54_000_000), 62_500_000), 54_000_000);
+    }
+
+    #[test]
+    fn effective_timer_hz_falls_back_to_the_register() {
+        // Absent override → the `CNTFRQ_EL0` value is used.
+        assert_eq!(effective_timer_hz(None, 62_500_000), 62_500_000);
+        // A zero override is treated as absent (never a 0 Hz timer).
+        assert_eq!(effective_timer_hz(Some(0), 62_500_000), 62_500_000);
     }
 }

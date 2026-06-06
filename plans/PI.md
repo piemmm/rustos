@@ -284,7 +284,7 @@ reads `gic::current()`); both PASS. `cargo xtask cfg-check` stays clean
 GIC-400 bases are host-unit-tested + an on-metal item (no `raspi4b` in
 QEMU — the same gap as P2).
 
-### P4 — Generic timer + live scheduler on the Pi `[ ]`
+### P4 — Generic timer + live scheduler on the Pi `[x]`
 
 - Reuse the W7 live-scheduler wiring (`preempt` + `context` + `mlfq`) over
   the discovered GIC-400 + Pi generic-timer PPI. The Pi's `CNTFRQ_EL0` and
@@ -295,6 +295,31 @@ QEMU — the same gap as P2).
 **Done when:** a `-M raspi4b` `sched_drive` vertical drives the live
 `Scheduler` ≥ 20 timer ticks + ≥ 1 IPI tick, exactly as the `virt` one
 does (`plans/WIRING.md` W7).
+
+**Landed.** The generic-timer counter rate is now a *discovered* board
+fact rather than the raw register: `fdt::timer_clock_frequency` reads the
+`/timer` node's optional `clock-frequency` override (the standard
+`arm,armv?-timer` binding the firmware carries when `CNTFRQ_EL0` is
+mis-programmed) and the pure, host-tested `fdt::effective_timer_hz`
+selects it over `CNTFRQ_EL0` when present and non-zero, else falls back to
+the register (a zero override is treated as absent — never a 0 Hz timer,
+§2.9). The freestanding `kernel_arch::timer_frequency_hz(&fdt)` composes
+the two; `boot_aarch64` seeds the `Aarch64Arch` clock/preempt interval
+from it and logs `timer_hz_from_tree`. `timer_clock_frequency` matches the
+timer node through the shared `Fdt::nodes` early-returning walk (the same
+byte-safe traversal `gic::configure_from_fdt` uses, §2.2) — **not** the
+whole-tree `Fdt::property`/`walk` scan, which faults under the verticals'
+MMU-off boot when the compiler widens the byte reads; reaching only the
+matched node's own properties keeps discovery safe MMU-off. **Runtime
+proof on `-M virt`:** the `sched_drive_qemu_aarch64` vertical now derives
+the tick interval from `timer_frequency_hz(&fdt)` over the embedded `virt`
+DTB and **poisons** the GIC base, rediscovering it (`configure_from_fdt`)
+before `gic::init`, so the ≥ 20 timer ticks + ≥ 1 IPI that drive the live
+`Scheduler` run over the *discovered* GIC base and frequency. The `virt`
+tree omits `clock-frequency`, so the runtime path exercises the register
+fallback while the override branch is host-unit-tested; honouring the Pi's
+real 54 MHz crystal is an on-metal item (no `-M raspi4b` in QEMU — the
+same gap as P2/P3). `cargo xtask cfg-check` stays clean.
 
 ### P5 — SMP bring-up on the Pi (PSCI vs spin-table) `[ ]`
 
