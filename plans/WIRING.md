@@ -74,11 +74,11 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 `ContextSwitch` (W5a), the MMU `AddressSpace` page-table trait
 (map/translate/unmap — W5b-1/W5b-2), the per-page `TlbShootdown`
 slice (W5b-2), and the `PageTableFrames` page-table frame-source slice
-(allocator-backed port tables via `FrameTableSource` — W5b-3). The
-remaining slices (cross-CPU TLB shootdown; SMP bring-up — landed
-port-side per arch in W6, not yet a HAL trait) are still ad-hoc inside
-each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
-§17 burn-down advances".
+(allocator-backed port tables via `FrameTableSource` — W5b-3), and the
+`CrossCpuTlbShootdown` cross-CPU TLB-shootdown slice (W13). The remaining
+slice (SMP bring-up — landed port-side per arch in W6/W8, not yet a HAL
+trait) is still ad-hoc inside each port — the §17.2 surface `PLAN.md`
+flags as "migrated here as the §17 burn-down advances".
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
 
@@ -87,6 +87,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | Boot stub + early console         |   ✓    |    ✓    |    ✓    |   ✓    |
 | `SchedulerArch` impl              |   ✓    |    ✓    |    ✓    |   ✓    |
 | Paging / MMU primitives (`AddressSpace` HAL) | ✓ | ✓ | ✓ | n/a |
+| Cross-CPU TLB shootdown HAL (`CrossCpuTlbShootdown`) | ✓ IPI+ack | ✓ TLBI bcast | ✓ SBI RFENCE | n/a |
 | Memory isolation QEMU vertical    |   ✓    |    ✓    |    ✓    | ✓ browser |
 | Context switch (`ContextSwitch`)  |   ✓    |    ✓    |    ✓    |  n/a   |
 | Timer + preemption HAL (`Timer`)  |   ✓    |    ✓    |    ✓    |   ✓    |
@@ -117,6 +118,7 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
 | input (`ps2`/device)    |   ✓    |    ✓    |    ✓    |  n/a   |
 | display (`vesa`/fb)     |   ✓    |    ✓    |    ✓    |  **✗** |
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
+| **`cross_cpu_tlb_shootdown`** | ✓ | ✓ | ✓ | n/a |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the
@@ -142,8 +144,9 @@ each port — the §17.2 surface `PLAN.md` flags as "migrated here as the
   `passes_arch_hal_conformance_suite`) now exists and folds in the
   `SchedulerArch`, §19.1 side-channel, §19.10 memory-tagging, platform-
   discovery, and per-CPU verticals, so those slices are enforced rather
-  than asserted by inspection. The remaining ad-hoc slices (cross-CPU
-  TLB shootdown, SMP bring-up) are not yet HAL traits.
+  than asserted by inspection. The cross-CPU TLB-shootdown slice is now a
+  HAL trait too (`CrossCpuTlbShootdown`, W13); the only remaining ad-hoc
+  slice is SMP secondary-core bring-up.
 
 ---
 
@@ -169,7 +172,8 @@ docs + §17.2 of `AGENTS.md` when each lands):
 - `AddressSpace` / `Mmu` + `TlbShootdown` — page-table primitives wired
   into `kernel/mem` (map/translate/unmap + per-page local invalidation —
   ✅ W5b-2); allocator-backed port tables via the `PageTableFrames`
-  frame-source seam (✅ W5b-3); cross-CPU TLB invalidation (W6) remains.
+  frame-source seam (✅ W5b-3); cross-CPU TLB invalidation via the
+  `CrossCpuTlbShootdown` slice (✅ W13).
 - `Smp` — secondary-CPU start + directed IPI (INIT-SIPI-SIPI / PSCI
   `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn).
 
@@ -806,6 +810,62 @@ is deleted.
   `riscv64gc-unknown-none-elf` (the `itest_*` cfgs under which the code is
   active). Docs: `docs/src/drivers/bus.md`, `lib/util` crate docs, `PLAN.md`,
   this file. No `lib/abi` change, so no ABI / C-header drift.
+
+#### Stage W13 — cross-CPU TLB-shootdown HAL slice — ✅ landed
+
+The last ad-hoc per-port memory primitive becomes a HAL trait. Local
+per-page invalidation was already the `TlbShootdown` slice (W5b-2); on an
+SMP system that only flushes the *calling* CPU, so a page-table edit that
+tightens or tears down a shared mapping needs a system-wide shootdown.
+W13 adds that as an object-safe `kernel/arch/api` trait and implements it
+once per port.
+
+- **`CrossCpuTlbShootdown` (`kernel/arch/api/src/xtlb.rs`).** One method,
+  `shootdown_page(&self, vaddr)`, infallible by construction (a shootdown
+  can only ever *over*-invalidate, never refuse — §2.9 holds vacuously).
+  It is a separate trait from the local `TlbShootdown`, not a flag on it:
+  the local flush is a single privilege-neutral instruction the hot
+  map/unmap loop drives, whereas the cross-CPU shootdown needs the port's
+  CPU topology and only returns once the invalidation is globally visible
+  (collapsing them would be the §2.4 interface creep). Implemented on each
+  port's `SchedulerArch` handle (the owner of topology + the directed-IPI
+  path). Ships with a host `xtlb::conformance` vertical proving the
+  observable half (object-safe, total, panic-free for any/zero/misaligned
+  address), exactly as `tlb::conformance` does.
+- **Per-port impls (the §2.2 modularity carve-out — same trait, port-
+  specific mechanism):**
+  - **x86_64** has no broadcast invalidation, so `kernel/arch/x86_64/src/
+    tlb_shootdown.rs` raises a `TLB_SHOOTDOWN_VECTOR` (0x21) IPI at every
+    other online CPU through a lock-serialised mailbox; each target runs
+    `invlpg` in the shootdown ISR and decrements an acknowledge counter,
+    and the initiator spins until the count hits zero. The local `invlpg`
+    is the one already used by `TlbShootdown::flush_page` (shared, §2.2).
+  - **aarch64** issues the inner-shareable *broadcast* `tlbi vaae1is` +
+    `dsb ish`/`isb` — the same instruction the local flush already uses,
+    so the local and cross-CPU paths funnel through one shared
+    `paging::invalidate_page_inner_shareable` (§2.2); no IPI/ack needed.
+  - **riscv64** has no broadcast `sfence.vma`, so it issues a local
+    `sfence.vma` (shared `paging::invalidate_page_local`, §2.2) plus the
+    SBI **RFENCE** `remote_sfence_vma` firmware call (new `sbi::sbi_call4`
+    + `SBI_EXT_RFENCE`) to every other online hart; the firmware performs
+    the remote acknowledge.
+  - **wasm32** is an honest **n/a** — a Web Worker owns isolated linear
+    memory with no shared page table or TLB — so it implements no
+    `CrossCpuTlbShootdown` (§0.4 honest absence, never a faked no-op).
+- **QEMU verticals (real ≥ 2 cores), one per bare-metal port, enrolled
+  with `cpus: 2`:** `cross_cpu_tlb_shootdown_qemu_{riscv64,aarch64,x86_64}`
+  each start a secondary CPU and drive `shootdown_page`. riscv64 asserts
+  the firmware reports the remote fence reached the live hart; x86_64 only
+  reaches PASS once the AP's ISR `invlpg`'d and acknowledged (the spin
+  cannot return otherwise); aarch64 proves the broadcast executes on a
+  real two-core machine without faulting.
+- **Verified:** the three new host conformance tests
+  (`passes_cross_cpu_tlb_shootdown_conformance`, one per port) pass; all
+  three QEMU bins exit `0` under `cargo xtask test --qemu` (a single-CPU
+  x86_64 run correctly *fails* — "no application processor found" — so the
+  PASS is genuine). No `lib/abi` change, so no ABI / C-header drift. Docs:
+  `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
+  aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
 
 ---
 

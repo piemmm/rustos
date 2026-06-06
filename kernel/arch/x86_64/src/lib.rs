@@ -167,6 +167,7 @@ pub mod syscall_entry;
 /// §2.3).
 #[cfg(feature = "sched-arch")]
 pub mod timer_hal;
+pub mod tlb_shootdown;
 /// x86_64 Time-Stamp Counter suitability validation: the Invariant TSC
 /// CPUID probe the boot path consults before trusting `RDTSC` as a
 /// cross-CPU monotonic clock source (`AGENTS.md` §17.2, §19.1).

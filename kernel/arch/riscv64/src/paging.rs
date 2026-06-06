@@ -535,25 +535,40 @@ impl MmuAddressSpace for AddressSpace {
 
 impl TlbShootdown for AddressSpace {
     fn flush_page(&mut self, vaddr: u64) {
-        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-        {
-            // SAFETY: `sfence.vma {addr}, zero` is the documented Sv39
-            // single-page TLB invalidation; it touches no memory and only
-            // discards the cached translation for `vaddr`. No Rust
-            // spelling exists.
-            unsafe {
-                core::arch::asm!(
-                    "sfence.vma {addr}, zero",
-                    addr = in(reg) vaddr,
-                    options(nostack, preserves_flags),
-                );
-            }
+        invalidate_page_local(vaddr);
+    }
+}
+
+/// Invalidate the *calling* hart's cached Sv39 translation for the 4 KiB
+/// page containing `vaddr`.
+///
+/// This is the single instruction sequence shared by both the local
+/// per-page flush ([`TlbShootdown::flush_page`]) and the local half of
+/// the cross-CPU shootdown
+/// ([`rustos_arch_api::CrossCpuTlbShootdown::shootdown_page`] on
+/// [`crate::kernel_arch::RiscvArch`]) — one implementation, not two
+/// (`AGENTS.md` §2.2). Unlike aarch64 there is no broadcast variant: the
+/// cross-CPU path reaches *other* harts through the SBI RFENCE firmware
+/// call (`crate::sbi::remote_sfence_vma`).
+pub(crate) fn invalidate_page_local(vaddr: u64) {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: `sfence.vma {addr}, zero` is the documented Sv39
+        // single-page TLB invalidation; it touches no memory and only
+        // discards the cached translation for `vaddr`. No Rust
+        // spelling exists.
+        unsafe {
+            core::arch::asm!(
+                "sfence.vma {addr}, zero",
+                addr = in(reg) vaddr,
+                options(nostack, preserves_flags),
+            );
         }
-        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-        {
-            // The host has no TLB to invalidate; a flush is vacuous.
-            let _ = vaddr;
-        }
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+    {
+        // The host has no TLB to invalidate; a flush is vacuous.
+        let _ = vaddr;
     }
 }
 

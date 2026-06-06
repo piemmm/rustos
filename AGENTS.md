@@ -970,10 +970,16 @@ as non-negotiable as §2.
   wasm32) — and the interrupt entry/exit slice: `IrqController`
   (controller line masking) and `InterruptEntry` (the claim/complete
   prologue/epilogue, implemented by the claim-based ports — riscv64 PLIC,
-  aarch64 GICv2; vectored x86_64 implements `IrqController` only); each
-  carries a conformance vertical in `kernel/arch/api`. The remaining
-  primitives are migrated as the §17 burn-down advances
-  (`plans/WIRING.md`).
+  aarch64 GICv2; vectored x86_64 implements `IrqController` only) — and
+  the TLB-shootdown slices: `TlbShootdown` (the local per-page
+  invalidation `kernel/mem` drives) and `CrossCpuTlbShootdown` (the
+  system-wide shootdown implemented on each port's `SchedulerArch`
+  handle: an x86_64 IPI + software acknowledge, an aarch64 inner-shareable
+  `tlbi ...is` broadcast, a riscv64 SBI RFENCE `remote_sfence_vma`; wasm32
+  is an honest n/a — isolated linear memory, no shared TLB); each carries
+  a conformance vertical in `kernel/arch/api`. The remaining primitives
+  (notably SMP secondary-core bring-up, still port-side per arch) are
+  migrated as the §17 burn-down advances (`plans/WIRING.md`).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the

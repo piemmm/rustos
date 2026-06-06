@@ -163,6 +163,20 @@ fake primitive (`AGENTS.md` §2.1). The slice is honestly absent, the same
 shape as the missing context-switch/user-entry primitives, which is why
 wasm32 has no `memory_isolation` QEMU vertical.
 
+### Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`) — n/a
+
+The Arch HAL `CrossCpuTlbShootdown` slice (`AGENTS.md` §17.2 /
+`plans/WIRING.md` Stage W13) is **not applicable** to wasm32 and the port
+implements no `CrossCpuTlbShootdown`. A cross-CPU shootdown invalidates a
+stale page translation cached in *other* CPUs' TLBs, but each wasm32 "CPU"
+is a separate Web Worker with its own linear-memory module instance — no
+shared page table, and no software-visible TLB to invalidate (the engine
+bounds-checks accesses against the instance's own memory). There is
+nothing to shoot down, so synthesising the call would be a fake primitive
+(`AGENTS.md` §2.1); it is honestly absent, the same shape as the missing
+MMU/context-switch/user-entry primitives. This is why only the three
+bare-metal ports carry a `cross_cpu_tlb_shootdown_qemu_*` vertical.
+
 ### Hand-rolled host bindings
 
 The host imports in `bindings` are a plain `extern "C"` block resolved

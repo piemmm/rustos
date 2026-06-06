@@ -54,7 +54,13 @@
 //! trait whose [`TlbShootdown::flush_page`] the per-process map/unmap
 //! path drives to invalidate one CPU's stale cached translation
 //! (`invlpg` / `tlbi vae1is` / `sfence.vma`), plus its
-//! [`tlb::conformance`] vertical — and the **page-table frame-source**
+//! [`tlb::conformance`] vertical — and the **cross-CPU TLB-shootdown**
+//! slice (`AGENTS.md` §17.2, `plans/WIRING.md` W6): the
+//! [`CrossCpuTlbShootdown`] trait whose [`CrossCpuTlbShootdown::shootdown_page`]
+//! invalidates a stale translation on *every* online CPU (an x86_64
+//! IPI + acknowledge, an aarch64 inner-shareable `tlbi ...is` broadcast,
+//! a riscv64 SBI `remote_sfence_vma`), plus its [`xtlb::conformance`]
+//! vertical — and the **page-table frame-source**
 //! slice (`AGENTS.md` §17.2, `plans/WIRING.md` W5b-3): the
 //! [`PageTableFrames`] trait a port draws its root and intermediate
 //! tables from (as [`TableFrame`]s), so a real per-process address space
@@ -64,12 +70,12 @@
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
 //! inspection (`plans/WIRING.md`). The remaining HAL surface enumerated
-//! by `AGENTS.md` §17.2 — *cross-CPU* TLB shootdown (the local per-page
-//! half lives here now; the cross-CPU half depends on the aarch64 IPI
-//! from Stage W6) and SMP secondary-core bring-up — is migrated here as
-//! the §17 burn-down advances; see `PLAN.md` / `plans/WIRING.md`. Until a
-//! primitive lives here it stays in its current owning crate, and the
-//! move is tracked, not silently duplicated (`AGENTS.md` §2.2).
+//! by `AGENTS.md` §17.2 — SMP secondary-core bring-up (landed port-side
+//! per arch in Stage W6/W8; an `Smp` HAL trait remains a future §17.2
+//! decision) — is migrated here as the §17 burn-down advances; see
+//! `PLAN.md` / `plans/WIRING.md`. Until a primitive lives here it stays in
+//! its current owning crate, and the move is tracked, not silently
+//! duplicated (`AGENTS.md` §2.2).
 //!
 //! # Why `no_std` and dependency-light
 //!
@@ -98,6 +104,7 @@ pub mod sidechannel;
 pub mod timer;
 pub mod tlb;
 pub mod userentry;
+pub mod xtlb;
 
 pub use sidechannel::{
     conformance as sidechannel_conformance, Mitigation, MitigationEntry, MitigationProfile,
@@ -132,6 +139,8 @@ pub use frames::{
 };
 
 pub use tlb::{conformance as tlb_conformance, TlbShootdown};
+
+pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

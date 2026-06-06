@@ -106,6 +106,13 @@ so `kernel/mem` names only the HAL vocabulary (`AGENTS.md` §2.2,
 | `root_phys()` | Physical address of the root translation table. |
 | `flush_page(vaddr)` | Per-CPU TLB invalidation (no-op on host). |
 
+`flush_page` invalidates only the *calling* CPU. The system-wide
+counterpart — invalidating a stale translation on every other online CPU
+after a shared mapping is torn down — is a sibling Arch HAL slice,
+`rustos_arch_api::xtlb::CrossCpuTlbShootdown`, implemented on each port's
+`SchedulerArch` handle rather than on the page-table object (see
+[the modularity page](./modularity.md) and `plans/WIRING.md` Stage W13).
+
 The façade bridges its own `Page` / `Frame` / `MapFlags` currency to the
 HAL's `u64` / `PageFlags` at the boundary. Each arch crate's `paging`
 `AddressSpace` implements the HAL traits directly. To keep `kernel/mem`

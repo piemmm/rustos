@@ -38,7 +38,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
+use rustos_arch_api::{CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch};
 
 use crate::hybrid;
 use crate::percpu::MAX_CPUS;
@@ -341,6 +341,37 @@ impl SchedulerArch for X86_64Arch {
     }
 }
 
+impl CrossCpuTlbShootdown for X86_64Arch {
+    fn shootdown_page(&self, vaddr: u64) {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // Gather the LAPIC ids of every *other* online CPU; the
+            // caller invalidates itself inside `shootdown`. The fixed
+            // array is bounded by `MAX_CPUS`, so there is no allocation
+            // on the shootdown path.
+            let me = self.current_cpu();
+            let mut targets = [0u8; MAX_CPUS];
+            let mut n = 0;
+            for cpu in 0..MAX_CPUS as CpuId {
+                if cpu == me {
+                    continue;
+                }
+                if let Some(lapic) = self.lapic_id_of(cpu) {
+                    targets[n] = lapic;
+                    n += 1;
+                }
+            }
+            crate::tlb_shootdown::shootdown(vaddr, &targets[..n]);
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            // Host: no second CPU and no TLB; the conformance vertical
+            // only checks the call is total and panic-free.
+            let _ = vaddr;
+        }
+    }
+}
+
 // --- Halt -------------------------------------------------------------
 
 /// Mask interrupts and park the CPU forever.
@@ -516,6 +547,20 @@ mod tests {
             &discovery,
             &crate::percpu_hal::PerCpuStorage::new(),
         );
+    }
+
+    /// §17.2 / W6: the port passes the cross-CPU TLB-shootdown
+    /// conformance vertical over its real `X86_64Arch` handle. On the
+    /// host there is no second CPU and no TLB, so the vertical asserts
+    /// the observable half — the call is total and panic-free for any
+    /// address. The real IPI + acknowledge round-trip is proven by
+    /// `cross_cpu_tlb_shootdown_qemu_x86_64`.
+    #[test]
+    fn passes_cross_cpu_tlb_shootdown_conformance() {
+        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        rustos_arch_api::xtlb::conformance::run_all(&arch, 0x10_0000_0000);
+        let erased: &dyn CrossCpuTlbShootdown = &arch;
+        rustos_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
     }
 
     /// Compile-time proof that [`halt`] has the `-> !` signature

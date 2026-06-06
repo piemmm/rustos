@@ -106,5 +106,20 @@ fn passes_arch_hal_conformance_suite() {
     );
 }
 
+/// §17.2 / W6: the port passes the cross-CPU TLB-shootdown conformance
+/// vertical over its real `RiscvArch` handle. On the host the local
+/// `sfence.vma` is a vacuous no-op (no TLB) and there is no firmware to
+/// call, so the vertical asserts the observable half — the call is total
+/// and panic-free for any address. The real local-`sfence` + SBI
+/// `remote_sfence_vma` round-trip is proven by
+/// `cross_cpu_tlb_shootdown_qemu_riscv64`.
+#[test]
+fn passes_cross_cpu_tlb_shootdown_conformance() {
+    let arch = RiscvArch::with_harts(0, 10_000_000, &[0, 1]);
+    rustos_arch_api::xtlb::conformance::run_all(&arch, 100u64 << 30);
+    let erased: &dyn CrossCpuTlbShootdown = &arch;
+    rustos_arch_api::xtlb::conformance::run_all(erased, 100u64 << 30);
+}
+
 /// Compile-time proof that `RiscvArch` implements [`SchedulerArch`].
 const _IS_SCHED_ARCH: fn(&RiscvArch) -> CpuId = <RiscvArch as SchedulerArch>::current_cpu;

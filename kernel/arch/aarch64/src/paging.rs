@@ -635,31 +635,45 @@ impl MmuAddressSpace for AddressSpace {
 
 impl TlbShootdown for AddressSpace {
     fn flush_page(&mut self, vaddr: u64) {
-        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-        {
-            // SAFETY: `tlbi vaae1is` invalidates the inner-shareable TLB
-            // entries for the page named by its operand (VA[55:12], all
-            // ASIDs); the `dsb`/`isb` barriers order the invalidation and
-            // make it visible before the next translation. It touches no
-            // memory and only discards a cached translation. No Rust
-            // spelling exists.
-            let va_page = vaddr >> 12;
-            unsafe {
-                core::arch::asm!(
-                    "dsb ishst",
-                    "tlbi vaae1is, {page}",
-                    "dsb ish",
-                    "isb",
-                    page = in(reg) va_page,
-                    options(nostack, preserves_flags),
-                );
-            }
+        invalidate_page_inner_shareable(vaddr);
+    }
+}
+
+/// Invalidate, on every PE in the inner-shareable domain, the stage-1
+/// EL1&0 TLB entries for the 4 KiB page containing `vaddr` (all ASIDs).
+///
+/// This is the single instruction sequence shared by both the *local*
+/// per-page flush ([`TlbShootdown::flush_page`]) and the *cross-CPU*
+/// shootdown ([`rustos_arch_api::CrossCpuTlbShootdown::shootdown_page`] on
+/// [`crate::kernel_arch::Aarch64Arch`]): `tlbi vaae1is` is the
+/// inner-shareable *broadcast* variant, so the "local" and "cross-CPU"
+/// shootdowns are literally the same operation on aarch64 — there is one
+/// implementation, not two (`AGENTS.md` §2.2).
+pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: `tlbi vaae1is` invalidates the inner-shareable TLB
+        // entries for the page named by its operand (VA[55:12], all
+        // ASIDs); the `dsb`/`isb` barriers order the invalidation and
+        // make it visible before the next translation. It touches no
+        // memory and only discards a cached translation. No Rust
+        // spelling exists.
+        let va_page = vaddr >> 12;
+        unsafe {
+            core::arch::asm!(
+                "dsb ishst",
+                "tlbi vaae1is, {page}",
+                "dsb ish",
+                "isb",
+                page = in(reg) va_page,
+                options(nostack, preserves_flags),
+            );
         }
-        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-        {
-            // The host has no TLB to invalidate; a flush is vacuous.
-            let _ = vaddr;
-        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    {
+        // The host has no TLB to invalidate; a flush is vacuous.
+        let _ = vaddr;
     }
 }
 

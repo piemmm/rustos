@@ -52,6 +52,12 @@ pub const SBI_EXT_HSM: usize = 0x48_534D;
 /// `hart_start` function id within the HSM extension.
 pub const SBI_FID_HART_START: usize = 0;
 
+/// SBI v0.2 Remote Fence (RFENCE) extension id (ASCII `"RFNC"`).
+pub const SBI_EXT_RFENCE: usize = 0x5246_4E43;
+
+/// `remote_sfence_vma` function id within the RFENCE extension.
+pub const SBI_FID_REMOTE_SFENCE_VMA: usize = 1;
+
 /// `SbiRet` — the two-register return of every SBI v0.2 call.
 ///
 /// `error` is `0` ([`SbiRet::SUCCESS`]) on success and a negative SBI
@@ -172,6 +178,38 @@ pub fn hart_start(hartid: CpuId, start_addr: usize, opaque: usize) -> SbiRet {
     )
 }
 
+/// Instruct every hart selected by `(hart_mask, hart_mask_base)` to
+/// execute an `sfence.vma` covering `[start_addr, start_addr + size)`
+/// via the SBI v0.2 RFENCE extension — the riscv64 cross-CPU TLB
+/// shootdown (`AGENTS.md` §17.2).
+///
+/// riscv64 has no broadcast `sfence.vma`, so the cross-CPU invalidation
+/// is delegated to the firmware: `remote_sfence_vma` returns only once
+/// the listed harts have fenced, so the call *is* the remote acknowledge
+/// — no software ack loop is needed (unlike the x86_64 IPI path). Build
+/// the mask for a single hart with [`hart_mask_for`]. The calling hart
+/// is **not** covered by the remote fence and must `sfence.vma` itself
+/// separately. Returns the [`SbiRet`]; an invalid mask is reported
+/// through `error` and dropped by the caller (over-/under-fencing the
+/// *remote* set cannot corrupt the local mapping).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[must_use]
+pub fn remote_sfence_vma(
+    hart_mask: usize,
+    hart_mask_base: usize,
+    start_addr: usize,
+    size: usize,
+) -> SbiRet {
+    sbi_call4(
+        SBI_EXT_RFENCE,
+        SBI_FID_REMOTE_SFENCE_VMA,
+        hart_mask,
+        hart_mask_base,
+        start_addr,
+        size,
+    )
+}
+
 /// Issue an SBI v0.2 `ecall` with two argument registers (`a0`, `a1`).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 fn sbi_call2(eid: usize, fid: usize, arg0: usize, arg1: usize) -> SbiRet {
@@ -218,18 +256,47 @@ fn sbi_call3(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize) -> S
     SbiRet { error, value }
 }
 
+/// Issue an SBI v0.2 `ecall` with four argument registers (`a0`–`a3`).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+fn sbi_call4(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> SbiRet {
+    let error: isize;
+    let value: isize;
+    // SAFETY: identical convention to `sbi_call2`, with the third and
+    // fourth arguments supplied in `a2`/`a3`. For `remote_sfence_vma`
+    // they are the start address and size — read-only to the firmware —
+    // so they are bound as plain `in`. The call writes no guest memory
+    // and clobbers only the SBI return registers, bound `inout`.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") eid,
+            in("a6") fid,
+            inout("a0") arg0 => error,
+            inout("a1") arg1 => value,
+            in("a2") arg2,
+            in("a3") arg3,
+            options(nostack),
+        );
+    }
+    SbiRet { error, value }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn extension_ids_match_ascii_encoding() {
-        // The SBI specification assigns the IPI and HSM extension ids
-        // the ASCII bytes of "sPI" and "HSM" respectively.
+        // The SBI specification assigns the IPI, HSM, and RFENCE
+        // extension ids the ASCII bytes of "sPI", "HSM", and "RFNC".
         assert_eq!(SBI_EXT_IPI, 0x73_5049);
         assert_eq!(SBI_EXT_HSM, 0x48_534D);
+        assert_eq!(SBI_EXT_RFENCE, 0x5246_4E43);
         assert_eq!(SBI_FID_SEND_IPI, 0);
         assert_eq!(SBI_FID_HART_START, 0);
+        // `remote_sfence_vma` is function id 1 in the RFENCE extension
+        // (function id 0 is `remote_fence_i`).
+        assert_eq!(SBI_FID_REMOTE_SFENCE_VMA, 1);
     }
 
     #[test]

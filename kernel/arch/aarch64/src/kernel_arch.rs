@@ -36,7 +36,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
+use rustos_arch_api::{CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch};
 
 /// Maximum number of logical CPUs the per-CPU accounting arrays cover.
 /// The boot/timer slice brings up one; the bound is headroom for the
@@ -298,6 +298,18 @@ impl SchedulerArch for Aarch64Arch {
     }
 }
 
+impl CrossCpuTlbShootdown for Aarch64Arch {
+    fn shootdown_page(&self, vaddr: u64) {
+        // aarch64 needs no IPI or software acknowledge: `tlbi vaae1is`
+        // is the *inner-shareable broadcast* invalidation, so the same
+        // instruction the local flush issues already reaches every PE in
+        // the domain. Both paths funnel through the one shared sequence
+        // (`AGENTS.md` §2.2); the `dsb ish` + `isb` inside it provide the
+        // ordering the cross-CPU contract requires.
+        crate::paging::invalidate_page_inner_shareable(vaddr);
+    }
+}
+
 /// Read the architectural physical counter `CNTPCT_EL0` (the monotonic
 /// tick source on the `virt` board).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -487,6 +499,20 @@ mod tests {
         arch.classify_from_fdt(&fdt);
         assert_eq!(arch.core_class(0), CoreClass::Performance);
         assert_eq!(arch.core_class(1), CoreClass::Performance);
+    }
+
+    /// §17.2 / W6: the port passes the cross-CPU TLB-shootdown
+    /// conformance vertical over its real `Aarch64Arch` handle. On the
+    /// host the broadcast `tlbi` is a vacuous no-op (no TLB), so the
+    /// vertical asserts the observable half — the call is total and
+    /// panic-free for any address. The real inner-shareable broadcast is
+    /// proven by `cross_cpu_tlb_shootdown_qemu_aarch64`.
+    #[test]
+    fn passes_cross_cpu_tlb_shootdown_conformance() {
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        rustos_arch_api::xtlb::conformance::run_all(&arch, 64u64 << 30);
+        let erased: &dyn CrossCpuTlbShootdown = &arch;
+        rustos_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
     }
 
     /// §17.2 / W0: the port passes the shared Arch HAL conformance

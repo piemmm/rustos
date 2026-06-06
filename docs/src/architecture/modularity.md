@@ -271,9 +271,38 @@ state, so it is infallible by construction; `tlb::conformance::run_all`
 proves the observable half on the host (object-safe, panic-free for any
 address, including misaligned and zero) for every port — the real
 instruction is exercised by the spawn / `memory_isolation` QEMU
-verticals. The *cross-CPU* shootdown depends on the Stage W6 aarch64
-directed IPI and is a tracked follow-up, not stubbed here (`AGENTS.md`
-§2.2).
+verticals.
+
+### Cross-CPU TLB shootdown
+
+The local `TlbShootdown` only flushes the *calling* CPU; on an SMP
+system a page-table edit that tightens or tears down a shared mapping
+must also invalidate every other CPU's cached translation. The
+`CrossCpuTlbShootdown` slice (`kernel/arch/api::xtlb`) is that
+system-wide operation: one infallible method,
+`shootdown_page(&self, vaddr)`, implemented on each port's
+`SchedulerArch` handle (the owner of the CPU topology and the
+directed-IPI path). It is a *separate* trait from the local flush, not a
+flag on it — collapsing the cheap per-edit local flush and the expensive
+system-wide shootdown into one call would be the §2.4 interface creep —
+and it can only ever *over*-invalidate, so like the local flush it is
+infallible by construction (§2.9 holds vacuously).
+
+The mechanism is the §2.2 modularity carve-out (same trait, port-specific
+implementation): x86_64 has no broadcast invalidation, so it raises a
+shootdown IPI at every other online CPU through a lock-serialised
+mailbox and spins until each target's ISR has run `invlpg` and
+acknowledged; aarch64 issues the inner-shareable broadcast `tlbi vaae1is`
++ `dsb ish`/`isb` (the *same* instruction the local flush uses, so both
+paths funnel through one shared `paging::invalidate_page_inner_shareable`
+helper); riscv64 issues a local `sfence.vma` plus the SBI RFENCE
+`remote_sfence_vma` firmware call to every other hart; wasm32 is an
+honest **n/a** (a Web Worker owns isolated linear memory with no shared
+TLB) and implements nothing. `xtlb::conformance::run_all` proves the
+observable half on the host (object-safe, panic-free for any address);
+the real cross-CPU round-trip is proven by the three
+`cross_cpu_tlb_shootdown_qemu_*` QEMU verticals on real ≥ 2 emulated
+cores (`plans/WIRING.md` Stage W13).
 
 ### Page-table frame source
 
@@ -312,8 +341,9 @@ the `translate`/`unmap`/`flush_page` surface and the per-page TLB
 shootdown; Stage W5b-3 added the `PageTableFrames` frame-source seam and
 the `FrameTableSource` allocator backing above, so a real per-process
 address space's tables come from the frame allocator while the static
-`PageTablePool` stays the boot/bootstrap source. Cross-CPU shootdown is
-W6 — not duplicated here (`AGENTS.md` §2.2).
+`PageTablePool` stays the boot/bootstrap source. The cross-CPU shootdown
+(`CrossCpuTlbShootdown`, Stage W13) is a sibling HAL slice described
+above, not duplicated here (`AGENTS.md` §2.2).
 
 ## `cargo xtask cfg-check`
 

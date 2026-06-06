@@ -809,6 +809,66 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
+    // HAL slice (`rustos_arch_api::CrossCpuTlbShootdown`) proven on real
+    // emulated cores, one vertical per bare-metal port. riscv64: the boot
+    // hart starts a second hart, then `RiscvArch::shootdown_page` runs the
+    // local `sfence.vma` + the SBI RFENCE `remote_sfence_vma` firmware call
+    // to the live hart, and the test asserts the firmware reports the
+    // remote fence reached it. Two CPUs (the point of the test) and a
+    // 60-second budget match the other multi-hart riscv64 tests.
+    QemuTest {
+        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-riscv64",
+        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
+    // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
+    // boot core starts a second core via PSCI `CPU_ON`, then
+    // `Aarch64Arch::shootdown_page` issues the inner-shareable *broadcast*
+    // `tlbi vaae1is` + `dsb ish`/`isb` — the hardware propagates it to
+    // every PE in the domain, so no IPI or software acknowledge is needed.
+    // Reaching PASS proves the broadcast executes on a real two-core
+    // machine without faulting. Two CPUs and a 60-second budget.
+    QemuTest {
+        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64",
+        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
+    // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
+    // port whose cross-CPU invalidation is entirely hand-written software
+    // (no broadcast `invlpg`). The BSP brings up an application processor
+    // via INIT-SIPI-SIPI; both install the shootdown ISR; the BSP drives
+    // `X86_64Arch::shootdown_page`, which IPIs the AP and spins on the
+    // acknowledge counter, returning only once the AP's ISR has `invlpg`'d
+    // and acknowledged. Reaching PASS proves the IPI + invalidation + ack
+    // round-trip ran on a second real core. Two CPUs and a 60-second
+    // budget.
+    QemuTest {
+        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
     // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`

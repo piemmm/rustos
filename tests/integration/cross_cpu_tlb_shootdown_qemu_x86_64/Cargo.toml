@@ -1,0 +1,38 @@
+[package]
+name = "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64"
+description = "WIRING Stage W6 QEMU integration test: cross-CPU TLB shootdown on x86_64 — the BSP brings up an application processor, both install the shootdown ISR, and the BSP drives X86_64Arch::shootdown_page (the IPI + invlpg + acknowledge round-trip) on real cores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding cross-CPU TLB-shootdown integration test — the x86_64
+# proof of the `rustos_arch_api::CrossCpuTlbShootdown` HAL slice
+# (`plans/WIRING.md` Stage W6). x86_64 has no broadcast TLB
+# invalidation, so the cross-CPU shootdown is an inter-processor
+# interrupt + a software acknowledge: this is the port whose cross-CPU
+# code is entirely hand-written and therefore most needs a real-cores
+# proof. The BSP enumerates the AP from the MADT, brings it up through
+# `smp::init_sipi_sipi`, both CPUs install the shootdown ISR
+# (`tlb_shootdown::init_local_tlb_shootdown`), and the BSP drives
+# `X86_64Arch::shootdown_page`, which returns only once the AP's ISR has
+# `invlpg`'d and acknowledged. Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on the arch crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md`
+# §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

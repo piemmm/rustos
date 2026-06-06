@@ -881,6 +881,41 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `qemu-system-riscv64 -M virt`. Docs:
       `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
       virtio-input driver `README.md`, `plans/WIRING.md`.
+- [x] **WIRING Stage W13 — cross-CPU TLB-shootdown HAL slice (all
+      ports).** The last ad-hoc per-port memory primitive is now an
+      object-safe Arch HAL trait, `CrossCpuTlbShootdown`
+      (`kernel/arch/api/src/xtlb.rs`), with one infallible method
+      `shootdown_page(&self, vaddr)` and a host `xtlb::conformance`
+      vertical (object-safe, total, panic-free). It is a *separate* trait
+      from the local `TlbShootdown` (W5b-2), not a flag on it: the local
+      flush is one privilege-neutral instruction the hot map/unmap loop
+      drives, the cross-CPU shootdown needs the port's topology and global
+      visibility (§2.4). Implemented once per port on its `SchedulerArch`
+      handle (the §2.2 modularity carve-out — same trait, port-specific
+      mechanism): **x86_64** a `TLB_SHOOTDOWN_VECTOR` (0x21) IPI +
+      lock-serialised mailbox + per-target `invlpg`/acknowledge spin
+      (`kernel/arch/x86_64/src/tlb_shootdown.rs`); **aarch64** the
+      inner-shareable broadcast `tlbi vaae1is` + `dsb ish`/`isb` (shared
+      with the local flush via `paging::invalidate_page_inner_shareable`,
+      §2.2); **riscv64** a local `sfence.vma` (shared
+      `paging::invalidate_page_local`) + the SBI RFENCE `remote_sfence_vma`
+      firmware call (new `sbi::sbi_call4` + `SBI_EXT_RFENCE`); **wasm32**
+      an honest n/a (isolated linear memory, no shared TLB — implements
+      nothing). Three new real-≥2-core QEMU verticals,
+      `cross_cpu_tlb_shootdown_qemu_{riscv64,aarch64,x86_64}` (enrolled
+      `cpus: 2`), each start a secondary CPU and drive `shootdown_page`;
+      the x86_64 one returns only once the AP's ISR `invlpg`'d and
+      acknowledged, the riscv64 one asserts the firmware reports the remote
+      fence reached the live hart, the aarch64 one proves the broadcast
+      executes without faulting. **Verified host-green** (the three
+      `passes_cross_cpu_tlb_shootdown_conformance` tests) and **QEMU-green**
+      (all three bins exit `0` under `cargo xtask test --qemu`; a 1-CPU
+      x86_64 run correctly fails, so PASS is genuine). No `lib/abi` change,
+      so no ABI / C-header drift. The only remaining ad-hoc §17.2 slice is
+      SMP secondary-core bring-up. Docs:
+      `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `AGENTS.md`
+      §17.2, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

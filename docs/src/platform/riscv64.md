@@ -192,6 +192,27 @@ per-site failure finisher instead (`AGENTS.md` §5.4.5 — fail closed).
 The test is enrolled in `tools/xtask/src/commands/qemu_tests.rs` (single
 CPU, 60 s budget).
 
+## Cross-CPU TLB-shootdown HAL slice
+
+riscv64 implements the Arch HAL `CrossCpuTlbShootdown` slice
+(`rustos_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `RiscvArch`.
+There is no broadcast `sfence.vma`, so `shootdown_page` invalidates the
+calling hart locally — the shared `paging::invalidate_page_local`
+sequence the local `TlbShootdown::flush_page` also uses (`AGENTS.md`
+§2.2) — and reaches every *other* online hart through the SBI **RFENCE**
+extension: a `remote_sfence_vma` firmware call (`sbi::remote_sfence_vma`,
+issued over the new `sbi_call4` with `SBI_EXT_RFENCE`). The firmware
+returns only once the listed harts have fenced, so it performs the remote
+acknowledge — no software ack loop is needed.
+
+`tests/integration/cross_cpu_tlb_shootdown_qemu_riscv64` is the real
+two-hart proof: the boot hart starts a second hart (SBI HSM
+`hart_start`), drives `RiscvArch::shootdown_page`, then asserts a direct
+`remote_sfence_vma` to the live hart returns success — proving the
+firmware honoured the remote fence. Enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`, 60 s budget); it runs
+under `cargo xtask test --qemu`.
+
 ## CC2 `abi-sys` `ecall` round-trip QEMU vertical
 
 `tests/integration/abi_sys_syscall_qemu_riscv64` is the riscv64 half of

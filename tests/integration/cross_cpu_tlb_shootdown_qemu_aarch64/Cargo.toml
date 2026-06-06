@@ -1,0 +1,38 @@
+[package]
+name = "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64"
+description = "WIRING Stage W6 QEMU integration test: cross-CPU TLB shootdown on the aarch64 virt board — the boot core starts a secondary core, then drives Aarch64Arch::shootdown_page (the inner-shareable broadcast tlbi vaae1is + dsb ish/isb) on a real two-core machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding cross-CPU TLB-shootdown integration test — the aarch64
+# proof of the `rustos_arch_api::CrossCpuTlbShootdown` HAL slice
+# (`plans/WIRING.md` Stage W6). It links only the `rustos-arch-aarch64`
+# port: the boot core starts a second core through `smp::start_secondary`
+# (the PSCI `CPU_ON` call), waits for it to come up, then drives
+# `Aarch64Arch::shootdown_page` — the inner-shareable *broadcast*
+# `tlbi vaae1is` + `dsb ish`/`isb`, which the hardware propagates to every
+# PE in the domain, so no IPI or software acknowledge is needed.
+# Reaching the PASS finisher proves the broadcast executes on a real
+# two-core machine without faulting. Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on the arch crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md`
+# §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

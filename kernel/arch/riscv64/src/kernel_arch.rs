@@ -38,7 +38,7 @@ use core::sync::atomic::AtomicU64;
 #[cfg(any(test, not(target_os = "none")))]
 use core::sync::atomic::Ordering;
 
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch};
 
 use crate::smp::MAX_HARTS;
 
@@ -237,6 +237,49 @@ impl SchedulerArch for RiscvArch {
             // already validated the index is in range.
             let _ = hartid;
             self.host_ipi_count[target as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl CrossCpuTlbShootdown for RiscvArch {
+    fn shootdown_page(&self, vaddr: u64) {
+        // Invalidate the calling hart locally first: the SBI remote
+        // fence below covers only the *other* harts, never the caller.
+        // Both the local flush and this share the one sequence (§2.2).
+        crate::paging::invalidate_page_local(vaddr);
+
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            // Reach every *other* online hart through the SBI RFENCE
+            // firmware call. `remote_sfence_vma` returns only once those
+            // harts have fenced, so the firmware performs the remote
+            // acknowledge — there is no software ack loop (cf. the
+            // x86_64 IPI path). A malformed mask returns an SBI error
+            // the caller cannot act on, so it is dropped (over-/under-
+            // fencing the *remote* set cannot corrupt the local map).
+            let me = SchedulerArch::current_cpu(self);
+            let page = vaddr & !(crate::paging::PAGE_SIZE as u64 - 1);
+            for cpu in 0..MAX_HARTS as u32 {
+                if cpu == me {
+                    continue;
+                }
+                if let Some(hartid) = self.hartid_of(cpu) {
+                    let (mask, base) = crate::sbi::hart_mask_for(hartid);
+                    let _ = crate::sbi::remote_sfence_vma(
+                        mask,
+                        base,
+                        page as usize,
+                        crate::paging::PAGE_SIZE,
+                    );
+                }
+            }
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            // Host: the local helper above was a vacuous no-op and there
+            // is no firmware to call; the conformance vertical asserts
+            // only that the call is total and panic-free.
+            let _ = vaddr;
         }
     }
 }

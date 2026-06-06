@@ -349,6 +349,25 @@ host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which
 now builds its victim/attacker spaces through this trait.
 
+## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
+
+The aarch64 port implements the Arch HAL `CrossCpuTlbShootdown` slice
+(`rustos_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `Aarch64Arch`.
+It needs no IPI: `shootdown_page` issues the *inner-shareable broadcast*
+`tlbi vaae1is` + `dsb ish`/`isb`, which the hardware propagates to every
+PE in the inner-shareable domain. That broadcast is the *same* instruction
+the local `TlbShootdown::flush_page` already issues, so both funnel
+through one shared `paging::invalidate_page_inner_shareable` helper — the
+"local" and "cross-CPU" shootdowns are literally the same operation on
+aarch64 (`AGENTS.md` §2.2), and the `dsb ish`/`isb` provide the ordering
+the cross-CPU contract requires.
+
+`tests/integration/cross_cpu_tlb_shootdown_qemu_aarch64` proves it on a
+real two-core `virt` board: the boot core starts core 1 (PSCI `CPU_ON`),
+then drives `Aarch64Arch::shootdown_page`; reaching the PASS finisher
+proves the broadcast executes across a multi-PE domain without faulting.
+Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`, 60 s).
+
 ## Heterogeneous (`big.LITTLE`) core classification
 
 The aarch64 port overrides the Arch HAL `SchedulerArch::core_class`
