@@ -321,7 +321,7 @@ fallback while the override branch is host-unit-tested; honouring the Pi's
 real 54 MHz crystal is an on-metal item (no `-M raspi4b` in QEMU — the
 same gap as P2/P3). `cargo xtask cfg-check` stays clean.
 
-### P5 — SMP bring-up on the Pi (PSCI vs spin-table) `[ ]`
+### P5 — SMP bring-up on the Pi (PSCI vs spin-table) `[x]`
 
 - The Pi 4 firmware exposes PSCI when `armstub8.bin` is present (default
   on current firmware); the W6 `psci::CPU_ON` path then works unchanged.
@@ -334,6 +334,28 @@ same gap as P2/P3). `cargo xtask cfg-check` stays clean.
 **Done when:** a `-M raspi4b --cpus 4` vertical starts the secondary
 cores via the discovered conduit and delivers a directed SGI, mirroring
 `ipi_smp_qemu_aarch64`; the conduit choice is discovered, not assumed.
+
+**Landed.** The PSCI conduit is now a *discovered* board fact end to end.
+`fdt::psci_method` was moved off the whole-tree `Fdt::property` scan onto
+the shared `Fdt::nodes` early-return walk (matching the `/psci` node by an
+`arm,psci` `compatible` prefix and reading `method` from that node only),
+the same byte-safe traversal `gic::configure_from_fdt` /
+`fdt::timer_clock_frequency` use (§2.2) — so conduit discovery is safe on
+the MMU-off bring-up path where a full-tree scan faults (the P4
+watch-out). `boot_aarch64` now reads the conduit from the `x0` DTB,
+installs it via `Aarch64Arch::with_psci_method`, and logs
+`psci_conduit_discovered`; a tree with no `/psci` node leaves the conduit
+unset, so the `SecondaryBringup` HAL fails closed (`SmpError::NotReady`)
+rather than assuming one (§5.4.5). **Runtime proof on `-M virt`:**
+`ipi_smp_qemu_aarch64` now *discovers* the conduit from the embedded
+`virt` tree (replacing the former hard-coded `VIRT_PSCI_METHOD`), asserts
+it is the board's `hvc`, fails closed otherwise, and starts the secondary
+core + delivers a directed SGI over *that* discovered conduit. Host tests
+cover the conduit read from both the `virt` (`hvc`) and `raspi` (`smc`)
+fixtures and the fail-closed no-`/psci` path. The Pi's `smc` conduit (via
+`armstub8.bin`) flows through the identical path and is an on-metal
+acceptance item (no `-M raspi4b` in QEMU — the same gap as P2/P3/P4).
+`cargo xtask cfg-check` stays clean.
 
 ### P6 — Spawn `init` into EL0 on the Pi `[ ]`
 

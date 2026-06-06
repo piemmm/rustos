@@ -121,6 +121,17 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
     // (`discovered.timer_hz`).
     let counter_hz = discovered.timer_hz;
     let arch = Aarch64Arch::new(BOOT_CPU, counter_hz);
+    // Install the PSCI conduit discovered from the firmware tree (`hvc`
+    // at EL2-hosted, `smc` at EL3-hosted — the Pi 4's `armstub8.bin`
+    // exposes `smc`), so the SMP bring-up that follows (`plans/PI.md` P5)
+    // issues `CPU_ON` through the conduit the board *declares*, never an
+    // assumed one (`AGENTS.md` §17.2 — no `cfg(board)` fork). A tree that
+    // declares no PSCI node leaves the conduit unset, and bring-up fails
+    // closed at the start site rather than guessing (`AGENTS.md` §5.4.5).
+    let arch = match discovered.psci_method {
+        Some(method) => arch.with_psci_method(method),
+        None => arch,
+    };
 
     // Sanity-check that the constructed handle reports the boot CPU, and
     // that the generic-timer frequency is usable. A zero frequency would
@@ -172,8 +183,12 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                     value: yes_no(discovered.timer_hz_from_tree),
                 },
                 Field {
+                    key: "psci_conduit_discovered",
+                    value: yes_no(discovered.psci_method.is_some()),
+                },
+                Field {
                     key: "next_stage",
-                    value: "pi_p4_timer_and_scheduler",
+                    value: "pi_p6_spawn_init",
                 },
             ],
         },
@@ -199,6 +214,11 @@ struct Discovered {
     /// `true` when `timer_hz` came from the device-tree override rather
     /// than the `CNTFRQ_EL0` register.
     timer_hz_from_tree: bool,
+    /// The PSCI conduit (`hvc`/`smc`) the `/psci` node declares, used to
+    /// issue `CPU_ON` for SMP bring-up (`plans/PI.md` P5). `None` when the
+    /// tree declares no PSCI node, so bring-up fails closed rather than
+    /// assuming a conduit.
+    psci_method: Option<fdt::PsciMethod>,
 }
 
 /// Discover the board from the device tree at `dtb`: point the console
@@ -217,6 +237,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         // source; P4's tree override (if any) overwrites this below.
         timer_hz: read_cntfrq(),
         timer_hz_from_tree: false,
+        psci_method: None,
     };
     if dtb == 0 {
         return out;
@@ -239,5 +260,9 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // `cfg(board)` fork).
     out.timer_hz_from_tree = fdt::timer_clock_frequency(&fdt).is_some_and(|hz| hz != 0);
     out.timer_hz = timer_frequency_hz(&fdt);
+    // P5: discover the PSCI conduit (`hvc`/`smc`) the firmware tree
+    // declares, so secondary-core bring-up issues `CPU_ON` over the
+    // board's conduit rather than an assumed one (`AGENTS.md` §17.2).
+    out.psci_method = fdt::psci_method(&fdt);
     out
 }

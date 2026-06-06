@@ -32,18 +32,19 @@
 //! harness reports `Outcome::Timeout` — the documented fail-loud
 //! behaviour (`AGENTS.md` §7).
 //!
-//! ## PSCI conduit
+//! ## PSCI conduit (PI Stage P5)
 //!
 //! `smp::start_secondary` takes the PSCI conduit (`hvc`/`smc`) as a
-//! parameter; the production boot path discovers it from the device tree
-//! through the W1 FDT reader (`platform::FdtDiscovery`, host-tested +
-//! conformance-gated). This QEMU vertical runs only on the `virt` board,
-//! whose conduit is `hvc`, and QEMU's ELF `-kernel` boot does not hand
-//! the kernel a DTB pointer (`x0 = 0`, unlike the Linux Image protocol),
-//! so the test names the board's known conduit directly — the same kind
-//! of test-environment knowledge as the fixed two-core MPIDR layout
-//! below. The runtime FDT-discovery path itself is exercised by W1's
-//! tests, not re-proved here.
+//! parameter. This vertical proves the conduit is **discovered**, not
+//! assumed: before building the arch handle it reads `/psci` `method`
+//! from the canonical `virt` device tree embedded at build time
+//! (`fdt::psci_method`) and fails closed if no PSCI node is found, then
+//! installs *that discovered* conduit on the handle. The secondary core
+//! this test starts is therefore brought up over the conduit read from
+//! the tree, mirroring how the production `boot_aarch64` path installs
+//! it (`plans/PI.md` P5). The board tree is embedded, not read from
+//! `x0`, for the same reason as the GIC bases below: QEMU's ELF
+//! `-kernel` boot hands no DTB pointer.
 //!
 //! ## GICv2 base discovery (PI Stage P3)
 //!
@@ -104,11 +105,12 @@ mod kernel {
     /// the linear core index. Core 1's affinity is therefore 1.
     const SECONDARY_MPIDR: u64 = SECONDARY_CPU as u64;
 
-    /// PSCI conduit on the QEMU `virt` board (no EL3 → `hvc`). See the
-    /// module docs: the production path discovers this from the device
-    /// tree, but QEMU's ELF boot hands no DTB pointer, so the vertical
-    /// names the board's known conduit.
-    const VIRT_PSCI_METHOD: fdt::PsciMethod = fdt::PsciMethod::Hvc;
+    /// The PSCI conduit the QEMU `virt` board declares (no EL3 → `hvc`).
+    /// This is the *expected* result of discovery, asserted against the
+    /// conduit `fdt::psci_method` reads from the embedded tree — the
+    /// vertical drives bring-up over the discovered value, not this
+    /// constant (`plans/PI.md` P5).
+    const VIRT_EXPECTED_PSCI_METHOD: fdt::PsciMethod = fdt::PsciMethod::Hvc;
 
     /// Stable audit-event ids for the QEMU transcript.
     const SMP_TEST_START: EventId = EventId(4230);
@@ -125,6 +127,10 @@ mod kernel {
     /// Failure finisher code: the GICv2 bases were not discovered from the
     /// embedded `virt` device tree (P3).
     const FAIL_GIC_NOT_DISCOVERED: u16 = 4;
+    /// Failure finisher code: the PSCI conduit was not discovered from the
+    /// embedded `virt` device tree, or did not match the board's `hvc`
+    /// (P5).
+    const FAIL_PSCI_NOT_DISCOVERED: u16 = 5;
 
     /// A deliberately-wrong GICv2 distributor/CPU-interface base installed
     /// before discovery runs. It is **not** the `virt` GICv2 base, so a
@@ -208,15 +214,29 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_ZERO_FREQ);
         }
 
+        // P5: discover the PSCI conduit from the embedded `virt` device
+        // tree rather than naming it. Fail closed if the tree declares no
+        // PSCI node, or declares one other than the board's `hvc`, so the
+        // secondary is brought up only over a *discovered* conduit.
+        let psci_method = match Fdt::new(DTB_BLOB) {
+            Ok(fdt) => fdt::psci_method(&fdt),
+            Err(_) => None,
+        };
+        let Some(psci_method) = psci_method else {
+            qemu_exit::exit_failure(FAIL_PSCI_NOT_DISCOVERED);
+        };
+        if psci_method != VIRT_EXPECTED_PSCI_METHOD {
+            qemu_exit::exit_failure(FAIL_PSCI_NOT_DISCOVERED);
+        }
+
         // Build the arch handle with the two-core MPIDR map so
         // `current_cpu` reverse-maps each core's affinity and `send_ipi`
-        // targets the right GICv2 CPU interface. Install the `virt`
-        // board's PSCI conduit so the `SecondaryBringup` HAL trait can
-        // issue `CPU_ON` (the production path discovers it from the FDT;
-        // see the module docs on QEMU's no-DTB-pointer ELF boot).
+        // targets the right GICv2 CPU interface. Install the *discovered*
+        // PSCI conduit so the `SecondaryBringup` HAL trait issues `CPU_ON`
+        // over the conduit read from the tree (`plans/PI.md` P5).
         let arch =
             Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR])
-                .with_psci_method(VIRT_PSCI_METHOD);
+                .with_psci_method(psci_method);
 
         // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
         // the runtime base, then read the GICD/GICC bases from the

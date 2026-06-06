@@ -52,9 +52,32 @@ impl PsciMethod {
 
 /// Read the PSCI conduit from the `/psci` node, or `None` if the tree
 /// declares no PSCI node or an unrecognised method.
+///
+/// Matches the `/psci` node through the shared `Fdt::nodes` early-return
+/// walk — the same byte-safe traversal [`crate::gic::configure_from_fdt`]
+/// and [`timer_clock_frequency`] use (`AGENTS.md` §2.2) — and reads
+/// `method` from that node's own properties. It stops at the first
+/// matching node and never scans the whole tree, so it stays safe with
+/// the MMU off (the secondary-bring-up boot path discovers the conduit
+/// before the page tables are live; a whole-tree `Fdt::property`/`walk`
+/// scan faults there once the compiler widens the byte reads —
+/// `plans/PI.md` P4/P5 watch-out).
 #[must_use]
 pub fn psci_method(fdt: &Fdt<'_>) -> Option<PsciMethod> {
-    PsciMethod::from_property(fdt.property(&[b"psci"], b"method")?)
+    let node = fdt.nodes().flatten().find(node_is_psci)?;
+    PsciMethod::from_property(node.property("method")?.value())
+}
+
+/// `true` iff `node` is the standard `/psci` node — matched by an
+/// `arm,psci` `compatible` prefix (covering `arm,psci`, `arm,psci-0.2`,
+/// `arm,psci-1.0`, …) so the conduit is read from the firmware's PSCI
+/// node regardless of the exact revision it advertises.
+fn node_is_psci(node: &rustos_fdt::Node<'_>) -> bool {
+    node.property("compatible").is_some_and(|compatible| {
+        compatible
+            .iter_strings()
+            .any(|s| s.starts_with(b"arm,psci"))
+    })
 }
 
 /// Read the generic-timer interrupt (PPI) number from the `/timer` node.
@@ -125,7 +148,7 @@ mod tests {
     use super::{
         effective_timer_hz, psci_method, timer_clock_frequency, timer_ppi, Fdt, PsciMethod,
     };
-    use rustos_fdt::fixture::{virt_like_arm, DtbBuilder};
+    use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
 
     /// Build a minimal tree carrying a `/timer` node with the given
     /// `clock-frequency` (a single big-endian `u32`), used to exercise
@@ -152,6 +175,32 @@ mod tests {
         let smc = virt_like_arm(0x4000_0000, 0x2000_0000, "smc", 14);
         let fdt = Fdt::new(&smc).expect("valid fdt");
         assert_eq!(psci_method(&fdt), Some(PsciMethod::Smc));
+    }
+
+    #[test]
+    fn reads_psci_method_from_a_raspi_shaped_tree() {
+        // The Raspberry-Pi-shaped fixture carries a `/psci` node with the
+        // `smc` conduit an EL3-firmware platform uses (`armstub8.bin`).
+        let blob = raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(psci_method(&fdt), Some(PsciMethod::Smc));
+    }
+
+    #[test]
+    fn psci_method_absent_on_a_tree_without_the_node() {
+        // A tree with no `/psci` node yields `None`, so the bring-up path
+        // fails closed rather than assuming a conduit (`AGENTS.md` §5.4.5).
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("timer");
+        b.prop_str("compatible", "arm,armv8-timer");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(psci_method(&fdt), None);
     }
 
     #[test]

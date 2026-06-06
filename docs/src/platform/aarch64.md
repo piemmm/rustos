@@ -135,9 +135,16 @@ Since **P3** it also points the GICv2 driver at the discovered GICD/GICC
 bases (`gic::configure_from_fdt`) and reads the `/memory` window, logging
 `gic_discovered` / `ram_discovered` (see
 [Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
-The discovery-fed `kernel_core::kernel_main` hand-off (the live
-`BootMemoryMap` + scheduler over that map) is staged to P4/P6: a
-hard-coded map would violate `AGENTS.md` §18.5.
+Since **P5** it discovers the PSCI conduit (`fdt::psci_method`) and
+installs it on the handle (`with_psci_method`), logging
+`psci_conduit_discovered`, so SMP bring-up issues `CPU_ON` over the
+conduit the board declares (`hvc` on `virt`, `smc` on the Pi) rather than
+an assumed one (see
+[SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gicv2-ipi)).
+The discovery-fed
+`kernel_core::kernel_main` hand-off (the live `BootMemoryMap` + scheduler
+over that map) is staged to P6: a hard-coded map would violate
+`AGENTS.md` §18.5.
 
 ## Arch HAL boundary
 
@@ -547,9 +554,25 @@ delegates to `smp::start_secondary` above. The host
 over a real handle; the real PSCI `CPU_ON` is proven by the two-core QEMU
 verticals, which start their secondary core through this HAL trait —
 `cross_cpu_tlb_shootdown_qemu_aarch64` and, since `plans/WIRING.md` Stage
-W15, `ipi_smp_qemu_aarch64` (its handle now carries the conduit via
-`with_psci_method`) — rather than calling the port-private
+W15, `ipi_smp_qemu_aarch64` — rather than calling the port-private
 `smp::start_secondary` directly.
+
+Since `plans/PI.md` **P5** the conduit `with_psci_method` installs is a
+*discovered* board fact, not a constant. The production `boot_aarch64`
+path reads `/psci` `method` from the `x0` DTB (`fdt::psci_method`) and
+installs it on the handle, logging `psci_conduit_discovered`; a tree with
+no PSCI node leaves the conduit unset so bring-up fails closed
+(`SmpError::NotReady`) rather than assuming one. `fdt::psci_method`
+matches the `/psci` node through the shared `Fdt::nodes` early-return
+walk (the same byte-safe traversal `gic::configure_from_fdt` and
+`fdt::timer_clock_frequency` use, §2.2) — not the whole-tree
+`Fdt::property` scan, which faults under the verticals' MMU-off boot once
+the compiler widens the byte reads. The `ipi_smp_qemu_aarch64` vertical
+proves the discovered conduit drives bring-up: it reads the conduit from
+the embedded `virt` tree (asserting it is the board's `hvc`) and starts
+the secondary over *that* value, fail-closed if the tree declares none.
+The Pi's `smc` conduit (via `armstub8.bin`) flows through the identical
+path and is an on-metal acceptance item (no `-M raspi4b` in QEMU).
 
 Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3, whose firmware
 parks secondaries on a release address rather than offering PSCI) is a
