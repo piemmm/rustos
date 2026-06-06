@@ -16,8 +16,9 @@
 //! firmware-call property rather than a device node, so it is exposed
 //! through the reader, not as a tree node.
 
+use crate::console::find_console;
 use crate::fdt::{timer_ppi, Fdt};
-use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT};
+use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// Builds the hardware tree from a borrowed flattened device tree.
@@ -52,6 +53,24 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
             node.push_resource(HwResource::irq(u64::from(ppi), 1))
                 .map_err(|_| DiscoveryError::MalformedSource)?;
             sink.emit(node)?;
+            next_id += 1;
+        }
+
+        // The console UART (`plans/PI.md` P2): its MMIO base is discovered,
+        // not assumed, so the boot console can be brought up on whatever
+        // board the firmware describes. The node carries the model's
+        // `compatible` as its bind key and the register window as a
+        // capability-gated MMIO resource (`AGENTS.md` §4 / §18.1).
+        if let Some(console) = find_console(&self.fdt) {
+            let mut node = HwNode::new(next_id, 0, HwDeviceClass::Serial);
+            node.push_match_key(
+                HwMatchKey::compatible(console.model.compatible())
+                    .map_err(|_| DiscoveryError::MalformedSource)?,
+            )
+            .map_err(|_| DiscoveryError::MalformedSource)?;
+            node.push_resource(HwResource::mmio(console.base, console.len))
+                .map_err(|_| DiscoveryError::MalformedSource)?;
+            sink.emit(node)?;
         }
 
         Ok(())
@@ -61,10 +80,11 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
 #[cfg(test)]
 mod tests {
     use super::FdtDiscovery;
+    use crate::console::ConsoleModel;
     use crate::fdt::Fdt;
-    use rustos_abi::{HwDeviceClass, HwNode};
+    use rustos_abi::{HwDeviceClass, HwNode, HwResourceKind};
     use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
-    use rustos_fdt::fixture::virt_like_arm;
+    use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm};
 
     #[test]
     fn passes_platform_discovery_conformance() {
@@ -79,6 +99,9 @@ mod tests {
         memory: usize,
         timer: usize,
         timer_irq: u64,
+        serial: usize,
+        serial_base: u64,
+        serial_compatible: std::vec::Vec<u8>,
         total: usize,
     }
 
@@ -91,6 +114,16 @@ mod tests {
                     self.timer += 1;
                     if let Some(res) = node.resources().first() {
                         self.timer_irq = res.base();
+                    }
+                }
+                Some(HwDeviceClass::Serial) => {
+                    self.serial += 1;
+                    if let Some(res) = node.resources().first() {
+                        assert_eq!(res.kind(), Some(HwResourceKind::Mmio));
+                        self.serial_base = res.base();
+                    }
+                    if let Some(key) = node.match_keys().first() {
+                        self.serial_compatible = key.compatible_bytes().to_vec();
                     }
                 }
                 _ => {}
@@ -110,5 +143,30 @@ mod tests {
         assert_eq!(sink.memory, 1);
         assert_eq!(sink.timer, 1);
         assert_eq!(sink.timer_irq, 30, "timer node carries the PPI as an IRQ");
+        // The `virt` fixture carries no UART node, so no serial node is
+        // emitted (the console keeps its discovered-or-default base).
+        assert_eq!(sink.serial, 0);
+    }
+
+    #[test]
+    fn emits_serial_node_with_discovered_base_from_raspi_tree() {
+        // The Pi-shaped fixture carries a PL011 + a mini-UART and no
+        // `/timer`; discovery emits root + memory + the (preferred) PL011
+        // serial node, with its MMIO base read from the tree.
+        let blob = raspi_like_arm(0x3f20_1000, 0x3f21_5040);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let disco = FdtDiscovery::new(fdt);
+        let mut sink = CountingSink::default();
+        disco.discover(&mut sink).expect("discovery succeeds");
+        assert_eq!(sink.total, 3, "root + memory + serial");
+        assert_eq!(sink.memory, 1);
+        assert_eq!(sink.timer, 0);
+        assert_eq!(sink.serial, 1);
+        assert_eq!(sink.serial_base, 0x3f20_1000, "serial base discovered");
+        assert_eq!(
+            sink.serial_compatible,
+            ConsoleModel::Pl011.compatible(),
+            "serial node carries the model's compatible bind key"
+        );
     }
 }

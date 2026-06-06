@@ -3,9 +3,9 @@
 //! Rust forbids library-defined `#[panic_handler]`s, so each binary
 //! declares its own one-liner that forwards to
 //! [`handle_panic_via_serial`]. The bridge emits a single best-effort
-//! record through the PL011 console and parks the CPU forever
-//! (`AGENTS.md` §2 — fail closed, never silently reset; §2.9 — no
-//! panic recovery in production paths).
+//! record through the currently-configured console and parks the CPU
+//! forever (`AGENTS.md` §2 — fail closed, never silently reset; §2.9 —
+//! no panic recovery in production paths).
 //!
 //! Like the riscv64 bridge, this does not route through
 //! `kernel_core::handle_panic`: the boot slice has no post-init arch
@@ -19,14 +19,14 @@ use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
 use crate::kernel_arch::halt_current_cpu;
-use crate::serial::Pl011Writer;
+use crate::serial::ConsoleWriter;
 
 /// Shared `#[panic_handler]` body for the aarch64 boot binaries.
 ///
-/// Always returns `!`: emits one record on the PL011 console, then parks
-/// the CPU via [`halt_current_cpu`].
+/// Always returns `!`: emits one record on the configured console, then
+/// parks the CPU via [`halt_current_cpu`].
 pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
-    let mut w = Pl011Writer;
+    let mut w = ConsoleWriter;
     let _ = writeln!(w, "[rustos-kernel] aarch64 panic: {info}");
     halt_current_cpu()
 }

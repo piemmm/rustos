@@ -1,0 +1,35 @@
+[package]
+name = "rustos-test-uart-console-qemu-aarch64"
+description = "PI Stage P2 QEMU integration test: boot the aarch64 virt board, discover the console UART base from the firmware device tree at runtime, print over it, and report PASS via ARM semihosting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the `virt` board through the arch crate's trampoline,
+# discover the console base from the device tree QEMU hands the kernel, and
+# print over it" integration test — the runtime proof of `plans/PI.md` P2
+# (board-discovered console). It poisons the console base, then proves
+# `configure_from_fdt` overwrites it with the base read from the firmware
+# tree and that writes reach that base. It runs on `virt` (not a Pi board)
+# because QEMU's `raspi*` models do not hand the kernel a device tree in
+# x0; see the bin's module docs. The QEMU-exit shortcut lives in this
+# dedicated bin, never behind a Cargo feature on the arch crate
+# (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-uart-console-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

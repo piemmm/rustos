@@ -104,6 +104,10 @@ rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" 
 # discovery-fed `kernel_core` hand-off staged for P2–P4.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
+# The shared FDT reader (`AGENTS.md` §2.2): `boot_aarch64` parses the
+# firmware device tree the loader hands the kernel to discover the board
+# console base (`plans/PI.md` P2).
+rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 
 [dev-dependencies]
 # The `virtio_factory` unit tests drive a real `DmaPool` through

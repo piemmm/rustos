@@ -189,6 +189,58 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
     b.build()
 }
 
+/// A Raspberry-Pi-shaped aarch64 tree carrying the two console UARTs the
+/// Pi exposes — a PrimeCell PL011 (`arm,pl011`) and a BCM2835 AUX
+/// mini-UART (`brcm,bcm2835-aux-uart`) — plus a `/psci` (`smc`) node and a
+/// 1 GiB `/memory@0` node.
+///
+/// `pl011_base` and `miniuart_base` are the ARM *physical* MMIO bases the
+/// nodes' `reg` cells carry directly (the fixture applies no `ranges`
+/// translation, matching what [`crate::Fdt`] reads). A `pl011_base` of `0`
+/// omits the PL011 node, leaving the mini-UART as the only console — used
+/// to exercise the aarch64 port's console-model fallback. The PL011 window
+/// is `0x1000` bytes; the mini-UART window is `0x40` bytes (the
+/// `AUX_MU_*` register block).
+#[must_use]
+pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+
+    b.begin_node("psci");
+    b.prop_str("compatible", "arm,psci-1.0");
+    b.prop_str("method", "smc");
+    b.end_node();
+
+    let reg_pair = |base: u64, size: u64| {
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&base.to_be_bytes());
+        reg.extend_from_slice(&size.to_be_bytes());
+        reg
+    };
+
+    if pl011_base != 0 {
+        b.begin_node(&alloc::format!("serial@{pl011_base:x}"));
+        b.prop_str("compatible", "arm,pl011");
+        b.prop("reg", &reg_pair(pl011_base, 0x1000));
+        b.end_node();
+    }
+
+    b.begin_node(&alloc::format!("serial@{miniuart_base:x}"));
+    b.prop_str("compatible", "brcm,bcm2835-aux-uart");
+    b.prop("reg", &reg_pair(miniuart_base, 0x40));
+    b.end_node();
+
+    b.begin_node("memory@0");
+    b.prop("device_type", b"memory\0");
+    b.prop("reg", &reg_pair(0, 0x4000_0000));
+    b.end_node();
+
+    b.end_node();
+    b.build()
+}
+
 /// A QEMU-`virt`-shaped aarch64 tree: 2/2 root cells, a `/memory` node, a
 /// `/psci` node with a `method` (`hvc`/`smc`), and a `/timer` node with an
 /// `interrupts` cell list (the per-CPU PPI the generic timer raises).

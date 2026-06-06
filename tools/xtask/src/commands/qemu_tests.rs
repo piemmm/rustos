@@ -1010,6 +1010,34 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
+    // is the runtime proof of the board-discovered console. It boots the
+    // `virt` board through the arch crate's EL1 trampoline, poisons the
+    // console base with a deliberately-wrong value, parses the canonical
+    // QEMU `virt` device tree embedded at build time (QEMU's aarch64
+    // `-kernel <ELF>` path passes no DTB pointer in `x0`), and calls
+    // `console::configure_from_fdt`. It then asserts the base moved off the
+    // poison value to the PL011 the tree advertised and logs two lines over
+    // the *discovered* console before the ARM semihosting PASS finisher —
+    // proving the console MMIO base is now sourced from the firmware device
+    // tree, not a compile-time constant, and that writes reach it. (The
+    // Pi's specific console base is host-unit-tested against the
+    // `raspi_like_arm` fixture and is an on-metal acceptance item: QEMU's
+    // `raspi*` models do not model the GPU-firmware DTB hand-off.) Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
+    QemuTest {
+        package: "rustos-test-uart-console-qemu-aarch64",
+        binary: "rustos-test-uart-console-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
     // MMIO analogue of the riscv64 virtio-blk-mmio vertical — boot the

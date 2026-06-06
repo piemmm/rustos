@@ -201,26 +201,47 @@ until P2's console discovery lands. The `CPACR_EL1.FPEN` enable is now a
 single `rustos_arch_aarch64::enable_fp_el1()` helper (§2.2), adopted by
 the production binary and the existing aarch64 verticals.
 
-### P2 — Board-discovered UART console (PL011 + mini-UART) `[ ]`
+### P2 — Board-discovered UART console (PL011 + mini-UART) `[x]`
 
-- Replace the fixed `serial::PL011_BASE` constant with a console whose
-  MMIO base + model come from the device tree via `FdtDiscovery`. The
-  PL011 register layout is unchanged; only the base moves. Add the BCM2835
-  **AUX mini-UART** as a second console model behind the same
-  `rustos_log::Sink` seam (different register layout, 7-bit-addressed),
+- The fixed `serial::PL011_BASE` constant is gone: the console MMIO base +
+  register model now live in a new host-testable
+  `rustos_arch_aarch64::console` module (an atomic `(base, model)` pair,
+  default = the `virt` PL011 base) that the freestanding `serial` sink
+  transmits through on every byte. `console::configure_from_fdt` reads the
+  base + model from the device tree. The BCM2835 **AUX mini-UART** is a
+  second `ConsoleModel` behind the same `rustos_log::Sink` seam (its own
+  `AUX_MU_IO`/`AUX_MU_LSR` register offsets + opposite-sense TX-ready bit),
   selected by the `compatible` string — `brcm,bcm2835-aux-uart` vs
-  `arm,pl011`. One console abstraction, two register backends (§2.2: this
-  is a driver-model split, not duplication).
-- Extend `platform::FdtDiscovery` to emit a `serial`-class `HwNode`
-  carrying the UART `reg` (and the mini-UART variant), so the console base
-  is discovered, not assumed.
+  `arm,pl011`. One console abstraction, two register backends (§2.2).
+- `platform::FdtDiscovery` emits a `serial`-class `HwNode` carrying the
+  discovered UART `compatible` bind key + its `reg` as a capability-gated
+  MMIO resource, so the console base is discovered, not assumed.
+- `boot_aarch64::boot` calls `console::configure_from_fdt` from the `x0`
+  DTB before its first log line (MMU-off-safe: the `lib/fdt` reader is
+  byte-wise, no multi-byte Device-memory load — W17).
 
-**Done when:** a new `tests/integration/uart_console_qemu_aarch64`-style
-vertical boots under `-M raspi4b`, discovers the Pi PL011 base from the
-firmware DTB, and prints the canonical boot log to `-serial`; host unit
-tests cover the mini-UART register encoder and the `compatible`-string
-console selection. The `virt` PL011 vertical stays green (same code,
-different discovered base).
+**Done when:** host unit tests cover the mini-UART/PL011 register
+encoders and the `compatible`-string console selection + the discovered
+`serial` `HwNode` (against the new `rustos_fdt` `raspi_like_arm` fixture);
+and the new `tests/integration/uart_console_qemu_aarch64` vertical boots
+the `virt` board, **poisons** the console base, then proves
+`configure_from_fdt` overwrites it with the base read from the firmware
+device tree and that writes reach that base (it prints two lines over the
+*discovered* console before the semihosting PASS finisher). All existing
+`virt` aarch64 verticals stay green.
+
+**Emulation gap (honest, not faked — §2.1):** the vertical runs on `-M
+virt`, **not** a Pi board, because QEMU's `raspi*` models do not model the
+Raspberry Pi GPU-firmware DTB hand-off — they enter an ELF `-kernel` with
+`x0 = 0` (verified by GDB on `raspi3b`), and QEMU 8.2.2 has no `raspi4b`
+at all. The `virt` board *does* pass its generated tree (which carries a
+real `arm,pl011` node), so the runtime discover→configure→print path is
+CI-proven there against a genuine firmware tree (the canonical `virt` DTB,
+dumped + embedded at build time since `-kernel <ELF>` passes no pointer).
+The Pi's *specific* console base + the mini-UART register layout are
+covered by the host unit tests against the `raspi_like_arm` fixture, and
+printing on real Pi PL011 silicon is an on-metal acceptance item for the
+Arc C peripheral stages (where the real firmware populates `x0`).
 
 ### P3 — GIC-400 from the tree + Pi RAM map `[ ]`
 

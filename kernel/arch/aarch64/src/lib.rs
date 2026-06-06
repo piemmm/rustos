@@ -78,6 +78,13 @@ core::arch::global_asm!(include_str!("vectors.s"));
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(include_str!("smp.s"));
 
+/// Board-discovered console model + runtime MMIO base (`plans/PI.md` P2):
+/// the one console abstraction ([`console::ConsoleModel`] — PL011 / BCM2835
+/// AUX mini-UART register layouts) the freestanding `serial` sink
+/// transmits through, configured from the firmware device tree
+/// ([`console::configure_from_fdt`]). Host-testable; the MMIO accesses live
+/// in the `serial` module.
+pub mod console;
 pub mod context;
 /// aarch64 implementation of the Arch HAL context-switch surface
 /// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the

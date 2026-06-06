@@ -1564,6 +1564,37 @@ Each sub-stage delivers one architecture. They share the same checklist:
               `CPACR_EL1.FPEN` enable is consolidated into
               `rustos_arch_aarch64::enable_fp_el1()` (§2.2), adopted by
               the production binary and the existing aarch64 verticals.
+        - [x] **P2 — Board-discovered UART console (PL011 + mini-UART).**
+              The fixed `serial::PL011_BASE` constant is gone: a new
+              host-testable `rustos_arch_aarch64::console` module holds the
+              console MMIO base + register model (an atomic `(base, model)`
+              pair, default = the `virt` PL011) that the freestanding
+              `serial` sink reads on every byte, plus `find_console` /
+              `configure_from_fdt` over the shared `lib/fdt` reader. The
+              BCM2835 **AUX mini-UART** is a second `ConsoleModel` behind
+              the same `rustos_log::Sink` seam (its own register offsets +
+              opposite-sense TX-ready bit), selected by `compatible`
+              (`brcm,bcm2835-aux-uart` vs `arm,pl011`) — one console
+              abstraction, two backends (§2.2). `platform::FdtDiscovery`
+              emits a `serial`-class `HwNode` (compatible bind key + `reg`
+              MMIO resource), and `boot_aarch64::boot` configures the
+              console from the `x0` DTB before its first log line
+              (MMU-off-safe: the byte-wise `lib/fdt` reader takes no
+              multi-byte Device-memory load — W17). Host unit tests cover
+              the PL011/mini-UART register encoders, the `compatible`
+              selection, and the discovered `serial` node (against a new
+              `rustos_fdt` `raspi_like_arm` fixture). The QEMU vertical
+              `tests/integration/uart_console_qemu_aarch64` (enrolled,
+              single CPU, 60 s) boots the `virt` board, poisons the console
+              base, then proves `configure_from_fdt` overwrites it from the
+              board's embedded device tree and that writes reach the
+              discovered base, **verified green under QEMU on this host**.
+              *Honest emulation gap (§2.1):* the vertical runs on `virt`,
+              not a Pi board — QEMU's `raspi*` models pass no DTB pointer
+              (`x0 = 0`, GDB-verified) and QEMU 8.2.2 lacks `raspi4b`; the
+              Pi's specific base / mini-UART layout are host-unit-tested
+              against the fixture and are on-metal acceptance items for the
+              Arc C peripheral stages.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

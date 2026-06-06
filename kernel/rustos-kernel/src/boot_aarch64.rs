@@ -21,15 +21,26 @@
 //! **staged**, not stubbed: it requires a real `BootMemoryMap` and IRQ
 //! routing, which only the device-tree discovery and GIC-400 wiring of
 //! `plans/PI.md` P2/P3 can honestly supply (fabricating a hardware map
-//! would violate `AGENTS.md` §18.5). Those stages add the `-M raspi4b`
-//! QEMU verticals that *prove* the runtime path; until then P1's gate is
-//! that this image builds and links (`plans/PI.md` P1 "Done when"). The
-//! console here uses the port's existing PL011 base, which P2 replaces
-//! with the base discovered from the firmware device tree.
+//! would violate `AGENTS.md` §18.5). Those stages add the QEMU verticals
+//! that *prove* the runtime path; the GIC-400 bases + memory map land in
+//! P3.
+//!
+//! # P2: board-discovered console
+//!
+//! Before logging, [`boot`] points the console at the UART the firmware
+//! device tree describes ([`rustos_arch_aarch64::console::configure_from_fdt`]).
+//! On the QEMU `virt` board this re-confirms the default PL011 base; on a
+//! Raspberry Pi it selects the Pi's PL011 (or the BCM2835 AUX mini-UART)
+//! at its high-peripheral base, so the boot line prints on real hardware
+//! and under `-M raspi3b`. The FDT reader accesses the blob byte-wise, so
+//! the walk is safe with the MMU still off (no multi-byte Device-memory
+//! load — `plans/PI.md` W17). A missing or malformed tree leaves the
+//! `virt` default in place (`AGENTS.md` §2.9 — fail closed).
 
 use rustos_arch_aarch64::kernel_arch::read_cntfrq;
-use rustos_arch_aarch64::{enable_fp_el1, halt_current_cpu, Aarch64Arch};
+use rustos_arch_aarch64::{console, enable_fp_el1, halt_current_cpu, Aarch64Arch};
 use rustos_arch_api::SchedulerArch;
+use rustos_fdt::Fdt;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
 /// The boot CPU's logical id. The boot trampoline parks every other CPU
@@ -83,6 +94,13 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
         enable_fp_el1();
     }
 
+    // Point the console at the UART the firmware device tree describes,
+    // before any log line is emitted (P2). The FDT reader is byte-wise, so
+    // this is safe with the MMU still off (`plans/PI.md` W17). A null,
+    // unreadable, or console-less tree leaves the `virt` PL011 default in
+    // place (fail closed, `AGENTS.md` §2.9).
+    let console_discovered = configure_console(dtb);
+
     // Construct the architecture handle — the single §17.1/§17.2
     // concrete-arch selection point for the kernel image. The counter
     // frequency seeds the handle's monotonic clock.
@@ -123,12 +141,38 @@ pub fn boot(dtb: u64, log_sink: &'static (dyn Sink + Sync)) -> ! {
                     value: yes_no(dtb != 0),
                 },
                 Field {
+                    key: "console_discovered",
+                    value: yes_no(console_discovered),
+                },
+                Field {
                     key: "next_stage",
-                    value: "pi_p2_console_discovery",
+                    value: "pi_p3_gic_and_memory_map",
                 },
             ],
         },
     );
 
     halt_current_cpu()
+}
+
+/// Point the console at the UART described by the device tree at `dtb`,
+/// returning whether a recognised console was discovered.
+///
+/// A null pointer, an unreadable/invalid blob, or a tree carrying no
+/// recognised console all leave the pre-discovery `virt` PL011 default
+/// untouched (fail closed, `AGENTS.md` §2.9).
+fn configure_console(dtb: u64) -> bool {
+    if dtb == 0 {
+        return false;
+    }
+    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
+    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
+    // and bounds the blob by its own `totalsize` before any further read,
+    // and every read is a single byte, so the access is valid MMU-off. A
+    // bogus pointer fails the magic check and returns `Err` rather than
+    // faulting on structured data.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+        return false;
+    };
+    console::configure_from_fdt(&fdt).is_some()
 }

@@ -1,5 +1,4 @@
-//! PL011-UART-backed [`rustos_log::Sink`] for the freestanding aarch64
-//! kernel.
+//! UART-backed [`rustos_log::Sink`] for the freestanding aarch64 kernel.
 //!
 //! Mirrors the riscv64 SBI-console sink (`kernel/arch/riscv64::serial`)
 //! and the x86_64 COM1 sink: one formatted line per event, in the
@@ -10,62 +9,64 @@
 //! [<level>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
-//! The QEMU `virt` board exposes a PrimeCell PL011 UART (ARM DDI 0183)
-//! at [`PL011_BASE`], which QEMU wires to `-serial stdio`. The sink is a
-//! zero-sized type exposed through the [`SERIAL_SINK`] `'static` so a bin
-//! can hand the same reference to `BootInfo`'s `log_sink` / `audit_sink`
-//! slots without a mutable static (`AGENTS.md` §2 — no global mutable
-//! state beyond the per-CPU bootstrap area). The underlying shared
-//! mutable state is the UART itself, not this wrapper.
+//! # Board-discovered base and model (`plans/PI.md` P2)
+//!
+//! The transmit path is **board-independent**: it reads the current MMIO
+//! base and register layout from [`crate::console`] on every byte. The
+//! QEMU `virt` board's PrimeCell PL011 is the pre-discovery default; a
+//! board whose console lives elsewhere (the Raspberry Pi — a PL011 or a
+//! BCM2835 AUX mini-UART at the SoC's high peripheral window) overrides
+//! both by calling [`crate::console::configure_from_fdt`] early in boot.
+//! There is one console abstraction with two register backends, not two
+//! consoles (`AGENTS.md` §2.2).
+//!
+//! The sink is a zero-sized type exposed through the [`SERIAL_SINK`]
+//! `'static` so a bin can hand the same reference to `BootInfo`'s
+//! `log_sink` / `audit_sink` slots without a mutable static (`AGENTS.md`
+//! §2 — no global mutable state beyond the per-CPU bootstrap area). The
+//! underlying shared mutable state is the UART itself plus the console
+//! base/model cell in [`crate::console`], not this wrapper.
 
 use core::fmt::Write as _;
 
 use rustos_log::{Event, Level, Sink};
 
-/// MMIO base address of the QEMU `virt` board's PL011 UART. Fixed by the
-/// `virt` memory map; the host runner wires it to `-serial stdio`.
-pub const PL011_BASE: usize = 0x0900_0000;
+use crate::console;
 
-/// Byte offset of the data register (`UARTDR`): a write transmits the
-/// low byte (ARM PrimeCell PL011 TRM §3.3.1).
-const UARTDR: usize = 0x00;
-
-/// Byte offset of the flag register (`UARTFR`).
-const UARTFR: usize = 0x18;
-
-/// `UARTFR.TXFF` — transmit FIFO full (bit 5). Polled before each store
-/// so a write never drops a byte into a full FIFO.
-const UARTFR_TXFF: u32 = 1 << 5;
-
-/// Transmit one byte through the PL011, busy-waiting while the transmit
-/// FIFO is full.
+/// Transmit one byte through the currently-configured console UART,
+/// busy-waiting while the transmitter cannot yet accept it.
 ///
-/// Freestanding-only: the MMIO access is meaningful solely on the
-/// `virt` board. The host build omits it (the host tests cover the
-/// `Sink` formatting through a capturing writer instead).
+/// Freestanding-only: the MMIO access is meaningful solely on the target.
+/// The host build omits it (the host tests cover the `Sink` formatting
+/// through a capturing writer and the register helpers in
+/// [`crate::console`] instead).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn putchar(byte: u8) {
-    // SAFETY: `PL011_BASE` is the fixed MMIO address of the `virt`
-    // board's PL011 UART. The reads/writes are naturally-aligned 32-bit
-    // accesses to device registers and touch no Rust-managed memory.
+    let (base, model) = console::current();
+    let status_reg = (base + model.status_offset()) as *const u32;
+    let data_reg = (base + model.data_offset()) as *mut u32;
+    // SAFETY: `base` is the console UART's MMIO base — the `virt` PL011
+    // default or the value discovered from the firmware device tree
+    // (`console::configure_from_fdt`). The reads/writes are
+    // naturally-aligned 32-bit accesses to device registers at the
+    // model's documented offsets and touch no Rust-managed memory.
     unsafe {
-        let fr = (PL011_BASE + UARTFR) as *const u32;
-        while (core::ptr::read_volatile(fr) & UARTFR_TXFF) != 0 {
+        while !model.tx_ready(core::ptr::read_volatile(status_reg)) {
             core::hint::spin_loop();
         }
-        core::ptr::write_volatile((PL011_BASE + UARTDR) as *mut u32, u32::from(byte));
+        core::ptr::write_volatile(data_reg, u32::from(byte));
     }
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn putchar(_byte: u8) {}
 
-/// [`core::fmt::Write`] adapter that emits each byte through the PL011,
-/// translating `\n` into `\r\n` so terminals capturing `-serial stdio`
-/// render the boot log with proper line breaks.
-pub struct Pl011Writer;
+/// [`core::fmt::Write`] adapter that emits each byte through the
+/// configured console, translating `\n` into `\r\n` so terminals
+/// capturing `-serial stdio` render the boot log with proper line breaks.
+pub struct ConsoleWriter;
 
-impl core::fmt::Write for Pl011Writer {
+impl core::fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for byte in s.bytes() {
             if byte == b'\n' {
@@ -77,7 +78,7 @@ impl core::fmt::Write for Pl011Writer {
     }
 }
 
-/// `Sink` that emits one formatted line per event through the PL011.
+/// `Sink` that emits one formatted line per event through the console.
 #[derive(Debug)]
 pub struct SerialSink;
 
@@ -97,8 +98,8 @@ impl Default for SerialSink {
 
 impl Sink for SerialSink {
     fn write_event(&self, event: &Event<'_>) {
-        let mut w = Pl011Writer;
-        // Ignore write errors: `Pl011Writer` is infallible (the MMIO
+        let mut w = ConsoleWriter;
+        // Ignore write errors: `ConsoleWriter` is infallible (the MMIO
         // store returns no status). The logging path must not panic
         // (`AGENTS.md` §2.9).
         let _ = write!(

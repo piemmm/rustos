@@ -124,13 +124,14 @@ fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
   selection point for the image), records a boot audit line over the
   console, and parks fail-closed.
 
-At P1 the console still uses the port's PL011 base (P2 makes it
-device-tree-discovered) and the discovery-fed `kernel_core::kernel_main`
-hand-off is deliberately staged to P2/P3: it needs a real `BootMemoryMap`
-and IRQ routing, which only device-tree discovery and the GIC-400 wiring
-can honestly supply (a hard-coded map would violate `AGENTS.md` §18.5). The
-`-M raspi4b` runtime vertical that proves the boot path lands in P2, once
-the console base is discovered.
+Since P2 the console base is **device-tree-discovered**: `kernel_main`
+calls `rustos_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
+before its first log line, so the console points at whatever UART the
+firmware tree describes (see [Board-discovered console](#board-discovered-console)).
+The discovery-fed `kernel_core::kernel_main` hand-off (a real
+`BootMemoryMap` + IRQ routing) is staged to P3: only the GIC-400 wiring
+and the Pi RAM map can honestly supply it (a hard-coded map would violate
+`AGENTS.md` §18.5).
 
 ## Arch HAL boundary
 
@@ -154,8 +155,13 @@ finisher constants) builds on the host so its unit tests run under
 
 `qemu-system-aarch64 -M virt -kernel <elf>` loads the ELF at its link
 address (`0x4020_0000`, 2 MiB above the `virt` RAM base) and enters its
-entry point with the Linux aarch64 boot-protocol hand-off
-(`x0 = DTB`). The `_start` trampoline (`boot.s`):
+entry point. The `_start` trampoline (`boot.s`) follows the Linux aarch64
+boot protocol's `x0 = DTB` register convention, which real firmware (and
+the Pi GPU firmware) populates; note that QEMU's `-kernel <ELF>` path
+itself passes `x0 = 0` (it treats the image as bare firmware), so the
+verticals that need the board tree embed it at build time rather than
+reading the pointer (see [Board-discovered console](#board-discovered-console)).
+The trampoline:
 
 1. Masks interrupts (`DAIFSet`).
 2. If entered at EL2 (a `virtualization=on` board), configures EL1 to
@@ -167,8 +173,42 @@ entry point with the Linux aarch64 boot-protocol hand-off
    `rustos_arch_aarch64_main(dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 
-The console (`serial.rs`) writes the boot log through the `virt` board's
-PL011 UART at `0x0900_0000`, which QEMU routes to `-serial stdio`.
+The console (`serial.rs`) writes the boot log through whatever UART the
+`console` module currently points at; before any discovery runs that is
+the `virt` board's PL011 at `0x0900_0000`, which QEMU routes to
+`-serial stdio`.
+
+## Board-discovered console
+
+The console MMIO base and register model are **discovered from the
+firmware device tree**, not hard-wired (`plans/PI.md` P2). The
+host-testable `console` module holds the active `(base, model)` as an
+atomic pair (the pre-discovery default is the `virt` PL011 base), and the
+freestanding `serial` sink reads it on every transmitted byte.
+`console::find_console` / `configure_from_fdt` walk the shared `lib/fdt`
+reader for the first node whose `compatible` names a model the port
+speaks, preferring the PrimeCell **PL011** (`arm,pl011`) over the BCM2835
+AUX **mini-UART** (`brcm,bcm2835-aux-uart`). The two models are one
+console abstraction with two register backends — distinct data/status
+register offsets and opposite-sense transmit-ready bits — not duplication
+(`AGENTS.md` §2.2). `platform::FdtDiscovery` also emits a `serial`-class
+`HwNode` carrying the discovered `compatible` bind key and the UART `reg`
+as a capability-gated MMIO resource.
+
+The runtime walk is safe with the MMU still off: the `lib/fdt` reader
+accesses the blob byte-by-byte, so it takes no multi-byte Device-memory
+load that would fault without exception vectors (`plans/PI.md` W17).
+
+**QEMU caveat (honest emulation gap, `AGENTS.md` §2.1).** QEMU's `raspi*`
+machine models do **not** emulate the Raspberry Pi GPU-firmware DTB
+hand-off: they enter an ELF `-kernel` with `x0 = 0` (GDB-verified on
+`raspi3b`), and QEMU 8.2.2 ships no `raspi4b`. The `virt` board *does*
+hand the kernel a generated tree (with a real `arm,pl011` node), so the
+runtime discover→configure→print path is CI-proven on `virt` against a
+genuine firmware tree; the Pi's specific console base and the mini-UART
+register layout are covered by host unit tests against the `rustos_fdt`
+`raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
+peripheral stages.
 
 ## Result protocol
 
@@ -221,16 +261,23 @@ system-register/assembly/MMIO operations to the freestanding target.
 
 ## QEMU verticals
 
-Seven freestanding integration binaries cover the Stage-3 per-sub-stage
-checklist (plus the CCOMPAT CC2 syscall round-trip, the Stage W3-B
-device-IRQ vertical, the Stage W6 SMP/IPI vertical, and the Stage W7
-live-scheduler vertical) on the `virt` board; each links only the arch
-port (the live-scheduler vertical also links the
-`rustos-kernel-sched-mlfq` policy) and reports its result through the
-semihosting finisher. They are enrolled in `cargo xtask test --qemu`.
+Eight freestanding integration binaries cover the Stage-3 per-sub-stage
+checklist (plus the PI Stage P2 console-discovery vertical, the CCOMPAT
+CC2 syscall round-trip, the Stage W3-B device-IRQ vertical, the Stage W6
+SMP/IPI vertical, and the Stage W7 live-scheduler vertical) on the `virt`
+board; each links only the arch port (the live-scheduler vertical also
+links the `rustos-kernel-sched-mlfq` policy) and reports its result
+through the semihosting finisher. They are enrolled in
+`cargo xtask test --qemu`.
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots to init**: the
   trampoline reaches `kernel_main` at EL1 and logs over the PL011 UART.
+- `rustos-test-uart-console-qemu-aarch64` — **the console base is
+  discovered, not hard-wired** (PI Stage P2): poisons the console base,
+  then proves `console::configure_from_fdt` overwrites it with the base
+  read from the board's embedded device tree and that writes reach that
+  base (it prints two lines over the *discovered* console before the PASS
+  finisher).
 - `rustos-test-timer-preempt-qemu-aarch64` — **timer interrupt drives
   the scheduler**: arms the EL1 physical timer at 100 Hz and confirms the
   GICv2 IRQ path drives the `preempt` callback ≥ 20 times.
@@ -313,10 +360,12 @@ queries on it: the first `/memory` region, the `/psci` `method`
 (`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up calls),
 and the generic-timer per-CPU interrupt (PPI) number from
 `/timer`. `FdtDiscovery` emits a root node, a `Memory` node carrying the
-RAM window, and a `Timer` node carrying its PPI as a capability-gated
-(`CAP_IRQ_BIND`) IRQ resource. The reader is host-tested against the
-shared DTB fixture and exercised by the port's
-`passes_arch_hal_conformance_suite`.
+RAM window, a `Timer` node carrying its PPI as a capability-gated
+(`CAP_IRQ_BIND`) IRQ resource, and (PI Stage P2) a `Serial` node carrying
+the discovered console UART's `compatible` bind key and its `reg` as an
+MMIO resource. The reader is host-tested against the shared DTB fixtures
+(including the `raspi_like_arm` Pi-shaped tree) and exercised by the
+port's `passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 
