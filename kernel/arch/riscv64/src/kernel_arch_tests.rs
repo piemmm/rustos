@@ -121,5 +121,40 @@ fn passes_cross_cpu_tlb_shootdown_conformance() {
     rustos_arch_api::xtlb::conformance::run_all(erased, 100u64 << 30);
 }
 
+/// §17.2 / W14: the port passes the secondary-bring-up conformance
+/// vertical over its real `RiscvArch` handle. On the host there is no SBI
+/// firmware, so the vertical asserts the observable half — starting an
+/// unstartable id fails closed and never panics. The real SBI HSM
+/// `hart_start` round-trip is proven by the multi-hart QEMU verticals
+/// (`ipi_smp_qemu_riscv64`, `cross_cpu_tlb_shootdown_qemu_riscv64`).
+#[test]
+fn passes_secondary_bringup_conformance() {
+    let arch = RiscvArch::with_harts(0, 10_000_000, &[0, 1]);
+    rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+    let erased: &dyn SecondaryBringup = &arch;
+    rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+}
+
+/// The boot hart and any unmapped / out-of-range dense id are refused
+/// before any firmware call — the fail-closed contract (`AGENTS.md`
+/// §5.4.5). (The set-once secondary-entry slot is a process-global
+/// shared with `crate::smp`'s own tests, so it is exercised there, not
+/// re-driven here — `AGENTS.md` §7, no flaky cross-test state.)
+#[test]
+fn start_secondary_rejects_boot_and_unmapped_ids() {
+    let arch = RiscvArch::with_harts(0, 10_000_000, &[0, 1]);
+    // SAFETY: the host build of `start_secondary` issues no SBI call; it
+    // only validates the id. Both ids below are refused before the
+    // entry-slot check, so this test touches no shared global state.
+    unsafe {
+        // Boot hart: already running.
+        assert_eq!(arch.start_secondary(0), Err(SmpError::InvalidCpu));
+        // Unmapped dense id.
+        assert_eq!(arch.start_secondary(5), Err(SmpError::InvalidCpu));
+        // Out-of-range id (beyond the hart pool).
+        assert_eq!(arch.start_secondary(u32::MAX), Err(SmpError::InvalidCpu));
+    }
+}
+
 /// Compile-time proof that `RiscvArch` implements [`SchedulerArch`].
 const _IS_SCHED_ARCH: fn(&RiscvArch) -> CpuId = <RiscvArch as SchedulerArch>::current_cpu;

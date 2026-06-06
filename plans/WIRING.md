@@ -75,10 +75,10 @@ The HAL surface *migrated* into `kernel/arch/api` so far:
 (map/translate/unmap — W5b-1/W5b-2), the per-page `TlbShootdown`
 slice (W5b-2), and the `PageTableFrames` page-table frame-source slice
 (allocator-backed port tables via `FrameTableSource` — W5b-3), and the
-`CrossCpuTlbShootdown` cross-CPU TLB-shootdown slice (W13). The remaining
-slice (SMP bring-up — landed port-side per arch in W6/W8, not yet a HAL
-trait) is still ad-hoc inside each port — the §17.2 surface `PLAN.md`
-flags as "migrated here as the §17 burn-down advances".
+`CrossCpuTlbShootdown` cross-CPU TLB-shootdown slice (W13), and the
+`SecondaryBringup` SMP secondary-CPU bring-up slice (W14). With W14
+landed **every** §17.2 architecture primitive now lives behind the HAL;
+the burn-down is complete.
 
 **Parity matrix** (✓ present, ~ partial, ✗ missing, n/a not applicable):
 
@@ -145,8 +145,9 @@ flags as "migrated here as the §17 burn-down advances".
   `SchedulerArch`, §19.1 side-channel, §19.10 memory-tagging, platform-
   discovery, and per-CPU verticals, so those slices are enforced rather
   than asserted by inspection. The cross-CPU TLB-shootdown slice is now a
-  HAL trait too (`CrossCpuTlbShootdown`, W13); the only remaining ad-hoc
-  slice is SMP secondary-core bring-up.
+  HAL trait too (`CrossCpuTlbShootdown`, W13), and SMP secondary-CPU
+  bring-up is now the `SecondaryBringup` HAL trait (W14) — no §17.2
+  primitive remains ad-hoc.
 
 ---
 
@@ -174,8 +175,10 @@ docs + §17.2 of `AGENTS.md` when each lands):
   ✅ W5b-2); allocator-backed port tables via the `PageTableFrames`
   frame-source seam (✅ W5b-3); cross-CPU TLB invalidation via the
   `CrossCpuTlbShootdown` slice (✅ W13).
-- `Smp` — secondary-CPU start + directed IPI (INIT-SIPI-SIPI / PSCI
-  `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn).
+- `SecondaryBringup` — secondary-CPU start (INIT-SIPI-SIPI / PSCI
+  `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn); the directed IPI
+  is already `SchedulerArch::send_ipi`, so this slice is start-only
+  (✅ W14). No §17.2 primitive remains ad-hoc.
 
 Each trait keeps its pure bit/encoding/layout math host-testable and
 gates only the register/assembly operation to the freestanding target,
@@ -864,6 +867,51 @@ once per port.
   three QEMU bins exit `0` under `cargo xtask test --qemu` (a single-CPU
   x86_64 run correctly *fails* — "no application processor found" — so the
   PASS is genuine). No `lib/abi` change, so no ABI / C-header drift. Docs:
+  `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
+  aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
+
+#### Stage W14 — SMP secondary-CPU bring-up HAL slice — ✅ landed
+
+The last enumerated §17.2 primitive becomes a HAL trait. Secondary
+bring-up was implemented port-side (W6 PSCI, W8 Web Worker, the riscv64
+SBI HSM path, and the x86_64 INIT-SIPI-SIPI orchestration that lived in
+the QEMU test bin), but it was not reachable through one neutral surface.
+W14 adds it as an object-safe `kernel/arch/api` trait and folds each
+port's existing `smp` onto it. The directed-IPI half of SMP is already
+`SchedulerArch::send_ipi`, so this slice is **start-only** (§2.4 — no
+interface creep).
+
+- **`SecondaryBringup` (`kernel/arch/api/src/smp.rs`).** One method,
+  `unsafe fn start_secondary(&self, cpu) -> Result<(), SmpError>`,
+  implemented on each port's `SchedulerArch` handle (the owner of the
+  dense `CpuId` ↔ native-id topology map). It **fails closed**
+  (`SmpError::InvalidCpu`) before any platform action for the boot CPU,
+  an out-of-range id, or an unmapped id, and never panics (§2.9). The
+  set-once *entry* a fresh CPU runs is deliberately **not** on the trait
+  (a bare-metal `extern "C" fn(CpuId) -> !` vs. wasm32's fixed module
+  export — forcing one shape would make wasm32 fake the other, §2.1).
+  Ships with a host `smp::conformance` vertical proving the observable
+  half (object-safe, fail-closed, panic-free).
+- **Per-port impls (the §2.2 carve-out — same trait, port mechanism):**
+  - **x86_64** owns a per-AP stack pool, the `AP_TRAMPOLINE_PHYS` frame,
+    the boot `CR3`, a PIT `Delay`, and a set-once entry slot;
+    `smp::start_secondary` installs the trampoline, stamps each
+    `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits on the
+    AP `ready` flag. This orchestration **moved out of**
+    `scheduler_stress_qemu` and `cross_cpu_tlb_shootdown_qemu_x86_64`
+    into the arch crate (§2.2 — the two verticals had duplicated it);
+    both now call `X86_64Arch::start_secondary`.
+  - **aarch64** delegates to the W6 `smp::start_secondary` (PSCI
+    `CPU_ON`); the conduit is installed on the handle via
+    `Aarch64Arch::with_psci_method` (a missing conduit → `NotReady`).
+  - **riscv64** delegates to the SBI HSM `hart_start` `smp::start_secondary`.
+  - **wasm32** delegates to `smp::start_worker` (Web Worker spawn); it
+    has no settable entry, so it never reports `NotReady`.
+- **Verified:** the four host `passes_secondary_bringup_conformance`
+  tests pass; the migrated `scheduler_stress_qemu` (BSP starts 3 APs via
+  the HAL) and `cross_cpu_tlb_shootdown_qemu_x86_64` build freestanding
+  and stay green under `cargo xtask test --qemu`. No `lib/abi` change, so
+  no ABI / C-header drift. Docs:
   `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
   aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
 

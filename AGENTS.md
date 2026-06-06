@@ -977,9 +977,15 @@ as non-negotiable as §2.
   handle: an x86_64 IPI + software acknowledge, an aarch64 inner-shareable
   `tlbi ...is` broadcast, a riscv64 SBI RFENCE `remote_sfence_vma`; wasm32
   is an honest n/a — isolated linear memory, no shared TLB); each carries
-  a conformance vertical in `kernel/arch/api`. The remaining primitives
-  (notably SMP secondary-core bring-up, still port-side per arch) are
-  migrated as the §17 burn-down advances (`plans/WIRING.md`).
+  a conformance vertical in `kernel/arch/api` — and `SecondaryBringup`
+  (the SMP secondary-CPU bring-up slice, implemented on each port's
+  `SchedulerArch` handle: an x86_64 INIT-SIPI-SIPI handshake, an aarch64
+  PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web Worker
+  spawn; it fails closed for an unstartable CPU and never panics), which
+  also carries a `kernel/arch/api` conformance vertical. With
+  `SecondaryBringup` landed every architecture primitive enumerated above
+  now lives behind the HAL; the §17.2 burn-down is complete
+  (`plans/WIRING.md`).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the

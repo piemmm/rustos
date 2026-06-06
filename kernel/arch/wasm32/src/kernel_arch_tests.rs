@@ -116,3 +116,35 @@ fn passes_arch_hal_conformance_suite() {
         &crate::percpu_hal::PerCpuStorage::new(),
     );
 }
+
+/// §17.2 / W14: the port passes the secondary-bring-up conformance
+/// vertical over its real `WasmArch` handle. Spawning a Web Worker is a
+/// host action with no observable host-test effect, so the vertical
+/// asserts the observable half — starting an unstartable id fails closed
+/// and never panics. The real Worker spawn is proven by the wasm32
+/// browser vertical.
+#[test]
+fn passes_secondary_bringup_conformance() {
+    let arch = WasmArch::with_workers(0, &[0, 1]);
+    rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+    let erased: &dyn SecondaryBringup = &arch;
+    rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+}
+
+/// The boot context and any unmapped dense id are refused before asking
+/// the host to spawn a worker — the fail-closed contract (`AGENTS.md`
+/// §5.4.5). (The host `start_worker` substitute increments a
+/// process-global counter shared with `crate::smp`'s own tests, so the
+/// accepted path is exercised there, not re-driven here — no flaky
+/// cross-test state, `AGENTS.md` §7.)
+#[test]
+fn start_secondary_rejects_boot_and_unmapped_ids() {
+    let arch = WasmArch::with_workers(0, &[0, 1]);
+    // SAFETY: both ids below are refused before any host spawn, so this
+    // test takes no platform action and touches no shared global state.
+    unsafe {
+        assert_eq!(arch.start_secondary(0), Err(SmpError::InvalidCpu));
+        assert_eq!(arch.start_secondary(7), Err(SmpError::InvalidCpu));
+        assert_eq!(arch.start_secondary(u32::MAX), Err(SmpError::InvalidCpu));
+    }
+}

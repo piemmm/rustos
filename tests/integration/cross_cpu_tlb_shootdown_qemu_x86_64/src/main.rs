@@ -43,16 +43,13 @@ mod kernel {
     use core::fmt::Write as _;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use rustos_arch_api::CrossCpuTlbShootdown;
+    use rustos_arch_api::{CrossCpuTlbShootdown, SecondaryBringup};
     use rustos_arch_x86_64::acpi::{self, MadtEntry};
     use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-    use rustos_arch_x86_64::apic_timer::{PolledPit, PortIo};
     use rustos_arch_x86_64::kernel_arch::X86_64Arch;
     use rustos_arch_x86_64::multiboot2::BootInfo;
     use rustos_arch_x86_64::percpu::MAX_CPUS;
-    use rustos_arch_x86_64::smp::{
-        self, init_sipi_sipi, ApBootSlot, Delay, TrampolineFrame, AP_TRAMPOLINE_PHYS,
-    };
+    use rustos_arch_x86_64::smp;
     use rustos_arch_x86_64::{percpu, preempt, qemu_exit, serial, tlb_shootdown};
 
     /// A representative page to invalidate. The exact address is
@@ -77,27 +74,6 @@ mod kernel {
         // (SAFETY-INVARIANT 4 — 0..4 GiB identity map).
         let mmio = unsafe { VolatileLapicMmio::new(0xFEE0_0000 as *mut u32) };
         Lapic::new(mmio)
-    }
-
-    /// `Delay` backed by busy-waiting on PIT channel 2 OUT (the INIT-SIPI
-    /// handshake needs the architectural 10 ms / 200 µs waits). Mirrors
-    /// the helper in `scheduler_stress_qemu`.
-    struct PitDelay {
-        pit: PolledPit,
-    }
-    impl Delay for PitDelay {
-        fn delay_us(&mut self, us: u32) {
-            let reload = ((u64::from(us) * 1_193_182) / 1_000_000) as u16;
-            if reload == 0 {
-                return;
-            }
-            let gate = self.pit.inb(0x61);
-            self.pit.outb(0x61, (gate & 0xFC) | 0x01);
-            self.pit.outb(0x43, 0xB0);
-            self.pit.outb(0x42, (reload & 0xFF) as u8);
-            self.pit.outb(0x42, (reload >> 8) as u8);
-            while self.pit.inb(0x61) & 0x20 == 0 {}
-        }
     }
 
     /// Enabled application processors discovered from the MADT (BSP
@@ -143,34 +119,6 @@ mod kernel {
         Some(list)
     }
 
-    /// Per-AP stack (16 KiB, 16-byte aligned per the System V AMD64 ABI).
-    #[repr(C, align(16))]
-    struct ApStack([u8; 16 * 1024]);
-
-    /// One AP in this test (`-smp 2`); size the pool to `MAX_CPUS - 1`.
-    const MAX_APS: usize = MAX_CPUS - 1;
-    static mut AP_STACKS: [ApStack; MAX_APS] = {
-        const Z: ApStack = ApStack([0; 16 * 1024]);
-        [Z; MAX_APS]
-    };
-
-    fn ap_stack_top(idx: usize) -> u64 {
-        // SAFETY: `idx < MAX_APS`; the returned address is one past the
-        // last byte (the ABI's initial RSP). 16-byte alignment is
-        // preserved by the `align(16)` struct.
-        unsafe {
-            let base = core::ptr::addr_of!(AP_STACKS[idx]) as u64;
-            base + core::mem::size_of::<ApStack>() as u64
-        }
-    }
-
-    /// Typed view of the 4 KiB AP trampoline frame at `AP_TRAMPOLINE_PHYS`.
-    fn trampoline_frame_mut() -> &'static mut [u8] {
-        // SAFETY: identity-mapped, reserved by this test binary, and the
-        // BSP serialises AP launches, so no other CPU touches it.
-        unsafe { core::slice::from_raw_parts_mut(AP_TRAMPOLINE_PHYS as *mut u8, 4096) }
-    }
-
     /// Entry the AP runs after the trampoline hands control to long mode.
     extern "C" fn ap_entry(cpu_id: u32) -> ! {
         // SAFETY: called once on this AP before interrupts are enabled;
@@ -214,54 +162,6 @@ mod kernel {
             unsafe {
                 core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
             }
-        }
-    }
-
-    /// Bring up `target` (its LAPIC id) as dense CPU `cpu_id` via
-    /// INIT-SIPI-SIPI, blocking until the trampoline raises its ready
-    /// flag.
-    fn bring_up_ap(
-        target: u8,
-        cpu_id: u32,
-        lapic: &mut Lapic<VolatileLapicMmio>,
-        delay: &mut PitDelay,
-        com1: &mut serial::Serial,
-    ) {
-        let mut frame = match TrampolineFrame::new(trampoline_frame_mut()) {
-            Ok(f) => f,
-            Err(_) => qemu_exit::exit_failure(),
-        };
-        if frame.install(smp::trampoline_payload()).is_err() {
-            qemu_exit::exit_failure();
-        }
-        let stack_top = ap_stack_top((cpu_id - 1) as usize);
-        let entry_addr = ap_entry as *const () as u64;
-        let cr3: u64;
-        // SAFETY: reading CR3 in ring 0 is well-defined.
-        unsafe {
-            core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
-        }
-        let slot = match ApBootSlot::new(cr3, stack_top, entry_addr, cpu_id) {
-            Ok(s) => s,
-            Err(_) => qemu_exit::exit_failure(),
-        };
-        frame.write_slot(&slot);
-
-        // Every slot byte must be visible before the SIPI.
-        core::sync::atomic::fence(Ordering::Release);
-        init_sipi_sipi(lapic, delay, target, smp::sipi_vector());
-
-        let mut spins: u64 = 0;
-        while frame.load_ready() == 0 {
-            spins += 1;
-            if spins > 10_000_000 {
-                let _ = writeln!(
-                    com1,
-                    "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: AP {target} never set ready"
-                );
-                qemu_exit::exit_failure();
-            }
-            core::hint::spin_loop();
         }
     }
 
@@ -331,9 +231,27 @@ mod kernel {
             Err(_) => qemu_exit::exit_failure(),
         };
 
-        // Bring up the single AP.
-        let mut pit_delay = PitDelay { pit: PolledPit };
-        bring_up_ap(ap_id, 1, &mut lapic, &mut pit_delay, &mut com1);
+        // Install the AP entry once, then bring the single AP up through
+        // the Arch HAL `SecondaryBringup` trait (the INIT-SIPI-SIPI
+        // orchestration lives in `rustos_arch_x86_64::smp`, Stage W14).
+        if smp::set_secondary_entry(ap_entry).is_err() {
+            let _ = writeln!(
+                com1,
+                "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: secondary entry already installed"
+            );
+            qemu_exit::exit_failure();
+        }
+        // SAFETY: BSP; `boot.s` zeroed `.bss` (clear AP stack pool), the
+        // BSP LAPIC is software-enabled, the entry is installed, and dense
+        // CPU 1 maps to the real, parked AP discovered from the MADT.
+        if let Err(e) = unsafe { arch.start_secondary(1) } {
+            let _ = writeln!(
+                com1,
+                "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: start_secondary: {}",
+                e.as_str()
+            );
+            qemu_exit::exit_failure();
+        }
 
         // Wait until the AP has installed its shootdown ISR and enabled
         // interrupts, so the IPI has a live target.

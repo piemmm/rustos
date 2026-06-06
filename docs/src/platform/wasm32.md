@@ -78,13 +78,23 @@ PSCI `CPU_ON`). `smp::start_worker(n)` range-checks `n` against the
 spawnable secondary range (`1..MAX_WORKERS`) and asks the host to spawn a
 real Web Worker that instantiates this same module as logical CPU `n`,
 with its own linear memory; `smp::current_worker` recovers the running
-context's logical id. Like riscv64 and aarch64, SMP is kept **port-side**
-here, not behind an `Smp` Arch HAL trait — an `Smp` HAL slice remains a
-future §17.2 decision shared by all three ports. An out-of-range index or
-a host refusal fails closed with a `StartWorkerError` (`AGENTS.md` §2.9).
-Because each worker is a separate module instance with its own scheduler
-and heap, an inter-context IPI is the only path between them; the main
-thread is the routing hub for worker→worker posts.
+context's logical id. An out-of-range index or a host refusal fails
+closed with a `StartWorkerError` (`AGENTS.md` §2.9). Because each worker
+is a separate module instance with its own scheduler and heap, an
+inter-context IPI is the only path between them; the main thread is the
+routing hub for worker→worker posts.
+
+Bring-up is now reached through the Arch HAL `SecondaryBringup` slice
+(`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
+`WasmArch::start_secondary(cpu)` resolves the dense `CpuId` to its worker
+index through the handle's map (failing closed with `SmpError::InvalidCpu`
+for the boot context or an unmapped id) and delegates to
+`smp::start_worker`. wasm32 has no settable entry pointer — a secondary
+is a fresh module instance entering at a fixed export — so it never
+reports `NotReady`. The host `passes_secondary_bringup_conformance` test
+runs `smp::conformance::run_all` over a real `WasmArch`; the real Web
+Worker spawn is proven by the wasm32 browser vertical. With this slice
+every §17.2 primitive is behind the HAL.
 
 ### Timer programming (`Timer`)
 

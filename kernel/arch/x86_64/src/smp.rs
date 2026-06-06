@@ -44,7 +44,9 @@
 // the `ApBootSlot` struct itself only uses a plain `u32` so it can stay
 // `Copy + Eq` (the asm-side `xchg` atomicity is what the wire protocol
 // requires; the Rust-side struct never receives an AP write directly).
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use rustos_arch_api::CpuId;
 
 use crate::apic::{DeliveryMode, Lapic, LapicMmio};
 
@@ -390,6 +392,273 @@ pub fn trampoline_payload() -> &'static [u8] {
     }
 }
 
+// --- Secondary entry slot -------------------------------------------
+
+/// The AP entry the boot CPU writes into each [`ApBootSlot`], packed
+/// into a `usize` (the size of a `fn` pointer) so the bring-up path
+/// reads it without a lock. `0` until [`set_secondary_entry`] installs
+/// it.
+///
+/// Unlike aarch64/riscv64 — whose fixed trampolines read a global slot —
+/// the x86_64 trampoline jumps to the per-AP `entry` address stored in
+/// that AP's [`ApBootSlot`]. `start_secondary` therefore reads this
+/// set-once slot and stamps it into every AP's boot slot, so the
+/// consumer installs the entry exactly once (mirroring the other ports'
+/// [`set_secondary_entry`] contract) rather than passing a raw function
+/// pointer per call.
+static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
+
+/// Failure modes of [`set_secondary_entry`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SetEntryError {
+    /// An entry was already installed; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1).
+    AlreadyInstalled,
+}
+
+/// Failure modes of `start_secondary`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum StartCpuError {
+    /// `cpu` was the boot CPU or outside `1..MAX_CPUS`, so it has no
+    /// reserved AP stack slot.
+    CpuIdOutOfRange,
+    /// No secondary entry was installed via [`set_secondary_entry`];
+    /// starting an AP that would jump to address `0` is refused so the
+    /// failure is loud at the call site, not a triple-fault on the AP.
+    NoEntryInstalled,
+    /// The AP never published its `ready` flag within the spin budget;
+    /// the trampoline frame must not be reused for the next AP, so the
+    /// bring-up fails closed rather than racing (`AGENTS.md` §5.4.5).
+    StartTimedOut,
+}
+
+impl StartCpuError {
+    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuIdOutOfRange => "cpu_id_out_of_range",
+            Self::NoEntryInstalled => "no_secondary_entry_installed",
+            Self::StartTimedOut => "ap_start_timed_out",
+        }
+    }
+}
+
+/// Install the entry a freshly-started AP runs.
+///
+/// The function must be `-> !`: an AP has nowhere to return to (the
+/// trampoline left it on a private stack with no caller). Encoding the
+/// bottom type in the signature pins that at the call site, exactly as
+/// the aarch64/riscv64 ports do.
+///
+/// # Errors
+///
+/// [`SetEntryError::AlreadyInstalled`] on the second publish.
+pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEntryError> {
+    let raw = entry as usize;
+    SECONDARY_ENTRY_FN
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetEntryError::AlreadyInstalled)
+}
+
+/// Address of the installed secondary entry (`0` if none).
+/// Test/diagnostic observer.
+#[must_use]
+pub fn secondary_entry_addr() -> usize {
+    SECONDARY_ENTRY_FN.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn clear_secondary_entry_for_tests() {
+    SECONDARY_ENTRY_FN.store(0, Ordering::Release);
+}
+
+// --- Bare-metal bring-up orchestration ------------------------------
+
+/// Maximum number of logical CPUs the per-AP stack pool covers, locked
+/// to the per-CPU arena bound (`crate::percpu::MAX_CPUS`).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const MAX_CPUS: usize = crate::percpu::MAX_CPUS;
+
+/// Number of application processors (every CPU except the boot CPU).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const MAX_APS: usize = MAX_CPUS - 1;
+
+/// Spin budget the boot CPU waits for an AP's `ready` flag before
+/// declaring the start timed out. Generous: each iteration is a single
+/// acquire-load, and a healthy AP sets `ready` within a few thousand.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const AP_READY_SPIN_BUDGET: u64 = 10_000_000;
+
+/// Per-AP bootstrap stack. `0x4000` (16 KiB) matches the boot stack size
+/// in `boot.s`. Aligned to 16 bytes per the System V AMD64 ABI.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[repr(C, align(16))]
+struct ApStack([u8; 16 * 1024]);
+
+/// Reserved AP stack pool — one 16 KiB stack per application processor.
+/// Zeroed by `boot.s` (`.bss`); each stack is handed to exactly one AP.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static mut AP_STACKS: [ApStack; MAX_APS] = {
+    const Z: ApStack = ApStack([0; 16 * 1024]);
+    [Z; MAX_APS]
+};
+
+/// Top-of-stack (one past the last byte, 16-byte aligned) of AP stack
+/// pool entry `idx`. The caller guarantees `idx < MAX_APS`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn ap_stack_top(idx: usize) -> u64 {
+    // SAFETY: `idx < MAX_APS` (checked by the caller). The struct and
+    // the array are both `align(16)`, so `base + size_of` preserves the
+    // 16-byte alignment the System V ABI requires for RSP on entry.
+    unsafe {
+        let base = core::ptr::addr_of!(AP_STACKS[idx]) as u64;
+        base + core::mem::size_of::<ApStack>() as u64
+    }
+}
+
+/// Typed view of the 4 KiB low frame at [`AP_TRAMPOLINE_PHYS`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn trampoline_frame_mut() -> &'static mut [u8] {
+    // SAFETY: identity-mapped (boot.s SAFETY-INVARIANT 4); the boot CPU
+    // serialises AP launches (it waits on each AP's `ready` flag before
+    // the next), so no other CPU reads or writes this page concurrently,
+    // and the page is reserved by the image (no allocator hands it out —
+    // the kernel heap lives well above 0x8000).
+    unsafe { core::slice::from_raw_parts_mut(AP_TRAMPOLINE_PHYS as *mut u8, 4096) }
+}
+
+/// [`Delay`] backed by busy-waiting on PIT channel 2 OUT.
+///
+/// The INIT-SIPI-SIPI handshake needs a real microsecond delay between
+/// IPIs (SDM Vol 3A §8.4.4.1); the PIT is the one timer guaranteed
+/// available before the LAPIC timer is calibrated.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+struct PitDelay {
+    pit: crate::apic_timer::PolledPit,
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+impl Delay for PitDelay {
+    fn delay_us(&mut self, us: u32) {
+        use crate::apic_timer::PortIo as _;
+        // PIT runs at 1.193182 MHz: ticks = us * 1_193_182 / 1_000_000.
+        // For `us` ≤ 54_925 the value fits in 16 bits; the bring-up uses
+        // 10_000 and 200, both well below.
+        #[allow(clippy::cast_possible_truncation)] // bounded by the comment above.
+        let reload = ((u64::from(us) * 1_193_182) / 1_000_000) as u16;
+        if reload == 0 {
+            return;
+        }
+        // Arm channel 2 one-shot, gate it, then poll the OUT bit.
+        let gate = self.pit.inb(0x61);
+        self.pit.outb(0x61, (gate & 0xFC) | 0x01);
+        self.pit.outb(0x43, 0xB0);
+        self.pit.outb(0x42, (reload & 0xFF) as u8);
+        self.pit.outb(0x42, (reload >> 8) as u8);
+        while self.pit.inb(0x61) & 0x20 == 0 {}
+    }
+}
+
+/// Build an ephemeral [`Lapic`] over this CPU's identity-mapped LAPIC
+/// MMIO frame. The boot CPU must have software-enabled its LAPIC first.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
+    // SAFETY: `LAPIC_BASE_PHYS` is the architectural LAPIC MMIO base on
+    // every Intel-architecture system QEMU emulates, identity-mapped by
+    // `boot.s` (SAFETY-INVARIANT 4).
+    let mmio =
+        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32) };
+    Lapic::new(mmio)
+}
+
+/// Start the application processor whose LAPIC id is `target_apic_id`
+/// and whose dense id is `cpu`, at the [`AP_TRAMPOLINE_PHYS`] trampoline.
+///
+/// Installs the trampoline payload, stamps a per-AP [`ApBootSlot`]
+/// (bootstrap `cr3` read from the boot CPU, this AP's reserved stack, the
+/// installed [`set_secondary_entry`] entry, and `cpu` as the context id),
+/// drives the INIT-SIPI-SIPI handshake, then waits for the AP to publish
+/// its `ready` flag before returning — so the shared trampoline frame is
+/// safe to reuse for the next AP.
+///
+/// # Errors
+///
+/// See [`StartCpuError`]. The launcher fails closed (`AGENTS.md` §5.4.5)
+/// rather than assuming the AP came up.
+///
+/// # Safety
+///
+/// Must be called from the boot CPU after `boot.s` has zeroed `.bss`
+/// (clearing the AP stack pool), after the boot CPU has software-enabled
+/// its LAPIC, and after the secondary entry is installed. `target_apic_id`
+/// must name a real, parked AP distinct from the caller, and `cpu` must be
+/// the dense id the rest of the kernel uses for it.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), StartCpuError> {
+    // Range-check before any hardware action: the boot CPU (0) is
+    // already running, and a dense id beyond the stack pool has no
+    // reserved stack (`AGENTS.md` §5.4.5).
+    let Some(stack_idx) = (cpu as usize).checked_sub(1) else {
+        return Err(StartCpuError::CpuIdOutOfRange);
+    };
+    if stack_idx >= MAX_APS {
+        return Err(StartCpuError::CpuIdOutOfRange);
+    }
+    let entry_addr = secondary_entry_addr();
+    if entry_addr == 0 {
+        return Err(StartCpuError::NoEntryInstalled);
+    }
+
+    let mut frame = match TrampolineFrame::new(trampoline_frame_mut()) {
+        Ok(frame) => frame,
+        // The frame address/size are compile-time constants that always
+        // satisfy the installer; treat any rejection as out-of-range
+        // rather than panicking (`AGENTS.md` §2.9).
+        Err(_) => return Err(StartCpuError::CpuIdOutOfRange),
+    };
+    if frame.install(trampoline_payload()).is_err() {
+        return Err(StartCpuError::CpuIdOutOfRange);
+    }
+
+    let stack_top = ap_stack_top(stack_idx);
+    // Read CR3 — the boot CPU's PML4; APs inherit it.
+    let cr3: u64;
+    // SAFETY: reading CR3 in ring 0 is well-defined and side-effect-free.
+    unsafe {
+        core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
+    }
+    let slot = match ApBootSlot::new(cr3, stack_top, entry_addr as u64, cpu) {
+        Ok(slot) => slot,
+        // `stack_top` is 16-byte aligned by construction; a misalignment
+        // would be an internal invariant break, not a caller error.
+        Err(_) => return Err(StartCpuError::CpuIdOutOfRange),
+    };
+    frame.write_slot(&slot);
+
+    // Every slot byte must be visible to the AP before the SIPI.
+    core::sync::atomic::fence(Ordering::Release);
+
+    let mut lapic = bringup_lapic();
+    let mut delay = PitDelay {
+        pit: crate::apic_timer::PolledPit,
+    };
+    init_sipi_sipi(&mut lapic, &mut delay, target_apic_id, sipi_vector());
+
+    // Wait for the AP's `xchg`-released `ready` flag before returning, so
+    // the shared frame can be reused for the next AP.
+    let mut spins: u64 = 0;
+    while frame.load_ready() == 0 {
+        spins += 1;
+        if spins > AP_READY_SPIN_BUDGET {
+            return Err(StartCpuError::StartTimedOut);
+        }
+        core::hint::spin_loop();
+    }
+    Ok(())
+}
+
 // --- Tests -----------------------------------------------------------
 
 #[cfg(test)]
@@ -560,5 +829,41 @@ mod tests {
             assert_eq!(icr_low & 0x700, 0x600);
             assert_eq!(icr_low & 0xFF, u32::from(sipi_vector()));
         }
+    }
+
+    /// A never-returning entry used only to populate the set-once slot;
+    /// it is never actually invoked on the host.
+    extern "C" fn dummy_entry(_cpu: CpuId) -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    #[test]
+    fn secondary_entry_round_trips_and_is_set_once() {
+        clear_secondary_entry_for_tests();
+        assert_eq!(secondary_entry_addr(), 0);
+        assert_eq!(set_secondary_entry(dummy_entry), Ok(()));
+        assert_eq!(secondary_entry_addr(), dummy_entry as *const () as usize);
+        // A second publish is refused (set-once); the slot is unchanged.
+        assert_eq!(
+            set_secondary_entry(dummy_entry),
+            Err(SetEntryError::AlreadyInstalled)
+        );
+        assert_eq!(secondary_entry_addr(), dummy_entry as *const () as usize);
+        clear_secondary_entry_for_tests();
+    }
+
+    #[test]
+    fn start_cpu_error_cause_strings_are_stable() {
+        assert_eq!(
+            StartCpuError::CpuIdOutOfRange.as_str(),
+            "cpu_id_out_of_range"
+        );
+        assert_eq!(
+            StartCpuError::NoEntryInstalled.as_str(),
+            "no_secondary_entry_installed"
+        );
+        assert_eq!(StartCpuError::StartTimedOut.as_str(), "ap_start_timed_out");
     }
 }

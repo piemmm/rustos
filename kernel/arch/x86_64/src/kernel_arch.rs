@@ -38,7 +38,9 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch};
+use rustos_arch_api::{
+    CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
+};
 
 use crate::hybrid;
 use crate::percpu::MAX_CPUS;
@@ -372,6 +374,48 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     }
 }
 
+impl SecondaryBringup for X86_64Arch {
+    unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
+        // Fail closed before any hardware action: the boot CPU is
+        // already running, and an unmapped dense id has no LAPIC to
+        // target (`AGENTS.md` §5.4.5).
+        if cpu == self.boot_cpu_id {
+            return Err(SmpError::InvalidCpu);
+        }
+        let Some(target_apic_id) = self.lapic_id_of(cpu) else {
+            return Err(SmpError::InvalidCpu);
+        };
+
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            // SAFETY: the caller of this HAL method guarantees `.bss` is
+            // zeroed (clear AP stack pool), the boot CPU's LAPIC is
+            // software-enabled, the secondary entry is installed, and
+            // `target_apic_id` names a real, parked AP distinct from the
+            // caller — exactly `crate::smp::start_secondary`'s contract.
+            match unsafe { crate::smp::start_secondary(target_apic_id, cpu) } {
+                Ok(()) => Ok(()),
+                Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
+                Err(crate::smp::StartCpuError::NoEntryInstalled) => Err(SmpError::NotReady),
+                Err(crate::smp::StartCpuError::StartTimedOut) => Err(SmpError::StartRejected(0)),
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            // Host: there is no INIT-SIPI-SIPI hardware. Mirror the
+            // bare-metal precondition so the observable contract holds —
+            // refuse when no secondary entry is installed, otherwise
+            // report the (range-checked) request as accepted. The real
+            // handshake is proven by the QEMU verticals.
+            let _ = target_apic_id;
+            if crate::smp::secondary_entry_addr() == 0 {
+                return Err(SmpError::NotReady);
+            }
+            Ok(())
+        }
+    }
+}
+
 // --- Halt -------------------------------------------------------------
 
 /// Mask interrupts and park the CPU forever.
@@ -561,6 +605,42 @@ mod tests {
         rustos_arch_api::xtlb::conformance::run_all(&arch, 0x10_0000_0000);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
         rustos_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
+    }
+
+    /// §17.2 / W14: the port passes the secondary-bring-up conformance
+    /// vertical over its real `X86_64Arch` handle. On the host there is
+    /// no INIT-SIPI-SIPI hardware, so the vertical asserts the observable
+    /// half — starting an unstartable id fails closed and never panics.
+    /// The real handshake is proven by the multi-core QEMU verticals
+    /// (`scheduler_stress_qemu`, `ipi_smp_qemu_x86_64`,
+    /// `cross_cpu_tlb_shootdown_qemu_x86_64`).
+    #[test]
+    fn passes_secondary_bringup_conformance() {
+        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+        let erased: &dyn SecondaryBringup = &arch;
+        rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+    }
+
+    /// The boot CPU and any unmapped dense id are refused before any
+    /// INIT-SIPI-SIPI action — the fail-closed contract (`AGENTS.md`
+    /// §5.4.5). (The set-once secondary-entry slot is a process-global
+    /// shared with `crate::smp`'s own tests, so the accepted path is
+    /// exercised there, not re-driven here — no flaky cross-test state,
+    /// `AGENTS.md` §7.)
+    #[test]
+    fn start_secondary_rejects_boot_and_unmapped_ids() {
+        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        // SAFETY: every call below is refused before any hardware
+        // action, so the test takes no platform action and touches no
+        // shared global state.
+        unsafe {
+            // Boot CPU: already running.
+            assert_eq!(arch.start_secondary(0), Err(SmpError::InvalidCpu));
+            // Unmapped dense id.
+            assert_eq!(arch.start_secondary(5), Err(SmpError::InvalidCpu));
+            assert_eq!(arch.start_secondary(u32::MAX), Err(SmpError::InvalidCpu));
+        }
     }
 
     /// Compile-time proof that [`halt`] has the `-> !` signature

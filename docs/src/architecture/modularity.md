@@ -58,9 +58,13 @@ side-channel slice, the §19.10 memory-tagging slice, the user-entry
 slice, the early-boot platform-discovery slice (`PlatformDiscovery`,
 below), the per-CPU storage slice (`PerCpu`, below), and the interrupt
 entry/exit slice (`IrqController` + `InterruptEntry`, below), the timer
-slice (`Timer`, below), and the context-switch slice (`ContextSwitch`,
-below); the remaining HAL primitives (MMU/TLB) migrate here as the §17
-burn-down advances.
+slice (`Timer`, below), the context-switch slice (`ContextSwitch`,
+below), the MMU / page-table slice (`AddressSpace`) with its local and
+cross-CPU TLB-shootdown siblings (`TlbShootdown` / `CrossCpuTlbShootdown`)
+and the `PageTableFrames` frame source, and the secondary-CPU bring-up
+slice (`SecondaryBringup`, below). With `SecondaryBringup` landed (Stage
+W14) every architecture primitive enumerated by §17.2 now lives behind
+the HAL; the burn-down is complete.
 
 `kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -303,6 +307,48 @@ observable half on the host (object-safe, panic-free for any address);
 the real cross-CPU round-trip is proven by the three
 `cross_cpu_tlb_shootdown_qemu_*` QEMU verticals on real ≥ 2 emulated
 cores (`plans/WIRING.md` Stage W13).
+
+### Secondary-CPU bring-up
+
+`AGENTS.md` §4 mandates SMP from day one, so the kernel must start the
+machine's other logical CPUs. That was the last enumerated §17.2
+primitive still ad-hoc per port: each port owned a `smp` module, but the
+rest of the kernel could not start a CPU through one neutral surface. The
+`SecondaryBringup` slice (`kernel/arch/api::smp`) closes it: one method,
+`unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError>`,
+implemented on each port's `SchedulerArch` handle (the owner of the dense
+`CpuId` ↔ native-id topology map). The *directed-IPI* half of SMP already
+lives on `SchedulerArch::send_ipi`, so this slice is only about
+**starting** a parked CPU and does not duplicate the IPI surface (§2.4).
+The call **fails closed** (`SmpError::InvalidCpu`) before any platform
+action for a CPU it cannot start — the boot CPU, an out-of-range id, or
+one absent from the topology — and never panics (§2.9).
+
+The set-once *entry* a fresh CPU runs is deliberately **not** on the
+trait. On the bare-metal ports it is an `extern "C" fn(CpuId) -> !`
+installed once via the port's `set_secondary_entry`; on wasm32 a
+secondary is a fresh module instance entering at a fixed export, not a
+runtime pointer one instance can hand another. Forcing a settable-entry
+method onto the HAL would make wasm32 fake one it could never honour
+(§2.1), so entry installation stays the genuinely port-shaped concern it
+is, performed once before the first `start_secondary`.
+
+The mechanism is the §2.2 modularity carve-out (same trait, port
+mechanism): **x86_64** owns a low-memory trampoline, a per-AP stack pool,
+and the boot PML4 — `start_secondary` installs the trampoline, stamps the
+per-AP `ApBootSlot`, runs the SDM INIT-SIPI-SIPI handshake, and waits on
+the AP's long-mode `ready` flag before returning (so the shared frame is
+reusable); **aarch64** issues PSCI `CPU_ON` over the device-tree conduit
+(`hvc`/`smc`) targeting the CPU's `MPIDR_EL1`; **riscv64** issues the SBI
+HSM `hart_start` firmware call targeting the hart id; **wasm32** asks its
+JavaScript host to spawn a Web Worker. `smp::conformance::run_all` proves
+the observable half on the host (object-safe, fails closed for an
+unstartable id, never panics) for every port — the real cross-core
+bring-up is proven by the multi-core `scheduler_stress_qemu`,
+`ipi_smp_qemu_*`, and `cross_cpu_tlb_shootdown_qemu_*` QEMU verticals on
+real ≥ 2 emulated cores, and the wasm32 browser vertical
+(`plans/WIRING.md` Stage W14). With this slice every §17.2 primitive
+listed by `AGENTS.md` is behind the HAL.
 
 ### Page-table frame source
 

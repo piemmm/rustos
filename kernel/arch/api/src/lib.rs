@@ -66,16 +66,21 @@
 //! tables from (as [`TableFrame`]s), so a real per-process address space
 //! is backed by the `kernel/mem` frame allocator while the static
 //! `PageTablePool` stays the boot/bootstrap source, plus its
-//! [`frames::conformance`] vertical. It also hosts the **§17.2 conformance
+//! [`frames::conformance`] vertical — and the **SMP secondary-CPU
+//! bring-up** slice (`AGENTS.md` §17.2, `plans/WIRING.md` W14): the
+//! [`SecondaryBringup`] trait whose [`SecondaryBringup::start_secondary`]
+//! starts a parked logical CPU (an x86_64 INIT-SIPI-SIPI handshake, an
+//! aarch64 PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web
+//! Worker spawn), plus its [`smp::conformance`] vertical. It also hosts
+//! the **§17.2 conformance
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
 //! inspection (`plans/WIRING.md`). The remaining HAL surface enumerated
-//! by `AGENTS.md` §17.2 — SMP secondary-core bring-up (landed port-side
-//! per arch in Stage W6/W8; an `Smp` HAL trait remains a future §17.2
-//! decision) — is migrated here as the §17 burn-down advances; see
-//! `PLAN.md` / `plans/WIRING.md`. Until a primitive lives here it stays in
-//! its current owning crate, and the move is tracked, not silently
-//! duplicated (`AGENTS.md` §2.2).
+//! by `AGENTS.md` §17.2 is now complete: the last ad-hoc slice — SMP
+//! secondary-CPU bring-up — became the [`SecondaryBringup`] trait in
+//! Stage W14 (`plans/WIRING.md`). Until a future primitive lives here it
+//! stays in its current owning crate, and the move is tracked, not
+//! silently duplicated (`AGENTS.md` §2.2).
 //!
 //! # Why `no_std` and dependency-light
 //!
@@ -101,6 +106,7 @@ pub mod mmu;
 pub mod percpu;
 pub mod platform;
 pub mod sidechannel;
+pub mod smp;
 pub mod timer;
 pub mod tlb;
 pub mod userentry;
@@ -141,6 +147,8 @@ pub use frames::{
 pub use tlb::{conformance as tlb_conformance, TlbShootdown};
 
 pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
+
+pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

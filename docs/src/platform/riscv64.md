@@ -213,6 +213,19 @@ firmware honoured the remote fence. Enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` (`cpus: 2`, 60 s budget); it runs
 under `cargo xtask test --qemu`.
 
+## Secondary-CPU bring-up HAL slice
+
+riscv64 implements the Arch HAL `SecondaryBringup` slice
+(`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14) on `RiscvArch`.
+`start_secondary(cpu)` resolves the dense `CpuId` to its hart id through
+the handle's map (failing closed with `SmpError::InvalidCpu` for the boot
+hart or an unmapped id) and delegates to `kernel/arch/riscv64::smp::start_secondary`,
+the SBI HSM `hart_start` firmware call that starts the parked hart at the
+`smp.s` trampoline. The host `passes_secondary_bringup_conformance` test
+runs `smp::conformance::run_all` over a real handle (object-safe, fails
+closed, never panics); the real `hart_start` is proven by the two-hart
+QEMU verticals (`cross_cpu_tlb_shootdown_qemu_riscv64`).
+
 ## CC2 `abi-sys` `ecall` round-trip QEMU vertical
 
 `tests/integration/abi_sys_syscall_qemu_riscv64` is the riscv64 half of

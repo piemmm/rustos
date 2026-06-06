@@ -7,14 +7,13 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsiz
 extern crate alloc;
 use alloc::sync::Arc;
 
+use rustos_arch_api::SecondaryBringup;
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, PortIo, Rdtsc};
+use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
+use rustos_arch_x86_64::kernel_arch::X86_64Arch;
 use rustos_arch_x86_64::multiboot2::BootInfo;
-use rustos_arch_x86_64::smp::{
-    self, init_sipi_sipi, ApBootSlot, Delay, TrampolineFrame, AP_BOOT_SLOT_OFFSET,
-    AP_TRAMPOLINE_PHYS,
-};
+use rustos_arch_x86_64::smp;
 use rustos_arch_x86_64::{percpu, preempt};
 use rustos_arch_x86_64::{qemu_exit, serial};
 use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
@@ -280,31 +279,6 @@ impl SchedulerArch for SmpArch {
     }
 }
 
-// --- PIT-based delay ----------------------------------------------
-
-/// `Delay` implementation backed by busy-waiting on PIT channel 2 OUT.
-struct PitDelay {
-    pit: PolledPit,
-}
-impl Delay for PitDelay {
-    fn delay_us(&mut self, us: u32) {
-        // PIT runs at 1.193182 MHz. ticks = us * 1_193_182 / 1_000_000
-        // ≈ us * 1.193. For `us` ≤ 54_925 the value fits in 16 bits; the
-        // bring-up uses 10 000 and 200, both safely below.
-        let reload = ((u64::from(us) * 1_193_182) / 1_000_000) as u16;
-        if reload == 0 {
-            return;
-        }
-        // Arm channel 2 one-shot, gate it, then poll the OUT bit.
-        let gate = self.pit.inb(0x61);
-        self.pit.outb(0x61, (gate & 0xFC) | 0x01);
-        self.pit.outb(0x43, 0xB0);
-        self.pit.outb(0x42, (reload & 0xFF) as u8);
-        self.pit.outb(0x42, (reload >> 8) as u8);
-        while self.pit.inb(0x61) & 0x20 == 0 {}
-    }
-}
-
 // --- BSP entry ----------------------------------------------------
 
 /// Entry point: BSP only.
@@ -425,12 +399,55 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         preempt::set_cpu_id_for_lapic(ap_ids.ids[i], cpu_id);
     }
 
-    // Bring the APs up one at a time.
-    let mut pit_delay = PitDelay { pit: PolledPit };
+    // Build the bring-up handle from the discovered LAPIC map and start
+    // every AP through the Arch HAL `SecondaryBringup` trait. The
+    // INIT-SIPI-SIPI orchestration now lives in `rustos_arch_x86_64::smp`
+    // (`plans/WIRING.md` Stage W14); this vertical exercises it
+    // end-to-end on ≥ 4 real (emulated) cores.
+    let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
+    cpu_to_lapic[0] = Some(bsp_id);
     for i in 0..ap_ids.count {
-        let target = ap_ids.ids[i];
+        cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
+    }
+    let bringup = match X86_64Arch::new(0, bsp_id, cpu_to_lapic) {
+        Ok(handle) => handle,
+        Err(e) => {
+            let _ = writeln!(
+                com1,
+                "[scheduler_stress_qemu] FAIL: X86_64Arch::new: {}",
+                e.as_str()
+            );
+            qemu_exit::exit_failure();
+        }
+    };
+    // Install the AP entry once (set-once); the HAL stamps it into each
+    // AP's boot slot.
+    if smp::set_secondary_entry(ap_entry).is_err() {
+        let _ = writeln!(
+            com1,
+            "[scheduler_stress_qemu] FAIL: secondary entry already installed"
+        );
+        qemu_exit::exit_failure();
+    }
+    for i in 0..ap_ids.count {
         let cpu_id = (i + 1) as u32; // BSP = 0, APs = 1..N
-        bring_up_ap(target, cpu_id, &mut lapic, &mut pit_delay, &mut com1);
+        let _ = writeln!(
+            com1,
+            "[scheduler_stress_qemu] bringing up APIC id {} as cpu_id {cpu_id}",
+            ap_ids.ids[i]
+        );
+        // SAFETY: this is the BSP; `boot.s` zeroed `.bss` (clearing the
+        // AP stack pool), the BSP LAPIC was software-enabled above, the
+        // secondary entry is installed, and `cpu_id` maps to a real,
+        // parked AP discovered from the MADT.
+        if let Err(e) = unsafe { bringup.start_secondary(cpu_id) } {
+            let _ = writeln!(
+                com1,
+                "[scheduler_stress_qemu] FAIL: start_secondary(cpu {cpu_id}): {}",
+                e.as_str()
+            );
+            qemu_exit::exit_failure();
+        }
     }
 
     // Arm the BSP's timer and enable interrupts. This *must* happen
@@ -748,99 +765,6 @@ fn discover_aps(multiboot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> O
 // `try_madt` / `read_phys_*` helpers are gone — `AGENTS.md` §2.2
 // (no duplication). The `discover_aps` helper above now calls the
 // shared, audited implementation.
-
-// --- Per-AP stack pool --------------------------------------------
-
-/// Per-AP stack. `0x4000` (16 KiB) matches the BSP bootstrap stack size
-/// in `boot.s`. Aligned to 16 bytes per the System V AMD64 ABI.
-#[repr(C, align(16))]
-struct ApStack([u8; 16 * 1024]);
-
-const MAX_APS: usize = MAX_CPUS - 1;
-static mut AP_STACKS: [ApStack; MAX_APS] = {
-    const Z: ApStack = ApStack([0; 16 * 1024]);
-    [Z; MAX_APS]
-};
-
-fn ap_stack_top(idx: usize) -> u64 {
-    // SAFETY: idx < MAX_APS; we return the *top* (one past the last
-    // byte) which is what the System V ABI wants RSP to be initialised
-    // to. The 16-byte alignment is preserved because the struct is
-    // `align(16)` and the array of `align(16)` structs is also
-    // `align(16)`; adding `size_of::<ApStack>()` keeps that alignment.
-    unsafe {
-        let base = core::ptr::addr_of!(AP_STACKS[idx]) as u64;
-        base + core::mem::size_of::<ApStack>() as u64
-    }
-}
-
-// --- Trampoline-frame access --------------------------------------
-
-/// Wrap the 4 KiB low frame at `AP_TRAMPOLINE_PHYS` in a typed view.
-fn trampoline_frame_mut() -> &'static mut [u8] {
-    // SAFETY: identity-mapped, no other CPU is reading or writing this
-    // page (the BSP serialises AP launches via the `ready` flag), and
-    // the page is reserved by the test binary (no other allocator
-    // hands it out — the BSP uses a static heap that lives well above
-    // 0x8000).
-    unsafe { core::slice::from_raw_parts_mut(AP_TRAMPOLINE_PHYS as *mut u8, 4096) }
-}
-
-// --- Per-AP launcher ----------------------------------------------
-
-fn bring_up_ap(
-    target: u8,
-    cpu_id: u32,
-    lapic: &mut Lapic<VolatileLapicMmio>,
-    delay: &mut PitDelay,
-    com1: &mut serial::Serial,
-) {
-    let _ = writeln!(
-        com1,
-        "[scheduler_stress_qemu] bringing up APIC id {target} as cpu_id {cpu_id}"
-    );
-
-    let mut frame = TrampolineFrame::new(trampoline_frame_mut()).expect("frame");
-    frame.install(smp::trampoline_payload()).expect("install");
-    let stack_top = ap_stack_top((cpu_id - 1) as usize);
-    let entry_addr = ap_entry as *const () as u64;
-    // Read CR3 — the BSP's PML4. APs inherit it.
-    let cr3: u64;
-    // SAFETY: reading CR3 in ring 0 is well-defined.
-    unsafe {
-        core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
-    }
-    let slot = ApBootSlot::new(cr3, stack_top, entry_addr, cpu_id).expect("slot");
-    frame.write_slot(&slot);
-
-    // Memory fence: every slot byte must be visible before SIPI.
-    core::sync::atomic::fence(Ordering::Release);
-
-    init_sipi_sipi(lapic, delay, target, smp::sipi_vector());
-
-    // Wait for the AP's `xchg`-released ready flag, with a generous
-    // budget. PIT delay isn't necessary here — we just spin on the
-    // memory location.
-    let mut spins: u64 = 0;
-    while frame.load_ready() == 0 {
-        spins += 1;
-        if spins > 10_000_000 {
-            let _ = writeln!(
-                com1,
-                "[scheduler_stress_qemu] FAIL: AP {target} (cpu_id {cpu_id}) never set ready"
-            );
-            qemu_exit::exit_failure();
-        }
-        core::hint::spin_loop();
-    }
-    let _ = writeln!(
-        com1,
-        "[scheduler_stress_qemu] AP {target} live after {spins} spins"
-    );
-    // The slot is reused for the next AP; the AP has already copied
-    // everything it needs into its own registers/stack.
-    let _ = AP_BOOT_SLOT_OFFSET; // silence unused-import lint if any
-}
 
 // --- Panic handler ------------------------------------------------
 

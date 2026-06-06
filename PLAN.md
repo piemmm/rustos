@@ -911,8 +911,35 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `passes_cross_cpu_tlb_shootdown_conformance` tests) and **QEMU-green**
       (all three bins exit `0` under `cargo xtask test --qemu`; a 1-CPU
       x86_64 run correctly fails, so PASS is genuine). No `lib/abi` change,
-      so no ABI / C-header drift. The only remaining ad-hoc §17.2 slice is
-      SMP secondary-core bring-up. Docs:
+      so no ABI / C-header drift. Docs:
+      `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `AGENTS.md`
+      §17.2, `plans/WIRING.md`.
+- [x] **WIRING Stage W14 — SMP secondary-CPU bring-up HAL slice (all
+      ports).** The last enumerated §17.2 primitive is now an object-safe
+      Arch HAL trait, `SecondaryBringup` (`kernel/arch/api/src/smp.rs`),
+      with one method `unsafe fn start_secondary(&self, cpu) -> Result<(),
+      SmpError>` implemented on each port's `SchedulerArch` handle, and a
+      host `smp::conformance` vertical (object-safe, fails closed for an
+      unstartable id, panic-free). The directed-IPI half of SMP is already
+      `SchedulerArch::send_ipi`, so the slice is start-only (§2.4); the
+      set-once entry stays port-shaped (a bare-metal `extern "C"
+      fn(CpuId) -> !` vs. wasm32's fixed module export — §2.1). Per-port
+      (the §2.2 carve-out): **x86_64** — the full AP bring-up (per-AP
+      stack pool, `AP_TRAMPOLINE_PHYS` frame, boot `CR3`, PIT `Delay`,
+      set-once entry, INIT-SIPI-SIPI, ready-wait) **moved out of** the
+      `scheduler_stress_qemu` / `cross_cpu_tlb_shootdown_qemu_x86_64` test
+      bins (which had duplicated it) into `kernel/arch/x86_64::smp`, and
+      both verticals now call `X86_64Arch::start_secondary`; **aarch64**
+      delegates to the W6 PSCI `CPU_ON` `smp::start_secondary` with the
+      conduit installed via `Aarch64Arch::with_psci_method`; **riscv64**
+      delegates to the SBI HSM `hart_start` path; **wasm32** delegates to
+      `smp::start_worker` (Web Worker spawn). **Verified host-green** (the
+      four `passes_secondary_bringup_conformance` tests) and the migrated
+      x86_64 verticals build freestanding and stay **QEMU-green** under
+      `cargo xtask test --qemu`. With this slice **every** §17.2
+      architecture primitive lives behind the HAL; the burn-down is
+      complete. No `lib/abi` change, so no ABI / C-header drift. Docs:
       `docs/src/architecture/modularity.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `AGENTS.md`
       §17.2, `plans/WIRING.md`.

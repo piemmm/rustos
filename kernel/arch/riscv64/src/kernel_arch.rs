@@ -38,7 +38,7 @@ use core::sync::atomic::AtomicU64;
 #[cfg(any(test, not(target_os = "none")))]
 use core::sync::atomic::Ordering;
 
-use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch};
+use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError};
 
 use crate::smp::MAX_HARTS;
 
@@ -280,6 +280,52 @@ impl CrossCpuTlbShootdown for RiscvArch {
             // is no firmware to call; the conformance vertical asserts
             // only that the call is total and panic-free.
             let _ = vaddr;
+        }
+    }
+}
+
+impl SecondaryBringup for RiscvArch {
+    unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
+        // Fail closed before any firmware call: the boot hart is already
+        // running, and an unmapped / out-of-range dense id has no hart to
+        // target (`AGENTS.md` §5.4.5).
+        if cpu == self.boot_cpu {
+            return Err(SmpError::InvalidCpu);
+        }
+        let Some(hartid) = self.hartid_of(cpu) else {
+            return Err(SmpError::InvalidCpu);
+        };
+        if !crate::smp::is_valid_hartid(hartid) {
+            return Err(SmpError::InvalidCpu);
+        }
+
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            // SAFETY: the caller of this HAL method guarantees the
+            // secondary entry is installed, `.bss` is zeroed, and the
+            // target hart is real and parked — exactly the contract
+            // `crate::smp::start_secondary` requires. The id was just
+            // range-checked against the stack pool above.
+            match unsafe { crate::smp::start_secondary(hartid) } {
+                Ok(()) => Ok(()),
+                Err(crate::smp::StartHartError::HartIdOutOfRange) => Err(SmpError::InvalidCpu),
+                Err(crate::smp::StartHartError::NoEntryInstalled) => Err(SmpError::NotReady),
+                Err(crate::smp::StartHartError::Sbi(status)) => {
+                    Err(SmpError::StartRejected(status as i64))
+                }
+            }
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            // Host: there is no SBI firmware to call. Mirror the
+            // bare-metal precondition so the observable contract holds —
+            // refuse when no secondary entry is installed, otherwise
+            // report the (range-checked) request as accepted. The real
+            // hart_start is proven by the QEMU verticals.
+            if crate::smp::secondary_entry_addr() == 0 {
+                return Err(SmpError::NotReady);
+            }
+            Ok(())
         }
     }
 }

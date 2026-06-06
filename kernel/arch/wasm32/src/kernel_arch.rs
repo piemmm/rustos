@@ -36,7 +36,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup, SmpError};
 
 /// Maximum number of Web Worker contexts the port tracks.
 ///
@@ -203,6 +203,29 @@ impl SchedulerArch for WasmArch {
             // already validated the index is in range.
             let _ = worker;
             self.host_ipi_count[target as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl SecondaryBringup for WasmArch {
+    unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
+        // Fail closed before asking the host to spawn anything: the boot
+        // context is already running, and an unmapped dense id has no
+        // worker to spawn (`AGENTS.md` §5.4.5).
+        if cpu == self.boot_cpu {
+            return Err(SmpError::InvalidCpu);
+        }
+        let Some(worker) = self.worker_of(cpu) else {
+            return Err(SmpError::InvalidCpu);
+        };
+        // A secondary is a fresh Web Worker instantiating this same
+        // module; there is no settable entry pointer to install (the
+        // worker enters through the fixed `rustos_arch_wasm32_main`
+        // export), so wasm32 never reports `NotReady`.
+        match crate::smp::start_worker(worker) {
+            Ok(()) => Ok(()),
+            Err(crate::smp::StartWorkerError::IndexOutOfRange) => Err(SmpError::InvalidCpu),
+            Err(crate::smp::StartWorkerError::HostRefused) => Err(SmpError::StartRejected(0)),
         }
     }
 }

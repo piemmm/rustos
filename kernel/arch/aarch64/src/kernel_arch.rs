@@ -36,7 +36,11 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch};
+use rustos_arch_api::{
+    CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
+};
+
+use crate::fdt::PsciMethod;
 
 /// Maximum number of logical CPUs the per-CPU accounting arrays cover.
 /// The boot/timer slice brings up one; the bound is headroom for the
@@ -80,6 +84,14 @@ pub struct Aarch64Arch {
     /// a `big.LITTLE` part (`AGENTS.md` §17.2 — static per-CPU identity
     /// discovered by the arch port).
     core_classes: [AtomicU8; MAX_CPUS],
+
+    /// PSCI conduit (`hvc`/`smc`) the [`SecondaryBringup`] path calls
+    /// firmware through, discovered from the `/psci` device-tree node
+    /// (`crate::fdt::psci_method`) and installed via
+    /// [`Self::with_psci_method`]. `None` on a single-core / headless
+    /// handle that never starts a secondary; starting one then fails
+    /// closed with [`SmpError::NotReady`] (`AGENTS.md` §5.4.5).
+    psci_method: Option<PsciMethod>,
 }
 
 impl Aarch64Arch {
@@ -126,7 +138,28 @@ impl Aarch64Arch {
             host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
             host_stray_ipi: AtomicU64::new(0),
             core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; MAX_CPUS],
+            psci_method: None,
         }
+    }
+
+    /// Install the PSCI conduit the [`SecondaryBringup`] path calls
+    /// firmware through, returning the updated handle (a builder so the
+    /// existing constructors keep their signatures).
+    ///
+    /// The downstream boot consumer reads the conduit from the device
+    /// tree (`crate::fdt::psci_method`) once on the boot core and installs
+    /// it here before bringing secondaries up.
+    #[must_use]
+    pub fn with_psci_method(mut self, method: PsciMethod) -> Self {
+        self.psci_method = Some(method);
+        self
+    }
+
+    /// The PSCI conduit installed via [`Self::with_psci_method`], or
+    /// `None` on a handle that never starts a secondary.
+    #[must_use]
+    pub const fn psci_method(&self) -> Option<PsciMethod> {
+        self.psci_method
     }
 
     /// Record the [`CoreClass`] discovered for dense `cpu`.
@@ -307,6 +340,55 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
         // (`AGENTS.md` §2.2); the `dsb ish` + `isb` inside it provide the
         // ordering the cross-CPU contract requires.
         crate::paging::invalidate_page_inner_shareable(vaddr);
+    }
+}
+
+impl SecondaryBringup for Aarch64Arch {
+    unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
+        // Fail closed before any PSCI call: the boot core is already
+        // running, and an unmapped dense id has no `MPIDR` to power on
+        // (`AGENTS.md` §5.4.5).
+        if cpu == self.boot_cpu {
+            return Err(SmpError::InvalidCpu);
+        }
+        let Some(mpidr) = self.mpidr_of(cpu) else {
+            return Err(SmpError::InvalidCpu);
+        };
+        // Bring-up needs the firmware conduit; a handle without one
+        // (single-core / headless) cannot start a secondary.
+        let Some(method) = self.psci_method else {
+            return Err(SmpError::NotReady);
+        };
+
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            // SAFETY: the caller of this HAL method guarantees `.bss` is
+            // zeroed (clear secondary-stack pool), the secondary entry is
+            // installed, and `mpidr` names a real, parked core distinct
+            // from the caller — exactly `crate::smp::start_secondary`'s
+            // contract. `cpu` was range-checked via `mpidr_of`.
+            match unsafe { crate::smp::start_secondary(method, cpu, mpidr) } {
+                Ok(()) => Ok(()),
+                Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
+                Err(crate::smp::StartCpuError::NoEntryInstalled) => Err(SmpError::NotReady),
+                Err(crate::smp::StartCpuError::Psci(status)) => {
+                    Err(SmpError::StartRejected(i64::from(status)))
+                }
+            }
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            // Host: there is no PSCI firmware to call. Mirror the
+            // bare-metal precondition so the observable contract holds —
+            // refuse when no secondary entry is installed, otherwise
+            // report the (range-checked) request as accepted. The real
+            // `CPU_ON` is proven by the QEMU verticals.
+            let _ = (method, mpidr);
+            if crate::smp::secondary_entry_addr() == 0 {
+                return Err(SmpError::NotReady);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -513,6 +595,48 @@ mod tests {
         rustos_arch_api::xtlb::conformance::run_all(&arch, 64u64 << 30);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
         rustos_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
+    }
+
+    /// §17.2 / W14: the port passes the secondary-bring-up conformance
+    /// vertical over its real `Aarch64Arch` handle. On the host there is
+    /// no PSCI firmware, so the vertical asserts the observable half —
+    /// starting an unstartable id fails closed and never panics. The real
+    /// PSCI `CPU_ON` round-trip is proven by the two-core QEMU verticals
+    /// (`ipi_smp_qemu_aarch64`, `cross_cpu_tlb_shootdown_qemu_aarch64`).
+    #[test]
+    fn passes_secondary_bringup_conformance() {
+        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+        let erased: &dyn SecondaryBringup = &arch;
+        rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+    }
+
+    /// The boot core and any unmapped dense id are refused before any
+    /// PSCI call, and a handle with no PSCI conduit cannot start a
+    /// secondary — the fail-closed contract (`AGENTS.md` §5.4.5). (The
+    /// set-once secondary-entry slot is a process-global shared with
+    /// `crate::smp`'s own tests, so the accepted path is exercised there,
+    /// not re-driven here — no flaky cross-test state, `AGENTS.md` §7.)
+    #[test]
+    fn start_secondary_fails_closed_on_unstartable_ids_and_missing_conduit() {
+        // SAFETY: every call below is refused before any PSCI action, so
+        // the test takes no platform action and touches no shared global.
+        unsafe {
+            let with_conduit =
+                Aarch64Arch::with_cpus(0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+            // Boot core: already running.
+            assert_eq!(with_conduit.start_secondary(0), Err(SmpError::InvalidCpu));
+            // Unmapped dense id.
+            assert_eq!(with_conduit.start_secondary(2), Err(SmpError::InvalidCpu));
+            assert_eq!(
+                with_conduit.start_secondary(CpuId::MAX),
+                Err(SmpError::InvalidCpu)
+            );
+            // A mapped secondary on a handle with no PSCI conduit is
+            // refused as not-ready, before any firmware call.
+            let no_conduit = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+            assert_eq!(no_conduit.start_secondary(1), Err(SmpError::NotReady));
+        }
     }
 
     /// §17.2 / W0: the port passes the shared Arch HAL conformance

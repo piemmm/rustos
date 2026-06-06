@@ -283,6 +283,17 @@ single-CPU self-target best-effort send. The `rustos-test-ipi-smp-qemu-aarch64`
 vertical above proves the full start-core → enable-IPI → directed-SGI →
 callback path on two emulated cores.
 
+Secondary bring-up is reached through the Arch HAL `SecondaryBringup`
+slice (`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
+`Aarch64Arch::start_secondary(cpu)` resolves the dense `CpuId` to its
+`MPIDR_EL1` affinity through the handle's map, looks up the PSCI conduit
+installed via `Aarch64Arch::with_psci_method` (a missing conduit or an
+unmapped id fails closed with `SmpError::NotReady` / `InvalidCpu`), and
+delegates to `smp::start_secondary` above. The host
+`passes_secondary_bringup_conformance` test runs `smp::conformance::run_all`
+over a real handle; the real PSCI `CPU_ON` is proven by the two-core QEMU
+verticals.
+
 Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3, whose firmware
 parks secondaries on a release address rather than offering PSCI) is a
 tracked follow-up: `start_secondary` would gain a spin-table branch
