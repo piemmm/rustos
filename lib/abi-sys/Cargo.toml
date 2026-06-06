@@ -13,3 +13,14 @@ workspace = true
 
 [dependencies]
 rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+# The single per-architecture syscall trap (`AGENTS.md` §2.2): this crate
+# marshals each `ros_sys_*` call into register form and hands it to the shared
+# `raw_syscall` primitive, so the trap assembly is not duplicated here.
+rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
+
+# The host trap seam used to assert the marshalling of every stub without a
+# kernel (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
+# `std`-pulling seam never reaches a shipping build.
+[dev-dependencies]
+rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

@@ -1689,23 +1689,33 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `NULL_CONSOLE` → `NotImplemented`) + the copy-in handler,
                   the `ros_sys_console_write` C stub, and the regenerated C
                   header. `SYSCALL_NAME_MAX` bumped 12→13.
-            - [x] **P6b — `rustos-init` becomes a real program.** The
-                  `rustos-init` package now builds the `init` bundle's `Run`
-                  entry-point binary (`src/run.rs`, §16.5): a freestanding
-                  C-ABI program whose entry is crt0's `_start`; `main` parses
-                  the compiled-in startup config (`src/startup.rs`, a tiny
-                  allocation-free fail-closed `console` + `session <abs-path>`
-                  text format, host-tested) and writes its first banner line
-                  through the P6a `console_write` syscall, with crt0 routing
-                  the return through `exit`. It links **only** the curated
-                  *System runtime / C ABI* class (crt0 + the stubs) — never
-                  the orchestrator library, whose `alloc`+crypto chain would
-                  be §2.3 bloat — so the parser lives beside the binary and
-                  the linked aarch64 PIE carries `_start`/`main`/
-                  `ros_sys_console_write`/`ros_sys_exit` and zero crypto
-                  symbols. A self-contained `build.rs` sets the `freestanding`
-                  cfg from `target_os` only (cfg-check + §17.4 layering stay
-                  clean); `Run.ld` mirrors the proven cc3 PIE link script.
+            - [x] **P6b — `rustos-init` becomes a real (pure-Rust)
+                  program.** The `rustos-init` package builds the `init`
+                  bundle's `Run` entry-point binary (`src/run.rs`, §16.5) as a
+                  **pure-Rust** program. RustOS is Rust-only (§1), so it links
+                  the new pure-Rust userland runtime `lib/rt` (`rustos-rt`) —
+                  **never** the C ABI (`crt0` + `abi-sys`), which exists solely
+                  for non-Rust programs (§16.4). `rustos-rt` provides `_start`,
+                  the §19.2 stack canary, the panic handler, and idiomatic
+                  syscall wrappers; `rustos_rt::entry!` names the program's
+                  safe `main() -> i32`, which parses the compiled-in startup
+                  config (`src/startup.rs`, a tiny allocation-free fail-closed
+                  `console` + `session <abs-path>` text format, host-tested)
+                  and writes its first banner line through the P6a
+                  `console_write` syscall, the runtime routing the return
+                  through `exit`. The trap assembly is **not** duplicated: a
+                  new `lib/abi-trap` (`rustos-abi-trap`) holds the one §1
+                  syscall/svc/ecall carve-out, shared by `rustos-rt` and
+                  `abi-sys` (§2.2). It links **only** the runtime and its own
+                  parser — never the orchestrator library, whose `alloc`+crypto
+                  chain would be §2.3 bloat — so the linked aarch64 PIE carries
+                  `_start`/`__rustos_rt_main`/`rust_rt_start` and a mangled
+                  `rustos_rt::console_write`, with zero `ros_sys_*` and zero
+                  crypto symbols, and **no `unsafe`** in the program. A
+                  self-contained `build.rs` sets the `freestanding` cfg from
+                  `target_os` only (cfg-check + §17.4 layering stay clean);
+                  `Run.ld` mirrors the proven PIE link layout the userland
+                  runtimes share.
             - [ ] **P6c** — production aarch64 boot reaches EL0 + the `-M
                   virt` banner vertical; **P6d** — `CAP_PROC_SPAWN` spawn
                   syscall; **P6e** — minimal shell `init` launches.

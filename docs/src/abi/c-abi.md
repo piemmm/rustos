@@ -109,8 +109,12 @@ user-space stub library `lib/abi-sys` (`rustos-abi-sys`), the curated
 stub marshals its typed arguments into the syscall registers and issues the
 per-architecture trap — `syscall` (x86_64, number in `rax`, arguments
 `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`, result `rax`), `svc #0` (AArch64, `x8` /
-`x0`–`x5` / `x0`), or `ecall` (RISC-V, `a7` / `a0`–`a5` / `a0`) — the §1
-assembly carve-out, compiled in only for the three native targets. It pins
+`x0`–`x5` / `x0`), or `ecall` (RISC-V, `a7` / `a0`–`a5` / `a0`). The trap
+*instruction* itself — the §1 assembly carve-out, compiled in only for the
+three native targets — lives once in `lib/abi-trap` (`rustos-abi-trap`), shared
+with the pure-Rust userland runtime (`lib/rt`) so it is not duplicated
+(`AGENTS.md` §2.2); `lib/abi-sys` only marshals and hands off to it. The stub
+pins
 each symbol with `#[export_name = "ros_sys_<name>"]` so the Rust compiler does
 not mangle it; this header is the contract those exports satisfy. Every entry
 point is panic-free (an unwind across `extern "C"` is undefined behaviour,
@@ -122,7 +126,7 @@ a Rust program could not.
 ### Verifying the trap end-to-end
 
 The marshalling each `ros_sys_*` stub performs is host-tested behind an
-injectable trap seam (`lib/abi-sys`), but the trap *instruction* itself is
+injectable trap seam (`lib/abi-trap`'s `host-seam`), but the trap *instruction* itself is
 exercised under QEMU. There is one CC2 round-trip test per native target
 (`cargo xtask test --qemu`); each installs a syscall dispatch callback, issues
 the `ros_sys_cap_query` stub so the **real** trap instruction runs, and the
@@ -171,6 +175,13 @@ and the declared `total_len`, rejects an embedded NUL, and fails closed rather
 than ever indexing out of range (`AGENTS.md` §2.9, §19.5/§19.6).
 
 ## Building and linking a C program (crt0)
+
+> This whole C-ABI class (`lib/crt0` + `lib/abi-sys`) exists **solely** for
+> programs **not** written in Rust (`AGENTS.md` §1, §16.4). RustOS's own
+> first-party programs are Rust and link the pure-Rust userland runtime
+> `lib/rt` (`rustos-rt`) instead — its own `_start`, stack canary, panic
+> handler, and idiomatic syscall wrappers — over the same shared
+> `lib/abi-trap` trap. A RustOS program never routes through this C path.
 
 The startup object that consumes the startup vector is `lib/crt0`
 (`rustos-crt0`) — the crt0 half of the curated `/System/Libraries/` *System

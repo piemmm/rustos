@@ -32,6 +32,7 @@ members = [
     # Shared libraries
     "lib/abi",
     "lib/abi-sys",
+    "lib/abi-trap",
     "lib/bumpalloc",
     "lib/caps",
     "lib/collections",
@@ -49,6 +50,7 @@ members = [
     "lib/procinfo",
     "lib/raster",
     "lib/rng",
+    "lib/rt",
     "lib/svg",
     "lib/sync",
     "lib/termcap",

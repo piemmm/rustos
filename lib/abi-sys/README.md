@@ -2,11 +2,12 @@
 
 The C-callable `abi-v1` syscall stub runtime: one `extern "C"`,
 export-name-pinned `ros_sys_<name>` function per `abi-v1` syscall that marshals
-its arguments into the per-architecture syscall registers, issues the trap
-(`syscall` on x86_64, `svc` on AArch64, `ecall` on RISC-V), and returns the
-kernel's result. It is the implementation behind the generated C header
+its arguments into the per-architecture syscall registers, issues the shared
+trap (`rustos-abi-trap`), and returns the kernel's result. It is the
+implementation behind the generated C header
 (`include/rustos/rustos_syscall.h`); a program **not** written in Rust links it
-to call the RustOS kernel.
+to call the RustOS kernel. (A first-party RustOS program is Rust and links the
+pure-Rust runtime `rustos-rt` instead; both share the one trap.)
 
 This crate is the curated `/System/Libraries/` class *System runtime / C ABI*
 (`AGENTS.md` §16.4): deliberately minimal — it marshals to the kernel and
@@ -24,14 +25,13 @@ each is panic-free (an unwind across `extern "C"` is UB, `AGENTS.md` §2.9).
 
 ## Targets
 
-The trap instruction is compiled in only for the three native Tier-1 targets
-(`x86_64-unknown-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`),
-selected by a build-script-emitted cfg rather than `cfg(target_arch)` so the
-instruction-set choice stays out of the source the §17.2 `cfg-check` guards.
-`wasm32` has no trap instruction and is out of scope (`plans/CCOMPAT.md` §1). On
-the host the entry points still build and link; their marshalling and
-return-decoding are unit-tested through an injectable trap seam (the trap
-instruction itself, the §1 assembly carve-out, is exercised under QEMU).
+The trap instruction lives once in `rustos-abi-trap` (the §1 assembly
+carve-out, compiled in only for the three native Tier-1 targets), so this crate
+is target-agnostic: it marshals each call and hands it to the shared
+`raw_syscall`. `wasm32` has no trap instruction and is out of scope
+(`plans/CCOMPAT.md` §1). On the host the entry points still build and link;
+their marshalling and return-decoding are unit-tested through the trap crate's
+injectable `host-seam` (the trap instruction itself is exercised under QEMU).
 
 ## Stability tier
 

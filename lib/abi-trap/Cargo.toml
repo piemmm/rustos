@@ -1,0 +1,24 @@
+[package]
+name = "rustos-abi-trap"
+description = "Raw abi-v1 user->kernel syscall trap primitive: the single per-architecture syscall/svc/ecall carve-out, shared by the C-ABI stub runtime (rustos-abi-sys) and the Rust userland runtime (rustos-rt) so the trap assembly exists exactly once."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Host-only test scaffolding (`AGENTS.md` §7). A thread-local seam that stands
+# in for the trap instruction so a *consuming* crate's host unit tests can
+# assert how a syscall marshals its number and arguments without a kernel. It
+# pulls `std` (for thread-local storage), so it is enabled only through a
+# `dev-dependencies` edge and is never present in a shipping (native) build;
+# the real per-architecture trap path never consults it.
+host-seam = []
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }

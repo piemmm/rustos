@@ -50,12 +50,13 @@
 //!   and `reap`.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
-//! `plans/PI.md` P6b). That binary is a lean freestanding C-ABI program linking
-//! only the curated *System runtime / C ABI* class (crt0 + the syscall stubs),
-//! **not** this orchestrator library, so its tiny startup-config parser lives
-//! alongside it (`src/startup.rs`) rather than here — pulling this crate's
-//! `alloc` + crypto dependency chain into a banner-printing program would be
-//! the bloat `AGENTS.md` §2.3 forbids.
+//! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
+//! program linking only the pure-Rust userland runtime `rustos-rt`
+//! (`AGENTS.md` §1 — RustOS code never uses the C ABI), **not** this
+//! orchestrator library, so its tiny startup-config parser lives alongside it
+//! (`src/startup.rs`) rather than here — pulling this crate's `alloc` + crypto
+//! dependency chain into a banner-printing program would be the bloat
+//! `AGENTS.md` §2.3 forbids.
 //!
 //! # Layering
 //!

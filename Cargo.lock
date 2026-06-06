@@ -455,6 +455,14 @@ name = "rustos-abi-sys"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-abi-trap",
+]
+
+[[package]]
+name = "rustos-abi-trap"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
 ]
 
 [[package]]
@@ -790,10 +798,9 @@ name = "rustos-init"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-abi-sys",
  "rustos-caps",
- "rustos-crt0",
  "rustos-log",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1066,6 +1073,14 @@ version = "0.0.0"
 dependencies = [
  "rustos-crypto",
  "zeroize",
+]
+
+[[package]]
+name = "rustos-rt"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-abi-trap",
 ]
 
 [[package]]

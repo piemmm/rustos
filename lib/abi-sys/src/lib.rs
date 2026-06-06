@@ -42,24 +42,24 @@
 //!
 //! # Targets
 //!
-//! The trap instruction is compiled in only for the three native Tier-1
-//! targets (`x86_64`, `aarch64`, `riscv64`); see the `trap` module. `wasm32`
-//! has no trap instruction and is out of scope for this runtime
-//! (`plans/CCOMPAT.md` §1). On the host the entry points still build and link
-//! (the marshalling logic is host-tested through an injectable seam), but
-//! there is no kernel to service the call.
+//! The user→kernel trap itself lives once, in `rustos-abi-trap`
+//! (`AGENTS.md` §2.2): this crate only marshals each call into register form
+//! and hands it to [`rustos_abi_trap::raw_syscall`]. The trap instruction is
+//! compiled in only for the three native Tier-1 targets (`x86_64`, `aarch64`,
+//! `riscv64`); `wasm32` has no trap instruction and is out of scope for this
+//! runtime (`plans/CCOMPAT.md` §1). On the host the entry points still build
+//! and link (the marshalling logic is host-tested through the trap crate's
+//! injectable `host-seam`), but there is no kernel to service the call.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-mod trap;
-
 use core::ffi::c_void;
 
 use rustos_abi::{SyscallNumber, SYSCALL_MAX_ARGS};
 
-use trap::raw_syscall;
+use rustos_abi_trap::raw_syscall;
 
 // Syscall numbers, read from the `abi-v1` source of truth so this crate can
 // never disagree with the frozen table (`AGENTS.md` §2.2).
@@ -266,54 +266,14 @@ pub extern "C" fn sys_console_write(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
-/// Test-only trap seam: a per-thread injectable replacement for the real trap
-/// instruction, used to assert the marshalling and return-decoding of every
-/// `ros_sys_*` stub on the host without a kernel (`plans/CCOMPAT.md` CC2
-/// "trap injected behind a seam"). Each test arms the seam with the value the
-/// "kernel" should return, calls a stub, then inspects the recorded
-/// `(number, args)`.
-#[cfg(test)]
-mod seam {
-    use core::cell::Cell;
-
-    use rustos_abi::SYSCALL_MAX_ARGS;
-
-    thread_local! {
-        static ARMED: Cell<bool> = const { Cell::new(false) };
-        static RETURN_VALUE: Cell<u64> = const { Cell::new(0) };
-        static LAST_CALL: Cell<Option<(u64, [u64; SYSCALL_MAX_ARGS])>> = const { Cell::new(None) };
-    }
-
-    /// Arm the seam for the current thread: the next trap returns `value` and
-    /// its `(number, args)` are recorded for inspection.
-    pub(crate) fn arm(value: u64) {
-        RETURN_VALUE.with(|v| v.set(value));
-        LAST_CALL.with(|c| c.set(None));
-        ARMED.with(|a| a.set(true));
-    }
-
-    /// The `(number, args)` of the most recent trap on this thread, or `None`
-    /// if no trap has been issued since [`arm`].
-    pub(crate) fn last_call() -> Option<(u64, [u64; SYSCALL_MAX_ARGS])> {
-        LAST_CALL.with(Cell::get)
-    }
-
-    /// Called by `trap::raw_syscall` on the host when `#[cfg(test)]`. Records
-    /// the call and returns the armed value, or `None` when not armed (so the
-    /// non-test sentinel path is still reachable).
-    pub(crate) fn dispatch(number: u64, args: &[u64; SYSCALL_MAX_ARGS]) -> Option<u64> {
-        if !ARMED.with(Cell::get) {
-            return None;
-        }
-        LAST_CALL.with(|c| c.set(Some((number, *args))));
-        Some(RETURN_VALUE.with(Cell::get))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The trap seam lives in `rustos-abi-trap` (the single trap home,
+    // `AGENTS.md` §2.2) and is reached here through the `host-seam`
+    // dev-dependency feature; production builds never compile it.
     use rustos_abi::SYSCALLS;
+    use rustos_abi_trap::seam;
 
     /// The complete set of stubs this crate implements, paired with the
     /// `abi-v1` number and argument count each one marshals. The drift tests

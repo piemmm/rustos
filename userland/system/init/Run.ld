@@ -1,15 +1,16 @@
 /* Link script for the `init` `Run` binary (`userland/system/init/src/run.rs`).
  *
- * `init` is a position-independent C-ABI program whose entry point is crt0's
- * `_start` (`rustos_crt0`). It links no architecture crate, so nothing in the
- * default object graph references `_start`; this script makes `_start` the
- * entry GC root and lays the loadable sections out at a fixed, non-zero base
+ * `init` is a position-independent **pure-Rust** program whose entry point is
+ * the `rustos-rt` runtime's `_start`. It links no architecture crate, so
+ * nothing in the default object graph references `_start`; this script makes
+ * `_start` the entry GC root and lays the loadable sections out at a fixed,
+ * non-zero base
  * so the consuming boot path maps the image at its link addresses with the
  * chosen relocation bias (`AGENTS.md` §9, §19.2 — the image is genuinely PIE).
  * One script serves every native target: it names only architecture-neutral
  * section classes (`AGENTS.md` §2.2). It mirrors
- * `tests/integration/cc3_program/program.ld`, which the curated System runtime
- * / C ABI class is proven against.
+ * `tests/integration/cc3_program/program.ld`, the proven PIE layout the
+ * userland program runtimes share.
  *
  * Every loadable segment is page-aligned in both file offset and virtual
  * address: the kernel `rxe` loader maps whole pages with per-segment

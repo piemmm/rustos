@@ -110,17 +110,22 @@ also builds the `init` application bundle's `Run` entry-point binary
 the moment it reaches user mode (`plans/PI.md` P6c, the "boot into user
 mode" milestone).
 
-That binary is a **freestanding C-ABI program**, built exactly like a
-non-Rust program: its entry point is crt0's `_start` (`rustos-crt0`),
-which sets up the C runtime and calls `main`; `main` writes the first
-banner line through the `abi-v1` `console_write` syscall
-(`rustos-abi-sys`, the `ros_sys_console_write` stub) and returns, and crt0
-routes the return value through the `exit` syscall. It links **only** the
-curated *System runtime / C ABI* class (crt0 + the syscall stubs,
-`AGENTS.md` §16.4), never the orchestrator library above: dragging that
-crate's `alloc` + crypto dependency chain into a banner-printing program
-would be the bloat `AGENTS.md` §2.3 forbids, so the shipped program
-contains no crypto code at all.
+That binary is a **pure-Rust freestanding program**. RustOS is Rust-only
+(`AGENTS.md` §1), so it links the pure-Rust userland runtime `rustos-rt` —
+never the C ABI (`crt0` + `abi-sys`), which exists solely for programs
+**not** written in Rust (`AGENTS.md` §16.4). `rustos-rt` provides the
+program's `_start`, the §19.2 stack canary, the panic handler, and
+idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
+`main`. `main` writes the first banner line through the `abi-v1`
+`console_write` syscall (`rustos_rt::console_write`) and returns, and the
+runtime routes the return value through the `exit` syscall. (Both the Rust
+runtime and the C ABI reach the kernel through the one shared trap,
+`rustos-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
+§2.2.) It links **only** the runtime and its own startup-config parser,
+never the orchestrator library above: dragging that crate's `alloc` +
+crypto dependency chain into a banner-printing program would be the bloat
+`AGENTS.md` §2.3 forbids, so the shipped program contains no crypto code at
+all and no `unsafe`.
 
 What `init` should do at user-mode entry is **data, not control flow**: a
 small, fail-closed startup config (`src/startup.rs`). The config is

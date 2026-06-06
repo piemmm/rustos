@@ -80,19 +80,21 @@ Reserved `EventId` range `9000..10000`:
 
 The package also builds the `init` application bundle's `Run` entry-point
 binary (`src/run.rs`, `AGENTS.md` §16.5) — the program the kernel spawns
-as PID 1 when it reaches user mode (`plans/PI.md` P6c). It is a
-freestanding C-ABI program whose entry is crt0's `_start`
-(`rustos-crt0`); `main` parses a compiled-in **startup config**
-(`src/startup.rs`) and writes its first banner line through the `abi-v1`
-`console_write` syscall (`rustos-abi-sys`, the P6a `ros_sys_console_write`
-stub).
+as PID 1 when it reaches user mode (`plans/PI.md` P6c). It is a **pure-Rust**
+program: RustOS is Rust-only (`AGENTS.md` §1), so it links the pure-Rust
+userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which
+exists solely for programs **not** written in Rust (`AGENTS.md` §16.4).
+`rustos-rt` provides `_start`, the §19.2 stack canary, the panic handler, and
+the syscall wrappers; `rustos_rt::entry!` names the program's `main`. `main`
+parses a compiled-in **startup config** (`src/startup.rs`) and writes its
+first banner line through the `abi-v1` `console_write` syscall
+(`rustos_rt::console_write`, the P6a syscall).
 
-It links **only** the curated *System runtime / C ABI* class (crt0 + the
-syscall stubs, `AGENTS.md` §16.4) — never the orchestrator library above,
-whose `alloc` + crypto dependency chain has no place in a
-banner-printing program (`AGENTS.md` §2.3). The parser therefore lives
-alongside the binary rather than in the library, and the shipped program
-contains no crypto code. On the host the binary is an inert stub so
+It links **only** the runtime and its own startup-config parser — never the
+orchestrator library above, whose `alloc` + crypto dependency chain has no
+place in a banner-printing program (`AGENTS.md` §2.3). The parser therefore
+lives alongside the binary rather than in the library, and the shipped
+program contains no crypto code. On the host the binary is an inert stub so
 `cargo build --workspace`, clippy, and fmt cover it; the parser's logic is
 host-tested directly.
 
@@ -120,9 +122,8 @@ The orchestrator library is `no_std` (with `alloc`) and depends only on
 `rustos-abi`, `rustos-caps`, and `rustos-log` (all `lib/*`), so a userland
 service never links a kernel or driver crate (`AGENTS.md` §17.4). No
 `unsafe`, no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9). The `Run` binary's only `unsafe` is the `extern "C"`
-`main` crt0 calls and the panic-free console-write cast, both documented
-in `src/run.rs`.
+(`AGENTS.md` §2.9). The `Run` binary is pure safe Rust — it contains **no**
+`unsafe`; the `_start`/trap plumbing lives behind `rustos-rt`'s safe API.
 
 ## Test surface
 

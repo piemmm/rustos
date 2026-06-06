@@ -176,11 +176,17 @@ rustos/
 │   ├── abi/             # Stable user/kernel ABI types.
 │   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: one
 │   │                    #   export-name-pinned ros_sys_<name> per syscall
-│   │                    #   that issues the per-arch trap (syscall/svc/ecall),
-│   │                    #   panic-free, no added authority — the implementation
-│   │                    #   behind the generated C header and the curated
-│   │                    #   /System/Libraries/ "System runtime / C ABI" class
+│   │                    #   that marshals its args and issues the shared
+│   │                    #   per-arch trap (lib/abi-trap), panic-free, no added
+│   │                    #   authority — the implementation behind the generated
+│   │                    #   C header and the curated /System/Libraries/ "System
+│   │                    #   runtime / C ABI" class for NON-Rust programs only
 │   │                    #   (§9, §16.4; plans/CCOMPAT.md CC2).
+│   ├── abi-trap/        # Raw abi-v1 user->kernel syscall trap primitive: the
+│   │                    #   single per-arch syscall/svc/ecall carve-out (§1),
+│   │                    #   shared by the C-ABI stubs (lib/abi-sys) and the
+│   │                    #   pure-Rust runtime (lib/rt) so the trap assembly
+│   │                    #   exists exactly once (§2.2). Adds no authority (§5.4).
 │   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
@@ -242,6 +248,13 @@ rustos/
 │   │                    #   audited HMAC, §1/§2.12), a pluggable entropy /
 │   │                    #   hardware-RNG seam (§17.2, §19.2), and a fast
 │   │                    #   non-crypto xoshiro256++ generator.
+│   ├── rt/              # The pure-Rust userland runtime a first-party RustOS
+│   │                    #   program links (§1): the _start trampoline, the
+│   │                    #   §19.2 stack canary, the panic handler, idiomatic
+│   │                    #   abi-v1 syscall wrappers, and the entry! macro, over
+│   │                    #   the shared lib/abi-trap trap. The Rust counterpart
+│   │                    #   of the C-only crt0+abi-sys; RustOS code never uses
+│   │                    #   the C ABI (§2.2, §16.4).
 │   ├── svg/             # Shared SVG image decoding (§16.4): a fail-closed,
 │   │                    #   first-party no_std decoder for the WM/desktop
 │   │                    #   SVG-first asset subset, producing the shared

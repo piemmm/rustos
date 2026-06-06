@@ -31,10 +31,11 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # orphan is recorded through a `rustos_log::Sink`.
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
-# The curated *System runtime / C ABI* class (`AGENTS.md` §16.4): crt0's
-# `_start` trampoline and the `ros_sys_*` syscall stubs the `Run` binary links
-# to run as a freestanding program. Pulled in only for the bare-metal targets
-# the program is actually built for; on the host the binary is an inert stub.
+# The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
+# `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.
+# RustOS is Rust-only, so `init` links this runtime, never the C ABI
+# (`crt0` + `abi-sys`), which exists solely for non-Rust programs
+# (`AGENTS.md` §16.4). Pulled in only for the bare-metal targets the program
+# is actually built for; on the host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-crt0 = { path = "../../../lib/crt0", version = "=0.0.0" }
-rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
