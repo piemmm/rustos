@@ -9,6 +9,97 @@ primitives, the `svc` syscall-entry marshalling, and the ARM semihosting
 test finisher. This page documents the boot model, the result protocol,
 the arch primitives, and the QEMU argv contract.
 
+## Raspberry Pi 4 (BCM2711)
+
+This section is the authoritative *facts of record* for the Raspberry Pi 4 /
+Pi 400 (BCM2711, quad Cortex-A72, GIC-400). It pins the numbers the
+`plans/PI.md` Pi-4 bring-up depends on so every later stage cites one source
+rather than re-deriving the MMIO map or boot protocol (`AGENTS.md` §13,
+§15.7 — no guessing). The Pi 3 (BCM2837, no GIC) and Pi 5 (BCM2712, RP1
+southbridge) are out of scope here; they reuse this work as later board ports.
+
+Per `plans/PI.md` §0.2, the `virt` board and the Pi 4 are two *boards of the
+same `aarch64` architecture*: every base below is consumed as **runtime
+device-tree data** discovered by `kernel/arch/aarch64::platform::FdtDiscovery`
+into `rustos_abi::hwtree`, never a `cfg(board = …)` fork (`AGENTS.md` §17.2 /
+§2.2). The numbers are recorded here only as the facts the discovery path must
+yield, and as the input to the one legitimate per-board artefact — the boot
+stub, linker script, and load address (the `AGENTS.md` §1 boot-stub carve-out).
+
+### MMIO map (ARM-physical addresses)
+
+The BCM2711 maps its "low peripheral" region (VideoCore bus alias
+`0x7E00_0000`) to ARM physical base **`0xFE00_0000`**. The peripherals this
+plan touches sit at the following offsets from that base:
+
+| Peripheral | Offset from `0xFE00_0000` | ARM-physical address |
+| --- | --- | --- |
+| PL011 UART (`uart0`, `arm,pl011`) | `+0x20_1000` | `0xFE20_1000` |
+| AUX mini-UART (`uart1`, `brcm,bcm2835-aux-uart`) | `+0x21_5040` | `0xFE21_5040` |
+| VideoCore mailbox | `+0x00_B880` | `0xFE00_B880` |
+| EMMC2 SD host | `+0x34_0000` | `0xFE34_0000` |
+
+The AUX block base is `0xFE21_5000` (the `brcm,bcm2835-aux` peripheral); the
+mini-UART register window begins at `+0x40` (`0xFE21_5040`), behind the AUX
+enable register at `+0x04`. The mini-UART register layout differs from the
+PL011 (a narrower, 7-bit-addressed 16550-derived block), which is why P2 adds
+it as a second console backend behind one `rustos_log::Sink` seam, selected by
+the device-tree `compatible` string.
+
+### Interrupt controller (GIC-400)
+
+The BCM2711 carries an Arm **GIC-400** (a GICv2 implementation), distinct from
+the legacy BCM2836/2837 local+ARMC interrupt controllers. Its bases are:
+
+| GIC-400 block | ARM-physical address |
+| --- | --- |
+| Distributor (`GICD`) | `0xFF84_1000` |
+| CPU interface (`GICC`) | `0xFF84_2000` |
+
+The GICv2 register layout already implemented by
+`kernel/arch/aarch64::gic` matches GIC-400 unchanged; only the bases move, and
+they are threaded from `FdtDiscovery` (P3) rather than the `virt` constants.
+
+### Boot protocol
+
+The Pi firmware (`start4.elf`, with `fixup4.dat`) loads the kernel image
+`kernel8.img` to physical **`0x8_0000`** (the AArch64 64-bit load address) and
+enters it in **AArch64 EL2** with the Linux aarch64 hand-off convention
+(`x0` = physical address of the firmware-supplied DTB; `x1`/`x2`/`x3` zero).
+On current firmware all four cores are released to the kernel entry unless an
+`armstub8.bin` spin-table stub is supplied; the boot stub must therefore park
+secondaries (`MPIDR_EL1` affinity ≠ 0) until SMP bring-up wants them (P1/P5).
+
+`config.txt` knobs the bring-up relies on:
+
+| Key | Value | Effect |
+| --- | --- | --- |
+| `arm_64bit` | `1` | boot the ARM cores in AArch64 |
+| `kernel` | `kernel8.img` | the image the firmware loads at `0x8_0000` |
+| `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
+| `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
+
+The PSCI conduit on the Pi is **`smc`** (via `armstub8.bin`), versus `hvc` on
+the QEMU `virt` board; it is discovered through `fdt::psci_method`, never
+assumed (P5).
+
+### RAM layout
+
+The BCM2711 places usable DRAM at physical base **`0x0`** (the QEMU `virt`
+board uses `0x4000_0000`). The four SKUs and the high-memory window:
+
+| SKU | Low window | High window (`>3 GiB`) |
+| --- | --- | --- |
+| 1 GiB | `0x0`–`0x3FFF_FFFF` | — |
+| 2 GiB | `0x0`–`0x7FFF_FFFF` | — |
+| 4 GiB | `0x0`–`0xBFFF_FFFF` | — |
+| 8 GiB | `0x0`–`0xBFFF_FFFF` (low 3 GiB) | `0x1_0000_0000`–`0x2_3FFF_FFFF` |
+
+The SoC's 35-bit address space aliases the peripheral and high-RAM windows;
+the firmware DTB's `/memory` node(s) report the SKU's actual extents, which
+`FdtDiscovery::first_memory_region` reads and feeds to `kernel/mem` (P3) — the
+allocator must not assume the `virt` `0x4000_0000` base.
+
 ## Arch HAL boundary
 
 Like x86_64 and riscv64, `kernel/arch/aarch64` is a pure Arch HAL

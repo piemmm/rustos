@@ -1524,6 +1524,21 @@ Each sub-stage delivers one architecture. They share the same checklist:
       and wiring the new `AddressSpace`/`context` switch into the *live*
       scheduler remain aarch64 follow-ups, exactly as they were staged
       for riscv64; `send_ipi` already raises a GICv2 SGI.
+    - **Raspberry Pi 4 (BCM2711) board bring-up — `plans/PI.md`.** The
+      Stage-3b port boots the QEMU `virt` board; taking it to a real
+      Pi 4 (board-discovered UART/GIC/RAM, a production aarch64
+      `rustos-kernel` binary, real peripherals, and a bootable SD image)
+      is staged P0–P10 in `plans/PI.md`. The board difference is runtime
+      device-tree data, never a `cfg(board=…)` fork (§17.2 / §2.2).
+        - [x] **P0 — Pi-4 facts of record (docs-only).** The
+              authoritative "Raspberry Pi 4 (BCM2711)" section in
+              `docs/src/platform/aarch64.md` pins the BCM2711 MMIO map
+              (`0xFE00_0000` peripheral base; PL011 `0xFE20_1000`, AUX
+              mini-UART `0xFE21_5040`, mailbox `0xFE00_B880`, EMMC2
+              `0xFE34_0000`), the GIC-400 bases (GICD `0xFF84_1000` /
+              GICC `0xFF84_2000`), the EL2 `kernel8.img`@`0x8_0000` boot
+              protocol + `config.txt` knobs, and the per-SKU RAM layout,
+              so P1+ cite one source. `cargo xtask docs-check` green.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
