@@ -18,6 +18,14 @@
 //! The format is the Devicetree Specification v0.4 flattened layout: a
 //! big-endian header, a structure block of `FDT_*` tokens, and a strings
 //! block.
+//!
+//! The blob is firmware/bootloader-supplied, so it is untrusted input
+//! (`AGENTS.md` §19.5): every read is bounds-checked and a malformed tree is
+//! rejected, never trusted (§5.4 — fail closed). That decode path carries a
+//! §19.6 fuzz harness (`tests/fuzz_fdt.rs`, registered as `fuzz_fdt` in
+//! `cargo xtask fuzz`), which drives mutated, truncated, and arbitrary device
+//! trees through [`Fdt::new`] and every public reader and asserts none of them
+//! ever panics or reads out of bounds.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

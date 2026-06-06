@@ -24,3 +24,14 @@ default = []
 test-fixtures = []
 
 [dependencies]
+
+[dev-dependencies]
+# The §19.6 fuzz harness (`tests/fuzz_fdt.rs`) drives the parser against
+# mutated-but-structured device trees. It builds those templates with the
+# crate's own `fixture` DTB builder rather than re-rolling a second builder
+# (`AGENTS.md` §2.2), so the harness needs the `test-fixtures` feature on.
+# Depending on the crate itself in `[dev-dependencies]` is the canonical way
+# to turn a feature on only for this crate's own tests; it never reaches the
+# `default = []` production surface (the `fixture`/`alloc` code stays out of
+# the parser that the architecture ports link).
+rustos-fdt = { path = ".", features = ["test-fixtures"] }

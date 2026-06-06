@@ -748,6 +748,9 @@ dependencies = [
 [[package]]
 name = "rustos-fdt"
 version = "0.0.0"
+dependencies = [
+ "rustos-fdt",
+]
 
 [[package]]
 name = "rustos-files"

@@ -101,6 +101,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",
     },
     Target {
+        package: "rustos-fdt",
+        test: "fuzz_fdt",
+        description: "lib/fdt device-tree reader (untrusted firmware/bootloader DTB bytes)",
+    },
+    Target {
         package: "rustos-curses",
         test: "fuzz_curses_input",
         description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",
@@ -464,6 +469,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "rustos-vt");
+    }
+
+    #[test]
+    fn fdt_reader_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_fdt"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "rustos-fdt");
     }
 
     #[test]
