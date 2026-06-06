@@ -102,6 +102,46 @@ plumbing and exhaustively testable.
 | 9006 | `ORPHAN_REAPED`        | Info  | an inherited orphan was reaped                |
 | 9007 | `GRAPH_REJECTED`       | Error | the service graph was structurally invalid    |
 
+## The `Run` entry-point binary and startup config (`plans/PI.md` P6b)
+
+Everything above describes the orchestrator *library*. The same package
+also builds the `init` application bundle's `Run` entry-point binary
+(`src/run.rs`, `AGENTS.md` §16.5) — the program the kernel spawns as PID 1
+the moment it reaches user mode (`plans/PI.md` P6c, the "boot into user
+mode" milestone).
+
+That binary is a **freestanding C-ABI program**, built exactly like a
+non-Rust program: its entry point is crt0's `_start` (`rustos-crt0`),
+which sets up the C runtime and calls `main`; `main` writes the first
+banner line through the `abi-v1` `console_write` syscall
+(`rustos-abi-sys`, the `ros_sys_console_write` stub) and returns, and crt0
+routes the return value through the `exit` syscall. It links **only** the
+curated *System runtime / C ABI* class (crt0 + the syscall stubs,
+`AGENTS.md` §16.4), never the orchestrator library above: dragging that
+crate's `alloc` + crypto dependency chain into a banner-printing program
+would be the bloat `AGENTS.md` §2.3 forbids, so the shipped program
+contains no crypto code at all.
+
+What `init` should do at user-mode entry is **data, not control flow**: a
+small, fail-closed startup config (`src/startup.rs`). The config is
+line-oriented; `#` begins a comment, and blank or comment-only lines are
+ignored. Exactly two directives are defined and each is required once:
+
+- `console` — open the system console so the banner (and later output)
+  has somewhere to go. Takes no argument.
+- `session <path>` — the absolute path of the program `init` launches as
+  the user's session (the shell). Launching it needs the process-spawn
+  syscall (`plans/PI.md` P6d) and a shell (P6e), neither of which exists
+  yet; until then the path is validated as parsed, not launched.
+
+Because the config is the first thing a freshly spawned program reads, the
+parser treats it as untrusted input (`AGENTS.md` §19.5): it is
+allocation-free, borrows from its source text, and **fails closed** with a
+`ConfigError` — refusing an unknown or duplicated directive, a directive
+given the wrong argument, a non-absolute `session` path, an over-long
+config, or an omitted required directive — rather than guess at a
+malformed intent (`AGENTS.md` §2.9, §5.4.5).
+
 ## Tests
 
 `cargo test -p rustos-init` drives the manager against an in-memory
@@ -111,4 +151,10 @@ registration, the capability grant as `request ∩ authority`, an
 escalation denial, a spawn failure cascading to its transitive
 dependents, an invalid manifest, and the reaper distinguishing a service
 exit from an inherited orphan — plus the `EventId` range and uniqueness
-invariants and the numeric audit-field formatter.
+invariants and the numeric audit-field formatter. The same run also
+covers the `Run` binary's startup-config parser: the default config, the
+comment/blank-line/inline-comment and whitespace handling, and every
+fail-closed rejection path.
+
+The `Run` binary's freestanding entry is exercised end to end under QEMU
+when the production boot path spawns it into EL0 (`plans/PI.md` P6c).

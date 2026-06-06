@@ -377,11 +377,29 @@ on its own before the next.
   `NotImplemented`) + the copy-in handler, the `ros_sys_console_write`
   C stub, and the regenerated C header. `SYSCALL_NAME_MAX` bumped 12→13
   to fit the name. All host tests + `abi-check` + `c-header` green.
-- **P6b — `rustos-init` becomes a real program `[ ]`.** Give the
-  `rustos-init` crate a binary `Run` entry (crt0 + a thin Rust entry) that
-  parses a minimal **startup config** (host-tested) — for now the config
-  just says "open the console and start the user in a shell" — and writes
-  its first banner line through `console_write`.
+- **P6b — `rustos-init` becomes a real program `[x]`.** The `rustos-init`
+  package now builds the `init` bundle's `Run` entry-point binary
+  (`src/run.rs`, `AGENTS.md` §16.5): a freestanding C-ABI program whose
+  entry is crt0's `_start` (`rustos-crt0`); `main` parses the compiled-in
+  startup config and writes its first banner line through the P6a
+  `console_write` syscall (`rustos-abi-sys`), and crt0 routes the return
+  through `exit`. The **startup config** (`src/startup.rs`) is a tiny,
+  allocation-free, host-tested text format with two required directives —
+  `console` and `session <absolute-path>` — that fails closed on an
+  unknown/duplicated directive, a wrong/missing argument, a non-absolute
+  path, an over-long config, or an omitted directive (`AGENTS.md` §2.9,
+  §19.5). The program links **only** the curated *System runtime / C ABI*
+  class (crt0 + the syscall stubs) — never the orchestrator library, whose
+  `alloc`+crypto chain would be §2.3 bloat — so the parser lives beside the
+  binary and the shipped image carries no crypto (verified: the linked
+  aarch64 PIE exports `_start`/`main`/`ros_sys_console_write`/`ros_sys_exit`
+  and zero crypto symbols). A self-contained `build.rs` sets the
+  `freestanding` cfg from `target_os` only (no `target_arch`, so
+  `cfg-check` stays clean; no dependency on the tests harness, so §17.4
+  layering stays clean); `Run.ld` mirrors the proven cc3 PIE link script.
+  Host DoD green (10 new startup-config tests + the freestanding aarch64
+  build via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0
+  spawn of this binary is P6c.
 - **P6c — production boot reaches EL0 `[ ]`.** Wire the freestanding
   aarch64 `rustos-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
   over the discovered `/memory` map, install the console (discovered

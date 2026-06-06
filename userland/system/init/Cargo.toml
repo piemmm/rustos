@@ -11,6 +11,14 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The package is both the `rustos-init` orchestrator library (above) and the
+# `Run` entry-point binary of the `init` application bundle (`AGENTS.md` §16.5).
+# The binary is a freestanding C-ABI program on the native Tier-1 targets and
+# an inert host stub elsewhere (see `src/run.rs` / `build.rs`, `plans/PI.md` P6b).
+[[bin]]
+name = "rustos-init-run"
+path = "src/run.rs"
+
 [dependencies]
 # The frozen `abi-v1` surface: the `ManifestHeader` + `decode_capability_ids`
 # pair init uses to turn a service's signed manifest into a requested
@@ -22,3 +30,11 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # §19.4 structured audit log: every start, denial, skip, exit, and reaped
 # orphan is recorded through a `rustos_log::Sink`.
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The curated *System runtime / C ABI* class (`AGENTS.md` §16.4): crt0's
+# `_start` trampoline and the `ros_sys_*` syscall stubs the `Run` binary links
+# to run as a freestanding program. Pulled in only for the bare-metal targets
+# the program is actually built for; on the host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-crt0 = { path = "../../../lib/crt0", version = "=0.0.0" }
+rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }

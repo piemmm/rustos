@@ -1678,6 +1678,37 @@ Each sub-stage delivers one architecture. They share the same checklist:
               no-`/psci` path. The Pi's `smc` conduit (via `armstub8.bin`)
               flows through the identical path and is an on-metal item
               (no `raspi4b` in QEMU). `cargo xtask cfg-check` stays clean.
+        - [~] **P6 — Spawn `init` into EL0 (the "boot into user mode"
+              milestone).** Staged into chunks P6a–P6e (`plans/PI.md` P6),
+              each landed green on its own.
+            - [x] **P6a — `console_write` `abi-v1` syscall.** New syscall
+                  number 11 + `CAP_CONSOLE_WRITE` (id 18), the `SyscallSpec`
+                  row + recomputed `SYSCALL_TABLE_HASH`, the `kernel/core`
+                  `ConsoleWrite` seam (boot installs the device — framebuffer
+                  else first UART — defaulting to a fail-closed
+                  `NULL_CONSOLE` → `NotImplemented`) + the copy-in handler,
+                  the `ros_sys_console_write` C stub, and the regenerated C
+                  header. `SYSCALL_NAME_MAX` bumped 12→13.
+            - [x] **P6b — `rustos-init` becomes a real program.** The
+                  `rustos-init` package now builds the `init` bundle's `Run`
+                  entry-point binary (`src/run.rs`, §16.5): a freestanding
+                  C-ABI program whose entry is crt0's `_start`; `main` parses
+                  the compiled-in startup config (`src/startup.rs`, a tiny
+                  allocation-free fail-closed `console` + `session <abs-path>`
+                  text format, host-tested) and writes its first banner line
+                  through the P6a `console_write` syscall, with crt0 routing
+                  the return through `exit`. It links **only** the curated
+                  *System runtime / C ABI* class (crt0 + the stubs) — never
+                  the orchestrator library, whose `alloc`+crypto chain would
+                  be §2.3 bloat — so the parser lives beside the binary and
+                  the linked aarch64 PIE carries `_start`/`main`/
+                  `ros_sys_console_write`/`ros_sys_exit` and zero crypto
+                  symbols. A self-contained `build.rs` sets the `freestanding`
+                  cfg from `target_os` only (cfg-check + §17.4 layering stay
+                  clean); `Run.ld` mirrors the proven cc3 PIE link script.
+            - [ ] **P6c** — production aarch64 boot reaches EL0 + the `-M
+                  virt` banner vertical; **P6d** — `CAP_PROC_SPAWN` spawn
+                  syscall; **P6e** — minimal shell `init` launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

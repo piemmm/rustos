@@ -790,7 +790,9 @@ name = "rustos-init"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-abi-sys",
  "rustos-caps",
+ "rustos-crt0",
  "rustos-log",
 ]
 
