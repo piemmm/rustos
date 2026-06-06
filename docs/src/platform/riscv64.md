@@ -224,7 +224,10 @@ the SBI HSM `hart_start` firmware call that starts the parked hart at the
 `smp.s` trampoline. The host `passes_secondary_bringup_conformance` test
 runs `smp::conformance::run_all` over a real handle (object-safe, fails
 closed, never panics); the real `hart_start` is proven by the two-hart
-QEMU verticals (`cross_cpu_tlb_shootdown_qemu_riscv64`).
+QEMU verticals. Those verticals start their secondary hart through this
+HAL trait — `cross_cpu_tlb_shootdown_qemu_riscv64` and, since
+`plans/WIRING.md` Stage W15, `ipi_smp_qemu_riscv64` — rather than
+calling the port-private `smp::start_secondary` directly.
 
 ## CC2 `abi-sys` `ecall` round-trip QEMU vertical
 

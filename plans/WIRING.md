@@ -147,7 +147,8 @@ the burn-down is complete.
   than asserted by inspection. The cross-CPU TLB-shootdown slice is now a
   HAL trait too (`CrossCpuTlbShootdown`, W13), and SMP secondary-CPU
   bring-up is now the `SecondaryBringup` HAL trait (W14) — no §17.2
-  primitive remains ad-hoc.
+  primitive remains ad-hoc. Every SMP QEMU/browser vertical now starts
+  its secondary through that trait, not the port-private helper (W15).
 
 ---
 
@@ -914,6 +915,38 @@ interface creep).
   no ABI / C-header drift. Docs:
   `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
   aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
+
+#### Stage W15 — fold the bare-metal/wasm SMP verticals onto the HAL — ✅ landed
+
+W14 routed the x86_64 SMP verticals (`scheduler_stress_qemu`,
+`cross_cpu_tlb_shootdown_qemu_x86_64`) through
+`SecondaryBringup::start_secondary` but left the
+`ipi_smp_qemu_{riscv64,aarch64}` and `kernel_arch_boot_wasm32` verticals
+calling the port-private `smp::start_secondary` / `smp::start_worker`
+directly. That was sound (the free port helper the HAL delegates to is
+not §2.2 duplication) but asymmetric. W15 finishes the symmetry: every
+SMP vertical now starts its secondary through the neutral HAL trait, so
+the bring-up surface the tests exercise matches the one the kernel uses.
+
+- **riscv64** (`ipi_smp_qemu_riscv64`): the `RiscvArch::with_harts`
+  handle is built up front and `arch.start_secondary(secondary_hartid)`
+  replaces the bare `smp::start_secondary(hartid)`.
+- **aarch64** (`ipi_smp_qemu_aarch64`): the `Aarch64Arch::with_cpus`
+  handle now also carries `.with_psci_method(VIRT_PSCI_METHOD)` so
+  `arch.start_secondary(SECONDARY_CPU)` can issue PSCI `CPU_ON`.
+- **wasm32** (`kernel_arch_boot_wasm32`): `arch.start_secondary(WORKER_CPU)`
+  on the existing `WasmArch::with_workers` handle replaces
+  `smp::start_worker`.
+- Each vertical keeps `smp::set_secondary_entry` (entry install is
+  off-trait by design, §2.4) and imports `SecondaryBringup`. No new HAL
+  surface, no `lib/abi` change → no ABI / C-header drift.
+- **Verified:** `ipi_smp_qemu_{riscv64,aarch64}` exit `0` under
+  `rustos-qemu-run --cpus 2`; the wasm32 browser harness reports
+  `WORKER_OK=true IPI_RECV=true PASS`; whole-project `cargo fmt --all
+  --check`, `cargo xtask ci`, `cargo xtask fuzz --secs 5`, and
+  `tools/ci/soak.sh both --secs 10` are all green. Docs:
+  `docs/src/architecture/modularity.md`, `docs/src/platform/{aarch64,
+  riscv64,wasm32}.md`, `PLAN.md`, this file.
 
 ---
 

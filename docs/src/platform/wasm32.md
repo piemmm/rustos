@@ -93,8 +93,11 @@ for the boot context or an unmapped id) and delegates to
 is a fresh module instance entering at a fixed export — so it never
 reports `NotReady`. The host `passes_secondary_bringup_conformance` test
 runs `smp::conformance::run_all` over a real `WasmArch`; the real Web
-Worker spawn is proven by the wasm32 browser vertical. With this slice
-every §17.2 primitive is behind the HAL.
+Worker spawn is proven by the wasm32 browser vertical, which since
+`plans/WIRING.md` Stage W15 spawns its worker through this HAL trait
+(`arch.start_secondary(WORKER_CPU)`) rather than calling the port-private
+`smp::start_worker` directly. With this slice every §17.2 primitive is
+behind the HAL.
 
 ### Timer programming (`Timer`)
 

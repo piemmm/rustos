@@ -943,6 +943,30 @@ parity sweep — is staged in `plans/WIRING.md` (continuation prompt
       `docs/src/architecture/modularity.md`,
       `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `AGENTS.md`
       §17.2, `plans/WIRING.md`.
+- [x] **WIRING Stage W15 — fold the bare-metal/wasm SMP verticals onto
+      the HAL.** W14 routed only the x86_64 SMP verticals through
+      `SecondaryBringup::start_secondary`; the
+      `ipi_smp_qemu_{riscv64,aarch64}` and `kernel_arch_boot_wasm32`
+      verticals still called the port-private `smp::start_secondary` /
+      `smp::start_worker` directly (sound, since the free port helper the
+      HAL delegates to is not §2.2 duplication, but asymmetric). W15
+      finishes the symmetry so every SMP vertical starts its secondary
+      through the neutral HAL trait: **riscv64** builds the
+      `RiscvArch::with_harts` handle up front and calls
+      `arch.start_secondary(secondary_hartid)`; **aarch64** adds
+      `.with_psci_method(VIRT_PSCI_METHOD)` to the `with_cpus` handle and
+      calls `arch.start_secondary(SECONDARY_CPU)` (PSCI `CPU_ON`);
+      **wasm32** calls `arch.start_secondary(WORKER_CPU)` on the existing
+      `WasmArch::with_workers` handle. Each keeps `smp::set_secondary_entry`
+      (entry install is off-trait by design, §2.4) and imports
+      `SecondaryBringup`; no new HAL surface and no `lib/abi` change → no
+      ABI / C-header drift. **Verified QEMU-green** —
+      `ipi_smp_qemu_{riscv64,aarch64}` exit `0` under `rustos-qemu-run
+      --cpus 2` and the wasm32 browser harness reports `WORKER_OK=true
+      IPI_RECV=true PASS` — and **host-green** (`cargo xtask ci`,
+      `fuzz --secs 5`, `soak both --secs 10`). Docs:
+      `docs/src/architecture/modularity.md`,
+      `docs/src/platform/{aarch64,riscv64,wasm32}.md`, `plans/WIRING.md`.
 
 Each sub-stage delivers one architecture. They share the same checklist:
 

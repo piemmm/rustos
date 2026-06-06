@@ -48,7 +48,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_arch_api::{CpuId, SchedulerArch};
+    use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use rustos_arch_riscv64::fdt::Fdt;
     use rustos_arch_riscv64::{
         halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, smp, trap, RiscvArch,
@@ -168,6 +168,13 @@ mod kernel {
         }
         let secondary_hartid: CpuId = boot_hartid ^ 1;
 
+        // Build the arch handle with the two-hart map up front so the
+        // `SecondaryBringup` Arch HAL trait can map the dense `CpuId` to
+        // the target hart id, `current_cpu` reverse-maps the running
+        // hart, and `send_ipi` targets the right hart. The logical CPU
+        // map is the identity over hart ids `0` and `1`.
+        let arch = RiscvArch::with_harts(boot_hartid, timebase, &[0, 1]);
+
         // Install the shared callbacks before starting the secondary
         // hart, so it observes them already in place.
         preempt::set_ipi_callback(on_ipi);
@@ -175,12 +182,15 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
-        // Start the other hart.
+        // Start the other hart through the `SecondaryBringup` Arch HAL
+        // trait (`plans/WIRING.md` Stage W14/W15) rather than the
+        // port-private `smp::start_secondary`, so this vertical exercises
+        // the same neutral bring-up surface the x86_64 SMP verticals use.
         // SAFETY: called on the boot hart after `boot.s` zeroed `.bss`
         // (clearing the secondary stack pool) and after the secondary
         // entry was installed; `secondary_hartid` is a real, parked,
-        // distinct hart.
-        if unsafe { smp::start_secondary(secondary_hartid) }.is_err() {
+        // distinct hart the handle's topology map covers.
+        if unsafe { arch.start_secondary(secondary_hartid) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
@@ -202,7 +212,6 @@ mod kernel {
         // handle's SBI IPI path (the deliverable that replaces the former
         // `send_ipi` no-op). The logical CPU map is the identity over
         // hart ids `0` and `1`, so the target `CpuId` is the hart id.
-        let arch = RiscvArch::with_harts(boot_hartid, timebase, &[0, 1]);
         arch.send_ipi(secondary_hartid);
 
         // Wait for the secondary hart to take the software-interrupt

@@ -68,7 +68,7 @@ mod kernel {
         exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp, Aarch64Arch,
         SERIAL_SINK,
     };
-    use rustos_arch_api::{CpuId, SchedulerArch};
+    use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use rustos_log::{log, Event, EventId, Level};
 
     /// `u32` sentinel for "no IPI callback has fired yet".
@@ -182,9 +182,13 @@ mod kernel {
 
         // Build the arch handle with the two-core MPIDR map so
         // `current_cpu` reverse-maps each core's affinity and `send_ipi`
-        // targets the right GICv2 CPU interface.
+        // targets the right GICv2 CPU interface. Install the `virt`
+        // board's PSCI conduit so the `SecondaryBringup` HAL trait can
+        // issue `CPU_ON` (the production path discovers it from the FDT;
+        // see the module docs on QEMU's no-DTB-pointer ELF boot).
         let arch =
-            Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR]);
+            Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR])
+                .with_psci_method(VIRT_PSCI_METHOD);
 
         // Bring up the boot core's GICv2 distributor so the directed SGI
         // it later raises is forwarded to the CPU interfaces.
@@ -201,14 +205,16 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
-        // Start core 1 through PSCI `CPU_ON`.
+        // Start core 1 through the `SecondaryBringup` Arch HAL trait
+        // (`plans/WIRING.md` Stage W14/W15) rather than the port-private
+        // `smp::start_secondary`, so this vertical exercises the same
+        // neutral bring-up surface the x86_64 SMP verticals use; the
+        // handle issues PSCI `CPU_ON` over the installed conduit.
         // SAFETY: called on the boot core after `boot.s` zeroed `.bss`
         // (clearing the secondary stack pool) and after the secondary
-        // entry was installed; `SECONDARY_MPIDR` names a real, parked,
-        // distinct core.
-        if unsafe { smp::start_secondary(VIRT_PSCI_METHOD, SECONDARY_CPU, SECONDARY_MPIDR) }
-            .is_err()
-        {
+        // entry was installed; `SECONDARY_CPU` maps to a real, parked,
+        // distinct core in the handle's topology.
+        if unsafe { arch.start_secondary(SECONDARY_CPU) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 

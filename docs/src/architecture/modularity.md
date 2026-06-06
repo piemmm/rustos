@@ -347,8 +347,10 @@ unstartable id, never panics) for every port — the real cross-core
 bring-up is proven by the multi-core `scheduler_stress_qemu`,
 `ipi_smp_qemu_*`, and `cross_cpu_tlb_shootdown_qemu_*` QEMU verticals on
 real ≥ 2 emulated cores, and the wasm32 browser vertical
-(`plans/WIRING.md` Stage W14). With this slice every §17.2 primitive
-listed by `AGENTS.md` is behind the HAL.
+(`plans/WIRING.md` Stage W14). Every one of those verticals — across all
+four ports — starts its secondary through `start_secondary`, not the
+port-private `smp` helper (`plans/WIRING.md` Stage W15). With this slice
+every §17.2 primitive listed by `AGENTS.md` is behind the HAL.
 
 ### Page-table frame source
 

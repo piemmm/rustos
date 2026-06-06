@@ -45,7 +45,7 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_api::{CpuId, SchedulerArch};
+    use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use rustos_arch_wasm32::console::write_line;
     use rustos_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
     use rustos_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
@@ -217,10 +217,19 @@ mod kernel {
         spawn_tasks(sched, BOOT_CPU, PRIMARY_TASKS);
 
         // Bring up logical CPU 1 as a real Web Worker, then deliver it a
-        // directed cross-context IPI. The MessageChannel buffers the post
-        // until the worker is live, so a single send suffices (no
-        // retry-until-it-works, `AGENTS.md` §2.1).
-        if smp::start_worker(WORKER_CPU).is_err() {
+        // directed cross-context IPI. This goes through the
+        // `SecondaryBringup` Arch HAL trait (`plans/WIRING.md` Stage
+        // W14/W15) rather than the port-private `smp::start_worker`, so
+        // the wasm32 vertical exercises the same neutral bring-up surface
+        // the bare-metal SMP verticals use. The MessageChannel buffers
+        // the post until the worker is live, so a single send suffices
+        // (no retry-until-it-works, `AGENTS.md` §2.1).
+        //
+        // SAFETY: a wasm32 secondary is a fresh module instance entered
+        // through the fixed `rustos_arch_wasm32_main` export (no settable
+        // entry to install), and `WORKER_CPU` maps to a real, distinct
+        // worker slot in the handle's topology, distinct from CPU 0.
+        if unsafe { arch.start_secondary(WORKER_CPU) }.is_err() {
             write_line("HARNESS_ERROR primary could not start worker 1");
             return;
         }

@@ -292,7 +292,11 @@ unmapped id fails closed with `SmpError::NotReady` / `InvalidCpu`), and
 delegates to `smp::start_secondary` above. The host
 `passes_secondary_bringup_conformance` test runs `smp::conformance::run_all`
 over a real handle; the real PSCI `CPU_ON` is proven by the two-core QEMU
-verticals.
+verticals, which start their secondary core through this HAL trait —
+`cross_cpu_tlb_shootdown_qemu_aarch64` and, since `plans/WIRING.md` Stage
+W15, `ipi_smp_qemu_aarch64` (its handle now carries the conduit via
+`with_psci_method`) — rather than calling the port-private
+`smp::start_secondary` directly.
 
 Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3, whose firmware
 parks secondaries on a release address rather than offering PSCI) is a
