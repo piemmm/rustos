@@ -200,11 +200,14 @@ impl TaskCapabilities {
 
     /// Apply a signed [`CapabilityToken`] to this task.
     ///
-    /// The token is verified against `authority` and the current
-    /// effective set (which acts as the parent); on success the task's
-    /// effective set is replaced with the token's payload (always a
-    /// subset of the current set by [`CapabilityToken::verify`]'s own
-    /// invariant). Failure modes are mapped to the same audit event as a
+    /// The token is verified against `authority`, the current effective
+    /// set (which acts as the parent), and **this task's id as the
+    /// subject** — a token minted for another task is refused here, so a
+    /// stolen or misdirected token cannot be replayed onto an unrelated
+    /// principal (`AGENTS.md` §5.4). On success the task's effective set
+    /// is replaced with the token's payload (always a subset of the
+    /// current set by [`CapabilityToken::verify`]'s own invariant).
+    /// Failure modes are mapped to the same audit event as a
     /// direct [`Self::delegate`]: a forged or stale token is *security*
     /// information, not crypto trivia, and the audit trail records the
     /// security decision rather than which validation step failed
@@ -221,7 +224,7 @@ impl TaskCapabilities {
         epoch: RevocationEpoch,
         audit: &S,
     ) -> Result<(), Errno> {
-        match token.verify(authority, &self.effective, epoch) {
+        match token.verify(authority, &self.effective, epoch, self.task.0) {
             Ok(()) => {
                 self.effective = token.caps;
                 let mut buf = [0u8; 16];
@@ -499,6 +502,45 @@ mod tests {
         assert_eq!(t.apply_token(&token, &authority, epoch, &sink), Ok(()));
         assert!(t.has(CapabilityId::FS_MOUNT));
         assert!(!t.has(CapabilityId::AUDIT_READ));
+    }
+
+    #[test]
+    fn token_for_another_task_is_refused() {
+        // A correctly-signed, current-epoch, subset token issued to a
+        // *different* task must not apply here: binding to the subject
+        // forecloses replaying a stolen token onto another principal
+        // (`AGENTS.md` §5.4). The effective set must be left untouched.
+        let signing = SigningKey::from_bytes(&[0x33; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+
+        let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
+        let sink = RecordingSink::new();
+        let mut t = TaskCapabilities::derive(TaskId(9), UserId(1), user_grant, user_grant, &sink);
+
+        let epoch = RevocationEpoch(3);
+        let narrowed = caps_of(&[CapabilityId::FS_MOUNT]);
+        // Sign the token for some other task, not `t`.
+        let other_subject = t.task().0 ^ 0x1;
+        let body =
+            CapabilityToken::signing_input(ABI_VERSION_CURRENT, other_subject, epoch, &narrowed);
+        let sig = signing.sign(&body);
+        let token = CapabilityToken {
+            abi_version: ABI_VERSION_CURRENT,
+            subject: other_subject,
+            epoch,
+            caps: narrowed,
+            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+        };
+        assert_eq!(
+            t.apply_token(&token, &authority, epoch, &sink),
+            Err(Errno::NotFound),
+        );
+        // The task keeps its full grant; the foreign token changed nothing.
+        assert!(t.has(CapabilityId::FS_MOUNT));
+        assert!(t.has(CapabilityId::AUDIT_READ));
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::TaskCapabilitiesDelegateWiden.id().0));
     }
 
     #[test]

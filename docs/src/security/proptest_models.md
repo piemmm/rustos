@@ -37,7 +37,8 @@ Each lives in a `tests/proptest_model.rs` next to the code it checks:
   ascending iteration, and the delegation invariant (a delegated set is
   never a superset). A second model signs real Ed25519 `CapabilityToken`s
   and checks `verify` against an oracle of its documented error precedence
-  (ABI version → epoch → signature → subset).
+  (ABI version → epoch → subject → signature → subset), including tokens
+  addressed to a different subject.
 * **`kernel/sec`** — drives a `CapTable` of `TaskCapabilities` through
   `derive` / `delegate` / `revoke` / `remove` commands. It asserts that a
   derived effective set is exactly `user_grant ∩ manifest_request` (no
