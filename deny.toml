@@ -37,6 +37,13 @@ exceptions = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# First-party `path` dependencies legitimately omit a version (a crate
+# depending on itself with extra features for its own test fixtures, e.g.
+# `lib/fdt`'s `test-fixtures` dev-dependency). Those are not the
+# supply-chain risk the wildcard ban targets (§19.3) — that risk is
+# unpinned *registry* crates — so exempt path deps while still denying
+# wildcard versions on anything fetched from a registry.
+allow-wildcard-paths = true
 highlight = "all"
 # Crates explicitly forbidden by `AGENTS.md` §1: hand-rolled crypto and
 # unaudited globals. Extend this list when a problem dependency is found.

@@ -77,6 +77,7 @@ pub mod console;
 pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
+pub mod kthread;
 pub mod panic;
 pub mod random;
 // The single scheduler selection point (`AGENTS.md` §17.1). Internal:
@@ -103,6 +104,9 @@ pub use fs::{
     VfsError,
 };
 pub use init::{kernel_main, InitError, Phase};
+pub use kthread::{
+    spawn_kthread, spawn_kthread_with_stack, BoxStack, KernelStack, Yielder, KTHREAD_STACK_BYTES,
+};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use spawn::{

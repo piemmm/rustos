@@ -1,0 +1,40 @@
+[package]
+name = "rustos-test-kthread-switch-qemu-aarch64"
+description = "SPAWN Stage SP1 QEMU integration test: two kernel-thread tasks ping-pong through the real Arch HAL ContextSwitch::switch under the live kernel/sched scheduler on the aarch64 virt board. Boots virt, builds a real Scheduler over Aarch64Arch, spawns two kthreads via kernel_core::spawn_kthread whose bodies cooperatively yield back and forth, drives the cooperative step loop until both have run N times and exited, and PASSes — making ContextSwitch::switch a production scheduling path."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "two kthreads ping-pong via the real context switch under
+# the live scheduler" integration test — the aarch64 deliverable of
+# `plans/SPAWN.md` Stage SP1. It links the `rustos-kernel-core` kthread
+# runtime, the `rustos-arch-aarch64` port, and the default
+# `rustos-kernel-sched-eevdf` policy, then drives the cooperative `step`
+# loop over two kthreads whose bodies `yield_now` back and forth, so the
+# §17.2 `ContextSwitch::switch` primitive runs on a production scheduling
+# path for the first time. Keeping the QEMU-exit shortcut in a dedicated
+# bin (not a Cargo feature on a library crate) prevents feature
+# unification from leaking it into any production build (`AGENTS.md`
+# §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-kthread-switch-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

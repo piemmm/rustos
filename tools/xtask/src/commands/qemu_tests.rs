@@ -814,6 +814,35 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
+    // runtime proven on real silicon — two kernel-thread tasks ping-pong
+    // through the *real* `rustos_arch_api::ContextSwitch::switch` under the
+    // live scheduler, making that primitive a production scheduling path
+    // for the first time (until now it was exercised only by the W7
+    // `sched_drive` round-trip). It boots the `virt` board, reads the
+    // GICv2 base + timer rate from the embedded `virt` DTB and brings up
+    // the EL1 vectors + GICv2 (interrupts stay masked — dispatch is the
+    // cooperative `step` loop, so the kthread switches are the only
+    // mechanism under test), builds a real `rustos-kernel-sched-mlfq`
+    // `Scheduler` over `Aarch64Arch`, spawns two kthreads via
+    // `kernel_core::spawn_kthread` whose bodies `yield_now` back and forth,
+    // and drains the `step` loop. PASS once both kthreads have run their
+    // full ping-pong count and exited; a switch that never resumed its
+    // task stalls the drain and the harness reports a timeout (fail-loud,
+    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-kthread-switch-qemu-aarch64",
+        binary: "rustos-test-kthread-switch-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
     // HAL slice (`rustos_arch_api::CrossCpuTlbShootdown`) proven on real
     // emulated cores, one vertical per bare-metal port. riscv64: the boot
