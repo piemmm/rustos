@@ -508,13 +508,16 @@ on its own before the next.
   the live scheduler; SP2 resumable EL0 tasks that timeshare a CPU; SP3
   the `spawn` syscall #12 + embedded-program registry; SP4 `init` launches
   the `session` process — overlapping P6e). Each `SP`-stage lands green
-  over the whole project on its own. **SP0 and SP1 (aarch64) are landed:**
-  the SP0 design note is `docs/src/architecture/multitasking.md`, and the
-  `kernel/core::kthread` runtime (`spawn_kthread`, the `Yielder`, the
-  per-task kernel stack) is host-tested and proven on `-M virt` by
-  `tests/integration/kthread_switch_qemu_aarch64` — two kthreads ping-pong
-  through the real `ContextSwitch::switch`, now a production scheduling
-  path. Remaining in SP1: the riscv64 + x86_64 sibling verticals.
+  over the whole project on its own. **SP0 and SP1 are landed (all three
+  bare-metal ports):** the SP0 design note is
+  `docs/src/architecture/multitasking.md`, and the `kernel/core::kthread`
+  runtime (`spawn_kthread`, the `Yielder`, the per-task kernel stack) is
+  host-tested and proven on `-M virt` by
+  `tests/integration/kthread_switch_qemu_{aarch64,riscv64,x86_64}` — two
+  kthreads ping-pong through the real `ContextSwitch::switch`, now a
+  production scheduling path on every arch. (The x86_64 sibling was the
+  first on-metal first-resume into a real Rust trampoline and surfaced a
+  latent `TaskCtx::prepare` rdi-slot + stack-alignment bug, now fixed.)
 - **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
   `userland/shell` program on the console; `init`'s startup config
   launches it as the user's session.

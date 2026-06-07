@@ -1,0 +1,41 @@
+[package]
+name = "rustos-test-kthread-switch-qemu-x86-64"
+description = "SPAWN Stage SP1 QEMU integration test: two kernel-thread tasks ping-pong through the real Arch HAL ContextSwitch::switch under the live kernel/sched scheduler on x86_64. Boots the multiboot kernel, builds a real Scheduler over the production X86_64Arch on the boot CPU, spawns two kthreads via kernel_core::spawn_kthread whose bodies cooperatively yield back and forth, drives the cooperative step loop until both have run N times and exited, and PASSes — making ContextSwitch::switch a production scheduling path on x86_64."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "two kthreads ping-pong via the real context switch under
+# the live scheduler" integration test — the x86_64 deliverable of
+# `plans/SPAWN.md` Stage SP1, the sibling of
+# `tests/integration/kthread_switch_qemu_{aarch64,riscv64}`. It links the
+# `rustos-kernel-core` kthread runtime, the `rustos-arch-x86_64` port (the
+# `sched-arch` feature exposes the production `X86_64Arch` SchedulerArch
+# impl), and the default `rustos-kernel-sched-eevdf` policy (matching
+# `kernel-core`'s default scheduler feature — selecting a different policy
+# would trip the §17.1 "exactly one policy" guard under feature
+# unification), then drives the cooperative `step` loop over two kthreads
+# whose bodies `yield_now` back and forth, so the §17.2
+# `ContextSwitch::switch` primitive runs on a production scheduling path.
+# Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature
+# on a library crate) prevents feature unification from leaking it into
+# any production build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-kthread-switch-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

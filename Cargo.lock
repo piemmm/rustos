@@ -1539,6 +1539,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-kthread-switch-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-sched-eevdf",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-kthread-switch-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-sched-eevdf",
+]
+
+[[package]]
 name = "rustos-test-memory-isolation"
 version = "0.0.0"
 dependencies = [

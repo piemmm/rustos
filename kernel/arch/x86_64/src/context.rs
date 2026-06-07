@@ -76,7 +76,7 @@ impl TaskCtx {
     /// 16-byte aligned (System V AMD64 §3.2.2) and non-zero.
     ///
     /// On success returns `()` and `self.rsp` points at the bottom of
-    /// the synthesised frame; the layout matches the suspend epilogue
+    /// the synthesised frame; the layout matches the resume epilogue
     /// of `switch` exactly so the first resume pops the synthesised
     /// callee-saved zeros and `ret`s into `entry`.
     ///
@@ -85,7 +85,7 @@ impl TaskCtx {
     /// [`PrepareError::NullStack`] if `stack_top == 0`;
     /// [`PrepareError::Misaligned`] if `stack_top % 16 != 0`;
     /// [`PrepareError::TooSmall`] if `stack_top` does not have room for
-    /// the synthesised frame (8 × 8 bytes).
+    /// the synthesised frame (9 × 8 bytes).
     pub fn prepare(
         &mut self,
         stack_top: u64,
@@ -99,21 +99,32 @@ impl TaskCtx {
             return Err(PrepareError::Misaligned);
         }
         // Frame layout the resume half of `switch` expects to pop, in
-        // ascending address order from `rsp`:
+        // ascending address order from `rsp`. This must match the actual
+        // `popq` order in `context.s` (rdi first, then r15..rbp, then
+        // `ret`), *not* the push order of the suspend half:
         //
-        //   [rsp + 0x00]  r15  (callee-saved, seeded to 0)
-        //   [rsp + 0x08]  r14  (   "       ", seeded to 0)
-        //   [rsp + 0x10]  r13  (   "       ", seeded to 0)
-        //   [rsp + 0x18]  r12  (   "       ", seeded to 0)
-        //   [rsp + 0x20]  rbx  (   "       ", seeded to 0)
-        //   [rsp + 0x28]  rbp  (   "       ", seeded to 0)
-        //   [rsp + 0x30]  rdi  (first SysV arg, seeded to `arg`)
+        //   [rsp + 0x00]  rdi  (first SysV arg, seeded to `arg`)
+        //   [rsp + 0x08]  r15  (callee-saved, seeded to 0)
+        //   [rsp + 0x10]  r14  (   "       ", seeded to 0)
+        //   [rsp + 0x18]  r13  (   "       ", seeded to 0)
+        //   [rsp + 0x20]  r12  (   "       ", seeded to 0)
+        //   [rsp + 0x28]  rbx  (   "       ", seeded to 0)
+        //   [rsp + 0x30]  rbp  (   "       ", seeded to 0)
         //   [rsp + 0x38]  ret  (popped by `ret`, seeded to `entry`)
+        //   [rsp + 0x40]  pad  (16-byte alignment; never read)
         //
-        // After `ret` lands in `entry`, %rdi holds `arg`. We push rdi
-        // through the frame (rather than relying on the suspend half to
-        // have saved it) because `arg` is the new task's first-run
-        // argument, *not* the suspended caller's preserved value.
+        // `rdi` is at offset 0 because the resume half's first `popq` is
+        // `popq %rdi`; seeding `arg` anywhere else (e.g. at the suspend
+        // half's *push* offset) would deliver `arg` in the wrong
+        // register and enter `entry` with `%rdi == 0`.
+        //
+        // The trailing pad word makes the trampoline land at
+        // `(%rsp + 8) % 16 == 0`: the resume pops 7 words (rdi + 6
+        // callee registers) and then `ret` pops the 8th (the return
+        // address), leaving `%rsp == stack_top - 8`. Because `stack_top`
+        // is 16-byte aligned, the entry then observes the System V
+        // AMD64 §3.2.2 alignment a `call` would have produced. Without
+        // the pad, `entry` would run on a stack misaligned by 8.
         if stack_top < FRAME_BYTES {
             return Err(PrepareError::TooSmall);
         }
@@ -126,14 +137,16 @@ impl TaskCtx {
         // in the topmost `FRAME_BYTES` of that range.
         unsafe {
             let p = rsp as *mut u64;
-            // r15..rbp zero-initialised callee-saved registers.
-            for i in 0..6 {
+            // rdi <- arg (popped first by the resume half).
+            core::ptr::write(p.add(0), arg as u64);
+            // r15, r14, r13, r12, rbx, rbp <- zero (popped next).
+            for i in 1..7 {
                 core::ptr::write(p.add(i), 0);
             }
-            // rdi <- arg
-            core::ptr::write(p.add(6), arg as u64);
-            // return address <- entry
+            // return address <- entry (consumed by `ret`).
             core::ptr::write(p.add(7), entry as usize as u64);
+            // p.add(8) is the alignment pad — never read by the resume
+            // half, so it is left at the stack's existing contents.
         }
         self.rsp = rsp;
         Ok(())
@@ -152,10 +165,12 @@ pub enum PrepareError {
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes.
-/// Eight 8-byte slots: six callee-saved registers, `rdi`, and the
-/// initial return address. The const-asserts below keep this in step
-/// with the assembly in `context.s`.
-const FRAME_BYTES: u64 = 8 * 8;
+/// Nine 8-byte slots: `rdi`, six callee-saved registers, the initial
+/// return address, and a trailing 16-byte alignment pad so the
+/// trampoline is entered with the System V AMD64 `(%rsp + 8) % 16 == 0`
+/// invariant. The const-asserts below keep this in step with the
+/// `popq` sequence in `context.s`.
+const FRAME_BYTES: u64 = 9 * 8;
 
 /// Compile-time pinning of the [`TaskCtx`] layout. The `switch`
 /// inline assembly addresses `TaskCtx::rsp` by the constant offset
@@ -281,17 +296,18 @@ mod tests {
         let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(16) } as u64;
         let mut c = TaskCtx::new();
         c.prepare(top, host_entry, 0xCAFE).unwrap();
-        // rsp should be `top - 64`.
-        assert_eq!(c.rsp, top - 64);
-        // Verify the frame layout the resume epilogue will pop.
+        // rsp should be `top - 72` (8 frame words + the alignment pad).
+        assert_eq!(c.rsp, top - 72);
+        // Verify the frame layout the resume epilogue will pop, in the
+        // `context.s` `popq` order: rdi, then r15..rbp, then `ret`.
         let frame = unsafe { core::slice::from_raw_parts(c.rsp as *const u64, 8) };
-        // r15, r14, r13, r12, rbx, rbp <- zero
-        for slot in &frame[..6] {
+        // rdi <- arg (popped first).
+        assert_eq!(frame[0], 0xCAFE);
+        // r15, r14, r13, r12, rbx, rbp <- zero.
+        for slot in &frame[1..7] {
             assert_eq!(*slot, 0);
         }
-        // rdi <- arg
-        assert_eq!(frame[6], 0xCAFE);
-        // return address <- entry
+        // return address <- entry (consumed by `ret`).
         assert_eq!(frame[7], host_entry as *const () as usize as u64);
     }
 }

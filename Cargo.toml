@@ -184,6 +184,8 @@ members = [
     "tests/integration/sched_drive_qemu_riscv64",
     "tests/integration/sched_drive_qemu_aarch64",
     "tests/integration/kthread_switch_qemu_aarch64",
+    "tests/integration/kthread_switch_qemu_riscv64",
+    "tests/integration/kthread_switch_qemu_x86_64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_riscv64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_aarch64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_x86_64",

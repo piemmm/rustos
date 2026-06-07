@@ -32,19 +32,24 @@
 
 rustos_arch_x86_64_switch:
     // --- Suspend half ---
-    // Push callee-saved registers onto the *outgoing* task's stack in
-    // descending order so a popq sequence later restores them. Stack
-    // grows downward; the resulting frame the resume half pops is, in
-    // ascending address order:
+    // Push callee-saved registers onto the *outgoing* task's stack so a
+    // popq sequence later restores them. Stack grows downward and `rdi`
+    // is pushed last, so the resulting frame the resume half pops is, in
+    // ascending address order (lowest = last pushed = first popped):
     //
-    //   [rsp + 0x00]  r15
-    //   [rsp + 0x08]  r14
-    //   [rsp + 0x10]  r13
-    //   [rsp + 0x18]  r12
-    //   [rsp + 0x20]  rbx
-    //   [rsp + 0x28]  rbp
-    //   [rsp + 0x30]  rdi  (= prev pointer at entry — see below)
+    //   [rsp + 0x00]  rdi  (= prev pointer at entry — see below)
+    //   [rsp + 0x08]  r15
+    //   [rsp + 0x10]  r14
+    //   [rsp + 0x18]  r13
+    //   [rsp + 0x20]  r12
+    //   [rsp + 0x28]  rbx
+    //   [rsp + 0x30]  rbp
     //   [rsp + 0x38]  return address pushed by the call site
+    //
+    // `TaskCtx::prepare` seeds a synthetic copy of exactly this frame
+    // (with `rdi` = the task's first-run argument and the return address
+    // = its entry point), so its slot order must match this `popq`
+    // order, not the textual push order below.
     //
     // We deliberately save `rdi` (the outbound `prev` pointer) too.
     // The reason: when a freshly-prepared task first runs, its

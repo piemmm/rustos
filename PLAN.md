@@ -1759,16 +1759,20 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `spawn_init_qemu_aarch64` vertical's PASS now proves the
                   banner reached the console. **P6d** — `CAP_PROC_SPAWN`
                   spawn syscall, staged *properly* in `plans/SPAWN.md`;
-                  **SP0 + SP1 (aarch64) landed:** the SP0 design note
+                  **SP0 + all of SP1 landed (all three bare-metal ports):**
+                  the SP0 design note
                   (`docs/src/architecture/multitasking.md`) and the
                   `kernel/core::kthread` resumable-kernel-thread runtime
                   (`spawn_kthread` + `Yielder` + per-task kernel stack,
-                  layered over `SchedulerPolicy::spawn`, §17.1) — proven on
-                  `-M virt` by `tests/integration/kthread_switch_qemu_aarch64`
+                  layered over `SchedulerPolicy::spawn`, §17.1) — proven by
+                  `tests/integration/kthread_switch_qemu_{aarch64,riscv64,x86_64}`
                   (two kthreads ping-pong through the real
-                  `ContextSwitch::switch`, now a production scheduling path);
-                  riscv64 + x86_64 sibling verticals remain. **P6e** —
-                  minimal shell `init` launches.
+                  `ContextSwitch::switch`, now a production scheduling path
+                  on each arch; the x86_64 sibling fixed a latent
+                  `TaskCtx::prepare` rdi-slot + stack-alignment bug exposed
+                  by the first on-metal first-resume). **SP2** (resumable
+                  EL0 tasks) is next. **P6e** — minimal shell `init`
+                  launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

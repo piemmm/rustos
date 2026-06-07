@@ -106,29 +106,36 @@ header (`cargo xtask c-header --write`), which the drift guard enforces.
   trap-return reschedule decision point and the EL0 save-area layout. Pure
   documentation; landed together with SP1.
 
-### SP1 — Kernel-thread task runtime in `kernel/core` `[~]`
+### SP1 — Kernel-thread task runtime in `kernel/core` `[x]`
 
-**Landed (aarch64 increment).** The `kernel/core::kthread` runtime exists:
-`KernelStack` (+ `BoxStack`), the `Yielder`, the boxed `ThreadControl`, the
-generic `trampoline`, the `dispatch_step` shim, and the public
-`spawn_kthread` / `spawn_kthread_with_stack` layered over
+**Done (all three bare-metal ports).** The `kernel/core::kthread` runtime
+exists: `KernelStack` (+ `BoxStack`), the `Yielder`, the boxed
+`ThreadControl`, the generic `trampoline`, the `dispatch_step` shim, and the
+public `spawn_kthread` / `spawn_kthread_with_stack` layered over
 `SchedulerPolicy::spawn` (the `kernel/sched/*` policy crates are untouched,
 §2.4/§17.1). Seven host tests pass (first-run prepare-then-switch, prepare
 happens once, fail-closed `Exit` on a bad stack, terminal `Exit`, the
 `Yielder` action+switch, a live-`Scheduler` spawn+step smoke test, and the
 slab-backed stack reclaim + `SlabError::TagMismatch` UAF check, §19.10). The
-aarch64 `-M virt` vertical
-`tests/integration/kthread_switch_qemu_aarch64` is enrolled in
-`cargo xtask test --qemu` and QEMU-green: two kthreads ping-pong N times
-through the **real** `ContextSwitch::switch`, making it a *production*
-scheduling path for the first time. `cargo xtask ci`, `fuzz --secs 5`, the
-QEMU matrix, and the soak are all green.
+two-kthread ping-pong vertical is enrolled in `cargo xtask test --qemu` and
+QEMU-green on **every** bare-metal port —
+`tests/integration/kthread_switch_qemu_{aarch64,riscv64,x86_64}` — so two
+kthreads ping-pong N times through the **real** `ContextSwitch::switch`,
+making it a *production* scheduling path for the first time on each arch.
+`cargo xtask ci`, `fuzz --secs 5`, the QEMU matrix, and the soak are all
+green. wasm32 has no EL0/MMU model — n/a (declared, §0.9).
 
-**Remaining (immediately-following SP1 sibling increment):** the x86_64 and
-riscv64 ping-pong verticals (`kthread_switch_qemu_{x86_64,riscv64}`), so
-every bare-metal port exercises the runtime. The runtime itself is
-arch-neutral and already builds on every port; only the per-arch QEMU proof
-remains. wasm32 has no EL0/MMU model — n/a (declared, §0.9).
+**Bug fixed in passing (x86_64):** the riscv64 + x86_64 verticals are the
+*first* on-metal exercisers of each port's first-resume into a real Rust
+trampoline (the W7 `sched_drive_*` round-trip never first-resumed, and
+`context::conformance` is a host no-op). That surfaced a latent x86_64
+`TaskCtx::prepare` bug: it seeded the first-run argument at the suspend
+half's *push* offset, but `context.s` `popq %rdi` **first**, so the
+trampoline entered with `rdi`(=the control-block pointer)`=0` → null deref;
+the synthesised frame was also misaligned by 8 vs System V AMD64 §3.2.2.
+`prepare` now seeds `arg` at frame offset 0 and adds a trailing 16-byte
+alignment pad (`FRAME_BYTES` 64→72); the host layout test and the stale
+`context.s` comment were corrected to match the real `popq` order (§2.2).
 
 The foundation: make a scheduler task a *resumable kernel thread* with its
 own kernel stack, driven through the existing `ContextSwitch` HAL, without
