@@ -1100,6 +1100,7 @@ name = "rustos-shell"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -1775,6 +1776,17 @@ dependencies = [
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-spawn-session-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel",
  "rustos-log",
 ]
 

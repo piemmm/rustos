@@ -105,14 +105,19 @@ pub struct Aarch64InitSpawn;
 /// The single, `'static` [`Aarch64InitSpawn`] the boot path borrows.
 pub static AARCH64_INIT_SPAWN: Aarch64InitSpawn = Aarch64InitSpawn;
 
-/// `init`'s effective capability set: exactly `CAP_CONSOLE_WRITE`, so PID 1
-/// can write its startup banner through the `console_write` syscall
-/// (`plans/PI.md` P6a/P6b). The boot path passes this as both the user
-/// grant and the manifest request, so the intersection the kernel derives
-/// is the same set — `init` is granted no more (`AGENTS.md` §5.2).
+/// `init`'s effective capability set: `CAP_CONSOLE_WRITE`, so PID 1 can
+/// write its startup banner through the `console_write` syscall
+/// (`plans/PI.md` P6a/P6b), plus `CAP_PROC_SPAWN`, so it can launch the
+/// user's session program through the `spawn` syscall (`plans/SPAWN.md`
+/// `SP3b`). The boot path passes this as both the user grant and the manifest
+/// request, so the intersection the kernel derives is the same set — `init`
+/// is granted no more (`AGENTS.md` §5.2). Spawning is not ambient authority:
+/// the child PID 1 launches receives only *its own* manifest∩user-grant set,
+/// never `init`'s (`AGENTS.md` §4, §16.5).
 fn init_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::CONSOLE_WRITE);
+    caps.insert(CapabilityId::PROC_SPAWN);
     caps
 }
 

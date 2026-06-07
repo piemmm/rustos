@@ -34,7 +34,9 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleWrite, NULL_CONSOLE};
 use crate::dispatch_slot::DispatchCallbackSlot;
-use crate::spawn::InitSpawn;
+use crate::spawn::{
+    InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+};
 
 /// Architecture-neutral hook the kernel core needs from a Stage 3
 /// arch port.
@@ -402,6 +404,31 @@ where
     /// running kernel, like the console and the sinks.
     pub init: Option<&'static dyn InitSpawn>,
 
+    /// Embedded-program registry the `spawn` syscall resolves a program
+    /// path against (`plans/SPAWN.md` SP3).
+    ///
+    /// Defaults to [`EMPTY_PROGRAM_REGISTRY`]: a `spawn` of any path then
+    /// fails closed with [`rustos_abi::Errno::NotFound`] until the arch
+    /// port installs a populated registry through [`Self::with_spawn`]. The
+    /// program bytes are `'static` (the host-only `elf2rxe` build glue bakes
+    /// them into the kernel image, `AGENTS.md` §2.2), so the registry lives
+    /// for the running kernel's lifetime, exactly like the console device.
+    pub programs: &'static ProgramRegistry,
+
+    /// Architecture-specific producer the `spawn` syscall drives to build a
+    /// child's hardware-isolated address space and admit it as a runnable
+    /// process (`plans/SPAWN.md` SP3).
+    ///
+    /// Defaults to [`NULL_PROCESS_SPAWN`], which fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`] (`AGENTS.md` §2.9): a port that
+    /// has no runtime-spawn producer wired leaves this default and `spawn`
+    /// announces an inert subsystem rather than half-building a task. A port
+    /// that can build a child address space installs its producer through
+    /// [`Self::with_spawn`]; spawning is *not* a privileged bypass — the
+    /// child receives only its manifest∩user-grant authority (`AGENTS.md`
+    /// §4, §16.5). Held as a `'static` borrow, like the console device.
+    pub spawn_service: &'static (dyn ProcessSpawn + 'static),
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -453,6 +480,11 @@ where
             // `InitSpawn` through `with_init`; `kernel_main` halts after
             // `BootCompleted` until then (`plans/PI.md` P6c-3).
             init: None,
+            // Spawn subsystem unwired until the arch port threads a populated
+            // registry + producer through `with_spawn` (`plans/SPAWN.md`
+            // SP3): `spawn` fails closed (`NotFound` / `NotImplemented`).
+            programs: &EMPTY_PROGRAM_REGISTRY,
+            spawn_service: &NULL_PROCESS_SPAWN,
             _marker: core::marker::PhantomData,
         }
     }
@@ -491,6 +523,30 @@ where
     #[must_use]
     pub fn with_init(mut self, init: &'static dyn InitSpawn) -> Self {
         self.init = Some(init);
+        self
+    }
+
+    /// Install the embedded-program registry and the architecture spawn
+    /// producer the `spawn` syscall drives, consuming and returning `self`
+    /// (`plans/SPAWN.md` SP3).
+    ///
+    /// Called by an arch port's boot pipeline once it can build a child
+    /// address space and has embedded programs to launch. Until this is
+    /// called the handover holds [`EMPTY_PROGRAM_REGISTRY`] and
+    /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
+    /// ([`rustos_abi::Errno::NotFound`] / [`rustos_abi::Errno::NotImplemented`]).
+    /// Both must be `'static`: the program bytes and the producer live for
+    /// the lifetime of the running kernel, exactly like the console device
+    /// (`AGENTS.md` §2.1 — the install is a one-shot move, not a global
+    /// mutable static).
+    #[must_use]
+    pub fn with_spawn(
+        mut self,
+        programs: &'static ProgramRegistry,
+        spawn_service: &'static (dyn ProcessSpawn + 'static),
+    ) -> Self {
+        self.programs = programs;
+        self.spawn_service = spawn_service;
         self
     }
 

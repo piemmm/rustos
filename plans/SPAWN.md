@@ -287,13 +287,14 @@ SP2b + SP2c are landed, so SP2 is complete on aarch64; the x86_64 +
 riscv64 sibling EL0 ports follow when their `spawn_program_*` verticals
 gain the second-task capability (§0.8).**
 
-### SP3 — `spawn` syscall + embedded-program registry `[~]`
+### SP3 — `spawn` syscall + embedded-program registry `[x]`
 
 Too large for one safe landing, so staged SP3a (the ABI surface + the
 fail-closed handler/seam, host-proven) and SP3b (the arch producer +
 registry population + the `-M virt` vertical), mirroring the P6a→P6c
 `console_write` precedent (`abi-v1` syscall + fail-closed `NULL_*` seam
 landed first; the real device/producer wired in a following increment).
+**Both SP3a and SP3b are landed.**
 
 #### SP3a — `spawn` syscall #12 + fail-closed handler/seam `[x]`
 
@@ -333,37 +334,54 @@ landed first; the real device/producer wired in a following increment).
   `NotFound`; dispatcher denial without `CAP_PROC_SPAWN`. `docs/src`
   syscall table + handler-wiring + capability matrix updated.
 
-#### SP3b — aarch64 `ProcessSpawn` producer + registry + `-M virt` vertical `[ ]`
+#### SP3b — aarch64 `ProcessSpawn` producer + registry + `-M virt` vertical `[x]`
 
-- A real aarch64 `ProcessSpawn` producer in the kernel binary (sibling of
-  `init_spawn`): per-child page-table pool management, build a fresh
-  2 GiB-identity isolated user space, parse the `rxe` against
-  `SYSCALL_TABLE_HASH`, `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
-  audits), freeze, build the `pre_resume`/`enter` closures, and call
-  `ctx.admit_process`. Wire `with_frames` + `with_spawn` into the boot
-  `KernelDispatchHook` wiring; register the embedded `session` (and a test
-  child) program in the `ProgramRegistry` via the host-only `elf2rxe` build
-  glue (§2.2; RustOS stays Rust-only, §1).
-- `-M virt` vertical: PID 1 spawns an embedded child program; both run
-  (proving SP2 timesharing), the child writes a banner + `exit`s, and the
-  parent observes the child's PID. Map `AdmitError` + build/parse failures
-  onto stable `Errno`s; every failure path frees what it built (§2.9).
+**Landed.** The real aarch64 `ProcessSpawn` producer lives in the kernel
+binary (`kernel/rustos-kernel/src/spawn_producer.rs`, sibling of
+`init_spawn`): a static `PageTablePool` reserve + monotonic cursor
+(`MAX_SPAWNS = 8`, fail-closed `NoSpace` on exhaustion), builds a fresh
+2 GiB-identity isolated user space **without** switching `TTBR0_EL1` (the
+spawning caller keeps running — the build writes through the identity
+`physmap`, so the child space need not be active), parses the `rxe` against
+`SYSCALL_TABLE_HASH`, calls `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
+audits), freezes, builds the `pre_resume`/`enter` closures, and calls
+`ctx.admit_process`. `boot_aarch64` wires `.with_spawn(&AARCH64_PROGRAM_REGISTRY,
+&AARCH64_PROCESS_SPAWN)`; `kernel_core` threads `programs`/`spawn_service` +
+`&state.frame_allocator` through `BootInfo::with_spawn` → `run_phases` →
+`KernelDispatchHook::new` → `with_frames`/`with_spawn`. The kernel `build.rs`
+was generalised to build **both** `init` and the `Shell` session program
+through one `elf2rxe` helper (§2.2; RustOS stays Rust-only, §1), embedding
+`SHELL_RXE` registered under `/Apps/Shell.app/Run`. `AdmitError`,
+build, and parse failures map onto stable `Errno`s (`NoSpace` /
+`AlreadyExists` / `PermissionDenied` / `BadMagic`); the partial pool/frame
+reserves are monotonic, so a failed spawn leaks nothing user-visible (§2.9).
+- `-M virt` vertical landed: `rustos-test-spawn-session-qemu-aarch64` boots
+  the production pipeline, PID 1 `init` spawns `/Apps/Shell.app/Run` through
+  the `spawn` syscall, both run (proving SP2 timesharing), the session writes
+  a gated banner + `exit`s, and `init` observes the returned PID. PASS keys
+  on two `ProcessSpawned` (4030) + three audited syscalls (5000) — `init`'s
+  `spawn`, `init`'s `exit`, and the session's necessarily-last gated `exit`.
 
 **Done when (SP3 overall):** a userland process can spawn a separate,
 isolated, runnable process via `abi-v1` on aarch64 `-M virt`; siblings
-follow. **SP3a is landed (host-proven); SP3b remains.**
+follow. **SP3a + SP3b are landed.**
 
-### SP4 — `init` launches the `session` program `[ ]` (folds into PI.md P6e)
+### SP4 — `init` launches the `session` program `[x]` (folds into PI.md P6e)
 
-- `init`'s startup config (`session <absolute-path>`, already parsed,
-  `plans/PI.md` P6b) is launched through the SP3 spawn syscall as a
-  separate process; `init` continues running (e.g. as the session
-  supervisor) rather than being replaced. The minimal shell/`session`
-  program itself is `plans/PI.md` P6e.
+**Landed alongside SP3b.** `init`'s startup config (`session
+/Apps/Shell.app/Run`, already parsed, `plans/PI.md` P6b) is now launched
+through the SP3 `spawn` syscall (`rustos_rt::spawn`) as a separate, isolated
+process; `init` keeps running and reacts fail-closed (`EXIT_SESSION_FAILED`)
+to a failed spawn rather than being replaced. `init`'s effective set gained
+`CAP_PROC_SPAWN`; the child receives only its own `CAP_CONSOLE_WRITE`
+(no ambient authority, §4). The minimal `session` program is a banner+exit
+`Run` stub in the `Shell` bundle; growing it into a real shell REPL over the
+console (wiring in the `rustos-shell` interpreter library) is `plans/PI.md`
+P6e. Supervising the session across its lifetime (restart, reap) is also P6e.
 
 **Done when:** PID 1 `init` spawns the `session` process via the spawn
-syscall and both run concurrently on `-M virt`; the real Pi is the
-on-metal acceptance item.
+syscall and both run concurrently on `-M virt` — proven by the SP3b vertical.
+The real Pi is the on-metal acceptance item.
 
 ### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[ ]` (beyond P6d)
 

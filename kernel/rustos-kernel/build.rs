@@ -44,17 +44,59 @@ use build_support::{is_freestanding, kernel_isa, linker_script_for};
 /// Rust target triple of the freestanding aarch64 (Raspberry Pi 4) build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
-/// Virtual base the `init` (`Run`) program image is mapped at when the
-/// aarch64 boot path spawns PID 1 (`plans/PI.md` P6c-3).
+/// Virtual base each spawned program (`Run`) image is mapped at when the
+/// aarch64 boot path builds it (`plans/PI.md` P6c-3, `plans/SPAWN.md` `SP3b`).
 ///
 /// 64 GiB — far above the boot path's identity map and within the 39-bit
 /// (512 GiB) TTBR0 region — so the program's pages land on freshly walked
 /// stage-1 tables instead of colliding with an identity gigapage block.
-/// `boot_aarch64`'s `InitSpawn` passes the same bias to `spawn_and_enter`,
-/// and `elf_to_rxe` relocates the image for it, so the in-memory pointers
-/// match where the image is mapped. Mirrors the proven
-/// `spawn_program_qemu_aarch64` fixture's bias (`AGENTS.md` §2.2).
-const INIT_USER_BIAS: u64 = 0x10_0000_0000;
+/// The spawn seam / producer passes the same bias to the build caller, and
+/// `elf_to_rxe` relocates the image for it, so the in-memory pointers match
+/// where the image is mapped. Each program lives in its **own** address
+/// space, so every program reuses this one bias (`AGENTS.md` §2.2). Mirrors
+/// the proven `spawn_program_qemu_aarch64` fixture's bias.
+const USER_BIAS: u64 = 0x10_0000_0000;
+
+/// One embedded `Run` program the boot path builds into an `rxe` image: the
+/// crate package, its `Run` bin, the absolute source dir, the generated
+/// fixture file name, and the `const`-name prefix the fixture emits under.
+struct Program {
+    /// Cargo package name (`-p <pkg>`).
+    pkg: &'static str,
+    /// `Run` binary name (`--bin <bin>`).
+    bin: &'static str,
+    /// Path to the program crate dir, relative to this crate's manifest dir.
+    rel_dir: &'static str,
+    /// Generated fixture file name written under `OUT_DIR`.
+    fixture: &'static str,
+    /// Prefix for the emitted `const`s (`<PREFIX>_RXE`, `<PREFIX>_USER_BIAS`).
+    prefix: &'static str,
+    /// Extra source files (relative to the crate dir) to re-run the build on.
+    rerun: &'static [&'static str],
+}
+
+/// The embedded programs the aarch64 boot path spawns: PID 1 `init`, and the
+/// `Shell` session program `init` launches (`plans/SPAWN.md` `SP3b`). Both are
+/// pure-Rust `Run` bins built the same way (`AGENTS.md` §2.2 — one build
+/// path), differing only in their package/paths.
+const PROGRAMS: &[Program] = &[
+    Program {
+        pkg: "rustos-init",
+        bin: "rustos-init-run",
+        rel_dir: "../../userland/system/init",
+        fixture: "init_rxe.rs",
+        prefix: "INIT",
+        rerun: &["src/run.rs", "src/startup.rs", "Run.ld", "Cargo.toml"],
+    },
+    Program {
+        pkg: "rustos-shell",
+        bin: "rustos-shell-run",
+        rel_dir: "../../userland/shell/shell",
+        fixture: "shell_rxe.rs",
+        prefix: "SHELL",
+        rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
+    },
+];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(freestanding)");
@@ -79,51 +121,62 @@ fn main() {
         println!("cargo:rustc-cfg=freestanding");
     }
 
-    emit_init_rxe(&target);
+    emit_program_rxes(&target);
 }
 
-/// Build the `init` (`Run`) program PIE and embed its `rxe` image so the
-/// aarch64 boot path can spawn PID 1 into EL0 (`plans/PI.md` P6c-3).
+/// Build every embedded [`PROGRAMS`] `Run` PIE and embed its `rxe` image so
+/// the aarch64 boot path can spawn PID 1 `init` into EL0 (`plans/PI.md`
+/// P6c-3) and `init` can launch the session program (`plans/SPAWN.md` `SP3b`).
 ///
-/// On the freestanding aarch64 target it compiles `rustos-init-run`
+/// On the freestanding aarch64 target each program is compiled
 /// position-independent against its own `Run.ld` into a private target
 /// directory under `OUT_DIR` (so it never collides with the outer kernel
-/// build — `AGENTS.md` §2.2, one program source built two ways), then
-/// converts the linked PIE ELF into an `rxe` blob with
+/// build — `AGENTS.md` §2.2, one program source built two ways), then the
+/// linked PIE ELF is converted into an `rxe` blob with
 /// [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
-/// [`INIT_USER_BIAS`] and stamping the kernel's compiled-in syscall CFI
-/// tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
+/// [`USER_BIAS`] and stamping the kernel's compiled-in syscall CFI tag
+/// (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
 /// [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2).
 ///
 /// On every other target (host `cargo build --workspace`, clippy, the
-/// x86_64 image) it emits an inert empty blob: the boot-path module that
-/// consumes `INIT_RXE` compiles only for the freestanding aarch64 target.
-fn emit_init_rxe(target: &str) {
+/// x86_64 image) each fixture is an inert empty blob: the boot-path modules
+/// that consume them compile only for the freestanding aarch64 target.
+fn emit_program_rxes(target: &str) {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
 
-    let init_dir = format!("{manifest_dir}/../../userland/system/init");
-    println!("cargo:rerun-if-changed={init_dir}/src/run.rs");
-    println!("cargo:rerun-if-changed={init_dir}/src/startup.rs");
-    println!("cargo:rerun-if-changed={init_dir}/Run.ld");
-    println!("cargo:rerun-if-changed={init_dir}/Cargo.toml");
+    for program in PROGRAMS {
+        emit_program_rxe(target, manifest_dir, &out_dir, program);
+    }
+}
 
-    let rxe_path = PathBuf::from(&out_dir).join("init_rxe.rs");
+/// Build one [`Program`] and write its generated fixture under `OUT_DIR`.
+fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &Program) {
+    let prog_dir = format!("{manifest_dir}/{}", program.rel_dir);
+    for rel in program.rerun {
+        println!("cargo:rerun-if-changed={prog_dir}/{rel}");
+    }
 
     let rxe = if target == AARCH64_TARGET {
-        build_and_convert_init(manifest_dir, &out_dir, &init_dir)
+        build_and_convert(manifest_dir, out_dir, &prog_dir, program)
     } else {
         Vec::new()
     };
-    write_init_fixture(&rxe_path, &rxe);
+    let fixture_path = PathBuf::from(out_dir).join(program.fixture);
+    write_fixture(&fixture_path, program, &rxe);
 }
 
-/// Compile `rustos-init-run` PIE for the freestanding aarch64 target and
+/// Compile a program's `Run` bin PIE for the freestanding aarch64 target and
 /// convert the linked ELF into an `rxe` blob.
-fn build_and_convert_init(manifest_dir: &str, out_dir: &str, init_dir: &str) -> Vec<u8> {
-    let run_ld = format!("{init_dir}/Run.ld");
-    let target_dir = format!("{out_dir}/init-target");
+fn build_and_convert(
+    manifest_dir: &str,
+    out_dir: &str,
+    prog_dir: &str,
+    program: &Program,
+) -> Vec<u8> {
+    let run_ld = format!("{prog_dir}/Run.ld");
+    let target_dir = format!("{out_dir}/{}-target", program.pkg);
 
     // Cargo fingerprints the RUSTFLAGS *string* (which names the linker
     // script by path) but not the script's *content*, so a `Run.ld` edit
@@ -134,16 +187,15 @@ fn build_and_convert_init(manifest_dir: &str, out_dir: &str, init_dir: &str) -> 
     // without churning ordinary incremental builds.
     let _ = fs::remove_dir_all(&target_dir);
 
-    // `init` links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
+    // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
     // roots the `rustos-rt` runtime trampoline; it is built
     // position-independent (`AGENTS.md` §19.2), with `core` /
     // `compiler_builtins` / `alloc` built PIC alongside it (`-Z
-    // build-std`). `alloc` is required because the `init` package's
-    // dependencies (`rustos-log`, `rustos-abi`) name `alloc`, even though
-    // the banner-printing `Run` binary itself never allocates (the
-    // unreachable allocating paths are dead-stripped, so no global
-    // allocator is needed). Scope the PIE link flags to the aarch64 target
-    // so the program's own host build script is unaffected.
+    // build-std`). `alloc` is required because the program packages name it
+    // transitively, even though the banner-printing `Run` binaries never
+    // allocate (the unreachable allocating paths are dead-stripped, so no
+    // global allocator is needed). Scope the PIE link flags to the aarch64
+    // target so the program's own host build script is unaffected.
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(manifest_dir)
@@ -162,9 +214,9 @@ fn build_and_convert_init(manifest_dir: &str, out_dir: &str, init_dir: &str) -> 
         .args([
             "build",
             "-p",
-            "rustos-init",
+            program.pkg,
             "--bin",
-            "rustos-init-run",
+            program.bin,
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -173,29 +225,47 @@ fn build_and_convert_init(manifest_dir: &str, out_dir: &str, init_dir: &str) -> 
             &target_dir,
         ])
         .status()
-        .expect("spawn cargo to build the init Run program");
-    assert!(status.success(), "building the init Run program failed");
+        .unwrap_or_else(|e| panic!("spawn cargo to build the {} Run program: {e}", program.pkg));
+    assert!(
+        status.success(),
+        "building the {} Run program failed",
+        program.pkg
+    );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-init-run");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/{}", program.bin);
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
     rustos_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
         &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-        INIT_USER_BIAS,
+        USER_BIAS,
     )
-    .expect("convert the init Run program ELF into an rxe image")
+    .unwrap_or_else(|e| {
+        panic!(
+            "convert the {} Run program ELF into an rxe image: {e:?}",
+            program.pkg
+        )
+    })
 }
 
-/// Emit `INIT_RXE` and `INIT_USER_BIAS` as a Rust source the boot path
-/// `include!`s.
-fn write_init_fixture(path: &Path, rxe: &[u8]) {
+/// Emit `<PREFIX>_RXE` and `<PREFIX>_USER_BIAS` as a Rust source the boot
+/// path `include!`s.
+fn write_fixture(path: &Path, program: &Program, rxe: &[u8]) {
+    let prefix = program.prefix;
     let mut out = String::new();
     out.push_str("// Auto-generated by build.rs. DO NOT EDIT.\n");
-    let _ = writeln!(out, "/// Virtual base the `init` image is mapped at.");
-    let _ = writeln!(out, "pub const INIT_USER_BIAS: u64 = {INIT_USER_BIAS:#x};");
-    out.push_str("/// The converted `rxe` image of the `init` `Run` program.\n");
-    out.push_str("pub const INIT_RXE: &[u8] = &[");
+    let _ = writeln!(
+        out,
+        "/// Virtual base the `{}` image is mapped at.",
+        program.pkg
+    );
+    let _ = writeln!(out, "pub const {prefix}_USER_BIAS: u64 = {USER_BIAS:#x};");
+    let _ = writeln!(
+        out,
+        "/// The converted `rxe` image of the `{}` `Run` program.",
+        program.pkg
+    );
+    let _ = writeln!(out, "pub const {prefix}_RXE: &[u8] = &[");
     for (i, b) in rxe.iter().enumerate() {
         if i % 16 == 0 {
             out.push_str("\n    ");
@@ -203,5 +273,5 @@ fn write_init_fixture(path: &Path, rxe: &[u8]) {
         let _ = write!(out, "0x{b:02x}, ");
     }
     out.push_str("\n];\n");
-    fs::write(path, out).expect("write init_rxe.rs");
+    fs::write(path, out).expect("write program rxe fixture");
 }

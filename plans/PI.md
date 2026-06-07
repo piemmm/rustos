@@ -496,7 +496,7 @@ on its own before the next.
     the `spawn_init_qemu_aarch64` vertical's PASS (keyed on the audited
     `exit` 5000 — `console_write` is `audit:false`) now genuinely proves the
     banner reached the console (`-M virt`, verified green).
-- **P6d — userland process-spawn syscall `[~]`.** Add the `abi-v1`
+- **P6d — userland process-spawn syscall `[x]`.** Add the `abi-v1`
   spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
   an embedded-program registry so `init` can launch a separate process.
   Per the standing direction this is being done *properly* — a real
@@ -543,11 +543,24 @@ on its own before the next.
   `NotImplemented`, mirroring `NULL_CONSOLE`). The `spawn` handler
   copies-in the path, resolves it, and admits a **Ready** resumable user
   kthread through `SpawnCtx::admit_process` (host-proven by a `ProcessSpawn`
-  double + 8 host tests); production `spawn` fails closed until SP3b wires
-  the real aarch64 producer + registry + the `-M virt` vertical. Then SP4.
-- **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
-  `userland/shell` program on the console; `init`'s startup config
-  launches it as the user's session.
+  double + 8 host tests). **SP3b and SP4 are now landed too, so P6d is
+  complete:** the real aarch64 `ProcessSpawn` producer
+  (`kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh,
+  hardware-isolated 2 GiB-identity address space from a static
+  `PageTablePool` reserve (without switching the spawning caller's
+  `TTBR0_EL1`), drives the audited `spawn_image` + `admit_process`, and is
+  installed via `BootInfo::with_spawn`; the kernel `build.rs` now embeds both
+  `init` and the `Shell` session program through one `elf2rxe` helper. PID 1
+  `init` (granted `CAP_PROC_SPAWN`) spawns `config.session()`
+  (`/Apps/Shell.app/Run`) through `rustos_rt::spawn` and keeps running; the
+  `tests/integration/spawn_session_qemu_aarch64` vertical proves both
+  processes run on `-M virt` (PASS on two `ProcessSpawned` + three audited
+  syscalls — the session's gated banner+exit is necessarily last).
+- **P6e — real shell REPL + session supervision `[ ]`.** The `session`
+  program `init` launches is currently a banner+exit `Run` stub in the
+  `Shell` bundle; P6e wires the existing `rustos-shell` interpreter library
+  into it (a real REPL over the console) and has `init` supervise the
+  session across its lifetime (restart, reap).
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
 `init` emits its first line on the console (framebuffer if present, else

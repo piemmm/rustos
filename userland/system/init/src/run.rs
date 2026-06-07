@@ -43,6 +43,12 @@ mod program {
     /// well-formed, so reaching this is a build defect, not a runtime input.
     const EXIT_CONFIG_INVALID: i32 = 70;
 
+    /// Exit code when launching the session program failed — the `spawn`
+    /// syscall returned a negative `-errno`. A reserved, fail-closed value
+    /// (`AGENTS.md` §2.9) distinct from [`EXIT_CONFIG_INVALID`] so the cause
+    /// is unambiguous in the audit transcript.
+    const EXIT_SESSION_FAILED: i32 = 71;
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -59,15 +65,17 @@ mod program {
     /// (`AGENTS.md` §2.9). This is a terminal park, not a retry loop
     /// (`AGENTS.md` §2.1).
     ///
-    /// The config also names the session program `init` will launch; spawning
-    /// it needs the process-spawn syscall (`plans/PI.md` P6d) and a shell
-    /// (P6e), neither of which exists yet. Until then `init`'s P6b job is to
-    /// reach user mode and prove the console write path, so the session path
-    /// is only validated as parsed, not launched.
+    /// The config also names the session program `init` launches: after the
+    /// banner lands, PID 1 spawns it through the `spawn` syscall
+    /// (`plans/SPAWN.md` SP3) as a separate, hardware-isolated process that
+    /// runs concurrently — a true spawn, not an `exec`-style hand-off, so
+    /// PID 1 keeps running. `spawn` returns the child's PID (`≥ 0`) or a
+    /// negative `-errno`; a failed spawn is fail-loud, not ignored
+    /// ([`EXIT_SESSION_FAILED`], `AGENTS.md` §2.9). Supervising the session
+    /// across its lifetime (restart, reap) is `plans/PI.md` P6e.
     fn main() -> i32 {
-        let config = match StartupConfig::parse(DEFAULT_CONFIG) {
-            Ok(config) => config,
-            Err(_) => return EXIT_CONFIG_INVALID,
+        let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
+            return EXIT_CONFIG_INVALID;
         };
         let banner = BANNER.as_bytes();
         if rustos_rt::console_write(banner) != banner.len() {
@@ -75,9 +83,13 @@ mod program {
                 core::hint::spin_loop();
             }
         }
-        // P6d/P6e will spawn this program as the user's session; for now its
-        // presence is what the parse guarantees.
-        let _session = config.session();
+        // Launch the user's session as a concurrent, isolated process. A
+        // negative result is a failed spawn (an unknown path, an unwired
+        // spawn subsystem, a build failure); surface it as a distinct,
+        // fail-closed exit code rather than pretending the system came up.
+        if rustos_rt::spawn(config.session().as_bytes()) < 0 {
+            return EXIT_SESSION_FAILED;
+        }
         EXIT_OK
     }
 

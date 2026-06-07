@@ -143,6 +143,25 @@ These are absolute. They override any local convenience.
     is alive. Removing the last consumer of a `lib/*` crate, a driver, or a
     syscall means removing the thing itself and updating §3 / §16.4 / `PLAN.md`
     accordingly.
+15. **No work is "done" until the validation gate is green.** Every piece of
+    work — a feature, a bug fix, a refactor, a docs-only change, a plan
+    update, anything that touches the tree — MUST end by running the full
+    validation pipeline over the **entire** workspace and seeing it pass
+    before it is reported, submitted, merged, or marked complete. This is not
+    optional and has no "trivial change" exemption.
+    - The gate is the §7 "Definition of done" sequence, run from the
+      repository root and never scoped to a single crate with `-p`:
+      `cargo fmt --all` (verified with `cargo fmt --all --check`), the full
+      `cargo xtask ci` pull-request pipeline, the `cargo xtask fuzz --secs 5`
+      run, and anything else `.github/workflows/ci.yml` exercises (§7, §15.6).
+    - "Done" means a **green** gate. A change that compiles, or whose touched
+      crate alone tests clean, is **not** done. The actual command output is
+      quoted in the completion report (§7, §23.4).
+    - Any failure the gate surfaces — in code you touched or anywhere else —
+      is fixed or reverted in the same change before the work is done.
+      "Pre-existing" and "out of scope" are not exits (§2.5, §7).
+    - Skipping, deferring ("CI will catch it"), faking, or partially running
+      the gate is a §2.1 hack and a review blocker (§15.3, §15.6).
 
 ---
 

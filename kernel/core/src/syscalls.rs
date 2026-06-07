@@ -1118,6 +1118,9 @@ where
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
         console: &'static (dyn ConsoleWrite + 'static),
+        frames: &'a FrameAllocator,
+        programs: &'static ProgramRegistry,
+        spawn_service: &'static (dyn ProcessSpawn + 'static),
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -1131,7 +1134,9 @@ where
                 aspaces,
                 rng,
             )
-            .with_console(console),
+            .with_console(console)
+            .with_frames(frames)
+            .with_spawn(programs, spawn_service),
             sched,
             caps,
             arch,

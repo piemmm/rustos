@@ -71,6 +71,9 @@ const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
 /// `yield` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 
+/// `spawn` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -133,6 +136,35 @@ pub fn yield_now() {
     }
 }
 
+/// Spawn the embedded program registered under the absolute `path` as a
+/// new, concurrently runnable process, returning its PID
+/// (`SyscallNumber::SPAWN`, `plans/SPAWN.md` SP3).
+///
+/// Requires `CAP_PROC_SPAWN`; the kernel validates the capability and the
+/// `(path, len)` pair against the caller's address space before reading it,
+/// resolves the path against the kernel's embedded-program registry, builds
+/// the child a fresh hardware-isolated address space, and admits it
+/// **Ready** — the caller keeps running (a true concurrent spawn, not an
+/// `exec`-style hand-off, `AGENTS.md` §4 / §5.4).
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: a non-negative value is the new PID, and a
+/// negative value is `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`). The wrapper surfaces that raw signed value so
+/// the caller decides how to react to a failed spawn — it adds no authority
+/// and hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
+pub fn spawn(path: &[u8]) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `(path, len)` against the caller's address space before touching it
+    // (`AGENTS.md` §5.4). `path` is a live shared `&[u8]` for the duration
+    // of the call, so the `(ptr, len)` pair denotes readable memory.
+    let ret = unsafe { raw_syscall(NUM_SPAWN, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -189,6 +221,31 @@ mod tests {
         let buffer = [0u8; 16];
         let (_, _) = capture(10, || {
             assert_eq!(console_write(&buffer), 10);
+        });
+    }
+
+    #[test]
+    fn spawn_marshals_path_pointer_and_len() {
+        let path = *b"/Apps/Shell.app/Run";
+        let (number, args) = capture(7, || {
+            assert_eq!(spawn(&path), 7);
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn spawn_surfaces_negative_errno_encoding() {
+        // `NotFound` (7) is encoded by the kernel as the two's-complement
+        // negation; the wrapper hands that signed value back unchanged. The
+        // register carries the raw bit pattern, so reinterpret rather than
+        // sign-loss-cast it.
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(spawn(b"/nope"), want);
         });
     }
 

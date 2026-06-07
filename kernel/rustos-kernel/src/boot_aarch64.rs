@@ -385,7 +385,15 @@ fn enter_kernel_core(
     // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s EL0 image and drop into user mode.
-    .with_init(&crate::init_spawn::AARCH64_INIT_SPAWN);
+    .with_init(&crate::init_spawn::AARCH64_INIT_SPAWN)
+    // Install the runtime `spawn` producer + embedded-program registry
+    // (`plans/SPAWN.md` SP3b): the `spawn` syscall resolves a path against
+    // the registry and drives the producer to build a fresh, isolated child
+    // address space, so PID 1 `init` can launch the user's session.
+    .with_spawn(
+        &crate::spawn_producer::AARCH64_PROGRAM_REGISTRY,
+        &crate::spawn_producer::AARCH64_PROCESS_SPAWN,
+    );
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

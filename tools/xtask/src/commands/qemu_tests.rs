@@ -1132,6 +1132,37 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP3b (`plans/SPAWN.md`):
+    // `rustos-test-spawn-session-qemu-aarch64` boots the *production*
+    // aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`) on the `virt`
+    // board with both the `InitSpawn` seam and the runtime `ProcessSpawn`
+    // producer + embedded-program registry installed. After `kernel_main`
+    // emits `BootCompleted` it spawns PID 1 `init` into EL0 (`ProcessSpawned`,
+    // `EventId(4030)` #1); `init` writes its banner and issues the audited
+    // `spawn` syscall (`SyscallInvoked`, `EventId(5000)` #1) for
+    // `/Apps/Shell.app/Run`. The producer builds the session a fresh,
+    // hardware-isolated address space through the capability-checked, audited
+    // spawn caller (`ProcessSpawned` #2) and admits it Ready — a true
+    // concurrent spawn, so `init` keeps running. `init` then exits
+    // (`SyscallInvoked` #2) and the cooperative drain loop steps the session,
+    // which writes its own gated banner and exits (`SyscallInvoked` #3). The
+    // audit sink reports PASS through the ARM semihosting finisher once it has
+    // seen two `ProcessSpawned` and three audited syscalls — proving the
+    // runtime spawn producer built a second, isolated, concurrently-runnable
+    // process that ran. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-spawn-session-qemu-aarch64",
+        binary: "rustos-test-spawn-session-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
     // vertical — the first proof that two **user** (EL0) tasks timeshare one
     // CPU under the live scheduler, on the `virt` board. It reads the GICv2

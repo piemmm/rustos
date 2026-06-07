@@ -9,6 +9,12 @@ agent). A stage is complete only when:
 - All listed documentation is written and links cleanly.
 - `AGENTS.md` rules have been observed (no hacks, no duplication, no
   weakened tests, no missing docs).
+- The `AGENTS.md` §2.15 validation gate has been run over the **entire**
+  workspace and is green: `cargo fmt --all`, the full `cargo xtask ci`
+  pipeline, `cargo xtask fuzz --secs 5`, and anything else
+  `.github/workflows/ci.yml` exercises (§7 "Definition of done"). No stage,
+  and no individual piece of work within it, is complete until this gate
+  passes; the actual command output is quoted in the completion report.
 
 Do **not** begin a stage before all its listed dependencies are complete.
 
@@ -1808,10 +1814,25 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `NULL_CONSOLE`) and the `spawn` handler that copies-in the
                   path, resolves it, and admits a **Ready** resumable user
                   kthread through `SpawnCtx::admit_process` (host-proven via
-                  a `ProcessSpawn` double; 8 new host tests). **SP3b** — the
-                  real aarch64 `ProcessSpawn` producer + registry population
-                  + the `-M virt` vertical — remains. **P6e** — minimal
-                  shell `init` launches.
+                  a `ProcessSpawn` double; 8 new host tests). **SP3b + SP4
+                  are now landed, so P6d is complete:** the real aarch64
+                  `ProcessSpawn` producer
+                  (`kernel/rustos-kernel/src/spawn_producer.rs`) builds each
+                  child a fresh, hardware-isolated 2 GiB-identity address
+                  space from a static `PageTablePool` reserve (without
+                  switching the spawning caller's `TTBR0_EL1`), drives the
+                  audited `spawn_image` + `admit_process`, and is installed
+                  via `BootInfo::with_spawn`; the kernel `build.rs` now embeds
+                  both `init` and the `Shell` session program through one
+                  `elf2rxe` helper, registered under `/Apps/Shell.app/Run`.
+                  PID 1 `init` (granted `CAP_PROC_SPAWN`) spawns
+                  `config.session()` via `rustos_rt::spawn` and keeps running;
+                  `tests/integration/spawn_session_qemu_aarch64` proves both
+                  processes run on `-M virt` (PASS on two `ProcessSpawned` +
+                  three audited syscalls, the session's gated banner+exit
+                  necessarily last). **P6e** — wire the `rustos-shell`
+                  interpreter REPL into the session stub + `init` session
+                  supervision — remains.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

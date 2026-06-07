@@ -133,6 +133,16 @@ pub mod boot_aarch64;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub mod init_spawn;
 
+// The aarch64 runtime `spawn` producer + embedded-program registry
+// (`plans/SPAWN.md` SP3b): the `rustos_kernel_core::ProcessSpawn`
+// implementation `boot_aarch64` installs into the `BootInfo` hand-off so the
+// `spawn` syscall can build a fresh, hardware-isolated child address space
+// and admit it Ready. Freestanding+aarch64-only: it links the aarch64 port's
+// page-table / `EnterUser` primitives and `include!`s the build-time `Shell`
+// `rxe` blob.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub mod spawn_producer;
+
 // The aarch64 `/memory` → `BootMemoryMap` translation (`plans/PI.md`
 // P6c-1). The arithmetic is free of the bare-metal-only aarch64 port, so
 // it compiles — and its bounds-check unit tests run — on the CI host

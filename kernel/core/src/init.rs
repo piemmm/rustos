@@ -467,6 +467,8 @@ fn run_phases<A: KernelArch>(
         arch,
         dispatcher_callback_slot,
         console,
+        programs,
+        spawn_service,
         ..
     } = boot;
 
@@ -571,6 +573,9 @@ fn run_phases<A: KernelArch>(
             &state.aspaces,
             &state.rng,
             console,
+            &state.frame_allocator,
+            programs,
+            spawn_service,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)

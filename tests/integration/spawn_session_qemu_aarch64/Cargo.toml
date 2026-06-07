@@ -1,0 +1,48 @@
+[package]
+name = "rustos-test-spawn-session-qemu-aarch64"
+description = "QEMU integration test (plans/SPAWN.md SP3b): boot the aarch64 rustos-kernel pipeline on the virt board, spawn PID 1 (init) into EL0, have init launch the embedded Shell session program through the spawn syscall, and report PASS via ARM semihosting once both processes have been built and the session has run its banner and exited — proving the runtime spawn producer builds a second, hardware-isolated, concurrently-runnable process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the aarch64 kernel pipeline, spawn PID 1, and let PID 1
+# spawn the session" integration test — the runtime proof of
+# `plans/SPAWN.md` SP3b. It reuses the production aarch64 boot pipeline
+# through `rustos-kernel`'s library half (`boot_aarch64::boot`), which
+# installs both the `InitSpawn` seam and the runtime `ProcessSpawn` producer
+# + embedded-program registry into the `BootInfo` hand-off. After
+# `kernel_core::kernel_main` emits `AuditEvent::BootCompleted` it spawns PID 1
+# `init`, which writes its banner and then spawns `/Apps/Shell.app/Run`
+# through the `spawn` syscall; the producer builds the session a fresh,
+# isolated address space and admits it Ready, and both processes run. This
+# bin only swaps the audit sink: observing two `ProcessSpawned` (4030) and
+# three audited syscalls (5000) — `init`'s spawn, `init`'s exit, and the
+# session's gated exit — flips `qemu_exit::exit_success`. Keeping the
+# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a production
+# crate) prevents feature unification from leaking it into any production
+# build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-spawn-session-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The production aarch64 boot pipeline (with the `InitSpawn` seam and the
+# runtime `ProcessSpawn` producer) lives in `rustos-kernel`'s library half;
+# this vertical reuses it verbatim and only swaps the audit sink
+# (`AGENTS.md` §2.2 — no duplication).
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+# The boot heap the `kernel_core::kernel_main` allocations (the leaked
+# `KernelState`, the scheduler, the spawned address spaces) draw from.
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
