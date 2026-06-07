@@ -211,22 +211,35 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   project DoD green: `cargo xtask ci` (incl. `test --qemu`), `fuzz
   --secs 5`, and `tools/ci/soak.sh both` all pass.
 
-#### SP2b — aarch64: enter EL0 as a user kthread + wire the producer `[ ]`
+#### SP2b — aarch64: enter EL0 as a user kthread + wire the producer `[x]`
 
-- An aarch64 `activate_user_root(root_phys)` primitive (MMU already on:
-  reprogram `TTBR0_EL1` + `tlbi`/`isb`) so a user kthread's `pre_resume`
-  hook (capturing only the `u64` root — keeps the runtime `Send`)
-  reactivates its address space before each `eret`.
-- Re-express the aarch64 user-task entry so PID 1 (and test EL0 tasks) are
-  `spawn_user_kthread` tasks whose work diverges into EL0 via
-  `EnterUser::enter_user`.
-- Make the **producer**: the `KernelDispatchHook` maps the `yield`/`exit`
-  syscalls to `DispatchOutcome::Reschedule` (the `yield_now`/`exit`
-  handlers stop driving the scheduler's re-enqueue/reap directly — the
-  kthread `TaskAction` returned by `dispatch_step` is authoritative —
-  reconciling the double-handling the SP2a design note flagged). Thread
-  the reschedule result through the aarch64 trap callback so the trap path
-  calls `reschedule_current` instead of ereting on a rescheduling syscall.
+**Done.** PID 1 now reaches EL0 as a resumable user kthread, and the
+producer is wired arch-neutrally:
+
+- `kernel/arch/aarch64/src/paging.rs` gained `activate_user_root(root_phys:
+  u64)` (MMU already on: `msr TTBR0_EL1` + `dsb`/`tlbi vmalle1`/`dsb`/`isb`),
+  with a host no-op `cfg` arm. It takes only the `u64` root, so the
+  `pre_resume` hook stays `Send`.
+- `KernelArch` (`kernel/core`) grew an associated `type Cs: ContextSwitch +
+  Copy + Send + 'static` + `context_switch()` accessor; all three bin
+  wrappers (`Aarch64BinArch`, x86_64 `BinArch`, riscv64 `RiscvBinArch`) and
+  the host `TestArch` (new `TestContextSwitch` double) implement it.
+- `InitSpawnCtx::admit_init` now takes a boxed `pre_resume` hook alongside
+  `enter` and admits PID 1 via `spawn_user_kthread` (own kernel stack);
+  `kernel_main` drains the boot CPU's run queue until no task is live, then
+  halts. The aarch64 `init_spawn` seam builds the `pre_resume` hook over the
+  captured `init_root_phys` (`activate_user_root`).
+- Producer: `KernelDispatchHook::dispatch` maps `yield`/`exit` to
+  `DispatchOutcome::Reschedule { result, action, cpu }` (via the new
+  `reschedule_action_for`); the `yield_now`/`exit` handlers no longer drive
+  the scheduler (`exit` keeps only the IRQ/caps cleanup), reconciling the
+  double-handling. The bin-side `dispatch_via_slot` already calls
+  `reschedule_current`, so the aarch64 trap callback needed no change.
+- Whole-project DoD green: `cargo fmt --all --check`, `cargo xtask ci`,
+  `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both --secs 10`, and the
+  full `cargo xtask test --qemu` matrix (49 verticals, incl.
+  `spawn-init-qemu-aarch64` reaching EL0 through the production hook +
+  producer and all three `kthread-switch` verticals).
 
 #### SP2c — `-M virt` EL0↔EL0 timeshare vertical `[ ]`
 

@@ -38,6 +38,7 @@
 use alloc::sync::Arc;
 
 use rustos_arch_api::{CpuId, SchedulerArch};
+use rustos_arch_riscv64::context_hal::ContextSwitchHal;
 use rustos_arch_riscv64::fdt::Fdt;
 use rustos_arch_riscv64::{halt_current_hart, RiscvArch};
 use rustos_kernel_core::{kernel_main, BootInfo, DispatchCallbackSlot, KernelArch};
@@ -112,6 +113,12 @@ impl SchedulerArch for RiscvBinArch {
 }
 
 impl KernelArch for RiscvBinArch {
+    type Cs = ContextSwitchHal;
+
+    fn context_switch(&self) -> Self::Cs {
+        ContextSwitchHal::new()
+    }
+
     fn halt(&self) -> ! {
         halt_current_hart()
     }

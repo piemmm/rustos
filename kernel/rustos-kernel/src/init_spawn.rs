@@ -30,7 +30,9 @@ use alloc::boxed::Box;
 
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery};
-use rustos_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
+use rustos_arch_aarch64::paging::{
+    activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
+};
 use rustos_arch_aarch64::userentry::UserMode;
 use rustos_arch_api::EnterUser;
 use rustos_caps::CapabilitySet;
@@ -134,6 +136,11 @@ impl InitSpawn for Aarch64InitSpawn {
         else {
             return;
         };
+        // Capture PID 1's stage-1 root before the arch space is moved into
+        // the `kernel/mem` wrapper, so the `pre_resume` hook can reactivate
+        // `TTBR0_EL1` with it before every switch into PID 1 (`plans/SPAWN.md`
+        // SP2). It is a plain `u64`, so the boxed hook stays `Send`.
+        let init_root_phys = arch.root_phys();
         // SAFETY: the identity map covers the kernel's current `pc`, `sp`,
         // the leaked kernel state, the boot heap, and the device MMIO (all
         // within `[0, 2 GiB)` on the proving-ground board), so enabling it
@@ -200,6 +207,20 @@ impl InitSpawn for Aarch64InitSpawn {
             unsafe { user_mode.enter_user(entry) }
         });
 
+        // PID 1's user-address-space reactivation hook (`plans/SPAWN.md`
+        // SP2): the core runs it on the dispatcher's context immediately
+        // before every switch into PID 1, so the task `eret`s back into EL0
+        // under its own `TTBR0_EL1` root and stays isolated from any sibling
+        // process (`AGENTS.md` §4). It captures only the `u64` root, so it is
+        // `Send`.
+        let pre_resume: Box<dyn FnMut() + Send> = Box::new(move || {
+            // SAFETY: the MMU is already enabled and `init_root_phys` is the
+            // L1 root of PID 1's space, which identity-maps the low kernel
+            // window the running kernel executes from — exactly
+            // `activate_user_root`'s contract.
+            unsafe { activate_user_root(init_root_phys) };
+        });
+
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry
         // holds (the live arch `space` is not `Sync`), and box the direct
@@ -217,7 +238,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // `InitSpawnCtx::admit_init` contract; `frozen` faithfully describes
         // the active mappings and `physmap` backs them.
         unsafe {
-            ctx.admit_init(init_caps(), frozen, physmap, enter);
+            ctx.admit_init(init_caps(), frozen, physmap, pre_resume, enter);
         }
     }
 }

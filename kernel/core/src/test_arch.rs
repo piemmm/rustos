@@ -22,9 +22,56 @@ extern crate std;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use rustos_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+
 use crate::sched::{CpuId, SchedulerArch};
 
 use crate::bootinfo::KernelArch;
+
+/// Frame size the [`TestContextSwitch`] double reserves when seeding a
+/// task's first frame — below the kthread test stacks but above the
+/// 16-byte too-small probe, matching the `kernel/arch/api` conformance
+/// double.
+const TEST_FRAME_BYTES: u64 = 64;
+
+/// Host-only [`ContextSwitch`] double backing [`TestArch`]'s
+/// [`KernelArch::Cs`].
+///
+/// `prepare` honours the same fail-closed contract a real port owes (it
+/// rejects a null, misaligned, or too-small `stack_top`) so the
+/// user-kthread admission path can be exercised on the host; `switch` is
+/// never reached under `cargo test` (the host never enters EL0), so its
+/// body is empty — exactly the `kernel/arch/api` `conformance` precedent.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TestContextSwitch;
+
+impl ContextSwitch for TestContextSwitch {
+    fn prepare(
+        &self,
+        ctx: &mut TaskContext,
+        stack_top: u64,
+        _entry: TaskEntry,
+        _arg: usize,
+    ) -> Result<(), PrepareError> {
+        if stack_top == 0 {
+            return Err(PrepareError::NullStack);
+        }
+        if stack_top % 16 != 0 {
+            return Err(PrepareError::Misaligned);
+        }
+        if stack_top < TEST_FRAME_BYTES {
+            return Err(PrepareError::TooSmall);
+        }
+        ctx.stack_pointer = stack_top - TEST_FRAME_BYTES;
+        Ok(())
+    }
+
+    unsafe fn switch(&self, _prev: *mut TaskContext, _next: *mut TaskContext) {
+        // The host never switches into an EL0 task; the bare-metal ports'
+        // QEMU verticals exercise the real switch (`AGENTS.md` §1 — no
+        // fake primitive).
+    }
+}
 
 /// Sentinel panic message produced by [`TestArch::halt`].
 ///
@@ -121,6 +168,12 @@ impl SchedulerArch for TestArch {
 }
 
 impl KernelArch for TestArch {
+    type Cs = TestContextSwitch;
+
+    fn context_switch(&self) -> Self::Cs {
+        TestContextSwitch
+    }
+
     fn halt(&self) -> ! {
         self.halts.fetch_add(1, Ordering::Relaxed);
         // SAFETY-INVARIANT: `halt` must not return on production ports;

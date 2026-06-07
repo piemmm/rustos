@@ -100,17 +100,27 @@ pub trait InitSpawnCtx {
     /// Register the freshly built PID 1 with the scheduler (so
     /// `current_task` resolves the caller on its first syscall) and the
     /// capability table (`caps`, the effective set the manifest∩user grant
-    /// produced), then dispatch it — running `enter`, which must transfer
-    /// control to EL0 and not return.
+    /// produced), then dispatch it as a **resumable user kthread**
+    /// (`plans/SPAWN.md` SP2): PID 1 runs on its own kernel stack, `enter`
+    /// diverges it into EL0, and its rescheduling syscalls (`yield`/`exit`)
+    /// suspend it back to the scheduler through the Arch-HAL context-switch
+    /// slice. `kernel_main` drains the boot CPU's run queue until PID 1
+    /// (and anything it spawns) has exited, then halts fail-closed.
     ///
     /// `enter` is the arch-specific user-mode transition boxed as a
     /// `FnMut()`: `EnterUser::enter_user` diverges, so the closure never
     /// truly returns (its `!` coerces to `()`); modelling it as `FnMut()`
-    /// keeps this boundary free of a `dyn FnMut() -> !` bound. The task is
-    /// dispatched on the boot CPU; on the authorised path the call
-    /// diverges into the new program. It returns only if the task could
-    /// not be admitted, so the seam (and then `kernel_main`) halts
-    /// fail-closed (`AGENTS.md` §2.9).
+    /// keeps this boundary free of a `dyn FnMut() -> !` bound. It becomes
+    /// the kthread's work body, invoked once on the task's first dispatch.
+    ///
+    /// `pre_resume` is the arch-specific user-address-space reactivation
+    /// hook (`plans/SPAWN.md` SP2): the runtime calls it on the
+    /// dispatcher's context immediately before every switch into PID 1, so
+    /// the task `eret`s back into EL0 under its own page-table root and
+    /// stays hardware-isolated from any sibling process (`AGENTS.md` §4).
+    /// It captures only the arch root word, so it is `Send`. Its presence
+    /// also enrols PID 1 in the per-CPU resume table so its trap path can
+    /// suspend it.
     ///
     /// `space` is the registry-storable, `Send + Sync` snapshot of PID 1's
     /// user mappings (an arch port's *live* `AddressSpace` is not `Sync`
@@ -136,6 +146,7 @@ pub trait InitSpawnCtx {
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        pre_resume: Box<dyn FnMut() + Send>,
         enter: Box<dyn FnMut() + Send>,
     );
 }

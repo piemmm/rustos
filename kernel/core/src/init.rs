@@ -31,7 +31,7 @@ use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
-use rustos_kernel_sched_api::{Priority, TaskAction, TaskContext};
+use rustos_kernel_sched_api::{Priority, StepOutcome};
 use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
 use rustos_sync::RwLock;
@@ -352,20 +352,34 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        pre_resume: Box<dyn FnMut() + Send>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
 
-        // Admit PID 1 with a body that performs the user-mode transition.
-        // `enter` diverges into EL0, so the body never reaches the trailing
-        // `TaskAction::Exit` — it is the unreachable lifecycle fallback that
-        // satisfies the `FnMut(&mut TaskContext) -> TaskAction` signature
-        // for the (impossible) case the transition ever returned.
-        let body = move |_ctx: &mut TaskContext| -> TaskAction {
+        // Admit PID 1 as a resumable **user kthread** (`plans/SPAWN.md`
+        // SP2): the work body performs the user-mode transition on the
+        // task's own kernel stack, and the `pre_resume` hook reactivates
+        // PID 1's address-space root before every switch into it so it
+        // `eret`s back into EL0 under the correct translation regime.
+        // `enter` diverges into EL0, so the work never returns through the
+        // trampoline's terminal `Exit` — PID 1 leaves EL0 only through a
+        // rescheduling syscall (`yield`/`exit`), whose trap path suspends
+        // it back to the scheduler. The unit `()` the work yields satisfies
+        // the `FnMut(&mut Yielder<_>)` body signature for the (impossible)
+        // case the transition ever returned.
+        let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
             enter();
-            TaskAction::Exit
         };
-        let Ok(task_id) = self.scheduler.spawn(cpu, Priority::Normal, body) else {
+        let cs = self.arch.context_switch();
+        let Ok(task_id) = crate::kthread::spawn_user_kthread(
+            self.scheduler,
+            cs,
+            cpu,
+            Priority::Normal,
+            pre_resume,
+            work,
+        ) else {
             // The home queue could not admit the task — fail closed: return
             // so the seam (and then `kernel_main`) halts the CPU.
             return;
@@ -399,13 +413,28 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
             return;
         }
 
-        // Dispatch PID 1: `step` sets the per-CPU current task to it and
-        // runs the body, which transfers control to EL0 and does not return.
-        // SAFETY: the seam built the image into and switched to the active
-        // address space before calling here, and the EL1/trap vector is
-        // installed, so the new program's first syscall is handled (this
-        // method's contract).
-        let _ = self.scheduler.step(cpu);
+        // Drive PID 1 (and anything it spawns) to completion: each `step`
+        // dispatches the next runnable task on this CPU. The first step
+        // sets the per-CPU current task to PID 1, runs its `pre_resume`
+        // hook, and switches into it; control returns here when the task
+        // suspends through a rescheduling syscall (`yield`/`exit`) or its
+        // kernel stack could not seed a frame (fail-closed `Exit`). The
+        // loop stops once no task is live or the CPU idles, then returns so
+        // `kernel_main` halts fail-closed (`AGENTS.md` §2.9). A real
+        // session frontend that never exits is `plans/SPAWN.md` SP4.
+        //
+        // SAFETY: the seam built PID 1's image into and switched to the
+        // active address space before calling here, and the EL1/trap vector
+        // is installed, so the new program's first syscall is handled (this
+        // method's contract); the `pre_resume` hook keeps the correct root
+        // active across every later switch into a user kthread.
+        let _ = task_id;
+        loop {
+            match self.scheduler.step(cpu) {
+                Ok(StepOutcome::Ran(_)) if self.scheduler.live_task_count() > 0 => {}
+                Ok(_) | Err(_) => break,
+            }
+        }
     }
 }
 

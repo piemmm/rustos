@@ -20,6 +20,7 @@
 //! freestanding Stage-2 QEMU test bins.
 
 use rustos_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
+use rustos_arch_x86_64::context_hal::ContextSwitchHal;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_kernel_core::{IrqRouting, KernelArch};
 use rustos_kernel_irq::{IrqController, IrqTable};
@@ -251,6 +252,12 @@ impl SchedulerArch for BinArch {
 }
 
 impl KernelArch for BinArch {
+    type Cs = ContextSwitchHal;
+
+    fn context_switch(&self) -> Self::Cs {
+        ContextSwitchHal::new()
+    }
+
     fn halt(&self) -> ! {
         arch_halt()
     }

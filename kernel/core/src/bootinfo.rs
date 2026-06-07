@@ -24,6 +24,8 @@
 
 use alloc::sync::Arc;
 
+use rustos_arch_api::ContextSwitch;
+
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
 use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
 use rustos_kernel_mem::BootMemoryMap;
@@ -54,6 +56,29 @@ use crate::spawn::InitSpawn;
 /// * [`SchedulerArch::current_cpu`] returns the calling CPU's
 ///   identifier. Used by the panic handler when dumping context.
 pub trait KernelArch: SchedulerArch {
+    /// The Arch-HAL context-switch primitive (`AGENTS.md` §17.2 — the
+    /// "context switch" slice of the closed arch surface) this port
+    /// exposes.
+    ///
+    /// `kernel/core` reaches it through [`Self::context_switch`] to run a
+    /// user task as a *resumable kernel thread*: PID 1 (and every later
+    /// spawned process) is admitted with [`crate::spawn_user_kthread`],
+    /// whose work diverges into EL0 and whose syscall trap path suspends
+    /// it back to the scheduler through the same [`ContextSwitch::switch`]
+    /// (`plans/SPAWN.md` SP2). The handle is a zero-sized, `Copy` value on
+    /// every port — the per-task state lives in the
+    /// [`rustos_arch_api::TaskContext`] the runtime owns, not in the
+    /// handle — so it is cheap to hand to the runtime by value.
+    type Cs: ContextSwitch + Copy + Send + 'static;
+
+    /// Return this port's [context-switch handle](Self::Cs).
+    ///
+    /// Called when admitting a user kthread so the runtime can seed the
+    /// task's first kernel-stack frame and switch into/out of it
+    /// (`plans/SPAWN.md` SP2). The returned handle is stateless and
+    /// `Copy`, so a fresh value per call is equivalent to any other.
+    fn context_switch(&self) -> Self::Cs;
+
     /// Park the calling CPU forever.
     ///
     /// Called by the panic handler and by [`crate::kernel_main`] after

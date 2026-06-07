@@ -74,7 +74,9 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::{CapabilityId, Errno, IrqHandle, RandomFlags, RANDOM_REQUEST_MAX_BYTES};
+use rustos_abi::{
+    CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
+};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
@@ -94,7 +96,7 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleWrite, NULL_CONSOLE};
-use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
+use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::random::{reserve_errno, RandomReserve};
 
 /// Production [`SyscallHandlers`] implementation.
@@ -329,26 +331,21 @@ impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
     A: KernelArch + 'static,
 {
-    fn yield_now(&self, caller: &CallerContext<'_>) -> SyscallResult {
-        // The dispatcher hands us the caller's `sec::TaskId`; the
-        // scheduler's own `TaskId` is a transparent `u64`, so the
-        // bridge is one field access. The `Scheduler::yield_current`
-        // contract maps every error to a stable `Errno`:
-        //
-        // * `NoSuchTask` — the dispatcher walked a stale `CallerContext`
-        //   (shouldn't happen: `KernelState` removes the caps record
-        //   only after `Scheduler::exit`). Surface as `NotFound`.
-        // * `InvalidState` — the task was not `Running`; this can
-        //   legitimately happen if a sibling CPU parked it between
-        //   `current_task` and `yield_current`. Surface as `OutOfRange`
-        //   — the closest stable variant that means "the operation
-        //   was inapplicable to the current state" without
-        //   over-promising `PermissionDenied`.
-        match self.sched.yield_current(caller.task_id.0) {
-            Ok(()) => Ok(0),
-            Err(crate::sched::SchedError::NoSuchTask) => Err(Errno::NotFound),
-            Err(_) => Err(Errno::OutOfRange),
-        }
+    fn yield_now(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        // SP2b (`plans/SPAWN.md` SP2): a `yield` from a resumable user
+        // kthread is driven by the reschedule path, not here. The
+        // dispatch hook recognises the `yield` syscall number and returns
+        // `DispatchOutcome::Reschedule { action: Yield, .. }`; the
+        // bin-crate callback then suspends the caller back to the
+        // scheduler, which re-enqueues it from the `TaskAction::Yield` the
+        // kthread reports when it switches back. Driving
+        // `Scheduler::yield_current` here as well would double-handle the
+        // re-enqueue — and, fatally, mutate scheduler state re-entrantly
+        // from inside the in-flight `step` the kthread is running under
+        // (the SP2a note's reconciliation). The handler is therefore inert
+        // and always reports success; the value is encoded only on the
+        // (degenerate) path where no user kthread is published.
+        Ok(0)
     }
 
     fn exit(&self, caller: &CallerContext<'_>, _code: i32) -> SyscallResult {
@@ -369,20 +366,30 @@ where
         //      `cap_query` racing this `exit` cannot observe a task
         //      that the scheduler still believes exists but whose
         //      caps have vanished.
-        //   3. Mark the task exited in the scheduler.
         //
-        // Each step is idempotent; the call ordering matters for
+        // The scheduler reap is step 3, driven by the reschedule path
+        // below rather than from this handler. Each step is idempotent;
+        // the call ordering matters for
         // the *security* observer (no caller can hold an audited
         // capability bit after the IRQ subsystem has released the
         // task's bindings).
+        //
+        // SP2b (`plans/SPAWN.md` SP2): the scheduler reap itself is driven
+        // by the reschedule path, not here — the dispatch hook returns
+        // `DispatchOutcome::Reschedule { action: Exit, .. }` and the
+        // bin-crate callback suspends the caller, after which the kthread
+        // reports `TaskAction::Exit` and the scheduler reaps it. Calling
+        // `Scheduler::exit` here as well would mutate scheduler state
+        // re-entrantly from inside the in-flight `step` the exiting
+        // kthread runs under. This handler keeps only the security-state
+        // cleanup the reschedule path does not perform (IRQ bindings,
+        // capability record); both are idempotent and ordered so no caller
+        // can hold an audited capability bit after the IRQ subsystem has
+        // released the task's bindings.
         let task = caller.task_id;
         let _ = self.irq.release_for(task);
         let _ = self.caps.write().remove(task);
-        match self.sched.exit(task.0) {
-            Ok(()) => Ok(0),
-            Err(SchedError::NoSuchTask) => Err(Errno::NotFound),
-            Err(_) => Err(Errno::OutOfRange),
-        }
+        Ok(0)
     }
 
     fn ipc_send(
@@ -979,7 +986,45 @@ where
         // capability check, argument validation, handler dispatch,
         // and audit emission.
         let dispatcher = Dispatcher::new(&self.handlers, self.audit);
-        DispatchOutcome::Returned(dispatcher.dispatch(&caller, raw_number, args))
+        let result = dispatcher.dispatch(&caller, raw_number, args);
+
+        // SP2b producer (`plans/SPAWN.md` SP2): a rescheduling syscall from
+        // a resumable user kthread must suspend its caller back to the
+        // scheduler rather than `eret` straight back into EL0 — the kthread
+        // `TaskAction` the scheduler observes when the task switches back is
+        // authoritative for the re-enqueue/reap, so the `yield_now`/`exit`
+        // handlers no longer drive the scheduler directly (reconciling the
+        // double-handling the SP2a note flagged). The bin-crate callback
+        // turns this into a `reschedule_current` call; if no user kthread is
+        // published on this CPU it falls back to an ordinary encoded return
+        // (fail closed — `crate::dispatch_slot::DispatchOutcome::Reschedule`).
+        if let Some(action) = reschedule_action_for(raw_number) {
+            return DispatchOutcome::Reschedule {
+                result,
+                action,
+                cpu,
+            };
+        }
+        DispatchOutcome::Returned(result)
+    }
+}
+
+/// Map a rescheduling syscall number to the [`RescheduleAction`] its
+/// caller must be suspended with, or `None` for an ordinary syscall that
+/// returns straight to user space (`plans/SPAWN.md` SP2).
+///
+/// `yield` re-enqueues the caller; `exit` reaps it. Every other syscall
+/// (`console_write`, `ipc_*`, `cap_*`, `clock_get`, `irq_*`, `random_get`)
+/// returns to the same EL0 task without a context switch, so it is `None`.
+/// This is the single place the dispatch path names the rescheduling
+/// syscalls (`AGENTS.md` §2.2).
+fn reschedule_action_for(raw_number: u16) -> Option<RescheduleAction> {
+    if raw_number == SyscallNumber::YIELD.as_u16() {
+        Some(RescheduleAction::Yield)
+    } else if raw_number == SyscallNumber::EXIT.as_u16() {
+        Some(RescheduleAction::Exit)
+    } else {
+        None
     }
 }
 
@@ -1105,9 +1150,15 @@ mod tests {
         );
     }
 
-    /// `yield_now` against an unknown task surfaces `NotFound`.
+    /// `SP2b` (`plans/SPAWN.md` SP2): the `yield_now` handler is inert
+    /// toward the scheduler — the reschedule path (driven from the
+    /// dispatch hook by the `yield` syscall number) re-enqueues the
+    /// caller from the kthread `TaskAction`, so the handler always reports
+    /// success and never touches `Scheduler::yield_current`. Driving the
+    /// scheduler here would double-handle (and re-entrantly mutate) the
+    /// in-flight `step` the kthread runs under.
     #[test]
-    fn yield_now_unknown_task_returns_not_found() {
+    fn yield_now_is_inert_and_reports_success() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -1127,12 +1178,18 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.yield_now(&ctx), Err(Errno::NotFound));
+        // Even for a task the scheduler never admitted, the handler is a
+        // no-op success: the reschedule path is authoritative.
+        assert_eq!(h.yield_now(&ctx), Ok(0));
     }
 
-    /// `exit` removes the capability record and forwards to scheduler.
+    /// `SP2b` (`plans/SPAWN.md` SP2): the `exit` handler keeps only the
+    /// security-state cleanup (evicting the capability record; releasing
+    /// IRQ bindings) and reports success — the scheduler reap is driven by
+    /// the reschedule path, not from this handler. It evicts the caps
+    /// record even when the scheduler never admitted the task.
     #[test]
-    fn exit_clears_caps_record_and_returns_not_found_on_unknown_task() {
+    fn exit_clears_caps_record_and_reports_success() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -1160,10 +1217,48 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         let r = h.exit(&ctx, 0);
-        // Scheduler half returns `NoSuchTask` → `NotFound`.
-        assert_eq!(r, Err(Errno::NotFound));
-        // The capability record was evicted regardless.
+        // The handler no longer drives the scheduler, so it reports
+        // success; the reschedule path reaps the task.
+        assert_eq!(r, Ok(0));
+        // The capability record was evicted as part of the security
+        // cleanup the reschedule path does not perform.
         assert!(table.read().is_empty());
+    }
+
+    /// `SP2b` (`plans/SPAWN.md` SP2): the producer maps exactly the two
+    /// rescheduling syscalls (`yield`, `exit`) onto a `RescheduleAction`
+    /// and leaves every other syscall as an ordinary return. This is the
+    /// single decision point the dispatch hook consults before turning a
+    /// completed syscall into `DispatchOutcome::Reschedule`.
+    #[test]
+    fn reschedule_action_for_maps_only_yield_and_exit() {
+        assert_eq!(
+            reschedule_action_for(SyscallNumber::YIELD.as_u16()),
+            Some(RescheduleAction::Yield)
+        );
+        assert_eq!(
+            reschedule_action_for(SyscallNumber::EXIT.as_u16()),
+            Some(RescheduleAction::Exit)
+        );
+        // Every non-rescheduling syscall returns straight to EL0.
+        for n in [
+            SyscallNumber::IPC_SEND,
+            SyscallNumber::IPC_RECV,
+            SyscallNumber::CAP_QUERY,
+            SyscallNumber::CAP_DELEGATE,
+            SyscallNumber::CAP_REVOKE,
+            SyscallNumber::CLOCK_GET,
+            SyscallNumber::IRQ_BIND,
+            SyscallNumber::IRQ_WAIT,
+            SyscallNumber::RANDOM_GET,
+            SyscallNumber::CONSOLE_WRITE,
+        ] {
+            assert_eq!(
+                reschedule_action_for(n.as_u16()),
+                None,
+                "{n:?} must return to user space without a reschedule"
+            );
+        }
     }
 
     /// `cap_query` returns 1 for a held capability and 0 otherwise.

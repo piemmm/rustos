@@ -677,6 +677,63 @@ pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
     }
 }
 
+/// Reactivate `root_phys` as the active stage-1 EL1&0 translation root
+/// (reprogram `TTBR0_EL1`) on a CPU whose MMU is already enabled.
+///
+/// This is the SP2b user-kthread `pre_resume` primitive (`plans/SPAWN.md`
+/// SP2): immediately before the kernel `eret`s back into a user task's
+/// EL0, that task's own page-table root must be installed so its
+/// translations — and only its — are in force, keeping sibling processes
+/// hardware-isolated (`AGENTS.md` §4). It takes only the `u64` root, so
+/// the per-task hook that calls it captures a plain word and stays `Send`.
+///
+/// Unlike [`AddressSpace::switch`] this does **not** touch `MAIR_EL1` /
+/// `TCR_EL1` / `SCTLR_EL1.M`: the MMU is already on with the boot
+/// translation controls in force, and only the low (`TTBR0_EL1`)
+/// translation regime changes between user spaces.
+///
+/// # Safety
+///
+/// The MMU must already be enabled, and the L1 table at `root_phys` must
+/// map the currently-executing kernel `pc`, `sp`, and the MMIO the code
+/// touches identically to the outgoing root — every RustOS user space
+/// identity-maps the low kernel window, so this holds for any task root,
+/// but a `root_phys` that does not faults the CPU on its next access.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    // SAFETY: writing `TTBR0_EL1` swaps the low translation regime; the
+    // `dsb`/`tlbi vmalle1`/`dsb`/`isb` sequence flushes the stale EL1&0
+    // entries and makes the new root in force before the next access. No
+    // memory is touched and no Rust spelling exists for these system
+    // registers. The caller's contract guarantees the new root covers the
+    // running kernel context.
+    unsafe {
+        core::arch::asm!(
+            "msr TTBR0_EL1, {ttbr}",
+            "dsb ish",
+            "tlbi vmalle1",
+            "dsb ish",
+            "isb",
+            ttbr = in(reg) root_phys,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: reprogramming `TTBR0_EL1` is meaningful only on the
+/// bare-metal aarch64 target. Never linked into a kernel image and never
+/// reached on the host (the QEMU verticals exercise the real switch).
+///
+/// # Safety
+///
+/// Carries the same contract as the bare-metal definition above (MMU
+/// enabled; `root_phys` maps the running kernel context), so the two
+/// `cfg` arms present one `unsafe` API. The host body is inert.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    let _ = root_phys;
+}
+
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
 // reference points at a freshly-alloc'd table from `frames` or at a
 // sibling recovered through the identity map, never a borrow of

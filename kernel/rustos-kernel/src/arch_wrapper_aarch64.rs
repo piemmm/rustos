@@ -22,6 +22,7 @@
 //! as the riscv64 boot consumer does. Wiring the GICv2 dispatcher into
 //! this surface is a later PI stage.
 
+use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
 use rustos_arch_api::{CpuId, SchedulerArch};
 use rustos_kernel_core::{ConsoleWrite, KernelArch};
@@ -68,6 +69,12 @@ impl SchedulerArch for Aarch64BinArch {
 }
 
 impl KernelArch for Aarch64BinArch {
+    type Cs = ContextSwitchHal;
+
+    fn context_switch(&self) -> Self::Cs {
+        ContextSwitchHal::new()
+    }
+
     fn halt(&self) -> ! {
         halt_current_cpu()
     }
