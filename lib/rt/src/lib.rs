@@ -68,6 +68,9 @@ const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;
 /// `console_write` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
 
+/// `yield` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -110,6 +113,24 @@ pub fn console_write(bytes: &[u8]) -> usize {
     // of the call, so the `(ptr, len)` pair denotes readable memory.
     let written = unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
     written as usize
+}
+
+/// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
+///
+/// A cooperative reschedule point: the kernel suspends the caller, runs
+/// another runnable task, and returns here when the caller is next
+/// dispatched. It requires no capability, takes no arguments, and returns
+/// nothing (`abi-v1` `yield` is `() -> ()`). A program that must let a
+/// sibling run — without a blocking syscall to wait on — calls this rather
+/// than spinning (`AGENTS.md` §2.1).
+pub fn yield_now() {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `yield` takes
+    // no arguments and no memory operand, so all six argument registers are
+    // zero; the kernel ignores its return value.
+    unsafe {
+        let _ = raw_syscall(NUM_YIELD, [0, 0, 0, 0, 0, 0]);
+    }
 }
 
 /// Define the program's entry point.
@@ -169,6 +190,13 @@ mod tests {
         let (_, _) = capture(10, || {
             assert_eq!(console_write(&buffer), 10);
         });
+    }
+
+    #[test]
+    fn yield_now_issues_the_yield_syscall_with_no_arguments() {
+        let (number, args) = capture(0, yield_now);
+        assert_eq!(number, NUM_YIELD);
+        assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

@@ -1132,6 +1132,35 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
+    // vertical — the first proof that two **user** (EL0) tasks timeshare one
+    // CPU under the live scheduler, on the `virt` board. It reads the GICv2
+    // base + timer rate from the embedded `virt` DTB (P3/P4), brings up the
+    // EL1 vectors + GICv2 (interrupts stay masked — dispatch is the cooperative
+    // `step` loop), and builds **two** hardware-isolated EL0 address spaces from
+    // the pure-Rust `rustos-test-el0-yielder` fixture (built PIE + converted to
+    // `rxe` by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`. It admits each as a resumable user kthread via
+    // `spawn_user_kthread` (its `pre_resume` hook reactivates that task's
+    // page-table root, §4) and drains the `step` loop; the dispatch callback
+    // maps each task's `yield`/`exit` `svc` to `reschedule_current`, suspending
+    // the running task back to the dispatcher exactly as the production callback
+    // does. PASS once both tasks yielded their full count and exited; a switch
+    // that never resumes stalls the drain and the harness times out (fail-loud,
+    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-el0-timeshare-qemu-aarch64",
+        binary: "rustos-test-spawn-el0-timeshare-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the

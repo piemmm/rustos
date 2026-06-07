@@ -508,8 +508,8 @@ on its own before the next.
   the live scheduler; SP2 resumable EL0 tasks that timeshare a CPU; SP3
   the `spawn` syscall #12 + embedded-program registry; SP4 `init` launches
   the `session` process — overlapping P6e). Each `SP`-stage lands green
-  over the whole project on its own. **SP0, SP1, SP2a, and SP2b are
-  landed:** the SP0 design note is
+  over the whole project on its own. **SP0, SP1, SP2a, SP2b, and SP2c are
+  landed, so SP2 is complete on aarch64:** the SP0 design note is
   `docs/src/architecture/multitasking.md`, and the `kernel/core::kthread`
   runtime (`spawn_kthread`, the `Yielder`, the per-task kernel stack) is
   host-tested and proven on `-M virt` by
@@ -526,8 +526,15 @@ on its own before the next.
   `KernelDispatchHook` producer maps `yield`/`exit` to a `Reschedule`
   outcome (the handlers no longer drive the scheduler directly). The
   production `spawn_init_qemu_aarch64` vertical reaches EL0 through that
-  full path. What remains is SP2c (the `-M virt` EL0↔EL0 timeshare
-  vertical) then SP3/SP4.
+  full path. **SP2c then proves two EL0 user tasks timeshare one CPU**:
+  the new `tests/integration/spawn_el0_timeshare_qemu_aarch64` vertical
+  builds two hardware-isolated EL0 address spaces from the pure-Rust
+  `rustos-test-el0-yielder` fixture (it links the new `rustos_rt::yield_now`
+  wrapper), admits each as a resumable user kthread via `spawn_user_kthread`,
+  and drains the cooperative `step` loop while a dispatch callback maps each
+  task's `yield`/`exit` to `reschedule_current` — verified green on `-M
+  virt`. What remains is SP3 (the `spawn` syscall #12 + embedded-program
+  registry) then SP4.
 - **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
   `userland/shell` program on the console; `init`'s startup config
   launches it as the user's session.

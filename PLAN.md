@@ -1771,8 +1771,33 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   on each arch; the x86_64 sibling fixed a latent
                   `TaskCtx::prepare` rdi-slot + stack-alignment bug exposed
                   by the first on-metal first-resume). **SP2** (resumable
-                  EL0 tasks) is next. **P6e** — minimal shell `init`
-                  launches.
+                  EL0 tasks, staged SP2a/SP2b/SP2c) is in progress:
+                  **SP2a** (the arch-neutral EL0-reschedule core —
+                  `DispatchOutcome::Reschedule` + `RescheduleAction`, the
+                  per-CPU `USER_RESUME` resume table + `reschedule_current`,
+                  and the `pre_resume` user-kthread hook on `dispatch_step`)
+                  and **SP2b** (aarch64 enters PID 1 into EL0 as a resumable
+                  user kthread — `spawn_user_kthread`, the
+                  `KernelArch::Cs`/`context_switch` Arch-HAL context-switch
+                  accessor, the `activate_user_root` `TTBR0_EL1`
+                  `pre_resume` hook, and the arch-neutral `yield`/`exit`
+                  reschedule producer that retires the double-handling so
+                  the `yield_now`/`exit` handlers no longer drive the
+                  scheduler; `kernel_main` now drains the boot CPU's run
+                  queue to completion), and **SP2c** (the `-M virt`
+                  EL0↔EL0 two-task timeshare vertical —
+                  `tests/integration/spawn_el0_timeshare_qemu_aarch64`
+                  builds two hardware-isolated EL0 address spaces from the
+                  pure-Rust `rustos-test-el0-yielder` fixture, which links
+                  the new `rustos_rt::yield_now` wrapper, admits each as a
+                  resumable user kthread via `spawn_user_kthread`, and
+                  drains the cooperative `step` loop while a dispatch
+                  callback maps each task's `yield`/`exit` to
+                  `reschedule_current`; PASS once both tasks yielded their
+                  full count and exited — **verified green on `-M virt`**)
+                  are landed, so **SP2 is complete on aarch64**. What
+                  remains is **SP3** (the `spawn` syscall + embedded-program
+                  registry). **P6e** — minimal shell `init` launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

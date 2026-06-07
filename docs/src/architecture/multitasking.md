@@ -124,7 +124,7 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   as a *user* kthread and what reactivates the task's address space so it
   `eret`s under the correct translation regime (§4).
 
-### Remaining EL0 wiring (SP2b/SP2c — planned)
+### EL0 wiring (SP2b — implemented)
 
 * **Per-arch address-space reactivation.** The `pre_resume` hook captures
   only the user page-table root (a `u64`, keeping the runtime `Send`) and
@@ -138,3 +138,17 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   the single authority for the scheduler re-enqueue/reap (the handlers stop
   driving it directly). A non-rescheduling syscall returns to the same task
   exactly as today.
+
+### Two EL0 tasks timeshare a CPU (SP2c — proven)
+
+The model is proven end to end on the aarch64 `virt` board by
+`tests/integration/spawn_el0_timeshare_qemu_aarch64`: it builds **two**
+hardware-isolated EL0 address spaces from a pure-Rust fixture program (which
+yields then exits through the `rustos_rt::yield_now` / `exit` wrappers),
+admits each as a resumable user kthread via `spawn_user_kthread`, and drives
+the cooperative `step` loop. Each task's `yield` / `exit` `svc` traps to a
+dispatch callback that calls `reschedule_current`, suspending the running
+task back to the dispatcher so the scheduler interleaves the two through real
+EL0→EL0 context switches — each switching back into its own page-table root
+via its `pre_resume` hook. The run passes once both tasks have yielded their
+full count and exited, with no task left live.

@@ -1310,6 +1310,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-el0-yielder"
+version = "0.0.0"
+dependencies = [
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-test-enter-user-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
@@ -1696,6 +1703,23 @@ dependencies = [
  "rustos-arch-x86_64",
  "rustos-itest-harness",
  "rustos-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "rustos-test-spawn-el0-timeshare-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
 ]
 
 [[package]]

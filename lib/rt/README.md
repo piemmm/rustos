@@ -52,4 +52,4 @@ compiled, unit-tested through the trap crate's injectable seam.
 
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
 exposed syscall-wrapper surface grows as RustOS programs need it; today it is
-`console_write` and `exit`.
+`console_write`, `yield_now`, and `exit`.

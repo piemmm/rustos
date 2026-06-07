@@ -1,0 +1,24 @@
+[package]
+name = "rustos-test-el0-yielder"
+description = "SPAWN stage SP2c fixture: a minimal, separately-linked pure-Rust EL0 program that yields a build-time-fixed number of times then exits 0, so the spawn_el0_timeshare vertical can prove two such programs timeshare one CPU under the live scheduler. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-el0-yielder"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`),
+# which exists solely for non-Rust programs (`AGENTS.md` §16.4). Only on the
+# three native Tier-1 targets (`target_os = "none"`); on the host it is an inert
+# stub so `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }

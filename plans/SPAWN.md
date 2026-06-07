@@ -163,7 +163,7 @@ vertical is QEMU-green on at least aarch64; x86_64 + riscv64 siblings land
 in the same stage or an immediately-following SP1 sibling increment so
 every bare-metal port has the runtime.
 
-### SP2 — EL0 tasks become resumable kernel threads `[ ]`
+### SP2 — EL0 tasks become resumable kernel threads `[x]`
 
 Bring EL0 into the SP1 model so two **user** tasks can timeshare the CPU.
 Like P6c, the work is too large for one safe landing, so it is staged
@@ -241,18 +241,44 @@ producer is wired arch-neutrally:
   `spawn-init-qemu-aarch64` reaching EL0 through the production hook +
   producer and all three `kthread-switch` verticals).
 
-#### SP2c — `-M virt` EL0↔EL0 timeshare vertical `[ ]`
+#### SP2c — `-M virt` EL0↔EL0 timeshare vertical `[x]`
 
-- A new `-M virt` vertical (mirrors `kthread_switch_qemu_aarch64` + the
-  `spawn_program` EL0 recipe): two EL0 tasks, each in its **own isolated
-  address space**, each `yield`ing N times then `exit`ing, drained by the
-  cooperative `step` loop — proving a real EL0→EL0 context switch under the
-  live scheduler. The memory-isolation invariant (§4) still holds.
+**Done.** The new `tests/integration/spawn_el0_timeshare_qemu_aarch64`
+vertical (mirrors `kthread_switch_qemu_aarch64` + the `spawn_program` EL0
+recipe) proves two EL0 user tasks timeshare one CPU under the live
+scheduler on the `virt` board:
+
+- A new pure-Rust EL0 fixture program `rustos-test-el0-yielder`
+  (`tests/integration/el0_yielder_program`) links `rustos-rt` (§1) and
+  yields `RUSTOS_EL0_YIELDS` times then exits 0. The new
+  `rustos_rt::yield_now()` wrapper (over the existing `abi-v1` `yield`
+  syscall) is its cooperative reschedule point; the vertical's `build.rs`
+  owns the yield count, injecting it into the program build *and* emitting
+  the matching `YIELDS_PER_TASK` constant the kernel asserts against, so the
+  two halves can never disagree (§2.2).
+- The freestanding test kernel reads the GICv2 base + timer rate from the
+  embedded `virt` DTB (P3/P4), brings up the EL1 vectors + GICv2, and builds
+  **two** hardware-isolated EL0 address spaces (two `PageTablePool`s, a
+  shared monotonic `FRAME_POOL`, §4) from the same `rxe` through the
+  production capability-checked, audited `spawn_image`. It admits each as a
+  resumable user kthread via `spawn_user_kthread` — each task's `pre_resume`
+  hook reactivates *its* page-table root before every switch-in — and drains
+  the cooperative `step` loop. A dispatch callback maps each task's
+  `yield`/`exit` `svc` to `reschedule_current`, suspending the running task
+  back to the dispatcher exactly as the production bin callback does.
+- PASS once both tasks yielded their full count (`2 × YIELDS_PER_TASK`) and
+  exited (`live_task_count() == 0`); distinct failure finishers and the
+  harness timeout keep it fail-loud (§7). **Verified green under QEMU on
+  this host** (two `ProcessSpawned` into two isolated spaces → drain → PASS).
+  Enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
 
 **Done when (SP2 overall):** two EL0 user tasks timeshare one CPU under
 the live scheduler on aarch64 `-M virt`, each isolated; siblings follow;
 `virt` and the headless build stay green. (SP2a is the host-proven core;
-SP2b wires aarch64 EL0 + the producer; SP2c is the QEMU proof.)
+SP2b wires aarch64 EL0 + the producer; SP2c is the QEMU proof.) **SP2a +
+SP2b + SP2c are landed, so SP2 is complete on aarch64; the x86_64 +
+riscv64 sibling EL0 ports follow when their `spawn_program_*` verticals
+gain the second-task capability (§0.8).**
 
 ### SP3 — `spawn` syscall + embedded-program registry `[ ]`
 
