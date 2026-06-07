@@ -496,9 +496,19 @@ on its own before the next.
     the `spawn_init_qemu_aarch64` vertical's PASS (keyed on the audited
     `exit` 5000 — `console_write` is `audit:false`) now genuinely proves the
     banner reached the console (`-M virt`, verified green).
-- **P6d — userland process-spawn syscall `[ ]`.** Add the `abi-v1`
+- **P6d — userland process-spawn syscall `[~]`.** Add the `abi-v1`
   spawn syscall (gated by `CAP_PROC_SPAWN`, already reserved at id 17) +
   an embedded-program registry so `init` can launch a separate process.
+  Per the standing direction this is being done *properly* — a real
+  concurrent process (its own isolated address space, scheduled
+  independently), not an `exec`-style hand-off — which requires real
+  kernel-thread EL0↔EL0 context switching the kernel does not have yet.
+  So P6d is itself staged in **`plans/SPAWN.md`** (SP0 design; SP1
+  kernel-thread task runtime wiring the existing `ContextSwitch` HAL into
+  the live scheduler; SP2 resumable EL0 tasks that timeshare a CPU; SP3
+  the `spawn` syscall #12 + embedded-program registry; SP4 `init` launches
+  the `session` process — overlapping P6e). Each `SP`-stage lands green
+  over the whole project on its own.
 - **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
   `userland/shell` program on the console; `init`'s startup config
   launches it as the user's session.
