@@ -533,8 +533,18 @@ on its own before the next.
   wrapper), admits each as a resumable user kthread via `spawn_user_kthread`,
   and drains the cooperative `step` loop while a dispatch callback maps each
   task's `yield`/`exit` to `reschedule_current` — verified green on `-M
-  virt`. What remains is SP3 (the `spawn` syscall #12 + embedded-program
-  registry) then SP4.
+  virt`. **SP3 (the `spawn` syscall #12 + embedded-program registry) is
+  staged SP3a/SP3b; SP3a is landed:** the `abi-v1` `spawn` syscall #12
+  (`CAP_PROC_SPAWN`, audited) is wired end to end — `lib/abi` row + frozen
+  tests, the `ros_sys_spawn` C stub + regenerated header, the
+  `kernel/syscall` dispatch arm + recomputed `SYSCALL_TABLE_HASH` — plus
+  the `kernel/core` path-keyed `ProgramRegistry` and the fail-closed
+  `ProcessSpawn`/`SpawnCtx` seam (default `NULL_PROCESS_SPAWN` →
+  `NotImplemented`, mirroring `NULL_CONSOLE`). The `spawn` handler
+  copies-in the path, resolves it, and admits a **Ready** resumable user
+  kthread through `SpawnCtx::admit_process` (host-proven by a `ProcessSpawn`
+  double + 8 host tests); production `spawn` fails closed until SP3b wires
+  the real aarch64 producer + registry + the `-M virt` vertical. Then SP4.
 - **P6e — minimal shell + `init` launches it `[ ]`.** A minimal
   `userland/shell` program on the console; `init`'s startup config
   launches it as the user's session.

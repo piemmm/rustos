@@ -82,8 +82,11 @@ use rustos_kernel_ipc::{EndpointId, PortRegistry};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_mem::{copy_in, copy_out, PhysMap, UaccessError, UserAddressSpace, VirtAddr};
-use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
+use rustos_kernel_mem::{
+    copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr,
+};
+use rustos_kernel_sched_api::Priority;
+use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use rustos_log::{Field, Sink};
 use rustos_sync::RwLock;
@@ -98,6 +101,9 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleWrite, NULL_CONSOLE};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::random::{reserve_errno, RandomReserve};
+use crate::spawn::{
+    AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+};
 
 /// Production [`SyscallHandlers`] implementation.
 ///
@@ -162,6 +168,29 @@ where
     /// a `'static` borrow because the installed console lives for the
     /// lifetime of the running kernel, exactly like `NULL_CONSOLE`.
     console: &'static (dyn ConsoleWrite + 'static),
+    /// The kernel's live physical-frame allocator, the source of the
+    /// frames a spawned process's pages are mapped to (`plans/SPAWN.md`
+    /// SP3). [`None`] until the boot path threads it through
+    /// [`Self::with_frames`]; while it is `None` the `spawn` syscall fails
+    /// closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9 — the spawn
+    /// subsystem is not wired). Borrowed for the handler's lifetime,
+    /// exactly like the other registries.
+    frames: Option<&'a FrameAllocator>,
+    /// The embedded-program registry the `spawn` syscall resolves a path
+    /// against (`plans/SPAWN.md` SP3). Defaults to the shared empty
+    /// registry, so a `spawn` of any path fails closed with
+    /// [`Errno::NotFound`] until the boot path installs a populated one
+    /// through [`Self::with_spawn`]. Held as a `'static` borrow because
+    /// the registry's program bytes live for the lifetime of the running
+    /// kernel.
+    programs: &'static ProgramRegistry,
+    /// The architecture-specific spawn producer the `spawn` syscall drives
+    /// to build a child's isolated address space and admit it
+    /// (`plans/SPAWN.md` SP3). Defaults to [`NULL_PROCESS_SPAWN`] (fail
+    /// closed with [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot
+    /// path installs the concrete producer through [`Self::with_spawn`].
+    /// Held as a `'static` borrow, exactly like the console device.
+    spawn_service: &'static (dyn ProcessSpawn + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -213,6 +242,12 @@ where
             // (`AGENTS.md` §2.9 / §5.4): an early `console_write` returns
             // `NotImplemented` rather than silently dropping the bytes.
             console: &NULL_CONSOLE,
+            // Spawn subsystem unwired until the boot path threads a frame
+            // allocator + populated registry + producer (`plans/SPAWN.md`
+            // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
+            frames: None,
+            programs: &EMPTY_PROGRAM_REGISTRY,
+            spawn_service: &NULL_PROCESS_SPAWN,
         }
     }
 
@@ -231,6 +266,40 @@ where
     #[must_use]
     pub const fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
         self.console = console;
+        self
+    }
+
+    /// Install the live frame allocator the `spawn` syscall draws the
+    /// child image's frames from, consuming and returning `self`
+    /// (`plans/SPAWN.md` SP3).
+    ///
+    /// Until this is called the handler holds [`None`] and `spawn` fails
+    /// closed with [`Errno::NotImplemented`] — the spawn subsystem is not
+    /// wired. The allocator is the leaked `KernelState`'s, which lives for
+    /// the lifetime of the running kernel (`AGENTS.md` §2.1).
+    #[must_use]
+    pub const fn with_frames(mut self, frames: &'a FrameAllocator) -> Self {
+        self.frames = Some(frames);
+        self
+    }
+
+    /// Install the embedded-program registry and the architecture spawn
+    /// producer the `spawn` syscall drives, consuming and returning `self`
+    /// (`plans/SPAWN.md` SP3).
+    ///
+    /// Until this is called the handler holds the empty registry and
+    /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
+    /// ([`Errno::NotFound`] / [`Errno::NotImplemented`]). Both must be
+    /// `'static`: the program bytes and the producer live for the lifetime
+    /// of the running kernel, exactly like the console device.
+    #[must_use]
+    pub const fn with_spawn(
+        mut self,
+        programs: &'static ProgramRegistry,
+        spawn_service: &'static (dyn ProcessSpawn + 'static),
+    ) -> Self {
+        self.programs = programs;
+        self.spawn_service = spawn_service;
         self
     }
 
@@ -326,6 +395,18 @@ const RANDOM_STAGE_CHUNK: usize = 256;
 /// banner line is far smaller than this, so the common path never
 /// iterates.
 const CONSOLE_WRITE_MAX: usize = 4096;
+
+/// Upper bound, in bytes, on the program path a single `spawn` call may
+/// pass.
+///
+/// `spawn` stages the caller's path in one kernel-owned buffer before
+/// looking it up in the registry, so an unbounded `path_len` would let a
+/// caller force an arbitrarily large kernel allocation whose failure path
+/// could OOM (`AGENTS.md` §4 — deterministic OOM behaviour). An absolute
+/// program path (`/Apps/<Name>.app/Run`, `AGENTS.md` §16.5) is far shorter
+/// than this; a longer request is refused with [`Errno::NotFound`] (it
+/// cannot name any registered program) rather than allocated.
+const SPAWN_PATH_MAX: usize = 1024;
 
 impl<A> SyscallHandlers for KernelSyscallHandlers<'_, A>
 where
@@ -766,6 +847,164 @@ where
         // silently dropping the bytes.
         self.console.write(&payload).map(|n| n as u64)
     }
+
+    fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
+        // is non-null (`UserPtr`). Bound the staged path so a hostile
+        // `path_len` cannot force an arbitrarily large kernel allocation
+        // (`AGENTS.md` §4); an over-long or empty path cannot name a
+        // registered program, so it fails closed with `NotFound`.
+        if path_len == 0 || path_len > SPAWN_PATH_MAX {
+            return Err(Errno::NotFound);
+        }
+
+        // The spawn subsystem must be fully wired before any state is
+        // touched: a build with no frame allocator threaded fails closed
+        // with `NotImplemented` (`AGENTS.md` §2.9), the spawn-equivalent of
+        // `console_write`'s `NULL_CONSOLE`.
+        let Some(frames) = self.frames else {
+            return Err(Errno::NotImplemented);
+        };
+
+        // Copy the path in from the caller's address space through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // touching the registry. A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`, never
+        // leaking which case occurred (§19.1).
+        let mut path_buf = alloc::vec![0u8; path_len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(path), &mut path_buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Resolve the path to a registered embedded program. An unknown
+        // path fails closed with `NotFound` (`AGENTS.md` §2.1) — there is
+        // no prefix or alias resolution.
+        let Some(rxe) = self.programs.lookup(&path_buf) else {
+            return Err(Errno::NotFound);
+        };
+
+        // Hand the validated `rxe` to the architecture spawn producer,
+        // which builds a fresh hardware-isolated address space and admits
+        // it as a runnable process through `ctx`, returning the new PID.
+        // The default `NULL_PROCESS_SPAWN` fails closed with
+        // `NotImplemented` (`AGENTS.md` §2.9). The producer re-asserts the
+        // `CAP_PROC_SPAWN` gate inside `spawn_image` and audits the
+        // decision; the child receives only its manifest∩user-grant
+        // authority (`AGENTS.md` §4, §16.5).
+        let ctx = HandlerSpawnCtx {
+            frames,
+            audit: self.audit,
+            sched: self.sched,
+            caps: self.caps,
+            aspaces: self.aspaces,
+            arch: self.arch,
+        };
+        self.spawn_service.spawn(rxe, &ctx)
+    }
+}
+
+/// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
+/// spawn producer (`plans/SPAWN.md` SP3).
+///
+/// Built fresh per `spawn` call from the handler's borrows; it carries no
+/// state of its own. [`SpawnCtx::admit_process`] registers the producer's
+/// freshly built process with this kernel state's scheduler, capability
+/// table, and address-space registry and returns its PID — the
+/// runtime-spawn analogue of the PID-1 `KernelInitSpawner` (`init.rs`), but
+/// it admits the task **Ready** and does **not** enter user mode or drain
+/// the scheduler (the spawning caller keeps running).
+struct HandlerSpawnCtx<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    frames: &'a FrameAllocator,
+    audit: &'a (dyn Sink + Sync),
+    sched: &'a Scheduler<A>,
+    caps: &'a RwLock<CapTable>,
+    aspaces: &'a RwLock<AddressSpaceRegistry>,
+    arch: &'a A,
+}
+
+impl<A> SpawnCtx for HandlerSpawnCtx<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn frames(&self) -> &FrameAllocator {
+        self.frames
+    }
+
+    fn audit(&self) -> &(dyn Sink + Sync) {
+        self.audit
+    }
+
+    unsafe fn admit_process(
+        &self,
+        caps: CapabilitySet,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+        physmap: Box<dyn PhysMap + Send + Sync>,
+        pre_resume: Box<dyn FnMut() + Send>,
+        mut enter: Box<dyn FnMut() + Send>,
+    ) -> Result<u64, AdmitError> {
+        let cpu = SchedulerArch::current_cpu(self.arch);
+
+        // Admit the child as a resumable user kthread (`plans/SPAWN.md`
+        // SP2): the work body performs the user-mode transition on the
+        // task's own kernel stack, and the `pre_resume` hook reactivates
+        // the child's address-space root before every switch into it so it
+        // `eret`s into EL0 under the correct, isolated translation regime
+        // (`AGENTS.md` §4). `enter` diverges into EL0, so the `()` it
+        // yields satisfies the body signature for the (impossible) case the
+        // transition ever returned.
+        let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
+            enter();
+        };
+        let cs = self.arch.context_switch();
+        let task_id = crate::kthread::spawn_user_kthread(
+            self.sched,
+            cs,
+            cpu,
+            Priority::Normal,
+            pre_resume,
+            work,
+        )
+        .map_err(|_| AdmitError::SchedulerFull)?;
+
+        // Register the child's caps under the *same* numeric id the
+        // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
+        // resolves a caller context (`AGENTS.md` §5.4.1). `caps` is already
+        // the manifest∩user-grant set the producer derived; pass it as both
+        // bounds so the kernel re-derives the same effective set. uid 0 is
+        // the system user (`AGENTS.md` §5.1); a per-user spawn uid is a
+        // later stage.
+        let sec_id = SecTaskId(task_id);
+        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
+        self.caps.write().insert(record);
+
+        // Register the child's frozen address space + direct map under the
+        // same id, so its first user-memory copy resolves its own mappings
+        // instead of failing closed with `BadAddress` (`plans/PI.md` P6c-3
+        // follow-up). A fresh task id is never already present; a refusal
+        // signals a kernel invariant violation, so fail closed
+        // (`AGENTS.md` §2.9) rather than admit a task whose user memory the
+        // kernel cannot reach. The already-admitted scheduler task is reaped
+        // when it is next dispatched and finds no caps/aspace — but that
+        // path cannot occur for a fresh id, so the conflict is reported as
+        // an invariant violation to the caller.
+        if self
+            .aspaces
+            .write()
+            .register(sec_id, space, physmap)
+            .is_err()
+        {
+            return Err(AdmitError::AspaceConflict);
+        }
+
+        Ok(task_id)
+    }
 }
 
 /// [`IrqWaiter`] adapter wiring the `irq_wait` syscall handler's
@@ -1041,10 +1280,15 @@ mod tests {
     use rustos_kernel_ipc::Port;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_mem::{
-        AddressSpace, Frame, HostPageTable, MapFlags, Page, PhysAddr, SimPhysMap, VirtAddr,
-        PAGE_SIZE,
+        AddressSpace, BootMemoryMap, Frame, FrameAllocator, HostPageTable, MapFlags, MemoryRegion,
+        Page, PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
     use rustos_kernel_sec::{TaskCapabilities, UserId};
+
+    // `ProcessSpawn`, `ProgramRegistry`, `SpawnCtx`, and `AdmitError` are
+    // already in scope through `use super::*`; only `EmbeddedProgram` is
+    // additionally needed here.
+    use crate::spawn::EmbeddedProgram;
     use rustos_log::{set_max_level, Level};
     use rustos_rng::{EntropyError, EntropySource, OutputReserve};
 
@@ -2893,5 +3137,411 @@ mod tests {
         let r = h.console_write(&ctx, 0x1000, CONSOLE_WRITE_MAX + 100);
         assert_eq!(r, Ok(CONSOLE_WRITE_MAX as u64));
         assert_eq!(console.written.lock().len(), CONSOLE_WRITE_MAX);
+    }
+
+    /// A live frame allocator over 64 usable frames — enough to pass the
+    /// `spawn` handler's "subsystem wired" gate. The host `ProcessSpawn`
+    /// double never actually allocates from it (it admits a host-built
+    /// space), so its capacity is irrelevant beyond being non-empty.
+    fn spawn_test_frames() -> FrameAllocator {
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: (PAGE_SIZE as u64) * 64,
+            kind: RegionKind::Usable,
+        });
+        FrameAllocator::new(&map).expect("frame allocator builds")
+    }
+
+    /// Absolute program path the spawn tests register and look up.
+    static SPAWN_PATH: &[u8] = b"/Apps/Child.app/Run";
+    /// Stand-in `rxe` bytes; the host producer double only records them,
+    /// it does not parse them (parsing is the arch producer's job, `SP3b`).
+    static SPAWN_RXE: &[u8] = b"child-rxe-blob";
+
+    /// A `ProcessSpawn` double that admits a freshly built **host**
+    /// address space through `ctx.admit_process` and records the `rxe` it
+    /// was handed, returning the new PID. It proves the core admit
+    /// machinery (scheduler + caps + aspace registration) end-to-end
+    /// without the arch-specific image build (`plans/SPAWN.md` SP3 host
+    /// proof; `SP3b` wires the real aarch64 producer).
+    struct RecordingSpawn {
+        seen_rxe: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
+    }
+
+    impl RecordingSpawn {
+        fn new() -> Self {
+            Self {
+                seen_rxe: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+            }
+        }
+    }
+
+    impl ProcessSpawn for RecordingSpawn {
+        fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+            self.seen_rxe.lock().extend_from_slice(rxe);
+            // Build a one-page host user space and freeze it into the
+            // registry-storable snapshot, exactly as the real producer
+            // freezes its built image.
+            let mut space = AddressSpace::new(HostPageTable::new());
+            space
+                .map(
+                    Page::from_addr(VirtAddr::new(0x1000)).expect("aligned"),
+                    Frame(9),
+                    MapFlags::READ | MapFlags::USER,
+                )
+                .expect("host map");
+            let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+            let physmap: Box<dyn PhysMap + Send + Sync> =
+                Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
+            let mut child_caps = CapabilitySet::empty();
+            child_caps.insert(CapabilityId::CONSOLE_WRITE);
+            // Inert closures: a host test never enters user mode or
+            // reactivates a page-table root.
+            let pre_resume: Box<dyn FnMut() + Send> = Box::new(|| {});
+            let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
+            // SAFETY: the host test never dispatches the admitted task, so
+            // the (inert) `enter`/`pre_resume` closures never run and the
+            // frozen host space need only answer `translate`; it faithfully
+            // describes the one page mapped above.
+            unsafe { ctx.admit_process(child_caps, frozen, physmap, pre_resume, enter) }
+                .map_err(|_| Errno::NoSpace)
+        }
+    }
+
+    /// Build a handler whose `spawn` subsystem is fully wired: frames +
+    /// a registry holding `SPAWN_PATH` + a producer.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_handler<'a>(
+        sched: &'a Scheduler<TestArch>,
+        table: &'a RwLock<CapTable>,
+        arch: &'a TestArch,
+        sink: &'static TestSink,
+        irq: &'a IrqTable,
+        ctl: &'a UnsupportedController,
+        ipc: &'a RwLock<PortRegistry>,
+        aspaces: &'a RwLock<AddressSpaceRegistry>,
+        rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        frames: &'a FrameAllocator,
+        programs: &'static ProgramRegistry,
+        producer: &'static (dyn ProcessSpawn + 'static),
+    ) -> KernelSyscallHandlers<'a, TestArch> {
+        KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_frames(frames)
+            .with_spawn(programs, producer)
+    }
+
+    /// `spawn` copies the caller's path in, resolves the embedded program,
+    /// builds + admits the child, and returns its PID — and the child is
+    /// registered with the scheduler, capability table, and aspace
+    /// registry (`plans/SPAWN.md` SP3).
+    #[test]
+    fn spawn_resolves_path_builds_and_admits_child_returning_pid() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let before = sched.live_task_count();
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .expect("spawn succeeds");
+        assert!(
+            sched.live_task_count() > before,
+            "child must be admitted as a live task"
+        );
+        assert!(
+            table.read().caps_for(SecTaskId(pid)).is_some(),
+            "child caps registered under its pid"
+        );
+        assert!(
+            aspaces.read().contains(SecTaskId(pid)),
+            "child address space registered under its pid"
+        );
+        assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
+    }
+
+    /// With no spawn producer wired the handler holds `NULL_PROCESS_SPAWN`
+    /// and fails closed with `NotImplemented` (`AGENTS.md` §2.9) — but only
+    /// after the path resolves, proving the null producer is reached.
+    #[test]
+    fn spawn_without_producer_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+
+        // Registry + frames wired, but the producer is the null default.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_spawn(programs, &NULL_PROCESS_SPAWN);
+
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// With no frame allocator threaded the spawn subsystem is unwired, so
+    /// `spawn` fails closed with `NotImplemented` before touching any
+    /// state (`AGENTS.md` §2.9) — the boot default.
+    #[test]
+    fn spawn_without_frames_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A path naming no registered program fails closed with `NotFound`
+    /// (`AGENTS.md` §2.1) — the empty boot registry resolves nothing.
+    #[test]
+    fn spawn_unknown_path_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // Frames + a real producer wired, but the registry is empty, so no
+        // path resolves and the producer is never reached.
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
+
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            Err(Errno::NotFound)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// `spawn` from a caller with no registered address space fails closed
+    /// with `BadAddress`, never leaking the missing-space case
+    /// (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn spawn_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_spawn(programs, producer);
+
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            Err(Errno::BadAddress)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// A zero-length or over-long path cannot name a registered program,
+    /// so it fails closed with `NotFound` without staging an unbounded
+    /// allocation (`AGENTS.md` §4).
+    #[test]
+    fn spawn_empty_or_oversize_path_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
+
+        assert_eq!(h.spawn(&ctx, 0x1000, 0), Err(Errno::NotFound));
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1),
+            Err(Errno::NotFound)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// The dispatcher refuses `spawn` from a caller without
+    /// `CAP_PROC_SPAWN` before the handler is reached (`AGENTS.md`
+    /// §5.4 step 2): the producer is never invoked.
+    #[test]
+    fn spawn_without_capability_is_denied_by_dispatcher() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // No CAP_PROC_SPAWN in the caller's effective set.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_spawn(programs, producer);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000;
+        args.0[1] = SPAWN_PATH.len() as u64;
+        let d = Dispatcher::new(&h, sink);
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(producer.seen_rxe.lock().is_empty());
     }
 }

@@ -112,6 +112,8 @@ pub use kthread::{
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use spawn::{
-    spawn_and_enter, spawn_image, InitSpawn, InitSpawnCtx, SpawnCallerError, SpawnRequest,
+    spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,
+    NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,
+    EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};

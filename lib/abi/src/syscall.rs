@@ -97,6 +97,25 @@ impl SyscallNumber {
     /// login, getty). A build with no console device wired fails closed
     /// with [`crate::Errno::NotImplemented`].
     pub const CONSOLE_WRITE: Self = Self(11);
+    /// Spawn a new process from an embedded program named by an absolute
+    /// path (`plans/SPAWN.md` SP3, `AGENTS.md` §16.5).
+    ///
+    /// Arguments: `path: *const u8` (user pointer to the program's
+    /// absolute path) and `path_len: usize`. The kernel copies the path
+    /// in through the validated `copy_from_user` boundary (`AGENTS.md`
+    /// §5.4), looks it up in the kernel's embedded-program registry,
+    /// builds a fresh **hardware-isolated** address space for it (§4),
+    /// registers it as a runnable process, and returns the new process's
+    /// PID; the caller keeps running (a true concurrent spawn, not an
+    /// `exec`-style hand-off). Gated by
+    /// [`crate::CapabilityId::PROC_SPAWN`] — spawning materialises a new
+    /// principal and hands it the CPU, so it is privileged rather than
+    /// ambient (`AGENTS.md` §4). The spawned program receives only the
+    /// intersection of its own signed manifest request and its user's
+    /// grants (§16.5); spawn authority does not widen the child's
+    /// authority. A build with no spawn service wired, or a path naming
+    /// no registered program, fails closed (`AGENTS.md` §2.9).
+    pub const SPAWN: Self = Self(12);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -176,6 +195,7 @@ mod tests {
         assert_eq!(SyscallNumber::IRQ_WAIT.as_u16(), 9);
         assert_eq!(SyscallNumber::RANDOM_GET.as_u16(), 10);
         assert_eq!(SyscallNumber::CONSOLE_WRITE.as_u16(), 11);
+        assert_eq!(SyscallNumber::SPAWN.as_u16(), 12);
     }
 
     #[test]

@@ -325,6 +325,30 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_WRITE),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::SPAWN,
+        name: "spawn",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Spawning a process materialises a new principal and hands it
+        // the CPU, so it is privileged rather than ambient (`AGENTS.md`
+        // §4 — no ambient authority). It is a security-relevant state
+        // change — a new process appears — so unlike the high-volume
+        // data movers it IS audited per call (`AGENTS.md` §5.4.4); the
+        // `ProcessSpawn*` events the spawn caller already emits cover the
+        // decision, and the dispatcher's per-call record attributes the
+        // request to the caller.
+        required_capability: Some(CapabilityId::PROC_SPAWN),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -500,6 +524,12 @@ mod tests {
             Some(CapabilityId::CONSOLE_WRITE)
         );
         assert!(!console.audit, "console_write must not audit per call");
+        // spawn is gated on CAP_PROC_SPAWN and audited per call — a new
+        // process is a security-relevant state change (`AGENTS.md` §4 /
+        // §5.4.4).
+        let spawn = spec_for(SyscallNumber::SPAWN).unwrap();
+        assert_eq!(spawn.required_capability, Some(CapabilityId::PROC_SPAWN));
+        assert!(spawn.audit, "spawn must be audited");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

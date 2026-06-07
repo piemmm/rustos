@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x3c, 0x76, 0x13, 0x3d, 0x78, 0x06, 0x40, 0xd9, 0xba, 0x87, 0x72, 0x4e, 0xc2, 0xa1, 0xf9, 0xcc,
-    0xcd, 0xe6, 0xd9, 0x09, 0x9c, 0xc6, 0x24, 0xff, 0x0c, 0x05, 0x81, 0x81, 0x25, 0xee, 0xa4, 0x5f,
+    0x79, 0x1b, 0x08, 0x7f, 0x3e, 0xd8, 0x02, 0x1a, 0xc2, 0x51, 0x9a, 0x12, 0x3f, 0x00, 0x59, 0x95,
+    0xc7, 0xf8, 0x84, 0x60, 0x96, 0x0e, 0xbd, 0x90, 0x91, 0xa1, 0x78, 0x71, 0xc6, 0xde, 0x1e, 0xb6,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -211,6 +211,22 @@ pub trait SyscallHandlers {
     /// fail closed with [`Errno::NotImplemented`] rather than silently
     /// discarding the bytes (`AGENTS.md` §2.9).
     fn console_write(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult;
+    /// Spawn a new process from the embedded program named by the
+    /// absolute path `(path, path_len)`, returning the new process's PID.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::PROC_SPAWN`], that `path` is non-null, and that
+    /// `path_len` fits in `usize`. The implementation copies the path in
+    /// through the validated `copy_from_user` boundary (`AGENTS.md`
+    /// §5.4), looks it up in the kernel's embedded-program registry,
+    /// builds a fresh hardware-isolated address space for it (§4),
+    /// registers it as a runnable process, and returns its PID; the
+    /// caller keeps running (`plans/SPAWN.md` SP3 — a true concurrent
+    /// spawn, not an `exec`-style hand-off). A build with no spawn
+    /// service wired must fail closed with [`Errno::NotImplemented`], and
+    /// a path naming no registered program with [`Errno::NotFound`],
+    /// rather than silently doing nothing (`AGENTS.md` §2.9).
+    fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -359,6 +375,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::CONSOLE_WRITE => {
                 let len = decode_len(args.0[1])?;
                 self.handlers.console_write(caller, args.0[0], len)
+            }
+            SyscallNumber::SPAWN => {
+                let len = decode_len(args.0[1])?;
+                self.handlers.spawn(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -666,6 +686,13 @@ mod tests {
             // arguments without wiring a real console here.
             Ok(len as u64)
         }
+        fn spawn(&self, _c: &CallerContext<'_>, _path: u64, path_len: usize) -> SyscallResult {
+            self.record("spawn");
+            // Echo the path length back so the reachability test can
+            // assert the dispatcher decoded the `(path, path_len)`
+            // arguments without wiring a real spawn service here.
+            Ok(path_len as u64)
+        }
     }
 
     #[test]
@@ -683,6 +710,7 @@ mod tests {
                 CapabilityId::USER_ADMIN,
                 CapabilityId::IRQ_BIND,
                 CapabilityId::CONSOLE_WRITE,
+                CapabilityId::PROC_SPAWN,
             ],
             &sink,
         );

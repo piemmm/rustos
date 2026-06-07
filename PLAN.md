@@ -1795,9 +1795,23 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   callback maps each task's `yield`/`exit` to
                   `reschedule_current`; PASS once both tasks yielded their
                   full count and exited — **verified green on `-M virt`**)
-                  are landed, so **SP2 is complete on aarch64**. What
-                  remains is **SP3** (the `spawn` syscall + embedded-program
-                  registry). **P6e** — minimal shell `init` launches.
+                  are landed, so **SP2 is complete on aarch64**. **SP3**
+                  (the `spawn` syscall + embedded-program registry) is
+                  staged SP3a/SP3b: **SP3a is landed** — the `abi-v1`
+                  `spawn` syscall #12 (`CAP_PROC_SPAWN`, audited) end to
+                  end (`lib/abi` row + frozen tests, the `ros_sys_spawn` C
+                  stub + regenerated header, the `kernel/syscall` dispatch
+                  arm + recomputed `SYSCALL_TABLE_HASH`), plus the
+                  `kernel/core` path-keyed `ProgramRegistry` + the
+                  fail-closed `ProcessSpawn`/`SpawnCtx` seam (default
+                  `NULL_PROCESS_SPAWN` → `NotImplemented`, mirroring
+                  `NULL_CONSOLE`) and the `spawn` handler that copies-in the
+                  path, resolves it, and admits a **Ready** resumable user
+                  kthread through `SpawnCtx::admit_process` (host-proven via
+                  a `ProcessSpawn` double; 8 new host tests). **SP3b** — the
+                  real aarch64 `ProcessSpawn` producer + registry population
+                  + the `-M virt` vertical — remains. **P6e** — minimal
+                  shell `init` launches.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

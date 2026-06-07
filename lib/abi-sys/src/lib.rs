@@ -75,6 +75,7 @@ const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
 const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
 const NUM_RANDOM_GET: u64 = SyscallNumber::RANDOM_GET.as_u16() as u64;
 const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
+const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -266,6 +267,22 @@ pub extern "C" fn sys_console_write(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `spawn`: spawn a new process from the embedded program named by the
+/// absolute path `(path, path_len)` (`SyscallNumber::SPAWN`). Returns the
+/// new process's PID, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// Requires `CAP_PROC_SPAWN`; the kernel validates the capability and the
+/// `(path, path_len)` pair against the caller's address space before
+/// reading it (`AGENTS.md` §5.4). The caller keeps running — this is a
+/// true concurrent spawn, not an `exec`-style hand-off (`plans/SPAWN.md`
+/// SP3).
+#[must_use]
+#[export_name = "ros_sys_spawn"]
+pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
+    unsafe { raw_syscall(NUM_SPAWN, [ptr_arg(path), path_len as u64, 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +310,7 @@ mod tests {
         (NUM_IRQ_WAIT, "irq_wait", 2),
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_CONSOLE_WRITE, "console_write", 2),
+        (NUM_SPAWN, "spawn", 2),
     ];
 
     #[test]
@@ -444,6 +462,19 @@ mod tests {
         assert_eq!(number, NUM_CONSOLE_WRITE);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 8);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn spawn_marshals_path_pointer_and_len() {
+        let mut path = *b"/Apps/Child.app/Run";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(7, || {
+            assert_eq!(sys_spawn(ptr, path.len()), 7);
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 

@@ -280,42 +280,71 @@ SP2b + SP2c are landed, so SP2 is complete on aarch64; the x86_64 +
 riscv64 sibling EL0 ports follow when their `spawn_program_*` verticals
 gain the second-task capability (§0.8).**
 
-### SP3 — `spawn` syscall + embedded-program registry `[ ]`
+### SP3 — `spawn` syscall + embedded-program registry `[~]`
 
-- `lib/abi`: new `SyscallNumber::SPAWN` (next free number, **12**) + its
-  `SyscallSpec` row gated on `CapabilityId::PROC_SPAWN` (id 17, already
-  defined), `audit: true`. Args: the program-path user pointer + length
-  (and an argv/flags shape kept minimal and frozen-once-shipped, §2.4).
-  Returns the new PID (or a stable `Errno`). Regenerate the C header
-  (`cargo xtask c-header --write`); `abi-check` + `c-header` drift guards
-  must pass. `ros_sys_spawn` stub follows the `ros_sys_*` convention (§9).
-- `kernel/syscall`: the dispatch arm + the recomputed `SYSCALL_TABLE_HASH`;
-  a `SyscallHandlers::spawn` trait method; table tests.
-- An **embedded-program registry**: a capability-agnostic, path-keyed map
-  of validated `rxe` programs the kernel can launch, threaded into
-  `kernel/core` like the `ConsoleWrite` seam (a `BootInfo` field +
-  builder; default empty → spawn of an unknown path fails closed with a
-  stable `Errno`). The kernel binary registers the embedded `session`
-  (and, for the vertical, a test child) program under its absolute path,
-  via the host-only `elf2rxe` build glue already used for `init` (§2.2;
-  RustOS stays Rust-only, §1).
-- The `kernel/core` spawn handler: §5.4 capability check (the dispatcher
-  already gates on `required_capability`; the handler re-asserts via the
-  existing `spawn_image` caller), copy-in the path from the caller's
-  address space, look it up in the registry, build a fresh isolated
-  address space (`build_process_image` + freeze + register in the
-  `AddressSpaceRegistry`), allocate a kernel stack + seed the EL0 frame
-  (SP1/SP2 runtime), register the task **Ready** with caps = manifest ∩
-  user grant, and return its PID. Every failure path frees what it built
-  and returns a stable `Errno` (§2.9).
+Too large for one safe landing, so staged SP3a (the ABI surface + the
+fail-closed handler/seam, host-proven) and SP3b (the arch producer +
+registry population + the `-M virt` vertical), mirroring the P6a→P6c
+`console_write` precedent (`abi-v1` syscall + fail-closed `NULL_*` seam
+landed first; the real device/producer wired in a following increment).
+
+#### SP3a — `spawn` syscall #12 + fail-closed handler/seam `[x]`
+
+**Done (host-proven).**
+
+- `lib/abi`: `SyscallNumber::SPAWN` (**12**) + its `SyscallSpec` row gated
+  on `CapabilityId::PROC_SPAWN` (id 17), `audit: true`. Args: program-path
+  user pointer + length; returns the new PID (`U64`) or a stable `Errno`.
+  Frozen-number + frozen-capability tests added.
+- `lib/abi-sys`: the `ros_sys_spawn` C stub (`#[export_name]`, panic-free,
+  `AGENTS.md` §9) + the drift-registry row + a marshalling test. C header
+  regenerated (`cargo xtask c-header --write` → `ROS_SYS_SPAWN 12u`,
+  `uint64_t ros_sys_spawn(void*, uintptr_t)`); `abi-check` + `c-header`
+  drift guards green. `SYSCALL_TABLE_HASH` recomputed (`791b08…`).
+- `kernel/syscall`: `SyscallHandlers::spawn` trait method + the
+  `SyscallNumber::SPAWN` dispatch arm + `MockHandlers::spawn` + the
+  reachability test's `CAP_PROC_SPAWN` grant.
+- `kernel/core`: the capability-agnostic, path-keyed `ProgramRegistry`
+  (path → validated `rxe`; default `EMPTY_PROGRAM_REGISTRY`) + the arch
+  `ProcessSpawn` seam (`spawn(rxe, &dyn SpawnCtx) -> Result<u64, Errno>`;
+  default fail-closed `NULL_PROCESS_SPAWN` → `NotImplemented`) + the
+  core-side `SpawnCtx` (`frames`/`audit`/`admit_process`). The `spawn`
+  handler copies the path in through the validated `copy_from_user`
+  boundary, resolves it, and delegates to the producer; `SpawnCtx`'s
+  `HandlerSpawnCtx` impl admits the child as a **Ready** resumable user
+  kthread (`spawn_user_kthread`) + registers its caps + frozen address
+  space, returning the PID **without** entering/draining (the caller keeps
+  running). Handler fields default in `new`, with `with_frames` /
+  `with_spawn` builders (mirroring `with_console`), so the kernel binary
+  needs no change yet and production `spawn` fails closed with
+  `NotImplemented`.
+- Host tests (8 new): happy path through a host `ProcessSpawn` double that
+  builds a frozen host space + calls `admit_process` (asserts the child is
+  admitted + caps/aspace registered + PID returned); no-producer →
+  `NotImplemented`; no-frames → `NotImplemented`; unknown path →
+  `NotFound`; bad pointer → `BadAddress`; empty/over-long path →
+  `NotFound`; dispatcher denial without `CAP_PROC_SPAWN`. `docs/src`
+  syscall table + handler-wiring + capability matrix updated.
+
+#### SP3b — aarch64 `ProcessSpawn` producer + registry + `-M virt` vertical `[ ]`
+
+- A real aarch64 `ProcessSpawn` producer in the kernel binary (sibling of
+  `init_spawn`): per-child page-table pool management, build a fresh
+  2 GiB-identity isolated user space, parse the `rxe` against
+  `SYSCALL_TABLE_HASH`, `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
+  audits), freeze, build the `pre_resume`/`enter` closures, and call
+  `ctx.admit_process`. Wire `with_frames` + `with_spawn` into the boot
+  `KernelDispatchHook` wiring; register the embedded `session` (and a test
+  child) program in the `ProgramRegistry` via the host-only `elf2rxe` build
+  glue (§2.2; RustOS stays Rust-only, §1).
 - `-M virt` vertical: PID 1 spawns an embedded child program; both run
   (proving SP2 timesharing), the child writes a banner + `exit`s, and the
-  parent observes the child's PID. Host tests for the handler cover denial
-  (no `CAP_PROC_SPAWN`), unknown path, bad pointer, malformed `rxe`, and
-  the happy path.
+  parent observes the child's PID. Map `AdmitError` + build/parse failures
+  onto stable `Errno`s; every failure path frees what it built (§2.9).
 
-**Done when:** a userland process can spawn a separate, isolated, runnable
-process via `abi-v1` on aarch64 `-M virt`; siblings follow.
+**Done when (SP3 overall):** a userland process can spawn a separate,
+isolated, runnable process via `abi-v1` on aarch64 `-M virt`; siblings
+follow. **SP3a is landed (host-proven); SP3b remains.**
 
 ### SP4 — `init` launches the `session` program `[ ]` (folds into PI.md P6e)
 

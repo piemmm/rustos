@@ -122,6 +122,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn spawn(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 fn budget_deadline() -> Option<Instant> {

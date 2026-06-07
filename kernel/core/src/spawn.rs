@@ -31,7 +31,7 @@
 use alloc::boxed::Box;
 
 use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery};
+use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_arch_api::{EnterUser, UserEntry};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{
@@ -361,6 +361,198 @@ where
         image.start_block,
     ))
 }
+
+/// One embedded program the kernel can launch on demand: its absolute
+/// path and the validated `rxe` bytes (`plans/SPAWN.md` SP3).
+///
+/// The bytes are the same `rxe` blob the host-only `elf2rxe` build glue
+/// produces for PID 1 `init` (`AGENTS.md` §2.2 — one conversion path);
+/// holding a valid [`LoadImage`] parsed from them is proof the §19.2
+/// load-time invariants hold, so the spawn producer re-parses against the
+/// kernel's compiled-in syscall CFI tag and fails closed on a mismatch.
+#[derive(Clone, Copy)]
+pub struct EmbeddedProgram {
+    /// Absolute path the program is registered (and looked up) under.
+    pub path: &'static [u8],
+    /// The validated `rxe` image bytes.
+    pub rxe: &'static [u8],
+}
+
+/// Capability-agnostic, path-keyed registry of the embedded programs the
+/// kernel can spawn (`plans/SPAWN.md` SP3).
+///
+/// Threaded into the syscall handler like the [`crate::ConsoleWrite`]
+/// console seam: it boots [`EMPTY`](Self::EMPTY), so a `spawn` of any path
+/// fails closed with [`Errno::NotFound`] until the kernel binary registers
+/// its embedded programs (the host-only `elf2rxe` build glue, `AGENTS.md`
+/// §2.2). It is pure data with no ambient authority and no audit sink of
+/// its own — the `spawn` handler and the [`ProcessSpawn`] producer own the
+/// security-relevant logging, exactly as the dispatcher audits IPC
+/// endpoint lookups rather than the registry doing so internally.
+pub struct ProgramRegistry {
+    programs: &'static [EmbeddedProgram],
+}
+
+impl ProgramRegistry {
+    /// Build a registry over `programs`.
+    #[must_use]
+    pub const fn new(programs: &'static [EmbeddedProgram]) -> Self {
+        Self { programs }
+    }
+
+    /// The empty registry — the boot default. A `spawn` of any path
+    /// resolves nothing and fails closed with [`Errno::NotFound`].
+    pub const EMPTY: Self = Self::new(&[]);
+
+    /// The validated `rxe` bytes registered under `path`, or [`None`] if
+    /// no embedded program bears that exact path.
+    ///
+    /// The match is exact (a byte-for-byte absolute path); there is no
+    /// prefix or alias resolution, so a path either names exactly one
+    /// registered program or nothing at all (fail closed, `AGENTS.md`
+    /// §2.1).
+    #[must_use]
+    pub fn lookup(&self, path: &[u8]) -> Option<&'static [u8]> {
+        self.programs.iter().find(|p| p.path == path).map(|p| p.rxe)
+    }
+
+    /// Number of registered programs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.programs.len()
+    }
+
+    /// Whether the registry holds no programs.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.programs.is_empty()
+    }
+}
+
+/// The shared empty [`ProgramRegistry`] the syscall handler defaults to
+/// until the kernel binary installs a populated one (`AGENTS.md` §2.9 —
+/// fail closed; mirrors [`crate::NULL_CONSOLE`]).
+pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
+
+/// Why admitting a freshly built process as a runnable task failed.
+///
+/// The [`ProcessSpawn`] producer maps each variant onto a stable
+/// [`Errno`] for the `spawn` syscall's caller; the partially built
+/// resources are reclaimed before returning (`AGENTS.md` §2.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AdmitError {
+    /// The scheduler's home run queue could not admit the new task.
+    SchedulerFull,
+    /// An address space is already registered for the new task id — a
+    /// fresh id is never already present, so this signals a kernel
+    /// invariant violation and is refused rather than papered over.
+    AspaceConflict,
+}
+
+/// The core-side registration context a [`ProcessSpawn`] producer drives
+/// to register a freshly built process and obtain its PID
+/// (`plans/SPAWN.md` SP3).
+///
+/// It is the runtime-spawn analogue of [`InitSpawnCtx`]: the arch-specific
+/// producer builds the isolated address space (naming the port's concrete
+/// page table + [`EnterUser`] primitive, which `kernel/core` cannot spell,
+/// `AGENTS.md` §17.2 / §17.4) and hands it back through
+/// [`admit_process`](Self::admit_process), which registers the task with
+/// the scheduler, capability table, and address-space registry. Unlike
+/// [`InitSpawnCtx::admit_init`] it admits the task **Ready** and returns
+/// its PID **without** entering user mode or draining the scheduler: the
+/// child runs when the scheduler next steps, and the spawning caller keeps
+/// running (a true concurrent spawn, not an `exec`-style hand-off).
+pub trait SpawnCtx {
+    /// The kernel's live physical-frame allocator, the source of the
+    /// frames the new image's pages are mapped to.
+    fn frames(&self) -> &FrameAllocator;
+
+    /// The boot audit sink the build path records `ProcessSpawn*` events
+    /// through.
+    fn audit(&self) -> &(dyn Sink + Sync);
+
+    /// Register the freshly built process as a runnable (**Ready**) task
+    /// with the scheduler (as a resumable user kthread, `plans/SPAWN.md`
+    /// SP2), the capability table (`caps`, the manifest∩user-grant set),
+    /// and the address-space registry (`space` + `physmap`, under the same
+    /// numeric id the dispatcher recovers so the child's first user-memory
+    /// copy resolves its own mappings), and return its PID.
+    ///
+    /// `enter` is the arch-specific user-mode transition boxed as a
+    /// `FnMut()` (it diverges, so its `!` coerces to `()`); it becomes the
+    /// task's kthread work body, run once on the task's first dispatch.
+    /// `pre_resume` reactivates the task's page-table root before every
+    /// switch into it, keeping it hardware-isolated from its siblings
+    /// (`AGENTS.md` §4).
+    ///
+    /// This does **not** enter user mode or step the scheduler: it returns
+    /// the new PID and the caller resumes. Every failure reclaims what it
+    /// built and returns an [`AdmitError`] (`AGENTS.md` §2.9).
+    ///
+    /// # Safety
+    ///
+    /// `space` must faithfully describe the isolated user mappings the
+    /// producer just built and `physmap` must back them, so the copy path
+    /// reads exactly the memory the program sees; `pre_resume` must
+    /// activate that space's root before the task is first entered.
+    unsafe fn admit_process(
+        &self,
+        caps: CapabilitySet,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+        physmap: Box<dyn PhysMap + Send + Sync>,
+        pre_resume: Box<dyn FnMut() + Send>,
+        enter: Box<dyn FnMut() + Send>,
+    ) -> Result<u64, AdmitError>;
+}
+
+/// The architecture-specific seam that builds a fresh, hardware-isolated
+/// address space from a validated `rxe` and admits it as a runnable
+/// process (`plans/SPAWN.md` SP3).
+///
+/// Installed into the syscall handler through
+/// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn),
+/// exactly as the console device is installed through `with_console`. It
+/// defaults to
+/// [`NULL_PROCESS_SPAWN`], which fails closed with
+/// [`Errno::NotImplemented`] (`AGENTS.md` §2.9) until an arch port wires a
+/// real producer. The producer builds the image through the production,
+/// capability-checked, audited [`spawn_image`] caller — spawning is *not*
+/// a privileged bypass: the child receives only the authority its manifest
+/// requests intersected with its user's grants (`AGENTS.md` §4, §16.5).
+///
+/// `Sync` because the installed producer is shared, immutably, by every
+/// CPU's syscall dispatch path (the handler is held inside the `Sync`
+/// [`crate::DispatchHook`]), exactly like the console device.
+pub trait ProcessSpawn: Sync {
+    /// Build the program in `rxe` into a fresh isolated address space and
+    /// admit it as a runnable process through `ctx`, returning its PID.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with a stable [`Errno`] on any error — a malformed
+    /// `rxe`, a build failure, an unrunnable context, or an admission
+    /// failure — never a panic or a half-built task (`AGENTS.md` §2.9).
+    fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
+}
+
+/// The fail-closed default [`ProcessSpawn`] producer: every build with no
+/// real spawn service wired returns [`Errno::NotImplemented`]
+/// (`AGENTS.md` §2.9), exactly as [`crate::NULL_CONSOLE`] does for the
+/// `console_write` syscall.
+pub struct NullProcessSpawn;
+
+impl ProcessSpawn for NullProcessSpawn {
+    fn spawn(&self, _rxe: &[u8], _ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullProcessSpawn`] the syscall handler defaults to until
+/// an arch port installs a real producer through
+/// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn).
+pub static NULL_PROCESS_SPAWN: NullProcessSpawn = NullProcessSpawn;
 
 /// Emit one structured audit record for `event` with `fields`.
 fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>]) {
