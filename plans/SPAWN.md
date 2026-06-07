@@ -12,6 +12,13 @@ staged.
 `plans/PI.md` first. Every rule in this file is binding too. One
 fully-gated increment (one `SP`-stage) per landing.
 
+SP0–SP4 are the P6d tranche (the spawn syscall + the multitasking it
+needs). **SP5 is a follow-on beyond P6d**, kept in this file because it is
+the natural next `abi-v1` process-runtime syscall and shares P6d's
+precondition (a process running in its own isolated address space): a
+dynamic per-process memory map/unmap (`brk`/`sbrk`/`mmap`-equivalent)
+pair. It is scheduled after the spawn tranche, not before SP3b/SP4.
+
 **Note:** `abi-v1` is *not* frozen, despite what `AGENTS.md` / `PLAN.md`
 say — the standing task direction supersedes that language. Adding the
 spawn syscall changes a `lib/abi` type; it requires regenerating the C
@@ -358,12 +365,106 @@ follow. **SP3a is landed (host-proven); SP3b remains.**
 syscall and both run concurrently on `-M virt`; the real Pi is the
 on-metal acceptance item.
 
+### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[ ]` (beyond P6d)
+
+The natural follow-on abi-v1 process-runtime capability, scheduled here
+after the spawn tranche because it has the same precondition: a process
+running in its **own** hardware-isolated address space (SP2/SP3). Today a
+spawned process gets exactly its fixed spawn-time image (code/data/bss + a
+fixed `UserStack`) and `abi-v1` has **no** `brk`/`sbrk`/`mmap`-equivalent,
+so a process cannot obtain a heap or any additional pages at runtime —
+its memory is bounded only by that static image. SP5 closes that gap with
+a modern anonymous-memory **map/unmap** pair.
+
+**Binding decisions (settle the open ones in the SP5-0 design note,
+§15.2 — do not invent the capability/ABI before then):**
+
+1. **Clean-slate shape, no legacy single break (§2.13).** RustOS has no
+   installed base, so SP5 adds an `mmap`-style *anonymous region* map +
+   unmap, **not** a `brk`/`sbrk` single-heap-break model. The libc/heap
+   allocator a program links (`lib/rt`, future) layers its `malloc` over
+   this pair; the kernel ABI is the region primitive only (§2.3 — no
+   convenience surface in the kernel).
+2. **W^X, RW only (§19.2).** `mem_map` returns `RW` anonymous pages and
+   **never** `RWX`. An executable (JIT) mapping is a *separate, later*
+   `CAP_JIT_MAP_EXEC`-gated `mprotect`-equivalent RW→RX flip — explicitly
+   **not** bundled into SP5 (§2.4 — no interface creep). SP5 does not add
+   `mprotect`.
+3. **Per-process, never global (§4).** A region is mapped only into the
+   **caller's own** isolated address space. No cross-process mapping;
+   shared memory stays the capability-checked IPC object (§4). There is no
+   global user heap.
+4. **Deterministic OOM, no artificial limit (§4 / §2.9).** A frame- or
+   page-table-allocation failure returns a stable `Errno` (`OutOfMemory`),
+   never a panic. Consistent with the standing position, SP5 adds **no**
+   per-process memory quota/`rlimit`; a process is bounded only by
+   available physical frames.
+5. **Zero on map and on free (§4 — secret hygiene).** Pages handed to
+   userland are zeroed before the mapping is visible (no stale kernel /
+   other-process bytes); `mem_unmap` zeroes-on-free the frames it reclaims
+   (the existing zero-on-free guarantee extends to user anonymous memory).
+6. **Capability gating — open question for SP5-0.** Ordinary anonymous
+   `RW` growth of one's *own* address space is the candidate **unprivileged
+   baseline** (mirroring §16.6 "list my own processes" needing no
+   capability), but whether a capability is required is decided in the
+   design note *before* the `SyscallSpec` row is written; the decision is
+   recorded there, not pre-empted here (§5.4 still applies — checked
+   before state, fail closed).
+
+**The kernel gap SP5b must close.** Post-spawn an address space is captured
+as an **immutable** `FrozenAddressSpace` snapshot (P6c-3 follow-up), so the
+copy/permission path can read it from the `Send+Sync` registry. SP5 needs
+the *running* user space to be **mutable** at runtime: `kernel/mem` grows a
+capability to map fresh zeroed frames into a live user address space (and
+unmap + TLB-shootdown via the §17.2 `TlbShootdown` / `CrossCpuTlbShootdown`
+HAL slices), keeping the registry view consistent — never a second
+parallel address-space model (§2.2).
+
+**Staging (mirrors the SP3a→SP3b precedent — one fully-gated increment per
+landing):**
+
+- **SP5-0 — design note `[ ]`.** Extend `docs/src/architecture/` (the
+  syscall + multitasking pages) with the map/unmap ABI shape (`mem_map`:
+  length + flags + optional addr hint → base `U64` or `Errno`; `mem_unmap`:
+  base + length → `Errno`), the live-address-space-mutation + TLB-shootdown
+  design, the W^X and zero-on-map/free invariants, the OOM-as-`Result`
+  contract, and the resolved capability-gating decision. Pure docs; lands
+  with SP5a.
+- **SP5a — abi-v1 surface + fail-closed seam (host-proven) `[ ]`.**
+  `lib/abi`: `SyscallNumber::MEM_MAP` (**13**) + `MEM_UNMAP` (**14**) +
+  their `SyscallSpec` rows (capability per SP5-0), with frozen-number tests.
+  `lib/abi-sys`: the `ros_sys_mem_map` / `ros_sys_mem_unmap` C stubs
+  (`#[export_name]`, panic-free) + drift-registry rows + marshalling tests;
+  regenerate the C header (`cargo xtask c-header --write`) and recompute
+  `SYSCALL_TABLE_HASH`; `abi-check` + `c-header` drift guards green.
+  `kernel/syscall`: the two `SyscallHandlers` trait methods + dispatch arms
+  + `MockHandlers` impls + reachability tests. `kernel/core`: a fail-closed
+  arch-neutral seam (default → `NotImplemented`, mirroring `NULL_CONSOLE` /
+  `NULL_PROCESS_SPAWN`), with `with_*` builders so the kernel binary needs
+  no change yet. Host-tested (validation, fail-closed, no-producer paths).
+- **SP5b — real producer + `-M virt` vertical `[ ]`.** `kernel/mem`'s live
+  user-space map/unmap (zero-on-map, fail-closed reclaim of a
+  partially-mapped range, TLB-shootdown) + the keep-the-frozen-view-
+  consistent update; the `kernel/core` handler wired to it; an `-M virt`
+  vertical where a pure-Rust EL0 fixture program `mem_map`s a region,
+  writes a pattern, reads it back, then `mem_unmap`s it (and a fault-on-use
+  check after unmap), PASSing via an audited marker. Siblings (x86_64,
+  riscv64) follow; wasm32's linear-memory model is an honest n/a (declared).
+
+**Done when (SP5 overall):** an EL0 process can obtain and release anonymous
+`RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and
+on free, OOM surfaced as an `Errno`; the immutable-`FrozenAddressSpace` gap
+is closed by a single live-space mutation path (§2.2); `virt` + the headless
+build stay green.
+
 ---
 
 ## 2. Cross-cutting requirements (apply to every stage)
 
-- **No new HAL trait unless deliberate (§17.2).** SP1–SP3 reuse the closed
-  HAL set. A genuinely new arch primitive lands in `kernel/arch/api` with a
+- **No new HAL trait unless deliberate (§17.2).** SP1–SP5 reuse the closed
+  HAL set (SP5's TLB shootdown uses the already-landed `TlbShootdown` /
+  `CrossCpuTlbShootdown` slices — the §17.2 burn-down is complete). A
+  genuinely new arch primitive lands in `kernel/arch/api` with a
   conformance vertical for every port, never a `cfg(target_*)` fork
   (`cargo xtask cfg-check` stays clean; grandfather lists stay empty).
 - **`SchedulerPolicy` is not changed (§2.4 / §17.1).** The kthread model is
