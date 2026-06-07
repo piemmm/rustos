@@ -166,28 +166,80 @@ every bare-metal port has the runtime.
 ### SP2 — EL0 tasks become resumable kernel threads `[ ]`
 
 Bring EL0 into the SP1 model so two **user** tasks can timeshare the CPU.
+Like P6c, the work is too large for one safe landing, so it is staged
+SP2a/SP2b/SP2c (one fully-gated increment each, §0 / DoD below).
 
-- Re-express the user-task entry (the `Aarch64InitSpawn` / `spawn_image`
-  path) so a user task is an SP1 kthread whose trampoline enters EL0 via
+The shape (decided, no backward compatibility required — the standing
+direction): a user EL0 task becomes an SP1 kthread whose work diverges
+into EL0 via `EnterUser::enter_user`. Because an EL0 `svc` traps onto
+*that task's own* EL1 kernel stack (= its kthread stack), the trap path
+can suspend the task with the ordinary `ContextSwitch::switch` back to the
+scheduler's dispatch context and resume exactly there (re-`eret`) on the
+next dispatch — **no separate EL0-frame save area and no new HAL trait**
+(§0.3); the kthread's kernel stack already *is* the save area.
+
+#### SP2a — core EL0-reschedule machinery (no EL0 yet) `[x]`
+
+**Done (host-proven, arch-neutral).** Landed entirely in `kernel/core`
+(+ the bin dispatch glue), with no syscall-semantics change yet:
+
+- `dispatch_slot`: a new `DispatchOutcome::Reschedule { result, action,
+  cpu }` plus a self-contained `RescheduleAction { Yield, Park, Exit }`
+  (kept off `kernel/sched`'s vocabulary; mapped to `TaskAction` at one
+  boundary, §2.2). Re-exported from the crate root.
+- `kthread`: a `KTHREAD_MAX_CPUS`-sized per-CPU resume table
+  (`SpinLock<Option<UserResumeHandle>>`, never cross-CPU contended), the
+  `C,S`-monomorphised `suspend_thunk` (reuses `Yielder::suspend`, §2.2),
+  and the public **`reschedule_current(cpu, action) -> bool`** the arch
+  trap path calls — it lifts the handle out from under the lock *before*
+  the suspending switch (no lock across the hand-off) and **fails closed**
+  (`false`) for an unpublished/out-of-range CPU.
+- `kthread`: a `pre_resume: Option<PreResume>` hook on `ThreadControl`
+  whose `Some`-ness marks a **user** kthread; `dispatch_step` now takes
+  `cpu`, runs `pre_resume` (the per-task address-space reactivation seam)
+  and publishes the resume handle immediately before the switch-in, and
+  clears it the instant the task switches back. New
+  `spawn_user_kthread[_with_stack]` carry the hook; plain `spawn_kthread`
+  is unchanged and never publishes.
+- `rustos-kernel::dispatch_core::dispatch_via_slot`: the `Reschedule` arm
+  (suspend via `reschedule_current`, then encode the result on resume).
+- **Tests:** 6 new `kernel/core` host tests (publish→suspend records the
+  `task→dispatch` switch + action; no-handle and out-of-range fail closed;
+  `pre_resume` fires every step and the handle is cleared after; a kernel
+  kthread never publishes; action mapping) + a bin `dispatch_core` test
+  (Reschedule with no user task falls back to an encoded return). Whole-
+  project DoD green: `cargo xtask ci` (incl. `test --qemu`), `fuzz
+  --secs 5`, and `tools/ci/soak.sh both` all pass.
+
+#### SP2b — aarch64: enter EL0 as a user kthread + wire the producer `[ ]`
+
+- An aarch64 `activate_user_root(root_phys)` primitive (MMU already on:
+  reprogram `TTBR0_EL1` + `tlbi`/`isb`) so a user kthread's `pre_resume`
+  hook (capturing only the `u64` root — keeps the runtime `Send`)
+  reactivates its address space before each `eret`.
+- Re-express the aarch64 user-task entry so PID 1 (and test EL0 tasks) are
+  `spawn_user_kthread` tasks whose work diverges into EL0 via
   `EnterUser::enter_user`.
-- The arch syscall-trap path gains a **reschedule decision**: after the
-  `kernel/syscall` dispatcher runs, if the call yielded/parked/exited the
-  caller (a core-provided decision, surfaced through an existing seam — not
-  a new HAL trait, §0.3), the trap path saves the caller's EL0 frame into
-  its task and `switch`es to the scheduler kthread instead of ereting; on
-  resume the task re-enters EL0 with its saved frame. A non-rescheduling
-  syscall returns to the same task exactly as today.
-- PID 1's address space stays registry-storable (`AddressSpace::freeze`,
-  `plans/PI.md` P6c-3 follow-up); per-task TTBR/SATP swap on resume goes
-  through the existing `AddressSpace::activate` MMU HAL slice.
-- `-M virt` vertical: two EL0 tasks (built like the `spawn_program`
-  fixture) ping-pong via the `yield` syscall, proving a real EL0→EL0
-  context switch; each runs in its own isolated address space (the memory
-  isolation vertical's invariant still holds, §4).
+- Make the **producer**: the `KernelDispatchHook` maps the `yield`/`exit`
+  syscalls to `DispatchOutcome::Reschedule` (the `yield_now`/`exit`
+  handlers stop driving the scheduler's re-enqueue/reap directly — the
+  kthread `TaskAction` returned by `dispatch_step` is authoritative —
+  reconciling the double-handling the SP2a design note flagged). Thread
+  the reschedule result through the aarch64 trap callback so the trap path
+  calls `reschedule_current` instead of ereting on a rescheduling syscall.
 
-**Done when:** two EL0 user tasks timeshare one CPU under the live
-scheduler on aarch64 `-M virt`, each isolated; siblings follow; `virt` and
-the headless build stay green.
+#### SP2c — `-M virt` EL0↔EL0 timeshare vertical `[ ]`
+
+- A new `-M virt` vertical (mirrors `kthread_switch_qemu_aarch64` + the
+  `spawn_program` EL0 recipe): two EL0 tasks, each in its **own isolated
+  address space**, each `yield`ing N times then `exit`ing, drained by the
+  cooperative `step` loop — proving a real EL0→EL0 context switch under the
+  live scheduler. The memory-isolation invariant (§4) still holds.
+
+**Done when (SP2 overall):** two EL0 user tasks timeshare one CPU under
+the live scheduler on aarch64 `-M virt`, each isolated; siblings follow;
+`virt` and the headless build stay green. (SP2a is the host-proven core;
+SP2b wires aarch64 EL0 + the producer; SP2c is the QEMU proof.)
 
 ### SP3 — `spawn` syscall + embedded-program registry `[ ]`
 

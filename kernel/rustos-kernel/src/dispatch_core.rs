@@ -17,7 +17,7 @@
 //! here once.
 
 use rustos_abi::SYSCALL_MAX_ARGS;
-use rustos_kernel_core::{DispatchCallbackSlot, DispatchOutcome};
+use rustos_kernel_core::{reschedule_current, DispatchCallbackSlot, DispatchOutcome};
 use rustos_kernel_syscall::RawArgs;
 
 /// Bridge the kernel-stack `[u64; SYSCALL_MAX_ARGS]` frame to a
@@ -105,6 +105,20 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
     match hook.dispatch(raw_number, args) {
         DispatchOutcome::Returned(result) => Some(encode_result(result)),
         DispatchOutcome::NoCallerContext => None,
+        DispatchOutcome::Reschedule {
+            result,
+            action,
+            cpu,
+        } => {
+            // The caller is a resumable user kthread that yielded, parked,
+            // or exited (`plans/SPAWN.md` SP2). Suspend it back to the
+            // scheduler; control returns here only when it is next
+            // dispatched (never, for `Exit`). A `false` means no user task
+            // was running on `cpu` — the syscall is then an ordinary return
+            // rather than an unsound switch (fail closed, `AGENTS.md` §2.9).
+            let _ = reschedule_current(cpu, action);
+            Some(encode_result(result))
+        }
     }
 }
 
@@ -113,7 +127,7 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use rustos_abi::Errno;
-    use rustos_kernel_core::DispatchHook;
+    use rustos_kernel_core::{DispatchHook, RescheduleAction};
 
     /// Hook that returns a caller-supplied [`DispatchOutcome`] for
     /// each invocation. Used to exercise both production-dispatch
@@ -228,6 +242,24 @@ mod tests {
             .expect("install");
         let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO);
         assert!(got.is_none(), "NoCallerContext must signal halt");
+    }
+
+    #[test]
+    fn dispatch_via_slot_encodes_result_on_reschedule_with_no_user_task() {
+        // A `Reschedule` outcome on a CPU with no published user kthread
+        // (the host has none) falls back to an ordinary encoded return.
+        let slot = DispatchCallbackSlot::new();
+        let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
+            outcome: DispatchOutcome::Reschedule {
+                result: Ok(0x7),
+                action: RescheduleAction::Yield,
+                cpu: 50,
+            },
+        }));
+        slot.install_dispatcher(hook as &'static dyn DispatchHook)
+            .expect("install");
+        let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO);
+        assert_eq!(got, Some(0x7));
     }
 
     #[test]

@@ -79,6 +79,57 @@ pub enum DispatchOutcome {
     Returned(SyscallResult),
     /// Caller identification failed; the bin crate must halt the CPU.
     NoCallerContext,
+    /// The syscall rescheduled its caller (a resumable EL0 task that
+    /// yielded, parked, or exited; `plans/SPAWN.md` SP2).
+    ///
+    /// The caller is a [`crate::kthread`] user task running on its own
+    /// kernel stack. Rather than return to user space immediately, the
+    /// bin-crate callback must suspend it back to the scheduler — it
+    /// calls [`crate::reschedule_current`] with `cpu` and `action`,
+    /// which switches to the scheduler's dispatch context and returns
+    /// only when this task is next dispatched. *Then* it encodes
+    /// `result` into the syscall-return register and resumes user space
+    /// (an [`RescheduleAction::Exit`] task is never dispatched again, so
+    /// the resume after it never happens; the encode is dead on that
+    /// path, which is why `result` is still carried — the bin crate need
+    /// not special-case the action).
+    ///
+    /// `cpu` is the dispatching CPU the hook identified the caller on
+    /// (`AGENTS.md` §5.4.1); it keys the per-CPU resume handle so the
+    /// suspend reaches *this* CPU's running task.
+    Reschedule {
+        /// The syscall-return value to encode once the caller is resumed
+        /// (ignored for [`RescheduleAction::Exit`], which never resumes).
+        result: SyscallResult,
+        /// What the scheduler should do with the caller.
+        action: RescheduleAction,
+        /// The CPU the caller was identified on; keys the per-CPU resume
+        /// handle (`AGENTS.md` §5.4.1).
+        cpu: u32,
+    },
+}
+
+/// What a rescheduling syscall ([`DispatchOutcome::Reschedule`]) asks the
+/// scheduler to do with its caller.
+///
+/// A self-contained mirror of the scheduler's `TaskAction` kept on the
+/// dispatch-callback ABI so the bin-crate callback and
+/// [`crate::dispatch_slot`] never depend on `kernel/sched`'s vocabulary;
+/// [`crate::reschedule_current`] maps it onto the scheduler's own
+/// `TaskAction` at the one boundary that needs it (`AGENTS.md` §2.2 — one
+/// definition, decoded at the edge).
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RescheduleAction {
+    /// Re-enqueue the caller at its current priority and run something
+    /// else (the `yield` syscall).
+    Yield,
+    /// Park the caller until an external wake (no yet-shipped syscall
+    /// produces this; carried for completeness so a future blocking
+    /// syscall needs no ABI change).
+    Park,
+    /// Terminate the caller; it is never dispatched again (the `exit`
+    /// syscall).
+    Exit,
 }
 
 /// Subsystem hook the binary's `extern "C"` syscall-dispatch callback

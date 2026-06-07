@@ -89,20 +89,52 @@ error) fails the task closed: the shim marks it terminal and returns
 (`AGENTS.md` §2.9 / §5.4). There is no `unwrap`/`expect`/`panic!` on the
 spawn or switch path.
 
-## Planned: bringing EL0 into the model
+## Bringing EL0 into the model
 
-The runtime above is architecture-neutral and does not yet touch EL0.
-Two further decisions are recorded here for the staged EL0 work
-(`plans/SPAWN.md` SP2/SP3):
+A user task is an SP1 kthread whose work diverges into EL0 via
+`EnterUser::enter_user`. The key realisation is that an EL0 `svc` traps
+onto *that task's own* EL1 kernel stack — which is its kthread stack — so
+**the kthread's kernel stack already is the EL0 save area**: there is no
+separate per-task EL0 frame to copy. The trap path suspends the task with
+the same `ContextSwitch::switch` the cooperative `Yielder` uses, and the
+task resumes exactly there (re-entering EL0) on its next dispatch. No new
+HAL trait is needed (§17.2).
 
-* **Trap-return reschedule decision point.** After the `kernel/syscall`
-  dispatcher runs, if the call yielded / parked / exited the caller, the
-  arch syscall-trap path saves the caller's EL0 frame into its task and
-  `switch`es to the scheduler kthread instead of returning to user mode; on
-  resume the task re-enters EL0 with its saved frame. A non-rescheduling
-  syscall returns to the same task exactly as today. This is surfaced
-  through an existing core seam, **not** a new HAL trait (§17.2).
-* **EL0 save-area layout.** A user task is an SP1 kthread whose trampoline
-  enters EL0 via `EnterUser::enter_user`; its per-task address space is
-  swapped on resume through the existing `AddressSpace::activate` MMU HAL
-  slice, so each task stays hardware-isolated (§4).
+### Core reschedule machinery (SP2a — implemented)
+
+The arch-neutral half lives in `kernel/core` and is host-proven:
+
+* **`DispatchOutcome::Reschedule { result, action, cpu }`** — the dispatch
+  callback's signal that the syscall rescheduled its caller, carrying a
+  self-contained `RescheduleAction` (`Yield` / `Park` / `Exit`) mapped onto
+  the scheduler's `TaskAction` at one boundary (§2.2).
+* **`reschedule_current(cpu, action) -> bool`** — the entry point the arch
+  trap path calls. It looks up a per-CPU *resume handle*, lifts it out from
+  under its lock *before* the suspending `switch` (so no lock is held
+  across the hand-off), and suspends the running user kthread back to the
+  dispatcher. It **fails closed** (returns `false`) when no user task is
+  published for the CPU, so the trap path falls back to an ordinary syscall
+  return rather than an unsound switch (§2.9, §5.4).
+* **The per-CPU resume table + `pre_resume` hook.** `dispatch_step`
+  publishes a resume handle for the user kthread it is about to switch
+  into, and clears it the instant the task switches back — so a handle is
+  valid exactly while that CPU runs the task (in EL0 or one of its syscall
+  traps). A `pre_resume` hook (carried by `spawn_user_kthread`) runs on the
+  dispatcher side before every switch-in; its presence is what marks a task
+  as a *user* kthread and what reactivates the task's address space so it
+  `eret`s under the correct translation regime (§4).
+
+### Remaining EL0 wiring (SP2b/SP2c — planned)
+
+* **Per-arch address-space reactivation.** The `pre_resume` hook captures
+  only the user page-table root (a `u64`, keeping the runtime `Send`) and
+  calls a small per-arch `activate_user_root` primitive (on aarch64:
+  reprogram `TTBR0_EL1` + `tlbi`/`isb`, MMU already on), so each task stays
+  hardware-isolated (§4).
+* **The producer.** `KernelDispatchHook` maps the `yield` / `exit`
+  syscalls to `DispatchOutcome::Reschedule`, and the arch trap callback
+  acts on it by calling `reschedule_current` instead of returning to user
+  mode. The kthread `TaskAction` returned by `dispatch_step` then becomes
+  the single authority for the scheduler re-enqueue/reap (the handlers stop
+  driving it directly). A non-rescheduling syscall returns to the same task
+  exactly as today.

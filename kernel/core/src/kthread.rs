@@ -66,6 +66,9 @@ use rustos_arch_api::{ContextSwitch, TaskContext};
 use rustos_kernel_sched_api::{
     CpuId, Priority, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
+use rustos_sync::SpinLock;
+
+use crate::dispatch_slot::RescheduleAction;
 
 /// Default per-kthread kernel-stack size, in bytes.
 ///
@@ -217,6 +220,138 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
     }
 }
 
+/// Upper bound on the number of CPUs the per-CPU EL0 resume table is
+/// sized for.
+///
+/// `kernel/core` cannot name an architecture's `MAX_CPUS` (it is a
+/// concrete-port constant, `AGENTS.md` §17.4); this is the core-owned
+/// bound for the EL0-task resume seam. It is comfortably above every
+/// Tier-1 port's own `MAX_CPUS` (x86_64 = 16, aarch64 = 8); a `cpu`
+/// index at or beyond it makes [`reschedule_current`] fail closed rather
+/// than index out of bounds (`AGENTS.md` §2.9, §5.4.5).
+pub const KTHREAD_MAX_CPUS: usize = 64;
+
+/// A published handle to the EL0 user kthread currently switched in on a
+/// CPU, through which its syscall trap path suspends it back to the
+/// scheduler ([`reschedule_current`]).
+///
+/// `data` is the address of the running task's `ThreadControl<C, S>` and
+/// `thunk` is the `C, S`-monomorphised [`suspend_thunk`] that knows how to
+/// reinterpret it; the pair is `Copy` so [`reschedule_current`] can lift it
+/// out from under the per-CPU lock *before* performing the (suspending)
+/// switch, never holding the lock across the hand-off.
+#[derive(Copy, Clone)]
+struct UserResumeHandle {
+    data: usize,
+    thunk: unsafe fn(usize, TaskAction),
+}
+
+/// Per-CPU EL0 resume table: slot `cpu` holds the handle for the user
+/// kthread currently switched in on that CPU, or `None` when no user task
+/// is running there.
+///
+/// [`dispatch_step`] publishes a slot immediately before switching into a
+/// user kthread and clears it the instant the task switches back, so a slot
+/// is `Some` exactly while that CPU is executing the task (in EL0 or in one
+/// of its syscall traps). The arch trap path reaches it only through
+/// [`reschedule_current`]. Each CPU touches only its own slot, so the
+/// `SpinLock` never contends across CPUs — it is the minimum interior
+/// mutability + memory-ordering primitive for the publish/observe, not a
+/// contention point (`AGENTS.md` §2.3).
+static USER_RESUME: [SpinLock<Option<UserResumeHandle>>; KTHREAD_MAX_CPUS] =
+    [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
+
+/// Map the dispatch-callback ABI's [`RescheduleAction`] onto the
+/// scheduler's own `TaskAction` at the one boundary that needs it
+/// (`AGENTS.md` §2.2 — the two vocabularies meet here, nowhere else).
+const fn to_task_action(action: RescheduleAction) -> TaskAction {
+    match action {
+        RescheduleAction::Yield => TaskAction::Yield,
+        RescheduleAction::Park => TaskAction::Park,
+        RescheduleAction::Exit => TaskAction::Exit,
+    }
+}
+
+/// Suspend the `ThreadControl` at `data` with `action` and switch back to
+/// its dispatcher, returning when the task is next resumed.
+///
+/// The `C, S`-monomorphised function pointer a [`UserResumeHandle`] carries:
+/// it reconstructs the task's [`Yielder`] from the control block and reuses
+/// [`Yielder::suspend`] so the switch-back invoke has exactly one definition
+/// (`AGENTS.md` §2.2).
+///
+/// # Safety
+///
+/// `data` must be the address of the live, boxed `ThreadControl<C, S>` the
+/// publishing [`dispatch_step`] passed, monomorphised over the *same* `C, S`.
+/// The caller must run between that `dispatch_step`'s switch-into-task and
+/// the task's switch-back — i.e. from the task's own syscall trap — so the
+/// CPU exclusively owns the control block (the kthread raw-pointer protocol,
+/// see the module docs).
+unsafe fn suspend_thunk<C, S>(data: usize, action: TaskAction)
+where
+    C: ContextSwitch + Copy,
+    S: KernelStack,
+{
+    let ctl = data as *mut ThreadControl<C, S>;
+    // SAFETY: `ctl` is the live control block per this function's contract;
+    // `cs` is `Copy`, and the three fields are distinct and live.
+    let mut yielder = unsafe {
+        Yielder {
+            cs: (*ctl).cs,
+            task_ctx: addr_of_mut!((*ctl).task_ctx),
+            dispatch_ctx: addr_of_mut!((*ctl).dispatch_ctx),
+            action: addr_of_mut!((*ctl).action),
+        }
+    };
+    yielder.suspend(action);
+}
+
+/// Suspend the EL0 user kthread currently switched in on `cpu` with
+/// `action`, returning when the scheduler next dispatches it (never, for
+/// [`RescheduleAction::Exit`]).
+///
+/// The bin-crate syscall-dispatch callback calls this on a
+/// [`DispatchOutcome::Reschedule`](crate::DispatchOutcome::Reschedule): a
+/// resumable user task that yielded, parked, or exited must be suspended
+/// back to the scheduler rather than returned to immediately. The suspend
+/// switches to the dispatcher's saved context; control returns here — and
+/// then to the callback, which encodes the syscall result and resumes user
+/// space — only when this task is dispatched again.
+///
+/// Returns `true` if a user kthread was running on `cpu` and was suspended;
+/// `false` if no resume handle is published for `cpu`. A `false` is the
+/// fail-closed signal that the caller was **not** a resumable user task (or
+/// `cpu` is out of range): the callback then treats the syscall as an
+/// ordinary return rather than perform an unsound switch (`AGENTS.md` §2.9,
+/// §5.4.5).
+#[must_use = "a false return means no user task was suspended; the caller must fall back to an ordinary syscall return"]
+pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
+    let Ok(idx) = usize::try_from(cpu) else {
+        return false;
+    };
+    let Some(slot) = USER_RESUME.get(idx) else {
+        return false;
+    };
+    // Lift the handle out from under the lock and release it *before*
+    // switching: the switch suspends this task, and holding the slot lock
+    // across it would deadlock the dispatcher-side clear that runs when the
+    // task resumes (`AGENTS.md` §2.1 — no lock held across a hand-off).
+    let handle = *slot.lock();
+    let Some(handle) = handle else {
+        return false;
+    };
+    // SAFETY: a published handle's `data`/`thunk` were installed by
+    // `dispatch_step` for the task currently switched in on this CPU,
+    // monomorphised over the matching `C, S`; this call runs from that
+    // task's syscall trap, so the control block is live and exclusively
+    // owned (the kthread raw-pointer protocol).
+    unsafe {
+        (handle.thunk)(handle.data, to_task_action(action));
+    }
+    true
+}
+
 /// The per-kthread control block: everything the dispatcher-side shim and
 /// the task-side [`trampoline`]/[`Yielder`] share.
 ///
@@ -242,7 +377,22 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// once taken; a never-started task that fails `prepare` leaves it
     /// `Some` and drops it with the control block.
     work: Option<Work<C>>,
+    /// Optional hook run on the dispatcher side immediately before each
+    /// switch into the task (`plans/SPAWN.md` SP2).
+    ///
+    /// `Some` marks this as a **user** kthread: the hook reactivates the
+    /// task's user address space (its arch page-table root) so the trap
+    /// path `eret`s back into EL0 with the correct translation regime, and
+    /// its presence is also what makes [`dispatch_step`] publish a
+    /// [`UserResumeHandle`] for the trap path. A plain kernel kthread
+    /// leaves this `None` and is never published. It runs on the
+    /// dispatcher's context, where the kernel mapping is identical across
+    /// every user space, so switching the user root mid-step is sound.
+    pre_resume: Option<PreResume>,
 }
+
+/// A user kthread's pre-resume hook: see [`ThreadControl::pre_resume`].
+type PreResume = Box<dyn FnMut() + Send + 'static>;
 
 /// The entry point a freshly prepared kthread first runs.
 ///
@@ -371,6 +521,111 @@ where
     S: KernelStack + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
+    spawn_control(scheduler, home_cpu, priority, cs, stack, work, None)
+}
+
+/// Admit a resumable **user** (EL0) kthread onto `scheduler`, giving it a
+/// fresh heap-backed kernel stack ([`BoxStack`]).
+///
+/// Identical to [`spawn_kthread`] but carries a `pre_resume` hook the
+/// dispatcher runs immediately before every switch into the task
+/// (`plans/SPAWN.md` SP2). The hook reactivates the task's user address
+/// space — its arch page-table root — so the task `eret`s back into EL0
+/// under the correct translation regime and stays isolated from its
+/// siblings (`AGENTS.md` §4). Its presence also enrols the task in the
+/// per-CPU resume table ([`reschedule_current`]), so its syscall trap path
+/// can suspend it back to the scheduler.
+///
+/// `work` typically diverges into EL0 via the arch `EnterUser` HAL; the
+/// reschedule machinery brings control back to the dispatcher on each
+/// rescheduling syscall.
+///
+/// # Errors
+///
+/// As [`spawn_kthread`].
+pub fn spawn_user_kthread<C, A, P, R, W>(
+    scheduler: &P,
+    cs: C,
+    home_cpu: CpuId,
+    priority: Priority,
+    pre_resume: R,
+    work: W,
+) -> SchedResult<TaskId>
+where
+    C: ContextSwitch + Copy + Send + 'static,
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+    R: FnMut() + Send + 'static,
+    W: FnMut(&mut Yielder<C>) + Send + 'static,
+{
+    spawn_user_kthread_with_stack(
+        scheduler,
+        cs,
+        BoxStack::new(),
+        home_cpu,
+        priority,
+        pre_resume,
+        work,
+    )
+}
+
+/// Admit a resumable user (EL0) kthread onto `scheduler` over a
+/// caller-supplied kernel stack `stack`.
+///
+/// The stack-owning counterpart of [`spawn_user_kthread`], in the same
+/// relation [`spawn_kthread_with_stack`] holds to [`spawn_kthread`].
+///
+/// # Errors
+///
+/// As [`spawn_kthread`].
+pub fn spawn_user_kthread_with_stack<C, A, P, S, R, W>(
+    scheduler: &P,
+    cs: C,
+    stack: S,
+    home_cpu: CpuId,
+    priority: Priority,
+    pre_resume: R,
+    work: W,
+) -> SchedResult<TaskId>
+where
+    C: ContextSwitch + Copy + Send + 'static,
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+    S: KernelStack + Send + 'static,
+    R: FnMut() + Send + 'static,
+    W: FnMut(&mut Yielder<C>) + Send + 'static,
+{
+    spawn_control(
+        scheduler,
+        home_cpu,
+        priority,
+        cs,
+        stack,
+        work,
+        Some(Box::new(pre_resume)),
+    )
+}
+
+/// Shared admission path for [`spawn_kthread_with_stack`] and
+/// [`spawn_user_kthread_with_stack`]: build the boxed [`ThreadControl`]
+/// (kernel or user, per `pre_resume`) and hand the scheduler the
+/// owning shim closure (`AGENTS.md` §2.2 — one admission path).
+fn spawn_control<C, A, P, S, W>(
+    scheduler: &P,
+    home_cpu: CpuId,
+    priority: Priority,
+    cs: C,
+    stack: S,
+    work: W,
+    pre_resume: Option<PreResume>,
+) -> SchedResult<TaskId>
+where
+    C: ContextSwitch + Copy + Send + 'static,
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+    S: KernelStack + Send + 'static,
+    W: FnMut(&mut Yielder<C>) + Send + 'static,
+{
     let mut control: Box<ThreadControl<C, S>> = Box::new(ThreadControl {
         cs,
         task_ctx: TaskContext::empty(),
@@ -379,12 +634,16 @@ where
         state: RunState::NotStarted,
         stack,
         work: Some(Box::new(work)),
+        pre_resume,
     });
 
     // The `move` closure owns the boxed control block, so its heap address
     // stays stable for the raw-pointer protocol; `&mut control` derefs to
-    // the `&mut ThreadControl` the shim step takes.
-    scheduler.spawn(home_cpu, priority, move |_step| dispatch_step(&mut control))
+    // the `&mut ThreadControl` the shim step takes. `step.cpu` keys the
+    // per-CPU resume table for a user kthread.
+    scheduler.spawn(home_cpu, priority, move |step| {
+        dispatch_step(&mut control, step.cpu)
+    })
 }
 
 /// Run one dispatch step of the kthread whose control block is `control`.
@@ -393,7 +652,7 @@ where
 /// it directly. It seeds the first frame on the first step, switches into
 /// the task, and returns the [`TaskAction`] the task requested when it
 /// switched back.
-fn dispatch_step<C, S>(control: &mut ThreadControl<C, S>) -> TaskAction
+fn dispatch_step<C, S>(control: &mut ThreadControl<C, S>, cpu: CpuId) -> TaskAction
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
@@ -436,6 +695,23 @@ where
     }
 
     let cs = unsafe { (*ctl).cs };
+
+    // A user kthread (one with a `pre_resume` hook) reactivates its user
+    // address space and publishes a resume handle so its syscall trap path
+    // can suspend it back to us. Both run on the dispatcher's context,
+    // where the kernel mapping is identical across every user space, so
+    // switching the user root here is sound (`plans/SPAWN.md` SP2).
+    // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
+    let is_user = unsafe { (*ctl).pre_resume.is_some() };
+    if is_user {
+        // SAFETY: `pre_resume` is `Some`; the field is exclusively ours
+        // between switches, so the `&mut` borrow does not alias.
+        if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
+            pre();
+        }
+        publish_resume::<C, S>(cpu, ctl);
+    }
+
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
     // (first step) or a prior `Yielder` suspension (later steps), so it
@@ -447,8 +723,46 @@ where
         );
     }
 
-    // The task switched back to us; report the action it requested.
+    // The task switched back to us. Retire the resume handle immediately:
+    // the task is no longer the one running on `cpu` (it yielded, parked,
+    // or exited), so its trap path must no longer reach this control block.
+    if is_user {
+        clear_resume(cpu);
+    }
+
+    // Report the action the task requested.
     unsafe { (*ctl).action }
+}
+
+/// Publish the per-CPU resume handle for the user kthread `ctl`, about to
+/// be switched in on `cpu` (the dispatcher side of [`reschedule_current`]).
+///
+/// Out-of-range or unconfigured `cpu` is a silent no-op: the task simply
+/// cannot be rescheduled from its trap and falls closed there, which is the
+/// same outcome [`reschedule_current`] gives (`AGENTS.md` §2.9).
+fn publish_resume<C, S>(cpu: CpuId, ctl: *mut ThreadControl<C, S>)
+where
+    C: ContextSwitch + Copy,
+    S: KernelStack,
+{
+    if let Ok(idx) = usize::try_from(cpu) {
+        if let Some(slot) = USER_RESUME.get(idx) {
+            *slot.lock() = Some(UserResumeHandle {
+                data: ctl as usize,
+                thunk: suspend_thunk::<C, S>,
+            });
+        }
+    }
+}
+
+/// Clear the per-CPU resume handle for `cpu` once its user kthread has
+/// switched back to the dispatcher (the counterpart of [`publish_resume`]).
+fn clear_resume(cpu: CpuId) {
+    if let Ok(idx) = usize::try_from(cpu) {
+        if let Some(slot) = USER_RESUME.get(idx) {
+            *slot.lock() = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -574,6 +888,30 @@ mod tests {
             state: RunState::NotStarted,
             stack,
             work: Some(Box::new(|_y: &mut Yielder<C>| {})),
+            pre_resume: None,
+        })
+    }
+
+    /// Like [`control_with`] but a **user** kthread: it carries a
+    /// `pre_resume` hook that increments `hits` on every switch-in, so a
+    /// test can prove the hook fires and the resume handle is published.
+    #[allow(clippy::unnecessary_box_returns)]
+    fn user_control_with<C: ContextSwitch + Copy, S: KernelStack>(
+        cs: C,
+        stack: S,
+        hits: &'static AtomicUsize,
+    ) -> Box<ThreadControl<C, S>> {
+        Box::new(ThreadControl {
+            cs,
+            task_ctx: TaskContext::empty(),
+            dispatch_ctx: TaskContext::empty(),
+            action: TaskAction::Yield,
+            state: RunState::NotStarted,
+            stack,
+            work: Some(Box::new(|_y: &mut Yielder<C>| {})),
+            pre_resume: Some(Box::new(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+            })),
         })
     }
 
@@ -586,7 +924,7 @@ mod tests {
         let mut control = control_with(cs, stack);
         let ctl_addr = addr_of_mut!(*control) as u64;
 
-        let action = dispatch_step(&mut control);
+        let action = dispatch_step(&mut control, 0);
 
         // One prepare, with the stack's top, the trampoline entry, and the
         // control block address as the entry argument.
@@ -609,8 +947,8 @@ mod tests {
         let rec = recorder();
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
 
-        let _ = dispatch_step(&mut control);
-        let _ = dispatch_step(&mut control);
+        let _ = dispatch_step(&mut control, 0);
+        let _ = dispatch_step(&mut control, 0);
 
         // Prepare happens once; each step switches in.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 1);
@@ -622,7 +960,7 @@ mod tests {
     fn failed_prepare_exits_without_switching() {
         let mut control = control_with(FailingCs, BoxStack::new());
 
-        let action = dispatch_step(&mut control);
+        let action = dispatch_step(&mut control, 0);
 
         // Fail closed: report Exit, mark terminal, never switch into an
         // unrunnable context.
@@ -636,7 +974,7 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
         control.state = RunState::Finished;
 
-        let action = dispatch_step(&mut control);
+        let action = dispatch_step(&mut control, 0);
 
         assert_eq!(action, TaskAction::Exit);
         // A terminal task is never prepared or switched into again.
@@ -773,5 +1111,102 @@ mod tests {
             slab.borrow_mut().slot_mut(stale).err(),
             Some(SlabError::TagMismatch)
         );
+    }
+
+    // --- EL0 reschedule seam (plans/SPAWN.md SP2) ----------------------
+    //
+    // Each test uses a distinct CPU index into the shared `USER_RESUME`
+    // table so the parallel host test threads never collide, and clears
+    // any handle it publishes before returning.
+
+    /// Leak a fresh, zeroed counter with a `'static` lifetime, for a
+    /// user kthread's `pre_resume` hook to tick.
+    fn leak_counter() -> &'static AtomicUsize {
+        StdBox::leak(StdBox::new(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn reschedule_current_without_a_published_handle_is_false() {
+        // No user task is running on CPU 63, so the trap path is told to
+        // fall back to an ordinary syscall return (fail closed, §2.9).
+        assert!(!reschedule_current(63, RescheduleAction::Yield));
+        assert!(!reschedule_current(63, RescheduleAction::Exit));
+    }
+
+    #[test]
+    fn reschedule_current_out_of_range_cpu_is_false() {
+        // A CPU index far beyond the table bound never indexes out of
+        // bounds; it fails closed like an unpublished slot.
+        assert!(KTHREAD_MAX_CPUS < CpuId::MAX as usize);
+        assert!(!reschedule_current(CpuId::MAX, RescheduleAction::Yield));
+    }
+
+    #[test]
+    fn reschedule_current_suspends_a_published_user_task() {
+        let rec = recorder();
+        let cs = RecordingCs(rec);
+        let mut control = control_with(cs, BoxStack::new());
+        let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
+        let cpu: CpuId = 60;
+
+        // Model `dispatch_step`'s publish, then drive the trap-path entry
+        // point directly. The handle's thunk reconstructs the task's
+        // Yielder and suspends it: one switch, task_ctx -> dispatch_ctx,
+        // with the requested action recorded.
+        publish_resume::<RecordingCs, BoxStack>(cpu, ctl);
+        assert!(reschedule_current(cpu, RescheduleAction::Exit));
+
+        assert_eq!(rec.switches.load(Ordering::SeqCst), 1);
+        assert_eq!(control.action, TaskAction::Exit);
+        assert_eq!(
+            rec.last_prev.load(Ordering::SeqCst),
+            unsafe { addr_of_mut!((*ctl).task_ctx) } as u64
+        );
+        assert_eq!(rec.last_next.load(Ordering::SeqCst), unsafe {
+            addr_of_mut!((*ctl).dispatch_ctx)
+        } as u64);
+
+        // After the dispatcher retires the handle, the slot is empty again.
+        clear_resume(cpu);
+        assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    #[test]
+    fn reschedule_action_maps_onto_task_action() {
+        assert_eq!(to_task_action(RescheduleAction::Yield), TaskAction::Yield);
+        assert_eq!(to_task_action(RescheduleAction::Park), TaskAction::Park);
+        assert_eq!(to_task_action(RescheduleAction::Exit), TaskAction::Exit);
+    }
+
+    #[test]
+    fn user_dispatch_step_runs_pre_resume_and_publishes_then_clears() {
+        let rec = recorder();
+        let hits = leak_counter();
+        let cpu: CpuId = 61;
+        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+
+        // The host switch is a no-op that returns immediately, so a step
+        // publishes the handle, runs `pre_resume`, switches in, and clears
+        // the handle before returning.
+        let _ = dispatch_step(&mut control, cpu);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // Handle retired: nothing to reschedule on this CPU now.
+        assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+
+        // `pre_resume` runs again on the next switch-in (every step
+        // reactivates the user address space).
+        let _ = dispatch_step(&mut control, cpu);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn kernel_dispatch_step_never_publishes_a_handle() {
+        let rec = recorder();
+        let cpu: CpuId = 62;
+        // A plain kernel kthread (no `pre_resume`) is never enrolled in the
+        // resume table, so its CPU stays unschedulable from a trap path.
+        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let _ = dispatch_step(&mut control, cpu);
+        assert!(!reschedule_current(cpu, RescheduleAction::Yield));
     }
 }

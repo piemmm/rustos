@@ -97,7 +97,7 @@ pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use console::{ConsoleWrite, NullConsole, NULL_CONSOLE};
 pub use dispatch_slot::{
-    AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome,
+    AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
 };
 pub use fs::{
     Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,
@@ -105,7 +105,9 @@ pub use fs::{
 };
 pub use init::{kernel_main, InitError, Phase};
 pub use kthread::{
-    spawn_kthread, spawn_kthread_with_stack, BoxStack, KernelStack, Yielder, KTHREAD_STACK_BYTES,
+    reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
+    spawn_user_kthread_with_stack, BoxStack, KernelStack, Yielder, KTHREAD_MAX_CPUS,
+    KTHREAD_STACK_BYTES,
 };
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
