@@ -8300,6 +8300,30 @@ When handing a stage to an implementing agent, the task brief **must**:
 4. Forbid stubs, `todo!()`, ignored tests, and `#[allow(...)]` without
    justification.
 5. Require the agent to quote actual `cargo xtask test` output on completion.
+6. Require the agent to apply the `AGENTS.md` §23 Code Review and Acceptance
+   Gate to its own diff and state the §23.5 verdict on completion.
 
 A stage delivered without the above is to be returned for rework, regardless
 of how much code was produced.
+
+---
+
+## Charter Amendments
+
+Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
+can see *why* a rule exists without diffing the charter's history.
+
+- **2026-06-07 — Code-quality & self-review hardening.** Added §2.13 (no
+  pre-release backwards-compatibility code — RustOS has not shipped, so
+  RustOS-native interfaces, types, and on-disk formats are evolved *in place*
+  with all callers updated in the same change; no `v2`-beside-`v1`, shims,
+  migrations, or "old data" fallbacks; this is distinct from reading *foreign*
+  ext4/FAT32 volumes under §21 and from the §2.4 freeze that binds only from
+  the first release). Added §2.14 (delete obsolete code — nothing commented
+  out, `_old`-renamed, `#[allow(dead_code)]`-ed, or orphaned; deletions update
+  §3 / §16.4 / this plan). Added §23 (Code Review and Acceptance Gate — a
+  binding adversarial self-review every agent runs on its own output before
+  reporting done: §23.1 security, §23.2 correctness/multi-arch, §23.3
+  no-compat/no-dead-code, §23.4 tests/docs/process, §23.5 verdict), cross-
+  referenced from §14 (mergeable criteria) and §15.12 (agent instructions).
+  No code or interface changed; this amendment is documentation only.

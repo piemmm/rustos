@@ -110,6 +110,39 @@ These are absolute. They override any local convenience.
     - This rule never overrides §2.1 (no hacks), §2.5 (tests), or §2.6
       (senior-developer quality). Reinventing a wheel badly is worse than a
       well-chosen, audited dependency.
+13. **No pre-release backwards-compatibility code. Evolve in place.**
+    RustOS has **not shipped a release**, so nothing in this workspace has
+    anything to be backwards-compatible *with*. There is no prior version,
+    no installed base, and no foreign consumer of a RustOS-native interface.
+    Therefore:
+    - When an interface, type, on-disk format, or protocol is wrong or can
+      be made better, **change it in place** and update every caller in the
+      same change. Do not add a `v2` alongside a `v1`, a compatibility shim,
+      a migration path, a fallback for "old" data, a feature flag that keeps
+      the old behaviour, or a "deprecated but still works" alias. The single
+      living definition is the only definition.
+    - This is the freedom §9 grants while `abi-v1` is unfrozen: until the
+      first release the ABI types are mutable, and the §2.4 "no interface
+      creep" freeze binds **only from the first shipped release onward**.
+      `abi-v2`, dual-version ABIs, and the immutability rule are *future*
+      concerns; writing them now is forbidden bloat (§2.3).
+    - This does **not** touch reading *foreign* systems' data. Reading an
+      ext4 / FAT32 volume (§21) or speaking an existing network protocol
+      created elsewhere is interoperability with the outside world, not
+      RustOS self-compatibility, and is governed by its own sections. The
+      ban is on carrying *our own* history we do not yet have.
+    - If you believe a compatibility seam is genuinely required, you have
+      found a design flaw — stop and ask (§15.7), do not paper over it.
+14. **Delete obsolete code; leave nothing dead behind.** When a change makes
+    code, a type, a file, a test fixture, a doc page, or a plan obsolete, the
+    same change **deletes** it. Superseded code is never commented out, never
+    renamed to `_old` / `legacy_` / `unused_`, never `#[allow(dead_code)]`-ed,
+    and never "kept just in case". Dead code misleads a future reader (human
+    or AI) into treating it as live, is an unaudited attack surface, and is a
+    review blocker. Version control is the history; the tree holds only what
+    is alive. Removing the last consumer of a `lib/*` crate, a driver, or a
+    syscall means removing the thing itself and updating §3 / §16.4 / `PLAN.md`
+    accordingly.
 
 ---
 
@@ -716,6 +749,7 @@ an update to this section.
   ```
 - A PR is mergeable only when:
   - `cargo xtask ci` passes locally and in CI,
+  - the §23 Code Review and Acceptance Gate has been applied and passes,
   - all reviewer comments are resolved,
   - `PLAN.md` is updated if a stage was advanced.
 
@@ -762,6 +796,12 @@ You are not exempt from any rule above. In addition:
     **generated** from `lib/abi` by `cargo xtask c-header --write` — never
     hand-write or hand-edit them (§2.2, §9). If a task appears to ask you to
     write C, you have misunderstood it: stop and ask (§15.7).
+12. **Review your own output against §23 before reporting done.** Run the
+    Code Review and Acceptance Gate adversarially over your own diff —
+    security (§23.1), correctness and multi-arch (§23.2), no
+    backwards-compatibility and no dead code (§23.3, §2.13, §2.14), and
+    tests/docs/process (§23.4) — and state the verdict (§23.5). A green
+    compile and green tests do not make a change done.
 
 ---
 
@@ -1578,6 +1618,117 @@ random seeding path.
   reseed, suspend/resume, fork/clone separation, zeroization, the
   fallible draw surfacing the transient reseed error, and the blocking
   draw waiting through a required reseed until it can return.
+
+---
+
+## 23. Code Review and Acceptance Gate
+
+A change is not "done" when it compiles and the tests are green (§7). It is
+done when it would **survive review** by a senior kernel engineer (§2.6).
+Every agent must review its **own** output against this gate before reporting
+a task complete, and must apply the same gate when reviewing existing code it
+is asked to assess. The gate is binding: a change that fails any item below is
+defective and must be reworked, not explained away. None of these items
+replaces the §7 test matrix — they are the judgement the tests cannot make for
+you.
+
+Self-review is adversarial: read the diff as if it were written by someone
+trying to sneak a flaw past you. "I wrote it, so it is fine" is not a review.
+When the gate surfaces a defect anywhere — in code you touched or code you did
+not — you fix it or revert it (§2.5, §7); "pre-existing" and "out of scope" are
+not exits.
+
+### 23.1 Security review (every change)
+
+Trace, do not assume. For every entry point the change adds or touches
+(syscall, IPC method, driver entry, parser, filesystem op):
+
+- **Capability check before state.** The capability is verified *before* any
+  state is read or mutated, using the kernel-provided caller identity, never a
+  caller-supplied one (§5.4). No "trusted caller" shortcut exists.
+- **Every input validated.** Each field, length, index, offset, and pointer
+  from an untrusted source is bounds- and shape-checked before use. A struct
+  with five fields has five validations, not "the obvious one". Reject the
+  whole input on any failure; never partially apply it.
+- **Fails closed.** The error, default, and not-yet-initialised paths deny
+  rather than grant (§5.4, §2.9). An `Err`, a missing capability, or an
+  unexpected variant never widens authority.
+- **No ambient authority added.** The change grants only the authority its
+  matched node / manifest / delegation already carries, never more (§4, §18).
+- **Secret hygiene.** Anything that held a key, credential, or capability
+  token is zeroed on free (§4); secrets never reach swap unencrypted (§4),
+  logs (§19.4/§20), or `stdinfo` (§20).
+- **`unsafe` is justified and covered.** Every `unsafe` block has an accurate
+  `// SAFETY:` invariant and a test or model check exercising it (§2.10); the
+  invariant actually holds for *all* inputs, not the happy path.
+- **Untrusted parsing is sandboxed.** Any new parser of untrusted input runs
+  in the §19.5 minimum-capability sandbox and has a fuzz harness (§19.6).
+- **Log the security decision.** Allow/deny decisions emit a stable §19.4
+  event ID. Audit-relevant state changes are on the hash-chained log.
+
+### 23.2 Correctness and multi-architecture review
+
+- **All four Tier-1 targets.** Logic that touches memory layout, atomics,
+  word size, endianness, or MMIO behaves correctly on `x86_64`, `aarch64`,
+  `riscv64`, and `wasm32`. Anything architecture-specific lives behind the
+  Arch HAL (§17.2); `cfg(target_arch …)` / `cfg(target_pointer_width …)`
+  outside the §17.2 allow-list is a defect. Time and persisted metadata are
+  64-bit-native (§21); pointer width is never time width.
+- **SMP-correct.** Shared state uses `lib/sync` primitives with a stated
+  ordering discipline; there is no data race, no torn read, no "works on one
+  core" assumption (§4). Lock acquisition order cannot deadlock.
+- **Error paths are real.** Allocation failure and every `Result` are handled
+  as values, never `unwrap`/`expect`/`panic!` in a production path (§2.9);
+  OOM is a `Result`, not a panic (§4). Cleanup on the error path leaks
+  nothing (memory, capabilities, locks, file handles).
+- **Illegal states unrepresentable.** Types encode the invariants so the
+  compiler rejects misuse; the code reads correctly with comments stripped
+  (§2.11).
+- **Edge cases covered.** Empty, max, off-by-one, overflow/underflow, and the
+  pre-1970 / post-2038 / past-format-boundary dates (§21) are handled and
+  tested (§7).
+- **Layering respected.** The dependency direction obeys §17.4; the headless
+  build (§17.3) still works; no non-GUI crate gained a `userland/gui/*` edge.
+
+### 23.3 No backwards-compatibility, no dead code
+
+- **No self-compat (§2.13).** The change has no `v2`-beside-`v1`, no shim, no
+  migration path, no "old data" fallback, no compatibility feature flag for a
+  RustOS-native interface. Improvements are made in place, with every caller
+  updated in the same change.
+- **No dead code left (§2.14).** Nothing the change supersedes is commented
+  out, `_old`-renamed, `#[allow(dead_code)]`-ed, or orphaned. Obsolete files,
+  tests, fixtures, doc pages, and plan entries are deleted, and §3 / §16.4 /
+  `PLAN.md` are updated to match.
+- **No speculative surface (§2.3, §2.4).** No method, type, or parameter is
+  added "for later" or "to make access easier". Every public item has a
+  present-day caller in at least two independent places before it becomes a
+  shared helper (§15.5).
+
+### 23.4 Tests, docs, and process
+
+- **Tests are part of this change (§7).** Bug → a reproducer that failed
+  before and passes after; feature → core, negative, and edge-case tests;
+  refactor → the existing covering tests identified and run. No `#[ignore]`,
+  no weakened assertion, no "tests later".
+- **Whole-project gate run (§7, §15.6).** `cargo fmt --all`, the full
+  `cargo xtask ci`, and `cargo xtask fuzz --secs 5` (plus anything else
+  `.github/workflows/ci.yml` runs) were executed over the **entire**
+  workspace — never a `-p` subset — and the actual output is quoted in the
+  completion report. The coverage targets (§7) still hold.
+- **Docs updated in the same change (§2.8, §13).** Rustdoc on every public
+  item, the relevant `docs/src/` page, and any affected `README.md` stability
+  tier (§6) are current. No stale symbol references remain.
+- **Assumptions stated (§15.7).** Any assumption that cannot be verified from
+  the repository was surfaced, not silently relied upon.
+
+### 23.5 Verdict
+
+State the verdict explicitly when reporting the task: which gate items were
+checked, what the whole-project run output was, and — if anything is
+incomplete, blocked, or deferred — exactly what and why (§15). A clean
+compile and green tests with an unstated or failed gate is **not** a passing
+change.
 
 ---
 
