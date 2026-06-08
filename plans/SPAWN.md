@@ -521,6 +521,72 @@ on free, OOM surfaced as an `Errno`; the immutable-`FrozenAddressSpace` gap
 is closed by a single live-space mutation path (§2.2); `virt` + the headless
 build stay green.
 
+### SP6 — `wait`: reap a child + read its exit code `[~]` (beyond P6d)
+
+The process-lifecycle counterpart of `spawn`: a parent blocks until one of
+its children exits, reaps the zombie, and reads back the child's exit code.
+It is the missing prerequisite for **P6e-3b** — both the shell's foreground
+job control (`ProcessHost::wait`) and PID 1 `init` supervising the session
+(reap, restart) need it — and `spawn` today is a spawn-and-forget with no way
+to observe a child's exit. Staged like SP5 (one fully-gated increment per
+landing).
+
+**Binding decisions:**
+
+1. **`waitpid`-style, not a global reaper (§2.13).** `wait(pid: i32,
+   status: *mut i32) -> i64`: `pid` selects a specific child or
+   `rustos_abi::WAIT_ANY` (`-1`) for any child; on success the kernel writes
+   the child's exit code to `status` and returns the reaped child's PID
+   (`< 0` is `-errno`, the standard signed-result convention).
+2. **Own children only (§4 / §16.6).** A process may only reap children it
+   spawned, so `wait` grants no authority over any other principal and needs
+   **no capability** — the same unprivileged baseline as `mem_map` and "list
+   my own processes". It **is** audited (a principal disappears), like
+   `spawn`/`exit`; it blocks rather than polls, so the per-call record does
+   not drown the log.
+3. **Block, never busy-poll (§2.1).** The blocking is the
+   scheduler-side producer's job (a cooperative park/unpark on the child's
+   exit, mirroring the `irq_wait` wait loop), not a spin in the handler.
+4. **Fail closed (§2.9).** A `pid` that is not a child of the caller →
+   `NotFound`; no producer wired → `NotImplemented`; a faulting `status`
+   pointer → `BadAddress`. The exit code is copied out only on success.
+
+**Staging:**
+
+- **SP6a — abi-v1 surface + fail-closed seam (host-proven) `[x]`.**
+  `lib/abi`: `SyscallNumber::WAIT` (**16**) + `WAIT_ANY` const + the
+  `SyscallSpec` row (`wait(I32 pid, UserPtr status) -> U64`, **unprivileged,
+  audited**) + frozen-number test. `lib/abi-sys`: the `ros_sys_wait` C stub
+  (`#[export_name]`, panic-free) + drift-registry row + marshalling tests;
+  regenerate the C header (`cargo xtask c-header --write`); `SYSCALL_TABLE_HASH`
+  re-derives from `ENCODED_TABLE`; `abi-check` + `c-header` guards green.
+  `lib/rt`: the `wait(pid, &mut status) -> i64` wrapper + marshalling tests.
+  `kernel/syscall`: the `SyscallHandlers::wait` trait method + dispatch arm
+  (I32-pid recovery, UserPtr status) + the three test-double impls
+  (`MockHandlers`/`AcceptingHandlers`/`CountingHandlers`) + decode/forward
+  tests. `kernel/core`: a fail-closed arch-neutral `procwait::ProcessWait`
+  seam (`wait(parent: TaskId, pid) -> Result<ReapedChild, Errno>`; default
+  `NULL_PROCESS_WAIT` → `NotImplemented`, mirroring `NULL_MEM_MAP` /
+  `NULL_PROCESS_SPAWN`), the `wait` handler (forward → `copy_out` the exit
+  code → return pid), and a `with_process_wait` builder, so the kernel binary
+  needs no change yet. Host-tested (forward+copy_out success, no-producer
+  `NotImplemented`, producer-error propagation, unregistered-caller
+  `BadAddress`). **Landed (this increment).**
+- **SP6b — scheduler-side blocking producer + `-M virt` EL0 vertical `[ ]`.**
+  The real producer: the scheduler grows parent/child + exit-status
+  bookkeeping (`exit` records the code against the parent; the reaper parks
+  the parent until a child is reapable and wakes it on the child's exit,
+  mirroring the cooperative `irq_wait` loop), wired through the
+  `kernel/core` `ProcessWait` seam. An aarch64 `-M virt` EL0 vertical proves
+  a parent `spawn`s a child that `exit`s with a known code and the parent's
+  `wait` reaps it and reads that code back. This unblocks the P6e-3b shell
+  REPL + `init` supervision.
+
+**Done when (SP6 overall):** a parent process can block on, reap, and read
+the exit code of its own child via `abi-v1` on aarch64 `-M virt`; waiting on
+a non-child fails closed; `virt` + the headless build stay green. SP6a (this
+landing) is the abi surface + fail-closed seam; SP6b is the producer.
+
 ---
 
 ## 2. Cross-cutting requirements (apply to every stage)

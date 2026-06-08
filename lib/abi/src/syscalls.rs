@@ -422,6 +422,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::WAIT,
+        name: "wait",
+        arg_count: 2,
+        args: [
+            AbiType::I32,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Reaping one's *own* child is the unprivileged baseline
+        // (`AGENTS.md` §16.6 precedent — observing/managing one's own
+        // processes needs no capability): a process may only wait on
+        // children it spawned, so waiting grants no authority over any
+        // other principal (`AGENTS.md` §4 — no ambient authority). Unlike
+        // the high-volume own-process data movers it IS audited per call:
+        // reaping a child is a security-relevant process-lifecycle state
+        // change — a principal disappears — exactly as `spawn`/`exit` are
+        // audited (`AGENTS.md` §5.4.4); `wait` blocks rather than polls, so
+        // the per-call record does not drown the log.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

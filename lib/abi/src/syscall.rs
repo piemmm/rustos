@@ -167,6 +167,22 @@ impl SyscallNumber {
     /// (`AGENTS.md` §5.4); a build with no memory service wired fails closed
     /// with [`crate::Errno::NotImplemented`].
     pub const MEM_UNMAP: Self = Self(15);
+    /// Wait for a child process to exit, reaping it and reporting its
+    /// exit code (`plans/SPAWN.md` SP6).
+    ///
+    /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_ANY`] to
+    /// wait for any of the caller's children) and `status: *mut i32` (a
+    /// non-null user pointer the kernel writes the reaped child's exit
+    /// code into). Returns the reaped child's PID. A process may only wait
+    /// on its **own** children — waiting reaps a child the caller spawned,
+    /// so it grants no authority over anything else and needs no
+    /// capability (`AGENTS.md` §16.6 precedent — "list my own processes");
+    /// the kernel validates the parent/child relationship and fails closed
+    /// (`AGENTS.md` §5.4). Waiting on a `pid` that is not a child of the
+    /// caller fails closed with [`crate::Errno::NotFound`]; a build with no
+    /// process-wait service wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
+    pub const WAIT: Self = Self(16);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -187,6 +203,14 @@ impl SyscallNumber {
         self.0
     }
 }
+
+/// The `pid` argument to [`SyscallNumber::WAIT`] that selects "any child".
+///
+/// Passing this rather than a specific PID waits for whichever of the
+/// caller's children exits next (the POSIX `waitpid(-1, …)` convention).
+/// A named constant keeps the sentinel from appearing as a bare `-1` at
+/// every call site (`AGENTS.md` §2.11).
+pub const WAIT_ANY: i32 = -1;
 
 /// Opaque, kernel-issued handle to a bound hardware interrupt line.
 ///
@@ -250,6 +274,7 @@ mod tests {
         assert_eq!(SyscallNumber::STREAM_READ.as_u16(), 13);
         assert_eq!(SyscallNumber::MEM_MAP.as_u16(), 14);
         assert_eq!(SyscallNumber::MEM_UNMAP.as_u16(), 15);
+        assert_eq!(SyscallNumber::WAIT.as_u16(), 16);
     }
 
     #[test]

@@ -189,6 +189,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn wait(&self, _c: &CallerContext<'_>, _pid: i32, _status: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

@@ -116,7 +116,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
     // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
-    // build `core` / `compiler_builtins` as PIC alongside it (`-Z build-std`).
+    // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
+    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // `#[global_allocator]` (its `mem_map`-backed heap), so the program names
+    // `alloc`; omitting it would pull `alloc` from the prebuilt sysroot while
+    // `core` is built fresh, a duplicate-lang-item link error.
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(manifest_dir)
@@ -141,7 +145,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
             "--target",
             AARCH64_TARGET,
             "-Z",
-            "build-std=core,compiler_builtins",
+            "build-std=core,compiler_builtins,alloc",
             "--target-dir",
             &target_dir,
         ])

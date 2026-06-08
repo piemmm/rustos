@@ -91,6 +91,9 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 /// `mem_unmap` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
+/// `wait` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -294,6 +297,36 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
     ret as i64
 }
 
+/// Wait for a child process to exit, reaping it and reading back its exit
+/// code (`SyscallNumber::WAIT`, `plans/SPAWN.md` SP6).
+///
+/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`] to
+/// wait for whichever of the caller's children exits next. On success the
+/// kernel writes the reaped child's exit code into `status` and returns its
+/// PID. A process may only wait on its **own** children; the kernel
+/// validates the parent/child relationship and fails closed (`AGENTS.md`
+/// §4 / §5.4).
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: a non-negative value is the reaped child's
+/// PID, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`) — `status` is left
+/// untouched on a negative result. The wrapper surfaces that raw signed
+/// value so the caller decides how to react; it adds no authority and hides
+/// no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
+pub fn wait(pid: i32, status: &mut i32) -> i64 {
+    let ptr = (status as *mut i32) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `status` pointer against the caller's address space before
+    // writing the exit code to it (`AGENTS.md` §5.4). `status` is a live
+    // exclusive `&mut i32` for the duration of the call, so the pointer
+    // denotes writable memory the kernel may fill.
+    let ret = unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -469,6 +502,43 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(mem_unmap(0x10_0100_0000, 0x1000), want);
+        });
+    }
+
+    #[test]
+    fn wait_marshals_pid_and_status_pointer() {
+        let mut status = 0i32;
+        let ptr = core::ptr::addr_of_mut!(status) as usize as u64;
+        // The kernel returns the reaped child's PID (non-negative).
+        let (number, args) = capture(5, || {
+            assert_eq!(wait(9, &mut status), 5);
+        });
+        assert_eq!(number, NUM_WAIT);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], ptr);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wait_marshals_wait_any_as_a_sign_extended_minus_one() {
+        let mut status = 0i32;
+        let (number, args) = capture(3, || {
+            assert_eq!(wait(rustos_abi::WAIT_ANY, &mut status), 3);
+        });
+        assert_eq!(number, NUM_WAIT);
+        // `WAIT_ANY` (-1) sign-extends to all-ones in the argument register.
+        assert_eq!(args[0], u64::MAX);
+    }
+
+    #[test]
+    fn wait_surfaces_negative_errno_encoding() {
+        // `NotFound` (no such child) is encoded as the two's-complement
+        // negation; the wrapper hands that signed value back unchanged.
+        let mut status = 0i32;
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(wait(9, &mut status), want);
         });
     }
 

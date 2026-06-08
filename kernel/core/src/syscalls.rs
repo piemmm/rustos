@@ -102,6 +102,7 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleRead, ConsoleWrite, NULL_CONSOLE, NULL_CONSOLE_READ};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
+use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
@@ -209,6 +210,14 @@ where
     /// producer through [`Self::with_mem_map`] once `SP5b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     mem_map: &'static (dyn MemMap + 'static),
+    /// The scheduler-side process-wait producer the `wait` syscall drives
+    /// to block the caller until one of its children exits, reap it, and
+    /// report its exit code (`plans/SPAWN.md` SP6). Defaults to
+    /// [`NULL_PROCESS_WAIT`] (fail closed with [`Errno::NotImplemented`],
+    /// `AGENTS.md` §2.9); the boot path installs the concrete producer
+    /// through [`Self::with_process_wait`] once `SP6b` lands. Held as a
+    /// `'static` borrow, exactly like the console device and spawn producer.
+    process_wait: &'static (dyn ProcessWait + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -274,6 +283,10 @@ where
             // the `kernel/mem` live-mapping producer (`plans/SPAWN.md` SP5b):
             // `mem_map` / `mem_unmap` fail closed with `NotImplemented`.
             mem_map: &NULL_MEM_MAP,
+            // Process-wait subsystem unwired until the boot path installs the
+            // scheduler-side producer (`plans/SPAWN.md` SP6b): `wait` fails
+            // closed with `NotImplemented`.
+            process_wait: &NULL_PROCESS_WAIT,
         }
     }
 
@@ -361,6 +374,23 @@ where
     #[must_use]
     pub const fn with_mem_map(mut self, mem_map: &'static (dyn MemMap + 'static)) -> Self {
         self.mem_map = mem_map;
+        self
+    }
+
+    /// Install the scheduler-side process-wait producer the `wait` syscall
+    /// drives, consuming and returning `self` (`plans/SPAWN.md` SP6).
+    ///
+    /// Until this is called the handler holds [`NULL_PROCESS_WAIT`], so
+    /// `wait` fails closed with [`Errno::NotImplemented`] (`AGENTS.md`
+    /// §2.9). The producer must be `'static`: it lives for the lifetime of
+    /// the running kernel, exactly like the console device, the spawn
+    /// producer, and the anonymous-memory producer.
+    #[must_use]
+    pub const fn with_process_wait(
+        mut self,
+        process_wait: &'static (dyn ProcessWait + 'static),
+    ) -> Self {
+        self.process_wait = process_wait;
         self
     }
 
@@ -1094,6 +1124,34 @@ where
         // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
         // error code, not a value).
         self.mem_map.unmap(base, len).map(|()| 0)
+    }
+
+    fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult {
+        // The dispatcher already validated that `pid` is a sign-extended
+        // `i32` and that `status` is a non-null `UserPtr`. Hand the request
+        // to the installed scheduler-side producer, which validates the
+        // parent/child relationship (a process may only reap its own
+        // children, `AGENTS.md` §4 / §5.4), blocks the caller until a child
+        // is reapable, and reports the reaped child. Until one is installed
+        // the default `NULL_PROCESS_WAIT` fails closed with `NotImplemented`
+        // (`AGENTS.md` §2.9), never fabricating a reaped child — the
+        // process-wait analogue of `NULL_MEM_MAP` / `NULL_PROCESS_SPAWN`.
+        let reaped = self.process_wait.wait(caller.task_id, pid)?;
+
+        // Copy the child's exit code out to the caller's `status` pointer
+        // through the validated `copy_to_user` boundary (`AGENTS.md` §5.4)
+        // *before* reporting success, so a faulting `status` is the same
+        // fail-closed `BadAddress` an actual fault produces and never leaks
+        // which case occurred (§19.1). `with_caller_aspace` yields `None`
+        // when the caller has no registered address space; fail closed.
+        let status_bytes = reaped.code.to_ne_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(status), &status_bytes)
+        }) {
+            Some(Ok(())) => Ok(u64::from(reaped.pid)),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 }
 
@@ -4350,5 +4408,173 @@ mod tests {
         // A well-formed range reaches the producer and reports Ok(0).
         assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x1000), Ok(0));
         assert_eq!(*producer.last_unmap.lock(), Some((0x10_0000, 0x1000)));
+    }
+
+    /// A `ProcessWait` producer that records the last `(parent, pid)` it was
+    /// handed and returns a configured result, so the handler tests can
+    /// assert the arguments reached it and the result flowed back without a
+    /// real scheduler-side wait path.
+    struct RecordingProcessWait {
+        last: rustos_sync::SpinLock<Option<(u64, i32)>>,
+        result: Result<crate::procwait::ReapedChild, Errno>,
+    }
+    impl RecordingProcessWait {
+        fn new(result: Result<crate::procwait::ReapedChild, Errno>) -> Self {
+            Self {
+                last: rustos_sync::SpinLock::new(None),
+                result,
+            }
+        }
+    }
+    impl crate::procwait::ProcessWait for RecordingProcessWait {
+        fn wait(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
+            *self.last.lock() = Some((parent.0, pid));
+            self.result
+        }
+    }
+
+    /// `wait` needs no capability (`AGENTS.md` §16.6 — a process reaps its
+    /// own children): it forwards the decoded `(parent, pid)` to the
+    /// installed producer, writes the reaped child's exit code to the
+    /// caller's `status` pointer through the validated copy-out boundary,
+    /// and returns the reaped child's PID.
+    #[test]
+    fn wait_forwards_to_producer_and_returns_reaped_pid() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A writable user page at VA 0x1000 backs the exit-code copy-out.
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 7 })),
+        ));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        // Returns the reaped child's PID; the producer saw the caller's
+        // task id as `parent` and the requested `pid` verbatim.
+        assert_eq!(h.wait(&ctx, 9, 0x1000), Ok(42));
+        assert_eq!(*producer.last.lock(), Some((2, 9)));
+    }
+
+    /// With no producer installed the handler holds `NULL_PROCESS_WAIT` and
+    /// fails closed with `NotImplemented` (`AGENTS.md` §2.9).
+    #[test]
+    fn wait_without_producer_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::NotImplemented));
+    }
+
+    /// A producer error (e.g. `pid` is not a child of the caller) propagates
+    /// verbatim, and the `status` pointer is never written on the error path
+    /// (`AGENTS.md` §2.9 — fail closed).
+    #[test]
+    fn wait_propagates_producer_error() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait =
+            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::NotFound));
+        assert_eq!(*producer.last.lock(), Some((2, 9)));
+    }
+
+    /// `wait` from a caller with no registered address space fails closed
+    /// with `BadAddress` — the reaped child's code cannot be copied out, and
+    /// the missing-space case is not leaked (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn wait_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 42, code: 0 })),
+        ));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        // The child was reaped (the producer ran) but its code cannot be
+        // delivered: the unregistered caller fails closed with BadAddress.
+        assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::BadAddress));
     }
 }

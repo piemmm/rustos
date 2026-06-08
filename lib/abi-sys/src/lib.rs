@@ -79,6 +79,7 @@ const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
+const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -347,6 +348,23 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
 }
 
+/// `wait`: wait for a child of the calling process to exit, reaping it and
+/// writing its exit code to `status` (`SyscallNumber::WAIT`). Returns the
+/// reaped child's PID, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`] to
+/// wait for any child. A process may only wait on its **own** children; the
+/// kernel validates the parent/child relationship and the `status` pointer
+/// before writing to it (`AGENTS.md` §4 / §5.4), and fails closed
+/// (`plans/SPAWN.md` SP6).
+#[must_use]
+#[export_name = "ros_sys_wait"]
+pub extern "C" fn sys_wait(pid: i32, status: *mut c_void) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `status` pointer
+    // against the caller's address space before writing the exit code to it.
+    unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr_arg(status), 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +396,7 @@ mod tests {
         (NUM_STREAM_READ, "stream_read", 3),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
+        (NUM_WAIT, "wait", 2),
     ];
 
     #[test]
@@ -581,6 +600,32 @@ mod tests {
         assert_eq!(args[0], 0x4000);
         assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wait_marshals_pid_and_status_pointer() {
+        let mut status = 0i32;
+        let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
+        // The kernel returns the reaped child's PID.
+        let (number, args) = capture(5, || {
+            assert_eq!(sys_wait(9, ptr), 5);
+        });
+        assert_eq!(number, NUM_WAIT);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wait_sign_extends_wait_any() {
+        let mut status = 0i32;
+        let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
+        let (number, args) = capture(3, || {
+            let _ = sys_wait(rustos_abi::WAIT_ANY, ptr);
+        });
+        assert_eq!(number, NUM_WAIT);
+        // `WAIT_ANY` (-1) sign-extends to all-ones in the argument register.
+        assert_eq!(args[0], u64::MAX);
     }
 
     #[test]

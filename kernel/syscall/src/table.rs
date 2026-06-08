@@ -302,6 +302,22 @@ pub trait SyscallHandlers {
     /// closed with [`Errno::NotImplemented`]; a zero `len` is rejected with
     /// [`Errno::LengthOutOfRange`]. Returns `Ok(0)` on success.
     fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult;
+    /// Wait for a child of the calling process to exit, reaping it and
+    /// writing its exit code to the user `status` pointer; returns the
+    /// reaped child's PID (`plans/SPAWN.md` SP6).
+    ///
+    /// The dispatcher has already validated that `pid` is a sign-extended
+    /// `i32` and that `status` is a non-null `UserPtr`. `pid` is either a
+    /// specific child's PID or [`rustos_abi::WAIT_ANY`] (wait for any
+    /// child). The implementation validates the parent/child relationship —
+    /// a process may only reap its **own** children (`AGENTS.md` §4 / §5.4)
+    /// — blocks the caller until a child is reapable, and copies the exit
+    /// code out through the validated `copy_to_user` boundary. A `pid` that
+    /// is not a child of the caller must fail closed with
+    /// [`Errno::NotFound`]; a build with no process-wait service wired must
+    /// fail closed with [`Errno::NotImplemented`] rather than fabricating a
+    /// reaped child (`AGENTS.md` §2.9).
+    fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -476,6 +492,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::MEM_UNMAP => {
                 let len = decode_len(args.0[1])?;
                 self.handlers.mem_unmap(caller, args.0[0], len)
+            }
+            SyscallNumber::WAIT => {
+                // `validate_arg` guarantees args[0] is a sign-extended
+                // `i32`; recover it by truncating the low 32 bits (the
+                // same recovery `EXIT` uses), and args[1] is a non-null
+                // `UserPtr`.
+                #[allow(clippy::cast_possible_wrap)]
+                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                self.handlers.wait(caller, pid, args.0[1])
             }
             _ => Err(Errno::NotFound),
         }
@@ -826,6 +851,15 @@ mod tests {
         fn mem_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
             self.record("mem_unmap");
             Ok(0)
+        }
+        fn wait(&self, _c: &CallerContext<'_>, pid: i32, _status: u64) -> SyscallResult {
+            self.record("wait");
+            // Echo the requested pid back as a fabricated reaped PID so the
+            // reachability test can assert the dispatcher decoded the
+            // `(pid, status)` arguments without wiring a real wait service
+            // here. The reachability test passes pid 0 (a valid I32).
+            #[allow(clippy::cast_sign_loss)]
+            Ok(u64::from(pid as u32))
         }
     }
 
@@ -1263,5 +1297,71 @@ mod tests {
             .is_ok());
         assert_eq!(h.last(), Some("mem_unmap"));
         assert!(sink.ids().is_empty(), "mem_unmap must not audit");
+    }
+
+    #[test]
+    fn wait_decodes_pid_and_status_and_is_audited() {
+        // `wait` is ungated (a process reaps its own children, no
+        // capability) but audited — reaping a child is a process-lifecycle
+        // state change (`AGENTS.md` §5.4.4). With a well-typed
+        // `(pid, status)` tuple the dispatcher recovers the `i32` pid,
+        // forwards the `status` pointer verbatim, reaches the handler, and
+        // emits exactly one `SyscallInvoked` record on success.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink); // no capability needed
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        // pid 5 as a sign-extended `i32` (low 32 bits only).
+        args.0[0] = 5;
+        args.0[1] = 0x1000; // status — a non-null user pointer
+        let r = d.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), args);
+        // The Mock echoes the decoded pid back as the fabricated reaped PID.
+        assert_eq!(r, Ok(5));
+        assert_eq!(h.last(), Some("wait"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn wait_recovers_a_negative_pid_and_rejects_a_null_status() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // `WAIT_ANY` (-1) is sign-extended through all 64 bits; the
+        // dispatcher must recover it as `i32::-1` and forward it. The Mock
+        // echoes the pid back reinterpreted as `u32`, i.e. `u32::MAX`.
+        let mut args = RawArgs::ZERO;
+        #[allow(clippy::cast_sign_loss)]
+        let extended = i64::from(rustos_abi::WAIT_ANY) as u64;
+        args.0[0] = extended;
+        args.0[1] = 0x1000; // status
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), args),
+            Ok(u64::from(u32::MAX))
+        );
+
+        // A null `status` pointer is rejected by the per-arg `UserPtr`
+        // validator before the handler is reached (`AGENTS.md` §5.4).
+        let h2 = MockHandlers::default();
+        let d2 = Dispatcher::new(&h2, &sink);
+        let mut bad = RawArgs::ZERO;
+        bad.0[0] = 1; // pid
+        bad.0[1] = 0; // null status
+        assert_eq!(
+            d2.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), bad),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(h2.last(), None);
     }
 }

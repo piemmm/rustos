@@ -81,7 +81,7 @@ pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
     STDINFO_VERSION_V1,
 };
-pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN};
+pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN, WAIT_ANY};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
     SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,

@@ -69,6 +69,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_READ`      | no      |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
+|  16 | `wait`         | `i32 pid`, `user_ptr` (status)          | `u64` (pid) | —                   | yes     |
 
 ### Capability matrix
 
@@ -97,6 +98,20 @@ anonymous `RW` memory, which grants no authority over anything else — the
 same unprivileged baseline as "list my own processes" (`AGENTS.md` §16.6).
 There is no global user heap and no cross-process mapping; shared memory
 stays the capability-checked IPC object (`AGENTS.md` §4).
+
+`wait` (no. 16) is likewise **ungated**: a process may only wait on its
+*own* children, so reaping one grants no authority over any other
+principal (the same §16.6 baseline). It is, however, *audited* — reaping a
+child is a process-lifecycle state change (a principal disappears), exactly
+as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4); `wait` blocks rather
+than polls, so the per-call record does not drown the log. `pid` is either
+a specific child's PID or `rustos_abi::WAIT_ANY` (`-1`, wait for any child);
+`status` is a non-null user pointer the kernel writes the reaped child's
+exit code to. The handler reaches the scheduler-side reaper through the
+`kernel/core::procwait::ProcessWait` seam, which is installed at boot like
+the `spawn` / `mem_map` producers; until a real producer is wired the
+default `NULL_PROCESS_WAIT` fails closed with `NotImplemented` (`AGENTS.md`
+§2.9). The first-party Rust wrapper is `rustos_rt::wait`.
 
 ## Standard streams (fd 0/1/2/3)
 
@@ -207,6 +222,7 @@ re-validates arguments — the dispatcher does that first.
 | `spawn`         | copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
+| `wait`          | hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship, blocks until a child is reapable, and reaps it; the reaped child's exit code is then copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot
