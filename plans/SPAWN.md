@@ -521,7 +521,7 @@ on free, OOM surfaced as an `Errno`; the immutable-`FrozenAddressSpace` gap
 is closed by a single live-space mutation path (§2.2); `virt` + the headless
 build stay green.
 
-### SP6 — `wait`: reap a child + read its exit code `[~]` (beyond P6d)
+### SP6 — `wait`: reap a child + read its exit code `[x]` (beyond P6d)
 
 The process-lifecycle counterpart of `spawn`: a parent blocks until one of
 its children exits, reaps the zombie, and reads back the child's exit code.
@@ -572,20 +572,38 @@ landing).
   needs no change yet. Host-tested (forward+copy_out success, no-producer
   `NotImplemented`, producer-error propagation, unregistered-caller
   `BadAddress`). **Landed (this increment).**
-- **SP6b — scheduler-side blocking producer + `-M virt` EL0 vertical `[ ]`.**
-  The real producer: the scheduler grows parent/child + exit-status
-  bookkeeping (`exit` records the code against the parent; the reaper parks
-  the parent until a child is reapable and wakes it on the child's exit,
-  mirroring the cooperative `irq_wait` loop), wired through the
-  `kernel/core` `ProcessWait` seam. An aarch64 `-M virt` EL0 vertical proves
-  a parent `spawn`s a child that `exit`s with a known code and the parent's
-  `wait` reaps it and reads that code back. This unblocks the P6e-3b shell
+- **SP6b — scheduler-side blocking producer + `-M virt` EL0 vertical `[x]`.**
+  The `ProcessWait` trait grew two default-no-op bookkeeping hooks —
+  `register_child(parent, child)` (called from the `spawn` admit path) and
+  `record_exit(task, code)` (called from the `exit` handler) — so the
+  fail-closed `NullProcessWait` and the host-test doubles inherit inert
+  bodies and `KernelState`/`KernelSyscallHandlers::new` need no churn. The
+  real producer, `kernel/core::procwait::KernelProcessWait<A: SchedulerArch>`,
+  owns a `SpinLock<ProcessTable>` (child id → `{parent, exit}`) and blocks a
+  waiting parent by cooperatively parking it back on the scheduler through
+  the free `reschedule_current(current_cpu, Yield)` until a matching child is
+  reapable, then reaps it (fail-closed `NotImplemented` if no resumable user
+  kthread is published — never a busy-spin, §2.1/§2.9). `run_phases` builds +
+  leaks it over the `'static` `KernelState` arch handle and installs it via
+  the hook's new `process_wait` param + `with_process_wait`. `exit` now feeds
+  the recorded code (it was previously dropped), and the `spawn` admit path
+  records the parent→child link. Host-proven (9 `ProcessTable`/producer
+  tests + the `exit`→`record_exit` and spawn-admit→`register_child` wiring
+  tests). The aarch64 `-M virt` vertical (`tests/integration/wait_qemu_aarch64`
+  + the two-role `tests/integration/wait_program` fixture, `build.rs` the §2.2
+  source of truth for `CHILD_EXIT_CODE`) builds an isolated child + parent EL0
+  space, registers the link with a live `KernelProcessWait`, and drives the
+  cooperative `step` loop: the child `exit`s with the agreed code, the
+  parent's `wait` parks then reaps it, the kernel copies the code out to the
+  parent's `status`, and the parent verifies it and exits 0 — PASS.
+  **Verified green under QEMU on `-M virt`.** This unblocks the P6e-3b shell
   REPL + `init` supervision.
 
 **Done when (SP6 overall):** a parent process can block on, reap, and read
 the exit code of its own child via `abi-v1` on aarch64 `-M virt`; waiting on
-a non-child fails closed; `virt` + the headless build stay green. SP6a (this
-landing) is the abi surface + fail-closed seam; SP6b is the producer.
+a non-child fails closed; `virt` + the headless build stay green. **SP6 is
+complete:** SP6a landed the abi surface + fail-closed seam; SP6b landed the
+scheduler-side blocking producer + the `-M virt` vertical.
 
 ---
 

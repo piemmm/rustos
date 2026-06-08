@@ -666,19 +666,29 @@ on its own before the next.
       `docs/src/architecture/memory.md` §7d. This unblocks the REPL; the REPL
       itself + `init` supervision (which also needs a process-wait syscall)
       remain.
-    - **Prerequisite — `wait` process-wait syscall (SP6) `[~]`.** Both the
+    - **Prerequisite — `wait` process-wait syscall (SP6) `[x]`.** Both the
       shell's foreground job control and `init` supervising the session
-      (reap, restart) need a way to block on and reap a child — `spawn` is
-      spawn-and-forget today. **SP6a is landed** (`plans/SPAWN.md` SP6): the
-      `abi-v1` surface (`SyscallNumber::WAIT` #16 + `WAIT_ANY`, the
+      (reap, restart) need a way to block on and reap a child — `spawn` was
+      spawn-and-forget. **SP6 is COMPLETE** (`plans/SPAWN.md` SP6): SP6a
+      landed the `abi-v1` surface (`SyscallNumber::WAIT` #16 + `WAIT_ANY`, the
       `wait(I32 pid, UserPtr status) -> U64` row, unprivileged + audited),
       the `ros_sys_wait` C stub + regenerated header, the `rustos_rt::wait`
       wrapper, the `kernel/syscall` dispatch arm + doubles, and the
-      fail-closed `kernel/core::procwait::ProcessWait` seam
-      (`NULL_PROCESS_WAIT` → `NotImplemented`, `with_process_wait`) + handler
-      (copy the reaped child's exit code out, return its PID). The
-      scheduler-side blocking producer + `-M virt` vertical are **SP6b**
-      (the remaining prerequisite before the REPL + supervision).
+      fail-closed `kernel/core::procwait::ProcessWait` seam + handler. **SP6b
+      (this session)** landed the scheduler-side producer: the `ProcessWait`
+      trait gained default-no-op `register_child`/`record_exit` hooks (so the
+      null default + test doubles stay inert and no `new()` churn), the real
+      `KernelProcessWait<A>` owns a `SpinLock<ProcessTable>` and blocks a
+      waiting parent by cooperatively parking it via `reschedule_current(…,
+      Yield)` until a child is reapable (fail-closed `NotImplemented` if no
+      user kthread is published — never a busy-spin), `exit` records the code,
+      the `spawn` admit path registers the parent→child link, and `run_phases`
+      installs the producer via the hook's new `with_process_wait`. The
+      aarch64 `-M virt` vertical `tests/integration/wait_qemu_aarch64` (+ the
+      two-role `tests/integration/wait_program` fixture) proves a parent reaps
+      a child that exited with a known code and reads it back, exiting 0 —
+      **verified green under QEMU on `-M virt`**. This unblocks the REPL +
+      `init` supervision.
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
 `init` emits its first line on the console (framebuffer if present, else

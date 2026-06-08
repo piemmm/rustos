@@ -115,7 +115,10 @@ pub use kthread::{
 };
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
-pub use procwait::{NullProcessWait, ProcessWait, ReapedChild, NULL_PROCESS_WAIT};
+pub use procwait::{
+    KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, ReapedChild,
+    NULL_PROCESS_WAIT,
+};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use spawn::{
     spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,

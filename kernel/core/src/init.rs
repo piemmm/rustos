@@ -41,6 +41,7 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
+use crate::procwait::KernelProcessWait;
 use crate::random::{BootReserve, RandomReserve};
 use crate::spawn::InitSpawnCtx;
 use crate::syscalls::KernelDispatchHook;
@@ -568,6 +569,17 @@ fn run_phases<A: KernelArch>(
     // §2.1).
     state.arch.install_irq_dispatch(&state.irq);
 
+    // Build the scheduler-side process-wait producer the `wait` syscall
+    // drives (`plans/SPAWN.md` SP6b). It owns the parent/child + exit-status
+    // bookkeeping and parks a waiting parent back on the scheduler until a
+    // child is reapable; it needs only the `'static` arch handle (to read the
+    // current CPU when parking), so it is built here over the leaked
+    // `KernelState` and `Box::leak`'d for the same one-shot-publish reason as
+    // the hook below (`AGENTS.md` §2.1). Until this stage the handler held the
+    // fail-closed `NULL_PROCESS_WAIT`.
+    let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
+        Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
+
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
     // the same reason as `KernelState`: its borrows reference
@@ -589,6 +601,7 @@ fn run_phases<A: KernelArch>(
             &state.frame_allocator,
             programs,
             spawn_service,
+            process_wait,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)

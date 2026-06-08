@@ -1906,6 +1906,31 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   alloc-grow-free-reuse end to end and exits 0 (PASS, ids
                   4290-4293), **verified green under QEMU on this host**.
                   Design note: `docs/src/architecture/memory.md` §7d.
+                  **SP6 (`wait`, process reap, `plans/SPAWN.md`) — COMPLETE**
+                  (PI P6e-3b prerequisite): SP6a landed the `abi-v1` surface
+                  (`SyscallNumber::WAIT` #16 + `WAIT_ANY`, the unprivileged +
+                  audited `wait(I32 pid, UserPtr status) -> U64` row, the
+                  `ros_sys_wait` C stub + header, the `rustos_rt::wait`
+                  wrapper, the dispatcher arm, and the fail-closed
+                  `kernel/core::procwait::ProcessWait` seam + handler). **SP6b
+                  landed the scheduler-side producer:** the `ProcessWait` trait
+                  gained default-no-op `register_child`/`record_exit` hooks
+                  (so the null default + test doubles stay inert and `new()`
+                  needs no churn); the real `KernelProcessWait<A>` owns a
+                  `SpinLock<ProcessTable>` (child id → `{parent, exit}`) and
+                  blocks a waiting parent by cooperatively parking it via
+                  `reschedule_current(current_cpu, Yield)` until a matching
+                  child is reapable (fail-closed `NotImplemented` if no user
+                  kthread is published — never a busy-spin, §2.1/§2.9); `exit`
+                  records the code, the `spawn` admit path records the
+                  parent→child link, and `run_phases` installs the producer via
+                  the hook's new `with_process_wait`. The aarch64 `-M virt`
+                  vertical `tests/integration/wait_qemu_aarch64` (+ the two-role
+                  `tests/integration/wait_program` fixture, `build.rs` the §2.2
+                  source of truth for `CHILD_EXIT_CODE`) proves a parent reaps a
+                  child that exited with a known code, reads it back, and exits
+                  0 (PASS, ids 4290-4292), **verified green under QEMU on this
+                  host**. This unblocks the P6e-3b REPL + `init` supervision.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

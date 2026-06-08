@@ -2015,6 +2015,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-wait"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-wait-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-sec",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-sync",
+]
+
+[[package]]
 name = "rustos-theme"
 version = "0.0.0"
 

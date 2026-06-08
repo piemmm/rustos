@@ -531,13 +531,17 @@ where
         Ok(0)
     }
 
-    fn exit(&self, caller: &CallerContext<'_>, _code: i32) -> SyscallResult {
-        // The exit code is already captured in the dispatcher's
-        // `SyscallInvoked` audit record (the `EXIT` spec sets
-        // `audit = true`). We deliberately do **not** invent a new
-        // field on `Task` or on `CapTable` to remember it — that
-        // would be interface creep without a consumer
-        // (`AGENTS.md` §2.4).
+    fn exit(&self, caller: &CallerContext<'_>, code: i32) -> SyscallResult {
+        // Hand the exit code to the scheduler-side process-wait producer so a
+        // parent blocked in `wait` can reap this task and read its terminal
+        // status back (`plans/SPAWN.md` SP6). The producer keeps the code only
+        // for a task it tracks as a child (a process spawned through `spawn`);
+        // PID 1 and kernel threads it does not track are ignored, and the
+        // default `NULL_PROCESS_WAIT` is an inert no-op — so this is not the
+        // interface creep `AGENTS.md` §2.4 forbids: the one consumer (`wait`)
+        // exists. The dispatcher's `SyscallInvoked` audit record (the `EXIT`
+        // spec sets `audit = true`) still carries the code for the log.
+        self.process_wait.record_exit(caller.task_id, code);
         //
         // Order matters:
         //
@@ -1081,6 +1085,12 @@ where
             caps: self.caps,
             aspaces: self.aspaces,
             arch: self.arch,
+            // Record the new child against the spawning caller so a later
+            // `wait` from this parent can reap it (`plans/SPAWN.md` SP6). The
+            // parent is the kernel-trusted caller identity, never a
+            // caller-supplied value (`AGENTS.md` §5.4.1).
+            parent: caller.task_id,
+            process_wait: self.process_wait,
         };
         self.spawn_service.spawn(rxe, &ctx)
     }
@@ -1175,6 +1185,16 @@ where
     caps: &'a RwLock<CapTable>,
     aspaces: &'a RwLock<AddressSpaceRegistry>,
     arch: &'a A,
+    /// The spawning caller's task id — the parent the freshly admitted
+    /// child is recorded against so a later `wait` from this parent can
+    /// reap it (`plans/SPAWN.md` SP6). Kernel-trusted, never caller-supplied
+    /// (`AGENTS.md` §5.4.1).
+    parent: SecTaskId,
+    /// The scheduler-side process-wait producer the parent/child link is
+    /// recorded with at admit. Defaults to the inert `NULL_PROCESS_WAIT`
+    /// until the boot path installs the real producer, so the link is a
+    /// no-op until `wait` is wired (`AGENTS.md` §2.9).
+    process_wait: &'static (dyn ProcessWait + 'static),
 }
 
 impl<A> SpawnCtx for HandlerSpawnCtx<'_, A>
@@ -1261,6 +1281,13 @@ where
         self.aspaces
             .write()
             .set_streams(sec_id, DescriptorTable::standard());
+
+        // Record the parent/child link with the process-wait producer so the
+        // spawning parent can later `wait` on this child and reap its exit
+        // code (`plans/SPAWN.md` SP6). Done only after the child is fully
+        // admitted (scheduler + caps + aspace + streams) so a parent that
+        // observes the returned PID can immediately and soundly reap it.
+        self.process_wait.register_child(self.parent, sec_id);
 
         Ok(task_id)
     }
@@ -1381,6 +1408,7 @@ where
         frames: &'a FrameAllocator,
         programs: &'static ProgramRegistry,
         spawn_service: &'static (dyn ProcessSpawn + 'static),
+        process_wait: &'static (dyn ProcessWait + 'static),
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -1397,7 +1425,8 @@ where
             .with_console(console)
             .with_console_read(console_read)
             .with_frames(frames)
-            .with_spawn(programs, spawn_service),
+            .with_spawn(programs, spawn_service)
+            .with_process_wait(process_wait),
             sched,
             caps,
             arch,
@@ -3973,6 +4002,58 @@ mod tests {
         assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
     }
 
+    /// The spawn admit path records the new child against the spawning
+    /// caller (the parent) with the process-wait producer, so a later `wait`
+    /// from that parent can reap it (`plans/SPAWN.md` SP6).
+    #[test]
+    fn spawn_admit_registers_child_with_process_wait_producer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let wait_producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 0, code: 0 })),
+        ));
+
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_process_wait(wait_producer);
+
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .expect("spawn succeeds");
+        // The child (its returned PID) was registered against parent 2.
+        assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
+    }
+
     /// With no spawn producer wired the handler holds `NULL_PROCESS_SPAWN`
     /// and fails closed with `NotImplemented` (`AGENTS.md` §2.9) — but only
     /// after the path resolves, proving the null producer is reached.
@@ -4416,12 +4497,16 @@ mod tests {
     /// real scheduler-side wait path.
     struct RecordingProcessWait {
         last: rustos_sync::SpinLock<Option<(u64, i32)>>,
+        last_exit: rustos_sync::SpinLock<Option<(u64, i32)>>,
+        last_register: rustos_sync::SpinLock<Option<(u64, u64)>>,
         result: Result<crate::procwait::ReapedChild, Errno>,
     }
     impl RecordingProcessWait {
         fn new(result: Result<crate::procwait::ReapedChild, Errno>) -> Self {
             Self {
                 last: rustos_sync::SpinLock::new(None),
+                last_exit: rustos_sync::SpinLock::new(None),
+                last_register: rustos_sync::SpinLock::new(None),
                 result,
             }
         }
@@ -4430,6 +4515,12 @@ mod tests {
         fn wait(&self, parent: SecTaskId, pid: i32) -> Result<crate::procwait::ReapedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
             self.result
+        }
+        fn record_exit(&self, task: SecTaskId, code: i32) {
+            *self.last_exit.lock() = Some((task.0, code));
+        }
+        fn register_child(&self, parent: SecTaskId, child: SecTaskId) {
+            *self.last_register.lock() = Some((parent.0, child.0));
         }
     }
 
@@ -4576,5 +4667,40 @@ mod tests {
         // The child was reaped (the producer ran) but its code cannot be
         // delivered: the unregistered caller fails closed with BadAddress.
         assert_eq!(h.wait(&ctx, 9, 0x1000), Err(Errno::BadAddress));
+    }
+
+    /// `exit` hands the caller's task id and exit code to the process-wait
+    /// producer so a parent blocked in `wait` can later reap it and read the
+    /// code back (`plans/SPAWN.md` SP6). The handler still reports success and
+    /// performs its security cleanup.
+    #[test]
+    fn exit_records_exit_code_with_the_process_wait_producer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::ReapedChild { pid: 0, code: 0 })),
+        ));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        assert_eq!(h.exit(&ctx, 42), Ok(0));
+        // The producer saw this task's id and its exit code.
+        assert_eq!(*producer.last_exit.lock(), Some((7, 42)));
     }
 }

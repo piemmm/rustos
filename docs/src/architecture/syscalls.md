@@ -109,9 +109,15 @@ a specific child's PID or `rustos_abi::WAIT_ANY` (`-1`, wait for any child);
 `status` is a non-null user pointer the kernel writes the reaped child's
 exit code to. The handler reaches the scheduler-side reaper through the
 `kernel/core::procwait::ProcessWait` seam, which is installed at boot like
-the `spawn` / `mem_map` producers; until a real producer is wired the
-default `NULL_PROCESS_WAIT` fails closed with `NotImplemented` (`AGENTS.md`
-§2.9). The first-party Rust wrapper is `rustos_rt::wait`.
+the `spawn` / `mem_map` producers. The boot path installs the real
+`KernelProcessWait` producer (`plans/SPAWN.md` SP6b): it owns the
+parent/child + exit-status bookkeeping (`ProcessTable`) — a child is
+recorded against its parent at `spawn` admit, its exit code is captured by
+the `exit` handler, and the parent's `wait` cooperatively parks (via the
+scheduler reschedule path) until a matching child is reapable, then reaps
+it. A `wait` issued before that install (or by a non-parkable task) fails
+closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
+(`AGENTS.md` §2.9). The first-party Rust wrapper is `rustos_rt::wait`.
 
 ## Standard streams (fd 0/1/2/3)
 

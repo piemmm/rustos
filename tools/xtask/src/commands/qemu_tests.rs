@@ -1254,6 +1254,37 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
+    // the proof that a parent process can block on, reap, and read back the
+    // exit code of its own child under the live scheduler on the `virt` board.
+    // It reads the GICv2 base + timer rate from the embedded `virt` DTB
+    // (P3/P4), brings up the EL1 vectors + GICv2, and builds **two** hardware-
+    // isolated EL0 address spaces — a child and a parent — from the pure-Rust
+    // `rustos-test-wait` fixture (built PIE in both roles + converted to `rxe`
+    // by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`. It records the parent/child link with a
+    // `kernel_core::KernelProcessWait` producer, admits each as a resumable
+    // user kthread (`spawn_user_kthread`, §4), and routes the child's `exit`
+    // and the parent's `wait`/`exit` `svc`s through the producer +
+    // `reschedule_current`: the producer parks the parent until the child is
+    // reapable, then the kernel copies the reaped exit code out to the parent's
+    // `status` pointer. PASS once the parent reaped the child, read back the
+    // agreed code, and exited 0; a wrong code, a missing reap, an unexpected
+    // syscall, or a stall writes a distinct failure finisher (fail-loud,
+    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-wait-qemu-aarch64",
+        binary: "rustos-test-wait-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the
