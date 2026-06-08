@@ -49,6 +49,45 @@ kernel.
    expanding each word (`env::Environment::expand_word`) and either
    dispatching a builtin or launching through the `ProcessHost`.
 
+## The session program (`Run`) and its REPL
+
+The crate is both the interpreter library above and the `Run` entry-point
+binary of the `Shell` application bundle (`AGENTS.md` §16.5) — the program
+PID 1 [`init`](./init.md) launches as the user's session. The binary is a
+pure-Rust program (`AGENTS.md` §1): it links `rustos-rt` (`_start`, the stack
+canary, the panic handler, the `mem_map`-backed global allocator, and the
+syscall wrappers), never the C ABI.
+
+`run::main` wraps the interpreter in a **read-eval-print loop** (`repl::run`)
+over the program's **inherited standard streams** (`AGENTS.md` §20):
+
+- It reads command lines from **standard input** (fd 0) through
+  `rustos_rt::stdin`, reassembling lines across reads and stripping a
+  trailing CRLF.
+- It writes the prompt and all command output to **standard output** (fd 1)
+  and **standard error** (fd 2) through the `RtConsole` seam.
+- It emits advisory metadata on the **standard information stream** (fd 3,
+  `AGENTS.md` §20.1) — currently a single `omission` record when an input
+  line exceeds the 4 KiB limit and is discarded.
+
+The loop binds to fd 0/1/2/3 **only**, never a console, UART, or framebuffer:
+naming a device would be ambient authority (`AGENTS.md` §4) and hidden
+coupling (§17.3 / §17.4), and the same binary must work whatever the spawner
+backed the streams with (§20 — device independence is a property of the
+stream layer). A zero-length read is treated as end of input (a clean session
+end); *blocking* until a byte arrives is the stream backing's job, not the
+program's, so live interactive receive over a real UART is an on-metal item
+(`plans/PI.md` P6e-2).
+
+The `RtProcessHost` launches external commands through the `spawn` syscall
+and reaps them through `wait`. The current `spawn` ABI carries only a program
+*path* — no argument vector, environment, pipe, or redirection — so the host
+launches a single bare-path command and fails closed with `NotImplemented`
+on anything it cannot yet express (a pipeline, a redirection, arguments,
+`fg`/`bg` signals, or `cd`); richer launches await an ABI extension. The
+in-process builtins (`echo`, `exit`, `export`, `pwd`, `help`, …) work
+regardless.
+
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,

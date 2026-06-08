@@ -642,11 +642,43 @@ on its own before the next.
     / `soak.sh both` / `cargo xtask test --qemu`) **green on this host**.
     Real UART **RX** over fd 0 on silicon remains an on-metal item (no
     deterministic `-M virt` serial-RX injection, consistent with P6e-2).
-  - **P6e-3b — shell REPL over its streams + `init` supervision `[ ]`.**
+  - **P6e-3b — shell REPL over its streams + `init` supervision `[~]`.**
     Wire `rustos-shell` to read fd 0 / write fd 1 (and emit `stdinfo` on
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
     `init` supervising the session (restart, reap). The shell contains
-    **no** reference to `console_*` or to any device.
+    **no** reference to `console_*` or to any device. Staged into the REPL
+    itself (P6e-3b-i, landed) and `init` supervision (P6e-3b-ii, remaining).
+    - **P6e-3b-i — shell REPL over fd 0/1/2/3 `[x]`.** The `Shell` bundle's
+      `Run` binary (`userland/shell/shell/src/run.rs`) no longer prints a
+      banner and exits: it runs the sibling `rustos-shell` interpreter as a
+      read-eval-print loop (the new `repl` lib module) over its **inherited
+      standard streams** (`AGENTS.md` §20). `repl::run` reads command lines
+      from fd 0 (`rustos_rt::stdin`, reassembling lines across reads,
+      stripping CRLF, capping a line at 4 KiB and discarding an over-length
+      line), runs each through `Shell::run_line`, writes the prompt + output
+      to fd 1/2 through the `RtConsole` seam, and emits one `omission`
+      `StdInfoRecord` on fd 3 when a line is dropped (§20.1). It binds to fd
+      0/1/2/3 only — **no** `console_*` or device reference (ambient authority
+      §4 / hidden coupling §17.3/§17.4). A zero-length read is end of input
+      (clean exit); *blocking* is the stream backing's job (§20), so live UART
+      RX stays an on-metal item (P6e-2). The `RtProcessHost` launches a single
+      bare-path command via `spawn` + reaps via `wait`, failing closed
+      (`NotImplemented`) on pipes/redirs/args/signals/`cd` the current `spawn`
+      ABI cannot express. `lib/abi` gained a tested `Errno::from_i32` decoder
+      (single source of truth, §2.2; no C-header/hash impact — a method, not
+      an ABI type change) and `rustos_rt::stdin` now clamps a negative
+      `-errno` to a zero-length read and clamps the count to `buf.len()`
+      (defence in depth, §5.4). Host-proven (6 new `repl` tests over scripted
+      stdin/stdinfo + `Console`/`ProcessHost` fixtures; 3 new `lib/rt` stdin
+      tests; the `Errno::from_i32` round-trip test) and freestanding-built on
+      all three bare-metal targets; the `spawn_session_qemu_aarch64` vertical
+      stays green (the session now writes its gated prompt, reads end-of-input,
+      and exits). Docs: `docs/src/userland/shell.md`.
+    - **P6e-3b-ii — `init` session supervision `[ ]`.** Have PID 1 `init`
+      `wait`/reap and restart the session across its lifetime rather than
+      spawn-and-forget. This changes `init`'s audited-syscall sequence, so the
+      `spawn_session`/`spawn_init` `-M virt` vertical assertions are reworked
+      with it. (Remaining.)
     - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
       `[x]`.** The `rustos-shell` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link

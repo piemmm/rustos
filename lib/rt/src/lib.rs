@@ -180,8 +180,19 @@ pub fn stdinfo(bytes: &[u8]) -> usize {
 /// before writing it (`AGENTS.md` §5.4). A short read (fewer bytes than
 /// `buf.len()`, possibly zero when no input is pending) is valid, so the
 /// caller loops.
+///
+/// The kernel encodes a failure as a negative register (`-errno`, the
+/// standard `abi-v1` convention) — e.g. fd 0 is not a readable stream, or
+/// the buffer pointer faults. A reader handed a `&mut [u8]` has no way to
+/// surface an `Errno`, and an unread input stream is indistinguishable from
+/// end-of-input from the program's side (the *backing* owns blocking, §20),
+/// so this reports a failure as a zero-length read. The count is also
+/// clamped to `buf.len()` as defence in depth, so a buggy kernel count can
+/// never drive an out-of-bounds slice in the caller (`AGENTS.md` §5.4).
 #[must_use]
-#[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `buf.len()`.
+#[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `buf.len()`.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-read encoding (count ≥ 0, else -errno).
+#[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above; the cast runs only when `read >= 0`.
 pub fn stdin(buf: &mut [u8]) -> usize {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
@@ -190,8 +201,12 @@ pub fn stdin(buf: &mut [u8]) -> usize {
     // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable
     // memory the kernel may fill.
-    let read = unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(STDIN), ptr, len, 0, 0, 0]) };
-    read as usize
+    let read =
+        unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(STDIN), ptr, len, 0, 0, 0]) } as i64;
+    if read < 0 {
+        return 0;
+    }
+    (read as usize).min(buf.len())
 }
 
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
@@ -422,6 +437,30 @@ mod tests {
         let mut buffer = [0u8; 16];
         let (_, _) = capture(3, || {
             assert_eq!(stdin(&mut buffer), 3);
+        });
+    }
+
+    #[test]
+    fn stdin_reports_a_negative_errno_as_end_of_input() {
+        // A failure (fd 0 not readable, faulting buffer) is encoded as a
+        // negative register; a `&mut [u8]` reader cannot carry an `Errno`, so
+        // it surfaces as a zero-length read (end of input), never a huge
+        // count that would slice out of bounds.
+        let mut buffer = [0u8; 16];
+        let neg =
+            u64::from_ne_bytes((-i64::from(rustos_abi::Errno::NotFound.as_i32())).to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(stdin(&mut buffer), 0);
+        });
+    }
+
+    #[test]
+    fn stdin_clamps_an_oversized_count_to_the_buffer_length() {
+        // Defence in depth: a count larger than the buffer (a buggy kernel)
+        // is clamped so the caller can never index past `buf.len()`.
+        let mut buffer = [0u8; 16];
+        let (_, _) = capture(99, || {
+            assert_eq!(stdin(&mut buffer), 16);
         });
     }
 

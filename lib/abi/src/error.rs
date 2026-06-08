@@ -146,6 +146,41 @@ impl Errno {
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
+
+    /// Recover an [`Errno`] from its ABI numeric value, or `None` if `value`
+    /// is not a known discriminant.
+    ///
+    /// The inverse of [`as_i32`](Self::as_i32) and the single place the
+    /// numeric → variant mapping lives (`AGENTS.md` §2.2): a caller decoding
+    /// a syscall's signed result (a negative register is `-errno`, the
+    /// standard `abi-v1` convention) recovers the `Errno` here rather than
+    /// re-listing the discriminants.
+    #[must_use]
+    pub const fn from_i32(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::BufferTooSmall),
+            2 => Some(Self::BadAlignment),
+            3 => Some(Self::BadMagic),
+            4 => Some(Self::LengthOutOfRange),
+            5 => Some(Self::OutOfRange),
+            6 => Some(Self::PermissionDenied),
+            7 => Some(Self::NotFound),
+            8 => Some(Self::DelegationWiden),
+            9 => Some(Self::SignatureInvalid),
+            10 => Some(Self::AbiVersionUnsupported),
+            11 => Some(Self::MessageTooLarge),
+            12 => Some(Self::NotImplemented),
+            13 => Some(Self::TimedOut),
+            14 => Some(Self::TimestampOutOfRange),
+            15 => Some(Self::NoSpace),
+            16 => Some(Self::EntropyNotReady),
+            17 => Some(Self::AlreadyExists),
+            18 => Some(Self::BadAddress),
+            19 => Some(Self::WouldBlock),
+            20 => Some(Self::OutOfMemory),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Errno {
@@ -203,6 +238,39 @@ mod tests {
         assert_eq!(Errno::BadAddress.as_i32(), 18);
         assert_eq!(Errno::WouldBlock.as_i32(), 19);
         assert_eq!(Errno::OutOfMemory.as_i32(), 20);
+    }
+
+    #[test]
+    fn from_i32_round_trips_every_variant() {
+        // Every known discriminant decodes back to its variant, and an
+        // unknown value (0 / out of range) is rejected rather than guessed.
+        for errno in [
+            Errno::BufferTooSmall,
+            Errno::BadAlignment,
+            Errno::BadMagic,
+            Errno::LengthOutOfRange,
+            Errno::OutOfRange,
+            Errno::PermissionDenied,
+            Errno::NotFound,
+            Errno::DelegationWiden,
+            Errno::SignatureInvalid,
+            Errno::AbiVersionUnsupported,
+            Errno::MessageTooLarge,
+            Errno::NotImplemented,
+            Errno::TimedOut,
+            Errno::TimestampOutOfRange,
+            Errno::NoSpace,
+            Errno::EntropyNotReady,
+            Errno::AlreadyExists,
+            Errno::BadAddress,
+            Errno::WouldBlock,
+            Errno::OutOfMemory,
+        ] {
+            assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
+        }
+        assert_eq!(Errno::from_i32(0), None);
+        assert_eq!(Errno::from_i32(21), None);
+        assert_eq!(Errno::from_i32(-1), None);
     }
 
     #[test]

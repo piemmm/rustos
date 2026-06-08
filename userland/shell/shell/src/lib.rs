@@ -59,6 +59,7 @@ pub mod host;
 pub mod job;
 pub mod lexer;
 pub mod parser;
+pub mod repl;
 pub mod shell;
 
 #[cfg(test)]
@@ -68,4 +69,5 @@ pub use env::Environment;
 pub use error::ParseError;
 pub use host::{Console, LaunchSpec, ProcessHost, ResolvedCommand, ResolvedRedirection};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
+pub use repl::{run as run_repl, ReplInput};
 pub use shell::Shell;

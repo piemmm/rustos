@@ -7,23 +7,30 @@
 //! it links the Rust userland runtime `rustos-rt` — never the C ABI, which
 //! exists solely for programs **not** written in Rust (`AGENTS.md` §16.4).
 //! `rustos-rt` provides `_start`, the per-process stack canary (`AGENTS.md`
-//! §19.2), the panic handler, and the syscall wrappers; `rustos_rt::entry!`
-//! names this program's `main`.
+//! §19.2), the panic handler, the `mem_map`-backed global allocator, and the
+//! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
 //!
-//! For `SP3b` its job is to prove a *second*, hardware-isolated process — built
-//! by the runtime-spawn producer in its own address space and admitted Ready
-//! alongside the still-running PID 1 — actually runs: it writes a banner to
-//! its inherited standard output (fd 1) through `rustos_rt::stdout` (the
-//! `abi-v1` `stream_write` syscall) and exits. Reaching the exit is itself
-//! the proof, because the write is *gated* (see `main`). The session binds
-//! to its inherited streams, never a device (`AGENTS.md` §20). Growing this
-//! into a real REPL over fd 0/1 — wiring in the `rustos-shell` interpreter
-//! library this crate already provides — is `plans/PI.md` P6e-3b.
+//! `main` runs the [`rustos_shell`] interpreter as a read-eval-print loop over
+//! its **inherited standard streams** (`AGENTS.md` §20): it reads command
+//! lines from standard input (fd 0), writes the prompt and command output to
+//! standard output and standard error (fd 1 / fd 2), and emits advisory
+//! metadata on the standard information stream (fd 3). It binds to those
+//! descriptors only — never a console, UART, or framebuffer — because binding
+//! to a device would be ambient authority (`AGENTS.md` §4) and hidden coupling
+//! (§17.3 / §17.4); the same binary therefore works whatever the spawner
+//! backed the streams with (§20).
 //!
-//! It links **only** the runtime, never the sibling `rustos-shell`
-//! interpreter library (whose `alloc`-using parser has no place in a
-//! banner-printing stub yet, `AGENTS.md` §2.3). On the host it is an inert
-//! stub so `cargo build --workspace`, clippy, and fmt still cover the file.
+//! The interpreter is pure: it decides *what* to run but reaches the outside
+//! world only through two injected seams. `RtConsole` carries its output to
+//! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
+//! `spawn` syscall and reaps them through `wait`. The current `spawn` ABI
+//! carries only a program path (no argument vector, environment, pipe, or
+//! redirection), so `RtProcessHost` launches a single bare-path command and
+//! fails closed (`AGENTS.md` §2.9) on anything it cannot yet express; richer
+//! launches await an ABI extension.
+//!
+//! On the host it is an inert stub so `cargo build --workspace`, clippy, and
+//! fmt still cover the file.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -31,35 +38,155 @@
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
-mod program {
-    /// Exit code for a clean run: the banner was written in full.
-    const EXIT_OK: i32 = 0;
+extern crate alloc;
 
-    /// The line the session writes to the console once it is running. A
-    /// fixed, terse banner (`AGENTS.md` §13 — no aimless waffle) that proves
-    /// a second isolated process spawned by PID 1 reached EL0 and its own
-    /// `stream_write` path works end to end.
-    const BANNER: &[u8] = b"RustOS shell: session started\n";
+#[cfg(freestanding)]
+mod program {
+    use alloc::string::String;
+
+    use rustos_abi::Errno;
+    use rustos_shell::{
+        Console, LaunchSpec, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
+    };
+
+    /// The shell's output sink, backed by the inherited standard output (fd 1)
+    /// and standard error (fd 2) through `rustos_rt` (`AGENTS.md` §20).
+    struct RtConsole;
+
+    /// Write all of `bytes` to standard output, looping over short writes.
+    ///
+    /// A write that accepts zero bytes means the stream will accept no more
+    /// (a closed or full backing); the loop stops rather than spinning
+    /// (`AGENTS.md` §2.1). Output is best-effort: a dropped tail does not
+    /// abort the session.
+    fn write_all_stdout(mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let written = rustos_rt::stdout(bytes);
+            if written == 0 {
+                break;
+            }
+            bytes = &bytes[written.min(bytes.len())..];
+        }
+    }
+
+    /// Write all of `bytes` to standard error, looping over short writes (see
+    /// [`write_all_stdout`]).
+    fn write_all_stderr(mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let written = rustos_rt::stderr(bytes);
+            if written == 0 {
+                break;
+            }
+            bytes = &bytes[written.min(bytes.len())..];
+        }
+    }
+
+    impl Console for RtConsole {
+        fn write_stdout(&self, text: &str) {
+            write_all_stdout(text.as_bytes());
+        }
+
+        fn write_stderr(&self, text: &str) {
+            write_all_stderr(text.as_bytes());
+        }
+    }
+
+    /// The shell's standard-input (fd 0) and standard-information (fd 3) seam,
+    /// backed by `rustos_rt` (`AGENTS.md` §20).
+    struct RtInput;
+
+    impl ReplInput for RtInput {
+        fn read(&mut self, buf: &mut [u8]) -> usize {
+            rustos_rt::stdin(buf)
+        }
+
+        fn write_info(&mut self, bytes: &[u8]) {
+            // fd 3 is best-effort and ignorable: discard the accepted count.
+            let _ = rustos_rt::stdinfo(bytes);
+        }
+    }
+
+    /// Recover the [`Errno`] a syscall encoded as a negative register
+    /// (`-errno`, the standard `abi-v1` convention). An unrecognised code
+    /// fails closed as [`Errno::NotImplemented`] rather than being guessed.
+    fn errno_from(ret: i64) -> Errno {
+        i32::try_from(-ret)
+            .ok()
+            .and_then(Errno::from_i32)
+            .unwrap_or(Errno::NotImplemented)
+    }
+
+    /// Launches and reaps external commands through the `spawn` and `wait`
+    /// syscalls (`plans/SPAWN.md` SP3 / SP6).
+    struct RtProcessHost;
+
+    impl ProcessHost for RtProcessHost {
+        fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
+            // The current `spawn` ABI carries only a program path: no argument
+            // vector, environment, pipe, or redirection. Anything richer is
+            // refused rather than silently dropped (`AGENTS.md` §2.9); it
+            // awaits an ABI extension, not a shortcut here.
+            let [command] = spec.commands else {
+                return Err(Errno::NotImplemented);
+            };
+            if !command.redirections.is_empty() || command.argv.len() != 1 {
+                return Err(Errno::NotImplemented);
+            }
+            let Some(path) = command.argv.first() else {
+                return Err(Errno::NotImplemented);
+            };
+            let ret = rustos_rt::spawn(path.as_bytes());
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            // `ret >= 0` here, so the cast preserves the PID value.
+            #[allow(clippy::cast_sign_loss)]
+            Ok(Pid::new(ret as u64))
+        }
+
+        fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {
+            let mut status = 0i32;
+            // PIDs fit an `i32` on this ABI; `wait` takes a signed PID.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let ret = rustos_rt::wait(pid.as_u64() as i32, &mut status);
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            Ok(WaitOutcome::Exited(status))
+        }
+
+        fn signal(&self, _pid: Pid, _signal: Signal) -> Result<(), Errno> {
+            // There is no signal-delivery syscall yet (`fg`/`bg` resume is
+            // future work); fail closed rather than pretend it landed.
+            Err(Errno::NotImplemented)
+        }
+
+        fn poll(&self) -> Option<(Pid, WaitOutcome)> {
+            // No asynchronous background-state notification exists yet; the
+            // shell reaps foreground jobs through `wait`.
+            None
+        }
+
+        fn change_directory(&self, _path: &str) -> Result<String, Errno> {
+            // There is no working-directory syscall yet; fail closed so `cd`
+            // reports an honest error rather than silently doing nothing.
+            Err(Errno::NotImplemented)
+        }
+    }
 
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Writes the session banner to its inherited standard output (fd 1)
-    /// and returns [`EXIT_OK`]. The write is *gated*: `stdout` returns the
-    /// number of bytes the kernel accepted, so a short count means the
-    /// write did not fully land (a missing `CAP_CONSOLE_WRITE`, an
-    /// unresolved address space, an unestablished descriptor, or a
-    /// closed-fail kernel path). The session cannot usefully proceed
-    /// without its output stream, so it parks fail-closed rather than
-    /// exiting "successfully" on a stream it never reached (`AGENTS.md`
-    /// §2.9). This is a terminal park, not a retry loop (`AGENTS.md` §2.1).
+    /// Runs the interpreter as a read-eval-print loop over the inherited
+    /// standard streams and returns the session's exit code (the `exit`
+    /// builtin's code, or `0` when the input stream ends). The loop binds only
+    /// to fd 0/1/2/3, never a device (`AGENTS.md` §20).
     fn main() -> i32 {
-        if rustos_rt::stdout(BANNER) != BANNER.len() {
-            loop {
-                core::hint::spin_loop();
-            }
-        }
-        EXIT_OK
+        let console = RtConsole;
+        let host = RtProcessHost;
+        let mut input = RtInput;
+        let mut shell = Shell::new(&host, &console);
+        rustos_shell::run_repl(&mut shell, &console, &mut input)
     }
 
     rustos_rt::entry!(main);

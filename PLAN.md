@@ -1861,8 +1861,22 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   session write via `rustos_rt::stdout`. C header + hash
                   regenerated; the `spawn_session_qemu_aarch64` `-M virt`
                   vertical proves a child writes fd 1 over the UART backing.
-                  **P6e-3b remains:** wire the `rustos-shell` REPL over
-                  fd 0/1/3 (no `console_*`) + `init` session supervision.
+                  **P6e-3b-i (shell REPL) landed:** the `Shell` bundle's
+                  `Run` binary now runs the `rustos-shell` interpreter as a
+                  read-eval-print loop (new `repl` lib module) over its
+                  inherited standard streams — reads fd 0 (`rustos_rt::stdin`,
+                  line reassembly + CRLF strip + 4 KiB cap), writes the prompt
+                  + output to fd 1/2 via an `RtConsole`, emits an `omission`
+                  `StdInfoRecord` on fd 3 when a line is dropped, and launches
+                  externals via `spawn`+`wait` (fail-closed `NotImplemented`
+                  on pipes/redirs/args/signals/`cd` the `spawn` ABI cannot yet
+                  carry) — **no** `console_*`/device reference (§4/§20). Added
+                  a tested `Errno::from_i32` decoder (§2.2) and hardened
+                  `rustos_rt::stdin` (negative `-errno` → 0, count clamped to
+                  `buf.len()`). Host-proven (6 `repl` + 3 `stdin` + 1
+                  `from_i32` tests) and freestanding-built on all three
+                  bare-metal targets; `spawn_session_qemu_aarch64` stays green.
+                  **P6e-3b-ii (`init` session supervision) remains.**
                   **SP5 (`mem_map`/`mem_unmap`, runtime anonymous memory,
                   `plans/SPAWN.md`) — SP5-0 + SP5a landed:**
                   `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the
