@@ -1,0 +1,53 @@
+[package]
+name = "rustos-test-mem-map-qemu-riscv64"
+description = "SPAWN stage SP5b-2 QEMU integration test (riscv64 sibling of rustos-test-mem-map-qemu-aarch64): prove a U-mode process can obtain and release anonymous RW memory at runtime via abi-v1 on the riscv64 virt board. The build script compiles the pure-Rust EL0 program (tests/integration/mem_map_program) PIE and converts it to an rxe blob; the kernel materialises one hardware-isolated Sv39 U-mode address space with rustos_kernel_core::spawn_image, retains it live, installs a rustos_kernel_core::MemMap producer backed by rustos_kernel_mem::map_anonymous/unmap_anonymous over that space, and routes the program's mem_map/mem_unmap syscalls through it — PASS once the program mapped a region, verified a written pattern, unmapped it, and faulted on use after unmap."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/SPAWN.md` stage SP5b-2 riscv64 mem_map/mem_unmap
+# vertical, the sibling of `rustos-test-mem-map-qemu-aarch64`. The fixture
+# program (`rustos-test-mem-map`) is built position-independent by `build.rs`
+# and converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
+# kernel's compiled-in syscall CFI tag. On boot the test stands up an Sv39
+# address space (identity-mapping the kernel + MMIO), activates it, installs the
+# trap vector + a dispatch callback + a fault handler, builds one isolated
+# U-mode address space via `rustos_kernel_core::spawn_image` (capability-checked
+# + audited), retains it live, installs a `MemMap` producer over `map_anonymous`
+# / `unmap_anonymous`, and `sret`s into the program; the dispatch callback
+# routes the program's `mem_map` / `mem_unmap` `ecall`s through the producer.
+# The fault handler reports the deliberate use-after-unmap page fault as PASS.
+# Any shortfall (the program returning a failure exit code, or no fault) writes
+# a distinct `SiFive` Test failure finisher or times out (fail-loud,
+# `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-mem-map-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

@@ -511,9 +511,18 @@ landing):**
   a pattern, `mem_unmap`s it, then touches the released range; the fault
   handler reports the use-after-unmap data abort as PASS (id 4282), and a
   verification failure exits early with a distinct finisher (fail-loud,
-  `AGENTS.md` §7). Verified green under QEMU on `-M virt`. Siblings
-  (x86_64, riscv64) and production per-task live-space retention follow;
-  wasm32's linear-memory model is an honest n/a (declared).
+  `AGENTS.md` §7). Verified green under QEMU on `-M virt`. The **riscv64
+  sibling** (`tests/integration/mem_map_qemu_riscv64`) is now landed: it
+  reuses the same pure-Rust `mem_map_program` fixture and the same SP5b-1
+  `kernel/mem` producer (its own `AnonProducer` over an Sv39 U-mode space),
+  but — having a single task that only direct-returns from its `ecall`s —
+  drops into the program through `spawn_image` + a direct
+  `EnterUser::enter_user` rather than the scheduler, keeping the riscv64
+  cooperative-switch trap-save path off the critical path; its fault handler
+  reports the use-after-unmap page fault as PASS on `-M virt` (ids 4284–4287,
+  verified green on this host). The x86_64 sibling and production per-task
+  live-space retention still follow; wasm32's linear-memory model is an honest
+  n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous
 `RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and

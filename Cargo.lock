@@ -1621,6 +1621,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-mem-map-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-memory-isolation"
 version = "0.0.0"
 dependencies = [

@@ -516,9 +516,15 @@ This is staged (`plans/SPAWN.md` SP5):
   and reads back a pattern (proving the pages are real `RW` memory),
   `mem_unmap`s it, then touches the released range — the data abort the
   fault handler reports as PASS. The `rustos_rt::mem_map` / `mem_unmap`
-  wrappers are the program's interface. The sibling x86_64 / riscv64
-  verticals and the production per-task live-space retention follow it;
-  wasm32's linear-memory model is an honest n/a.
+  wrappers are the program's interface. The **riscv64 sibling**
+  (`tests/integration/mem_map_qemu_riscv64`) is now landed too: it reuses the
+  same pure-Rust `mem_map_program` fixture and the same `kernel/mem` producer
+  over an Sv39 U-mode space, drops into the program through `spawn_image` + a
+  direct `EnterUser::enter_user` (no scheduler — a single task only
+  direct-returns from its `ecall`s, so the cooperative-switch trap-save path is
+  off the critical path), and reports the use-after-unmap page fault as PASS on
+  `-M virt`. The x86_64 sibling and the production per-task live-space retention
+  follow; wasm32's linear-memory model is an honest n/a.
 
 The binding invariants the producer must honour (settled here as the SP5
 design note, `AGENTS.md` §15.2):

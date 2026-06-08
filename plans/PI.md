@@ -806,9 +806,16 @@ resumable user kthread, and routes the program's `mem_map`/`mem_unmap`
 `tests/integration/mem_map_program` (linking the new
 `rustos_rt::mem_map`/`mem_unmap` wrappers) maps a region (FIXED),
 writes+verifies a pattern, unmaps it, then faults on use — the fault handler
-reports PASS, **verified green under QEMU on `-M virt`**. Sibling
-(x86_64/riscv64) verticals + production per-task live-space retention
-follow.
+reports PASS, **verified green under QEMU on `-M virt`**. The **riscv64
+sibling `tests/integration/mem_map_qemu_riscv64` is now landed too**: it
+reuses the same pure-Rust `mem_map_program` fixture and the same
+`kernel/mem::anon` producer over an Sv39 U-mode space, but drops into the
+program through `spawn_image` + a direct `EnterUser::enter_user` (a single
+task that only direct-returns from its `ecall`s, so the riscv64
+cooperative-switch trap-save path stays off the critical path) and reports
+the use-after-unmap page fault as PASS on `-M virt` (ids 4284–4287, **verified
+green on this host**). The x86_64 sibling + production per-task live-space
+retention still follow.
 
 **P6 follow-on — kthread kernel-stack guard page.** The deep-`wait`-handler
 overrun that silently corrupted the next task's snapshot (P6e-3b-ii) is now

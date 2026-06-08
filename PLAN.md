@@ -1923,9 +1923,18 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `rustos_rt::mem_map`/`mem_unmap` wrappers) maps a region
                   (FIXED), writes+verifies a pattern, unmaps it, then faults
                   on use — the fault handler reports PASS (id 4282),
-                  **verified green under QEMU on this host**. Sibling
-                  (x86_64/riscv64) verticals + production per-task live-space
-                  retention follow. **The `lib/rt` heap that layers over the
+                  **verified green under QEMU on this host**. **The riscv64
+                  sibling `tests/integration/mem_map_qemu_riscv64` also
+                  landed:** it reuses the same pure-Rust `mem_map_program`
+                  fixture and the same `kernel/mem::anon` producer over an
+                  Sv39 U-mode space, but drops in through `spawn_image` + a
+                  direct `EnterUser::enter_user` (a single task that only
+                  direct-returns from its `ecall`s, so the riscv64
+                  cooperative-switch trap-save path stays off the critical
+                  path) and reports the use-after-unmap page fault as PASS
+                  (ids 4284-4287), **verified green under QEMU on this host**.
+                  The x86_64 sibling + production per-task live-space
+                  retention still follow. **The `lib/rt` heap that layers over the
                   pair also landed** (PI P6e-3b prerequisite): a
                   `#[global_allocator]` in `lib/rt/src/heap.rs` — a free-span
                   allocator over a fixed-base virtual arena that grows by
