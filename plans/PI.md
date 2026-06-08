@@ -559,11 +559,26 @@ on its own before the next.
 - **P6e — real shell REPL + session supervision `[~]`.** The `session`
   program `init` launches is currently a banner+exit `Run` stub in the
   `Shell` bundle; P6e wires the existing `rustos-shell` interpreter library
-  into it (a real REPL over the console) and has `init` supervise the
-  session across its lifetime (restart, reap). A REPL needs console
-  *input*, which `abi-v1` did not yet expose, so P6e is staged:
+  into it (a real REPL) and has `init` supervise the session across its
+  lifetime (restart, reap). **Design correction (binding, AGENTS.md §20):**
+  the shell must do its text I/O over its **inherited standard streams
+  (fd 0 `stdin` / fd 1 `stdout` / fd 2 `stderr` / fd 3 `stdinfo`)**, *not*
+  over the kernel-discovered console via `console_read`/`console_write`.
+  Binding the REPL to the discovered console hard-codes "whichever console
+  the kernel found" into the shell — ambient authority (§4) and hidden
+  device coupling (§17.3/§17.4). Reading fd 0 / writing fd 1 makes the same
+  `rustos-shell` binary "just work" whether started on a UART, a
+  framebuffer console, a network socket, or a WM terminal surface, with
+  **zero** shell-side changes — only the *backing* of its descriptors
+  differs. The gap this exposes: `abi-v1`'s startup vector
+  (`lib/abi/src/process.rs`) carries args/env/canary but **no descriptor
+  table** — there is no notion of inherited streams yet. So P6e is staged
+  so that P6e-1/P6e-2 build the device *backing* and P6e-3a adds the
+  stream layer the shell actually binds to:
   - **P6e-1 — `console_read` `abi-v1` syscall + kernel seam `[x]`.** The
-    input counterpart of P6a's `console_write`: syscall **#13**
+    input counterpart of P6a's `console_write`, and — together with it —
+    reframed as the bootstrap **device backing** the stream layer attaches
+    to fd 0/1, *not* the shell's interface (AGENTS.md §20). Syscall **#13**
     (`SyscallNumber::CONSOLE_READ`) gated by the new
     `CapabilityId::CONSOLE_READ` (**id 19**), appended to the `lib/abi`
     source of truth (table row, regenerated C header, recomputed
@@ -579,13 +594,32 @@ on its own before the next.
     device read is wired yet** — the aarch64 serial has no RX primitive, so
     `console_read` fails closed everywhere until P6e-2.
   - **P6e-2 — UART RX device + wiring `[ ]`.** Add a non-blocking
-    console-input read primitive to the aarch64 serial path (PL011/16550
-    RX FIFO drain), implement `ConsoleRead` for the discovered-UART
-    console device, and install it through `BootInfo::with_console_read`
-    in `boot_aarch64`.
-  - **P6e-3 — shell REPL + `init` session supervision `[ ]`.** Wire
-    `rustos-shell` into the session `Run` over `console_read`/`console_write`
-    and have `init` supervise the session (restart, reap).
+    console-input read primitive to the aarch64 serial path (PL011 + the
+    BCM2835 AUX mini-UART RX FIFO drain, no busy-wait §2.1), implement
+    `ConsoleRead` for the discovered-UART console device, and install it
+    through `BootInfo::with_console_read` in `boot_aarch64`. This completes
+    the **bootstrap backing**: it feeds fd 0's backing object (P6e-3a),
+    it is **not** called directly by the shell.
+  - **P6e-3a — standard-stream ABI + fd table `[ ]`.** Add the stream
+    layer the shell binds to (AGENTS.md §20), since `abi-v1` has no
+    descriptor table yet. Evolve the two console syscalls **in place**
+    (§2.13 — no `v2`, no shim) into fd-keyed stream ops (e.g.
+    `stream_read(fd, buf)` / `stream_write(fd, buf)`); add a per-process
+    descriptor table to the process model (`lib/abi/src/process.rs`) with
+    fd 0/1/2/3 established at spawn, each descriptor pointing at a kernel
+    *stream backing* object; add the `lib/rt` `stdin`/`stdout`/`stderr`/
+    `stdinfo` wrappers over fd 0/1/2/3; and have the spawner attach the
+    bootstrap session's fd 0/1 to the discovered-console backing (so the
+    P6e-1/P6e-2 UART work is **reused behind the stream**, not exposed).
+    Regenerate the C header (`cargo xtask c-header --write`) and recompute
+    `SYSCALL_TABLE_HASH` (the drift guards enforce both). Prove host-side
+    + a `-M virt` vertical that a child reads fd 0 / writes fd 1 with the
+    backing being the UART.
+  - **P6e-3b — shell REPL over its streams + `init` supervision `[ ]`.**
+    Wire `rustos-shell` to read fd 0 / write fd 1 (and emit `stdinfo` on
+    fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
+    `init` supervising the session (restart, reap). The shell contains
+    **no** reference to `console_*` or to any device.
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
 `init` emits its first line on the console (framebuffer if present, else

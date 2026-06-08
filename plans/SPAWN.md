@@ -375,9 +375,13 @@ process; `init` keeps running and reacts fail-closed (`EXIT_SESSION_FAILED`)
 to a failed spawn rather than being replaced. `init`'s effective set gained
 `CAP_PROC_SPAWN`; the child receives only its own `CAP_CONSOLE_WRITE`
 (no ambient authority, §4). The minimal `session` program is a banner+exit
-`Run` stub in the `Shell` bundle; growing it into a real shell REPL over the
-console (wiring in the `rustos-shell` interpreter library) is `plans/PI.md`
-P6e. Supervising the session across its lifetime (restart, reap) is also P6e.
+`Run` stub in the `Shell` bundle; growing it into a real shell REPL (wiring
+in the `rustos-shell` interpreter library) is `plans/PI.md` P6e. Per the
+binding §20 stream model, the REPL does its text I/O over its **inherited
+standard streams (fd 0/1/2/3 — `stdin`/`stdout`/`stderr`/`stdinfo`)**, never
+the kernel-discovered console (`console_*` is only the bootstrap stream
+*backing*, AGENTS.md §20). Supervising the session across its lifetime
+(restart, reap) is also P6e.
 
 **Done when:** PID 1 `init` spawns the `session` process via the spawn
 syscall and both run concurrently on `-M virt` — proven by the SP3b vertical.

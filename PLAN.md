@@ -1830,9 +1830,22 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `tests/integration/spawn_session_qemu_aarch64` proves both
                   processes run on `-M virt` (PASS on two `ProcessSpawned` +
                   three audited syscalls, the session's gated banner+exit
-                  necessarily last). **P6e** — wire the `rustos-shell`
-                  interpreter REPL into the session stub + `init` session
-                  supervision — remains.
+                  necessarily last). **P6e** — grow the session stub into a
+                  real `rustos-shell` REPL + `init` session supervision —
+                  remains, staged P6e-1/P6e-2/P6e-3a/P6e-3b. **Binding
+                  design correction (AGENTS.md §20):** the shell does its
+                  text I/O over its inherited **standard streams (fd 0/1/2/3
+                  — `stdin`/`stdout`/`stderr`/`stdinfo`)**, *not* the
+                  kernel-discovered console via `console_read`/
+                  `console_write` (which would be ambient authority §4 +
+                  device coupling §17.3/§17.4). P6e-1 (`console_read`
+                  syscall, landed) + P6e-2 (UART RX device) build the
+                  bootstrap stream **backing**; P6e-3a adds the
+                  standard-stream fd ABI + per-process descriptor table (the
+                  console syscalls evolve in place §2.13 into fd-keyed
+                  stream ops) + the `lib/rt` std-stream wrappers; P6e-3b
+                  wires the REPL over fd 0/1/3 (no `console_*`) + `init`
+                  supervision.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

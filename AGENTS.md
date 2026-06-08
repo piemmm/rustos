@@ -1477,7 +1477,62 @@ prevents false claims:
 
 ---
 
-## 20. Standard Information Stream (`stdinfo`, fd 3)
+## 20. Standard Streams (fd 0/1/2/3)
+
+RustOS programs perform **all** of their text input and output over the
+four inherited standard streams, never over a kernel-discovered device.
+The process ABI reserves exactly four standard file descriptors, and they
+are the only text-I/O surface a program is given:
+
+- **fd 0 — `stdin`:** primary text input.
+- **fd 1 — `stdout`:** primary data output.
+- **fd 2 — `stderr`:** errors, warnings, and diagnostics.
+- **fd 3 — `stdinfo`:** optional structured advisory metadata (see below).
+
+Binding rules for the standard text-I/O streams:
+
+- **Bind to the streams, never to a device.** Every command-line / text
+  program — the shell, `sysinfo`, every tool in `userland/shell/` and
+  `userland/apps/`, every system service that talks text — reads `stdin`,
+  writes `stdout`/`stderr`, and emits `stdinfo`, and does so **only**
+  through the standard descriptors it inherited from whoever spawned it.
+  A program **must not** call a console / UART / framebuffer syscall (e.g.
+  the bootstrap `console_read` / `console_write` device seam, §4) as its
+  text interface, and must not reach for "whichever console the kernel
+  discovered". That is ambient authority (§4) and hidden device coupling
+  (§17.3/§17.4); the spawner grants the streams explicitly, the program
+  never reaches for a global device.
+- **Device independence is a property of the stream layer, not the
+  program.** Because a program only names fd 0/1/2/3, the same binary
+  "just works" when started on a UART, a framebuffer console, a network
+  socket, or a terminal surface inside the window manager — only the
+  *backing* of its descriptors differs. What a descriptor is backed by is
+  decided by the spawner / kernel stream layer, never hard-coded into the
+  program.
+- **Pipes and redirection require fd semantics.** `cmd | next` pipes fd 1
+  into the next program's fd 0; `cmd 3>info.jsonl` captures fd 3. These
+  only have meaning because programs read and write *descriptors*. A
+  program wired straight to a device cannot participate in pipes or
+  redirection and is a defect.
+- **The descriptor table is part of the process ABI.** A spawning process
+  establishes the child's fd 0/1/2/3 at spawn time; each descriptor points
+  at a kernel/IPC *stream backing* object. The standard-stream syscalls and
+  the per-process descriptor table live in `lib/abi` under the same ABI
+  discipline as the syscall table (§9): versioned, hashed, and — from the
+  first release — frozen. The Rust standard-stream wrappers
+  (`stdin`/`stdout`/`stderr`/`stdinfo`) live in `lib/rt`; first-party
+  programs link those, never a device syscall (§16.4, §2.2).
+- **Fail closed.** A program with no inherited stream for a descriptor, or
+  a write to a descriptor with no attached consumer, denies or no-ops
+  rather than falling back to a device (§5.4). fd 3 specifically is
+  best-effort and non-blocking when unattached (see below).
+
+`console_read` / `console_write` (and any future framebuffer/network
+console seam) exist solely as a **backing** the stream layer may attach to
+fd 0/1 during early boot bring-up; they are not a program-facing text
+interface and no program links them directly.
+
+### 20.1 The Standard Information Stream (`stdinfo`, fd 3)
 
 RustOS reserves file descriptor 3 as `stdinfo`: an optional, structured
 advisory stream for concise human context and AI/tool metadata.
