@@ -129,7 +129,7 @@ pub trait InitSpawnCtx {
     /// and `physmap` is the kernel direct map backing it. They are
     /// registered with the kernel-wide [`crate::AddressSpaceRegistry`] under
     /// the *same* numeric id the dispatcher recovers, so PID 1's first
-    /// syscall that copies from user memory (e.g. `console_write` reading
+    /// syscall that copies from user memory (e.g. `stream_write` reading
     /// its banner) resolves the caller's address space instead of failing
     /// closed with `BadAddress` (`plans/PI.md` P6c-3 follow-up).
     ///
@@ -540,7 +540,7 @@ pub trait ProcessSpawn: Sync {
 /// The fail-closed default [`ProcessSpawn`] producer: every build with no
 /// real spawn service wired returns [`Errno::NotImplemented`]
 /// (`AGENTS.md` §2.9), exactly as [`crate::NULL_CONSOLE`] does for the
-/// `console_write` syscall.
+/// `stream_write` syscall.
 pub struct NullProcessSpawn;
 
 impl ProcessSpawn for NullProcessSpawn {

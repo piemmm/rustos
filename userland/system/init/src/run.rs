@@ -10,10 +10,11 @@
 //! panic handler, and the syscall wrappers; `rustos_rt::entry!` names this
 //! program's `main`.
 //!
-//! `main` parses the compiled-in `startup::DEFAULT_CONFIG` and, when it asks
-//! for the console, writes the first banner line through the `abi-v1`
-//! `console_write` syscall (`rustos_rt::console_write`, the P6a syscall).
-//! The runtime routes `main`'s return value through the `exit` syscall.
+//! `main` parses the compiled-in `startup::DEFAULT_CONFIG` and writes the
+//! first banner line to its inherited standard output (fd 1) through
+//! `rustos_rt::stdout`, which issues the `abi-v1` `stream_write` syscall
+//! (`AGENTS.md` §20 — `init` binds to the stream, never a device). The
+//! runtime routes `main`'s return value through the `exit` syscall.
 //!
 //! It links **only** the runtime and its own startup-config parser, never the
 //! sibling `rustos-init` orchestrator library, whose `alloc`-and-crypto
@@ -53,13 +54,14 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
-    /// the system console, and returns [`EXIT_OK`].
+    /// its inherited standard output (fd 1), and returns [`EXIT_OK`].
     ///
-    /// The banner write is *gated*: `console_write` returns the number of
-    /// bytes the kernel accepted, so a short count means the privileged
-    /// console write did not fully land (a missing `CAP_CONSOLE_WRITE`, an
-    /// unresolved address space, or a closed-fail kernel path). PID 1 cannot
-    /// usefully proceed without the console it was spawned to drive and has
+    /// The banner write is *gated*: `stdout` returns the number of
+    /// bytes the kernel accepted, so a short count means the write did not
+    /// fully land (a missing `CAP_CONSOLE_WRITE`, an unresolved address
+    /// space, an unestablished descriptor, or a closed-fail kernel path).
+    /// PID 1 cannot usefully proceed without the console it was spawned to
+    /// drive and has
     /// no session path to launch yet (P6d/P6e), so it parks fail-closed
     /// rather than exiting "successfully" on a console it never reached
     /// (`AGENTS.md` §2.9). This is a terminal park, not a retry loop
@@ -78,7 +80,7 @@ mod program {
             return EXIT_CONFIG_INVALID;
         };
         let banner = BANNER.as_bytes();
-        if rustos_rt::console_write(banner) != banner.len() {
+        if rustos_rt::stdout(banner) != banner.len() {
             loop {
                 core::hint::spin_loop();
             }

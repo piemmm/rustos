@@ -116,8 +116,10 @@ never the C ABI (`crt0` + `abi-sys`), which exists solely for programs
 **not** written in Rust (`AGENTS.md` §16.4). `rustos-rt` provides the
 program's `_start`, the §19.2 stack canary, the panic handler, and
 idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
-`main`. `main` writes the first banner line through the `abi-v1`
-`console_write` syscall (`rustos_rt::console_write`) and returns, and the
+`main`. `main` writes the first banner line to its inherited standard
+output (fd 1) through `rustos_rt::stdout` — the `abi-v1` `stream_write`
+syscall (`AGENTS.md` §20; `init` binds to the inherited stream, never an
+ambient device) — and returns, and the
 runtime routes the return value through the `exit` syscall. (Both the Rust
 runtime and the C ABI reach the kernel through the one shared trap,
 `rustos-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`

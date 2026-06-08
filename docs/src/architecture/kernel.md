@@ -89,7 +89,8 @@ The `Phase::Syscall` step:
    named-port registry (`ipc`), per-task address-space registry
    (`aspaces`), the kernel random output reserve (`rng`), and the
    system `console` device (`BootInfo::console`, the discovered
-   framebuffer or first UART the `console_write` syscall emits to;
+   framebuffer or first UART that backs a process's standard output
+   stream, written through the `stream_write` syscall, `AGENTS.md` §20;
    defaults to the fail-closed `NULL_CONSOLE`). The
    `aspaces` registry lets a handler resolve `caller.task_id` to the
    user address space + `PhysMap` the user-memory copy path walks
@@ -173,7 +174,7 @@ stack-resident, so the panic path survives a wedged heap.
 | `audit_sink`       | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `log_level`        | `rustos_log::Level`               | Installed before the first `PhaseStarted`.    |
 | `dispatcher_callback_slot` | `&'static DispatchCallbackSlot`   | Bin-crate-owned slot; receives the production `DispatchHook` during the `syscall` phase. See below. |
-| `console`          | `&'static (dyn ConsoleWrite + 'static)` | System console the `console_write` syscall emits to; defaults to the fail-closed `NULL_CONSOLE` until the arch port installs a device via `with_console`. |
+| `console`          | `&'static (dyn ConsoleWrite + 'static)` | System console that backs a process's standard output stream (the `stream_write` syscall, `AGENTS.md` §20); defaults to the fail-closed `NULL_CONSOLE` until the arch port installs a device via `with_console`. |
 
 `BootInfo::validate()` runs at the top of `kernel_main` and reports any
 violation as a `BootInfoError`; the kernel then logs a `PhaseFailed`

@@ -75,7 +75,8 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{
-    CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
+    CapabilityId, DescriptorTable, Errno, IrqHandle, RandomFlags, StreamMode, SyscallNumber,
+    RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
@@ -160,7 +161,7 @@ where
     /// reserve mutates its buffer as it serves (`AGENTS.md` §2.1 — the
     /// reserve owns no lock of its own).
     rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
-    /// The system console sink `console_write` emits to (`AGENTS.md`
+    /// The system console sink `stream_write` emits to (`AGENTS.md`
     /// §10 / §16.4). Defaults to [`NULL_CONSOLE`] (fail closed with
     /// [`Errno::NotImplemented`]); the boot path installs the concrete
     /// device — the detected framebuffer, else the first discovered
@@ -168,7 +169,7 @@ where
     /// a `'static` borrow because the installed console lives for the
     /// lifetime of the running kernel, exactly like `NULL_CONSOLE`.
     console: &'static (dyn ConsoleWrite + 'static),
-    /// The system console input source `console_read` draws from
+    /// The system console input source `stream_read` draws from
     /// (`AGENTS.md` §10 / §16.4). Defaults to [`NULL_CONSOLE_READ`] (fail
     /// closed with [`Errno::NotImplemented`]); the boot path installs the
     /// concrete device — the first discovered keyboard/UART input source
@@ -247,11 +248,11 @@ where
             aspaces,
             rng,
             // Fail closed until the boot path installs a real device
-            // (`AGENTS.md` §2.9 / §5.4): an early `console_write` returns
+            // (`AGENTS.md` §2.9 / §5.4): an early `stream_write` returns
             // `NotImplemented` rather than silently dropping the bytes.
             console: &NULL_CONSOLE,
             // Same fail-closed default for the input direction: an early
-            // `console_read` returns `NotImplemented` rather than
+            // `stream_read` returns `NotImplemented` rather than
             // fabricating input (`AGENTS.md` §2.9 / §5.4).
             console_read: &NULL_CONSOLE_READ,
             // Spawn subsystem unwired until the boot path threads a frame
@@ -263,14 +264,14 @@ where
         }
     }
 
-    /// Install the system console `console_write` emits to, consuming
+    /// Install the system console `stream_write` emits to, consuming
     /// and returning `self`.
     ///
     /// Called once by the boot path after it has selected the console
     /// device from the normalised hardware tree — the detected
     /// framebuffer when present, else the first discovered UART
     /// (`plans/PI.md` P6, `AGENTS.md` §18). Until this is called the
-    /// handler holds [`NULL_CONSOLE`] and `console_write` fails closed
+    /// handler holds [`NULL_CONSOLE`] and `stream_write` fails closed
     /// with [`Errno::NotImplemented`]. The console must be `'static`:
     /// the boot path leaks the device alongside `KernelState`, which
     /// lives for the lifetime of the running kernel (`AGENTS.md` §2.1 —
@@ -281,14 +282,14 @@ where
         self
     }
 
-    /// Install the system console input source `console_read` draws from,
+    /// Install the system console input source `stream_read` draws from,
     /// consuming and returning `self`.
     ///
     /// The read counterpart of [`Self::with_console`], called once by the
     /// boot path after it has selected the console device from the
     /// normalised hardware tree (`plans/PI.md` P6, `AGENTS.md` §18). Until
     /// this is called the handler holds [`NULL_CONSOLE_READ`] and
-    /// `console_read` fails closed with [`Errno::NotImplemented`]. The
+    /// `stream_read` fails closed with [`Errno::NotImplemented`]. The
     /// source must be `'static`: the boot path leaks the device alongside
     /// `KernelState`, which lives for the lifetime of the running kernel
     /// (`AGENTS.md` §2.1 — no global mutable static; the install is a
@@ -417,9 +418,9 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
 /// simply loops.
 const RANDOM_STAGE_CHUNK: usize = 256;
 
-/// Upper bound, in bytes, on a single `console_write` call.
+/// Upper bound, in bytes, on a single `stream_write` call.
 ///
-/// `console_write` stages the caller's bytes in one kernel-owned buffer
+/// `stream_write` stages the caller's bytes in one kernel-owned buffer
 /// before handing them to the device, so an unbounded `len` would let a
 /// caller force an arbitrarily large kernel allocation whose failure
 /// path could OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The
@@ -429,9 +430,9 @@ const RANDOM_STAGE_CHUNK: usize = 256;
 /// iterates.
 const CONSOLE_WRITE_MAX: usize = 4096;
 
-/// Upper bound, in bytes, on a single `console_read` call.
+/// Upper bound, in bytes, on a single `stream_read` call.
 ///
-/// `console_read` reads into one kernel-owned staging buffer before
+/// `stream_read` reads into one kernel-owned staging buffer before
 /// copying it out to the caller, so an unbounded `len` would let a caller
 /// force an arbitrarily large kernel allocation whose failure path could
 /// OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The call therefore
@@ -856,7 +857,24 @@ where
         outcome.unwrap_or(Err(Errno::BadAddress))
     }
 
-    fn console_write(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+    fn stream_write(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Resolve `fd` against the caller's per-process descriptor table
+        // *before* touching any state (`AGENTS.md` §5.4): the inherited
+        // descriptor, not an ambient device, is the authority (§20). An
+        // `fd` that is not a writable inherited stream fails closed with
+        // `NotFound` (its stream backing does not exist for this caller),
+        // never leaking whether it was closed, the wrong direction, or
+        // out of range. An unregistered caller resolves to the
+        // all-`Closed` default and fails here too.
+        if self.aspaces.read().streams(caller.task_id).mode(fd) != StreamMode::Write {
+            return Err(Errno::NotFound);
+        }
         // The dispatcher already checked `CAP_CONSOLE_WRITE` and that
         // `buf` is non-null (`UserPtr`). A zero-length write touches
         // neither the caller's buffer nor the device.
@@ -892,7 +910,21 @@ where
         self.console.write(&payload).map(|n| n as u64)
     }
 
-    fn console_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+    fn stream_read(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Resolve `fd` against the caller's per-process descriptor table
+        // *before* touching any state (`AGENTS.md` §5.4 / §20): an `fd`
+        // that is not a readable inherited stream fails closed with
+        // `NotFound`, never leaking which case occurred. An unregistered
+        // caller resolves to the all-`Closed` default and fails here too.
+        if self.aspaces.read().streams(caller.task_id).mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
         // The dispatcher already checked `CAP_CONSOLE_READ` and that
         // `buf` is non-null (`UserPtr`). A zero-length read touches
         // neither the device nor the caller's buffer.
@@ -951,7 +983,7 @@ where
         // The spawn subsystem must be fully wired before any state is
         // touched: a build with no frame allocator threaded fails closed
         // with `NotImplemented` (`AGENTS.md` §2.9), the spawn-equivalent of
-        // `console_write`'s `NULL_CONSOLE`.
+        // `stream_write`'s `NULL_CONSOLE`.
         let Some(frames) = self.frames else {
             return Err(Errno::NotImplemented);
         };
@@ -1092,6 +1124,17 @@ where
         {
             return Err(AdmitError::AspaceConflict);
         }
+
+        // Establish the child's standard streams (`AGENTS.md` §20): a
+        // spawned process inherits the standard descriptor table (`stdin`
+        // readable, `stdout`/`stderr`/`stdinfo` writable), each backed by
+        // the bootstrap console the boot path installed. The program
+        // names only the fd numbers; it never reaches an ambient device
+        // (§4 / §17.4). A richer inheritance policy (e.g. piping a
+        // child's `stdout`) is a later stage.
+        self.aspaces
+            .write()
+            .set_streams(sec_id, DescriptorTable::standard());
 
         Ok(task_id)
     }
@@ -1350,7 +1393,7 @@ where
 /// returns straight to user space (`plans/SPAWN.md` SP2).
 ///
 /// `yield` re-enqueues the caller; `exit` reaps it. Every other syscall
-/// (`console_write`, `ipc_*`, `cap_*`, `clock_get`, `irq_*`, `random_get`)
+/// (`stream_write`, `ipc_*`, `cap_*`, `clock_get`, `irq_*`, `random_get`)
 /// returns to the same EL0 task without a context switch, so it is `None`.
 /// This is the single place the dispatch path names the rescheduling
 /// syscalls (`AGENTS.md` §2.2).
@@ -1372,7 +1415,7 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use rustos_abi::{CapabilityId, Errno};
+    use rustos_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
     use rustos_caps::CapabilitySet;
     use rustos_kernel_ipc::Port;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
@@ -1592,7 +1635,7 @@ mod tests {
             SyscallNumber::IRQ_BIND,
             SyscallNumber::IRQ_WAIT,
             SyscallNumber::RANDOM_GET,
-            SyscallNumber::CONSOLE_WRITE,
+            SyscallNumber::STREAM_WRITE,
         ] {
             assert_eq!(
                 reschedule_action_for(n.as_u16()),
@@ -3048,7 +3091,7 @@ mod tests {
     }
 
     /// A console sink that records every byte handed to it, for the
-    /// `console_write` handler tests.
+    /// `stream_write` handler tests.
     struct RecordingConsole {
         written: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
     }
@@ -3068,7 +3111,7 @@ mod tests {
         }
     }
 
-    /// `console_write` copies the caller's bytes in and hands the exact
+    /// `stream_write` copies the caller's bytes in and hands the exact
     /// buffer to the installed console, returning the byte count.
     #[test]
     fn console_write_copies_in_and_emits_to_installed_console() {
@@ -3099,9 +3142,12 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console(console);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
 
         assert_eq!(
-            h.console_write(&ctx, 0x1000, banner.len()),
+            h.stream_write(&ctx, STDOUT, 0x1000, banner.len()),
             Ok(banner.len() as u64)
         );
         assert_eq!(console.written.lock().as_slice(), banner);
@@ -3136,10 +3182,16 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.console_write(&ctx, 0x1000, 2), Err(Errno::NotImplemented));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(
+            h.stream_write(&ctx, STDOUT, 0x1000, 2),
+            Err(Errno::NotImplemented)
+        );
     }
 
-    /// A zero-length `console_write` succeeds without touching the
+    /// A zero-length `stream_write` succeeds without touching the
     /// caller's buffer or the device (so it works even with no console).
     #[test]
     fn console_write_zero_length_is_ok_and_inert() {
@@ -3160,14 +3212,19 @@ mod tests {
         };
 
         // No address space registered: a real copy would fail closed,
-        // but a zero-length write never reaches the copy path.
+        // but a zero-length write to an *open* descriptor never reaches
+        // the copy path. The descriptor table is still established so the
+        // write is to a valid (writable) stream.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.console_write(&ctx, 0x1000, 0), Ok(0));
+        assert_eq!(h.stream_write(&ctx, STDOUT, 0x1000, 0), Ok(0));
     }
 
-    /// `console_write` from a caller with no registered address space
+    /// `stream_write` from a caller with no registered address space
     /// fails closed with `BadAddress`, never leaking the missing-space
     /// case (`AGENTS.md` §5.4 / §19.1).
     #[test]
@@ -3193,7 +3250,13 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console(console);
-        assert_eq!(h.console_write(&ctx, 0x1000, 4), Err(Errno::BadAddress));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(
+            h.stream_write(&ctx, STDOUT, 0x1000, 4),
+            Err(Errno::BadAddress)
+        );
         assert!(console.written.lock().is_empty());
     }
 
@@ -3230,15 +3293,18 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console(console);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
         // Ask for more than the cap; the handler writes exactly the cap.
-        let r = h.console_write(&ctx, 0x1000, CONSOLE_WRITE_MAX + 100);
+        let r = h.stream_write(&ctx, STDOUT, 0x1000, CONSOLE_WRITE_MAX + 100);
         assert_eq!(r, Ok(CONSOLE_WRITE_MAX as u64));
         assert_eq!(console.written.lock().len(), CONSOLE_WRITE_MAX);
     }
 
     /// A console input source that yields a preset byte string and
     /// records the length of the buffer it was handed, for the
-    /// `console_read` handler tests. It fills the caller's buffer with up
+    /// `stream_read` handler tests. It fills the caller's buffer with up
     /// to `buf.len()` bytes of the preset input (a real device's
     /// short-read behaviour) and reports the count.
     struct RecordingConsoleRead {
@@ -3264,7 +3330,7 @@ mod tests {
         }
     }
 
-    /// `console_read` reads the device bytes into the kernel staging
+    /// `stream_read` reads the device bytes into the kernel staging
     /// buffer and copies them out to the caller, returning the count. The
     /// bytes land at the caller's pointer.
     #[test]
@@ -3297,8 +3363,14 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console_read(console);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
 
-        assert_eq!(h.console_read(&ctx, 0x1000, 64), Ok(line.len() as u64));
+        assert_eq!(
+            h.stream_read(&ctx, STDIN, 0x1000, 64),
+            Ok(line.len() as u64)
+        );
         // The bytes landed at the caller's pointer.
         let delivered = h
             .with_caller_aspace(&ctx, |space, physmap| {
@@ -3339,10 +3411,16 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.console_read(&ctx, 0x1000, 8), Err(Errno::NotImplemented));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(
+            h.stream_read(&ctx, STDIN, 0x1000, 8),
+            Err(Errno::NotImplemented)
+        );
     }
 
-    /// A zero-length `console_read` succeeds without touching the device
+    /// A zero-length `stream_read` succeeds without touching the device
     /// or the caller's buffer (so it works even with no console).
     #[test]
     fn console_read_zero_length_is_ok_and_inert() {
@@ -3363,11 +3441,15 @@ mod tests {
         };
 
         // No address space registered: a real copy would fail closed,
-        // but a zero-length read never reaches the device or copy path.
+        // but a zero-length read to an *open* descriptor never reaches
+        // the device or copy path.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.console_read(&ctx, 0x1000, 0), Ok(0));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 0), Ok(0));
     }
 
     /// A device with no input pending reports a zero-length read without
@@ -3402,7 +3484,10 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console_read(console);
-        assert_eq!(h.console_read(&ctx, 0x1000, 8), Ok(0));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 8), Ok(0));
     }
 
     /// A `len` above `CONSOLE_READ_MAX` hands the device a bounded buffer
@@ -3445,14 +3530,17 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console_read(console);
-        let r = h.console_read(&ctx, 0x1000, CONSOLE_READ_MAX + 100);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let r = h.stream_read(&ctx, STDIN, 0x1000, CONSOLE_READ_MAX + 100);
         assert_eq!(r, Ok(CONSOLE_READ_MAX as u64));
         // The device was handed exactly the capped buffer, never the
         // caller's oversized request.
         assert_eq!(*console.last_buf_len.lock(), Some(CONSOLE_READ_MAX));
     }
 
-    /// `console_read` from a caller with no registered address space
+    /// `stream_read` from a caller with no registered address space
     /// fails closed with `BadAddress`, never leaking the missing-space
     /// case (`AGENTS.md` §5.4 / §19.1).
     #[test]
@@ -3479,7 +3567,131 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_console_read(console);
-        assert_eq!(h.console_read(&ctx, 0x1000, 4), Err(Errno::BadAddress));
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(
+            h.stream_read(&ctx, STDIN, 0x1000, 4),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// `stream_write` to a descriptor that is not a writable inherited
+    /// stream fails closed with `NotFound` before any copy — the
+    /// descriptor table, not an ambient device, is the authority
+    /// (`AGENTS.md` §20 / §5.4). The cases: a read-only fd (`STDIN`), an
+    /// out-of-range fd, and a caller whose table is the closed default.
+    #[test]
+    fn stream_write_to_non_writable_fd_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let banner = b"nope";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, banner);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console(console);
+        // `STDIN` is read-only; an out-of-range fd resolves to Closed.
+        assert_eq!(h.stream_write(&ctx, STDIN, 0x1000, 4), Err(Errno::NotFound));
+        assert_eq!(h.stream_write(&ctx, 99, 0x1000, 4), Err(Errno::NotFound));
+        // The device was never reached.
+        assert!(console.written.lock().is_empty());
+    }
+
+    /// `stream_read` from a descriptor that is not a readable inherited
+    /// stream fails closed with `NotFound` before touching the device
+    /// (`AGENTS.md` §20 / §5.4): a write-only fd (`STDOUT`) and a closed
+    /// (unestablished) caller.
+    #[test]
+    fn stream_read_from_non_readable_fd_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"data")));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console_read(console);
+        // `STDOUT` is write-only here, so a read of it is refused.
+        assert_eq!(h.stream_read(&ctx, STDOUT, 0x1000, 4), Err(Errno::NotFound));
+        // The device was never read.
+        assert_eq!(*console.last_buf_len.lock(), None);
+    }
+
+    /// A caller whose descriptor table was never established (the
+    /// fail-closed `Closed` default) cannot reach any stream backing
+    /// (`AGENTS.md` §5.4): both directions deny with `NotFound`.
+    #[test]
+    fn stream_ops_without_established_table_are_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No `set_streams`: the caller resolves to the closed default.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.stream_write(&ctx, STDOUT, 0x1000, 4),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 4), Err(Errno::NotFound));
     }
 
     /// A live frame allocator over 64 usable frames — enough to pass the

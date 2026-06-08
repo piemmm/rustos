@@ -352,7 +352,7 @@ pub fn boot(
 /// be entered (the `kernel_core` `Syscall` phase publishes the resident
 /// hook into [`DISPATCH_SLOT`]), wraps the validated [`Aarch64Arch`] in
 /// the local [`Aarch64BinArch`] `KernelArch`, and installs the
-/// discovered-UART [`UART_CONSOLE`] as the `console_write` device. A
+/// discovered-UART [`UART_CONSOLE`] as the `stream_write` device. A
 /// hand-off that `BootInfo::validate` rejects parks fail-closed rather
 /// than entering the core (`AGENTS.md` §2.9 / §5.4.5).
 fn enter_kernel_core(
@@ -383,7 +383,7 @@ fn enter_kernel_core(
     )
     .with_console(&UART_CONSOLE)
     // Install the discovered-UART input backing (`plans/PI.md` P6e-2): the
-    // non-blocking RX drain the `console_read` syscall reads through. It is
+    // non-blocking RX drain the `stream_read` syscall reads through. It is
     // the bootstrap stream backing for fd 0 (`AGENTS.md` §20), reusing the
     // same zero-sized `UART_CONSOLE` device as the output half.
     .with_console_read(&UART_CONSOLE)

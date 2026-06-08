@@ -1,5 +1,5 @@
-//! The kernel-side system console seam the `console_write` (`abi-v1`
-//! number 11) and `console_read` (`abi-v1` number 13) syscalls use
+//! The kernel-side system console seam the `stream_write` (`abi-v1`
+//! number 11) and `stream_read` (`abi-v1` number 13) syscalls use
 //! (`AGENTS.md` §10 / §16.4).
 //!
 //! [`ConsoleWrite`] is the output half and [`ConsoleRead`] the input
@@ -8,9 +8,9 @@
 //! handlers own the user-memory copy and the capability check, never the
 //! device.
 //!
-//! `console_write` lets the privileged early bring-up principals (PID 1
+//! `stream_write` lets the privileged early bring-up principals (PID 1
 //! `init`, login, getty) write a byte buffer to the *hardware* console;
-//! `console_read` lets them read input back from it (the shell REPL).
+//! `stream_read` lets them read input back from it (the shell REPL).
 //! Which device that is — the detected framebuffer when one is present,
 //! else the first discovered UART (`plans/PI.md` P6) — is a boot-time
 //! decision the architecture port makes from the normalised hardware
@@ -64,7 +64,7 @@ pub trait ConsoleWrite: Sync {
 ///
 /// Every write fails closed with [`Errno::NotImplemented`] — the
 /// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
-/// `console_write` issued before the boot path installs a device (or on
+/// `stream_write` issued before the boot path installs a device (or on
 /// a target that genuinely has no console) announces an inert interface
 /// rather than silently discarding the bytes.
 #[derive(Debug, Default, Copy, Clone)]
@@ -123,7 +123,7 @@ pub trait ConsoleRead: Sync {
 ///
 /// Every read fails closed with [`Errno::NotImplemented`] — the
 /// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
-/// `console_read` issued before the boot path installs a device (or on
+/// `stream_read` issued before the boot path installs a device (or on
 /// a target that genuinely has no console input) announces an inert
 /// interface rather than fabricating input.
 #[derive(Debug, Default, Copy, Clone)]
@@ -138,7 +138,7 @@ impl ConsoleRead for NullConsoleRead {
 /// The shared [`NullConsoleRead`] instance the syscall handler defaults
 /// to.
 ///
-/// `KernelSyscallHandlers::new` points its `console_read` borrow here so
+/// `KernelSyscallHandlers::new` points its `stream_read` borrow here so
 /// the field is always valid without an `Option` branch on the hot
 /// path; the boot path replaces it with the real device through
 /// `KernelSyscallHandlers::with_console_read`.

@@ -61,9 +61,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |   8 | `irq_bind`     | `u32 line`                              | `IrqHandle` | `CAP_IRQ_BIND`      | yes     |
 |   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
 |  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
-|  11 | `console_write`| `user_ptr`, `len`                       | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
+|  11 | `stream_write` | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
 |  12 | `spawn`        | `user_ptr` (path), `len`                | `u64` (pid) | `CAP_PROC_SPAWN`    | yes     |
-|  13 | `console_read` | `user_ptr`, `len`                       | `u64`   | `CAP_CONSOLE_READ`      | no      |
+|  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_READ`      | no      |
 
 ### Capability matrix
 
@@ -75,9 +75,9 @@ is exhaustive — anything not listed below is ungated:
 | ------------------ | -------------------------- |
 | `CAP_USER_ADMIN`   | `cap_revoke`               |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
-| `CAP_CONSOLE_WRITE`| `console_write`            |
+| `CAP_CONSOLE_WRITE`| `stream_write`             |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
-| `CAP_CONSOLE_READ` | `console_read`             |
+| `CAP_CONSOLE_READ` | `stream_read`              |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -85,6 +85,36 @@ modes are documented in
 
 A future syscall that needs e.g. `CAP_DRV_LOAD` lands as a new entry in
 the table and a new row here; existing rows never move.
+
+## Standard streams (fd 0/1/2/3)
+
+A program performs **all** of its text I/O over the four inherited
+standard descriptors, never over a kernel-discovered device (`AGENTS.md`
+§20): fd 0 `stdin`, fd 1 `stdout`, fd 2 `stderr`, fd 3 `stdinfo`. The
+`stream_write` / `stream_read` syscalls take that descriptor as their
+`fd` argument; the program names only the fd number, so the same binary
+works whatever the spawner backed the stream with.
+
+The per-process **descriptor table** is part of the process model
+(`rustos_abi::DescriptorTable`, `lib/abi/src/process.rs`): a fixed table
+of four `StreamMode`s (`Closed` / `Read` / `Write`), one per standard
+descriptor. The spawner establishes it when it admits a process
+(`AddressSpaceRegistry::set_streams`, keyed by the same `TaskId` as the
+address space) — `init` and every program it spawns inherit the standard
+table (fd 0 readable, fd 1/2/3 writable). The dispatcher's handler
+resolves `fd` against this table **before** any state is touched: an `fd`
+that is not the right direction (or a process whose table was never
+established) fails closed with `NotFound`, so the inherited descriptor —
+not an ambient device — is the authority (`AGENTS.md` §4 / §5.4).
+
+In this bootstrap phase every descriptor's kernel *stream backing* is the
+discovered console the boot path installed (`BootInfo::with_console` /
+`with_console_read`), so a console-backed stream additionally requires
+`CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — the coarse "may use a
+console-backed stream" gate the dispatcher checks, on top of the fd-level
+descriptor gate. The first-party Rust wrappers are `rustos_rt::stdout` /
+`stderr` / `stdinfo` / `stdin`; a program never names `console_*` or a
+device (`AGENTS.md` §20, §2.2).
 
 ## Argument validation
 
@@ -159,8 +189,8 @@ re-validates arguments — the dispatcher does that first.
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
-| `console_write` | copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to the installed `ConsoleWrite` device (`with_console`; default `NULL_CONSOLE`) | `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. No device wired → `NotImplemented`. Otherwise `Ok(bytes_written)`. |
-| `console_read` | reads from the installed `ConsoleRead` device (`with_console_read`; default `NULL_CONSOLE_READ`) into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `len == 0` → `Ok(0)`. No device wired → `NotImplemented`. No input pending → `Ok(0)` (short read). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read)`. |
+| `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20), then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to the descriptor's backing — in the bootstrap session the installed `ConsoleWrite` device (`with_console`; default `NULL_CONSOLE`) | `fd` not a writable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. No device wired → `NotImplemented`. Otherwise `Ok(bytes_written)`. |
+| `stream_read` | resolves `fd` against the caller's per-process descriptor table, then reads from the descriptor's backing — in the bootstrap session the installed `ConsoleRead` device (`with_console_read`; default `NULL_CONSOLE_READ`) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `fd` not a readable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. No device wired → `NotImplemented`. No input pending → `Ok(0)` (short read). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read)`. |
 | `spawn`         | copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default

@@ -145,7 +145,7 @@ impl CapabilityQuery for SpawnAuthority {
 }
 
 /// A spawned child's effective capability set: exactly `CAP_CONSOLE_WRITE`,
-/// so the session program can write its banner through the `console_write`
+/// so the session program can write its banner through the `stream_write`
 /// syscall. Passed as both the user grant and the manifest request, so the
 /// intersection the kernel derives is the same set — the child is granted no
 /// more (`AGENTS.md` §5.2), and never inherits the spawning caller's
@@ -259,7 +259,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry holds
         // (the live arch `space` is not `Sync`), and box the direct map that
-        // backs it, so the child's `console_write` can copy its banner out of
+        // backs it, so the child's `stream_write` can copy its banner out of
         // its own user memory. Freezing *after* `spawn_image` captures every
         // mapped page — segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());

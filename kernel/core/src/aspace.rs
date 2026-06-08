@@ -46,6 +46,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
+use rustos_abi::DescriptorTable;
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
 
@@ -81,6 +82,15 @@ struct TaskAddressSpace {
 #[derive(Default)]
 pub struct AddressSpaceRegistry {
     tasks: BTreeMap<TaskId, TaskAddressSpace>,
+    /// Each live task's standard-stream descriptor table (`AGENTS.md`
+    /// §20). Co-located with the address space because it shares the
+    /// exact per-process lifecycle — established at spawn, withdrawn at
+    /// exit — and is keyed by the same [`TaskId`]; a parallel registry +
+    /// lock would be near-duplicate plumbing (`AGENTS.md` §2.2 / §2.3).
+    /// A task with no entry resolves to the fail-closed
+    /// [`DescriptorTable::closed`] default, so an unestablished process
+    /// can reach no stream backing (§5.4).
+    streams: BTreeMap<TaskId, DescriptorTable>,
 }
 
 impl AddressSpaceRegistry {
@@ -89,6 +99,7 @@ impl AddressSpaceRegistry {
     pub const fn new() -> Self {
         Self {
             tasks: BTreeMap::new(),
+            streams: BTreeMap::new(),
         }
     }
 
@@ -116,9 +127,39 @@ impl AddressSpaceRegistry {
     ///
     /// Idempotent: withdrawing a task with no entry (e.g. a kernel task
     /// that never had a user address space, or a double `exit`) is a
-    /// no-op that returns `false`.
+    /// no-op that returns `false`. The task's standard-stream descriptor
+    /// table is dropped at the same time so a reused id never inherits a
+    /// dead task's streams (`AGENTS.md` §5.4 — fail closed).
     pub fn withdraw(&mut self, task: TaskId) -> bool {
-        self.tasks.remove(&task).is_some()
+        let had_streams = self.streams.remove(&task).is_some();
+        self.tasks.remove(&task).is_some() || had_streams
+    }
+
+    /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`
+    /// §20).
+    ///
+    /// Called by the spawner when it admits a process, recording which
+    /// inherited streams the child may read or write. Replacing an
+    /// existing table is permitted: re-establishing the streams of a live
+    /// task is the spawner's prerogative, and unlike the address space
+    /// there is no live mapping to protect. A task whose table is never
+    /// set resolves to [`DescriptorTable::closed`] via [`Self::streams`].
+    pub fn set_streams(&mut self, task: TaskId, table: DescriptorTable) {
+        self.streams.insert(task, table);
+    }
+
+    /// Resolve `task`'s standard-stream descriptor table, or the
+    /// fail-closed [`DescriptorTable::closed`] default when none is
+    /// established.
+    ///
+    /// The `stream_read` / `stream_write` handlers consult this to turn a
+    /// caller's `fd` into the direction its backing supports (`AGENTS.md`
+    /// §20). An unregistered task (a kernel task, or one withdrawn on
+    /// `exit`) has every descriptor closed, so it can reach no backing
+    /// (§5.4).
+    #[must_use]
+    pub fn streams(&self, task: TaskId) -> DescriptorTable {
+        self.streams.get(&task).copied().unwrap_or_default()
     }
 
     /// Resolve `task` to the `(address space, physical map)` pair the
@@ -256,5 +297,31 @@ mod tests {
             .expect("re-registration after withdraw succeeds");
         let (space, _) = reg.resolve(TaskId(5)).expect("re-registered");
         assert_eq!(space.translate(page(3)).expect("page 3").0, Frame(30));
+    }
+
+    #[test]
+    fn unset_streams_resolve_to_the_closed_default() {
+        let reg = AddressSpaceRegistry::new();
+        // A task with no established table can reach no backing.
+        assert_eq!(reg.streams(TaskId(9)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn set_streams_then_resolve_returns_the_table() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_streams(TaskId(2), DescriptorTable::standard());
+        assert_eq!(reg.streams(TaskId(2)), DescriptorTable::standard());
+        // A different task is unaffected and stays fail-closed.
+        assert_eq!(reg.streams(TaskId(3)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn withdraw_clears_the_stream_table() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_streams(TaskId(4), DescriptorTable::standard());
+        // Withdrawing a task with streams but no address space still
+        // reports the slot was present and clears the table.
+        assert!(reg.withdraw(TaskId(4)));
+        assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
     }
 }

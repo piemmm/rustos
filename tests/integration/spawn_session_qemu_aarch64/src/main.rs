@@ -27,7 +27,7 @@
 //! Two `ProcessSpawned` records prove the producer built a **second**,
 //! distinct image. The session's `exit` (the third audited syscall) is on
 //! the critical path *only* if the session actually ran: its banner write is
-//! gated — `console_write` reports the accepted byte count, and the session
+//! gated — `stream_write` reports the accepted byte count, and the session
 //! parks fail-closed on a short write (`userland/shell/shell/src/run.rs`),
 //! so it reaches `exit` only once its banner landed, which in turn requires
 //! its *own* isolated address space to have resolved through the kernel-wide

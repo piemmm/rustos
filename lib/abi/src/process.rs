@@ -500,15 +500,172 @@ pub fn write_into(
     Ok(total_len)
 }
 
+/// The four standard file descriptors every process inherits at spawn
+/// (`AGENTS.md` §20).
+///
+/// A program performs **all** of its text I/O over these inherited
+/// descriptors and never over a kernel-discovered device: fd 0 reads
+/// input, fd 1 writes data, fd 2 writes diagnostics, and fd 3 carries
+/// optional structured advisory metadata ([`crate::stdinfo`]). Which
+/// kernel *stream backing* each descriptor resolves to is decided by the
+/// spawner, never hard-coded into the program (§20 — device
+/// independence is a property of the stream layer, not the program).
+pub const STDIN: u32 = 0;
+/// Primary data output (`AGENTS.md` §20). See [`STDIN`].
+pub const STDOUT: u32 = 1;
+/// Errors, warnings, and diagnostics (`AGENTS.md` §20). See [`STDIN`].
+pub const STDERR: u32 = 2;
+/// Optional structured advisory metadata (`AGENTS.md` §20, [`crate::stdinfo`]).
+/// See [`STDIN`].
+pub const STDINFO: u32 = 3;
+
+/// Number of standard file descriptors the process ABI reserves
+/// (`AGENTS.md` §20): exactly fd 0/1/2/3.
+pub const STD_STREAM_COUNT: usize = 4;
+
+/// The access a single inherited descriptor grants its process.
+///
+/// A descriptor is established at spawn and points at a kernel *stream
+/// backing* object (`AGENTS.md` §20). [`StreamMode`] records the
+/// direction that backing supports for the owning process; a
+/// [`stream_read`](crate::SyscallNumber::STREAM_READ) /
+/// [`stream_write`](crate::SyscallNumber::STREAM_WRITE) against a
+/// descriptor whose mode does not permit the direction fails closed
+/// (§5.4) rather than reaching a device the program was never granted.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum StreamMode {
+    /// No backing is attached to this descriptor: every access denies
+    /// (`AGENTS.md` §5.4 — fail closed; §20 — no fallback to a device).
+    Closed = 0,
+    /// The descriptor is readable (a `stream_read` source). Writes deny.
+    Read = 1,
+    /// The descriptor is writable (a `stream_write` sink). Reads deny.
+    Write = 2,
+}
+
+/// One process's standard-stream descriptor table (`AGENTS.md` §20).
+///
+/// A fixed table of [`STD_STREAM_COUNT`] entries, one per standard
+/// descriptor (fd 0/1/2/3), recording the access each inherited stream
+/// grants. The spawner establishes it when it creates the process; the
+/// kernel consults it to resolve a `stream_read` / `stream_write` fd to
+/// its backing's direction (`AGENTS.md` §20 — the descriptor table, not
+/// an ambient device, is the authority). The table is small and `Copy`;
+/// the backing objects themselves live kernel-side.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DescriptorTable {
+    modes: [StreamMode; STD_STREAM_COUNT],
+}
+
+impl DescriptorTable {
+    /// A table with every standard descriptor [`Closed`](StreamMode::Closed).
+    ///
+    /// The fail-closed default (`AGENTS.md` §5.4): a process with no
+    /// inherited streams can reach no backing until the spawner attaches
+    /// one. This is also what an unregistered task resolves to.
+    #[must_use]
+    pub const fn closed() -> Self {
+        Self {
+            modes: [StreamMode::Closed; STD_STREAM_COUNT],
+        }
+    }
+
+    /// The standard text-I/O table: fd 0 readable, fd 1/2/3 writable.
+    ///
+    /// The shape every bootstrap-session process inherits (`AGENTS.md`
+    /// §20): `stdin` is the input source, `stdout`/`stderr`/`stdinfo` are
+    /// output sinks. The spawner backs these descriptors with the
+    /// discovered console during early bring-up (`plans/PI.md` P6e-3a),
+    /// but the program only ever names the fd numbers.
+    #[must_use]
+    pub const fn standard() -> Self {
+        let mut modes = [StreamMode::Closed; STD_STREAM_COUNT];
+        modes[STDIN as usize] = StreamMode::Read;
+        modes[STDOUT as usize] = StreamMode::Write;
+        modes[STDERR as usize] = StreamMode::Write;
+        modes[STDINFO as usize] = StreamMode::Write;
+        Self { modes }
+    }
+
+    /// The [`StreamMode`] of descriptor `fd`, or
+    /// [`StreamMode::Closed`] when `fd` is not one of the standard
+    /// descriptors (`fd >= STD_STREAM_COUNT`).
+    ///
+    /// An out-of-range descriptor resolves to `Closed` so the kernel
+    /// fails it closed exactly as it would a closed standard descriptor,
+    /// without leaking that the index was out of range (`AGENTS.md`
+    /// §5.4).
+    #[must_use]
+    pub fn mode(&self, fd: u32) -> StreamMode {
+        let index = fd as usize;
+        if index < STD_STREAM_COUNT {
+            self.modes[index]
+        } else {
+            StreamMode::Closed
+        }
+    }
+}
+
+impl Default for DescriptorTable {
+    fn default() -> Self {
+        Self::closed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     use super::{
-        ProcessStart, ProcessStartHeader, StringSlot, PROCESS_START_MAGIC,
-        PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+        DescriptorTable, ProcessStart, ProcessStartHeader, StreamMode, StringSlot,
+        PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+        PROCESS_START_MAX_TOTAL_LEN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
+
+    #[test]
+    fn standard_fd_numbers_are_frozen() {
+        // The fd numbers are part of the process ABI (`AGENTS.md` §20).
+        assert_eq!(STDIN, 0);
+        assert_eq!(STDOUT, 1);
+        assert_eq!(STDERR, 2);
+        assert_eq!(STDINFO, 3);
+        assert_eq!(STD_STREAM_COUNT, 4);
+    }
+
+    #[test]
+    fn closed_table_denies_every_descriptor() {
+        let table = DescriptorTable::closed();
+        assert_eq!(table, DescriptorTable::default());
+        for fd in [STDIN, STDOUT, STDERR, STDINFO] {
+            assert_eq!(table.mode(fd), StreamMode::Closed);
+        }
+    }
+
+    #[test]
+    fn standard_table_reads_stdin_and_writes_the_rest() {
+        let table = DescriptorTable::standard();
+        assert_eq!(table.mode(STDIN), StreamMode::Read);
+        assert_eq!(table.mode(STDOUT), StreamMode::Write);
+        assert_eq!(table.mode(STDERR), StreamMode::Write);
+        assert_eq!(table.mode(STDINFO), StreamMode::Write);
+    }
+
+    #[test]
+    fn out_of_range_descriptor_is_closed() {
+        // A descriptor past the standard set resolves to Closed so the
+        // kernel fails it closed without leaking the out-of-range case.
+        let first_out_of_range = u32::try_from(STD_STREAM_COUNT).expect("fits in u32");
+        assert_eq!(
+            DescriptorTable::standard().mode(first_out_of_range),
+            StreamMode::Closed
+        );
+        assert_eq!(
+            DescriptorTable::standard().mode(u32::MAX),
+            StreamMode::Closed
+        );
+    }
 
     /// Build a valid startup-vector block from argument and environment
     /// strings, mirroring what the kernel loader will write.

@@ -1845,11 +1845,24 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `serial::read_console_bytes`, no busy-wait §2.1), a
                   `ConsoleRead` impl on the zero-sized `UartConsole`, and
                   its install via `BootInfo::with_console_read` in
-                  `boot_aarch64`. P6e-3a adds the standard-stream fd ABI +
-                  per-process descriptor table (the console syscalls evolve
-                  in place §2.13 into fd-keyed stream ops) + the `lib/rt`
-                  std-stream wrappers; P6e-3b wires the REPL over fd 0/1/3
-                  (no `console_*`) + `init` supervision.
+                  `boot_aarch64`. **P6e-3a is now landed:** the console
+                  syscalls evolved **in place** (§2.13) into fd-keyed
+                  `stream_write(fd,buf,len)` (#11) / `stream_read(fd,buf,len)`
+                  (#13); `lib/abi` gained the per-process descriptor model
+                  (`STDIN/STDOUT/STDERR/STDINFO`, `StreamMode`,
+                  `DescriptorTable`) the kernel holds per task in
+                  `AddressSpaceRegistry` and establishes at spawn
+                  (`admit_init`/`admit_process` install
+                  `DescriptorTable::standard()`); the handlers resolve `fd`
+                  → backing (fail-closed `NotFound` on the wrong direction),
+                  reusing the P6e-1/P6e-2 UART backing behind fd 0/1. `lib/rt`
+                  now exposes `stdout`/`stderr`/`stdinfo`/`stdin` and
+                  `lib/abi-sys` `ros_sys_stream_*`; `init` + the `Shell`
+                  session write via `rustos_rt::stdout`. C header + hash
+                  regenerated; the `spawn_session_qemu_aarch64` `-M virt`
+                  vertical proves a child writes fd 1 over the UART backing.
+                  **P6e-3b remains:** wire the `rustos-shell` REPL over
+                  fd 0/1/3 (no `console_*`) + `init` session supervision.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

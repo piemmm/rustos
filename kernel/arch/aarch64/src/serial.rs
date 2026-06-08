@@ -67,7 +67,7 @@ fn putchar(_byte: u8) {}
 /// This is the non-blocking counterpart of [`putchar`]: it polls the
 /// model's receive-ready bit once and, if a byte is waiting, reads the
 /// data register. It never busy-waits for input (`AGENTS.md` §2.1) — the
-/// caller drains what is available and returns, so a `console_read` with
+/// caller drains what is available and returns, so a `stream_read` with
 /// no pending input is a valid short (zero-length) read rather than a
 /// spin.
 ///
@@ -107,7 +107,7 @@ fn getchar() -> Option<u8> {
 /// Non-blocking: it drains the receive FIFO into `buf` and stops at the
 /// first byte that is not yet available (or when `buf` is full), so it
 /// never busy-waits for input (`AGENTS.md` §2.1). A read with no pending
-/// input returns `0` — a valid short read the `console_read` handler
+/// input returns `0` — a valid short read the `stream_read` handler
 /// reports to the caller, which loops. This is the device-side **backing**
 /// the stream layer attaches to fd 0 (`plans/PI.md` P6e-2 / `AGENTS.md`
 /// §20); it is not a program-facing interface.
@@ -134,7 +134,7 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 /// transmit path accepts every byte).
 ///
 /// Unlike [`ConsoleWriter`] this performs **no** `\n` → `\r\n`
-/// translation: it is the raw byte sink the `console_write` syscall
+/// translation: it is the raw byte sink the `stream_write` syscall
 /// (`abi-v1` number 11) emits a user program's output through, so the
 /// bytes reach the device exactly as the program wrote them
 /// (`plans/PI.md` P6c-2, `AGENTS.md` §10 / §16.4). The downstream boot

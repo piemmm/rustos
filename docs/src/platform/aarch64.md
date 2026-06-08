@@ -236,7 +236,7 @@ register layout are covered by host unit tests against the `rustos_fdt`
 `raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
 peripheral stages.
 
-### Console input backing (`console_read`)
+### Console input backing (the standard-input stream, fd 0)
 
 The same `console` model backs the **input** half (`plans/PI.md` P6e-2):
 `ConsoleModel::rx_ready` decodes the model's receive-status bit (the
@@ -249,13 +249,16 @@ first byte that is not yet present — it **never busy-waits** for input
 (`AGENTS.md` §2.1), so a read with no pending byte is a valid zero-length
 short read. `boot_aarch64` installs this through the same zero-sized
 `UartConsole` device (it implements both `ConsoleWrite` and `ConsoleRead`)
-via `BootInfo::with_console_read`, so the `console_read` syscall reads the
+via `BootInfo::with_console_read`, so a `stream_read` of fd 0 (whose
+backing the spawner attaches to this device, `AGENTS.md` §20) reads the
 discovered UART.
 
 This is the bootstrap stream **backing** the spawner attaches to fd 0
 (`AGENTS.md` §20); it is not a program-facing interface. The receive-bit
-decoders are host-unit-tested; real RX over `virt`/Pi silicon is exercised
-once the standard-stream layer binds fd 0 to it (`plans/PI.md` P6e-3a).
+decoders are host-unit-tested; the standard-stream layer now binds fd 0 to
+this backing (`plans/PI.md` P6e-3a), so a process's `stream_read` of fd 0
+reaches the discovered UART; real RX over `virt`/Pi silicon remains an
+on-metal acceptance item.
 
 ## Board-discovered interrupt controller
 

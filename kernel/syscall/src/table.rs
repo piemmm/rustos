@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x3f, 0x5a, 0xfa, 0xa0, 0x79, 0x82, 0xe2, 0x2d, 0x96, 0x36, 0xb0, 0x9d, 0xec, 0xce, 0x35, 0xd0,
-    0x47, 0x2b, 0x51, 0x2b, 0x36, 0xd2, 0x5e, 0xc7, 0xd8, 0x9f, 0xba, 0x9d, 0x8d, 0x68, 0x56, 0x5c,
+    0x1c, 0xfb, 0xad, 0x1d, 0xd3, 0x20, 0x1f, 0x09, 0x2a, 0xe9, 0x4c, 0x01, 0x8c, 0x32, 0x6c, 0x7c,
+    0x7c, 0x4d, 0x84, 0xf3, 0x57, 0xef, 0x23, 0x24, 0x13, 0xab, 0xf5, 0x78, 0xe4, 0xbf, 0x19, 0xc9,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -198,19 +198,31 @@ pub trait SyscallHandlers {
         len: usize,
         flags: RandomFlags,
     ) -> SyscallResult;
-    /// Write the `len` bytes at user pointer `buf` to the system
-    /// console, returning the number of bytes written.
+    /// Write the `len` bytes at user pointer `buf` to the calling
+    /// process's standard stream `fd`, returning the number of bytes
+    /// written (`AGENTS.md` §20).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::CONSOLE_WRITE`], that `buf` is non-null, and that
-    /// `len` fits in `usize`. The implementation copies the buffer
-    /// through the validated `copy_from_user` boundary (`AGENTS.md`
-    /// §5.4) and emits it to the console device installed at boot — the
-    /// detected framebuffer when present, else the first discovered UART
-    /// (`plans/PI.md` P6). A build with no console device wired must
-    /// fail closed with [`Errno::NotImplemented`] rather than silently
-    /// discarding the bytes (`AGENTS.md` §2.9).
-    fn console_write(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult;
+    /// [`CapabilityId::CONSOLE_WRITE`], that `buf` is non-null, that `fd`
+    /// fits in `u32`, and that `len` fits in `usize`. The implementation
+    /// resolves `fd` against the caller's per-process descriptor table
+    /// (`rustos_abi::DescriptorTable`): an `fd` that is not a writable
+    /// inherited stream fails closed (`AGENTS.md` §5.4 / §20 — the
+    /// descriptor, not an ambient device, is the authority). It then
+    /// copies the buffer through the validated `copy_from_user` boundary
+    /// (`AGENTS.md` §5.4) and emits it to that descriptor's kernel stream
+    /// backing — in the bootstrap session the discovered console (the
+    /// detected framebuffer when present, else the first discovered UART,
+    /// `plans/PI.md` P6). A build with no backing wired must fail closed
+    /// with [`Errno::NotImplemented`] rather than silently discarding the
+    /// bytes (`AGENTS.md` §2.9).
+    fn stream_write(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult;
     /// Spawn a new process from the embedded program named by the
     /// absolute path `(path, path_len)`, returning the new process's PID.
     ///
@@ -227,21 +239,32 @@ pub trait SyscallHandlers {
     /// a path naming no registered program with [`Errno::NotFound`],
     /// rather than silently doing nothing (`AGENTS.md` §2.9).
     fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult;
-    /// Read up to `len` bytes from the system console into the user
-    /// buffer at `buf`, returning the number of bytes read.
+    /// Read up to `len` bytes from the calling process's standard stream
+    /// `fd` into the user buffer at `buf`, returning the number of bytes
+    /// read (`AGENTS.md` §20).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::CONSOLE_READ`], that `buf` is non-null, and that
-    /// `len` fits in `usize`. The implementation reads from the console
-    /// input device installed at boot — the first discovered
-    /// keyboard/UART input source (`plans/PI.md` P6) — into a bounded
-    /// kernel staging buffer and copies it out through the validated
-    /// `copy_to_user` boundary (`AGENTS.md` §5.4). A short read (fewer
-    /// bytes than `len`, possibly zero when no input is pending) is
-    /// valid, so the caller loops. A build with no console input device
-    /// wired must fail closed with [`Errno::NotImplemented`] rather than
-    /// fabricating input (`AGENTS.md` §2.9).
-    fn console_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult;
+    /// [`CapabilityId::CONSOLE_READ`], that `buf` is non-null, that `fd`
+    /// fits in `u32`, and that `len` fits in `usize`. The implementation
+    /// resolves `fd` against the caller's per-process descriptor table
+    /// (`rustos_abi::DescriptorTable`): an `fd` that is not a readable
+    /// inherited stream fails closed (`AGENTS.md` §5.4 / §20). It then
+    /// reads from that descriptor's kernel stream backing — in the
+    /// bootstrap session the first discovered keyboard/UART input source
+    /// (`plans/PI.md` P6) — into a bounded kernel staging buffer and
+    /// copies it out through the validated `copy_to_user` boundary
+    /// (`AGENTS.md` §5.4). A short read (fewer bytes than `len`, possibly
+    /// zero when no input is pending) is valid, so the caller loops. A
+    /// build with no backing wired must fail closed with
+    /// [`Errno::NotImplemented`] rather than fabricating input
+    /// (`AGENTS.md` §2.9).
+    fn stream_read(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -387,17 +410,23 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let flags = RandomFlags::from_bits((args.0[2] & 0xFFFF_FFFF) as u32)?;
                 self.handlers.random_get(caller, args.0[0], len, flags)
             }
-            SyscallNumber::CONSOLE_WRITE => {
-                let len = decode_len(args.0[1])?;
-                self.handlers.console_write(caller, args.0[0], len)
+            SyscallNumber::STREAM_WRITE => {
+                // `validate_arg` constrained args[0] to fit in u32 (upper
+                // bits zero), so the narrowing is lossless.
+                #[allow(clippy::cast_possible_truncation)]
+                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
+                let len = decode_len(args.0[2])?;
+                self.handlers.stream_write(caller, fd, args.0[1], len)
             }
             SyscallNumber::SPAWN => {
                 let len = decode_len(args.0[1])?;
                 self.handlers.spawn(caller, args.0[0], len)
             }
-            SyscallNumber::CONSOLE_READ => {
-                let len = decode_len(args.0[1])?;
-                self.handlers.console_read(caller, args.0[0], len)
+            SyscallNumber::STREAM_READ => {
+                #[allow(clippy::cast_possible_truncation)]
+                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
+                let len = decode_len(args.0[2])?;
+                self.handlers.stream_read(caller, fd, args.0[1], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -698,8 +727,14 @@ mod tests {
             // arguments without inventing a real reserve here.
             Ok(len as u64)
         }
-        fn console_write(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
-            self.record("console_write");
+        fn stream_write(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("stream_write");
             // Echo the requested length back as the byte count so the
             // reachability test can assert the dispatcher decoded the
             // arguments without wiring a real console here.
@@ -712,8 +747,14 @@ mod tests {
             // arguments without wiring a real spawn service here.
             Ok(path_len as u64)
         }
-        fn console_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
-            self.record("console_read");
+        fn stream_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("stream_read");
             // Echo the requested length back as the byte count so the
             // reachability test can assert the dispatcher decoded the
             // arguments without wiring a real console here.

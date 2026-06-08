@@ -84,19 +84,24 @@ impl SyscallNumber {
     /// yet seeded it returns [`crate::Errno::EntropyNotReady`] rather
     /// than blocking.
     pub const RANDOM_GET: Self = Self(10);
-    /// Write a byte buffer to the system console (`AGENTS.md` §10, §16.4).
+    /// Write a byte buffer to one of the calling process's inherited
+    /// standard streams (`AGENTS.md` §20).
     ///
-    /// Arguments: `buf: *const u8` (user pointer), `len: usize`. Returns
-    /// the number of bytes written. The kernel copies the buffer through
-    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4) and
-    /// emits it to the system console device — the detected framebuffer
-    /// when one is present, else the first discovered UART (`plans/PI.md`
-    /// P6). This is the privileged *hardware* console, not a per-process
-    /// stdout, so it is gated by [`crate::CapabilityId::CONSOLE_WRITE`]
-    /// and granted only to the early bring-up principals (PID 1 `init`,
-    /// login, getty). A build with no console device wired fails closed
-    /// with [`crate::Errno::NotImplemented`].
-    pub const CONSOLE_WRITE: Self = Self(11);
+    /// Arguments: `fd: u32` (the standard descriptor — [`crate::STDOUT`],
+    /// [`crate::STDERR`], or [`crate::STDINFO`]), `buf: *const u8` (user
+    /// pointer), `len: usize`. Returns the number of bytes written. The
+    /// kernel resolves `fd` against the caller's per-process descriptor
+    /// table ([`crate::DescriptorTable`]) — the inherited descriptor, not
+    /// an ambient device, is the authority (§20) — then copies the buffer
+    /// through the validated `copy_from_user` boundary (`AGENTS.md` §5.4)
+    /// and emits it to that descriptor's kernel stream backing. In the
+    /// bootstrap session every backing is the discovered console (the
+    /// detected framebuffer when present, else the first discovered UART,
+    /// `plans/PI.md` P6), so use of a console-backed stream additionally
+    /// requires [`crate::CapabilityId::CONSOLE_WRITE`]. An `fd` that is
+    /// not a writable inherited stream fails closed; a build with no
+    /// backing wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const STREAM_WRITE: Self = Self(11);
     /// Spawn a new process from an embedded program named by an absolute
     /// path (`plans/SPAWN.md` SP3, `AGENTS.md` §16.5).
     ///
@@ -116,23 +121,25 @@ impl SyscallNumber {
     /// authority. A build with no spawn service wired, or a path naming
     /// no registered program, fails closed (`AGENTS.md` §2.9).
     pub const SPAWN: Self = Self(12);
-    /// Read a byte buffer from the system console (`AGENTS.md` §10, §16.4).
+    /// Read a byte buffer from the calling process's inherited standard
+    /// input (`AGENTS.md` §20).
     ///
-    /// Arguments: `buf: *mut u8` (user pointer), `len: usize`. Returns
-    /// the number of bytes read. The kernel reads from the system console
-    /// device — the first discovered keyboard/UART input source
-    /// (`plans/PI.md` P6) — into a bounded kernel staging buffer and copies
-    /// it out through the validated `copy_to_user` boundary (`AGENTS.md`
-    /// §5.4). The read is the input counterpart of
-    /// [`SyscallNumber::CONSOLE_WRITE`]: a short read (fewer bytes than
-    /// `len`, possibly zero when no input is pending) is valid, so the
-    /// caller loops. This is the privileged *hardware* console, not a
-    /// per-process stdin, so it is gated by
-    /// [`crate::CapabilityId::CONSOLE_READ`] and granted only to the early
-    /// bring-up principals (PID 1 `init`, login, getty, the shell). A build
-    /// with no console input device wired fails closed with
+    /// Arguments: `fd: u32` (the standard descriptor — normally
+    /// [`crate::STDIN`]), `buf: *mut u8` (user pointer), `len: usize`.
+    /// Returns the number of bytes read. The kernel resolves `fd` against
+    /// the caller's per-process descriptor table ([`crate::DescriptorTable`])
+    /// and reads from that descriptor's kernel stream backing — in the
+    /// bootstrap session the first discovered keyboard/UART input source
+    /// (`plans/PI.md` P6) — into a bounded kernel staging buffer, copying it
+    /// out through the validated `copy_to_user` boundary (`AGENTS.md`
+    /// §5.4). The input counterpart of [`SyscallNumber::STREAM_WRITE`]: a
+    /// short read (fewer bytes than `len`, possibly zero when no input is
+    /// pending) is valid, so the caller loops. Use of a console-backed
+    /// stream additionally requires [`crate::CapabilityId::CONSOLE_READ`].
+    /// An `fd` that is not a readable inherited stream fails closed; a
+    /// build with no backing wired fails closed with
     /// [`crate::Errno::NotImplemented`].
-    pub const CONSOLE_READ: Self = Self(13);
+    pub const STREAM_READ: Self = Self(13);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -211,9 +218,9 @@ mod tests {
         assert_eq!(SyscallNumber::IRQ_BIND.as_u16(), 8);
         assert_eq!(SyscallNumber::IRQ_WAIT.as_u16(), 9);
         assert_eq!(SyscallNumber::RANDOM_GET.as_u16(), 10);
-        assert_eq!(SyscallNumber::CONSOLE_WRITE.as_u16(), 11);
+        assert_eq!(SyscallNumber::STREAM_WRITE.as_u16(), 11);
         assert_eq!(SyscallNumber::SPAWN.as_u16(), 12);
-        assert_eq!(SyscallNumber::CONSOLE_READ.as_u16(), 13);
+        assert_eq!(SyscallNumber::STREAM_READ.as_u16(), 13);
     }
 
     #[test]

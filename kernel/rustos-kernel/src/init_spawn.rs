@@ -106,7 +106,7 @@ pub struct Aarch64InitSpawn;
 pub static AARCH64_INIT_SPAWN: Aarch64InitSpawn = Aarch64InitSpawn;
 
 /// `init`'s effective capability set: `CAP_CONSOLE_WRITE`, so PID 1 can
-/// write its startup banner through the `console_write` syscall
+/// write its startup banner through the `stream_write` syscall
 /// (`plans/PI.md` P6a/P6b), plus `CAP_PROC_SPAWN`, so it can launch the
 /// user's session program through the `spawn` syscall (`plans/SPAWN.md`
 /// `SP3b`). The boot path passes this as both the user grant and the manifest
@@ -229,7 +229,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // Freeze the just-built mappings into the registry-storable,
         // `Send + Sync` snapshot the kernel-wide address-space registry
         // holds (the live arch `space` is not `Sync`), and box the direct
-        // map that backs it, so PID 1's `console_write` can copy its banner
+        // map that backs it, so PID 1's `stream_write` can copy its banner
         // out of user memory (`plans/PI.md` P6c-3 follow-up). Freezing
         // *after* `spawn_image` captures every mapped page — segments,
         // stack, and the startup-vector block.

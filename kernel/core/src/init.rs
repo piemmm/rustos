@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
+use rustos_abi::DescriptorTable;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
@@ -397,7 +398,7 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
         // Register PID 1's frozen address space + direct map under the same
         // id, so a first syscall that copies from user memory (e.g.
-        // `console_write` reading `init`'s banner) resolves the caller's
+        // `stream_write` reading `init`'s banner) resolves the caller's
         // mappings instead of failing closed with `BadAddress`
         // (`plans/PI.md` P6c-3 follow-up). A fresh task id is never already
         // present; should registration nonetheless be refused, fail closed
@@ -412,6 +413,16 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         {
             return;
         }
+
+        // Establish PID 1's standard streams (`AGENTS.md` §20): the
+        // standard descriptor table (`stdin` readable,
+        // `stdout`/`stderr`/`stdinfo` writable), each backed by the
+        // discovered console the boot path installed, so `init` writes
+        // its banner through `stream_write(STDOUT, …)` over an inherited
+        // stream rather than an ambient device (§4 / §17.4).
+        self.aspaces
+            .write()
+            .set_streams(sec_id, DescriptorTable::standard());
 
         // Drive PID 1 (and anything it spawns) to completion: each `step`
         // dispatches the next runnable task on this CPU. The first step

@@ -133,27 +133,34 @@ impl CapabilityId {
     /// program still receives only the intersection of its own signed
     /// manifest request and its user's grants (§16.5).
     pub const PROC_SPAWN: Self = Self(17);
-    /// Write directly to the system console device (`AGENTS.md` §10, §16.4).
+    /// Use a console-backed standard *output* stream (`AGENTS.md` §10,
+    /// §16.4, §20).
     ///
-    /// Gates the `console_write` syscall (`abi-v1` number 11), which emits
-    /// a byte buffer to the privileged *hardware* console — the detected
-    /// framebuffer when present, else the first discovered UART
-    /// (`plans/PI.md` P6). It is **not** a per-process stdout: only the
-    /// early bring-up principals (PID 1 `init`, login, getty) are granted
-    /// it, so an ordinary app cannot scribble on the system console
-    /// (`AGENTS.md` §4 — no ambient authority; §5.4 — capability checks
-    /// before state touches).
+    /// The coarse gate on the `stream_write` syscall (`abi-v1` number 11)
+    /// when the addressed descriptor's backing is the privileged
+    /// *hardware* console — the detected framebuffer when present, else
+    /// the first discovered UART (`plans/PI.md` P6). The fine, per-fd
+    /// authority is the inherited descriptor table the spawner
+    /// established ([`crate::DescriptorTable`], §20); this capability says
+    /// the principal may use a *console-backed* output stream at all.
+    /// Only the early bring-up principals (PID 1 `init`, login, getty,
+    /// the shell) are granted it, so an ordinary app cannot scribble on
+    /// the system console (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// capability checks before state touches).
     pub const CONSOLE_WRITE: Self = Self(18);
-    /// Read directly from the system console device (`AGENTS.md` §10, §16.4).
+    /// Use a console-backed standard *input* stream (`AGENTS.md` §10,
+    /// §16.4, §20).
     ///
-    /// Gates the `console_read` syscall (`abi-v1` number 13), which reads a
-    /// byte buffer from the privileged *hardware* console input — the first
-    /// discovered keyboard/UART input source (`plans/PI.md` P6). It is the
-    /// input counterpart of [`CONSOLE_WRITE`](Self::CONSOLE_WRITE) and is
-    /// **not** a per-process stdin: only the early bring-up principals (PID 1
-    /// `init`, login, getty, the shell) are granted it, so an ordinary app
-    /// cannot read the system console (`AGENTS.md` §4 — no ambient authority;
-    /// §5.4 — capability checks before state touches).
+    /// The coarse gate on the `stream_read` syscall (`abi-v1` number 13)
+    /// when the addressed descriptor's backing is the privileged
+    /// *hardware* console input — the first discovered keyboard/UART input
+    /// source (`plans/PI.md` P6). The input counterpart of
+    /// [`CONSOLE_WRITE`](Self::CONSOLE_WRITE); the fine, per-fd authority
+    /// is the inherited descriptor table ([`crate::DescriptorTable`],
+    /// §20). Only the early bring-up principals (PID 1 `init`, login,
+    /// getty, the shell) are granted it, so an ordinary app cannot read
+    /// the system console (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// capability checks before state touches).
     pub const CONSOLE_READ: Self = Self(19);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with

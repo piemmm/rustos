@@ -375,28 +375,28 @@ where
     /// "Syscall registration phase" section.
     pub dispatcher_callback_slot: &'static DispatchCallbackSlot,
 
-    /// System console the `console_write` syscall (`abi-v1` number 11)
+    /// System console the `stream_write` syscall (`abi-v1` number 11)
     /// emits to — the detected framebuffer when present, else the first
     /// discovered UART (`plans/PI.md` P6, `AGENTS.md` §10 / §16.4).
     ///
     /// Defaults to [`NULL_CONSOLE`], which fails closed with
     /// [`rustos_abi::Errno::NotImplemented`] (`AGENTS.md` §2.9): an arch
     /// port that has not discovered a console device leaves this default
-    /// and `console_write` announces an inert interface rather than
+    /// and `stream_write` announces an inert interface rather than
     /// silently dropping the bytes. A port that has a device installs it
     /// through [`Self::with_console`]. Held as a `'static` borrow because
     /// the installed console lives for the lifetime of the running
     /// kernel, exactly like the log/audit sinks.
     pub console: &'static (dyn ConsoleWrite + 'static),
 
-    /// System console input source the `console_read` syscall (`abi-v1`
+    /// System console input source the `stream_read` syscall (`abi-v1`
     /// number 13) draws from — the first discovered keyboard/UART input
     /// source (`plans/PI.md` P6, `AGENTS.md` §10 / §16.4).
     ///
     /// Defaults to [`NULL_CONSOLE_READ`], which fails closed with
     /// [`rustos_abi::Errno::NotImplemented`] (`AGENTS.md` §2.9): an arch
     /// port that has not discovered a console input device leaves this
-    /// default and `console_read` announces an inert interface rather than
+    /// default and `stream_read` announces an inert interface rather than
     /// fabricating input. A port that has a device installs it through
     /// [`Self::with_console_read`]. Held as a `'static` borrow because the
     /// installed console lives for the lifetime of the running kernel,
@@ -506,14 +506,14 @@ where
         }
     }
 
-    /// Install the system console the `console_write` syscall emits to,
+    /// Install the system console the `stream_write` syscall emits to,
     /// consuming and returning `self`.
     ///
     /// Called by an arch port's boot pipeline after it has selected the
     /// console device from the normalised hardware tree — the detected
     /// framebuffer when present, else the first discovered UART
     /// (`plans/PI.md` P6, `AGENTS.md` §18). Until this is called the
-    /// handover holds [`NULL_CONSOLE`] and `console_write` fails closed
+    /// handover holds [`NULL_CONSOLE`] and `stream_write` fails closed
     /// with [`rustos_abi::Errno::NotImplemented`]. The console must be
     /// `'static`: the boot path leaks the device alongside the kernel
     /// state, which lives for the lifetime of the running kernel
@@ -525,14 +525,14 @@ where
         self
     }
 
-    /// Install the system console input source the `console_read` syscall
+    /// Install the system console input source the `stream_read` syscall
     /// draws from, consuming and returning `self`.
     ///
     /// The read counterpart of [`Self::with_console`], called by an arch
     /// port's boot pipeline after it has selected the console device from
     /// the normalised hardware tree (`plans/PI.md` P6, `AGENTS.md` §18).
     /// Until this is called the handover holds [`NULL_CONSOLE_READ`] and
-    /// `console_read` fails closed with
+    /// `stream_read` fails closed with
     /// [`rustos_abi::Errno::NotImplemented`]. The source must be
     /// `'static`: the boot path leaks the device alongside the kernel
     /// state, which lives for the lifetime of the running kernel

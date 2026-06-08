@@ -95,9 +95,9 @@ const _AARCH64_BIN_ARCH_HALT_RETURNS_NEVER: fn(&Aarch64BinArch) -> ! =
 /// [`rustos_kernel_core::BootInfo`].
 ///
 /// A zero-sized [`ConsoleWrite`] + [`ConsoleRead`] adapter over the
-/// discovered console UART: every `console_write` byte is forwarded
+/// discovered console UART: every `stream_write` byte is forwarded
 /// verbatim through [`rustos_arch_aarch64::serial::write_console_bytes`]
-/// and every `console_read` drains pending input through
+/// and every `stream_read` drains pending input through
 /// [`rustos_arch_aarch64::serial::read_console_bytes`], both targeting
 /// the board-discovered UART base (`plans/PI.md` P2 / P6). It is the
 /// "first discovered UART" half of the §10 console seam; the framebuffer

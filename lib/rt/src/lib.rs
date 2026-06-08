@@ -31,7 +31,7 @@
 //! #![no_main]
 //!
 //! fn main() -> i32 {
-//!     rustos_rt::console_write(b"hello\n");
+//!     rustos_rt::stream_write(b"hello\n");
 //!     0
 //! }
 //!
@@ -55,7 +55,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::SyscallNumber;
+use rustos_abi::{SyscallNumber, STDERR, STDIN, STDINFO, STDOUT};
 use rustos_abi_trap::raw_syscall;
 
 #[cfg(rt_native)]
@@ -65,11 +65,11 @@ mod start;
 /// crate can never disagree with the table (`AGENTS.md` §2.2).
 const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;
 
-/// `console_write` syscall number (`AGENTS.md` §2.2, as above).
-const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
+/// `stream_write` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_STREAM_WRITE: u64 = SyscallNumber::STREAM_WRITE.as_u16() as u64;
 
-/// `console_read` syscall number (`AGENTS.md` §2.2, as above).
-const NUM_CONSOLE_READ: u64 = SyscallNumber::CONSOLE_READ.as_u16() as u64;
+/// `stream_read` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 
 /// `yield` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
@@ -102,37 +102,70 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
-/// Write `bytes` to the system console (`SyscallNumber::CONSOLE_WRITE`),
-/// returning the number of bytes the kernel accepted.
+/// Write `bytes` to the calling process's standard stream `fd`
+/// (`SyscallNumber::STREAM_WRITE`), returning the number of bytes the
+/// kernel accepted (`AGENTS.md` §20).
 ///
-/// Requires `CAP_CONSOLE_WRITE`; the kernel validates the capability and the
+/// The shared core of [`stdout`], [`stderr`], and [`stdinfo`]: the
+/// program names only the inherited descriptor, never a device, so the
+/// same binary works whatever the spawner backed the stream with (§20 —
+/// device independence is a property of the stream layer). The kernel
+/// resolves `fd` against the caller's descriptor table and validates the
 /// `(buf, len)` pair against the caller's address space before reading it
-/// (`AGENTS.md` §5.4). This is the privileged hardware console, not a
-/// per-process stdout (`plans/PI.md` §P6).
-#[must_use]
+/// (`AGENTS.md` §5.4); a short write (fewer than `bytes.len()`) is valid,
+/// so the caller loops.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `bytes.len()`.
-pub fn console_write(bytes: &[u8]) -> usize {
+fn stream_write(fd: u32, bytes: &[u8]) -> usize {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(buf, len)` against the caller's address space before touching it
     // (`AGENTS.md` §5.4). `bytes` is a live shared `&[u8]` for the duration
     // of the call, so the `(ptr, len)` pair denotes readable memory.
-    let written = unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
+    let written = unsafe {
+        raw_syscall(
+            NUM_STREAM_WRITE,
+            [u64::from(fd), ptr, bytes.len() as u64, 0, 0, 0],
+        )
+    };
     written as usize
 }
 
-/// Read up to `buf.len()` bytes from the system console into `buf`
-/// (`SyscallNumber::CONSOLE_READ`), returning the number of bytes read.
+/// Write `bytes` to standard output (fd 1, `AGENTS.md` §20), returning the
+/// number of bytes the kernel accepted. The program's primary data
+/// output; a short write is valid, so the caller loops.
+#[must_use]
+pub fn stdout(bytes: &[u8]) -> usize {
+    stream_write(STDOUT, bytes)
+}
+
+/// Write `bytes` to standard error (fd 2, `AGENTS.md` §20): errors,
+/// warnings, and diagnostics. Returns the number of bytes accepted.
+#[must_use]
+pub fn stderr(bytes: &[u8]) -> usize {
+    stream_write(STDERR, bytes)
+}
+
+/// Write `bytes` to the standard information stream (fd 3, `AGENTS.md`
+/// §20.1): optional, ignorable structured advisory metadata. Returns the
+/// number of bytes accepted (zero when no consumer is attached — fd 3 is
+/// best-effort and must never affect correctness).
+#[must_use]
+pub fn stdinfo(bytes: &[u8]) -> usize {
+    stream_write(STDINFO, bytes)
+}
+
+/// Read up to `buf.len()` bytes from standard input (fd 0, `AGENTS.md`
+/// §20) into `buf` (`SyscallNumber::STREAM_READ`), returning the number of
+/// bytes read.
 ///
-/// Requires `CAP_CONSOLE_READ`; the kernel validates the capability and the
-/// `(buf, len)` pair against the caller's address space before writing it
-/// (`AGENTS.md` §5.4). The read counterpart of [`console_write`]: a short
-/// read (fewer bytes than `buf.len()`, possibly zero when no input is
-/// pending) is valid, so the caller loops. This is the privileged hardware
-/// console, not a per-process stdin (`plans/PI.md` §P6).
+/// The kernel resolves fd 0 against the caller's descriptor table and
+/// validates the `(buf, len)` pair against the caller's address space
+/// before writing it (`AGENTS.md` §5.4). A short read (fewer bytes than
+/// `buf.len()`, possibly zero when no input is pending) is valid, so the
+/// caller loops.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `buf.len()`.
-pub fn console_read(buf: &mut [u8]) -> usize {
+pub fn stdin(buf: &mut [u8]) -> usize {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -140,7 +173,7 @@ pub fn console_read(buf: &mut [u8]) -> usize {
     // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable
     // memory the kernel may fill.
-    let read = unsafe { raw_syscall(NUM_CONSOLE_READ, [ptr, len, 0, 0, 0, 0]) };
+    let read = unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(STDIN), ptr, len, 0, 0, 0]) };
     read as usize
 }
 
@@ -231,43 +264,61 @@ mod tests {
     }
 
     #[test]
-    fn console_write_marshals_pointer_and_len() {
+    fn stdout_marshals_fd_pointer_and_len() {
         let buffer = *b"hello\n";
         let (number, args) = capture(6, || {
-            assert_eq!(console_write(&buffer), 6);
+            assert_eq!(stdout(&buffer), 6);
         });
-        assert_eq!(number, NUM_CONSOLE_WRITE);
-        assert_eq!(args[0], buffer.as_ptr() as usize as u64);
-        assert_eq!(args[1], 6);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(number, NUM_STREAM_WRITE);
+        assert_eq!(args[0], u64::from(STDOUT));
+        assert_eq!(args[1], buffer.as_ptr() as usize as u64);
+        assert_eq!(args[2], 6);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
-    fn console_write_returns_the_kernel_accepted_count() {
+    fn stderr_and_stdinfo_marshal_their_fd() {
+        let buffer = *b"warn\n";
+        let (number, args) = capture(5, || {
+            assert_eq!(stderr(&buffer), 5);
+        });
+        assert_eq!(number, NUM_STREAM_WRITE);
+        assert_eq!(args[0], u64::from(STDERR));
+        let (number, args) = capture(0, || {
+            // fd 3 is best-effort: a zero return (no consumer) is valid.
+            assert_eq!(stdinfo(&buffer), 0);
+        });
+        assert_eq!(number, NUM_STREAM_WRITE);
+        assert_eq!(args[0], u64::from(STDINFO));
+    }
+
+    #[test]
+    fn stdout_returns_the_kernel_accepted_count() {
         let buffer = [0u8; 16];
         let (_, _) = capture(10, || {
-            assert_eq!(console_write(&buffer), 10);
+            assert_eq!(stdout(&buffer), 10);
         });
     }
 
     #[test]
-    fn console_read_marshals_pointer_and_len() {
+    fn stdin_marshals_fd_pointer_and_len() {
         let mut buffer = [0u8; 16];
         let ptr = buffer.as_mut_ptr() as usize as u64;
         let (number, args) = capture(7, || {
-            assert_eq!(console_read(&mut buffer), 7);
+            assert_eq!(stdin(&mut buffer), 7);
         });
-        assert_eq!(number, NUM_CONSOLE_READ);
-        assert_eq!(args[0], ptr);
-        assert_eq!(args[1], 16);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(number, NUM_STREAM_READ);
+        assert_eq!(args[0], u64::from(STDIN));
+        assert_eq!(args[1], ptr);
+        assert_eq!(args[2], 16);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
-    fn console_read_returns_the_kernel_reported_count() {
+    fn stdin_returns_the_kernel_reported_count() {
         let mut buffer = [0u8; 16];
         let (_, _) = capture(3, || {
-            assert_eq!(console_read(&mut buffer), 3);
+            assert_eq!(stdin(&mut buffer), 3);
         });
     }
 

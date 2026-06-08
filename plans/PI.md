@@ -611,21 +611,37 @@ on its own before the next.
     `console` tests + 1 `arch_wrapper_aarch64` adapter test); the
     freestanding aarch64 kernel builds clean. Real RX over silicon is
     exercised once the stream layer binds fd 0 (P6e-3a).
-  - **P6e-3a — standard-stream ABI + fd table `[ ]`.** Add the stream
-    layer the shell binds to (AGENTS.md §20), since `abi-v1` has no
-    descriptor table yet. Evolve the two console syscalls **in place**
-    (§2.13 — no `v2`, no shim) into fd-keyed stream ops (e.g.
-    `stream_read(fd, buf)` / `stream_write(fd, buf)`); add a per-process
-    descriptor table to the process model (`lib/abi/src/process.rs`) with
-    fd 0/1/2/3 established at spawn, each descriptor pointing at a kernel
-    *stream backing* object; add the `lib/rt` `stdin`/`stdout`/`stderr`/
-    `stdinfo` wrappers over fd 0/1/2/3; and have the spawner attach the
-    bootstrap session's fd 0/1 to the discovered-console backing (so the
-    P6e-1/P6e-2 UART work is **reused behind the stream**, not exposed).
-    Regenerate the C header (`cargo xtask c-header --write`) and recompute
-    `SYSCALL_TABLE_HASH` (the drift guards enforce both). Prove host-side
-    + a `-M virt` vertical that a child reads fd 0 / writes fd 1 with the
-    backing being the UART.
+  - **P6e-3a — standard-stream ABI + fd table `[x]`.** The two console
+    syscalls were evolved **in place** (§2.13) into fd-keyed stream ops:
+    `stream_write(fd, buf, len)` (#11) and `stream_read(fd, buf, len)`
+    (#13), arg_count 3 with a leading `U32 fd`, appended-row-stable
+    capabilities (`CAP_CONSOLE_WRITE`/`CAP_CONSOLE_READ` kept as the coarse
+    "may use a console-backed stream" gate). `lib/abi/src/process.rs` gained
+    the per-process descriptor model — `STDIN`/`STDOUT`/`STDERR`/`STDINFO`,
+    `STD_STREAM_COUNT`, `StreamMode{Closed,Read,Write}`, and `DescriptorTable`
+    (`closed()`/`standard()`/`mode()`) — established at spawn and held per
+    task in `AddressSpaceRegistry` (new `set_streams`/`streams`, cleared on
+    `withdraw`). The `stream_write`/`stream_read` handlers resolve `fd`
+    against the caller's table **before** any state and fail closed with
+    `NotFound` unless the direction matches; both production admit paths
+    (`admit_init`, `admit_process`) install `DescriptorTable::standard()`, so
+    a process's fd 0 reads / fd 1/2/3 write the discovered console the boot
+    path installed (the P6e-1/P6e-2 UART backing **reused behind the
+    stream**, not exposed). `lib/rt` now exposes `stdout`/`stderr`/`stdinfo`/
+    `stdin` (over fd 0/1/2/3, `console_*` removed); `lib/abi-sys` exports
+    `ros_sys_stream_write`/`ros_sys_stream_read`; `init` + the `Shell`
+    session write their banner via `rustos_rt::stdout`. C header regenerated
+    (`ROS_SYS_STREAM_WRITE`/`_READ`) and `SYSCALL_TABLE_HASH` recomputed
+    (`1cfbad…`); the abi-check + c-header drift guards are green. Proven
+    host-side (the `lib/abi` descriptor-table tests, the `aspace` stream-map
+    tests, the 11 reworked + 3 new `kernel/core` handler gate tests, the
+    rt/abi-sys fd-marshalling tests) and on `-M virt`: the
+    `spawn_session_qemu_aarch64` vertical now proves a spawned child writes
+    fd 1 over the discovered-UART backing (the shell banner lands via
+    `stdout`). Whole-project gate (fmt / `cargo xtask ci` / `fuzz --secs 5`
+    / `soak.sh both` / `cargo xtask test --qemu`) **green on this host**.
+    Real UART **RX** over fd 0 on silicon remains an on-metal item (no
+    deterministic `-M virt` serial-RX injection, consistent with P6e-2).
   - **P6e-3b — shell REPL over its streams + `init` supervision `[ ]`.**
     Wire `rustos-shell` to read fd 0 / write fd 1 (and emit `stdinfo` on
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with

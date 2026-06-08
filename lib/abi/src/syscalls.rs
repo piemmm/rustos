@@ -53,7 +53,7 @@ pub const SYSCALL_MAX_ARGS: usize = 6;
 ///
 /// Pinned so that [`ENCODED_TABLE`] uses a fixed stride per record and the
 /// encoding is computable in a `const fn` without an allocator. Sized to fit
-/// the longest `abi-v1` name (`console_write`, 13 bytes).
+/// the longest `abi-v1` name (`stream_write`, 13 bytes).
 pub const SYSCALL_NAME_MAX: usize = 13;
 
 /// Stride, in bytes, of one record inside [`ENCODED_TABLE`].
@@ -305,23 +305,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         audit: false,
     },
     SyscallSpec {
-        number: SyscallNumber::CONSOLE_WRITE,
-        name: "console_write",
-        arg_count: 2,
+        number: SyscallNumber::STREAM_WRITE,
+        name: "stream_write",
+        arg_count: 3,
         args: [
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
-            AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // Writing to the privileged hardware console is gated
-        // (`AGENTS.md` §4 — no ambient authority): only the early
-        // bring-up principals hold `CAP_CONSOLE_WRITE`. Like the other
-        // high-volume data movers (`ipc_recv`, `random_get`) it is not
-        // audited per call, to avoid drowning the audit log.
+        // Writing one of the calling process's inherited standard
+        // streams (`AGENTS.md` §20) routes to that descriptor's kernel
+        // stream backing. Authority is the per-process descriptor table
+        // the spawner established — never an ambient device (§4). In this
+        // bootstrap phase every backing is the discovered console, so the
+        // coarse `CAP_CONSOLE_WRITE` still gates use of a console-backed
+        // output stream; the descriptor table is the fine, fd-level gate.
+        // Like the other high-volume data movers (`ipc_recv`,
+        // `random_get`) it is not audited per call, to avoid drowning the
+        // audit log.
         required_capability: Some(CapabilityId::CONSOLE_WRITE),
         audit: false,
     },
@@ -350,24 +355,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         audit: true,
     },
     SyscallSpec {
-        number: SyscallNumber::CONSOLE_READ,
-        name: "console_read",
-        arg_count: 2,
+        number: SyscallNumber::STREAM_READ,
+        name: "stream_read",
+        arg_count: 3,
         args: [
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
-            AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // Reading from the privileged hardware console is gated
-        // (`AGENTS.md` §4 — no ambient authority): only the early
-        // bring-up principals hold `CAP_CONSOLE_READ`. Like the other
-        // high-volume data movers (`console_write`, `ipc_recv`,
-        // `random_get`) it is not audited per call, to avoid drowning
-        // the audit log.
+        // Reading one of the calling process's inherited standard streams
+        // (`AGENTS.md` §20) routes to that descriptor's kernel stream
+        // backing. Authority is the per-process descriptor table the
+        // spawner established — never an ambient device (§4). In this
+        // bootstrap phase every backing is the discovered console, so the
+        // coarse `CAP_CONSOLE_READ` still gates use of a console-backed
+        // input stream; the descriptor table is the fine, fd-level gate.
+        // Like the other high-volume data movers (`stream_write`,
+        // `ipc_recv`, `random_get`) it is not audited per call, to avoid
+        // drowning the audit log.
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
     },
@@ -538,17 +547,17 @@ mod tests {
         assert!(bind.audit, "irq_bind must be audited");
         let wait = spec_for(SyscallNumber::IRQ_WAIT).unwrap();
         assert_eq!(wait.required_capability, Some(CapabilityId::IRQ_BIND));
-        // console_write is gated on CAP_CONSOLE_WRITE — the privileged
+        // stream_write is gated on CAP_CONSOLE_WRITE — the privileged
         // hardware console is never ambient (`AGENTS.md` §4).
-        let console = spec_for(SyscallNumber::CONSOLE_WRITE).unwrap();
+        let console = spec_for(SyscallNumber::STREAM_WRITE).unwrap();
         assert_eq!(
             console.required_capability,
             Some(CapabilityId::CONSOLE_WRITE)
         );
         assert!(!console.audit, "console_write must not audit per call");
-        // console_read is gated on CAP_CONSOLE_READ — the privileged
+        // stream_read is gated on CAP_CONSOLE_READ — the privileged
         // hardware console input is never ambient (`AGENTS.md` §4).
-        let console_read = spec_for(SyscallNumber::CONSOLE_READ).unwrap();
+        let console_read = spec_for(SyscallNumber::STREAM_READ).unwrap();
         assert_eq!(
             console_read.required_capability,
             Some(CapabilityId::CONSOLE_READ)

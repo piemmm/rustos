@@ -26,7 +26,7 @@ A program is `#![no_std]`, `#![no_main]`, declares its `main`, and hands it to
 #![no_main]
 
 fn main() -> i32 {
-    rustos_rt::console_write(b"hello\n");
+    rustos_rt::stdout(b"hello\n");
     0
 }
 
@@ -52,4 +52,5 @@ compiled, unit-tested through the trap crate's injectable seam.
 
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
 exposed syscall-wrapper surface grows as RustOS programs need it; today it is
-`console_write`, `yield_now`, and `exit`.
+the standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`,
+`AGENTS.md` §20), `spawn`, `yield_now`, and `exit`.
