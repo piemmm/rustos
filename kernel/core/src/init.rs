@@ -467,6 +467,7 @@ fn run_phases<A: KernelArch>(
         arch,
         dispatcher_callback_slot,
         console,
+        console_read,
         programs,
         spawn_service,
         ..
@@ -573,6 +574,7 @@ fn run_phases<A: KernelArch>(
             &state.aspaces,
             &state.rng,
             console,
+            console_read,
             &state.frame_allocator,
             programs,
             spawn_service,

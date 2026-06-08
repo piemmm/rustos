@@ -63,6 +63,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
 |  11 | `console_write`| `user_ptr`, `len`                       | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
 |  12 | `spawn`        | `user_ptr` (path), `len`                | `u64` (pid) | `CAP_PROC_SPAWN`    | yes     |
+|  13 | `console_read` | `user_ptr`, `len`                       | `u64`   | `CAP_CONSOLE_READ`      | no      |
 
 ### Capability matrix
 
@@ -76,6 +77,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
 | `CAP_CONSOLE_WRITE`| `console_write`            |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
+| `CAP_CONSOLE_READ` | `console_read`             |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -158,6 +160,7 @@ re-validates arguments — the dispatcher does that first.
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
 | `console_write` | copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to the installed `ConsoleWrite` device (`with_console`; default `NULL_CONSOLE`) | `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. No device wired → `NotImplemented`. Otherwise `Ok(bytes_written)`. |
+| `console_read` | reads from the installed `ConsoleRead` device (`with_console_read`; default `NULL_CONSOLE_READ`) into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `len == 0` → `Ok(0)`. No device wired → `NotImplemented`. No input pending → `Ok(0)` (short read). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read)`. |
 | `spawn`         | copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default

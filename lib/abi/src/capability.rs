@@ -144,6 +144,17 @@ impl CapabilityId {
     /// (`AGENTS.md` §4 — no ambient authority; §5.4 — capability checks
     /// before state touches).
     pub const CONSOLE_WRITE: Self = Self(18);
+    /// Read directly from the system console device (`AGENTS.md` §10, §16.4).
+    ///
+    /// Gates the `console_read` syscall (`abi-v1` number 13), which reads a
+    /// byte buffer from the privileged *hardware* console input — the first
+    /// discovered keyboard/UART input source (`plans/PI.md` P6). It is the
+    /// input counterpart of [`CONSOLE_WRITE`](Self::CONSOLE_WRITE) and is
+    /// **not** a per-process stdin: only the early bring-up principals (PID 1
+    /// `init`, login, getty, the shell) are granted it, so an ordinary app
+    /// cannot read the system console (`AGENTS.md` §4 — no ambient authority;
+    /// §5.4 — capability checks before state touches).
+    pub const CONSOLE_READ: Self = Self(19);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -174,6 +185,7 @@ impl CapabilityId {
         (Self::TIME_HIRES, "CAP_TIME_HIRES"),
         (Self::PROC_SPAWN, "CAP_PROC_SPAWN"),
         (Self::CONSOLE_WRITE, "CAP_CONSOLE_WRITE"),
+        (Self::CONSOLE_READ, "CAP_CONSOLE_READ"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -287,6 +299,7 @@ mod tests {
         assert_eq!(CapabilityId::TIME_HIRES.as_u16(), 16);
         assert_eq!(CapabilityId::PROC_SPAWN.as_u16(), 17);
         assert_eq!(CapabilityId::CONSOLE_WRITE.as_u16(), 18);
+        assert_eq!(CapabilityId::CONSOLE_READ.as_u16(), 19);
     }
 
     #[test]
@@ -302,6 +315,7 @@ mod tests {
             CapabilityId::CONSOLE_WRITE.name(),
             Some("CAP_CONSOLE_WRITE")
         );
+        assert_eq!(CapabilityId::CONSOLE_READ.name(), Some("CAP_CONSOLE_READ"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -312,9 +326,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=18 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=19 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=18 {
+        for raw in 1..=19 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

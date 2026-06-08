@@ -95,7 +95,9 @@ pub mod test_sink;
 pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
-pub use console::{ConsoleWrite, NullConsole, NULL_CONSOLE};
+pub use console::{
+    ConsoleRead, ConsoleWrite, NullConsole, NullConsoleRead, NULL_CONSOLE, NULL_CONSOLE_READ,
+};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
 };

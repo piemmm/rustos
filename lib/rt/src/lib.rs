@@ -68,6 +68,9 @@ const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;
 /// `console_write` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
 
+/// `console_read` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CONSOLE_READ: u64 = SyscallNumber::CONSOLE_READ.as_u16() as u64;
+
 /// `yield` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 
@@ -116,6 +119,29 @@ pub fn console_write(bytes: &[u8]) -> usize {
     // of the call, so the `(ptr, len)` pair denotes readable memory.
     let written = unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
     written as usize
+}
+
+/// Read up to `buf.len()` bytes from the system console into `buf`
+/// (`SyscallNumber::CONSOLE_READ`), returning the number of bytes read.
+///
+/// Requires `CAP_CONSOLE_READ`; the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before writing it
+/// (`AGENTS.md` §5.4). The read counterpart of [`console_write`]: a short
+/// read (fewer bytes than `buf.len()`, possibly zero when no input is
+/// pending) is valid, so the caller loops. This is the privileged hardware
+/// console, not a per-process stdin (`plans/PI.md` §P6).
+#[must_use]
+#[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `buf.len()`.
+pub fn console_read(buf: &mut [u8]) -> usize {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `(buf, len)` against the caller's address space before touching it
+    // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
+    // duration of the call, so the `(ptr, len)` pair denotes writable
+    // memory the kernel may fill.
+    let read = unsafe { raw_syscall(NUM_CONSOLE_READ, [ptr, len, 0, 0, 0, 0]) };
+    read as usize
 }
 
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
@@ -221,6 +247,27 @@ mod tests {
         let buffer = [0u8; 16];
         let (_, _) = capture(10, || {
             assert_eq!(console_write(&buffer), 10);
+        });
+    }
+
+    #[test]
+    fn console_read_marshals_pointer_and_len() {
+        let mut buffer = [0u8; 16];
+        let ptr = buffer.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(7, || {
+            assert_eq!(console_read(&mut buffer), 7);
+        });
+        assert_eq!(number, NUM_CONSOLE_READ);
+        assert_eq!(args[0], ptr);
+        assert_eq!(args[1], 16);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn console_read_returns_the_kernel_reported_count() {
+        let mut buffer = [0u8; 16];
+        let (_, _) = capture(3, || {
+            assert_eq!(console_read(&mut buffer), 3);
         });
     }
 

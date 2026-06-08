@@ -1,8 +1,16 @@
-//! The kernel-side system console sink the `console_write` syscall
-//! (`abi-v1` number 11, `AGENTS.md` §10 / §16.4) emits to.
+//! The kernel-side system console seam the `console_write` (`abi-v1`
+//! number 11) and `console_read` (`abi-v1` number 13) syscalls use
+//! (`AGENTS.md` §10 / §16.4).
+//!
+//! [`ConsoleWrite`] is the output half and [`ConsoleRead`] the input
+//! half; an arch port installs one device implementing each through the
+//! `BootInfo` `with_console` / `with_console_read` seams, and the syscall
+//! handlers own the user-memory copy and the capability check, never the
+//! device.
 //!
 //! `console_write` lets the privileged early bring-up principals (PID 1
-//! `init`, login, getty) write a byte buffer to the *hardware* console.
+//! `init`, login, getty) write a byte buffer to the *hardware* console;
+//! `console_read` lets them read input back from it (the shell REPL).
 //! Which device that is — the detected framebuffer when one is present,
 //! else the first discovered UART (`plans/PI.md` P6) — is a boot-time
 //! decision the architecture port makes from the normalised hardware
@@ -76,6 +84,66 @@ impl ConsoleWrite for NullConsole {
 /// `KernelSyscallHandlers::with_console`.
 pub static NULL_CONSOLE: NullConsole = NullConsole;
 
+/// A byte source for the privileged system console input.
+///
+/// The read counterpart of [`ConsoleWrite`], implemented by the same
+/// architecture-port-installed console device (a UART or a keyboard
+/// input source). The trait is deliberately minimal — one method that
+/// fills a kernel-owned buffer — so `kernel/core` stays free of any
+/// device knowledge (`AGENTS.md` §17.4) and the syscall handler owns
+/// the user-memory copy and the capability check, never the device
+/// implementation.
+///
+/// Implementations must be [`Sync`]: the single installed console is
+/// shared by the per-CPU syscall handlers, exactly like
+/// [`ConsoleWrite`].
+pub trait ConsoleRead: Sync {
+    /// Read available console input into `buf`, returning the number of
+    /// bytes actually read.
+    ///
+    /// The caller copies the filled prefix out to user memory through
+    /// the validated `copy_to_user` boundary (`AGENTS.md` §5.4) and has
+    /// already checked the caller's
+    /// [`CapabilityId::CONSOLE_READ`](rustos_abi::CapabilityId::CONSOLE_READ);
+    /// the implementation only moves bytes from the device. A short
+    /// read (fewer than `buf.len()`, including zero when no input is
+    /// pending) is permitted and reported through the return value; the
+    /// caller loops. The implementation must never report more bytes
+    /// than it wrote into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`Errno`] when the device cannot be read. The
+    /// default source ([`NullConsoleRead`]) returns
+    /// [`Errno::NotImplemented`] to mark an inert interface.
+    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+/// The console input source installed before any real device exists.
+///
+/// Every read fails closed with [`Errno::NotImplemented`] — the
+/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
+/// `console_read` issued before the boot path installs a device (or on
+/// a target that genuinely has no console input) announces an inert
+/// interface rather than fabricating input.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullConsoleRead;
+
+impl ConsoleRead for NullConsoleRead {
+    fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullConsoleRead`] instance the syscall handler defaults
+/// to.
+///
+/// `KernelSyscallHandlers::new` points its `console_read` borrow here so
+/// the field is always valid without an `Option` branch on the hot
+/// path; the boot path replaces it with the real device through
+/// `KernelSyscallHandlers::with_console_read`.
+pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +154,14 @@ mod tests {
         // Even an empty write announces the inert interface rather than
         // pretending success.
         assert_eq!(NullConsole.write(&[]), Err(Errno::NotImplemented));
+    }
+
+    #[test]
+    fn null_console_read_fails_closed() {
+        let mut buf = [0u8; 8];
+        assert_eq!(NULL_CONSOLE_READ.read(&mut buf), Err(Errno::NotImplemented));
+        // Even a zero-length read announces the inert interface rather
+        // than reporting a successful empty read.
+        assert_eq!(NullConsoleRead.read(&mut []), Err(Errno::NotImplemented));
     }
 }

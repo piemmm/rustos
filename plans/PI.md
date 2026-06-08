@@ -556,11 +556,36 @@ on its own before the next.
   `tests/integration/spawn_session_qemu_aarch64` vertical proves both
   processes run on `-M virt` (PASS on two `ProcessSpawned` + three audited
   syscalls — the session's gated banner+exit is necessarily last).
-- **P6e — real shell REPL + session supervision `[ ]`.** The `session`
+- **P6e — real shell REPL + session supervision `[~]`.** The `session`
   program `init` launches is currently a banner+exit `Run` stub in the
   `Shell` bundle; P6e wires the existing `rustos-shell` interpreter library
   into it (a real REPL over the console) and has `init` supervise the
-  session across its lifetime (restart, reap).
+  session across its lifetime (restart, reap). A REPL needs console
+  *input*, which `abi-v1` did not yet expose, so P6e is staged:
+  - **P6e-1 — `console_read` `abi-v1` syscall + kernel seam `[x]`.** The
+    input counterpart of P6a's `console_write`: syscall **#13**
+    (`SyscallNumber::CONSOLE_READ`) gated by the new
+    `CapabilityId::CONSOLE_READ` (**id 19**), appended to the `lib/abi`
+    source of truth (table row, regenerated C header, recomputed
+    `SYSCALL_TABLE_HASH`). A `ConsoleRead` seam in `kernel/core::console`
+    (default `NULL_CONSOLE_READ`, fail-closed `NotImplemented`, installed
+    via `BootInfo::with_console_read`) and a `console_read` handler that
+    reads into a bounded (`CONSOLE_READ_MAX`) kernel staging buffer and
+    `copy_out`s to the caller (short/zero reads valid, defensive clamp,
+    `BadAddress` on a faulting/unregistered caller). `lib/rt::console_read`
+    + `lib/abi-sys::ros_sys_console_read` wrappers. Host-proven by 7
+    `kernel/core` tests + the rt/abi-sys/abi drift+marshalling tests; the
+    dispatcher reachability/fuzz/proptest doubles gained the new arm. **No
+    device read is wired yet** — the aarch64 serial has no RX primitive, so
+    `console_read` fails closed everywhere until P6e-2.
+  - **P6e-2 — UART RX device + wiring `[ ]`.** Add a non-blocking
+    console-input read primitive to the aarch64 serial path (PL011/16550
+    RX FIFO drain), implement `ConsoleRead` for the discovered-UART
+    console device, and install it through `BootInfo::with_console_read`
+    in `boot_aarch64`.
+  - **P6e-3 — shell REPL + `init` session supervision `[ ]`.** Wire
+    `rustos-shell` into the session `Run` over `console_read`/`console_write`
+    and have `init` supervise the session (restart, reap).
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
 `init` emits its first line on the console (framebuffer if present, else

@@ -27,8 +27,8 @@ use crate::audit::{record, AuditEvent};
 /// syscall-registration phase of `kernel_main`; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
 pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x79, 0x1b, 0x08, 0x7f, 0x3e, 0xd8, 0x02, 0x1a, 0xc2, 0x51, 0x9a, 0x12, 0x3f, 0x00, 0x59, 0x95,
-    0xc7, 0xf8, 0x84, 0x60, 0x96, 0x0e, 0xbd, 0x90, 0x91, 0xa1, 0x78, 0x71, 0xc6, 0xde, 0x1e, 0xb6,
+    0x3f, 0x5a, 0xfa, 0xa0, 0x79, 0x82, 0xe2, 0x2d, 0x96, 0x36, 0xb0, 0x9d, 0xec, 0xce, 0x35, 0xd0,
+    0x47, 0x2b, 0x51, 0x2b, 0x36, 0xd2, 0x5e, 0xc7, 0xd8, 0x9f, 0xba, 0x9d, 0x8d, 0x68, 0x56, 0x5c,
 ];
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
@@ -227,6 +227,21 @@ pub trait SyscallHandlers {
     /// a path naming no registered program with [`Errno::NotFound`],
     /// rather than silently doing nothing (`AGENTS.md` §2.9).
     fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult;
+    /// Read up to `len` bytes from the system console into the user
+    /// buffer at `buf`, returning the number of bytes read.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::CONSOLE_READ`], that `buf` is non-null, and that
+    /// `len` fits in `usize`. The implementation reads from the console
+    /// input device installed at boot — the first discovered
+    /// keyboard/UART input source (`plans/PI.md` P6) — into a bounded
+    /// kernel staging buffer and copies it out through the validated
+    /// `copy_to_user` boundary (`AGENTS.md` §5.4). A short read (fewer
+    /// bytes than `len`, possibly zero when no input is pending) is
+    /// valid, so the caller loops. A build with no console input device
+    /// wired must fail closed with [`Errno::NotImplemented`] rather than
+    /// fabricating input (`AGENTS.md` §2.9).
+    fn console_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -379,6 +394,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::SPAWN => {
                 let len = decode_len(args.0[1])?;
                 self.handlers.spawn(caller, args.0[0], len)
+            }
+            SyscallNumber::CONSOLE_READ => {
+                let len = decode_len(args.0[1])?;
+                self.handlers.console_read(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -693,6 +712,13 @@ mod tests {
             // arguments without wiring a real spawn service here.
             Ok(path_len as u64)
         }
+        fn console_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("console_read");
+            // Echo the requested length back as the byte count so the
+            // reachability test can assert the dispatcher decoded the
+            // arguments without wiring a real console here.
+            Ok(len as u64)
+        }
     }
 
     #[test]
@@ -711,6 +737,7 @@ mod tests {
                 CapabilityId::IRQ_BIND,
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::PROC_SPAWN,
+                CapabilityId::CONSOLE_READ,
             ],
             &sink,
         );

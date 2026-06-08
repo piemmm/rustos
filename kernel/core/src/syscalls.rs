@@ -98,7 +98,7 @@ use alloc::boxed::Box;
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
-use crate::console::{ConsoleWrite, NULL_CONSOLE};
+use crate::console::{ConsoleRead, ConsoleWrite, NULL_CONSOLE, NULL_CONSOLE_READ};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::spawn::{
@@ -168,6 +168,14 @@ where
     /// a `'static` borrow because the installed console lives for the
     /// lifetime of the running kernel, exactly like `NULL_CONSOLE`.
     console: &'static (dyn ConsoleWrite + 'static),
+    /// The system console input source `console_read` draws from
+    /// (`AGENTS.md` §10 / §16.4). Defaults to [`NULL_CONSOLE_READ`] (fail
+    /// closed with [`Errno::NotImplemented`]); the boot path installs the
+    /// concrete device — the first discovered keyboard/UART input source
+    /// (`plans/PI.md` P6) — through [`Self::with_console_read`]. Held as a
+    /// `'static` borrow because the installed console lives for the
+    /// lifetime of the running kernel, exactly like `NULL_CONSOLE_READ`.
+    console_read: &'static (dyn ConsoleRead + 'static),
     /// The kernel's live physical-frame allocator, the source of the
     /// frames a spawned process's pages are mapped to (`plans/SPAWN.md`
     /// SP3). [`None`] until the boot path threads it through
@@ -242,6 +250,10 @@ where
             // (`AGENTS.md` §2.9 / §5.4): an early `console_write` returns
             // `NotImplemented` rather than silently dropping the bytes.
             console: &NULL_CONSOLE,
+            // Same fail-closed default for the input direction: an early
+            // `console_read` returns `NotImplemented` rather than
+            // fabricating input (`AGENTS.md` §2.9 / §5.4).
+            console_read: &NULL_CONSOLE_READ,
             // Spawn subsystem unwired until the boot path threads a frame
             // allocator + populated registry + producer (`plans/SPAWN.md`
             // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
@@ -266,6 +278,27 @@ where
     #[must_use]
     pub const fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
         self.console = console;
+        self
+    }
+
+    /// Install the system console input source `console_read` draws from,
+    /// consuming and returning `self`.
+    ///
+    /// The read counterpart of [`Self::with_console`], called once by the
+    /// boot path after it has selected the console device from the
+    /// normalised hardware tree (`plans/PI.md` P6, `AGENTS.md` §18). Until
+    /// this is called the handler holds [`NULL_CONSOLE_READ`] and
+    /// `console_read` fails closed with [`Errno::NotImplemented`]. The
+    /// source must be `'static`: the boot path leaks the device alongside
+    /// `KernelState`, which lives for the lifetime of the running kernel
+    /// (`AGENTS.md` §2.1 — no global mutable static; the install is a
+    /// one-shot move).
+    #[must_use]
+    pub const fn with_console_read(
+        mut self,
+        console_read: &'static (dyn ConsoleRead + 'static),
+    ) -> Self {
+        self.console_read = console_read;
         self
     }
 
@@ -395,6 +428,17 @@ const RANDOM_STAGE_CHUNK: usize = 256;
 /// banner line is far smaller than this, so the common path never
 /// iterates.
 const CONSOLE_WRITE_MAX: usize = 4096;
+
+/// Upper bound, in bytes, on a single `console_read` call.
+///
+/// `console_read` reads into one kernel-owned staging buffer before
+/// copying it out to the caller, so an unbounded `len` would let a caller
+/// force an arbitrarily large kernel allocation whose failure path could
+/// OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The call therefore
+/// reads at most this many bytes and returns the count; a caller wanting
+/// more loops, exactly as POSIX `read` allows. A line of console input is
+/// far smaller than this, so the common path never iterates.
+const CONSOLE_READ_MAX: usize = 4096;
 
 /// Upper bound, in bytes, on the program path a single `spawn` call may
 /// pass.
@@ -848,6 +892,52 @@ where
         self.console.write(&payload).map(|n| n as u64)
     }
 
+    fn console_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_CONSOLE_READ` and that
+        // `buf` is non-null (`UserPtr`). A zero-length read touches
+        // neither the device nor the caller's buffer.
+        if len == 0 {
+            return Ok(0);
+        }
+        // Bound the staging allocation so a hostile `len` cannot force an
+        // arbitrarily large kernel buffer (`AGENTS.md` §4). Reading a
+        // prefix and reporting the count is valid short-read behaviour;
+        // the caller loops for the remainder.
+        let take = core::cmp::min(len, CONSOLE_READ_MAX);
+
+        // Read from the installed console input source into the kernel
+        // staging buffer first. Until the boot path installs one the
+        // default `NULL_CONSOLE_READ` fails closed with `NotImplemented`
+        // (`AGENTS.md` §2.9), never fabricating input. A faulting device
+        // surfaces its `Errno` here before any user memory is touched.
+        let mut payload = alloc::vec![0u8; take];
+        let read = self.console_read.read(&mut payload)?;
+        // A correct device never reports more than the buffer it was
+        // handed; clamp defensively so a buggy source cannot drive an
+        // out-of-bounds copy (`AGENTS.md` §5.4 — validate every input,
+        // including from the device side of the seam).
+        let read = core::cmp::min(read, take);
+        if read == 0 {
+            // No input was pending: report a zero-length read without
+            // touching the caller's buffer. The caller loops.
+            return Ok(0);
+        }
+
+        // Copy the bytes actually read out to the caller's address space
+        // through the validated `copy_to_user` boundary (`AGENTS.md`
+        // §5.4). `with_caller_aspace` yields `None` when the caller has
+        // no registered address space (a kernel task, or one withdrawn on
+        // `exit`) — fail closed with the same `BadAddress` an actual
+        // fault produces, never leaking which case occurred (§19.1).
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &payload[..read])
+        }) {
+            Some(Ok(())) => Ok(read as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
     fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
         // is non-null (`UserPtr`). Bound the staged path so a hostile
@@ -1118,6 +1208,7 @@ where
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
         console: &'static (dyn ConsoleWrite + 'static),
+        console_read: &'static (dyn ConsoleRead + 'static),
         frames: &'a FrameAllocator,
         programs: &'static ProgramRegistry,
         spawn_service: &'static (dyn ProcessSpawn + 'static),
@@ -1135,6 +1226,7 @@ where
                 rng,
             )
             .with_console(console)
+            .with_console_read(console_read)
             .with_frames(frames)
             .with_spawn(programs, spawn_service),
             sched,
@@ -3142,6 +3234,252 @@ mod tests {
         let r = h.console_write(&ctx, 0x1000, CONSOLE_WRITE_MAX + 100);
         assert_eq!(r, Ok(CONSOLE_WRITE_MAX as u64));
         assert_eq!(console.written.lock().len(), CONSOLE_WRITE_MAX);
+    }
+
+    /// A console input source that yields a preset byte string and
+    /// records the length of the buffer it was handed, for the
+    /// `console_read` handler tests. It fills the caller's buffer with up
+    /// to `buf.len()` bytes of the preset input (a real device's
+    /// short-read behaviour) and reports the count.
+    struct RecordingConsoleRead {
+        input: alloc::vec::Vec<u8>,
+        last_buf_len: rustos_sync::SpinLock<Option<usize>>,
+    }
+
+    impl RecordingConsoleRead {
+        fn new(input: &[u8]) -> Self {
+            Self {
+                input: input.to_vec(),
+                last_buf_len: rustos_sync::SpinLock::new(None),
+            }
+        }
+    }
+
+    impl crate::console::ConsoleRead for RecordingConsoleRead {
+        fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            *self.last_buf_len.lock() = Some(buf.len());
+            let n = core::cmp::min(buf.len(), self.input.len());
+            buf[..n].copy_from_slice(&self.input[..n]);
+            Ok(n)
+        }
+    }
+
+    /// `console_read` reads the device bytes into the kernel staging
+    /// buffer and copies them out to the caller, returning the count. The
+    /// bytes land at the caller's pointer.
+    #[test]
+    fn console_read_copies_device_bytes_out_to_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let line = b"login: \n";
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(line)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console_read(console);
+
+        assert_eq!(h.console_read(&ctx, 0x1000, 64), Ok(line.len() as u64));
+        // The bytes landed at the caller's pointer.
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 8];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(&delivered, line);
+    }
+
+    /// With no console installed the handler holds `NULL_CONSOLE_READ`
+    /// and fails closed with `NotImplemented` rather than fabricating
+    /// input (`AGENTS.md` §2.9).
+    #[test]
+    fn console_read_without_device_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.console_read(&ctx, 0x1000, 8), Err(Errno::NotImplemented));
+    }
+
+    /// A zero-length `console_read` succeeds without touching the device
+    /// or the caller's buffer (so it works even with no console).
+    #[test]
+    fn console_read_zero_length_is_ok_and_inert() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No address space registered: a real copy would fail closed,
+        // but a zero-length read never reaches the device or copy path.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.console_read(&ctx, 0x1000, 0), Ok(0));
+    }
+
+    /// A device with no input pending reports a zero-length read without
+    /// touching the caller's buffer; the caller loops (`AGENTS.md` §16.4
+    /// short-read semantics).
+    #[test]
+    fn console_read_no_input_pending_reports_zero() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(&[])));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console_read(console);
+        assert_eq!(h.console_read(&ctx, 0x1000, 8), Ok(0));
+    }
+
+    /// A `len` above `CONSOLE_READ_MAX` hands the device a bounded buffer
+    /// and reports the bounded count — never an unbounded kernel
+    /// allocation (`AGENTS.md` §4).
+    #[test]
+    fn console_read_caps_length_at_console_read_max() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // One full page of writable user bytes backs the bounded copy.
+        let page_bytes = alloc::vec![0u8; PAGE_SIZE];
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &page_bytes,
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // The device has more bytes than the cap, so the read is bounded
+        // by `CONSOLE_READ_MAX`, not by the device.
+        let input = alloc::vec![0x41u8; CONSOLE_READ_MAX + 100];
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(&input)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console_read(console);
+        let r = h.console_read(&ctx, 0x1000, CONSOLE_READ_MAX + 100);
+        assert_eq!(r, Ok(CONSOLE_READ_MAX as u64));
+        // The device was handed exactly the capped buffer, never the
+        // caller's oversized request.
+        assert_eq!(*console.last_buf_len.lock(), Some(CONSOLE_READ_MAX));
+    }
+
+    /// `console_read` from a caller with no registered address space
+    /// fails closed with `BadAddress`, never leaking the missing-space
+    /// case (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn console_read_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"data")));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_console_read(console);
+        assert_eq!(h.console_read(&ctx, 0x1000, 4), Err(Errno::BadAddress));
     }
 
     /// A live frame allocator over 64 usable frames — enough to pass the

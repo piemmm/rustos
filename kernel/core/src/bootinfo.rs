@@ -32,7 +32,7 @@ use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Level, Sink};
 
-use crate::console::{ConsoleWrite, NULL_CONSOLE};
+use crate::console::{ConsoleRead, ConsoleWrite, NULL_CONSOLE, NULL_CONSOLE_READ};
 use crate::dispatch_slot::DispatchCallbackSlot;
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
@@ -389,6 +389,20 @@ where
     /// kernel, exactly like the log/audit sinks.
     pub console: &'static (dyn ConsoleWrite + 'static),
 
+    /// System console input source the `console_read` syscall (`abi-v1`
+    /// number 13) draws from — the first discovered keyboard/UART input
+    /// source (`plans/PI.md` P6, `AGENTS.md` §10 / §16.4).
+    ///
+    /// Defaults to [`NULL_CONSOLE_READ`], which fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`] (`AGENTS.md` §2.9): an arch
+    /// port that has not discovered a console input device leaves this
+    /// default and `console_read` announces an inert interface rather than
+    /// fabricating input. A port that has a device installs it through
+    /// [`Self::with_console_read`]. Held as a `'static` borrow because the
+    /// installed console lives for the lifetime of the running kernel,
+    /// exactly like [`Self::console`].
+    pub console_read: &'static (dyn ConsoleRead + 'static),
+
     /// Architecture-specific seam that spawns PID 1 (`init`) into user
     /// mode once boot completes (`plans/PI.md` P6c-3).
     ///
@@ -476,6 +490,9 @@ where
             // Fail closed until the arch port installs a real device
             // through `with_console` (`AGENTS.md` §2.9 / §5.4).
             console: &NULL_CONSOLE,
+            // Same fail-closed default for the input direction, installed
+            // through `with_console_read` (`AGENTS.md` §2.9 / §5.4).
+            console_read: &NULL_CONSOLE_READ,
             // No user-mode bring-up until the arch port installs an
             // `InitSpawn` through `with_init`; `kernel_main` halts after
             // `BootCompleted` until then (`plans/PI.md` P6c-3).
@@ -505,6 +522,25 @@ where
     #[must_use]
     pub fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
         self.console = console;
+        self
+    }
+
+    /// Install the system console input source the `console_read` syscall
+    /// draws from, consuming and returning `self`.
+    ///
+    /// The read counterpart of [`Self::with_console`], called by an arch
+    /// port's boot pipeline after it has selected the console device from
+    /// the normalised hardware tree (`plans/PI.md` P6, `AGENTS.md` §18).
+    /// Until this is called the handover holds [`NULL_CONSOLE_READ`] and
+    /// `console_read` fails closed with
+    /// [`rustos_abi::Errno::NotImplemented`]. The source must be
+    /// `'static`: the boot path leaks the device alongside the kernel
+    /// state, which lives for the lifetime of the running kernel
+    /// (`AGENTS.md` §2.1 — the install is a one-shot move, not a global
+    /// mutable static).
+    #[must_use]
+    pub fn with_console_read(mut self, console_read: &'static (dyn ConsoleRead + 'static)) -> Self {
+        self.console_read = console_read;
         self
     }
 

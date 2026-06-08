@@ -116,6 +116,23 @@ impl SyscallNumber {
     /// authority. A build with no spawn service wired, or a path naming
     /// no registered program, fails closed (`AGENTS.md` §2.9).
     pub const SPAWN: Self = Self(12);
+    /// Read a byte buffer from the system console (`AGENTS.md` §10, §16.4).
+    ///
+    /// Arguments: `buf: *mut u8` (user pointer), `len: usize`. Returns
+    /// the number of bytes read. The kernel reads from the system console
+    /// device — the first discovered keyboard/UART input source
+    /// (`plans/PI.md` P6) — into a bounded kernel staging buffer and copies
+    /// it out through the validated `copy_to_user` boundary (`AGENTS.md`
+    /// §5.4). The read is the input counterpart of
+    /// [`SyscallNumber::CONSOLE_WRITE`]: a short read (fewer bytes than
+    /// `len`, possibly zero when no input is pending) is valid, so the
+    /// caller loops. This is the privileged *hardware* console, not a
+    /// per-process stdin, so it is gated by
+    /// [`crate::CapabilityId::CONSOLE_READ`] and granted only to the early
+    /// bring-up principals (PID 1 `init`, login, getty, the shell). A build
+    /// with no console input device wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
+    pub const CONSOLE_READ: Self = Self(13);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -196,6 +213,7 @@ mod tests {
         assert_eq!(SyscallNumber::RANDOM_GET.as_u16(), 10);
         assert_eq!(SyscallNumber::CONSOLE_WRITE.as_u16(), 11);
         assert_eq!(SyscallNumber::SPAWN.as_u16(), 12);
+        assert_eq!(SyscallNumber::CONSOLE_READ.as_u16(), 13);
     }
 
     #[test]

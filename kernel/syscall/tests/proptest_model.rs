@@ -126,6 +126,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn console_read(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 fn budget_deadline() -> Option<Instant> {

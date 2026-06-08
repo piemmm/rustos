@@ -75,6 +75,7 @@ const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
 const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
 const NUM_RANDOM_GET: u64 = SyscallNumber::RANDOM_GET.as_u16() as u64;
 const NUM_CONSOLE_WRITE: u64 = SyscallNumber::CONSOLE_WRITE.as_u16() as u64;
+const NUM_CONSOLE_READ: u64 = SyscallNumber::CONSOLE_READ.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
@@ -267,6 +268,22 @@ pub extern "C" fn sys_console_write(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_CONSOLE_WRITE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `console_read`: read up to `len` bytes from the system console into `buf`
+/// (`SyscallNumber::CONSOLE_READ`). Returns the number of bytes read.
+///
+/// Requires `CAP_CONSOLE_READ`; the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before writing it
+/// (`AGENTS.md` §5.4). The read counterpart of `console_write`: a short read
+/// (fewer than `len`, possibly zero when no input is pending) is valid, so
+/// the caller loops. This is the privileged hardware console, not a
+/// per-process stdin (`plans/PI.md` P6).
+#[must_use]
+#[export_name = "ros_sys_console_read"]
+pub extern "C" fn sys_console_read(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe { raw_syscall(NUM_CONSOLE_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
 /// `spawn`: spawn a new process from the embedded program named by the
 /// absolute path `(path, path_len)` (`SyscallNumber::SPAWN`). Returns the
 /// new process's PID, or a `ROS_E_*` code reinterpreted into the result.
@@ -311,6 +328,7 @@ mod tests {
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_CONSOLE_WRITE, "console_write", 2),
         (NUM_SPAWN, "spawn", 2),
+        (NUM_CONSOLE_READ, "console_read", 2),
     ];
 
     #[test]
@@ -460,6 +478,19 @@ mod tests {
             assert_eq!(sys_console_write(ptr, 8), 8);
         });
         assert_eq!(number, NUM_CONSOLE_WRITE);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], 8);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn console_read_marshals_pointer_and_len() {
+        let mut buffer = [0u8; 8];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(5, || {
+            assert_eq!(sys_console_read(ptr, 8), 5);
+        });
+        assert_eq!(number, NUM_CONSOLE_READ);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 8);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);

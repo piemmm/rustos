@@ -36,6 +36,7 @@ extern "C" {
 #define ROS_SYS_RANDOM_GET 10u
 #define ROS_SYS_CONSOLE_WRITE 11u
 #define ROS_SYS_SPAWN 12u
+#define ROS_SYS_CONSOLE_READ 13u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -51,6 +52,7 @@ int32_t ros_sys_irq_wait(uint64_t a0, uint64_t a1);
 uint64_t ros_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_console_write(void * a0, uintptr_t a1);
 uint64_t ros_sys_spawn(void * a0, uintptr_t a1);
+uint64_t ros_sys_console_read(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

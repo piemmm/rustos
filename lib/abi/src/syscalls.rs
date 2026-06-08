@@ -349,6 +349,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::PROC_SPAWN),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_READ,
+        name: "console_read",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Reading from the privileged hardware console is gated
+        // (`AGENTS.md` §4 — no ambient authority): only the early
+        // bring-up principals hold `CAP_CONSOLE_READ`. Like the other
+        // high-volume data movers (`console_write`, `ipc_recv`,
+        // `random_get`) it is not audited per call, to avoid drowning
+        // the audit log.
+        required_capability: Some(CapabilityId::CONSOLE_READ),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -524,6 +546,14 @@ mod tests {
             Some(CapabilityId::CONSOLE_WRITE)
         );
         assert!(!console.audit, "console_write must not audit per call");
+        // console_read is gated on CAP_CONSOLE_READ — the privileged
+        // hardware console input is never ambient (`AGENTS.md` §4).
+        let console_read = spec_for(SyscallNumber::CONSOLE_READ).unwrap();
+        assert_eq!(
+            console_read.required_capability,
+            Some(CapabilityId::CONSOLE_READ)
+        );
+        assert!(!console_read.audit, "console_read must not audit per call");
         // spawn is gated on CAP_PROC_SPAWN and audited per call — a new
         // process is a security-relevant state change (`AGENTS.md` §4 /
         // §5.4.4).
