@@ -967,11 +967,27 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
       `soak.sh both`) green on this host. Doc:
       `docs/src/platform/aarch64.md` ("Routing the kthread stack through the
       arena (G3b-2)").
-    - **G3b-2-ii — runtime `spawn`-syscall path `[ ]`.** Route the
-      session (and anything it launches) through the arena too — the
-      `spawn_producer`/`admit_process` mirror of G3b-2-i. The poison-canary
-      `BoxStack` remains this path's binding non-deferred defence until it
-      lands (`AGENTS.md` §2.17).
+    - **G3b-2-ii — runtime `spawn`-syscall path `[x]`.** The session
+      (and anything it launches) now runs on an arena-backed,
+      hardware-guarded kernel stack too — the `spawn_producer`/
+      `admit_process` mirror of G3b-2-i. `kernel/core`'s
+      `SpawnCtx::admit_process` grew the same `stack: Box<dyn KernelStack +
+      Send>` parameter `InitSpawnCtx::admit_init` carries, routing the child
+      through `spawn_user_kthread_with_stack` (`HandlerSpawnCtx` +
+      the `RecordingSpawn` host double updated). `spawn_producer` allocates
+      an `ArenaStack` from `KTHREAD_STACK_ARENA`, then `split_block(guard)`
+      + `unmap(guard)` on the child's *own* `arch` root — which it builds
+      but **never switches to** (the spawning caller keeps its own
+      `TTBR0_EL1`), so the split/unmap only touch the child's tables through
+      the caller's identity window, disturb no live access, and need no TLB
+      maintenance — with the software-canary `BoxStack` fallback where no
+      arena region is available or the split/unmap fails (fail closed,
+      `AGENTS.md` §2.9/§2.17). Host-proven (the 11 `spawn` admit tests + the
+      `stack_arena` bump tests; the aarch64 kernel builds clean); the
+      `spawn_session` / `spawn_init` / `wait` `-M virt` verticals prove the
+      session still runs and is supervised, now on the arena stack. Doc:
+      `docs/src/platform/aarch64.md` ("Routing the kthread stack through the
+      arena (G3b-2)").
   - **G3c — production fault-form on `-M virt` `[ ]`.** Prove an
     overrunning kthread takes a synchronous data abort, not a
     next-reschedule canary detection.

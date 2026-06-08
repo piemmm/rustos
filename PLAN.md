@@ -2042,10 +2042,20 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   the new `InitSpawnCtx::admit_init` `stack: Box<dyn
                   KernelStack + Send>` param (fail-closed `BoxStack`-canary
                   fallback); host-proven + the `spawn_init`/`spawn_session`/
-                  `wait` `-M virt` verticals green. The runtime
-                  `spawn`-syscall path (G3b-2-ii) and the production
-                  fault-form proof on `-M virt` (G3c) follow. Docs:
-                  `docs/src/platform/aarch64.md`.
+                  `wait` `-M virt` verticals green. **G3b-2-ii is now
+                  landed:** the runtime `spawn`-syscall path (the session +
+                  anything it launches) is the `spawn_producer`/
+                  `admit_process` mirror — `SpawnCtx::admit_process` grew the
+                  same `stack` param (routing through
+                  `spawn_user_kthread_with_stack`; `HandlerSpawnCtx` + the
+                  `RecordingSpawn` host double updated), and `spawn_producer`
+                  `split_block`+`unmap`s an `ArenaStack` guard on the child's
+                  *own* never-switched-to `arch` root (`BoxStack`-canary
+                  fallback). Host-proven (11 `spawn` admit + `stack_arena`
+                  tests; aarch64 kernel builds clean) + the `spawn_session`/
+                  `spawn_init`/`wait` `-M virt` verticals green. Only the
+                  production fault-form proof on `-M virt` (G3c) follows.
+                  Docs: `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

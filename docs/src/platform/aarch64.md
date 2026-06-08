@@ -830,11 +830,11 @@ proves the HAL `prepare_guard_arena` reaches the inherent body over a
 
 ### Routing the kthread stack through the arena (G3b-2)
 
-PID 1 `init`'s kernel stack is now drawn from the reserved guard arena
-with its guard page genuinely **unmapped in `init`'s own page-table
-root**, so an overrun of `init`'s kernel stack takes a synchronous data
-abort under `init`'s `TTBR0_EL1` rather than a next-reschedule
-poison-canary detection. The pieces:
+Both spawn paths now draw their kthread kernel stack from the reserved
+guard arena with its guard page genuinely **unmapped in the task's own
+page-table root**, so an overrun of a task's kernel stack takes a
+synchronous data abort under that task's `TTBR0_EL1` rather than a
+next-reschedule poison-canary detection. The pieces:
 
 - A forward-only bump allocator, `stack_arena::KTHREAD_STACK_ARENA`
   (`rustos-kernel`), hands kthread kernel stacks out of the boot-reserved
@@ -844,18 +844,27 @@ poison-canary detection. The pieces:
   geometry to the heap-backed `BoxStack`. Regions are never reclaimed (the
   monotonic, free-list-free discipline of the spawn page-table pools,
   `AGENTS.md` §2.1).
-- `init_spawn` allocates one region, then — on `init`'s *own* concrete
-  `arch` address space, **before** it is switched to — calls
-  `split_block(guard)` (re-expressing the coarse identity block at 4 KiB)
-  followed by `unmap(guard)`. Doing it before activation disturbs no live
-  access and needs no TLB maintenance. The boxed stack is handed to
-  `kernel/core` through the new `InitSpawnCtx::admit_init` `stack`
+- **PID 1 `init` (G3b-2-i):** `init_spawn` allocates one region, then — on
+  `init`'s *own* concrete `arch` address space, **before** it is switched
+  to — calls `split_block(guard)` (re-expressing the coarse identity block
+  at 4 KiB) followed by `unmap(guard)`. Doing it before activation
+  disturbs no live access and needs no TLB maintenance. The boxed stack is
+  handed to `kernel/core` through the `InitSpawnCtx::admit_init` `stack`
   parameter (a `Box<dyn KernelStack + Send>`, so the concrete stack source
   never leaks into the object-safe boundary, §17.4) and admitted via
   `spawn_user_kthread_with_stack`.
+- **The runtime `spawn` syscall (G3b-2-ii):** `spawn_producer` does the
+  same, on the child's *own* `arch` root — which it builds but **never
+  switches to** (the spawning caller keeps its own `TTBR0_EL1`), so
+  `split_block`/`unmap` only touch the child's tables through the caller's
+  identity window, disturb no live access, and need no TLB maintenance.
+  `kernel/core` grew the matching `SpawnCtx::admit_process` `stack`
+  parameter (mirroring `admit_init`), routing the child through
+  `spawn_user_kthread_with_stack`. So the session and anything it launches
+  now run on an arena-backed, hardware-guarded kernel stack too.
 - If no arena region is available, or the split/unmap could not be
-  applied, the seam falls back to a software-canary `BoxStack` — it never
-  runs on an unguarded stack (fail closed, `AGENTS.md` §2.9 / §2.17).
+  applied, either seam falls back to a software-canary `BoxStack` — neither
+  ever runs on an unguarded stack (fail closed, `AGENTS.md` §2.9 / §2.17).
 
 `ArenaStack::check_guard` keeps the default `Ok(())`: the guard page is
 unmapped, so the hardware fault is the defence (there is no poison canary
@@ -863,14 +872,11 @@ to scan, and reading the page under the dispatcher's root would
 false-positive). The allocator's bump arithmetic is host-tested
 (`stack_arena` unit tests), and the existing aarch64 `spawn_init` /
 `spawn_session` / `wait` QEMU verticals prove `init` still reaches EL0,
-writes its banner, and supervises the session on the arena-backed stack.
+writes its banner, and supervises the session — `init` and the session
+both on arena-backed stacks.
 
-Two follow-ons remain. The runtime `spawn`-syscall path (the session and
-anything it launches) still takes a `BoxStack`; routing it through the
-arena too is **G3b-2-ii** (the poison-canary remains its binding
-non-deferred defence until then, `AGENTS.md` §2.17). Proving an
-*overrunning* kthread takes the synchronous abort on `-M virt` is the
-separate **G3c** vertical.
+One follow-on remains: proving an *overrunning* kthread takes the
+synchronous abort on `-M virt` is the separate **G3c** vertical.
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

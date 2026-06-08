@@ -1214,6 +1214,7 @@ where
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut() + Send>,
         mut enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError> {
@@ -1226,14 +1227,18 @@ where
         // `eret`s into EL0 under the correct, isolated translation regime
         // (`AGENTS.md` §4). `enter` diverges into EL0, so the `()` it
         // yields satisfies the body signature for the (impossible) case the
-        // transition ever returned.
+        // transition ever returned. The arch seam owns the kernel stack
+        // (`stack`) — an arena-backed stack whose guard page it has unmapped
+        // in the child's own root, else the software-canary `BoxStack`
+        // fallback (`plans/PI.md` G3b-2).
         let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
             enter();
         };
         let cs = self.arch.context_switch();
-        let task_id = crate::kthread::spawn_user_kthread(
+        let task_id = crate::kthread::spawn_user_kthread_with_stack(
             self.sched,
             cs,
+            stack,
             cpu,
             Priority::Normal,
             pre_resume,
@@ -3910,11 +3915,16 @@ mod tests {
             // reactivates a page-table root.
             let pre_resume: Box<dyn FnMut() + Send> = Box::new(|| {});
             let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
+            // The host double hands a plain software-canary `BoxStack` — the
+            // arena-backed guard-page stack is the arch producer's job
+            // (`plans/PI.md` G3b-2), unreachable from a host test.
+            let stack: Box<dyn crate::kthread::KernelStack + Send> =
+                Box::new(crate::kthread::BoxStack::new());
             // SAFETY: the host test never dispatches the admitted task, so
             // the (inert) `enter`/`pre_resume` closures never run and the
             // frozen host space need only answer `translate`; it faithfully
             // describes the one page mapped above.
-            unsafe { ctx.admit_process(child_caps, frozen, physmap, pre_resume, enter) }
+            unsafe { ctx.admit_process(child_caps, frozen, physmap, stack, pre_resume, enter) }
                 .map_err(|_| Errno::NoSpace)
         }
     }

@@ -501,6 +501,17 @@ pub trait SpawnCtx {
     /// switch into it, keeping it hardware-isolated from its siblings
     /// (`AGENTS.md` §4).
     ///
+    /// `stack` is the child's kernel stack, built by the arch seam so the
+    /// concrete stack source never leaks into this object-safe boundary
+    /// (`AGENTS.md` §17.4), exactly as [`InitSpawnCtx::admit_init`] takes it.
+    /// The seam supplies either the heap-backed software-canary
+    /// [`crate::BoxStack`] or an arena-backed stack whose guard page it has
+    /// **unmapped in the child's own page-table root**, so an overrun of the
+    /// child's kernel stack takes a synchronous fault under the child's
+    /// translation regime rather than corrupting a neighbour (`plans/PI.md`
+    /// guard-page fault-form; `AGENTS.md` §4 / §2.17). The runtime stores it
+    /// in the child's control block and frees it when the task exits.
+    ///
     /// This does **not** enter user mode or step the scheduler: it returns
     /// the new PID and the caller resumes. Every failure reclaims what it
     /// built and returns an [`AdmitError`] (`AGENTS.md` §2.9).
@@ -511,11 +522,14 @@ pub trait SpawnCtx {
     /// producer just built and `physmap` must back them, so the copy path
     /// reads exactly the memory the program sees; `pre_resume` must
     /// activate that space's root before the task is first entered.
+    /// `stack` must be a region exclusive to the child that stays mapped
+    /// (its guard page aside) and valid for as long as the task lives.
     unsafe fn admit_process(
         &self,
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut() + Send>,
         enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError>;
