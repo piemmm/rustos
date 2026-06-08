@@ -196,6 +196,14 @@ pub enum PageTableError {
     InvalidFlags,
     /// The underlying allocator failed.
     AllocFailed(AllocError),
+    /// The backend does not implement the requested page-table operation
+    /// (the fail-closed [`rustos_arch_api::mmu::MapError::Unsupported`]
+    /// from a port whose [`rustos_arch_api::mmu::AddressSpace::split_block`]
+    /// is not implemented). The map/unmap façade never drives such an
+    /// operation, so this surfaces only if a future caller routes one
+    /// through this layer — fail closed, never a silent success
+    /// (`AGENTS.md` §2.9).
+    Unsupported,
 }
 
 impl From<AllocError> for PageTableError {
@@ -275,6 +283,14 @@ fn from_map_error(err: MapError) -> PageTableError {
         MapError::InvalidFlags => PageTableError::InvalidFlags,
         MapError::PoolExhausted => PageTableError::AllocFailed(AllocError::OutOfMemory),
         MapError::NotMapped => PageTableError::NotMapped,
+        // `kernel/mem`'s map/unmap façade only ever drives `map_page`,
+        // `translate`, and `unmap`, none of which return `Unsupported`
+        // (that is the fail-closed result of `split_block` on a port that
+        // does not implement the coarse-block split, driven elsewhere).
+        // The arm carries the failure faithfully so a future caller that
+        // *does* route a split through this layer fails closed rather than
+        // seeing a mislabelled error (`AGENTS.md` §2.9).
+        MapError::Unsupported => PageTableError::Unsupported,
     }
 }
 
@@ -527,6 +543,15 @@ impl HalAddressSpace for HostPageTable {
         // The double has no real root table; a non-zero sentinel keeps
         // it honouring the `root_phys` contract (non-null once built).
         PAGE_SIZE as u64
+    }
+
+    fn block_split_support(&self) -> rustos_arch_api::mmu::BlockSplit {
+        // The double tracks single 4 KiB entries in a map; it has no
+        // coarse block descriptors to re-express, so the split is
+        // honestly unsupported (`AGENTS.md` §2.17).
+        rustos_arch_api::mmu::BlockSplit::Unsupported(
+            "host page-table double tracks single 4 KiB entries; no coarse blocks",
+        )
     }
 
     unsafe fn activate(&self) {

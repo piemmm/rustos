@@ -411,6 +411,32 @@ fn passes_mmu_conformance() {
 }
 
 #[test]
+fn declares_block_split_supported_and_the_hal_method_forwards() {
+    use rustos_arch_api::mmu::{self, BlockSplit};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // aarch64 honestly declares it can split coarse blocks (G1/G2).
+    assert_eq!(space.block_split_support(), BlockSplit::Supported);
+
+    // Driving `split_block` through the object-safe HAL trait must reach
+    // the same body as the inherent method: a page inside a 1 GiB block
+    // becomes a 4 KiB page leaf that then unmaps cleanly.
+    let va: u64 = (1u64 << 30) + 0x40_0000;
+    {
+        let erased: &mut dyn mmu::AddressSpace = &mut space;
+        erased
+            .split_block(va)
+            .expect("HAL split_block forwards to the inherent split");
+    }
+    assert_eq!(
+        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        Ok(va),
+        "the HAL-split page unmaps to its identity frame"
+    );
+}
+
+#[test]
 fn passes_tlb_conformance() {
     use rustos_arch_api::tlb;
     static POOL: PageTablePool = PageTablePool::new();

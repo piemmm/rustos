@@ -222,6 +222,24 @@ fn passes_mmu_conformance() {
 }
 
 #[test]
+fn block_split_is_pending_and_fails_closed() {
+    use rustos_arch_api::mmu::{self, MapError};
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    // riscv64 honestly declares the Sv39 block-split a tracked gap, not a
+    // pretend no-op (`AGENTS.md` §2.17): the profile is `Pending` with a
+    // non-empty tracking note.
+    let support = space.block_split_support();
+    assert!(support.is_pending());
+    assert!(support.detail().is_some_and(|n| !n.trim().is_empty()));
+    // The default `split_block` therefore fails closed rather than
+    // silently doing nothing (`AGENTS.md` §2.9).
+    assert_eq!(
+        mmu::AddressSpace::split_block(&mut space, 100u64 << 30),
+        Err(MapError::Unsupported)
+    );
+}
+
+#[test]
 fn passes_tlb_conformance() {
     use rustos_arch_api::tlb;
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");

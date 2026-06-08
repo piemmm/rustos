@@ -783,9 +783,36 @@ that is its own block, enable the MMU, write+read-back a sentinel through a
 guard page, `unmap` + `flush_page` it, prove the running stack (a
 *different* 2 MiB block) and a neighbouring arena page still work, then
 read the unmapped page — the MMU raises a synchronous data abort the fault
-handler reports as PASS. Promoting `prepare_guard_arena` onto the Arch HAL
-`AddressSpace` surface and routing `kthread::BoxStack` through the arena is
-the staged G3 follow-on.
+handler reports as PASS.
+
+### Promoting the split onto the Arch HAL (G3a)
+
+The block-split primitive is now part of the architecture-neutral Arch HAL
+`AddressSpace` surface (`rustos_arch_api::mmu`, `AGENTS.md` §17.2), so the
+kernel reaches it through one vocabulary rather than naming a concrete
+port. Two members were added:
+
+- `AddressSpace::block_split_support() -> BlockSplit` — each port's honest
+  declaration, modelled on the §19.1 / §19.10 `Mitigation` / `Tagging`
+  profiles: `Supported`, justified `Unsupported`, or tracked `Pending`.
+  aarch64 reports `Supported`; riscv64 and x86_64 report `Pending` (their
+  Sv39 / four-level huge-page splits land with each port's own guard-page
+  fault-form), with a non-empty tracking note the `mmu::conformance`
+  vertical enforces.
+- `AddressSpace::split_block(vaddr)` — the HAL view of the operation. Its
+  default fails closed with `MapError::Unsupported` so a non-supporting
+  port never silently no-ops (`AGENTS.md` §2.9). The aarch64 impl forwards
+  to its inherent, fully-tested `split_block` body, so there is one
+  implementation reached either directly (the boot path and the G1/G2
+  verticals) or through the HAL trait (`AGENTS.md` §2.2).
+
+The `mmu::conformance` suite gained a block-split honesty check (every
+port: the declaration is justified, and a non-`Supported` port fails
+`split_block` closed); aarch64's `paging_tests` additionally proves the
+HAL `split_block` reaches the inherent body over a `dyn AddressSpace`.
+Promoting `prepare_guard_arena` and routing `kthread::BoxStack` through the
+arena (so an overrun takes a synchronous abort rather than a
+next-reschedule canary detection) is the staged **G3b/G3c** follow-on.
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

@@ -2001,8 +2001,24 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   unmaps a guard page in it, proves the running stack (a
                   different block) and a neighbour page still work, then
                   faults on the unmapped page → PASS, **verified green under
-                  QEMU on this host**. G3 (`BoxStack` rewire + `split_block`
-                  HAL promotion + production wiring) follows. Docs:
+                  QEMU on this host**. **G3a is now landed:** the
+                  coarse-block split is promoted onto the Arch HAL
+                  `AddressSpace` surface (`rustos_arch_api::mmu`, §17.2) as
+                  `block_split_support() -> BlockSplit` (each port's honest
+                  `Supported`/`Unsupported`/`Pending` declaration, modelled
+                  on the §19.1/§19.10 profiles, justification enforced by
+                  `mmu::conformance`) plus a default-fail-closed
+                  `split_block(vaddr)` returning the new
+                  `MapError::Unsupported`; aarch64 reports `Supported` and
+                  forwards to its tested inherent body (one impl, §2.2),
+                  riscv64 + x86_64 report honest `Pending`, and
+                  `kernel/mem` carries the new cases
+                  (`PageTableError::Unsupported`). Host-proven (4 new
+                  arch-api conformance tests + aarch64 HAL-forwarding +
+                  riscv64 Pending-fails-closed); no QEMU vertical needed
+                  (G1/G2 already prove the live mechanism). G3b
+                  (`prepare_guard_arena` promotion + `BoxStack` rewire) and
+                  G3c (production fault-form on `-M virt`) follow. Docs:
                   `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**

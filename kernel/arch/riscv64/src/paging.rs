@@ -29,7 +29,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame};
-use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
@@ -515,6 +515,18 @@ impl MmuAddressSpace for AddressSpace {
 
     fn root_phys(&self) -> u64 {
         self.root_phys
+    }
+
+    fn block_split_support(&self) -> BlockSplit {
+        // Sv39 has gigapage/megapage leaves that a split *could* re-express
+        // at 4 KiB granularity (pure page-table work, no silicon
+        // dependency), but the primitive has not been written for riscv64
+        // yet: it lands with this port's own guard-page fault-form. aarch64
+        // has it (`plans/PI.md` G1/G2). Honest `Pending`, never a pretend
+        // no-op (`AGENTS.md` §2.17).
+        BlockSplit::Pending(
+            "Sv39 block-split lands with the riscv64 guard-page fault-form (plans/PI.md G3)",
+        )
     }
 
     unsafe fn activate(&self) {

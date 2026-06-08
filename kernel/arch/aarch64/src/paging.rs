@@ -32,7 +32,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame};
-use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, MapError, PageFlags};
+use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
 use rustos_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
@@ -757,6 +757,23 @@ impl MmuAddressSpace for AddressSpace {
 
     fn root_phys(&self) -> u64 {
         self.root_phys
+    }
+
+    fn block_split_support(&self) -> BlockSplit {
+        // aarch64 re-expresses a 1 GiB / 2 MiB block as a table of finer
+        // leaves (`plans/PI.md` G1/G2 — the guard-page fault-form
+        // foundation, host- and `-M virt`-proven).
+        BlockSplit::Supported
+    }
+
+    fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        // The HAL view of the inherent, fully-tested `AddressSpace::split_block`
+        // (G1): one body, reached either directly by the arch boot path /
+        // verticals or through the HAL trait here (`AGENTS.md` §2.2).
+        // Method-call syntax resolves to the inherent method (inherent methods
+        // take precedence over a same-named trait method), so this forwards to
+        // the inherent body rather than recursing into itself.
+        self.split_block(vaddr)
     }
 
     unsafe fn activate(&self) {

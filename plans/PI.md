@@ -887,13 +887,39 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
     The boot-map change stays in `boot_aarch64` (the §17.2 arch-gated binary,
     no `cfg(target_arch)` leak); promoting `prepare_guard_arena` onto the Arch
     HAL `AddressSpace` surface is **G3**.
-  - **G3 — `BoxStack` rewire + HAL promotion + production wiring `[ ]`.**
-    Promote `split_block` to the Arch HAL `AddressSpace` surface (the other
-    ports get a real impl or an honest `Pending`/`Unsupported` profile),
+  - **G3a — `split_block` HAL promotion `[x]`.** The coarse-block split is
+    now part of the architecture-neutral Arch HAL `AddressSpace` surface
+    (`rustos_arch_api::mmu`, §17.2), so the kernel reaches it through one
+    vocabulary instead of naming a concrete port. Two members:
+    `block_split_support() -> BlockSplit` (each port's honest declaration,
+    modelled on the §19.1/§19.10 `Mitigation`/`Tagging` profiles —
+    `Supported` / justified `Unsupported` / tracked `Pending`, with the
+    non-empty-justification rule the `mmu::conformance` vertical enforces)
+    and a default-fail-closed `split_block(vaddr)` (returns the new
+    `MapError::Unsupported` so a non-supporting port never silently
+    no-ops, §2.9). aarch64 reports `Supported` and the HAL `split_block`
+    forwards to its tested inherent body (one implementation, §2.2);
+    riscv64 + x86_64 report honest `Pending` (their Sv39 / four-level
+    huge-page splits land with each port's own guard-page fault-form); the
+    `kernel/mem` `HostPageTable` double + `from_map_error` carry the new
+    cases (`PageTableError::Unsupported`). Host-proven: the `mmu`
+    conformance suite gained a block-split honesty check (declaration
+    justified; non-`Supported` ports fail `split_block` closed — 4 new
+    arch-api tests), aarch64 `paging_tests` proves the HAL method reaches
+    the inherent body over `dyn AddressSpace`, riscv64 proves
+    `Pending` + fail-closed. Doc: `docs/src/platform/aarch64.md`
+    ("Promoting the split onto the Arch HAL (G3a)"). **No QEMU vertical
+    needed** — G1/G2 already prove the live aarch64 mechanism, now reached
+    through the promoted surface.
+  - **G3b — `prepare_guard_arena` HAL promotion + `BoxStack` rewire `[ ]`.**
+    Promote `prepare_guard_arena` onto the HAL `AddressSpace` surface and
     route the kthread `BoxStack` guard page through unmap-on-create over the
-    G2 arena (canary fallback where a port is `Unsupported`), and prove the
-    production fault-form on `-M virt` (an overrunning kthread takes a
-    synchronous abort, not a next-reschedule canary detection).
+    G2 arena (canary fallback where a port's `block_split_support` is not
+    `Supported`). Watch the cross-space-mapping requirement (the kthread
+    stack must be mapped in every space the task runs under).
+  - **G3c — production fault-form on `-M virt` `[ ]`.** Prove an
+    overrunning kthread takes a synchronous data abort, not a
+    next-reschedule canary detection.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 
