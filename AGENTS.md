@@ -39,11 +39,14 @@ Do not "just make it work".**
   - `aarch64-unknown-none` (Raspberry Pi 3/4/5, generic ARMv8)
   - `riscv64gc-unknown-none-elf` (QEMU virt, SiFive boards)
   - `wasm32-unknown-unknown` (browser, Chrome-class environment)
-- **Focus:** Security, correctness, multi-user, multi-core, modular
-  drivers, modular scheduler, modular architecture support, and an
+- **Focus:** Security, correctness, performance, multi-user, multi-core,
+  modular drivers, modular scheduler, modular architecture support, and an
   optional RISC OS-style desktop with a compositing window manager.
   The desktop is a session frontend, not a kernel requirement: a
   headless build must remain a first-class configuration (§17).
+  RustOS must be **secure *and* fast**: security and correctness are the
+  floor (§2.1, §2.5–§2.7), and within that floor execution speed is a
+  first-class goal, not an afterthought (§2.16).
 
 ---
 
@@ -162,6 +165,44 @@ These are absolute. They override any local convenience.
       "Pre-existing" and "out of scope" are not exits (§2.5, §7).
     - Skipping, deferring ("CI will catch it"), faking, or partially running
       the gate is a §2.1 hack and a review blocker (§15.3, §15.6).
+16. **Performance is a first-class goal, never an afterthought.** RustOS must
+    be **fast as well as secure**: a correct, secure result that is needlessly
+    slow is not finished work. Every contributor weighs the runtime cost of
+    what they write and chooses the efficient design when a clean one exists —
+    this is part of the §2.6 senior-developer bar, not an optional polish pass.
+    - **Order of precedence.** Security (§2.7), correctness (§2.5, §2.6), and
+      the safety rules (§2.1, §2.9, §2.10) come first; performance is the next
+      priority after them and ahead of convenience. Performance never licenses
+      a hack (§2.1), a weakened or skipped test (§2.5), an unchecked input or
+      ambient-authority shortcut (§5.4), an `unsafe` block without its §2.10
+      obligations, or a `panic!` on an error path (§2.9). When a genuine,
+      *measured* security-vs-speed conflict exists, security wins and the cost
+      is documented — but the two are usually reconcilable, and "it's for
+      security" is not an excuse to stop caring about speed.
+    - **Hot paths are designed, not discovered.** The paths that run often —
+      syscall and IPC dispatch (§9), the capability check (§5.4), the scheduler
+      pick/yield/wake (§17.1), context switch and TLB handling (§17.2), the
+      allocator (§4), interrupt entry/exit, the compositor blit/blend path
+      (§10), and the filesystem and network data paths — are written to be
+      efficient by construction: no needless allocation, copying, locking, or
+      per-call work that can be hoisted, precomputed, or amortised. Security
+      checks on these paths are mandatory (§5.4) and must themselves be
+      efficient, not skipped.
+    - **No premature pessimisation, no blind micro-optimisation.** Do not write
+      gratuitously wasteful code (redundant copies, O(n²) where O(n) is as
+      clear, locks held longer than needed, allocation in a tight loop). Do not
+      contort code or reach for `unsafe` for speculative speed without a
+      measurement: clarity (§2.11) and the safety rules are not traded away on
+      a hunch. Optimise where it is measured to matter.
+    - **Measure, do not guess (§15.7).** Performance claims and regressions are
+      backed by evidence — a benchmark, a complexity argument, or a profile —
+      not by intuition. Where a subsystem has a stated latency or throughput
+      budget, a change that blows it is a defect to be fixed or reverted in the
+      same change, exactly like a failed test (§2.5).
+    - **Scope discipline still applies.** This rule is a duty of care, not a
+      licence to add bloat (§2.3), speculative interfaces (§2.4), or
+      sibling-collapsing "fast paths" that duplicate logic (§2.2). The fastest
+      code is often the code you did not write.
 
 ---
 
@@ -1763,6 +1804,16 @@ Trace, do not assume. For every entry point the change adds or touches
   tested (§7).
 - **Layering respected.** The dependency direction obeys §17.4; the headless
   build (§17.3) still works; no non-GUI crate gained a `userland/gui/*` edge.
+- **Performance is paid attention to (§2.16).** The change does not add a
+  gratuitously wasteful design — redundant copies or allocation on a hot path
+  (syscall/IPC dispatch, capability check, scheduler, context switch,
+  allocator, compositor, FS/network data paths), a lock held longer than
+  needed, or worse-than-necessary algorithmic complexity where a clean
+  efficient form exists. Security checks stay mandatory (§5.4) but are
+  themselves efficient. A claimed or suspected regression is backed by
+  measurement, and any blown latency/throughput budget is fixed or reverted in
+  the same change. No `unsafe` or contorted code is added for speculative speed
+  without evidence (§2.10, §2.11).
 
 ### 23.3 No backwards-compatibility, no dead code
 
