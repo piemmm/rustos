@@ -26,6 +26,27 @@
 
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 
+/// Alignment of the kthread-stack guard arena: one L2 block (2 MiB).
+///
+/// Laying the arena out on a 2 MiB boundary means each of its guard pages
+/// becomes its own L3 leaf after the boot path re-expresses the covering
+/// block at 4 KiB granularity
+/// ([`rustos_arch_aarch64::paging::AddressSpace::prepare_guard_arena`]), so
+/// a guard page can be unmapped without shattering the 2 MiB block the
+/// running CPU executes on (`plans/PI.md` guard-page fault-form, stage G2).
+const GUARD_ARENA_ALIGN: u64 = 2 * 1024 * 1024;
+
+/// Size of the reserved kthread-stack guard arena: one 2 MiB block.
+///
+/// One block holds many guarded kthread kernel stacks (each a few pages of
+/// stack plus a one-page guard); wiring `BoxStack` onto the arena is the
+/// staged follow-on (`plans/PI.md` stage G3), so G2 reserves a single
+/// representative block. The arena is carved out of the usable window and
+/// marked [`RegionKind::Reserved`] so the frame allocator never hands its
+/// frames to another use (`AGENTS.md` §4 — the guard would otherwise
+/// corrupt an unrelated allocation).
+const GUARD_ARENA_BYTES: u64 = GUARD_ARENA_ALIGN;
+
 /// Why the discovered RAM window could not be turned into a usable map.
 ///
 /// Each variant is a fail-closed refusal (`AGENTS.md` §2.9): the boot
@@ -59,14 +80,73 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
     value.checked_add(mask).map(|sum| sum & !mask)
 }
 
-/// Build the two-region physical-memory map for the discovered RAM
-/// window `[ram_base, ram_base + ram_size)`, reserving everything up to
-/// the page-aligned `kernel_end` and marking the remainder usable.
+/// The reserved, 2 MiB-aligned kthread-stack guard arena `(base, len)`
+/// the boot path fine-maps and the allocator must not touch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GuardArena {
+    /// First physical byte of the arena (2 MiB-aligned).
+    pub(crate) base: u64,
+    /// Arena length in bytes ([`GUARD_ARENA_BYTES`]).
+    pub(crate) len: u64,
+}
+
+/// The physical-memory map plus the reserved guard arena carved from it.
+///
+/// [`build_memory_map`] returns both so the boot path hands the allocator
+/// the [`map`](Self::map) and fine-maps the [`arena`](Self::arena) (when
+/// one fits) through the page-table block-split.
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryLayout {
+    /// The physical-memory map the frame allocator consumes.
+    pub(crate) map: BootMemoryMap,
+    /// The reserved guard arena, or `None` when the usable window is too
+    /// small to carve a 2 MiB-aligned block out of (fail-closed: the boot
+    /// path simply leaves the kthread-stack guard in its software-canary
+    /// form, `plans/PI.md` stage G2 watch-out).
+    pub(crate) arena: Option<GuardArena>,
+}
+
+/// Carve a 2 MiB-aligned guard arena out of the usable window
+/// `[usable_start, ram_end)`.
+///
+/// The arena is placed at the first 2 MiB boundary at or after
+/// `usable_start` (above the kernel image, so it never overlaps the
+/// running code or boot stack). Returns `None` if a whole
+/// [`GUARD_ARENA_BYTES`] block does not fit before `ram_end`, so a tiny
+/// RAM window degrades to no arena rather than a wrapped or overlapping
+/// region (`AGENTS.md` §2.9).
+fn carve_guard_arena(usable_start: u64, ram_end: u64) -> Option<GuardArena> {
+    let base = align_up(usable_start, GUARD_ARENA_ALIGN)?;
+    let end = base.checked_add(GUARD_ARENA_BYTES)?;
+    if end > ram_end {
+        return None;
+    }
+    Some(GuardArena {
+        base,
+        len: GUARD_ARENA_BYTES,
+    })
+}
+
+/// Build the physical-memory map for the discovered RAM window
+/// `[ram_base, ram_base + ram_size)`, reserving everything up to the
+/// page-aligned `kernel_end`, carving a 2 MiB-aligned kthread-stack guard
+/// arena out of the usable remainder, and marking what is left usable.
 ///
 /// `kernel_end` is the linker-provided one-past-the-end address of the
 /// kernel image including the boot heap (`__kernel_end`). It is rounded
 /// up to a whole [`PAGE_SIZE`] frame so the usable region the allocator
 /// receives starts on a frame boundary.
+///
+/// The returned [`MemoryLayout`] pairs the allocator map with the carved
+/// [`GuardArena`] (when one fits). The map's regions, in physical order,
+/// are: the [`RegionKind::Reserved`] kernel image, an optional
+/// [`RegionKind::Usable`] head below the arena, the
+/// [`RegionKind::Reserved`] guard arena, and the [`RegionKind::Usable`]
+/// remainder. Zero-length usable spans are omitted so no degenerate
+/// region reaches the allocator. The arena's frames are reserved so the
+/// allocator never hands them out (`AGENTS.md` §4); the boot path
+/// re-expresses the arena at 4 KiB granularity so a guard page in it can
+/// later be unmapped (`plans/PI.md` stage G2/G3).
 ///
 /// # Errors
 ///
@@ -78,7 +158,7 @@ pub(crate) fn build_memory_map(
     ram_base: u64,
     ram_size: u64,
     kernel_end: u64,
-) -> Result<BootMemoryMap, MemoryMapError> {
+) -> Result<MemoryLayout, MemoryMapError> {
     let ram_end = ram_base
         .checked_add(ram_size)
         .ok_or(MemoryMapError::AddressOverflow)?;
@@ -88,18 +168,56 @@ pub(crate) fn build_memory_map(
         return Err(MemoryMapError::UsableRegionEmpty);
     }
 
+    let arena = carve_guard_arena(usable_start, ram_end);
+
     let mut map = BootMemoryMap::new();
+    // The kernel image + boot heap: always reserved, from the RAM base
+    // through the first usable frame.
     map.push(MemoryRegion {
         kind: RegionKind::Reserved,
         start: PhysAddr::new(ram_base),
         length: usable_start - ram_base,
     });
-    map.push(MemoryRegion {
-        kind: RegionKind::Usable,
-        start: PhysAddr::new(usable_start),
-        length: ram_end - usable_start,
-    });
-    Ok(map)
+
+    match arena {
+        Some(GuardArena { base, len }) => {
+            let arena_end = base + len;
+            // Usable head between the kernel image and the 2 MiB-aligned
+            // arena (omitted when the arena starts exactly at the first
+            // usable frame).
+            if base > usable_start {
+                map.push(MemoryRegion {
+                    kind: RegionKind::Usable,
+                    start: PhysAddr::new(usable_start),
+                    length: base - usable_start,
+                });
+            }
+            // The reserved guard arena itself.
+            map.push(MemoryRegion {
+                kind: RegionKind::Reserved,
+                start: PhysAddr::new(base),
+                length: len,
+            });
+            // The usable remainder above the arena (omitted when the arena
+            // ends exactly at the RAM window).
+            if arena_end < ram_end {
+                map.push(MemoryRegion {
+                    kind: RegionKind::Usable,
+                    start: PhysAddr::new(arena_end),
+                    length: ram_end - arena_end,
+                });
+            }
+        }
+        None => {
+            map.push(MemoryRegion {
+                kind: RegionKind::Usable,
+                start: PhysAddr::new(usable_start),
+                length: ram_end - usable_start,
+            });
+        }
+    }
+
+    Ok(MemoryLayout { map, arena })
 }
 
 /// Total bytes the map covers of each [`RegionKind`], in `(usable,
@@ -119,21 +237,24 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_memory_map, region_byte_totals, MemoryMapError};
+    use super::{build_memory_map, region_byte_totals, MemoryMapError, GUARD_ARENA_BYTES};
     use rustos_kernel_mem::{RegionKind, PAGE_SIZE};
 
     /// The QEMU `virt` board's RAM base (GiB 1).
     const VIRT_RAM_BASE: u64 = 0x4000_0000;
+    /// 2 MiB block alignment (and arena size), mirrored from the module.
+    const TWO_MIB: u64 = 0x20_0000;
 
     #[test]
-    fn page_aligned_kernel_end_yields_reserved_then_usable() {
+    fn kernel_then_head_then_reserved_arena_then_usable() {
         let ram_size = 0x4000_0000; // 1 GiB
         let kernel_end = VIRT_RAM_BASE + 0x10_0000; // 1 MiB image, already aligned
-        let map =
+        let layout =
             build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("window is well-formed");
-
-        let regions = map.regions();
-        assert_eq!(regions.len(), 2);
+        let regions = layout.map.regions();
+        // Reserved kernel, usable head (kernel end is not 2 MiB-aligned),
+        // reserved arena, usable remainder.
+        assert_eq!(regions.len(), 4);
 
         assert_eq!(regions[0].kind, RegionKind::Reserved);
         assert_eq!(regions[0].start.as_u64(), VIRT_RAM_BASE);
@@ -141,38 +262,99 @@ mod tests {
 
         assert_eq!(regions[1].kind, RegionKind::Usable);
         assert_eq!(regions[1].start.as_u64(), kernel_end);
-        assert_eq!(regions[1].length, ram_size - 0x10_0000);
 
-        // The two regions are contiguous and cover the whole window.
-        assert_eq!(
-            regions[1].start.as_u64() + regions[1].length,
-            VIRT_RAM_BASE + ram_size,
+        let arena = layout.arena.expect("a 2 MiB arena fits in a 1 GiB window");
+        assert_eq!(arena.len, GUARD_ARENA_BYTES);
+        assert_eq!(arena.base % TWO_MIB, 0, "arena is 2 MiB-aligned");
+        assert!(
+            arena.base >= kernel_end,
+            "arena sits above the kernel image"
         );
+        assert_eq!(regions[2].kind, RegionKind::Reserved);
+        assert_eq!(regions[2].start.as_u64(), arena.base);
+        assert_eq!(regions[2].length, arena.len);
+
+        assert_eq!(regions[3].kind, RegionKind::Usable);
+        assert_eq!(regions[3].start.as_u64(), arena.base + arena.len);
+
+        // The regions are contiguous and cover the whole window exactly.
+        assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
+    }
+
+    #[test]
+    fn arena_aligned_kernel_end_omits_the_usable_head() {
+        // A 2 MiB-aligned kernel end leaves the arena starting exactly at
+        // the first usable frame, so there is no head-usable region.
+        let ram_size = 0x4000_0000;
+        let kernel_end = VIRT_RAM_BASE + TWO_MIB;
+        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let regions = layout.map.regions();
+        assert_eq!(regions.len(), 3, "no usable head when the arena is aligned");
+        let arena = layout.arena.expect("arena fits");
+        assert_eq!(arena.base, kernel_end);
+        assert_eq!(regions[1].kind, RegionKind::Reserved);
+        assert_eq!(regions[1].start.as_u64(), arena.base);
+        assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
     }
 
     #[test]
     fn unaligned_kernel_end_rounds_up_to_a_whole_frame() {
         let ram_size = 0x4000_0000;
         let kernel_end = VIRT_RAM_BASE + 0x10_0123; // mid-page
-        let map = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
 
-        let usable_start = map.regions()[1].start.as_u64();
+        let usable_start = layout.map.regions()[1].start.as_u64();
         assert_eq!(usable_start % PAGE_SIZE as u64, 0);
         assert_eq!(usable_start, VIRT_RAM_BASE + 0x10_1000);
-        // No byte of memory is lost: reserved end meets usable start.
-        let reserved = map.regions()[0];
+        // No byte of memory is lost: reserved end meets the first usable
+        // frame, and every region tiles the window.
+        let reserved = layout.map.regions()[0];
         assert_eq!(reserved.start.as_u64() + reserved.length, usable_start);
+        assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
     }
 
     #[test]
-    fn byte_totals_split_usable_and_reserved() {
+    fn byte_totals_count_kernel_and_arena_as_reserved() {
         let ram_size = 0x4000_0000;
-        let kernel_end = VIRT_RAM_BASE + 0x20_0000; // 2 MiB
-        let map = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
-        let (usable, reserved) = region_byte_totals(&map);
-        assert_eq!(reserved, 0x20_0000);
-        assert_eq!(usable, ram_size - 0x20_0000);
+        let kernel_end = VIRT_RAM_BASE + TWO_MIB; // 2 MiB, already aligned
+        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let (usable, reserved) = region_byte_totals(&layout.map);
+        // The kernel image (2 MiB) plus the reserved arena (2 MiB).
+        assert_eq!(reserved, TWO_MIB + GUARD_ARENA_BYTES);
+        assert_eq!(usable, ram_size - reserved);
         assert_eq!(usable + reserved, ram_size);
+    }
+
+    #[test]
+    fn small_window_too_tight_for_an_arena_yields_none() {
+        // 3 MiB total, 1 MiB kernel: the next 2 MiB-aligned arena block
+        // would run past the window, so no arena is carved and the map is
+        // the plain reserved-then-usable split (fail closed, no overlap).
+        let ram_size = 0x30_0000; // 3 MiB
+        let kernel_end = VIRT_RAM_BASE + 0x10_0000; // 1 MiB
+        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        assert!(layout.arena.is_none(), "no arena fits a 3 MiB window");
+        let regions = layout.map.regions();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].kind, RegionKind::Reserved);
+        assert_eq!(regions[1].kind, RegionKind::Usable);
+        assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
+    }
+
+    /// Assert the map's regions tile `[ram_base, ram_base + ram_size)`
+    /// exactly: contiguous, non-overlapping, and lossless.
+    fn assert_regions_tile_window(layout: &super::MemoryLayout, ram_base: u64, ram_size: u64) {
+        let regions = layout.map.regions();
+        let mut cursor = ram_base;
+        for region in regions {
+            assert_eq!(region.start.as_u64(), cursor, "regions are contiguous");
+            cursor += region.length;
+        }
+        assert_eq!(
+            cursor,
+            ram_base + ram_size,
+            "regions cover the whole window"
+        );
     }
 
     #[test]

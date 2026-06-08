@@ -127,17 +127,21 @@ fn kernel_end_addr() -> u64 {
 }
 
 /// Enable the stage-1 identity MMU and install the EL1 exception
-/// vectors on the boot CPU.
+/// vectors on the boot CPU, returning the live boot [`AddressSpace`].
 ///
-/// Returns `false` (leaving the MMU off) when the boot page-table pool
+/// Returns `None` (leaving the MMU off) when the boot page-table pool
 /// cannot satisfy the identity map — a fail-closed signal the caller
 /// logs and parks on rather than running `kernel_main` over un-cacheable
 /// Device memory (`AGENTS.md` §2.9).
-fn enable_mmu_and_vectors() -> bool {
-    let Some(space) = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)
-    else {
-        return false;
-    };
+///
+/// The handle is returned, not dropped, so the caller can re-express the
+/// kthread-stack guard arena at 4 KiB granularity over the *active*
+/// tables once the RAM window has been discovered
+/// ([`AddressSpace::prepare_guard_arena`], `plans/PI.md` stage G2). The
+/// returned space still owns `TTBR0_EL1`'s root table
+/// ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
+fn enable_mmu_and_vectors() -> Option<AddressSpace> {
+    let space = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)?;
     // SAFETY: `new_identity_gigapages` identity-maps `[0, 512 GiB)`, so
     // the currently-executing `pc`, the boot stack, the firmware DTB, and
     // the board MMIO window all keep their physical addresses — enabling
@@ -150,7 +154,7 @@ fn enable_mmu_and_vectors() -> bool {
         space.switch();
         exceptions::init_vectors();
     }
-    true
+    Some(space)
 }
 
 /// Boot the aarch64 kernel on the boot CPU and hand off to
@@ -200,7 +204,8 @@ pub fn boot(
     // also makes the full-tree FDT walk below (`first_memory_region`)
     // safe, which faults MMU-off under release optimisation
     // (`plans/PI.md` watch-out).
-    let mmu_on = enable_mmu_and_vectors();
+    let mut boot_space = enable_mmu_and_vectors();
+    let mmu_on = boot_space.is_some();
 
     // Discover the board from the firmware device tree: point the console
     // at the UART, the GICv2 driver at the discovered GICD/GICC bases, and
@@ -240,21 +245,38 @@ pub fn boot(
     // An absent or malformed window fails closed to a status string
     // rather than a panic (`AGENTS.md` §2.9); the map is retained (not
     // just measured) so it can be moved into the `BootInfo` hand-off.
-    let map_result: Result<rustos_kernel_mem::BootMemoryMap, &'static str> =
+    let layout_result: Result<crate::mem_map::MemoryLayout, &'static str> =
         match discovered.ram_window {
             None => Err("no_memory_window"),
             Some((base, size)) => {
                 build_memory_map(base, size, kernel_end_addr()).map_err(|err| err.as_str())
             }
         };
-    let (mem_status, usable_bytes, reserved_bytes) = match &map_result {
-        Ok(map) => {
-            let (usable, reserved) = region_byte_totals(map);
+    let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
+        Ok(layout) => {
+            let (usable, reserved) = region_byte_totals(&layout.map);
             ("built", usable, reserved)
         }
         Err(status) => (*status, 0, 0),
     };
-    let mem_map_built = map_result.is_ok();
+    let mem_map_built = layout_result.is_ok();
+
+    // G2: re-express the reserved kthread-stack guard arena at 4 KiB
+    // granularity over the *active* boot tables, so a guard page in it can
+    // later be unmapped without shattering the 2 MiB block the CPU runs on
+    // (`plans/PI.md` stage G2 → G3). The split only *adds* table levels
+    // reproducing the existing translation, so it is safe against the live
+    // regime and needs no TLB maintenance. A window too small to carve an
+    // arena, or a pool that cannot supply the replacement tables, leaves
+    // the guard in its software-canary form — fail closed, never fatal to
+    // boot (`AGENTS.md` §2.9 / `plans/PI.md` G2 watch-out).
+    let arena_prepared = match (boot_space.as_mut(), &layout_result) {
+        (Some(space), Ok(layout)) => layout
+            .arena
+            .is_some_and(|arena| space.prepare_guard_arena(arena.base, arena.len).is_ok()),
+        _ => false,
+    };
+
     let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
 
     let level = if ready { Level::Info } else { Level::Warn };
@@ -326,6 +348,10 @@ pub fn boot(
                     value: yes_no(mmu_on),
                 },
                 Field {
+                    key: "guard_arena_prepared",
+                    value: yes_no(arena_prepared),
+                },
+                Field {
                     key: "next_stage",
                     value: "pi_p6c3_spawn_init_el0",
                 },
@@ -337,8 +363,8 @@ pub fn boot(
     // is sound; otherwise park fail-closed (`AGENTS.md` §2.9). The map is
     // moved into `BootInfo` here, so it is built exactly once.
     if ready {
-        if let Ok(memory_map) = map_result {
-            enter_kernel_core(arch, memory_map, log_sink, audit_sink)
+        if let Ok(layout) = layout_result {
+            enter_kernel_core(arch, layout.map, log_sink, audit_sink)
         }
     }
 

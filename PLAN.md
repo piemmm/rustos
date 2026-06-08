@@ -1985,9 +1985,24 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `tests/integration/stack_guard_qemu_aarch64` (split a RAM
                   block, MMU on, sentinel write+read-back, then unmap+flush
                   one page and fault on access → PASS, ids 4300-4302),
-                  **verified green under QEMU on this host**. G2 (guarded
-                  kthread-stack arena via a boot-map change) + G3 (`BoxStack`
-                  rewire + HAL promotion + production wiring) follow. Docs:
+                  **verified green under QEMU on this host**. **G2 is now
+                  landed:** `paging::AddressSpace::prepare_guard_arena(base,
+                  len)` applies `split_block` to every 2 MiB block an arena
+                  spans (idempotent, fail-closed, BBM-free, 3 host tests);
+                  `rustos-kernel::mem_map` carves a 2 MiB-aligned, 2 MiB
+                  guard arena out of the usable RAM window and marks it
+                  `Reserved` (returning a `MemoryLayout { map, arena }`, 2
+                  new host tests); `boot_aarch64` keeps the live boot
+                  `AddressSpace` and fine-maps the arena over the active
+                  tables after discovery (`guard_arena_prepared` audit
+                  field); and the per-arch vertical
+                  `tests/integration/stack_arena_qemu_aarch64` (ids
+                  4303-4305) prepares an arena that is its own 2 MiB block,
+                  unmaps a guard page in it, proves the running stack (a
+                  different block) and a neighbour page still work, then
+                  faults on the unmapped page → PASS, **verified green under
+                  QEMU on this host**. G3 (`BoxStack` rewire + `split_block`
+                  HAL promotion + production wiring) follows. Docs:
                   `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**

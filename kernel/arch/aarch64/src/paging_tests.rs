@@ -303,6 +303,97 @@ fn split_block_is_idempotent_and_fails_closed() {
 }
 
 #[test]
+fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // An arena that straddles a 2 MiB boundary inside the RAM gigapage:
+    // it starts 2 MiB-aligned and is 2 MiB + one page long, so it spans
+    // two distinct L2 blocks. Both must end up as 4 KiB leaves.
+    let base: u64 = (1u64 << 30) + 4 * BLOCK_2MIB;
+    let len: u64 = BLOCK_2MIB + PAGE_SIZE as u64;
+    assert!(is_block(
+        host_leaf_descriptor(space.root_phys(), base).expect("block maps base")
+    ));
+
+    space
+        .prepare_guard_arena(base, len)
+        .expect("prepare the arena");
+
+    // A page in the first covering block, a page in the second, and the
+    // arena's last page all resolve through 4 KiB page leaves now, each
+    // identity-translating exactly as the block did.
+    for va in [base, base + BLOCK_2MIB, base + len - PAGE_SIZE as u64] {
+        let leaf = host_leaf_descriptor(space.root_phys(), va).expect("page maps va");
+        assert!(!is_block(leaf), "arena page {va:#x} is now a 4 KiB leaf");
+        assert_eq!(
+            phys_from_descriptor(leaf),
+            va,
+            "identity preserved at {va:#x}"
+        );
+    }
+
+    // A single arena page now unmaps cleanly while its neighbour stays
+    // mapped — the property the guard page relies on.
+    let guard = base + 3 * PAGE_SIZE as u64;
+    assert_eq!(
+        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, guard),
+        Ok(guard),
+    );
+    assert_eq!(host_translate(space.root_phys(), guard), None);
+    assert_eq!(
+        host_translate(space.root_phys(), guard + PAGE_SIZE as u64),
+        Some(guard + PAGE_SIZE as u64),
+    );
+}
+
+#[test]
+fn prepare_guard_arena_is_idempotent() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let base: u64 = (1u64 << 30) + 6 * BLOCK_2MIB;
+
+    space.prepare_guard_arena(base, BLOCK_2MIB).expect("first");
+    let leaf_once = host_leaf_descriptor(space.root_phys(), base).expect("mapped");
+    space
+        .prepare_guard_arena(base, BLOCK_2MIB)
+        .expect("re-prepare is a no-op");
+    assert_eq!(
+        host_leaf_descriptor(space.root_phys(), base),
+        Some(leaf_once),
+        "an already-fine arena is left untouched",
+    );
+}
+
+#[test]
+fn prepare_guard_arena_fails_closed() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let base: u64 = (1u64 << 30) + 8 * BLOCK_2MIB;
+
+    // Zero length, a misaligned base, and an arena over unmapped memory
+    // are each rejected (`AGENTS.md` §2.9).
+    assert_eq!(
+        space.prepare_guard_arena(base, 0),
+        Err(MapError::Misaligned)
+    );
+    assert_eq!(
+        space.prepare_guard_arena(base | 0x1, BLOCK_2MIB),
+        Err(MapError::Misaligned),
+    );
+    assert_eq!(
+        space.prepare_guard_arena(64u64 << 30, BLOCK_2MIB),
+        Err(MapError::NotMapped),
+    );
+    // A length that wraps the address space is a degenerate arena, refused
+    // rather than truncated.
+    assert_eq!(
+        space.prepare_guard_arena(base, u64::MAX),
+        Err(MapError::Misaligned),
+    );
+}
+
+#[test]
 fn passes_mmu_conformance() {
     use rustos_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();

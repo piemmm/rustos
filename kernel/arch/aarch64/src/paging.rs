@@ -38,6 +38,15 @@ use rustos_arch_api::tlb::TlbShootdown;
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
 
+/// Size of an L2 block descriptor's translation (2 MiB).
+///
+/// The granularity [`AddressSpace::split_block`] re-expresses a coarse
+/// block down to before reaching 4 KiB leaves, and the alignment the
+/// guard-page arena ([`AddressSpace::prepare_guard_arena`]) is laid out
+/// at so each guard page becomes its own L3 leaf without disturbing a
+/// neighbour.
+pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
+
 /// Number of 64-bit entries in a stage-1 page-table page.
 pub const ENTRIES_PER_TABLE: usize = 512;
 
@@ -529,6 +538,59 @@ impl AddressSpace {
             l2[i2] = table_descriptor(phys);
         }
         // L2 now resolves `vaddr` through a 4 KiB page leaf.
+        Ok(())
+    }
+
+    /// Re-express every coarse block covering the arena
+    /// `[base, base + len)` at 4 KiB granularity, so any single page in
+    /// the arena can later be unmapped (e.g. a kthread kernel-stack guard
+    /// page) without shattering the block the running CPU executes on
+    /// (`plans/PI.md` guard-page fault-form, stage G2).
+    ///
+    /// This is [`Self::split_block`] applied to every 2 MiB block the
+    /// arena spans: a guard-page arena that the boot path laid down inside
+    /// the coarse identity gigapages has no per-4 KiB leaf to clear, so the
+    /// whole arena is split up-front, at boot, while it holds no running
+    /// context. Because `split_block` only ever *adds* table levels that
+    /// reproduce the existing translation, preparing the arena changes no
+    /// address's mapping and needs no TLB maintenance — it is safe against
+    /// the active translation regime and is idempotent (a re-prepare of an
+    /// already-fine arena allocates nothing).
+    ///
+    /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
+    /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
+    /// arena is walked from the 2 MiB block containing `base` through the
+    /// block containing its last byte, so an arena that is not itself a
+    /// whole number of 2 MiB blocks still has every covering block split.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `len` is zero or `base` is not
+    /// 4 KiB-aligned, [`MapError::NotMapped`] if any covering block has no
+    /// live mapping, or [`MapError::PoolExhausted`] if the page-table pool
+    /// cannot supply a replacement table. On a mid-arena failure the
+    /// blocks already split stay split (a faithful re-expression of the
+    /// same translation), so the space never describes a *different*
+    /// mapping (`AGENTS.md` §2.9 — fail closed, never corrupt).
+    pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
+        if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // The last byte the arena occupies; `len != 0`, so `base + len`
+        // does not underflow when computing it. A `base + len` that wraps
+        // `u64` is rejected as a fail-closed `Misaligned` (a degenerate
+        // arena), never silently truncated (`AGENTS.md` §2.9).
+        let last = base.checked_add(len - 1).ok_or(MapError::Misaligned)?;
+        let first_block = base & !(BLOCK_2MIB - 1);
+        let last_block = last & !(BLOCK_2MIB - 1);
+        let mut block = first_block;
+        loop {
+            self.split_block(block)?;
+            if block == last_block {
+                break;
+            }
+            block += BLOCK_2MIB;
+        }
         Ok(())
     }
 

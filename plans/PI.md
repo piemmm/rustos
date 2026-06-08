@@ -858,14 +858,35 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
     page and read it → synchronous data abort → PASS. **Verified green under
     QEMU on `-M virt` on this host.** Doc: `docs/src/platform/aarch64.md`
     ("Splitting a block: the guard-page fault-form").
-  - **G2 — guarded kthread-stack arena (boot mapping) `[ ]`.** Give kthread
+  - **G2 — guarded kthread-stack arena (boot mapping) `[x]`.** Gives kthread
     kernel-stacks a region whose guard pages can be unmapped without ever
-    shattering the block the CPU runs on: either map the kthread-stack arena
+    shattering the block the CPU runs on, by mapping a kthread-stack arena
     at 2 MiB/4 KiB granularity at boot (so a guard page is its own L3 leaf
     reachable through the G1 split run on a 2 MiB block that holds no running
-    context), or place the arena at a globally-mapped VA backed by allocator
-    frames at 4 KiB. Boot-map change in `boot_aarch64`, behind the Arch HAL
-    (no `cfg(target_arch)` leak), with a per-arch conformance vertical.
+    context). `rustos_arch_aarch64::paging::AddressSpace::prepare_guard_arena(base, len)`
+    is `split_block` applied to every 2 MiB block the arena spans — idempotent,
+    fail-closed (`Misaligned`/`NotMapped`/`PoolExhausted`), BBM-free against the
+    live regime (it only *adds* table levels reproducing the translation), and
+    needs no TLB maintenance (3 host tests in `paging_tests.rs`). `mem_map.rs`
+    carves a 2 MiB-aligned, 2 MiB guard arena out of the usable RAM window
+    (above the kernel image) and marks it `Reserved` so the allocator never
+    hands its frames out, returning a `MemoryLayout { map, arena }` (rewritten
+    + 2 new host tests proving the regions tile the window with no gap/overlap;
+    a too-small window degrades to no arena, fail closed). `boot_aarch64` now
+    keeps the live boot `AddressSpace` (`enable_mmu_and_vectors` returns it),
+    fine-maps the arena over the *active* tables after discovery, and logs a
+    `guard_arena_prepared` audit field. The per-arch conformance vertical
+    `tests/integration/stack_arena_qemu_aarch64` (ids 4300-range 4303–4305)
+    builds an identity space, prepares a 2 MiB-aligned arena that is its own L2
+    block, enables the MMU, write+read-back-verifies a guard page, `unmap`s it
+    + `flush_page`s it through the Arch HAL, proves the running stack (a
+    *different* 2 MiB block) and a neighbouring arena page still work, then
+    reads the unmapped page → synchronous data abort → PASS. **Verified green
+    under QEMU on `-M virt` on this host.** Doc:
+    `docs/src/platform/aarch64.md` ("A guard-page arena: the boot mapping").
+    The boot-map change stays in `boot_aarch64` (the §17.2 arch-gated binary,
+    no `cfg(target_arch)` leak); promoting `prepare_guard_arena` onto the Arch
+    HAL `AddressSpace` surface is **G3**.
   - **G3 — `BoxStack` rewire + HAL promotion + production wiring `[ ]`.**
     Promote `split_block` to the Arch HAL `AddressSpace` surface (the other
     ports get a real impl or an honest `Pending`/`Unsupported` profile),

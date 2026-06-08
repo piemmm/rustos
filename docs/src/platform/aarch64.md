@@ -744,6 +744,49 @@ write+read-back a sentinel through the guard page (the split preserved the
 mapping live), then `unmap` + `flush_page` that one page and read it — the
 MMU raises a synchronous data abort the fault handler reports as PASS.
 
+### A guard-page arena: the boot mapping (P6 follow-on, G2)
+
+G1 supplies the per-page primitive; G2 lays out *where* the guarded
+kthread kernel stacks live so the eventual guard-page unmap (G3) never has
+to break-before-make the coarse block the CPU is currently running on or
+stacked in. The boot path reserves a **guard arena** — a 2 MiB-aligned,
+2 MiB region carved out of the discovered usable RAM window, above the
+kernel image (`rustos-kernel::mem_map`) — and marks it
+`RegionKind::Reserved` so the frame allocator never hands its frames to
+another use (`AGENTS.md` §4: a guard page on shared frames would corrupt
+an unrelated allocation). `build_memory_map` now returns a
+`MemoryLayout { map, arena }` whose regions tile the window exactly
+(reserved kernel image, optional usable head, the reserved arena, usable
+remainder); a window too small for a 2 MiB block degrades to no arena
+(fail closed), leaving the guard in its software-canary form.
+
+`AddressSpace::prepare_guard_arena(base, len)` re-expresses the arena at
+4 KiB granularity by applying `split_block` to every 2 MiB block the arena
+spans. Because the split only *adds* table levels (it is the same
+break-before-make-free operation above), preparing the arena over the
+*active* boot tables changes no translation and needs no TLB maintenance;
+it is idempotent and fails closed (`Misaligned` / `NotMapped` /
+`PoolExhausted`). `boot_aarch64` keeps the live boot `AddressSpace`
+(`enable_mmu_and_vectors` returns it) and prepares the arena after the RAM
+window is discovered, recording a `guard_arena_prepared` audit field. The
+crucial property is that the arena is its own 2 MiB block, **distinct from
+the block holding the running code and stack** — so unmapping a guard page
+in it later (G3) never touches the running region.
+
+The carving and tiling arithmetic is host-tested (`mem_map.rs`), the
+range-split is host-tested (`paging_tests.rs`:
+`prepare_guard_arena_splits_every_covering_block_preserving_translation`,
+`prepare_guard_arena_is_idempotent`, `prepare_guard_arena_fails_closed`),
+and the live mechanism is proven on `-M virt` by
+`tests/integration/stack_arena_qemu_aarch64`: prepare a 2 MiB-aligned arena
+that is its own block, enable the MMU, write+read-back a sentinel through a
+guard page, `unmap` + `flush_page` it, prove the running stack (a
+*different* 2 MiB block) and a neighbouring arena page still work, then
+read the unmapped page — the MMU raises a synchronous data abort the fault
+handler reports as PASS. Promoting `prepare_guard_arena` onto the Arch HAL
+`AddressSpace` surface and routing `kthread::BoxStack` through the arena is
+the staged G3 follow-on.
+
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 
 The aarch64 port implements the Arch HAL `CrossCpuTlbShootdown` slice

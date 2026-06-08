@@ -1461,6 +1461,36 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // `plans/PI.md` guard-page fault-form (stage G2):
+    // `rustos-test-stack-arena-qemu-aarch64` proves the boot-time
+    // kthread-stack guard arena (`AddressSpace::prepare_guard_arena`). It
+    // builds one stage-1 `paging::AddressSpace` (identity-maps the low
+    // 2 GiB), prepares a 2 MiB-aligned, 2 MiB guard arena at 4 KiB
+    // granularity (the arena is its own L2 block, distinct from the block
+    // holding the running code/stack), installs the EL1 vectors + a
+    // `fault` handler, enables the MMU, writes+reads-back a sentinel
+    // through an arena guard page (proving the split preserved the mapping
+    // live), then `unmap`s that one page through the Arch HAL +
+    // `flush_page`s it, proves the running stack (a different 2 MiB block)
+    // and a neighbouring arena page still work, and reads the unmapped
+    // page: the MMU raises a data abort, the handler confirms the cause /
+    // faulting address, and reports PASS via semihosting. A regression
+    // that shatters the running block, fails to preserve the arena, or
+    // never faults either reports FAILURE explicitly or times out. Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
+    QemuTest {
+        package: "rustos-test-stack-arena-qemu-aarch64",
+        binary: "rustos-test-stack-arena-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
     // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
     // `rustos-test-irq-qemu-aarch64` installs the EL1 vectors, brings up the

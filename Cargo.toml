@@ -142,6 +142,7 @@ members = [
     "tests/integration/timer_preempt_qemu_aarch64",
     "tests/integration/memory_isolation_qemu_aarch64",
     "tests/integration/stack_guard_qemu_aarch64",
+    "tests/integration/stack_arena_qemu_aarch64",
     "tests/integration/memory_isolation_qemu_riscv64",
     "tests/integration/riscv64_boot",
     "tests/integration/syscall_dispatch_qemu",
