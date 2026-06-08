@@ -5782,6 +5782,29 @@ rejection). Docs: spec §13, `docs/src/filesystem/rustfs.md`, crate `README.md`.
   `docs/src/userland/appmgr.md` (+ SUMMARY links) and both `README.md`s.
   **Every Stage 6 deliverable is now done.**
 
+### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
+
+**Status: planned (not started).**
+
+The §20 standard-stream floor is in place: every text program does I/O over
+inherited fd 0/1/2/3 through the thin `lib/rt` wrappers
+(`stdout`/`stderr`/`stdinfo`/`stdin`), never a device syscall. What is missing
+is the ergonomic *library* on top of those wrappers — the RustOS equivalent of
+a `std::io` surface (`Read`/`Write` traits, buffered reader/writer with line
+reading, and `write!`/`writeln!`-style formatting) — so shells, tools, and
+services program against an abstraction instead of re-implementing the same
+short-write loop and "read until newline" logic (which would be the
+duplication `AGENTS.md` §2.2 forbids). It is a pure layer over the existing
+`abi-v1` stream syscalls: it adds **no** ABI surface, **no** syscall, and
+**no** capability (`AGENTS.md` §5.4), exposes only the four standard streams
+(never a device, §20), and is `no_std` + fail-closed (§2.9). RustOS does
+**not** build a system-wide C `stdio` — the *System runtime / C ABI* class
+stays minimal and a third-party C program brings its own libc in its bundle
+(`AGENTS.md` §16.4, `plans/CCOMPAT.md`). Staged IO1 (traits + the four stream
+handles) → IO2 (buffering) → IO3 (formatting) → IO4 (adopt across userland and
+delete the hand-rolled loops, §2.14) in `plans/IO.md`, which is binding under
+`AGENTS.md`.
+
 ---
 
 ## Stage 7 — Graphics, Window Manager, Taskbar
