@@ -277,6 +277,23 @@ pub fn boot(
         _ => false,
     };
 
+    // G3b-2: publish the reserved guard arena to the kthread-stack
+    // allocator so the PID 1 spawn seam can draw `init`'s kernel stack out
+    // of it and unmap that stack's guard page in `init`'s own page-table
+    // root — turning a stack overrun into a synchronous fault rather than a
+    // poison-canary detection (`plans/PI.md` G3b-2). Installed from the
+    // carved arena regardless of `arena_prepared` (which only re-expresses
+    // the arena over the *boot* tables): `init` builds its own root and
+    // splits the arena there independently; it needs only that the arena's
+    // frames are `Reserved` (the memory-map builder guarantees this). When
+    // no arena was carved the install is skipped and the seam falls back to
+    // a software-canary `BoxStack` (fail closed, `AGENTS.md` §2.17).
+    if let Ok(layout) = &layout_result {
+        if let Some(arena) = layout.arena {
+            crate::stack_arena::KTHREAD_STACK_ARENA.install(arena.base, arena.len);
+        }
+    }
+
     let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
 
     let level = if ready { Level::Info } else { Level::Warn };

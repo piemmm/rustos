@@ -828,13 +828,49 @@ x86_64 do, matching their `Pending` split); aarch64's `paging_tests`
 proves the HAL `prepare_guard_arena` reaches the inherent body over a
 `dyn AddressSpace`.
 
-Routing `kthread::BoxStack` through the arena (so an overrun takes a
-synchronous abort rather than a next-reschedule canary detection) needs
-the cross-space arena-frame plumbing reachable from the arch-neutral
-`kernel/core` (a kthread kernel stack must be mapped in every address
-space the task runs under), so it is the staged **G3b/G3c** follow-on; the
-poison-canary guard remains the binding non-deferred defence until it
-lands (`AGENTS.md` §2.17).
+### Routing the kthread stack through the arena (G3b-2)
+
+PID 1 `init`'s kernel stack is now drawn from the reserved guard arena
+with its guard page genuinely **unmapped in `init`'s own page-table
+root**, so an overrun of `init`'s kernel stack takes a synchronous data
+abort under `init`'s `TTBR0_EL1` rather than a next-reschedule
+poison-canary detection. The pieces:
+
+- A forward-only bump allocator, `stack_arena::KTHREAD_STACK_ARENA`
+  (`rustos-kernel`), hands kthread kernel stacks out of the boot-reserved
+  arena (`mem_map`, G2). `boot_aarch64` `install`s it from the carved
+  arena `(base, len)`; each `alloc` returns an `ArenaStack` — a one-page
+  guard region below the usable `KTHREAD_STACK_BYTES` stack, identical in
+  geometry to the heap-backed `BoxStack`. Regions are never reclaimed (the
+  monotonic, free-list-free discipline of the spawn page-table pools,
+  `AGENTS.md` §2.1).
+- `init_spawn` allocates one region, then — on `init`'s *own* concrete
+  `arch` address space, **before** it is switched to — calls
+  `split_block(guard)` (re-expressing the coarse identity block at 4 KiB)
+  followed by `unmap(guard)`. Doing it before activation disturbs no live
+  access and needs no TLB maintenance. The boxed stack is handed to
+  `kernel/core` through the new `InitSpawnCtx::admit_init` `stack`
+  parameter (a `Box<dyn KernelStack + Send>`, so the concrete stack source
+  never leaks into the object-safe boundary, §17.4) and admitted via
+  `spawn_user_kthread_with_stack`.
+- If no arena region is available, or the split/unmap could not be
+  applied, the seam falls back to a software-canary `BoxStack` — it never
+  runs on an unguarded stack (fail closed, `AGENTS.md` §2.9 / §2.17).
+
+`ArenaStack::check_guard` keeps the default `Ok(())`: the guard page is
+unmapped, so the hardware fault is the defence (there is no poison canary
+to scan, and reading the page under the dispatcher's root would
+false-positive). The allocator's bump arithmetic is host-tested
+(`stack_arena` unit tests), and the existing aarch64 `spawn_init` /
+`spawn_session` / `wait` QEMU verticals prove `init` still reaches EL0,
+writes its banner, and supervises the session on the arena-backed stack.
+
+Two follow-ons remain. The runtime `spawn`-syscall path (the session and
+anything it launches) still takes a `BoxStack`; routing it through the
+arena too is **G3b-2-ii** (the poison-canary remains its binding
+non-deferred defence until then, `AGENTS.md` §2.17). Proving an
+*overrunning* kthread takes the synchronous abort on `-M virt` is the
+separate **G3c** vertical.
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

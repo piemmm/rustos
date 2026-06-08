@@ -133,6 +133,17 @@ pub trait InitSpawnCtx {
     /// its banner) resolves the caller's address space instead of failing
     /// closed with `BadAddress` (`plans/PI.md` P6c-3 follow-up).
     ///
+    /// `stack` is PID 1's kernel stack, built by the arch seam so the
+    /// concrete stack source never leaks into this object-safe boundary
+    /// (`AGENTS.md` §17.4). The seam supplies either the heap-backed
+    /// software-canary [`crate::BoxStack`] or an arena-backed stack whose
+    /// guard page it has **unmapped in PID 1's own page-table root**, so an
+    /// overrun of PID 1's kernel stack takes a synchronous fault under PID
+    /// 1's translation regime rather than corrupting a neighbour
+    /// (`plans/PI.md` guard-page fault-form; `AGENTS.md` §4 / §2.17). The
+    /// runtime stores it in PID 1's control block and frees it when the task
+    /// exits.
+    ///
     /// # Safety
     ///
     /// The seam must have built PID 1's image into the **active** address
@@ -140,12 +151,15 @@ pub trait InitSpawnCtx {
     /// before calling here, so PID 1's first syscall is handled rather than
     /// faulting. `space` must faithfully describe the mappings the active
     /// address space resolves, and `physmap` must back them, so the copy
-    /// path reads exactly the memory the program sees.
+    /// path reads exactly the memory the program sees. `stack` must be a
+    /// region exclusive to PID 1 that stays mapped (its guard page aside)
+    /// and valid for as long as the task lives.
     unsafe fn admit_init(
         &self,
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut() + Send>,
         enter: Box<dyn FnMut() + Send>,
     );

@@ -258,6 +258,25 @@ unsafe impl KernelStack for BoxStack {
     }
 }
 
+// SAFETY: every method forwards to the boxed `KernelStack`, which upholds
+// the trait contract (a mapped, writable, exclusive, `STACK_ALIGN`-aligned
+// region whose `top` stays valid for the value's life). Boxing erases the
+// concrete stack source — `BoxStack` (the software-canary form) or an
+// arch-built arena stack whose guard page is unmapped in the task's own
+// root — so an arch spawn seam can hand `kernel/core` a stack of either
+// kind without the concrete type leaking into the admission generics
+// (`AGENTS.md` §2.2 / §17.4). The box owns its payload and is `Send`, so the
+// admitted task may run on any CPU.
+unsafe impl KernelStack for Box<dyn KernelStack + Send> {
+    fn top(&self) -> u64 {
+        (**self).top()
+    }
+
+    fn check_guard(&self) -> Result<(), StackGuardViolation> {
+        (**self).check_guard()
+    }
+}
+
 /// Where a kthread is in its lifecycle, from the shim's point of view.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum RunState {

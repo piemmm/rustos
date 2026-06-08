@@ -152,6 +152,17 @@ pub mod spawn_producer;
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 mod mem_map;
 
+// The guarded kthread kernel-stack arena (`plans/PI.md` G3b-2): the
+// forward-only bump allocator that hands kthread kernel stacks out of the
+// boot-reserved guard arena (`mem_map`) so a stack's guard page can be
+// unmapped in the owning task's root and an overrun faults in hardware
+// (`init_spawn`). Its bump arithmetic is free of the bare-metal aarch64
+// port, so it compiles — and its unit tests run — on the CI host as well
+// as on the aarch64 production build that consumes it, and on no other
+// configuration, so it is never dead code (`AGENTS.md` §2.3).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+mod stack_arena;
+
 // The build script's pure target-selection logic, compiled into the
 // host test build so its rules are unit tested (`AGENTS.md` §7).
 #[cfg(test)]

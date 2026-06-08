@@ -2033,10 +2033,18 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   falling back to the software canary (`mmu::conformance`
                   now also requires a non-`Supported` port to fail the arena
                   closed; aarch64 proves HAL→inherent over `dyn`, riscv64
-                  proves Pending fail-closed). G3b-2 (`BoxStack` rewire over
-                  the G2 arena, needs cross-space arena-frame plumbing in
-                  arch-neutral `kernel/core`) and G3c (production fault-form
-                  on `-M virt`) follow. Docs:
+                  proves Pending fail-closed). **G3b-2-i is now landed:**
+                  PID 1 `init`'s kernel stack is drawn from the boot-reserved
+                  guard arena (`rustos-kernel::stack_arena` bump allocator,
+                  installed by `boot_aarch64`) and its guard page is
+                  `split_block`+`unmap`-ed in `init`'s own root by
+                  `init_spawn` before switch, handed to `kernel/core` through
+                  the new `InitSpawnCtx::admit_init` `stack: Box<dyn
+                  KernelStack + Send>` param (fail-closed `BoxStack`-canary
+                  fallback); host-proven + the `spawn_init`/`spawn_session`/
+                  `wait` `-M virt` verticals green. The runtime
+                  `spawn`-syscall path (G3b-2-ii) and the production
+                  fault-form proof on `-M virt` (G3c) follow. Docs:
                   `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**

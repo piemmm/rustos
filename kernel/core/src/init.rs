@@ -354,6 +354,7 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         caps: CapabilitySet,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
+        stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut() + Send>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
@@ -374,9 +375,10 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
             enter();
         };
         let cs = self.arch.context_switch();
-        let Ok(task_id) = crate::kthread::spawn_user_kthread(
+        let Ok(task_id) = crate::kthread::spawn_user_kthread_with_stack(
             self.scheduler,
             cs,
+            stack,
             cpu,
             Priority::Normal,
             pre_resume,

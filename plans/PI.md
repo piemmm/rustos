@@ -936,14 +936,42 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
     live aarch64 arena, now reached through the promoted surface. Doc:
     `docs/src/platform/aarch64.md` ("Promoting the arena onto the Arch HAL
     (G3b)").
-  - **G3b-2 — `BoxStack` rewire over the G2 arena `[ ]`.** Route the kthread
-    `BoxStack` guard page through unmap-on-create over the G2 arena (canary
-    fallback where a port's `block_split_support` is not `Supported`). This
-    needs the cross-space arena-frame plumbing reachable from the
-    arch-neutral `kernel/core` — the kthread kernel stack must be mapped in
-    every space the task runs under — so it is staged after the HAL
-    promotion (G3b-1). The poison-canary guard remains the binding
-    non-deferred defence until it lands (`AGENTS.md` §2.17).
+  - **G3b-2 — `BoxStack` rewire over the G2 arena.** Route the kthread
+    kernel-stack guard page through unmap-on-create over the G2 arena
+    (canary fallback where a port's `block_split_support` is not
+    `Supported`). The kthread kernel stack must be mapped in every space the
+    task runs under, and each EL0 task runs the kernel on its *own* `TTBR0`,
+    so the guard page is unmapped **per-task, in that task's own root** — by
+    the arch spawn seam that builds the root, not generically in
+    `kernel/core` (whose `UserAddressSpace` view is read-only by design,
+    §2.4). Staged by spawn path:
+    - **G3b-2-i — PID 1 (`init`) path `[x]`.** A forward-only bump
+      allocator `stack_arena::KTHREAD_STACK_ARENA` (`rustos-kernel`) hands
+      kthread kernel stacks out of the boot-reserved arena (`boot_aarch64`
+      `install`s it from the carved `(base, len)`); each `ArenaStack` is a
+      one-page guard below the usable `KTHREAD_STACK_BYTES` stack, identical
+      in geometry to `BoxStack`, never reclaimed (§2.1). `init_spawn`
+      allocates one region and, on `init`'s *own* concrete `arch` space
+      **before** it is switched to, `split_block(guard)` + `unmap(guard)`
+      (no live access disturbed, no TLB maintenance), then hands the boxed
+      stack to `kernel/core` through the new `InitSpawnCtx::admit_init`
+      `stack: Box<dyn KernelStack + Send>` param (admitted via
+      `spawn_user_kthread_with_stack`). No arena / failed split → fall back
+      to a software-canary `BoxStack` (fail closed, §2.9/§2.17).
+      `ArenaStack::check_guard` is the default `Ok(())` — the hardware fault
+      is the defence, no canary to scan. Host-proven (`stack_arena` bump
+      tests + `kthread`/`spawn`/`init` build); the `spawn_init` /
+      `spawn_session` / `wait` `-M virt` verticals prove `init` still
+      reaches EL0 and supervises the session on the arena stack. Whole gate
+      (fmt / `cargo xtask ci` incl. `test --qemu` / `fuzz --secs 5` /
+      `soak.sh both`) green on this host. Doc:
+      `docs/src/platform/aarch64.md` ("Routing the kthread stack through the
+      arena (G3b-2)").
+    - **G3b-2-ii — runtime `spawn`-syscall path `[ ]`.** Route the
+      session (and anything it launches) through the arena too — the
+      `spawn_producer`/`admit_process` mirror of G3b-2-i. The poison-canary
+      `BoxStack` remains this path's binding non-deferred defence until it
+      lands (`AGENTS.md` §2.17).
   - **G3c — production fault-form on `-M virt` `[ ]`.** Prove an
     overrunning kthread takes a synchronous data abort, not a
     next-reschedule canary detection.
