@@ -91,7 +91,7 @@ use crate::dispatch_slot::RescheduleAction;
 /// [`BoxStack`] places a poison-filled guard page (`AGENTS.md` §4) immediately
 /// *below* the usable region, so an overrun runs off the bottom of the stack
 /// into the guard instead of straight into the neighbouring heap allocation.
-/// A contiguous overrun trips the guard's canary, which [`dispatch_step`]
+/// A contiguous overrun trips the guard's canary, which `dispatch_step`
 /// checks every time the task hands the CPU back, and the task is then failed
 /// closed rather than allowed to run on a corrupt stack (`AGENTS.md` §2.9,
 /// §2.17). The sizing still matters — the guard absorbs an overrun but a
@@ -134,7 +134,7 @@ const STACK_GUARD_CANARY_BYTES: usize = 64;
 ///
 /// Returned by [`KernelStack::check_guard`]. On real hardware the overrun
 /// faults on the unmapped guard page; the software emulation surfaces the
-/// same condition through this value so [`dispatch_step`] can fail the task
+/// same condition through this value so `dispatch_step` can fail the task
 /// closed identically either way (`AGENTS.md` §2.9, §2.17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackGuardViolation;
@@ -164,7 +164,7 @@ pub unsafe trait KernelStack {
     /// Check this stack's overrun guard, if it has one.
     ///
     /// Returns [`StackGuardViolation`] if the task has run off the bottom of
-    /// its usable stack into the guard region. [`dispatch_step`] calls this
+    /// its usable stack into the guard region. `dispatch_step` calls this
     /// each time the task switches back to the dispatcher and fails the task
     /// closed on a violation (`AGENTS.md` §2.9, §2.17), so an overrun is
     /// caught at the next reschedule instead of silently corrupting the
@@ -181,7 +181,7 @@ pub unsafe trait KernelStack {
 /// Heap-backed kernel stack: the production [`KernelStack`] source.
 ///
 /// The allocation is laid out, from low to high address, as a
-/// [`STACK_GUARD_BYTES`] guard region followed by the [`KTHREAD_STACK_BYTES`]
+/// `STACK_GUARD_BYTES` guard region followed by the [`KTHREAD_STACK_BYTES`]
 /// usable stack; [`Self::top`] is the exclusive upper bound of the *usable*
 /// region. A kernel stack grows *downward* from `top`, so an overrun runs
 /// off the bottom of the usable region into the guard — which is
@@ -211,7 +211,7 @@ impl BoxStack {
     /// `into_boxed_slice`), never built through a `[0u8; _]` stack temporary:
     /// a ~68 KiB array literal would itself risk the very stack overflow this
     /// type guards against (`AGENTS.md` §2.16). [`Self::top`] rounds the
-    /// exclusive upper bound down to [`STACK_ALIGN`], so the heap allocator's
+    /// exclusive upper bound down to `STACK_ALIGN`, so the heap allocator's
     /// own (byte) alignment is sufficient.
     #[must_use]
     pub fn new() -> Self {

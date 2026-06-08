@@ -12,7 +12,7 @@
 //! page. But the boot path identity-maps RAM with coarse 1 GiB / 2 MiB
 //! *block* descriptors, and a block has no per-4 KiB leaf to clear — so the
 //! region must first be re-expressed at 4 KiB granularity. That is exactly
-//! [`AddressSpace::split_block`], and this vertical proves the live
+//! `AddressSpace::split_block`, and this vertical proves the live
 //! mechanism end to end on the `virt` board.
 //!
 //! ## What this test asserts

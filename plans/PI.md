@@ -683,12 +683,14 @@ on its own before the next.
       life and never approaches it, but one that exits instantly (no input
       backing) stops the loop at `EXIT_SESSION_EXHAUSTED` rather than
       busy-spinning on `spawn` (`AGENTS.md` §2.1), and a failed `spawn`/`wait`
-      is fail-loud (`EXIT_SESSION_FAILED`/`EXIT_WAIT_FAILED`, §2.9). **No
-      kernel/boot change was needed** — the production aarch64 pipeline already
-      wires the `KernelProcessWait` producer (`kernel_core::run_phases`), the
-      `spawn` admit path's `register_child`, and the `exit` handler's
-      `record_exit`, and `admit_init`'s drive loop re-dispatches the parked
-      `init` after the session exits. This changes `init`'s audited-syscall
+      is fail-loud (`EXIT_SESSION_FAILED`/`EXIT_WAIT_FAILED`, §2.9). The
+      userland + kernel-bookkeeping pieces were already wired — the production
+      aarch64 pipeline wires the `KernelProcessWait` producer
+      (`kernel_core::run_phases`), the `spawn` admit path's `register_child`,
+      and the `exit` handler's `record_exit`, and `admit_init`'s drive loop
+      re-dispatches the parked `init` after the session exits — but the
+      supervise loop exposed a latent **aarch64 arch defect** that hung the
+      vertical (see the errata below). This changes `init`'s audited-syscall
       sequence, so the `-M virt` vertical assertions were reworked:
       `spawn_session_qemu_aarch64` now keys PASS on **three** `ProcessSpawned`
       (init + two session launches — the second launch proves the first was
@@ -700,6 +702,29 @@ on its own before the next.
       instead of exiting at end-of-input) stays an on-metal item — there is no
       deterministic `-M virt` serial-RX injection (consistent with
       P6e-2/P6e-3a). Docs: `docs/src/userland/init.md` ("Session supervision").
+    - **Errata — aarch64 exception return-state save/restore `[x]`.** The
+      P6e-3b-ii supervise loop hung the `spawn_session_qemu_aarch64` vertical
+      (`Outcome::Timeout`): `init`'s `wait` reaped the session and returned,
+      but `init` never reached its relaunch `spawn`. Root cause was a latent
+      defect in the aarch64 EL1 exception trampoline (`kernel/arch/aarch64/
+      src/vectors.s`): it saved only `x0..x30`, **not** `ELR_EL1`/`SPSR_EL1`/
+      `SP_EL0`, relying on the live system registers across `eret`. That holds
+      only when a handler returns directly — but a parked `wait`/`yield`
+      (SP2) suspends the task **mid-handler** and switches to another task,
+      whose own trap/`eret` clobbers those registers, so the resuming
+      exception `eret`ed `init` to the session's PC/stack. (The SP2c
+      `spawn_el0_timeshare` vertical masked it: two *identical* programs at
+      identical VAs resume "correctly" at the wrong-but-equal PC.) Fix: the
+      common trampoline now saves `ELR_EL1`/`SPSR_EL1`/`SP_EL0` into an
+      enlarged 288-byte per-exception frame (GP-register offsets unchanged —
+      the `[u64; SAVED_GPRS]` syscall view is intact) and writes them back
+      before `eret`, making every exception's resume self-contained across a
+      cooperative context switch. `spawn_session_qemu_aarch64` now PASSes
+      (3 `ProcessSpawned` + 4 audited syscalls). The riscv64/x86_64 trap
+      vectors carry the same latent pattern but have no EL0 spawn/wait
+      timeshare path wired yet, so it is unreachable there today and is
+      folded into those ports' user-mode bring-up follow-ons. Docs:
+      `docs/src/platform/aarch64.md` (Interrupts).
     - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
       `[x]`.** The `rustos-shell` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link

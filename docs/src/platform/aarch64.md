@@ -354,7 +354,18 @@ system-register/assembly/MMIO operations to the freestanding target.
   timer → end-of-interrupt handshake, an EL0 `svc` (lower-EL synchronous
   exception) to the installed syscall dispatch callback, and any other
   synchronous exception to the installed `fault` handler. `gic` is a
-  GICv2 distributor / CPU-interface / SGI driver.
+  GICv2 distributor / CPU-interface / SGI driver. The common trampoline
+  saves the interrupted GP registers **and** the per-exception return
+  state (`ELR_EL1`/`SPSR_EL1`/`SP_EL0`) into a 288-byte frame, writing
+  them back before `eret`. Saving the return state — not relying on the
+  live system registers — is what lets a task that is suspended
+  mid-handler resume correctly after a cooperative context switch ran
+  another task in between: the other task's `eret`/trap overwrites those
+  registers, so the resuming exception must restore its own copy or it
+  would return to the wrong task's PC/stack (the SP2 resumable
+  user-kthread runtime; a parked `wait`/`yield` depends on it). The first
+  31 frame slots are the `[u64; SAVED_GPRS]` view `syscall_entry` reads,
+  so their offsets are fixed.
 - **Syscall entry** (`syscall_entry`). The `svc` exception class decode
   and the `x8`/`x0`–`x5` → `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
   marshalling, with a set-once dispatch callback (the same shape the
