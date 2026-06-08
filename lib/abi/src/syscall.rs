@@ -140,6 +140,33 @@ impl SyscallNumber {
     /// build with no backing wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const STREAM_READ: Self = Self(13);
+    /// Map a fresh anonymous `RW` region into the calling process's own
+    /// address space (`plans/SPAWN.md` SP5).
+    ///
+    /// Arguments: `len: usize` (bytes, rounded up to whole pages),
+    /// `flags: u32` ([`crate::MapFlags`]), `addr_hint: u64` (a page-aligned
+    /// placement hint; `0` means "kernel chooses"). Returns the base address
+    /// of the new region. The region is zeroed before it is visible, is
+    /// always `RW` and never executable (`AGENTS.md` §19.2 — W^X), and is
+    /// mapped only into the **caller's own** hardware-isolated address space
+    /// (`AGENTS.md` §4 — no global user heap, no cross-process mapping). The
+    /// call is unprivileged — growing one's own address space needs no
+    /// capability (`AGENTS.md` §16.6 precedent) — but the kernel validates
+    /// every argument and fails closed (`AGENTS.md` §5.4). A frame- or
+    /// page-table-allocation failure returns [`crate::Errno::OutOfMemory`]
+    /// rather than panicking (`AGENTS.md` §4 / §2.9); a build with no memory
+    /// service wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const MEM_MAP: Self = Self(14);
+    /// Release a region previously returned by [`SyscallNumber::MEM_MAP`]
+    /// from the calling process's own address space (`plans/SPAWN.md` SP5).
+    ///
+    /// Arguments: `base: u64` (the region's base, as returned by `mem_map`)
+    /// and `len: usize` (its length in bytes). The frames reclaimed are
+    /// zeroed on free (`AGENTS.md` §4 — secret hygiene). Unmapping a region
+    /// that was never mapped, or a partial/over-long range, fails closed
+    /// (`AGENTS.md` §5.4); a build with no memory service wired fails closed
+    /// with [`crate::Errno::NotImplemented`].
+    pub const MEM_UNMAP: Self = Self(15);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -221,6 +248,8 @@ mod tests {
         assert_eq!(SyscallNumber::STREAM_WRITE.as_u16(), 11);
         assert_eq!(SyscallNumber::SPAWN.as_u16(), 12);
         assert_eq!(SyscallNumber::STREAM_READ.as_u16(), 13);
+        assert_eq!(SyscallNumber::MEM_MAP.as_u16(), 14);
+        assert_eq!(SyscallNumber::MEM_UNMAP.as_u16(), 15);
     }
 
     #[test]

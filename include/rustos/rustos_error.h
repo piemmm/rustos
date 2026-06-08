@@ -35,5 +35,6 @@
 #define ROS_E_ALREADY_EXISTS 17
 #define ROS_E_BAD_ADDRESS 18
 #define ROS_E_WOULD_BLOCK 19
+#define ROS_E_OUT_OF_MEMORY 20
 
 #endif /* ROS_ERROR_H */

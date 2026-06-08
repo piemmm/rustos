@@ -77,6 +77,8 @@ const NUM_RANDOM_GET: u64 = SyscallNumber::RANDOM_GET.as_u16() as u64;
 const NUM_STREAM_WRITE: u64 = SyscallNumber::STREAM_WRITE.as_u16() as u64;
 const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
+const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
+const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -312,6 +314,39 @@ pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize) -> u64 {
     unsafe { raw_syscall(NUM_SPAWN, [ptr_arg(path), path_len as u64, 0, 0, 0, 0]) }
 }
 
+/// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
+/// calling process's own address space, honouring `flags`
+/// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
+/// (`SyscallNumber::MEM_MAP`). Returns the base address of the new region.
+///
+/// The kernel validates every argument and fails closed (`AGENTS.md` §5.4);
+/// the region is zeroed before it is visible and is never executable
+/// (`AGENTS.md` §19.2). An out-of-memory condition is reported as a
+/// `ROS_E_*` code reinterpreted into the result (`plans/SPAWN.md` SP5).
+#[must_use]
+#[export_name = "ros_sys_mem_map"]
+pub extern "C" fn sys_mem_map(len: usize, flags: u32, addr_hint: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel maps the region and returns its base.
+    unsafe {
+        raw_syscall(
+            NUM_MEM_MAP,
+            [len as u64, u64::from(flags), addr_hint, 0, 0, 0],
+        )
+    }
+}
+
+/// `mem_unmap`: release the region of `len` bytes based at `base` previously
+/// returned by [`sys_mem_map`] from the calling process's own address space
+/// (`SyscallNumber::MEM_UNMAP`). Returns a `ROS_E_*` code.
+#[must_use]
+#[export_name = "ros_sys_mem_unmap"]
+pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
+    // against the caller's address space before unmapping it.
+    unsafe { ret_i32(raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +376,8 @@ mod tests {
         (NUM_STREAM_WRITE, "stream_write", 3),
         (NUM_SPAWN, "spawn", 2),
         (NUM_STREAM_READ, "stream_read", 3),
+        (NUM_MEM_MAP, "mem_map", 3),
+        (NUM_MEM_UNMAP, "mem_unmap", 2),
     ];
 
     #[test]
@@ -520,6 +557,29 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_map_marshals_len_flags_and_addr_hint() {
+        let (number, args) = capture(0x4000, || {
+            assert_eq!(sys_mem_map(0x2000, 1, 0x10_0000), 0x4000);
+        });
+        assert_eq!(number, NUM_MEM_MAP);
+        assert_eq!(args[0], 0x2000);
+        assert_eq!(args[1], 1);
+        assert_eq!(args[2], 0x10_0000);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_unmap_marshals_base_and_len() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_mem_unmap(0x4000, 0x2000), 0);
+        });
+        assert_eq!(number, NUM_MEM_UNMAP);
+        assert_eq!(args[0], 0x4000);
+        assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 

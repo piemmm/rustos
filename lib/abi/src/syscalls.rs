@@ -380,6 +380,48 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::MEM_MAP,
+        name: "mem_map",
+        arg_count: 3,
+        args: [
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Growing one's *own* hardware-isolated address space with
+        // anonymous RW memory is the unprivileged baseline (`AGENTS.md`
+        // §16.6 precedent — "list my own processes" needs no capability):
+        // a region is mapped only into the caller's own space, so it
+        // grants no authority over anything else (`AGENTS.md` §4 — no
+        // global user heap, no cross-process mapping). Like the other
+        // high-volume own-process operations it is not audited per call,
+        // to avoid drowning the audit log.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::MEM_UNMAP,
+        name: "mem_unmap",
+        arg_count: 2,
+        args: [
+            AbiType::U64,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The release half of `mem_map`; same unprivileged, unaudited
+        // posture — it only releases the caller's own anonymous memory.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -569,6 +611,16 @@ mod tests {
         let spawn = spec_for(SyscallNumber::SPAWN).unwrap();
         assert_eq!(spawn.required_capability, Some(CapabilityId::PROC_SPAWN));
         assert!(spawn.audit, "spawn must be audited");
+        // mem_map / mem_unmap grow and shrink the caller's OWN
+        // hardware-isolated address space, so they are the unprivileged
+        // baseline (`AGENTS.md` §16.6) and are not audited per call. Lock
+        // that down so a refactor cannot accidentally gate or audit them.
+        let mem_map = spec_for(SyscallNumber::MEM_MAP).unwrap();
+        assert_eq!(mem_map.required_capability, None);
+        assert!(!mem_map.audit, "mem_map must not audit per call");
+        let mem_unmap = spec_for(SyscallNumber::MEM_UNMAP).unwrap();
+        assert_eq!(mem_unmap.required_capability, None);
+        assert!(!mem_unmap.audit, "mem_unmap must not audit per call");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

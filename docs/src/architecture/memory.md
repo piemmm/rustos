@@ -471,6 +471,63 @@ cryptographic layer they are required to route through.
 [`SwapError::NonceExhausted`]: ../../rustos_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted
 [`SWAP_RECORD_LEN`]: ../../rustos_kernel_mem/swap/constant.SWAP_RECORD_LEN.html
 
+## 7c. Anonymous user memory (`mem_map` / `mem_unmap`)
+
+A spawned process boots with exactly its fixed spawn-time image
+(code/data/bss plus a fixed user stack, `plans/SPAWN.md` SP2/SP3). The
+`mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
+mechanism by which a process obtains and releases *additional* memory at
+runtime — the foundation a future `lib/rt` heap allocator layers its
+`malloc` / `free` over. The ABI shape is fixed in `rustos_abi::memory`
+(`MapFlags`) and `rustos_abi::syscall`; the syscall-layer contract is the
+`mem_map` / `mem_unmap` rows of [the syscall page](./syscalls.md).
+
+This is staged (`plans/SPAWN.md` SP5):
+
+- **SP5a (landed).** The `abi-v1` surface (`MapFlags`, the two syscall
+  numbers, the `Errno::OutOfMemory` variant), the C-callable stubs
+  (`ros_sys_mem_map` / `ros_sys_mem_unmap`) and generated header
+  (`include/rustos/rustos_memory.h`), the dispatcher arms, and an
+  arch-neutral fail-closed seam in `kernel/core` (`MemMap`, defaulting to
+  `NULL_MEM_MAP` → `Errno::NotImplemented`, installed through
+  `KernelSyscallHandlers::with_mem_map`, mirroring the console and spawn
+  seams). The handler rejects a zero `len` with `LengthOutOfRange` and a
+  reserved flag bit with `OutOfRange` before reaching the producer.
+- **SP5b (staged, not yet built).** The real `kernel/mem` producer that
+  mutates a *live* user address space: it maps fresh frames into the
+  caller's own [`AddressSpace<P: PageTable>`], and unmaps them with the
+  necessary TLB invalidation through the §17.2 `TlbShootdown` /
+  `CrossCpuTlbShootdown` HAL slices.
+
+The binding invariants the producer must honour (settled here as the SP5
+design note, `AGENTS.md` §15.2):
+
+- **W^X, `RW` only (`AGENTS.md` §19.2).** A region is always readable and
+  writable and **never** executable; `mem_map` never produces an `RWX`
+  mapping. An executable (JIT) mapping is a separate, later
+  `CAP_JIT_MAP_EXEC`-gated `RW`→`RX` flip and is explicitly **not** part of
+  SP5 — `mem_map` does not add an `mprotect`-equivalent.
+- **Per-process, never global (`AGENTS.md` §4).** A region is mapped only
+  into the **caller's own** hardware-isolated address space. There is no
+  global user heap and no cross-process mapping; shared memory stays the
+  capability-checked IPC object. Because it only ever grows the caller's
+  own space, the pair is unprivileged (no capability, `AGENTS.md` §16.6).
+- **Zero on map and on free (`AGENTS.md` §4 — secret hygiene).** Pages are
+  zeroed before the mapping is visible — no stale kernel or other-process
+  bytes — and the frames `mem_unmap` reclaims are zeroed on free, the same
+  guarantee [§4](#4-sensitive-region-api) and [§5](#5-dma-buffers) give
+  the rest of the crate.
+- **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A frame- or
+  page-table-allocation failure surfaces as `Errno::OutOfMemory`, never a
+  panic — the user-facing projection of the
+  [§6 result-returning OOM contract](#6-result-returning-oom-contract).
+  There is no per-process quota; a process is bounded only by the physical
+  frames available.
+
+The immutable-`FrozenAddressSpace` snapshot the post-spawn registry stores
+(§3b) is read-only; SP5b closes the gap with a single live-space mutation
+path rather than a second parallel address-space model (`AGENTS.md` §2.2).
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

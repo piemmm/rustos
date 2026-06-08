@@ -654,6 +654,19 @@ the discovered UART), then starts the user's shell; a vertical asserts the
 EL0 transition + the `init` banner. (This is the "boot into user mode"
 milestone.)
 
+**P6 follow-on — SP5 `mem_map`/`mem_unmap` (runtime anonymous memory).**
+A spawned process otherwise has only its fixed spawn-time image, so it
+cannot obtain a heap; SP5 (`plans/SPAWN.md`) adds the `mmap`-style
+anonymous map/unmap pair a future `lib/rt` `malloc`/`free` layers over.
+**SP5-0 (design note) and SP5a (the `abi-v1` surface + fail-closed seam)
+are landed:** `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the
+`MapFlags` type (with `FIXED`), the appended `Errno::OutOfMemory` (#20),
+the `ros_sys_mem_map`/`ros_sys_mem_unmap` C stubs + regenerated header,
+the dispatcher arms, and `kernel/core`'s `MemMap` seam (`NULL_MEM_MAP` /
+`with_mem_map`, unprivileged + unaudited, fail-closed `NotImplemented`).
+**SP5b remains:** the real `kernel/mem` live-address-space producer (zero
+on map/free, TLB shootdown) + the `-M virt` vertical.
+
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 
 - Implement the BCM2711 **mailbox** property-channel interface (a small

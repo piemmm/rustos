@@ -126,6 +126,18 @@ pub enum Errno {
     /// receiver can tell "no message yet" from "no such port" without
     /// the distinction leaking any other state.
     WouldBlock = 19,
+    /// A request to allocate or grow memory cannot be satisfied because
+    /// no backing physical frame (or page-table frame) is available.
+    ///
+    /// The RustOS equivalent of POSIX `ENOMEM`. Emitted by the anonymous
+    /// `mem_map` syscall (`plans/SPAWN.md` SP5) when the kernel cannot map
+    /// a fresh region into the caller's address space because physical
+    /// frames are exhausted. It is the deterministic, fail-closed result
+    /// of out-of-memory: allocation failure is always a `Result`, never a
+    /// panic (`AGENTS.md` §4). It is distinct from
+    /// [`NoSpace`](Self::NoSpace), which is a *storage* backend running out
+    /// of on-disk space.
+    OutOfMemory = 20,
 }
 
 impl Errno {
@@ -158,6 +170,7 @@ impl fmt::Display for Errno {
             Self::AlreadyExists => "object already exists",
             Self::BadAddress => "bad user-space address",
             Self::WouldBlock => "operation would block",
+            Self::OutOfMemory => "out of memory",
         };
         f.write_str(message)
     }
@@ -189,6 +202,7 @@ mod tests {
         assert_eq!(Errno::AlreadyExists.as_i32(), 17);
         assert_eq!(Errno::BadAddress.as_i32(), 18);
         assert_eq!(Errno::WouldBlock.as_i32(), 19);
+        assert_eq!(Errno::OutOfMemory.as_i32(), 20);
     }
 
     #[test]

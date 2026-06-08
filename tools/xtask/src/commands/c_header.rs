@@ -45,8 +45,8 @@ use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
     DriverKind, DriverManifest, Duration64, Errno, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
     HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryScope,
-    LoadHeader, ManifestHeader, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
-    PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
+    LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord, NamedKeyCode,
+    NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
     ProcessStartHeader, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
     StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
@@ -102,6 +102,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("ALREADY_EXISTS", Errno::AlreadyExists),
     ("BAD_ADDRESS", Errno::BadAddress),
     ("WOULD_BLOCK", Errno::WouldBlock),
+    ("OUT_OF_MEMORY", Errno::OutOfMemory),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -294,6 +295,32 @@ fn generate_random() -> String {
     out.push('\n');
 
     out.push_str("#endif /* ROS_RANDOM_H */\n");
+    out
+}
+
+/// `rustos_memory.h` — the anonymous-memory `mem_map` flag bits
+/// (`plans/SPAWN.md` SP5).
+///
+/// Declares the single defined `mem_map` flag bit (`ROS_MAP_FLAG_*`, read
+/// from [`MapFlags`]). The flag register is a `uint32_t`, matching the `U32`
+/// argument the `ros_sys_mem_map` prototype carries.
+fn generate_memory() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Anonymous-memory mem_map flag bits (plans/SPAWN.md SP5).");
+    out.push_str("#ifndef ROS_MEMORY_H\n#define ROS_MEMORY_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str(
+        "/* mem_map flags (uint32_t). Every undefined bit is reserved and must be zero. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_MAP_FLAG_FIXED {:#x}u",
+        MapFlags::FIXED.bits()
+    );
+    out.push('\n');
+
+    out.push_str("#endif /* ROS_MEMORY_H */\n");
     out
 }
 
@@ -1748,6 +1775,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
+    out.push_str("#include \"rustos_memory.h\"\n");
     out.push_str("#include \"rustos_hwtree.h\"\n");
     out.push_str("#include \"rustos_ipc.h\"\n");
     out.push_str("#include \"rustos_stdinfo.h\"\n");
@@ -1786,6 +1814,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_random.h",
             body: generate_random(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_memory.h",
+            body: generate_memory(),
         },
         GeneratedHeader {
             file_name: "rustos_hwtree.h",
@@ -1934,6 +1966,7 @@ mod tests {
             "rustos_capability.h",
             "rustos_time.h",
             "rustos_random.h",
+            "rustos_memory.h",
             "rustos_hwtree.h",
             "rustos_ipc.h",
             "rustos_stdinfo.h",
@@ -2033,6 +2066,21 @@ mod tests {
                 "#define ROS_RANDOM_REQUEST_MAX_BYTES ((uintptr_t){RANDOM_REQUEST_MAX_BYTES}u)"
             )),
             "request max: {h}"
+        );
+    }
+
+    #[test]
+    fn memory_header_pins_map_flags() {
+        let h = body("rustos_memory.h");
+        assert!(h.contains("#ifndef ROS_MEMORY_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // The flag bit value is read from lib/abi, never re-typed.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_MAP_FLAG_FIXED {:#x}u",
+                MapFlags::FIXED.bits()
+            )),
+            "fixed flag bit: {h}"
         );
     }
 
@@ -2903,10 +2951,10 @@ mod tests {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // WouldBlock is the last frozen abi-v1 variant (discriminant 19).
+        // OutOfMemory is the last appended abi-v1 variant (discriminant 20).
         assert_eq!(
             ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::WouldBlock.as_i32()),
+            Some(Errno::OutOfMemory.as_i32()),
             "errno table must end at the last frozen variant"
         );
     }

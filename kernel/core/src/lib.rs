@@ -78,6 +78,7 @@ pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
 pub mod kthread;
+pub mod memmap;
 pub mod panic;
 pub mod random;
 // The single scheduler selection point (`AGENTS.md` §17.1). Internal:
@@ -111,6 +112,7 @@ pub use kthread::{
     spawn_user_kthread_with_stack, BoxStack, KernelStack, Yielder, KTHREAD_MAX_CPUS,
     KTHREAD_STACK_BYTES,
 };
+pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
 pub use spawn::{

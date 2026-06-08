@@ -67,6 +67,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  11 | `stream_write` | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
 |  12 | `spawn`        | `user_ptr` (path), `len`                | `u64` (pid) | `CAP_PROC_SPAWN`    | yes     |
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_READ`      | no      |
+|  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
+|  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
 
 ### Capability matrix
 
@@ -88,6 +90,13 @@ modes are documented in
 
 A future syscall that needs e.g. `CAP_DRV_LOAD` lands as a new entry in
 the table and a new row here; existing rows never move.
+
+`mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
+grow and shrink the caller's *own* hardware-isolated address space with
+anonymous `RW` memory, which grants no authority over anything else — the
+same unprivileged baseline as "list my own processes" (`AGENTS.md` §16.6).
+There is no global user heap and no cross-process mapping; shared memory
+stays the capability-checked IPC object (`AGENTS.md` §4).
 
 ## Standard streams (fd 0/1/2/3)
 
@@ -151,6 +160,7 @@ declared arity.
 | `PermissionDenied`      | Caller lacks the syscall's `required_capability`.                                    |
 | `LengthOutOfRange`      | Trailing slot non-zero, or `Len` exceeds host `usize`.                               |
 | `BadAlignment`          | `UserPtr` argument is null.                                                          |
+| `OutOfMemory`           | `mem_map` could not obtain a backing frame (or page-table frame); deterministic OOM, never a panic (`AGENTS.md` §4). |
 | `AbiVersionUnsupported` | `verify_table_hash` ran at kernel-init time and the recomputed digest disagreed.     |
 | *(propagated)*          | Anything else a handler returns is delivered to user space verbatim.                 |
 
@@ -195,6 +205,8 @@ re-validates arguments — the dispatcher does that first.
 | `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20), then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to the descriptor's backing — in the bootstrap session the installed `ConsoleWrite` device (`with_console`; default `NULL_CONSOLE`) | `fd` not a writable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. No device wired → `NotImplemented`. Otherwise `Ok(bytes_written)`. |
 | `stream_read` | resolves `fd` against the caller's per-process descriptor table, then reads from the descriptor's backing — in the bootstrap session the installed `ConsoleRead` device (`with_console_read`; default `NULL_CONSOLE_READ`) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `fd` not a readable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. No device wired → `NotImplemented`. No input pending → `Ok(0)` (short read). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read)`. |
 | `spawn`         | copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
+| `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
+| `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

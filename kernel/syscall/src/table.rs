@@ -9,8 +9,8 @@
 //! (`AGENTS.md` §2.3 — no bloat).
 
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, SyscallSpec,
-    ENCODED_TABLE, SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, RandomFlags, SyscallNumber,
+    SyscallSpec, ENCODED_TABLE, SYSCALL_MAX_ARGS,
 };
 use rustos_crypto::{sha256, Sha256Digest};
 use rustos_kernel_sec::{TaskCapabilities, TaskId};
@@ -268,6 +268,40 @@ pub trait SyscallHandlers {
         buf: u64,
         len: usize,
     ) -> SyscallResult;
+    /// Map `len` bytes of fresh anonymous `RW` memory into the calling
+    /// process's own address space, returning the base address of the new
+    /// region (`plans/SPAWN.md` SP5).
+    ///
+    /// The dispatcher has already validated that `len` fits in `usize`,
+    /// that `flags` carries no reserved bit, and that `addr_hint` is a
+    /// well-formed `u64`. The implementation maps the region only into the
+    /// caller's **own** hardware-isolated address space (`AGENTS.md` §4 —
+    /// no global user heap, no cross-process mapping), zeroes it before it
+    /// is visible, and never makes it executable (`AGENTS.md` §19.2 — W^X).
+    /// A frame- or page-table-allocation failure must return
+    /// [`Errno::OutOfMemory`] rather than panicking (`AGENTS.md` §4 / §2.9);
+    /// a build with no memory service wired must fail closed with
+    /// [`Errno::NotImplemented`]. A zero `len` is rejected with
+    /// [`Errno::LengthOutOfRange`].
+    fn mem_map(
+        &self,
+        caller: &CallerContext<'_>,
+        len: usize,
+        flags: MapFlags,
+        addr_hint: u64,
+    ) -> SyscallResult;
+    /// Release the region of `len` bytes based at `base` previously returned
+    /// by [`SyscallHandlers::mem_map`] from the calling process's own
+    /// address space (`plans/SPAWN.md` SP5).
+    ///
+    /// The dispatcher has already validated that `base` is a well-formed
+    /// `u64` and that `len` fits in `usize`. The implementation zeroes the
+    /// frames it reclaims (`AGENTS.md` §4 — secret hygiene) and fails closed
+    /// when `(base, len)` does not name a region the caller mapped
+    /// (`AGENTS.md` §5.4). A build with no memory service wired must fail
+    /// closed with [`Errno::NotImplemented`]; a zero `len` is rejected with
+    /// [`Errno::LengthOutOfRange`]. Returns `Ok(0)` on success.
+    fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -430,6 +464,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
                 let len = decode_len(args.0[2])?;
                 self.handlers.stream_read(caller, fd, args.0[1], len)
+            }
+            SyscallNumber::MEM_MAP => {
+                let len = decode_len(args.0[0])?;
+                // `validate_arg` already constrained args[1] to fit in u32
+                // (upper bits zero); `from_bits` rejects any reserved bit.
+                #[allow(clippy::cast_possible_truncation)]
+                let flags = MapFlags::from_bits((args.0[1] & 0xFFFF_FFFF) as u32)?;
+                self.handlers.mem_map(caller, len, flags, args.0[2])
+            }
+            SyscallNumber::MEM_UNMAP => {
+                let len = decode_len(args.0[1])?;
+                self.handlers.mem_unmap(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -762,6 +808,24 @@ mod tests {
             // reachability test can assert the dispatcher decoded the
             // arguments without wiring a real console here.
             Ok(len as u64)
+        }
+        fn mem_map(
+            &self,
+            _c: &CallerContext<'_>,
+            len: usize,
+            _flags: MapFlags,
+            _addr_hint: u64,
+        ) -> SyscallResult {
+            self.record("mem_map");
+            // Echo the requested length back as a fabricated base so the
+            // reachability test can assert the dispatcher decoded the
+            // `(len, flags, addr_hint)` arguments without wiring a real
+            // memory service here.
+            Ok(len as u64)
+        }
+        fn mem_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+            self.record("mem_unmap");
+            Ok(0)
         }
     }
 
@@ -1129,5 +1193,75 @@ mod tests {
             .is_ok());
         assert_eq!(h.last(), Some("irq_wait"));
         assert!(sink.ids().is_empty(), "irq_wait must not audit on success");
+    }
+
+    #[test]
+    fn mem_map_decodes_len_flags_and_addr_hint_and_is_unaudited() {
+        // `mem_map` is ungated and unaudited (`AGENTS.md` §16.6). With a
+        // well-typed `(len, flags, addr_hint)` tuple the dispatcher decodes
+        // each argument, reaches the handler, and emits no audit record.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink); // no capability needed
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x2000; // len
+        args.0[1] = u64::from(MapFlags::FIXED.bits()); // flags
+        args.0[2] = 0x10_0000; // addr_hint
+        let r = d.dispatch(&ctx, SyscallNumber::MEM_MAP.as_u16(), args);
+        // The Mock echoes `len` back as the fabricated base.
+        assert_eq!(r, Ok(0x2000));
+        assert_eq!(h.last(), Some("mem_map"));
+        assert!(sink.ids().is_empty(), "mem_map must not audit");
+    }
+
+    #[test]
+    fn mem_map_rejects_a_reserved_flag_bit_before_the_handler() {
+        // `flags` is declared `U32`; the per-arg validator accepts the
+        // 32-bit value, but `MapFlags::from_bits` must reject a reserved
+        // bit with `Errno::OutOfRange` before the handler is reached.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000; // len
+        args.0[1] = 1 << 1; // reserved flag bit
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::MEM_MAP.as_u16(), args),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None);
+    }
+
+    #[test]
+    fn mem_unmap_forwards_base_and_len_unaudited() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x4000; // base
+        args.0[1] = 0x2000; // len
+        assert!(d
+            .dispatch(&ctx, SyscallNumber::MEM_UNMAP.as_u16(), args)
+            .is_ok());
+        assert_eq!(h.last(), Some("mem_unmap"));
+        assert!(sink.ids().is_empty(), "mem_unmap must not audit");
     }
 }

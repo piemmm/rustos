@@ -25,6 +25,7 @@ pub mod input;
 pub mod ipc;
 pub(crate) mod le;
 pub mod manifest;
+pub mod memory;
 pub mod process;
 pub mod random;
 pub mod rxe;
@@ -63,6 +64,7 @@ pub use ipc::{IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MA
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
+pub use memory::MapFlags;
 pub use process::{
     encoded_len as process_start_encoded_len, write_into as process_start_write_into,
     DescriptorTable, ProcessStart, ProcessStartHeader, StreamMode, StringSlot, PROCESS_START_MAGIC,

@@ -37,6 +37,8 @@ extern "C" {
 #define ROS_SYS_STREAM_WRITE 11u
 #define ROS_SYS_SPAWN 12u
 #define ROS_SYS_STREAM_READ 13u
+#define ROS_SYS_MEM_MAP 14u
+#define ROS_SYS_MEM_UNMAP 15u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -53,6 +55,8 @@ uint64_t ros_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t ros_sys_stream_write(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t ros_sys_spawn(void * a0, uintptr_t a1);
 uint64_t ros_sys_stream_read(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t ros_sys_mem_map(uintptr_t a0, uint32_t a1, uint64_t a2);
+int32_t ros_sys_mem_unmap(uint64_t a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

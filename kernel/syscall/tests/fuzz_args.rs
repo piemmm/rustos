@@ -26,7 +26,7 @@
 
 use core::cell::RefCell;
 use rustos_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, RandomFlags, SyscallNumber,
     ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use rustos_caps::CapabilitySet;
@@ -175,6 +175,20 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn mem_map(
+        &self,
+        _c: &CallerContext<'_>,
+        _len: usize,
+        _flags: MapFlags,
+        _addr_hint: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn mem_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity
@@ -212,6 +226,16 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     if spec.number == SyscallNumber::RANDOM_GET {
         let allowed = u64::from(RandomFlags::NON_BLOCKING.bits());
         if args[2] & !allowed != 0 {
+            return false;
+        }
+    }
+    // `mem_map`'s flags argument carries the same extra semantic check:
+    // the dispatcher runs the raw `U32` through `MapFlags::from_bits`,
+    // which rejects any reserved bit (the only defined bit today is
+    // `FIXED`). Mirror that here.
+    if spec.number == SyscallNumber::MEM_MAP {
+        let allowed = u64::from(MapFlags::FIXED.bits());
+        if args[1] & !allowed != 0 {
             return false;
         }
     }

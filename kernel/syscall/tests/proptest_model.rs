@@ -142,6 +142,20 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn mem_map(
+        &self,
+        _c: &CallerContext<'_>,
+        _len: usize,
+        _flags: rustos_abi::MapFlags,
+        _addr_hint: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn mem_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 fn budget_deadline() -> Option<Instant> {

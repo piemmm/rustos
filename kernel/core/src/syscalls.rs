@@ -75,8 +75,8 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{
-    CapabilityId, DescriptorTable, Errno, IrqHandle, RandomFlags, StreamMode, SyscallNumber,
-    RANDOM_REQUEST_MAX_BYTES,
+    CapabilityId, DescriptorTable, Errno, IrqHandle, MapFlags, RandomFlags, StreamMode,
+    SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
@@ -101,6 +101,7 @@ use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleRead, ConsoleWrite, NULL_CONSOLE, NULL_CONSOLE_READ};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
+use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
@@ -200,6 +201,14 @@ where
     /// path installs the concrete producer through [`Self::with_spawn`].
     /// Held as a `'static` borrow, exactly like the console device.
     spawn_service: &'static (dyn ProcessSpawn + 'static),
+    /// The architecture-specific anonymous-memory producer the `mem_map` /
+    /// `mem_unmap` syscalls drive to map and unmap fresh `RW` regions in the
+    /// caller's own live address space (`plans/SPAWN.md` SP5). Defaults to
+    /// [`NULL_MEM_MAP`] (fail closed with [`Errno::NotImplemented`],
+    /// `AGENTS.md` §2.9); the boot path installs the concrete `kernel/mem`
+    /// producer through [`Self::with_mem_map`] once `SP5b` lands. Held as a
+    /// `'static` borrow, exactly like the console device and spawn producer.
+    mem_map: &'static (dyn MemMap + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -261,6 +270,10 @@ where
             frames: None,
             programs: &EMPTY_PROGRAM_REGISTRY,
             spawn_service: &NULL_PROCESS_SPAWN,
+            // Anonymous-memory subsystem unwired until the boot path installs
+            // the `kernel/mem` live-mapping producer (`plans/SPAWN.md` SP5b):
+            // `mem_map` / `mem_unmap` fail closed with `NotImplemented`.
+            mem_map: &NULL_MEM_MAP,
         }
     }
 
@@ -334,6 +347,20 @@ where
     ) -> Self {
         self.programs = programs;
         self.spawn_service = spawn_service;
+        self
+    }
+
+    /// Install the architecture anonymous-memory producer the `mem_map` /
+    /// `mem_unmap` syscalls drive, consuming and returning `self`
+    /// (`plans/SPAWN.md` SP5).
+    ///
+    /// Until this is called the handler holds [`NULL_MEM_MAP`], so both
+    /// syscalls fail closed with [`Errno::NotImplemented`] (`AGENTS.md`
+    /// §2.9). The producer must be `'static`: it lives for the lifetime of
+    /// the running kernel, exactly like the console device.
+    #[must_use]
+    pub const fn with_mem_map(mut self, mem_map: &'static (dyn MemMap + 'static)) -> Self {
+        self.mem_map = mem_map;
         self
     }
 
@@ -1026,6 +1053,47 @@ where
             arch: self.arch,
         };
         self.spawn_service.spawn(rxe, &ctx)
+    }
+
+    fn mem_map(
+        &self,
+        _caller: &CallerContext<'_>,
+        len: usize,
+        flags: MapFlags,
+        addr_hint: u64,
+    ) -> SyscallResult {
+        // The dispatcher already validated `len` fits in `usize`, that
+        // `flags` carries no reserved bit, and that `addr_hint` is a
+        // well-formed `u64`. A zero-length mapping is meaningless; reject it
+        // before touching any state (`AGENTS.md` §5.4 — validate every
+        // input) rather than mapping an empty region.
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // Hand the request to the installed `kernel/mem` producer, which
+        // maps the region into the caller's own live address space, zeroes
+        // it, and returns its base (`plans/SPAWN.md` SP5b). Until one is
+        // installed the default `NULL_MEM_MAP` fails closed with
+        // `NotImplemented` (`AGENTS.md` §2.9), never pretending a region was
+        // mapped. A frame exhaustion surfaces as `OutOfMemory` here
+        // (`AGENTS.md` §4 — deterministic OOM).
+        self.mem_map.map(len, flags, addr_hint)
+    }
+
+    fn mem_unmap(&self, _caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
+        // The dispatcher already validated `base` and that `len` fits in
+        // `usize`. A zero-length range names nothing; reject it before
+        // touching any state (`AGENTS.md` §5.4).
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // Hand the range to the installed producer, which zeroes the frames
+        // it reclaims (`AGENTS.md` §4) and fails closed when `(base, len)`
+        // does not name a region the caller mapped. The default
+        // `NULL_MEM_MAP` fails closed with `NotImplemented`. Success reports
+        // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
+        // error code, not a value).
+        self.mem_map.unmap(base, len).map(|()| 0)
     }
 }
 
@@ -4098,5 +4166,189 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// A `MemMap` producer that records the last `(len, flags, addr_hint)`
+    /// it was handed and returns a fabricated base, so the handler tests
+    /// can assert the arguments reached it without a real `kernel/mem`
+    /// live-mapping path.
+    struct RecordingMemMap {
+        last_map: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
+        last_unmap: rustos_sync::SpinLock<Option<(u64, usize)>>,
+    }
+    impl RecordingMemMap {
+        fn new() -> Self {
+            Self {
+                last_map: rustos_sync::SpinLock::new(None),
+                last_unmap: rustos_sync::SpinLock::new(None),
+            }
+        }
+    }
+    impl crate::memmap::MemMap for RecordingMemMap {
+        fn map(
+            &self,
+            len: usize,
+            flags: rustos_abi::MapFlags,
+            addr_hint: u64,
+        ) -> Result<u64, Errno> {
+            *self.last_map.lock() = Some((len, flags.bits(), addr_hint));
+            // Echo a fabricated base derived from the request so the test
+            // can confirm the handler returned the producer's value verbatim.
+            Ok(0x5000_0000 | addr_hint)
+        }
+        fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
+            *self.last_unmap.lock() = Some((base, len));
+            Ok(())
+        }
+    }
+
+    /// `mem_map` needs no capability (`AGENTS.md` §16.6) and forwards the
+    /// decoded `(len, flags, addr_hint)` to the installed producer,
+    /// returning its base verbatim.
+    #[test]
+    fn mem_map_forwards_to_installed_producer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        let flags = rustos_abi::MapFlags::FIXED;
+        assert_eq!(
+            h.mem_map(&ctx, 0x2000, flags, 0x10_0000),
+            Ok(0x5000_0000 | 0x10_0000)
+        );
+        assert_eq!(
+            *producer.last_map.lock(),
+            Some((0x2000, flags.bits(), 0x10_0000))
+        );
+    }
+
+    /// With no producer installed the handler holds `NULL_MEM_MAP` and
+    /// fails closed with `NotImplemented` (`AGENTS.md` §2.9).
+    #[test]
+    fn mem_map_without_producer_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A zero-length `mem_map` is rejected before the producer is reached
+    /// (`AGENTS.md` §5.4): an empty mapping is meaningless.
+    #[test]
+    fn mem_map_zero_length_is_length_out_of_range() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        assert_eq!(
+            h.mem_map(&ctx, 0, rustos_abi::MapFlags::empty(), 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        // The producer was never reached: the zero-length guard fails
+        // closed before any state is touched.
+        assert!(producer.last_map.lock().is_none());
+    }
+
+    /// `mem_unmap` forwards `(base, len)` to the producer and reports
+    /// `Ok(0)` (the `Errno`-return ABI shape) on success; a zero-length
+    /// range and the no-producer build both fail closed.
+    #[test]
+    fn mem_unmap_forwards_and_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No producer → NotImplemented.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            bare.mem_unmap(&ctx, 0x10_0000, 0x1000),
+            Err(Errno::NotImplemented)
+        );
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // Zero-length range rejected before the producer is reached.
+        assert_eq!(
+            h.mem_unmap(&ctx, 0x10_0000, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(producer.last_unmap.lock().is_none());
+
+        // A well-formed range reaches the producer and reports Ok(0).
+        assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x1000), Ok(0));
+        assert_eq!(*producer.last_unmap.lock(), Some((0x10_0000, 0x1000)));
     }
 }

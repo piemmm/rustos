@@ -1863,6 +1863,18 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   vertical proves a child writes fd 1 over the UART backing.
                   **P6e-3b remains:** wire the `rustos-shell` REPL over
                   fd 0/1/3 (no `console_*`) + `init` session supervision.
+                  **SP5 (`mem_map`/`mem_unmap`, runtime anonymous memory,
+                  `plans/SPAWN.md`) — SP5-0 + SP5a landed:**
+                  `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the
+                  `MapFlags` type (`FIXED`), `Errno::OutOfMemory` (#20), the
+                  `ros_sys_mem_map`/`ros_sys_mem_unmap` C stubs + regenerated
+                  header, the dispatcher arms, and `kernel/core`'s `MemMap`
+                  seam (`NULL_MEM_MAP` / `with_mem_map`, unprivileged +
+                  unaudited, fail-closed `NotImplemented`, host-proven). The
+                  ungated decision follows §16.6 (a process grows only its
+                  **own** isolated space). **SP5b remains:** the real
+                  `kernel/mem` live-address-space producer (zero on map/free,
+                  TLB shootdown) + the `-M virt` vertical.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

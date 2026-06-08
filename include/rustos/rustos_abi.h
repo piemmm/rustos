@@ -25,6 +25,7 @@
 #include "rustos_capability.h"
 #include "rustos_time.h"
 #include "rustos_random.h"
+#include "rustos_memory.h"
 #include "rustos_hwtree.h"
 #include "rustos_ipc.h"
 #include "rustos_stdinfo.h"

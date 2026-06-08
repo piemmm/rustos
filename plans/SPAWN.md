@@ -387,7 +387,13 @@ the kernel-discovered console (`console_*` is only the bootstrap stream
 syscall and both run concurrently on `-M virt` — proven by the SP3b vertical.
 The real Pi is the on-metal acceptance item.
 
-### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[ ]` (beyond P6d)
+### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[~]` (beyond P6d)
+
+**SP5-0 and SP5a are landed; SP5b remains.** The `abi-v1` surface, the
+C-callable stubs + generated header, the dispatcher arms, and the
+fail-closed `kernel/core` seam exist and are host-proven; what is left is
+the real `kernel/mem` live-address-space producer + the `-M virt`
+vertical.
 
 The natural follow-on abi-v1 process-runtime capability, scheduled here
 after the spawn tranche because it has the same precondition: a process
@@ -445,16 +451,22 @@ parallel address-space model (§2.2).
 **Staging (mirrors the SP3a→SP3b precedent — one fully-gated increment per
 landing):**
 
-- **SP5-0 — design note `[ ]`.** Extend `docs/src/architecture/` (the
+- **SP5-0 — design note `[x]`.** Extend `docs/src/architecture/` (the
   syscall + multitasking pages) with the map/unmap ABI shape (`mem_map`:
   length + flags + optional addr hint → base `U64` or `Errno`; `mem_unmap`:
   base + length → `Errno`), the live-address-space-mutation + TLB-shootdown
   design, the W^X and zero-on-map/free invariants, the OOM-as-`Result`
   contract, and the resolved capability-gating decision. Pure docs; lands
-  with SP5a.
-- **SP5a — abi-v1 surface + fail-closed seam (host-proven) `[ ]`.**
-  `lib/abi`: `SyscallNumber::MEM_MAP` (**13**) + `MEM_UNMAP` (**14**) +
+  with SP5a. **Landed:** `docs/src/architecture/memory.md` §7c is the design
+  note and `syscalls.md` carries the ABI/handler rows. **Capability
+  decision: unprivileged** — growing one's *own* isolated address space
+  grants no authority over anything else (§16.6 "list my own processes").
+- **SP5a — abi-v1 surface + fail-closed seam (host-proven) `[x]`.**
+  `lib/abi`: `SyscallNumber::MEM_MAP` (**14**) + `MEM_UNMAP` (**15**) +
   their `SyscallSpec` rows (capability per SP5-0), with frozen-number tests.
+  (Numbers are **14/15**, not the 13/14 sketched below: `STREAM_READ` took
+  13. `MapFlags` carries a `FIXED` bit; `addr_hint` is advisory unless
+  `FIXED`. `Errno::OutOfMemory` = **20** was appended.)
   `lib/abi-sys`: the `ros_sys_mem_map` / `ros_sys_mem_unmap` C stubs
   (`#[export_name]`, panic-free) + drift-registry rows + marshalling tests;
   regenerate the C header (`cargo xtask c-header --write`) and recompute
@@ -464,6 +476,11 @@ landing):**
   arch-neutral seam (default → `NotImplemented`, mirroring `NULL_CONSOLE` /
   `NULL_PROCESS_SPAWN`), with `with_*` builders so the kernel binary needs
   no change yet. Host-tested (validation, fail-closed, no-producer paths).
+  **Landed:** both syscalls are **unprivileged + unaudited**; the handler
+  rejects a zero `len` (`LengthOutOfRange`) and a reserved flag bit
+  (`OutOfRange`); the seam is `kernel/core`'s `MemMap` (`NULL_MEM_MAP` /
+  `with_mem_map`), so the kernel binary is unchanged and production
+  `mem_map`/`mem_unmap` fail closed with `NotImplemented` until SP5b.
 - **SP5b — real producer + `-M virt` vertical `[ ]`.** `kernel/mem`'s live
   user-space map/unmap (zero-on-map, fail-closed reclaim of a
   partially-mapped range, TLB-shootdown) + the keep-the-frozen-view-
