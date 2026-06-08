@@ -24,6 +24,14 @@ rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
 
+[build-dependencies]
+# `build.rs` derives `SYSCALL_TABLE_HASH` from the single source of truth
+# (`rustos_abi::ENCODED_TABLE`) at build time rather than committing a
+# hand-maintained literal (`AGENTS.md` §9, §2.2). Same path crates the
+# library half links, so the host-computed digest matches the linked one.
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+
 [dev-dependencies]
 # The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
 # dispatch capability gate under randomised call sequences. Same pinned,

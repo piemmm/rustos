@@ -21,15 +21,18 @@ use crate::audit::{record, AuditEvent};
 
 /// SHA-256 fingerprint of [`rustos_abi::ENCODED_TABLE`].
 ///
-/// `cargo xtask abi-check` independently computes the same digest and
-/// fails the build if it disagrees with the literal here. The kernel
-/// itself re-checks the value via [`verify_table_hash`] at the
-/// syscall-registration phase of `kernel_main`; refusal to boot beats
+/// The value is **derived at build time** by this crate's `build.rs`
+/// from `rustos_abi::ENCODED_TABLE` — the single source of truth
+/// (`AGENTS.md` §9, §2.2) — and `include!`d here. There is no
+/// hand-maintained literal to edit or to let drift out of sync with the
+/// table it fingerprints: changing the syscall table re-derives this
+/// value on the next build. The kernel still re-checks it via
+/// [`verify_table_hash`] at the syscall-registration phase of
+/// `kernel_main`, and `cargo xtask abi-check` cross-checks the linked
+/// value against a freshly computed digest; refusal to boot beats
 /// silently dispatching against an ABI the user space never agreed to.
-pub const SYSCALL_TABLE_HASH: Sha256Digest = [
-    0x1c, 0xfb, 0xad, 0x1d, 0xd3, 0x20, 0x1f, 0x09, 0x2a, 0xe9, 0x4c, 0x01, 0x8c, 0x32, 0x6c, 0x7c,
-    0x7c, 0x4d, 0x84, 0xf3, 0x57, 0xef, 0x23, 0x24, 0x13, 0xab, 0xf5, 0x78, 0xe4, 0xbf, 0x19, 0xc9,
-];
+pub const SYSCALL_TABLE_HASH: Sha256Digest =
+    include!(concat!(env!("OUT_DIR"), "/syscall_table_hash.rs"));
 
 /// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
 /// to [`SYSCALL_TABLE_HASH`].

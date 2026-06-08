@@ -25,18 +25,20 @@ Both halves must ship together. Either half existing without the other
 is a hard error; `cargo xtask abi-check` fails the build at that point.
 
 The source half exposes a `&'static [SyscallSpec]` table and a
-deterministic byte encoding `ENCODED_TABLE`. The kernel half stores the
-SHA-256 fingerprint of that encoding as `SYSCALL_TABLE_HASH`. The
-`xtask` recomputes the SHA-256 of `ENCODED_TABLE` and demands that:
+deterministic byte encoding `ENCODED_TABLE`. The kernel half exposes the
+SHA-256 fingerprint of that encoding as `SYSCALL_TABLE_HASH` — but there
+is **no hand-maintained literal**: `kernel/syscall/build.rs` derives the
+value from `ENCODED_TABLE` at build time and `table.rs` `include!`s it
+(`AGENTS.md` §2.2 — one definition, nothing to edit or to let drift). A
+change to the table re-derives the fingerprint on the next build.
 
-1. the byte literal parsed from `kernel/syscall/src/table.rs` matches
-   the freshly computed digest, and
-2. the linked `rustos_kernel_syscall::SYSCALL_TABLE_HASH` matches it
-   too (catches stale `target/` caches).
-
-A negative-path test in `tools/xtask/src/commands/abi_check.rs`
-mutates one byte of the on-disk hash literal and asserts the check
-fails — proving the diff tool is not a no-op.
+The kernel re-checks the value at boot (`verify_table_hash`), and
+`cargo xtask abi-check` recomputes the SHA-256 of `ENCODED_TABLE` and
+demands that the linked `rustos_kernel_syscall::SYSCALL_TABLE_HASH`
+matches it (catching stale `target/` caches or a mismatched
+`rustos-abi`). A test in `tools/xtask/src/commands/abi_check.rs`
+asserts the linked, build-derived constant equals a freshly computed
+digest.
 
 ## `abi-v1` syscall table
 
@@ -44,7 +46,8 @@ The table **grows by appending**: existing entries are never re-numbered,
 removed, or re-typed, and a new syscall takes the next free number. While
 `abi-v1` is unfrozen (RustOS has not shipped a release, `AGENTS.md` §9 /
 §2.13) a new row also requires regenerating the C header
-(`cargo xtask c-header --write`) and recomputing `SYSCALL_TABLE_HASH`; the
+(`cargo xtask c-header --write`); `SYSCALL_TABLE_HASH` needs no manual
+step — it is re-derived from `ENCODED_TABLE` by the build script. The
 `abi-check` and `c-header` drift guards enforce both. From the first
 release onward the table is frozen and new behaviour ships as `abi-v2`.
 
