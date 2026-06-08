@@ -810,9 +810,31 @@ The `mmu::conformance` suite gained a block-split honesty check (every
 port: the declaration is justified, and a non-`Supported` port fails
 `split_block` closed); aarch64's `paging_tests` additionally proves the
 HAL `split_block` reaches the inherent body over a `dyn AddressSpace`.
-Promoting `prepare_guard_arena` and routing `kthread::BoxStack` through the
-arena (so an overrun takes a synchronous abort rather than a
-next-reschedule canary detection) is the staged **G3b/G3c** follow-on.
+
+### Promoting the arena onto the Arch HAL (G3b)
+
+`AddressSpace::prepare_guard_arena(base, len)` — the arena form of the
+split, applied to every coarse block an arena spans (G2) — is likewise now
+a member of the architecture-neutral HAL `AddressSpace` surface. Its
+default fails closed with `MapError::Unsupported`, so a port whose
+`block_split_support` is not `Supported` falls back to the software canary
+guard rather than silently pretending the arena was hardened (`AGENTS.md`
+§2.9 / §2.17). The aarch64 impl forwards to its inherent, fully-tested
+`prepare_guard_arena` body — one implementation reached either directly
+(the boot path and the G2 vertical) or through the HAL trait (`AGENTS.md`
+§2.2). The `mmu::conformance` honesty check now also requires a
+non-`Supported` port to fail `prepare_guard_arena` closed (riscv64 and
+x86_64 do, matching their `Pending` split); aarch64's `paging_tests`
+proves the HAL `prepare_guard_arena` reaches the inherent body over a
+`dyn AddressSpace`.
+
+Routing `kthread::BoxStack` through the arena (so an overrun takes a
+synchronous abort rather than a next-reschedule canary detection) needs
+the cross-space arena-frame plumbing reachable from the arch-neutral
+`kernel/core` (a kthread kernel stack must be mapped in every address
+space the task runs under), so it is the staged **G3b/G3c** follow-on; the
+poison-canary guard remains the binding non-deferred defence until it
+lands (`AGENTS.md` §2.17).
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

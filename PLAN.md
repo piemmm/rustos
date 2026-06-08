@@ -2016,9 +2016,18 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   (`PageTableError::Unsupported`). Host-proven (4 new
                   arch-api conformance tests + aarch64 HAL-forwarding +
                   riscv64 Pending-fails-closed); no QEMU vertical needed
-                  (G1/G2 already prove the live mechanism). G3b
-                  (`prepare_guard_arena` promotion + `BoxStack` rewire) and
-                  G3c (production fault-form on `-M virt`) follow. Docs:
+                  (G1/G2 already prove the live mechanism). **G3b-1 is now
+                  landed:** `prepare_guard_arena` (the arena form of the
+                  split) is promoted onto the same Arch HAL `AddressSpace`
+                  surface with a default-fail-closed `MapError::Unsupported`,
+                  aarch64 forwarding to its inherent body and riscv64/x86_64
+                  falling back to the software canary (`mmu::conformance`
+                  now also requires a non-`Supported` port to fail the arena
+                  closed; aarch64 proves HAL→inherent over `dyn`, riscv64
+                  proves Pending fail-closed). G3b-2 (`BoxStack` rewire over
+                  the G2 arena, needs cross-space arena-frame plumbing in
+                  arch-neutral `kernel/core`) and G3c (production fault-form
+                  on `-M virt`) follow. Docs:
                   `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**

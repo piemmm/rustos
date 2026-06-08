@@ -232,9 +232,15 @@ fn block_split_is_pending_and_fails_closed() {
     assert!(support.is_pending());
     assert!(support.detail().is_some_and(|n| !n.trim().is_empty()));
     // The default `split_block` therefore fails closed rather than
-    // silently doing nothing (`AGENTS.md` §2.9).
+    // silently doing nothing (`AGENTS.md` §2.9), and so does the
+    // guard-page arena (G3b) that builds on it — riscv64 falls back to the
+    // software canary until its Sv39 split lands.
     assert_eq!(
         mmu::AddressSpace::split_block(&mut space, 100u64 << 30),
+        Err(MapError::Unsupported)
+    );
+    assert_eq!(
+        mmu::AddressSpace::prepare_guard_arena(&mut space, 100u64 << 30, 0x20_0000),
         Err(MapError::Unsupported)
     );
 }

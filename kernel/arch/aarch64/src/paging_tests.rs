@@ -434,6 +434,23 @@ fn declares_block_split_supported_and_the_hal_method_forwards() {
         Ok(va),
         "the HAL-split page unmaps to its identity frame"
     );
+
+    // `prepare_guard_arena` (G3b) likewise forwards through the object-safe
+    // HAL trait to the inherent body: a 2 MiB arena in a fresh block is
+    // re-expressed at 4 KiB granularity, so a single page in it then unmaps.
+    let arena: u64 = (1u64 << 30) + 10 * BLOCK_2MIB;
+    {
+        let erased: &mut dyn mmu::AddressSpace = &mut space;
+        erased
+            .prepare_guard_arena(arena, BLOCK_2MIB)
+            .expect("HAL prepare_guard_arena forwards to the inherent body");
+    }
+    let arena_page = arena + 2 * PAGE_SIZE as u64;
+    assert_eq!(
+        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, arena_page),
+        Ok(arena_page),
+        "a page in the HAL-prepared arena unmaps to its identity frame"
+    );
 }
 
 #[test]

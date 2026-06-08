@@ -911,12 +911,32 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
     ("Promoting the split onto the Arch HAL (G3a)"). **No QEMU vertical
     needed** — G1/G2 already prove the live aarch64 mechanism, now reached
     through the promoted surface.
-  - **G3b — `prepare_guard_arena` HAL promotion + `BoxStack` rewire `[ ]`.**
-    Promote `prepare_guard_arena` onto the HAL `AddressSpace` surface and
-    route the kthread `BoxStack` guard page through unmap-on-create over the
-    G2 arena (canary fallback where a port's `block_split_support` is not
-    `Supported`). Watch the cross-space-mapping requirement (the kthread
-    stack must be mapped in every space the task runs under).
+  - **G3b-1 — `prepare_guard_arena` HAL promotion `[x]`.** The arena form
+    of the split (G2 — `split_block` applied to every coarse block an arena
+    spans) is now part of the architecture-neutral Arch HAL `AddressSpace`
+    surface (`rustos_arch_api::mmu`, §17.2), beside the G3a `split_block`
+    members. `AddressSpace::prepare_guard_arena(base, len)` defaults to a
+    fail-closed `MapError::Unsupported`, so a port whose
+    `block_split_support` is not `Supported` falls back to the software
+    canary guard rather than silently pretending the arena was hardened
+    (`AGENTS.md` §2.9 / §2.17); aarch64 (`Supported`) overrides it to
+    forward to its inherent, fully-tested body (one implementation, §2.2).
+    The `mmu::conformance` honesty check now also requires a non-`Supported`
+    port to fail `prepare_guard_arena` closed; aarch64 `paging_tests` proves
+    the HAL method reaches the inherent body over `dyn AddressSpace`, and
+    riscv64 (Pending) proves the arena fail-closed beside its `split_block`
+    one. Host-proven; **no QEMU vertical needed** — G2 already proves the
+    live aarch64 arena, now reached through the promoted surface. Doc:
+    `docs/src/platform/aarch64.md` ("Promoting the arena onto the Arch HAL
+    (G3b)").
+  - **G3b-2 — `BoxStack` rewire over the G2 arena `[ ]`.** Route the kthread
+    `BoxStack` guard page through unmap-on-create over the G2 arena (canary
+    fallback where a port's `block_split_support` is not `Supported`). This
+    needs the cross-space arena-frame plumbing reachable from the
+    arch-neutral `kernel/core` — the kthread kernel stack must be mapped in
+    every space the task runs under — so it is staged after the HAL
+    promotion (G3b-1). The poison-canary guard remains the binding
+    non-deferred defence until it lands (`AGENTS.md` §2.17).
   - **G3c — production fault-form on `-M virt` `[ ]`.** Prove an
     overrunning kthread takes a synchronous data abort, not a
     next-reschedule canary detection.

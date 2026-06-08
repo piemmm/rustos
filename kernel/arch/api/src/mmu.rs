@@ -339,6 +339,41 @@ pub trait AddressSpace {
         Err(MapError::Unsupported)
     }
 
+    /// Re-express every coarse block covering the arena
+    /// `[base, base + len)` at 4 KiB granularity, so any single page in
+    /// the arena (e.g. a kthread kernel-stack guard page) can later be
+    /// torn down with [`Self::unmap`] (+ a
+    /// [`crate::tlb::TlbShootdown::flush_page`]) without disturbing the
+    /// block the running CPU executes on.
+    ///
+    /// This is [`Self::split_block`] applied to every coarse block the
+    /// arena spans (`plans/PI.md` G2): a guard-page arena laid down inside
+    /// the boot path's coarse identity blocks has no per-4 KiB leaf to
+    /// clear until those blocks are re-expressed as tables of finer
+    /// leaves. Done up-front, at boot, while the arena holds no running
+    /// context. Because the split only ever *adds* table levels that
+    /// reproduce the existing translation, preparing the arena changes no
+    /// address's mapping and needs no TLB maintenance — it is
+    /// break-before-make-free against the active regime and is idempotent.
+    ///
+    /// The default fails closed with [`MapError::Unsupported`] for a port
+    /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
+    /// — the arena defence falls back to the software canary for such a
+    /// port (`AGENTS.md` §2.17), never silently no-ops (`AGENTS.md` §2.9).
+    /// A supporting port overrides this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `len` is zero or `base` is not
+    /// 4 KiB-aligned, [`MapError::NotMapped`] if any covering block has no
+    /// live mapping, [`MapError::PoolExhausted`] if the page-table pool
+    /// cannot supply a replacement table, or [`MapError::Unsupported`] on a
+    /// port that does not implement the split.
+    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
+        let _ = (base, len);
+        Err(MapError::Unsupported)
+    }
+
     /// Make this address space the active translation regime on the
     /// calling CPU.
     ///
@@ -404,12 +439,15 @@ pub mod conformance {
     /// The port's [`AddressSpace::block_split_support`] is honest: a
     /// non-supported declaration carries a non-empty justification
     /// (`AGENTS.md` §2.17 — a defence is never pretended), and a port that
-    /// does *not* support the split fails [`AddressSpace::split_block`]
-    /// closed with [`MapError::Unsupported`] rather than silently doing
-    /// nothing (`AGENTS.md` §2.9). A supporting port's positive split
-    /// behaviour is proven by its own host tests (it needs a known coarse
-    /// block, which this portable suite does not have), so the supported
-    /// case is only required to declare itself, not exercised here.
+    /// does *not* support the split fails both [`AddressSpace::split_block`]
+    /// and [`AddressSpace::prepare_guard_arena`] closed with
+    /// [`MapError::Unsupported`] rather than silently doing nothing
+    /// (`AGENTS.md` §2.9 — the guard-page arena that builds on the split
+    /// must fall back to the software canary, never pretend success). A
+    /// supporting port's positive split behaviour is proven by its own host
+    /// tests (it needs a known coarse block, which this portable suite does
+    /// not have), so the supported case is only required to declare itself,
+    /// not exercised here.
     fn block_split_declaration_is_honest<A: AddressSpace + ?Sized>(space: &mut A, va: u64) {
         let support = space.block_split_support();
         if let Some(reason) = support.detail() {
@@ -423,6 +461,11 @@ pub mod conformance {
                 space.split_block(va),
                 Err(MapError::Unsupported),
                 "a port that does not support block-split must fail split_block closed"
+            );
+            assert_eq!(
+                space.prepare_guard_arena(va, 4096),
+                Err(MapError::Unsupported),
+                "a port that does not support block-split must fail prepare_guard_arena closed"
             );
         }
     }

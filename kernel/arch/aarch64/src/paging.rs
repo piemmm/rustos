@@ -776,6 +776,15 @@ impl MmuAddressSpace for AddressSpace {
         self.split_block(vaddr)
     }
 
+    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
+        // The HAL view of the inherent, fully-tested
+        // `AddressSpace::prepare_guard_arena` (G2): one body, reached either
+        // directly by the arch boot path / verticals or through the HAL trait
+        // here (`AGENTS.md` §2.2). As with `split_block`, inherent-method
+        // resolution forwards to the inherent body rather than recursing.
+        self.prepare_guard_arena(base, len)
+    }
+
     unsafe fn activate(&self) {
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
