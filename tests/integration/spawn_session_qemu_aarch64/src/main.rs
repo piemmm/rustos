@@ -1,43 +1,48 @@
-//! `plans/SPAWN.md` `SP3b` QEMU integration test: boot the aarch64 (Raspberry
+//! `plans/PI.md` P6e-3b-ii QEMU integration test: boot the aarch64 (Raspberry
 //! Pi 4) `rustos-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
-//! into EL0, have `init` launch the embedded `Shell` session program through
-//! the `spawn` syscall, and report success to QEMU once **both** processes
-//! have been built and the session has run.
+//! into EL0, and prove `init` **supervises** the embedded `Shell` session —
+//! launching it, waiting on and reaping it when it exits, and relaunching it —
+//! rather than spawning it and forgetting it (`AGENTS.md` §20).
 //!
 //! ## What this test asserts
 //!
-//! `boot_aarch64::boot` installs the `InitSpawn` seam **and** the runtime
-//! `ProcessSpawn` producer + embedded-program registry into the `BootInfo`
-//! hand-off. After `kernel_core::kernel_main` emits
+//! `boot_aarch64::boot` installs the `InitSpawn` seam, the runtime
+//! `ProcessSpawn` producer + embedded-program registry, and (through
+//! `kernel_core`'s `run_phases`) the `KernelProcessWait` producer into the
+//! `BootInfo` hand-off. After `kernel_core::kernel_main` emits
 //! `AuditEvent::BootCompleted` it builds PID 1 `init` through the
 //! capability-checked, audited spawn caller (emitting
 //! `AuditEvent::ProcessSpawned`, `EventId(4030)`, #1) and `eret`s into it.
-//! `init` writes its banner, then issues the `spawn` syscall for
-//! `/Apps/Shell.app/Run` (an audited syscall, `AuditEvent::SyscallInvoked`,
-//! `EventId(5000)`, #1). The runtime `ProcessSpawn` producer builds the
-//! session a *fresh, hardware-isolated* address space through the same
-//! audited spawn caller (emitting `ProcessSpawned`, #2) and admits it
-//! **Ready** — `init` keeps running, so this is a true concurrent spawn, not
-//! an `exec`-style hand-off. `init` then exits (`SyscallInvoked` #2), the
-//! cooperative drain loop steps the session, which writes its own banner and
-//! exits (`SyscallInvoked` #3).
+//! `init` writes its banner, then runs its supervise loop
+//! (`userland/system/init/src/run.rs`):
 //!
-//! ## Why the PASS keys on two spawns and three audited syscalls
+//! 1. `spawn` for `/Apps/Shell.app/Run` (audited `SyscallInvoked`,
+//!    `EventId(5000)`, #1). The runtime `ProcessSpawn` producer builds the
+//!    session a *fresh, hardware-isolated* address space (emitting
+//!    `ProcessSpawned`, #2) and admits it **Ready**.
+//! 2. `wait` on that child (audited `SyscallInvoked` #2), which parks `init`
+//!    back on the scheduler until the child is reapable.
+//! 3. The cooperative drain loop steps the session; it writes its prompt,
+//!    reads end-of-input (no `-M virt` serial RX), and `exit`s (audited
+//!    `SyscallInvoked` #3). `init`'s `wait` then reaps it and reads its code.
+//! 4. `init` relaunches the session — a second `spawn` (audited
+//!    `SyscallInvoked` #4) producing a **third** `ProcessSpawned` (#3).
 //!
-//! Two `ProcessSpawned` records prove the producer built a **second**,
-//! distinct image. The session's `exit` (the third audited syscall) is on
-//! the critical path *only* if the session actually ran: its banner write is
-//! gated — `stream_write` reports the accepted byte count, and the session
-//! parks fail-closed on a short write (`userland/shell/shell/src/run.rs`),
-//! so it reaches `exit` only once its banner landed, which in turn requires
-//! its *own* isolated address space to have resolved through the kernel-wide
-//! registry so the kernel could copy the banner out of the session's memory
-//! (`AGENTS.md` §4 — hardware isolation). The three audited syscalls are
-//! `init`'s `spawn`, `init`'s `exit`, and the session's `exit`; the session's
-//! is necessarily last. A regression that never spawns the session, whose
-//! session never runs, or whose banner fails closed never reaches the third
-//! `SyscallInvoked`, so the run times out and the harness reports
-//! `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md` §7).
+//! ## Why the PASS keys on three spawns and four audited syscalls
+//!
+//! The **third** `ProcessSpawned` is the supervision witness: `init` only
+//! reaches its second `spawn` *after* its `wait` returned, which only happens
+//! once the first session was reaped — so a third built image proves the full
+//! reap-and-restart cycle, not merely a single concurrent spawn. The first
+//! session's `exit` (the third audited syscall) is on the critical path only
+//! if the session actually ran: its prompt write is gated through its *own*
+//! isolated address space (`AGENTS.md` §4), and `init`'s `wait` cannot return
+//! until that `exit` recorded the child's code. The four audited syscalls are
+//! `init`'s first `spawn`, `init`'s `wait`, the session's `exit`, and `init`'s
+//! second `spawn`. A regression that never spawns the session, never reaps it,
+//! or never relaunches it never reaches the third `ProcessSpawned`, so the run
+//! times out and the harness reports `Outcome::Timeout` — the documented
+//! fail-loud behaviour (`AGENTS.md` §7).
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -99,23 +104,26 @@ mod kernel {
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` emitted by the syscall dispatcher for an audited syscall —
-    /// `init`'s `spawn` and `exit`, and the session's `exit`. Pinned by the
+    /// `init`'s `spawn` / `wait` and the session's `exit`. Pinned by the
     /// audit-id test in `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Number of `ProcessSpawned` records seen so far. PASS requires two:
-    /// PID 1 `init` and the session it spawns.
+    /// Number of `ProcessSpawned` records seen so far. PASS requires three:
+    /// PID 1 `init` and the **two** session instances it launches — the
+    /// second launch can only happen after `init` reaped the first, so a third
+    /// `ProcessSpawned` is the witness that supervision (reap + restart) ran.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
     /// Number of audited `SyscallInvoked` records seen so far. PASS requires
-    /// three: `init`'s `spawn`, `init`'s `exit`, and the session's gated
-    /// `exit` (necessarily last).
+    /// four, the prefix of `init`'s supervise loop up to the relaunch:
+    /// `init`'s first `spawn`, `init`'s `wait` (which parks it), the first
+    /// session's gated `exit`, and `init`'s second `spawn` (the relaunch).
     static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once two processes have been built and three audited syscalls
-    /// have run — proving PID 1 spawned a second, isolated process that ran
-    /// its banner and exited.
+    /// to QEMU once three processes have been built and four audited syscalls
+    /// have run — proving PID 1 launched the session, waited on and reaped it
+    /// when it exited, and relaunched it (supervision, not spawn-and-forget).
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
@@ -128,7 +136,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 2 && SYSCALLS.load(Ordering::Acquire) >= 3 {
+            if SPAWNED.load(Ordering::Acquire) >= 3 && SYSCALLS.load(Ordering::Acquire) >= 4 {
                 qemu_exit::exit_success();
             }
         }

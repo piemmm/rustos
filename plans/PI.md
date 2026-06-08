@@ -357,7 +357,7 @@ fixtures and the fail-closed no-`/psci` path. The Pi's `smc` conduit (via
 acceptance item (no `-M raspi4b` in QEMU — the same gap as P2/P3/P4).
 `cargo xtask cfg-check` stays clean.
 
-### P6 — Spawn `init` into EL0 on the Pi `[~]`
+### P6 — Spawn `init` into EL0 on the Pi `[x]`
 
 The user-mode milestone is the first time the *production* kernel reaches
 EL0 on any arch (today only per-test fixtures do, via `spawn_and_enter`),
@@ -556,7 +556,7 @@ on its own before the next.
   `tests/integration/spawn_session_qemu_aarch64` vertical proves both
   processes run on `-M virt` (PASS on two `ProcessSpawned` + three audited
   syscalls — the session's gated banner+exit is necessarily last).
-- **P6e — real shell REPL + session supervision `[~]`.** The `session`
+- **P6e — real shell REPL + session supervision `[x]`.** The `session`
   program `init` launches is currently a banner+exit `Run` stub in the
   `Shell` bundle; P6e wires the existing `rustos-shell` interpreter library
   into it (a real REPL) and has `init` supervise the session across its
@@ -642,12 +642,12 @@ on its own before the next.
     / `soak.sh both` / `cargo xtask test --qemu`) **green on this host**.
     Real UART **RX** over fd 0 on silicon remains an on-metal item (no
     deterministic `-M virt` serial-RX injection, consistent with P6e-2).
-  - **P6e-3b — shell REPL over its streams + `init` supervision `[~]`.**
+  - **P6e-3b — shell REPL over its streams + `init` supervision `[x]`.**
     Wire `rustos-shell` to read fd 0 / write fd 1 (and emit `stdinfo` on
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
     `init` supervising the session (restart, reap). The shell contains
     **no** reference to `console_*` or to any device. Staged into the REPL
-    itself (P6e-3b-i, landed) and `init` supervision (P6e-3b-ii, remaining).
+    itself (P6e-3b-i) and `init` supervision (P6e-3b-ii) — **both landed**.
     - **P6e-3b-i — shell REPL over fd 0/1/2/3 `[x]`.** The `Shell` bundle's
       `Run` binary (`userland/shell/shell/src/run.rs`) no longer prints a
       banner and exits: it runs the sibling `rustos-shell` interpreter as a
@@ -674,11 +674,32 @@ on its own before the next.
       all three bare-metal targets; the `spawn_session_qemu_aarch64` vertical
       stays green (the session now writes its gated prompt, reads end-of-input,
       and exits). Docs: `docs/src/userland/shell.md`.
-    - **P6e-3b-ii — `init` session supervision `[ ]`.** Have PID 1 `init`
-      `wait`/reap and restart the session across its lifetime rather than
-      spawn-and-forget. This changes `init`'s audited-syscall sequence, so the
-      `spawn_session`/`spawn_init` `-M virt` vertical assertions are reworked
-      with it. (Remaining.)
+    - **P6e-3b-ii — `init` session supervision `[x]`.** PID 1 `init` no
+      longer spawns-and-forgets the session: `userland/system/init/src/run.rs`
+      now runs a fail-closed **supervise loop** — `spawn` the session, `wait`
+      on exactly that child (blocking until it exits, reaping it), then
+      relaunch it. The loop is bounded by a small `SESSION_SPAWN_BUDGET`
+      crash-loop guard: a session that blocks on input runs for PID 1's whole
+      life and never approaches it, but one that exits instantly (no input
+      backing) stops the loop at `EXIT_SESSION_EXHAUSTED` rather than
+      busy-spinning on `spawn` (`AGENTS.md` §2.1), and a failed `spawn`/`wait`
+      is fail-loud (`EXIT_SESSION_FAILED`/`EXIT_WAIT_FAILED`, §2.9). **No
+      kernel/boot change was needed** — the production aarch64 pipeline already
+      wires the `KernelProcessWait` producer (`kernel_core::run_phases`), the
+      `spawn` admit path's `register_child`, and the `exit` handler's
+      `record_exit`, and `admit_init`'s drive loop re-dispatches the parked
+      `init` after the session exits. This changes `init`'s audited-syscall
+      sequence, so the `-M virt` vertical assertions were reworked:
+      `spawn_session_qemu_aarch64` now keys PASS on **three** `ProcessSpawned`
+      (init + two session launches — the second launch proves the first was
+      reaped and relaunched) + **four** audited syscalls (`init`'s `spawn`,
+      `init`'s `wait`, the session's `exit`, `init`'s second `spawn`); the
+      sibling `spawn_init_qemu_aarch64` still PASSes (its witness is now
+      `init`'s first audited syscall, the `spawn`, instead of an `exit`) and
+      its doc was updated. Real UART **RX** over fd 0 (so the session blocks
+      instead of exiting at end-of-input) stays an on-metal item — there is no
+      deterministic `-M virt` serial-RX injection (consistent with
+      P6e-2/P6e-3a). Docs: `docs/src/userland/init.md` ("Session supervision").
     - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
       `[x]`.** The `rustos-shell` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link
@@ -728,6 +749,15 @@ the discovered UART), then starts the user's shell; a vertical asserts the
 EL0 transition + the `init` banner. (This is the "boot into user mode"
 milestone.)
 
+**Landed (proven on `-M virt`).** All of P6a–P6e are `[x]`: the production
+aarch64 kernel reaches EL0, PID 1 `init` writes its banner over its
+inherited `stdout`, launches the `Shell` session through the `spawn`
+syscall, and now **supervises** it (`spawn`→`wait`/reap→relaunch). The EL0
+transition + banner are proven by `spawn_init_qemu_aarch64` and the
+supervision by `spawn_session_qemu_aarch64`, both on `-M virt` — QEMU 8.2.2
+has no `raspi4b` and `raspi*` performs no DTB hand-off (the standing P2
+gap), so the `-M raspi4b` form of this gate is an on-metal acceptance item.
+
 **P6 follow-on — SP5 `mem_map`/`mem_unmap` (runtime anonymous memory).**
 A spawned process otherwise has only its fixed spawn-time image, so it
 cannot obtain a heap; SP5 (`plans/SPAWN.md`) adds the `mmap`-style
@@ -754,6 +784,28 @@ writes+verifies a pattern, unmaps it, then faults on use — the fault handler
 reports PASS, **verified green under QEMU on `-M virt`**. Sibling
 (x86_64/riscv64) verticals + production per-task live-space retention
 follow.
+
+**P6 follow-on — kthread kernel-stack guard page.** The deep-`wait`-handler
+overrun that silently corrupted the next task's snapshot (P6e-3b-ii) is now
+defended: `kernel/core::kthread::BoxStack` carries a poison-filled guard
+page immediately *below* the usable stack and `dispatch_step` verifies its
+canary on every switch-back, failing the task closed on an overrun rather
+than letting it reach the heap neighbour (`AGENTS.md` §4 / §2.9 / §2.17,
+host-proven; the same emulation `kernel/mem`'s slab guard documents). **This
+is the real, non-deferred defence — not the old 64 KiB limit bump.** The
+remaining work is the *deployment* form, which turns the overrun into an
+immediate hardware fault instead of a next-reschedule detection `[ ]`:
+- Lay the guard region on its own 4 KiB page (the stack allocation is
+  already page-multiple) and **unmap** that page in the kernel's own
+  (`TTBR0`) tables, so a write into it faults synchronously.
+- This needs a kernel-self-mapping path: the aarch64 port currently
+  identity-maps RAM as 1 GiB **blocks**, so unmapping one 4 KiB page means
+  splitting the block → 2 MiB → 4 KiB and a local TLB invalidation. Build
+  it behind the Arch HAL (§17.2, no `cfg(target_arch)` leak) on the Stage 6
+  page-table primitives, with the per-arch conformance vertical, and route
+  `BoxStack` through it. Until it lands the poison-canary emulation above
+  is the binding defence (§2.17 — a guard now, the fault-form staged, never
+  "security later").
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

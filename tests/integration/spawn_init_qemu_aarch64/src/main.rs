@@ -12,22 +12,24 @@
 //! (`spawn_and_enter`, gated on `CAP_PROC_SPAWN`), emitting
 //! `AuditEvent::ProcessSpawned` (`EventId(4030)`), and `eret`s into it.
 //! `init` runs in EL0 and writes its startup banner through the `abi-v1`
-//! `stream_write` syscall, then returns; the `rustos-rt` runtime routes the
-//! return through the `exit` syscall, whose `svc` traps back through the
-//! EL1 vector to the production dispatch callback, which emits the audited
-//! `AuditEvent::SyscallInvoked` (`EventId(5000)`).
+//! `stream_write` syscall, then issues the `spawn` syscall to launch its
+//! session (the first act of its supervise loop, `plans/PI.md` P6e-3b-ii);
+//! that `svc` traps back through the EL1 vector to the production dispatch
+//! callback, which emits the audited `AuditEvent::SyscallInvoked`
+//! (`EventId(5000)`).
 //!
 //! ## The banner write is on the critical path
 //!
-//! `init` only returns (and so only reaches the audited `exit`) once its
-//! `stream_write` reports the whole banner accepted; on a short write it
-//! parks fail-closed (`userland/system/init`). `stream_write` is itself
-//! *not* audited (`lib/abi` `audit: false`), so it emits no `SyscallInvoked`
-//! of its own. The PASS finisher therefore fires only after the banner write
-//! actually landed — proving PID 1's address space resolved through the
-//! kernel-wide registry so the kernel could copy the banner out of user
-//! memory (`plans/PI.md` P6c-3 follow-up), not merely that `init` reached
-//! EL0.
+//! `init` only issues its `spawn` (and so only reaches the first audited
+//! syscall) once its `stream_write` reports the whole banner accepted; on a
+//! short write it parks fail-closed (`userland/system/init`). `stream_write`
+//! is itself *not* audited (`lib/abi` `audit: false`), so it emits no
+//! `SyscallInvoked` of its own. The PASS finisher therefore fires only after
+//! the banner write actually landed — proving PID 1's address space resolved
+//! through the kernel-wide registry so the kernel could copy the banner out
+//! of user memory (`plans/PI.md` P6c-3 follow-up), not merely that `init`
+//! reached EL0. (This vertical proves the EL0 transition + banner; that
+//! `init` then *supervises* the session is `spawn_session_qemu_aarch64`.)
 //!
 //! This binary drives the real aarch64 boot pipeline end to end on the
 //! `virt` board and replaces only the audit sink: observing
@@ -103,8 +105,8 @@ mod kernel {
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` emitted by the syscall dispatcher for an audited syscall —
-    /// `init`'s `exit` is audited. Pinned by the audit-id test in
-    /// `kernel/syscall/src/audit.rs`.
+    /// `init`'s first audited syscall is the `spawn` that launches its
+    /// session. Pinned by the audit-id test in `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// Set once `ProcessSpawned` has been observed, so a `SyscallInvoked`

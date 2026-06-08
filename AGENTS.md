@@ -203,6 +203,37 @@ These are absolute. They override any local convenience.
       licence to add bloat (§2.3), speculative interfaces (§2.4), or
       sibling-collapsing "fast paths" that duplicate logic (§2.2). The fastest
       code is often the code you did not write.
+17. **Never defer, weaken, or trade away a security defence. Fix it now.**
+    A known security weakness — a missing guard page, an absent bounds or
+    capability check, an unchecked input, a fail-open path, a use-after-free,
+    a missing zeroisation of secrets, an `unsafe` invariant without its proof —
+    is fixed **in the change that discovers or touches it**, not parked behind
+    a `TODO`, a "future work" comment, a follow-up issue, or a "good enough for
+    now" rationalisation. This is absolute and binds every contributor, human
+    or AI.
+    - **No security regressions, ever.** A change must never leave the system
+      *less* defended than it found it: do not remove, bypass, loosen, or
+      "temporarily" disable a guard page, canary, capability gate, validation,
+      sandbox, encryption, or any other defence to make code compile, a test
+      pass, a deadline, or a diff smaller. Lowering a defence "to get it
+      working" is the §2.1 hack this rule forbids by name.
+    - **Bumping a limit is not a fix.** Enlarging a buffer, a stack, a timeout,
+      or a quota so a problem "stops happening" is mitigation, not a defence,
+      and never a substitute for the structural control (e.g. a guard page that
+      turns the overrun into a deterministic fault or a fail-closed detection).
+      If the structural control is genuinely large, you still land a real,
+      *non-deferred* defence now (§4's guard-page discipline, the §19.10
+      software tag check, a fail-closed check) and **stage** the deployment
+      form explicitly in `PLAN.md`/`plans/` — you do not ship the bare limit
+      bump and call the security work "later".
+    - **"Later", "out of scope", and "pre-existing" are not exits.** If you
+      notice a security defect while doing something else, you own it: fix it in
+      the same change or, if it is genuinely too large, stop and ask (§15.7)
+      before proceeding — never quietly leave it.
+    - This rule never overrides §2.5 (tests) or §2.6 (quality); it reinforces
+      §2.7 (security is the default) and §5.4 (fail closed). A change that
+      defers or reduces a security defence is a review blocker (§23.1),
+      regardless of whether it compiles or the tests pass.
 
 ---
 

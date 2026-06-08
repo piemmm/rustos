@@ -119,9 +119,9 @@ idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
 `main`. `main` writes the first banner line to its inherited standard
 output (fd 1) through `rustos_rt::stdout` — the `abi-v1` `stream_write`
 syscall (`AGENTS.md` §20; `init` binds to the inherited stream, never an
-ambient device) — and returns, and the
-runtime routes the return value through the `exit` syscall. (Both the Rust
-runtime and the C ABI reach the kernel through the one shared trap,
+ambient device) — then **supervises** the user's session (see below). The
+runtime routes `main`'s return value through the `exit` syscall. (Both the
+Rust runtime and the C ABI reach the kernel through the one shared trap,
 `rustos-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
 §2.2.) It links **only** the runtime and its own startup-config parser,
 never the orchestrator library above: dragging that crate's `alloc` +
@@ -137,9 +137,8 @@ ignored. Exactly two directives are defined and each is required once:
 - `console` — open the system console so the banner (and later output)
   has somewhere to go. Takes no argument.
 - `session <path>` — the absolute path of the program `init` launches as
-  the user's session (the shell). Launching it needs the process-spawn
-  syscall (`plans/PI.md` P6d) and a shell (P6e), neither of which exists
-  yet; until then the path is validated as parsed, not launched.
+  the user's session (the shell). `init` launches it through the
+  process-spawn syscall (`plans/PI.md` P6d) and supervises it (below).
 
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is
@@ -148,6 +147,34 @@ allocation-free, borrows from its source text, and **fails closed** with a
 given the wrong argument, a non-absolute `session` path, an over-long
 config, or an omitted required directive — rather than guess at a
 malformed intent (`AGENTS.md` §2.9, §5.4.5).
+
+### Session supervision (`plans/PI.md` P6e-3b-ii)
+
+Once the banner has landed, the `Run` binary does not exit — it
+**supervises** the `session` program for the lifetime of PID 1, owning its
+lifecycle rather than spawning it and forgetting it. Each cycle of the
+supervise loop:
+
+1. **launches** the session with the `spawn` syscall — a separate,
+   hardware-isolated process (a true `spawn`, not an `exec`-style hand-off,
+   `AGENTS.md` §4), so PID 1 keeps running. A negative result is fail-loud
+   (`EXIT_SESSION_FAILED`), never ignored (`AGENTS.md` §2.9);
+2. **blocks** on exactly that child with the `wait` syscall
+   (`plans/SPAWN.md` SP6), reaping it when it exits so it never lingers as a
+   zombie. A negative `wait` — the supervisor cannot reap its own child — is
+   surfaced as `EXIT_WAIT_FAILED` rather than continuing blindly;
+3. **relaunches** it, up to a small `SESSION_SPAWN_BUDGET` of launches.
+
+That bound is a **crash-loop guard**, not a fixed restart count: a session
+that blocks on input runs for PID 1's whole life and never approaches it
+(the supervisor blocks in `wait`); a session that exits the instant it
+starts — e.g. no input backing is attached — would otherwise make the loop
+a busy `spawn` spin, which `AGENTS.md` §2.1 forbids, so after the budget is
+spent `init` stops and exits `EXIT_SESSION_EXHAUSTED` (a session that
+cannot stay up means the system cannot come up — fail closed, `AGENTS.md`
+§2.9). The reaped child's exit code is read but not yet acted on; a policy
+that tells a clean logout from a crash (and resets the budget on a session
+that ran long enough) awaits a clock/session-state ABI.
 
 ## Tests
 
@@ -164,4 +191,9 @@ comment/blank-line/inline-comment and whitespace handling, and every
 fail-closed rejection path.
 
 The `Run` binary's freestanding entry is exercised end to end under QEMU
-when the production boot path spawns it into EL0 (`plans/PI.md` P6c).
+when the production boot path spawns it into EL0: the
+`spawn_init_qemu_aarch64` `-M virt` vertical proves the EL0 transition and
+the banner (`plans/PI.md` P6c-3), and the `spawn_session_qemu_aarch64`
+vertical proves the session supervision — PID 1 launches the session,
+`wait`s on and reaps it when it exits, and relaunches it (`plans/PI.md`
+P6e-3b-ii).

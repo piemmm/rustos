@@ -1832,7 +1832,9 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   three audited syscalls, the session's gated banner+exit
                   necessarily last). **P6e** — grow the session stub into a
                   real `rustos-shell` REPL + `init` session supervision —
-                  remains, staged P6e-1/P6e-2/P6e-3a/P6e-3b. **Binding
+                  is **complete** (P6e-1/P6e-2/P6e-3a/P6e-3b all landed), so
+                  **all of P6 (the "boot into user mode" milestone) is done**.
+                  **Binding
                   design correction (AGENTS.md §20):** the shell does its
                   text I/O over its inherited **standard streams (fd 0/1/2/3
                   — `stdin`/`stdout`/`stderr`/`stdinfo`)**, *not* the
@@ -1876,7 +1878,24 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `buf.len()`). Host-proven (6 `repl` + 3 `stdin` + 1
                   `from_i32` tests) and freestanding-built on all three
                   bare-metal targets; `spawn_session_qemu_aarch64` stays green.
-                  **P6e-3b-ii (`init` session supervision) remains.**
+                  **P6e-3b-ii (`init` session supervision) landed:** PID 1
+                  `init` (`userland/system/init/src/run.rs`) now runs a
+                  fail-closed supervise loop — `spawn` the session, `wait` on
+                  exactly that child (block, reap), then relaunch it, bounded
+                  by a small `SESSION_SPAWN_BUDGET` crash-loop guard (a
+                  session that blocks on input never approaches it; one that
+                  exits instantly stops at `EXIT_SESSION_EXHAUSTED` rather
+                  than busy-spinning §2.1; a failed `spawn`/`wait` is
+                  fail-loud). No kernel/boot change was needed — the
+                  production pipeline already wires the `KernelProcessWait`
+                  producer + `register_child`/`record_exit` and `admit_init`'s
+                  drive loop re-dispatches the parked `init`. The
+                  `spawn_session_qemu_aarch64` vertical was reworked to key
+                  PASS on **three** `ProcessSpawned` (init + two session
+                  launches = reap+restart witness) + **four** audited syscalls;
+                  `spawn_init_qemu_aarch64` still PASSes (witness now `init`'s
+                  first audited syscall, the `spawn`). Docs:
+                  `docs/src/userland/init.md` ("Session supervision").
                   **SP5 (`mem_map`/`mem_unmap`, runtime anonymous memory,
                   `plans/SPAWN.md`) — SP5-0 + SP5a landed:**
                   `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the

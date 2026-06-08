@@ -72,11 +72,72 @@ use crate::dispatch_slot::RescheduleAction;
 
 /// Default per-kthread kernel-stack size, in bytes.
 ///
-/// Sixteen KiB is comfortably above the synthesised initial frame plus the
-/// modest call depth a cooperative kthread body reaches before its next
-/// suspension point, and is a whole number of 4 KiB pages so a future
-/// guard-paged stack source (`AGENTS.md` §4) maps cleanly.
-pub const KTHREAD_STACK_BYTES: usize = 16 * 1024;
+/// A **user** kthread's body does not merely set up a suspension point: once
+/// it `eret`s into EL0, every syscall the task makes is handled *on this
+/// stack* (the EL1 trap runs on the kthread's kernel stack). The deepest such
+/// path is a full syscall dispatch — the arch trap prologue, the
+/// `KernelDispatchHook` layers, a handler, and the validated user-memory copy
+/// boundary ([`rustos_kernel_mem::uaccess`]) with its staging — and an
+/// unoptimised debug build spills generously at every frame, so the real
+/// working set is far above the "modest" depth a plain kernel kthread reaches.
+/// Sixteen KiB was *not* enough: a `wait` handler (reap + `copy_to_user`)
+/// overran a 16 KiB stack and silently corrupted the adjacent heap allocation
+/// — the next task's frozen address-space snapshot (`plans/PI.md` P6e-3b-ii).
+/// 64 KiB clears the deepest dispatch with margin and is a whole number of
+/// 4 KiB pages so the guard page below it (see [`BoxStack`]) sits on a clean
+/// page boundary.
+///
+/// This bound is **defence in depth**, not the only line of defence: the
+/// [`BoxStack`] places a poison-filled guard page (`AGENTS.md` §4) immediately
+/// *below* the usable region, so an overrun runs off the bottom of the stack
+/// into the guard instead of straight into the neighbouring heap allocation.
+/// A contiguous overrun trips the guard's canary, which [`dispatch_step`]
+/// checks every time the task hands the CPU back, and the task is then failed
+/// closed rather than allowed to run on a corrupt stack (`AGENTS.md` §2.9,
+/// §2.17). The sizing still matters — the guard absorbs an overrun but a
+/// generous stack avoids one in the first place — so this bound must
+/// comfortably exceed the deepest syscall-handler call depth.
+pub const KTHREAD_STACK_BYTES: usize = 64 * 1024;
+
+/// Width of the [`BoxStack`] guard region, in bytes: one 4 KiB page.
+///
+/// The guard sits immediately below the usable stack. Sized at one page so
+/// it matches the on-hardware form this emulates — a single *unmapped* page
+/// below the stack (`AGENTS.md` §4, the same model `kernel/mem`'s slab guard
+/// documents) — and absorbs a 4 KiB overrun before it can reach the
+/// lower-addressed neighbour. The deployment form that turns the overrun into
+/// an immediate hardware fault (unmapping this page in the kernel's own page
+/// tables) is staged in `plans/PI.md`; until the page-table split it backs on
+/// lands, the poison-byte emulation below is the real, non-deferred defence
+/// (`AGENTS.md` §2.17 — a guard now, not "later").
+const STACK_GUARD_BYTES: usize = 4096;
+
+/// Byte the [`BoxStack`] guard page is filled with (`0xCC`, x86 `int3`),
+/// matching `kernel/mem`'s slab guard: an "obviously wrong" value whose
+/// disturbance signals an overrun. On the deployment (unmapped-page) form the
+/// guard is never written at all — the access faults — so this byte is purely
+/// the host/software-emulation sentinel.
+const STACK_GUARD_BYTE: u8 = 0xCC;
+
+/// Bytes at the *top* of the guard region (immediately below the usable
+/// stack base) that [`BoxStack::check_guard`] verifies on the hot path.
+///
+/// A kernel stack grows downward and is written contiguously, so an overrun
+/// must cross these bytes first; verifying this small, O(1) window on every
+/// switch-back catches a contiguous overrun without scanning the whole guard
+/// page on the scheduler hot path (`AGENTS.md` §2.16). The full page still
+/// provides the 4 KiB of absorption.
+const STACK_GUARD_CANARY_BYTES: usize = 64;
+
+/// A kernel-stack guard violation: the task overran its stack into the
+/// [`BoxStack`] guard region.
+///
+/// Returned by [`KernelStack::check_guard`]. On real hardware the overrun
+/// faults on the unmapped guard page; the software emulation surfaces the
+/// same condition through this value so [`dispatch_step`] can fail the task
+/// closed identically either way (`AGENTS.md` §2.9, §2.17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackGuardViolation;
 
 /// A kthread's owned kernel stack: a stable, `STACK_ALIGN`-aligned region
 /// whose exclusive top (`Self::top`) seeds the task's first frame and
@@ -99,35 +160,65 @@ pub unsafe trait KernelStack {
     /// Exclusive upper bound of the stack (one past its last byte),
     /// aligned to `STACK_ALIGN`.
     fn top(&self) -> u64;
+
+    /// Check this stack's overrun guard, if it has one.
+    ///
+    /// Returns [`StackGuardViolation`] if the task has run off the bottom of
+    /// its usable stack into the guard region. [`dispatch_step`] calls this
+    /// each time the task switches back to the dispatcher and fails the task
+    /// closed on a violation (`AGENTS.md` §2.9, §2.17), so an overrun is
+    /// caught at the next reschedule instead of silently corrupting the
+    /// lower-addressed neighbour.
+    ///
+    /// The default returns `Ok(())`: a stack source without a guard (a
+    /// slab-backed or static test stack) has nothing to check. [`BoxStack`]
+    /// overrides it with the poison-canary check (`AGENTS.md` §4).
+    fn check_guard(&self) -> Result<(), StackGuardViolation> {
+        Ok(())
+    }
 }
 
 /// Heap-backed kernel stack: the production [`KernelStack`] source.
 ///
-/// A `STACK_ALIGN`-aligned, [`KTHREAD_STACK_BYTES`]-sized heap box. The
-/// allocation has a stable address for the box's lifetime and is freed on
+/// The allocation is laid out, from low to high address, as a
+/// [`STACK_GUARD_BYTES`] guard region followed by the [`KTHREAD_STACK_BYTES`]
+/// usable stack; [`Self::top`] is the exclusive upper bound of the *usable*
+/// region. A kernel stack grows *downward* from `top`, so an overrun runs
+/// off the bottom of the usable region into the guard — which is
+/// poison-filled and verified ([`Self::check_guard`], `AGENTS.md` §4) —
+/// before it can reach the lower-addressed heap neighbour. The backing
+/// `Box<[u8]>` has a stable address for the box's lifetime and is freed on
 /// drop, reclaiming the stack.
-pub struct BoxStack(Box<StackBytes>);
-
-#[repr(C, align(16))]
-struct StackBytes([u8; KTHREAD_STACK_BYTES]);
+pub struct BoxStack(Box<[u8]>);
 
 /// The widest ABI stack alignment any target requires (`AGENTS.md`
 /// §17.2); [`ContextSwitch::prepare`] rejects a misaligned `stack_top`.
 const STACK_ALIGN: usize = 16;
 
-/// [`StackBytes`] must be at least [`STACK_ALIGN`]-aligned so its `top` is a
-/// valid `stack_top` for [`ContextSwitch::prepare`], and its size a whole
-/// number of [`STACK_ALIGN`] units so the top stays aligned.
+/// The canary window must fit inside the guard region, and the guard is a
+/// whole number of 4 KiB pages so the staged deployment form (unmapping it,
+/// `plans/PI.md`) lands on a clean page boundary.
 const _STACK_LAYOUT_OK: () = {
-    assert!(core::mem::align_of::<StackBytes>() >= STACK_ALIGN);
-    assert!(KTHREAD_STACK_BYTES % STACK_ALIGN == 0);
+    assert!(STACK_GUARD_CANARY_BYTES <= STACK_GUARD_BYTES);
+    assert!(STACK_GUARD_BYTES % 4096 == 0);
 };
 
 impl BoxStack {
-    /// Allocate a fresh zeroed kernel stack on the heap.
+    /// Allocate a fresh kernel stack on the heap: a poison-filled guard
+    /// region below a zeroed usable stack.
+    ///
+    /// The backing slice is heap-allocated directly (`vec!` →
+    /// `into_boxed_slice`), never built through a `[0u8; _]` stack temporary:
+    /// a ~68 KiB array literal would itself risk the very stack overflow this
+    /// type guards against (`AGENTS.md` §2.16). [`Self::top`] rounds the
+    /// exclusive upper bound down to [`STACK_ALIGN`], so the heap allocator's
+    /// own (byte) alignment is sufficient.
     #[must_use]
     pub fn new() -> Self {
-        Self(Box::new(StackBytes([0u8; KTHREAD_STACK_BYTES])))
+        let mut bytes =
+            alloc::vec![0u8; STACK_GUARD_BYTES + KTHREAD_STACK_BYTES].into_boxed_slice();
+        bytes[..STACK_GUARD_BYTES].fill(STACK_GUARD_BYTE);
+        Self(bytes)
     }
 }
 
@@ -137,18 +228,33 @@ impl Default for BoxStack {
     }
 }
 
-// SAFETY: `top` returns `base + KTHREAD_STACK_BYTES`, the exclusive upper
-// bound of the heap box's storage. `StackBytes` is `align(16)`, so `base`
-// — and therefore `top` — is 16-aligned. The box owns the storage and
-// frees it on drop, and the region is exclusive to its owner.
+// SAFETY: `top` returns the heap slice's base plus its full length, rounded
+// down to `STACK_ALIGN` — the 16-aligned exclusive upper bound of the usable
+// region above the guard. The box owns the storage and frees it on drop, and
+// the region is exclusive to its owner.
 unsafe impl KernelStack for BoxStack {
     fn top(&self) -> u64 {
-        let base = core::ptr::addr_of!(*self.0) as u64;
-        let top = base + KTHREAD_STACK_BYTES as u64;
-        // Round down to `STACK_ALIGN`. Given the layout const-assert this is
-        // a no-op, but it makes the alignment `ContextSwitch::prepare`
-        // requires total rather than merely an invariant we rely on.
+        let base = self.0.as_ptr() as u64;
+        let top = base + (STACK_GUARD_BYTES + KTHREAD_STACK_BYTES) as u64;
+        // Round down to `STACK_ALIGN` so the seed `stack_top`
+        // [`ContextSwitch::prepare`] requires is aligned regardless of the
+        // allocator's base alignment (it wastes at most `STACK_ALIGN - 1`
+        // bytes off the top of the usable region).
         top & !(STACK_ALIGN as u64 - 1)
+    }
+
+    fn check_guard(&self) -> Result<(), StackGuardViolation> {
+        // Verify the canary: the top `STACK_GUARD_CANARY_BYTES` of the guard,
+        // immediately below the usable base, which a contiguous downward
+        // overrun crosses first. Checking just this O(1) window keeps the
+        // scheduler switch-back path cheap (`AGENTS.md` §2.16) while still
+        // catching a stack overflow; the full guard page provides absorption.
+        let canary = &self.0[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES..STACK_GUARD_BYTES];
+        if canary.iter().all(|&b| b == STACK_GUARD_BYTE) {
+            Ok(())
+        } else {
+            Err(StackGuardViolation)
+        }
     }
 }
 
@@ -730,6 +836,20 @@ where
         clear_resume(cpu);
     }
 
+    // The task ran on its kernel stack; verify it did not run off the bottom
+    // into the guard region before we trust it again. A violation means a
+    // stack overrun — on real hardware the unmapped guard page would already
+    // have faulted; the software emulation catches it here. Fail the task
+    // closed: mark it terminal and report `Exit` so the scheduler never
+    // switches into its corrupted context again (`AGENTS.md` §2.9, §2.17).
+    // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
+    if unsafe { (*ctl).stack.check_guard() }.is_err() {
+        unsafe {
+            (*ctl).state = RunState::Finished;
+        }
+        return TaskAction::Exit;
+    }
+
     // Report the action the task requested.
     unsafe { (*ctl).action }
 }
@@ -1208,5 +1328,126 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
         let _ = dispatch_step(&mut control, cpu);
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    // --- Stack guard page (AGENTS.md §4 / §2.17) -----------------------
+
+    /// A guardless [`KernelStack`] host double, to prove the default
+    /// [`KernelStack::check_guard`] is vacuously `Ok`. The host `switch` is a
+    /// no-op, so its `top` is never dereferenced.
+    #[derive(Copy, Clone)]
+    struct GuardlessStack;
+
+    // SAFETY: a host test double whose `top` is a plausible 16-aligned value;
+    // the host `ContextSwitch::switch` never transfers control, so nothing
+    // executes on this stack.
+    unsafe impl KernelStack for GuardlessStack {
+        fn top(&self) -> u64 {
+            0x1_0000
+        }
+    }
+
+    /// A [`KernelStack`] over a real [`BoxStack`] whose guard check can be
+    /// forced to report a violation, to drive [`dispatch_step`]'s fail-closed
+    /// path without an actual (host-impossible) stack overrun.
+    struct GuardDouble {
+        inner: BoxStack,
+        violated: bool,
+    }
+
+    // SAFETY: `top` delegates to a real, owned, aligned `BoxStack` region;
+    // `check_guard` reports a violation on demand. The host `switch` is a
+    // no-op, so nothing executes on the stack.
+    unsafe impl KernelStack for GuardDouble {
+        fn top(&self) -> u64 {
+            self.inner.top()
+        }
+
+        fn check_guard(&self) -> Result<(), StackGuardViolation> {
+            if self.violated {
+                Err(StackGuardViolation)
+            } else {
+                self.inner.check_guard()
+            }
+        }
+    }
+
+    #[test]
+    fn box_stack_guard_is_poisoned_and_usable_top_sits_above_it() {
+        let stack = BoxStack::new();
+        let base = stack.0.as_ptr() as u64;
+
+        // The guard region (low) is poison-filled and the usable region
+        // (high) is zeroed; `top` is the exclusive upper bound of the usable
+        // region, above the guard.
+        assert!(stack.0[..STACK_GUARD_BYTES]
+            .iter()
+            .all(|&b| b == STACK_GUARD_BYTE));
+        assert!(stack.0[STACK_GUARD_BYTES..].iter().all(|&b| b == 0));
+        // The allocator's base is byte-aligned, so the usable top is the
+        // (16-aligned) round-down of base + total.
+        assert_eq!(
+            stack.top(),
+            (base + (STACK_GUARD_BYTES + KTHREAD_STACK_BYTES) as u64) & !(STACK_ALIGN as u64 - 1)
+        );
+        assert!(stack.check_guard().is_ok());
+    }
+
+    #[test]
+    fn box_stack_check_guard_detects_an_overrun_at_the_usable_base() {
+        // The topmost guard byte sits immediately below the usable base — the
+        // first byte a contiguous downward overrun crosses.
+        let mut stack = BoxStack::new();
+        stack.0[STACK_GUARD_BYTES - 1] = 0;
+        assert_eq!(stack.check_guard(), Err(StackGuardViolation));
+    }
+
+    #[test]
+    fn box_stack_check_guard_detects_an_overrun_at_the_canary_floor() {
+        // The deepest byte the canary covers is still detected.
+        let mut stack = BoxStack::new();
+        stack.0[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES] = 0;
+        assert_eq!(stack.check_guard(), Err(StackGuardViolation));
+    }
+
+    #[test]
+    fn default_check_guard_is_ok_for_a_guardless_stack() {
+        assert!(GuardlessStack.check_guard().is_ok());
+    }
+
+    #[test]
+    fn dispatch_step_fails_closed_on_a_guard_violation() {
+        let rec = recorder();
+        let stack = GuardDouble {
+            inner: BoxStack::new(),
+            violated: true,
+        };
+        let mut control = control_with(RecordingCs(rec), stack);
+
+        // The first step prepares the frame and switches in (a host no-op),
+        // then the switch-back guard check trips: the task is failed closed
+        // (terminal + `Exit`) rather than trusted on a corrupt stack.
+        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Exit);
+        assert_eq!(control.state, RunState::Finished);
+
+        // It stays terminal and is never switched into again.
+        let before = rec.switches.load(Ordering::SeqCst);
+        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Exit);
+        assert_eq!(rec.switches.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    fn dispatch_step_reports_the_action_when_the_guard_is_intact() {
+        let rec = recorder();
+        let stack = GuardDouble {
+            inner: BoxStack::new(),
+            violated: false,
+        };
+        let mut control = control_with(RecordingCs(rec), stack);
+
+        // With the guard intact the shim reports the task's requested action
+        // (the default `Yield`) and the task stays runnable.
+        assert_eq!(dispatch_step(&mut control, 0), TaskAction::Yield);
+        assert_eq!(control.state, RunState::Running);
     }
 }
