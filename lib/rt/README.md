@@ -37,6 +37,24 @@ rustos_rt::entry!(main);
 per-process stack canary (`AGENTS.md` §19.2), calls `main`, and routes its
 return value through the `exit` syscall.
 
+## Heap (`#[global_allocator]`)
+
+On the three native targets `rustos-rt` registers a `#[global_allocator]`
+(`src/heap.rs`) so a first-party Rust program can use `alloc` (`Box`, `Vec`,
+`String`, …). It is a free-span allocator over a single contiguous virtual
+arena that grows upward, one or more whole pages at a time, by `mem_map`ping
+with `MapFlags::FIXED` at the arena's current top; freed regions are tracked as
+a coalesced, address-sorted free list held inside the allocator (not as
+intrusive links in user memory), so every returned pointer is bounds-checked
+before it is handed out (`AGENTS.md` §4). When coalescing frees whole trailing
+pages they are returned to the kernel with `mem_unmap` (the arena shrinks).
+Allocation failure (a failed `mem_map`, or an overflowed fixed-capacity free
+table) returns a null pointer per the `GlobalAlloc` contract — deterministic
+OOM, never a panic (`AGENTS.md` §4 / §2.9). The kernel zeroes pages on map and
+on free, so the heap does not re-zero on free; a process reusing its own freed
+bytes is not a security boundary (`AGENTS.md` §2.16). The arena base and the
+free-table capacity are fixed constants documented in `src/heap.rs`.
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled
@@ -53,4 +71,6 @@ compiled, unit-tested through the trap crate's injectable seam.
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
 exposed syscall-wrapper surface grows as RustOS programs need it; today it is
 the standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`,
-`AGENTS.md` §20), `spawn`, `yield_now`, and `exit`.
+`AGENTS.md` §20), `spawn`, `yield_now`, `exit`, the anonymous-memory pair
+(`mem_map`, `mem_unmap`), and the `mem_map`-backed `#[global_allocator]` they
+power.

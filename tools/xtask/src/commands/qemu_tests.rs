@@ -1222,6 +1222,38 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
+    // vertical — the proof that the `rustos-rt` `mem_map`-backed
+    // `#[global_allocator]` works end to end in an EL0 process on the `virt`
+    // board, so a first-party Rust program can use `alloc` (`Box`/`Vec`/
+    // `String`) before the shell REPL is wired in. It reads the GICv2 base +
+    // timer rate from the embedded `virt` DTB (P3/P4), brings up the EL1
+    // vectors + GICv2, and builds **one** hardware-isolated EL0 address space
+    // from the pure-Rust `rustos-test-heap` fixture (built PIE + converted to
+    // `rxe` by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`. It **retains** that space live behind a
+    // `kernel_core::MemMap` producer backed by
+    // `kernel_mem::map_anonymous`/`unmap_anonymous`, admits the program as a
+    // resumable user kthread (`spawn_user_kthread`, §4), and routes the
+    // program's allocator-issued `mem_map`/`mem_unmap` `svc`s through the
+    // producer. The fixture Box-allocates, grows a `Vec` across several pages,
+    // reallocates after freeing, verifies every value, and exits 0 — reported
+    // as PASS. A non-zero exit, an unexpected syscall, or a fault writes a
+    // distinct failure finisher; a stall times out (fail-loud, `AGENTS.md`
+    // §7). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-heap-qemu-aarch64",
+        binary: "rustos-test-heap-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the

@@ -647,6 +647,25 @@ on its own before the next.
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
     `init` supervising the session (restart, reap). The shell contains
     **no** reference to `console_*` or to any device.
+    - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
+      `[x]`.** The `rustos-shell` interpreter is `no_std + alloc`, but the
+      freestanding userland runtime had no heap, so the shell could not link
+      it. `lib/rt` now registers a `#[global_allocator]`
+      (`lib/rt/src/heap.rs`): a free-span allocator over a fixed-base virtual
+      arena that grows by `mem_map(FIXED)` and shrinks by `mem_unmap`,
+      first-fit with alignment-padding return + neighbour coalescing, real
+      free, deterministic-OOM-to-null (`AGENTS.md` §4/§2.9), no re-zero on
+      free (the kernel already zeroes on map/free, §2.16). The pure free-span
+      bookkeeping is host-unit-tested over a fake pager; the aarch64 `-M virt`
+      vertical `tests/integration/heap_qemu_aarch64` proves it end to end — a
+      pure-Rust EL0 fixture (`tests/integration/heap_program`) Box-allocates,
+      grows a `Vec` across pages, reallocates after freeing, verifies every
+      value, and exits 0 (PASS), with the allocator-issued `mem_map`/
+      `mem_unmap` `svc`s routed through the live `MemMap` producer.
+      **Verified green under QEMU on `-M virt`.** Design note:
+      `docs/src/architecture/memory.md` §7d. This unblocks the REPL; the REPL
+      itself + `init` supervision (which also needs a process-wait syscall)
+      remain.
 
 **Done when:** under `-M raspi4b`, the kernel reaches `init` in EL0 and
 `init` emits its first line on the console (framebuffer if present, else

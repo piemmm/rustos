@@ -1086,6 +1086,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-abi-trap",
+ "rustos-sync",
 ]
 
 [[package]]
@@ -1416,6 +1417,30 @@ dependencies = [
  "rustos-drv-fs-ext4",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+]
+
+[[package]]
+name = "rustos-test-heap"
+version = "0.0.0"
+dependencies = [
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-heap-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
 ]
 
 [[package]]

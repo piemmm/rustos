@@ -61,6 +61,14 @@ use rustos_abi_trap::raw_syscall;
 #[cfg(rt_native)]
 mod start;
 
+// The `mem_map`-backed global allocator. Compiled for the native targets that
+// register it as the `#[global_allocator]`, and for host unit tests of its pure
+// `HeapState` bookkeeping. A plain host build (no allocator to register, no
+// tests) needs neither, so the module is left out there to keep it dead-code
+// free (`AGENTS.md` §2.14).
+#[cfg(any(rt_native, test))]
+mod heap;
+
 /// `exit` syscall number, read from the `abi-v1` source of truth so this
 /// crate can never disagree with the table (`AGENTS.md` §2.2).
 const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;

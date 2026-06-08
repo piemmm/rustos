@@ -477,7 +477,7 @@ A spawned process boots with exactly its fixed spawn-time image
 (code/data/bss plus a fixed user stack, `plans/SPAWN.md` SP2/SP3). The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
-runtime — the foundation a future `lib/rt` heap allocator layers its
+runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its
 `malloc` / `free` over. The ABI shape is fixed in `rustos_abi::memory`
 (`MapFlags`) and `rustos_abi::syscall`; the syscall-layer contract is the
 `mem_map` / `mem_unmap` rows of [the syscall page](./syscalls.md).
@@ -548,6 +548,45 @@ design note, `AGENTS.md` §15.2):
 The immutable-`FrozenAddressSpace` snapshot the post-spawn registry stores
 (§3b) is read-only; SP5b closes the gap with a single live-space mutation
 path rather than a second parallel address-space model (`AGENTS.md` §2.2).
+
+## 7d. Userland heap allocator (`rustos-rt`)
+
+The `mem_map` / `mem_unmap` pair is a page-granularity primitive; ordinary
+`alloc` types (`Box`, `Vec`, `String`) need a byte-granularity `malloc` /
+`free`. `lib/rt` supplies it as a `#[global_allocator]` (`lib/rt/src/heap.rs`),
+so a first-party Rust program (the shell, `init`) can use `alloc`. It is a
+userland allocator — outside `kernel/mem` — but is documented here because it
+is the consumer the `mem_map` ABI exists for (§7c).
+
+- **Free-span allocator over a growable, fixed-base arena.** The heap owns one
+  contiguous virtual arena that starts at a fixed base and grows upward, one or
+  more whole pages at a time, by `mem_map`ping with `MapFlags::FIXED` at the
+  arena's current top. Freed regions are tracked as a coalesced,
+  address-sorted free list held *inside the allocator* (a fixed-capacity span
+  table), not as intrusive links in user memory, so the bookkeeping never
+  dereferences freed memory and every returned pointer is range-checked before
+  it is handed out (`AGENTS.md` §4 — no `unsafe` allocator doing raw pointer
+  arithmetic without a checked wrapper).
+- **Real free, with shrink.** Allocation is first-fit honouring the requested
+  alignment, returning alignment padding to the free list; free coalesces with
+  neighbours, and when whole trailing pages become free at the arena top they
+  are returned to the kernel with `mem_unmap` — both syscalls are genuinely
+  exercised, no dead path (`AGENTS.md` §2.14).
+- **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A failed `mem_map` or an
+  overflowed span table returns a null pointer per the `GlobalAlloc` contract,
+  never a panic.
+- **No re-zero on free (`AGENTS.md` §2.16).** The kernel already zeroes pages
+  on map and on free (§7c), so memory entering or leaving the process is clean;
+  a process reusing its own freed bytes within its own heap is not a security
+  boundary, so the heap does not re-zero on the hot path.
+
+The pure free-span bookkeeping is host-unit-tested over a fake pager; the
+aarch64 `-M virt` vertical `tests/integration/heap_qemu_aarch64` proves it end
+to end — a pure-Rust EL0 fixture (`tests/integration/heap_program`)
+Box-allocates, grows a `Vec` across several pages, reallocates after freeing,
+verifies every value, and exits 0, with the program's allocator-issued
+`mem_map` / `mem_unmap` `svc`s routed through the live `MemMap` producer
+(`plans/PI.md` P6e-3b prerequisite).
 
 ## 8. Testing strategy
 

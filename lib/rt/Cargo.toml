@@ -21,6 +21,11 @@ rustos-abi = { path = "../abi", version = "=0.0.0" }
 # trap assembly is not duplicated here.
 rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 
+# The `SpinLock` that guards the `mem_map`-backed global allocator's shared
+# free-span state (`src/heap.rs`). First-party (`AGENTS.md` §2.12); the one
+# deduplicated lock the workspace shares (`AGENTS.md` §2.2, §6).
+rustos-sync = { path = "../sync", version = "=0.0.0" }
+
 # The host trap seam used to assert the wrappers' marshalling without a kernel
 # (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.

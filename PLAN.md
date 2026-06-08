@@ -1892,7 +1892,20 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   on use — the fault handler reports PASS (id 4282),
                   **verified green under QEMU on this host**. Sibling
                   (x86_64/riscv64) verticals + production per-task live-space
-                  retention follow.
+                  retention follow. **The `lib/rt` heap that layers over the
+                  pair also landed** (PI P6e-3b prerequisite): a
+                  `#[global_allocator]` in `lib/rt/src/heap.rs` — a free-span
+                  allocator over a fixed-base virtual arena that grows by
+                  `mem_map(FIXED)` and shrinks by `mem_unmap`, first-fit with
+                  alignment-padding return + neighbour coalescing, real free,
+                  deterministic-OOM-to-null, no re-zero on free (the kernel
+                  already zeroes on map/free). Host-unit-tested over a fake
+                  pager; the aarch64 `-M virt` vertical
+                  `tests/integration/heap_qemu_aarch64` (fixture
+                  `tests/integration/heap_program`) proves `Box`/`Vec`
+                  alloc-grow-free-reuse end to end and exits 0 (PASS, ids
+                  4290-4293), **verified green under QEMU on this host**.
+                  Design note: `docs/src/architecture/memory.md` §7d.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
