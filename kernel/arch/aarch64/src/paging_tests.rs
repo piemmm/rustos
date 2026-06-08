@@ -200,6 +200,109 @@ fn host_leaf_descriptor(root_phys: u64, va: u64) -> Option<u64> {
 }
 
 #[test]
+fn split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // A page well inside the Normal RAM gigapage (GiB 1). Before the
+    // split it is mapped by the 1 GiB L1 *block* — there is no 4 KiB leaf.
+    let va: u64 = (1u64 << 30) + 0x10_0000;
+    let before = host_leaf_descriptor(space.root_phys(), va).expect("block maps va");
+    assert!(is_block(before), "va starts out mapped by a 1 GiB block");
+
+    space.split_block(va).expect("split the gigapage to pages");
+
+    // The same address now resolves through a 4 KiB *page* leaf (0b11),
+    // translates to the same physical frame (identity), and carries the
+    // identical Normal attributes the block had.
+    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("page maps va");
+    assert!(!is_block(leaf), "va is now mapped by a 4 KiB page leaf");
+    assert_eq!(
+        phys_from_descriptor(leaf),
+        va,
+        "identity translation preserved"
+    );
+    assert_eq!(
+        leaf,
+        descriptor(va, normal_leaf_attrs(false)),
+        "the page leaf reproduces the block's Normal attributes"
+    );
+
+    // A neighbouring page in the same shattered 2 MiB region also resolves
+    // identically (the whole block was faithfully re-expressed).
+    let nbr = va + PAGE_SIZE as u64;
+    assert_eq!(host_translate(space.root_phys(), nbr), Some(nbr));
+}
+
+#[test]
+fn split_block_then_unmap_tears_down_exactly_one_page() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x20_0000;
+
+    // A 4 KiB page cannot be unmapped while it is part of a block.
+    assert_eq!(
+        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        Err(MapError::NotMapped),
+        "a page inside a live block has no 4 KiB leaf to tear down"
+    );
+
+    space.split_block(va).expect("split");
+    // After the split the page exists as an L3 leaf and unmaps cleanly,
+    // returning its (identity) frame; its neighbour stays mapped.
+    assert_eq!(
+        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        Ok(va),
+        "the split page unmaps to its identity frame"
+    );
+    assert_eq!(host_translate(space.root_phys(), va), None, "page is gone");
+    assert_eq!(
+        host_translate(space.root_phys(), va + PAGE_SIZE as u64),
+        Some(va + PAGE_SIZE as u64),
+        "the neighbouring page is untouched"
+    );
+}
+
+#[test]
+fn split_block_preserves_device_attributes() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // GiB 0 is the Device MMIO gigapage.
+    let va: u64 = 0x10_0000;
+    space.split_block(va).expect("split the device gigapage");
+    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("page maps va");
+    assert_eq!(
+        leaf & (0b111 << 2),
+        attrs::ATTR_IDX_DEVICE,
+        "the shattered Device block keeps its Device memory attribute"
+    );
+    assert_eq!(leaf & 0b11, 0b11, "the leaf is a page descriptor");
+}
+
+#[test]
+fn split_block_is_idempotent_and_fails_closed() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x30_0000;
+
+    space.split_block(va).expect("first split");
+    let leaf_once = host_leaf_descriptor(space.root_phys(), va).expect("mapped");
+    // Re-splitting an already-fine region changes nothing and allocates
+    // nothing (idempotent).
+    space.split_block(va).expect("second split is a no-op");
+    assert_eq!(
+        host_leaf_descriptor(space.root_phys(), va),
+        Some(leaf_once),
+        "an already-split region is left untouched"
+    );
+
+    // Fail closed: a misaligned address and an address with no live
+    // mapping are both rejected without mutating the space.
+    assert_eq!(space.split_block(va | 0x1), Err(MapError::Misaligned));
+    assert_eq!(space.split_block(64u64 << 30), Err(MapError::NotMapped));
+}
+
+#[test]
 fn passes_mmu_conformance() {
     use rustos_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();

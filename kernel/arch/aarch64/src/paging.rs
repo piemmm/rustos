@@ -452,6 +452,86 @@ impl AddressSpace {
         Some(())
     }
 
+    /// Split the coarse block descriptor(s) covering `vaddr` down to
+    /// 4 KiB granularity, preserving the mapped output address and every
+    /// attribute, so the single 4 KiB page containing `vaddr` can then be
+    /// torn down with [`MmuAddressSpace::unmap`] without disturbing its
+    /// neighbours.
+    ///
+    /// This is the foundation of the kthread guard page (`plans/PI.md`):
+    /// a guard page that falls inside a region the boot path mapped with
+    /// coarse 1 GiB / 2 MiB *block* descriptors cannot be unmapped while
+    /// it is part of a block, because a block has no per-4 KiB leaf to
+    /// clear. Splitting re-expresses the same translation as a table of
+    /// finer descriptors — an L1 block (1 GiB) becomes a table of 512 ×
+    /// 2 MiB blocks, then the 2 MiB block covering `vaddr` becomes a table
+    /// of 512 × 4 KiB pages — leaving every address translating
+    /// identically but now at 4 KiB granularity.
+    ///
+    /// The split is **break-before-make-free for the running region**: it
+    /// only ever *adds* table levels that reproduce the existing
+    /// translation, never invalidating a live address, so it is safe to
+    /// run against the active translation regime (the resulting tables map
+    /// the same physical frames with the same permissions). It is
+    /// idempotent — a level that is already a table is left untouched — so
+    /// re-splitting an already-fine region succeeds without allocating.
+    /// The caller is responsible for any TLB maintenance after a
+    /// subsequent [`MmuAddressSpace::unmap`]; the split itself changes no
+    /// translation result and so needs none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
+    /// [`MapError::NotMapped`] if `vaddr` has no live mapping at the level
+    /// being split (nothing to shatter), or [`MapError::PoolExhausted`] if
+    /// the page-table pool cannot supply a replacement table. On
+    /// [`MapError::PoolExhausted`] any level already split stays split
+    /// (still a faithful identity re-expression of the same translation),
+    /// so the address space is never left describing a *different*
+    /// mapping (`AGENTS.md` §2.9 — fail closed, never corrupt).
+    pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        let frames = self.frames;
+        let i1 = table_index(vaddr, 1);
+
+        // --- Level 1: a 1 GiB block becomes a table of 512 × 2 MiB blocks.
+        let e1 = self.root[i1];
+        if (e1 & attrs::VALID) == 0 {
+            return Err(MapError::NotMapped);
+        }
+        if is_block(e1) {
+            let TableFrame { phys, entries } =
+                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
+            // 2 MiB sub-entries (shift 21) are still *blocks*, not pages.
+            shatter_block_into(entries, e1, 21, false);
+            self.root[i1] = table_descriptor(phys);
+        }
+
+        // L1 now holds a table descriptor; recover the L2 table it points at.
+        // SAFETY: the entry is a present, non-block table descriptor (just
+        // installed above, or pre-existing); its output address is an
+        // identity-mapped table page (the round-trip `ensure_child` relies
+        // on), and `&mut self` makes the borrow exclusive.
+        let l2 =
+            unsafe { &mut *(phys_from_descriptor(self.root[i1]) as *mut [u64; ENTRIES_PER_TABLE]) };
+        let i2 = table_index(vaddr, 2);
+        let e2 = l2[i2];
+        if (e2 & attrs::VALID) == 0 {
+            return Err(MapError::NotMapped);
+        }
+        if is_block(e2) {
+            let TableFrame { phys, entries } =
+                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
+            // 4 KiB sub-entries (shift 12) are L3 *pages* (`TABLE_OR_PAGE`).
+            shatter_block_into(entries, e2, 12, true);
+            l2[i2] = table_descriptor(phys);
+        }
+        // L2 now resolves `vaddr` through a 4 KiB page leaf.
+        Ok(())
+    }
+
     /// Physical address of the L1 root table (the value programmed into
     /// `TTBR0_EL1`). Exposed so tests can observe it.
     #[must_use]
@@ -732,6 +812,40 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub unsafe fn activate_user_root(root_phys: u64) {
     let _ = root_phys;
+}
+
+/// Populate the freshly-allocated table `child` with 512 descriptors that
+/// reproduce the leaf `block` at the next finer granularity, preserving
+/// every attribute bit.
+///
+/// `sub_shift` is the base-2 log of each sub-entry's coverage (21 for the
+/// 2 MiB sub-blocks an L1 block shatters into, 12 for the 4 KiB pages an
+/// L2 block shatters into); `page` selects an L3 *page* descriptor
+/// (`TABLE_OR_PAGE` set) when shattering to 4 KiB, versus a finer *block*
+/// (bit clear) at 2 MiB. Only the output address changes per sub-entry —
+/// `block & !ADDR_MASK` captures `VALID` plus every lower (`[11:2]`) and
+/// upper (`[63:48]`, incl. `PXN`/`UXN`) attribute bit, so the finer
+/// descriptors map the same memory with identical permissions
+/// (`AGENTS.md` §2.2 — one attribute vocabulary, never re-derived).
+fn shatter_block_into(
+    child: &mut [u64; ENTRIES_PER_TABLE],
+    block: u64,
+    sub_shift: u32,
+    page: bool,
+) {
+    let base = phys_from_descriptor(block);
+    let attr_bits = block & !ADDR_MASK;
+    let sub_size = 1u64 << sub_shift;
+    for (i, slot) in child.iter_mut().enumerate() {
+        let sub_pa = base + (i as u64) * sub_size;
+        let mut desc = (sub_pa & ADDR_MASK) | attr_bits;
+        if page {
+            desc |= attrs::TABLE_OR_PAGE;
+        } else {
+            desc &= !attrs::TABLE_OR_PAGE;
+        }
+        *slot = desc;
+    }
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

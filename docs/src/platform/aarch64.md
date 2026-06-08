@@ -412,6 +412,13 @@ through the semihosting finisher. They are enrolled in
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
+- `rustos-test-stack-guard-qemu-aarch64` — **the guard-page fault-form
+  works** (`plans/PI.md` G1): `AddressSpace::split_block` shatters the
+  coarse identity block covering a dedicated guard page down to 4 KiB
+  pages, then that single page is `unmap`ped + `flush_page`d through the
+  Arch HAL; reading it raises a data abort the `fault` handler confirms.
+  A sentinel write/read-back before the unmap proves the split preserved
+  the live mapping.
 - `rustos-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
   (Stage W6) **over a discovered GIC base** (PI Stage P3): the boot core
   first poisons the GICv2 base and rediscovers it from the embedded
@@ -684,6 +691,47 @@ intermediate tables through the identity map (phys == virt), the whole
 host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which
 now builds its victim/attacker spaces through this trait.
+
+### Splitting a block: the guard-page fault-form (P6 follow-on, G1)
+
+The boot path identity-maps RAM with coarse 1 GiB / 2 MiB *block*
+descriptors (`new_identity_gigapages`), and a block has no per-4 KiB leaf
+to clear, so an individual page inside it cannot be unmapped. The kthread
+kernel-stack guard page's *deployment* form — turning a stack overflow
+into an immediate hardware fault by unmapping the guard page rather than
+detecting a poison canary at the next reschedule (`AGENTS.md` §2.17,
+`plans/PI.md`) — needs that region re-expressed at 4 KiB granularity
+first. `AddressSpace::split_block(vaddr)` does it: the 1 GiB L1 block
+covering `vaddr` becomes a table of 512 × 2 MiB blocks, then the covering
+2 MiB block becomes a table of 512 × 4 KiB pages. The shared
+`shatter_block_into` helper reproduces the block at the finer granularity
+by preserving every attribute bit (`desc & !ADDR_MASK`) and only
+recomputing each sub-entry's output address, setting `TABLE_OR_PAGE` for
+the L3 page leaves — so the same memory keeps mapping with identical
+permissions (one attribute vocabulary, §2.2).
+
+The split is **break-before-make-free for the running region**: it only
+ever *adds* table levels that reproduce the existing translation, never
+invalidating a live address, so it is safe to run against the active
+regime — unlike a naive block→table swap, whose break window would
+momentarily unmap the kernel's own running stack/code (the reason the
+fault-form is staged G1..G3 in `plans/PI.md` rather than shattering the
+block the CPU executes in). It is idempotent (a level already a table is
+left untouched) and fails closed (`Misaligned` / `NotMapped` /
+`PoolExhausted`). After a split, the single 4 KiB page unmaps through the
+existing `MmuAddressSpace::unmap` and its stale TLB entry is dropped with
+`TlbShootdown::flush_page`.
+
+The table arithmetic is host-tested (`paging_tests.rs`:
+`split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping`,
+`split_block_then_unmap_tears_down_exactly_one_page`,
+`split_block_preserves_device_attributes`,
+`split_block_is_idempotent_and_fails_closed`), and the live mechanism is
+proven on `-M virt` by `tests/integration/stack_guard_qemu_aarch64`: build
+an identity space, `split_block` a RAM block, enable the MMU,
+write+read-back a sentinel through the guard page (the split preserved the
+mapping live), then `unmap` + `flush_page` that one page and read it — the
+MMU raises a synchronous data abort the fault handler reports as PASS.
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

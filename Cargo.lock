@@ -1841,6 +1841,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-stack-guard-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-itest-harness",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-syscall-dispatch-qemu"
 version = "0.0.0"
 dependencies = [

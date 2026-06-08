@@ -807,6 +807,48 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
   is the binding defence (§2.17 — a guard now, the fault-form staged, never
   "security later").
 
+  The fault-form is being built *properly* (the running kernel cannot
+  break-before-make-shatter the 1 GiB block it is itself executing on and
+  stacked in: the BBM "break" window would momentarily unmap the running
+  stack/code), so it is staged G1..G3:
+
+  - **G1 — aarch64 page-table block-split primitive `[x]`.** The missing
+    foundation: `rustos_arch_aarch64::paging::AddressSpace::split_block(vaddr)`
+    re-expresses the coarse block covering `vaddr` at 4 KiB granularity (L1
+    1 GiB block → table of 512 × 2 MiB blocks, then the covering 2 MiB block
+    → table of 512 × 4 KiB pages), preserving the output address and **every**
+    attribute bit (`shatter_block_into` copies `desc & !ADDR_MASK`, setting
+    `TABLE_OR_PAGE` only at L3). It only *adds* table levels that reproduce
+    the existing translation — never invalidating a live address — so it is
+    safe against the running region (no break-before-make), is idempotent, and
+    fails closed (`Misaligned`/`NotMapped`/`PoolExhausted`). With it a single
+    4 KiB page inside a former block can be torn down with the existing
+    `MmuAddressSpace::unmap` + `TlbShootdown::flush_page`. Host-proven (4 new
+    `paging_tests.rs` tests: identity-preserving shatter, post-split
+    single-page unmap, Device-attr preservation, idempotency + fail-closed)
+    and end-to-end on `-M virt` by `tests/integration/stack_guard_qemu_aarch64`
+    (ids 4300–4302): build an identity space, `split_block` a RAM block,
+    enable the MMU, write+read-back a sentinel through the guard page (the
+    split preserved the mapping live), then `unmap` + `flush_page` that one
+    page and read it → synchronous data abort → PASS. **Verified green under
+    QEMU on `-M virt` on this host.** Doc: `docs/src/platform/aarch64.md`
+    ("Splitting a block: the guard-page fault-form").
+  - **G2 — guarded kthread-stack arena (boot mapping) `[ ]`.** Give kthread
+    kernel-stacks a region whose guard pages can be unmapped without ever
+    shattering the block the CPU runs on: either map the kthread-stack arena
+    at 2 MiB/4 KiB granularity at boot (so a guard page is its own L3 leaf
+    reachable through the G1 split run on a 2 MiB block that holds no running
+    context), or place the arena at a globally-mapped VA backed by allocator
+    frames at 4 KiB. Boot-map change in `boot_aarch64`, behind the Arch HAL
+    (no `cfg(target_arch)` leak), with a per-arch conformance vertical.
+  - **G3 — `BoxStack` rewire + HAL promotion + production wiring `[ ]`.**
+    Promote `split_block` to the Arch HAL `AddressSpace` surface (the other
+    ports get a real impl or an honest `Pending`/`Unsupported` profile),
+    route the kthread `BoxStack` guard page through unmap-on-create over the
+    G2 arena (canary fallback where a port is `Unsupported`), and prove the
+    production fault-form on `-M virt` (an overrunning kthread takes a
+    synchronous abort, not a next-reschedule canary detection).
+
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 
 - Implement the BCM2711 **mailbox** property-channel interface (a small

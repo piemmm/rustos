@@ -1964,6 +1964,31 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   child that exited with a known code, reads it back, and exits
                   0 (PASS, ids 4290-4292), **verified green under QEMU on this
                   host**. This unblocks the P6e-3b REPL + `init` supervision.
+                  **P6 follow-on — kthread guard-page fault-form, staged
+                  G1..G3 (`plans/PI.md`); G1 landed:** the foundation for
+                  turning a stack overflow into an immediate hardware fault
+                  (rather than the already-landed poison-canary detected at
+                  the next reschedule, §2.17) is the aarch64
+                  `paging::AddressSpace::split_block(vaddr)` — it re-expresses
+                  the coarse identity block covering `vaddr` at 4 KiB
+                  granularity (1 GiB block → 512×2 MiB blocks → 512×4 KiB
+                  pages), preserving the output address and every attribute
+                  (`shatter_block_into` copies `desc & !ADDR_MASK`, setting
+                  `TABLE_OR_PAGE` only at L3). It only *adds* table levels
+                  reproducing the existing translation, so it is safe against
+                  the running region (no break-before-make of the block the
+                  CPU executes in — the reason the fault-form is staged, not
+                  a single shatter), is idempotent, and fails closed; a single
+                  page then unmaps via the existing `MmuAddressSpace::unmap` +
+                  `TlbShootdown::flush_page`. Host-proven (4 new
+                  `paging_tests.rs` tests) and end-to-end on `-M virt` by
+                  `tests/integration/stack_guard_qemu_aarch64` (split a RAM
+                  block, MMU on, sentinel write+read-back, then unmap+flush
+                  one page and fault on access → PASS, ids 4300-4302),
+                  **verified green under QEMU on this host**. G2 (guarded
+                  kthread-stack arena via a boot-map change) + G3 (`BoxStack`
+                  rewire + HAL promotion + production wiring) follow. Docs:
+                  `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`
