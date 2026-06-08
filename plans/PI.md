@@ -664,8 +664,12 @@ are landed:** `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the
 the `ros_sys_mem_map`/`ros_sys_mem_unmap` C stubs + regenerated header,
 the dispatcher arms, and `kernel/core`'s `MemMap` seam (`NULL_MEM_MAP` /
 `with_mem_map`, unprivileged + unaudited, fail-closed `NotImplemented`).
-**SP5b remains:** the real `kernel/mem` live-address-space producer (zero
-on map/free, TLB shootdown) + the `-M virt` vertical.
+**SP5b-1 is also landed:** the reusable, host-proven `kernel/mem::anon`
+live-address-space producer (`map_anonymous`/`unmap_anonymous` — zero on
+map/free, W^X `RW|USER`, deterministic OOM, fail-closed all-or-nothing
+reclaim, per-page TLB flush). **SP5b-2 remains:** the `-M virt` EL0 vertical
+that wires the producer through the `kernel/core` `MemMap` seam
+(map→write→read→unmap→fault-on-use).
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

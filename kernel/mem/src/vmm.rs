@@ -68,6 +68,11 @@ macro_rules! bitflags_like {
             /// Raw bit pattern.
             #[must_use]
             pub const fn bits(self) -> $T { self.0 }
+
+            /// The union of two sets — the `const` counterpart of
+            /// [`core::ops::BitOr`], usable when building a flag constant.
+            #[must_use]
+            pub const fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
         }
 
         impl core::ops::BitOr for $Name {

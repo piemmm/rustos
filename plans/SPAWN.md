@@ -389,11 +389,11 @@ The real Pi is the on-metal acceptance item.
 
 ### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[~]` (beyond P6d)
 
-**SP5-0 and SP5a are landed; SP5b remains.** The `abi-v1` surface, the
-C-callable stubs + generated header, the dispatcher arms, and the
-fail-closed `kernel/core` seam exist and are host-proven; what is left is
-the real `kernel/mem` live-address-space producer + the `-M virt`
-vertical.
+**SP5-0, SP5a, and SP5b-1 are landed; SP5b-2 remains.** The `abi-v1`
+surface, the C-callable stubs + generated header, the dispatcher arms, the
+fail-closed `kernel/core` seam, and the reusable `kernel/mem` live-address-
+space producer are host-proven; what is left is the `-M virt` EL0 vertical
+that wires the producer through the `kernel/core` `MemMap` seam.
 
 The natural follow-on abi-v1 process-runtime capability, scheduled here
 after the spawn tranche because it has the same precondition: a process
@@ -481,14 +481,26 @@ landing):**
   (`OutOfRange`); the seam is `kernel/core`'s `MemMap` (`NULL_MEM_MAP` /
   `with_mem_map`), so the kernel binary is unchanged and production
   `mem_map`/`mem_unmap` fail closed with `NotImplemented` until SP5b.
-- **SP5b — real producer + `-M virt` vertical `[ ]`.** `kernel/mem`'s live
-  user-space map/unmap (zero-on-map, fail-closed reclaim of a
-  partially-mapped range, TLB-shootdown) + the keep-the-frozen-view-
-  consistent update; the `kernel/core` handler wired to it; an `-M virt`
-  vertical where a pure-Rust EL0 fixture program `mem_map`s a region,
+- **SP5b-1 — reusable `kernel/mem` producer (host-proven) `[x]`.** The
+  architecture-neutral `kernel/mem::anon` module: `map_anonymous` maps fresh
+  `RW|USER` zeroed frames into a live `AddressSpace<P>` (the single
+  `ANON_FLAGS` set — never executable, W^X §19.2), zeroing each frame
+  through the kernel direct map before the mapping is visible, and unwinds
+  every page already mapped if a later page cannot be backed (fail-closed,
+  all-or-nothing, §2.9). `unmap_anonymous` validates the whole range is
+  mapped before tearing any of it down, zeroes every reclaimed frame on free
+  (§4), and folds an allocator exhaustion onto one OOM type. The per-page
+  TLB flush rides the existing `AddressSpace::map`/`unmap` (`TlbShootdown`
+  slice). Host-proven over `HostPageTable` + `SimPhysMap` (8 unit tests:
+  zeroed RW|USER map, zero-on-free, OOM unwind, already-mapped unwind,
+  validate-all unmap, zero-length/misaligned rejection, page-count rounding).
+- **SP5b-2 — `-M virt` EL0 vertical `[ ]`.** Wire the SP5b-1 producer
+  through the `kernel/core` `MemMap` seam in a self-contained aarch64 `-M
+  virt` vertical: a pure-Rust EL0 fixture program `mem_map`s a region,
   writes a pattern, reads it back, then `mem_unmap`s it (and a fault-on-use
   check after unmap), PASSing via an audited marker. Siblings (x86_64,
-  riscv64) follow; wasm32's linear-memory model is an honest n/a (declared).
+  riscv64) and production per-task live-space retention follow; wasm32's
+  linear-memory model is an honest n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous
 `RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and

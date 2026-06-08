@@ -1872,9 +1872,15 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   seam (`NULL_MEM_MAP` / `with_mem_map`, unprivileged +
                   unaudited, fail-closed `NotImplemented`, host-proven). The
                   ungated decision follows §16.6 (a process grows only its
-                  **own** isolated space). **SP5b remains:** the real
-                  `kernel/mem` live-address-space producer (zero on map/free,
-                  TLB shootdown) + the `-M virt` vertical.
+                  **own** isolated space). **SP5b-1 also landed:** the
+                  reusable, host-proven `kernel/mem::anon` producer
+                  (`map_anonymous`/`unmap_anonymous` — zero on map/free, W^X
+                  `RW|USER`, deterministic OOM, fail-closed all-or-nothing
+                  reclaim, per-page TLB flush) over a live `AddressSpace<P>`
+                  (8 host tests on `HostPageTable`+`SimPhysMap`). **SP5b-2
+                  remains:** the `-M virt` EL0 vertical wiring the producer
+                  through the `kernel/core` `MemMap` seam
+                  (map→write→read→unmap→fault-on-use).
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

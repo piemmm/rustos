@@ -493,11 +493,25 @@ This is staged (`plans/SPAWN.md` SP5):
   `KernelSyscallHandlers::with_mem_map`, mirroring the console and spawn
   seams). The handler rejects a zero `len` with `LengthOutOfRange` and a
   reserved flag bit with `OutOfRange` before reaching the producer.
-- **SP5b (staged, not yet built).** The real `kernel/mem` producer that
+- **SP5b-1 (landed).** The reusable, architecture-neutral `kernel/mem`
+  producer (`map_anonymous` / `unmap_anonymous` in the `anon` module) that
   mutates a *live* user address space: it maps fresh frames into the
-  caller's own [`AddressSpace<P: PageTable>`], and unmaps them with the
-  necessary TLB invalidation through the §17.2 `TlbShootdown` /
-  `CrossCpuTlbShootdown` HAL slices.
+  caller's own [`AddressSpace<P: PageTable>`] as `RW|USER` (the single
+  `ANON_FLAGS` set, never executable), zeroes each frame through the kernel
+  direct map *before* the mapping is visible, and on unmap validates the
+  whole range is mapped before zeroing-on-free and releasing every frame. A
+  frame exhaustion part-way through a map unwinds every page it already
+  added, so a failed map leaves the space unchanged (`AGENTS.md` §2.9). The
+  per-page TLB invalidation rides the existing `AddressSpace::map` /
+  `AddressSpace::unmap` flush (the §17.2 `TlbShootdown` slice); the
+  cross-CPU shootdown is part of SP5b-2 when the producer is driven from a
+  live multi-CPU regime. Host-proven over `HostPageTable` + `SimPhysMap`.
+- **SP5b-2 (staged, not yet built).** The aarch64 EL0 `-M virt` vertical
+  that wires the SP5b-1 producer through the `kernel/core` `MemMap` seam:
+  a pure-Rust EL0 fixture program `mem_map`s a region, writes and reads
+  back a pattern, `mem_unmap`s it, and faults on use after unmap. The
+  sibling x86_64 / riscv64 verticals and the production per-task live-space
+  retention follow it; wasm32's linear-memory model is an honest n/a.
 
 The binding invariants the producer must honour (settled here as the SP5
 design note, `AGENTS.md` §15.2):
