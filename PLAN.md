@@ -1839,13 +1839,17 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   kernel-discovered console via `console_read`/
                   `console_write` (which would be ambient authority §4 +
                   device coupling §17.3/§17.4). P6e-1 (`console_read`
-                  syscall, landed) + P6e-2 (UART RX device) build the
-                  bootstrap stream **backing**; P6e-3a adds the
-                  standard-stream fd ABI + per-process descriptor table (the
-                  console syscalls evolve in place §2.13 into fd-keyed
-                  stream ops) + the `lib/rt` std-stream wrappers; P6e-3b
-                  wires the REPL over fd 0/1/3 (no `console_*`) + `init`
-                  supervision.
+                  syscall) + P6e-2 (UART RX device) — **both landed** —
+                  build the bootstrap stream **backing**: P6e-2 added the
+                  aarch64 non-blocking RX read (`ConsoleModel::rx_ready` +
+                  `serial::read_console_bytes`, no busy-wait §2.1), a
+                  `ConsoleRead` impl on the zero-sized `UartConsole`, and
+                  its install via `BootInfo::with_console_read` in
+                  `boot_aarch64`. P6e-3a adds the standard-stream fd ABI +
+                  per-process descriptor table (the console syscalls evolve
+                  in place §2.13 into fd-keyed stream ops) + the `lib/rt`
+                  std-stream wrappers; P6e-3b wires the REPL over fd 0/1/3
+                  (no `console_*`) + `init` supervision.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

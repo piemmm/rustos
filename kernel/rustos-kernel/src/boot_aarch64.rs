@@ -382,6 +382,11 @@ fn enter_kernel_core(
         &DISPATCH_SLOT,
     )
     .with_console(&UART_CONSOLE)
+    // Install the discovered-UART input backing (`plans/PI.md` P6e-2): the
+    // non-blocking RX drain the `console_read` syscall reads through. It is
+    // the bootstrap stream backing for fd 0 (`AGENTS.md` §20), reusing the
+    // same zero-sized `UART_CONSOLE` device as the output half.
+    .with_console_read(&UART_CONSOLE)
     // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s EL0 image and drop into user mode.

@@ -236,6 +236,27 @@ register layout are covered by host unit tests against the `rustos_fdt`
 `raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
 peripheral stages.
 
+### Console input backing (`console_read`)
+
+The same `console` model backs the **input** half (`plans/PI.md` P6e-2):
+`ConsoleModel::rx_ready` decodes the model's receive-status bit (the
+PL011's `UARTFR.RXFE` is *set* when the receive FIFO is empty; the
+mini-UART's `AUX_MU_LSR_REG` bit 0 is *set* when data is ready), reusing
+the same status and data register offsets as the transmit path since they
+coincide on both models. `serial::read_console_bytes` drains whatever
+input is immediately available into the caller's buffer and stops at the
+first byte that is not yet present — it **never busy-waits** for input
+(`AGENTS.md` §2.1), so a read with no pending byte is a valid zero-length
+short read. `boot_aarch64` installs this through the same zero-sized
+`UartConsole` device (it implements both `ConsoleWrite` and `ConsoleRead`)
+via `BootInfo::with_console_read`, so the `console_read` syscall reads the
+discovered UART.
+
+This is the bootstrap stream **backing** the spawner attaches to fd 0
+(`AGENTS.md` §20); it is not a program-facing interface. The receive-bit
+decoders are host-unit-tested; real RX over `virt`/Pi silicon is exercised
+once the standard-stream layer binds fd 0 to it (`plans/PI.md` P6e-3a).
+
 ## Board-discovered interrupt controller
 
 The GICv2 distributor (`GICD`) and CPU-interface (`GICC`) MMIO bases are

@@ -25,7 +25,7 @@
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
 use rustos_arch_api::{CpuId, SchedulerArch};
-use rustos_kernel_core::{ConsoleWrite, KernelArch};
+use rustos_kernel_core::{ConsoleRead, ConsoleWrite, KernelArch};
 
 /// Local [`KernelArch`] wrapper around the arch port's
 /// [`Aarch64Arch`].
@@ -94,13 +94,18 @@ const _AARCH64_BIN_ARCH_HALT_RETURNS_NEVER: fn(&Aarch64BinArch) -> ! =
 /// The system console device the aarch64 boot path installs on
 /// [`rustos_kernel_core::BootInfo`].
 ///
-/// A zero-sized [`ConsoleWrite`] adapter over the discovered console
-/// UART: every `console_write` byte is forwarded verbatim through
-/// [`rustos_arch_aarch64::serial::write_console_bytes`], which targets
+/// A zero-sized [`ConsoleWrite`] + [`ConsoleRead`] adapter over the
+/// discovered console UART: every `console_write` byte is forwarded
+/// verbatim through [`rustos_arch_aarch64::serial::write_console_bytes`]
+/// and every `console_read` drains pending input through
+/// [`rustos_arch_aarch64::serial::read_console_bytes`], both targeting
 /// the board-discovered UART base (`plans/PI.md` P2 / P6). It is the
 /// "first discovered UART" half of the §10 console seam; the framebuffer
 /// path (`plans/PI.md` P7) replaces it with a text-console device once a
 /// display driver loads.
+///
+/// This is the bootstrap stream **backing** the spawner attaches to fd
+/// 0/1 (`AGENTS.md` §20), not a program-facing interface.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct UartConsole;
 
@@ -114,9 +119,20 @@ impl ConsoleWrite for UartConsole {
     }
 }
 
+impl ConsoleRead for UartConsole {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
+        // The non-blocking receive path drains whatever input is
+        // immediately available and never busy-waits (`AGENTS.md` §2.1);
+        // a read with no pending input is a valid zero-length read the
+        // caller loops on, never an error.
+        Ok(serial::read_console_bytes(buf))
+    }
+}
+
 /// The single `'static` [`UartConsole`] the boot path installs through
-/// [`rustos_kernel_core::BootInfo::with_console`]. Zero-sized, so it has
-/// no `.bss`/`.data` footprint — mirroring
+/// [`rustos_kernel_core::BootInfo::with_console`] (output) and
+/// [`rustos_kernel_core::BootInfo::with_console_read`] (input).
+/// Zero-sized, so it has no `.bss`/`.data` footprint — mirroring
 /// [`rustos_arch_aarch64::SERIAL_SINK`].
 pub static UART_CONSOLE: UartConsole = UartConsole;
 
@@ -143,5 +159,15 @@ mod tests {
         // contract (never short) holds without touching MMIO.
         assert_eq!(UART_CONSOLE.write(b"hello"), Ok(5));
         assert_eq!(UartConsole.write(&[]), Ok(0));
+    }
+
+    #[test]
+    fn uart_console_read_reports_zero_and_is_inert_on_host() {
+        // `serial::read_console_bytes` yields no input on the host build
+        // (the device `getchar` returns `None`), so the adapter reports a
+        // valid zero-length read — never an error — without touching MMIO.
+        let mut buf = [0u8; 8];
+        assert_eq!(UART_CONSOLE.read(&mut buf), Ok(0));
+        assert_eq!(UartConsole.read(&mut []), Ok(0));
     }
 }

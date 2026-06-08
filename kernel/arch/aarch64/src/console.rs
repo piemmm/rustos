@@ -65,6 +65,9 @@ const PL011_DR: usize = 0x00;
 const PL011_FR: usize = 0x18;
 /// `UARTFR.TXFF` — transmit FIFO full (bit 5). Clear means a byte fits.
 const PL011_FR_TXFF: u32 = 1 << 5;
+/// `UARTFR.RXFE` — receive FIFO empty (bit 4). Clear means a byte is
+/// available to read.
+const PL011_FR_RXFE: u32 = 1 << 4;
 
 /// Mini-UART data register (`AUX_MU_IO_REG`) offset, relative to the
 /// device-tree `reg` base.
@@ -75,6 +78,9 @@ const MINIUART_LSR: usize = 0x14;
 /// `AUX_MU_LSR_REG` bit 5 — "transmitter empty"/"can accept a byte". Set
 /// means a byte fits.
 const MINIUART_LSR_TX_EMPTY: u32 = 1 << 5;
+/// `AUX_MU_LSR_REG` bit 0 — "data ready". Set means the receive FIFO holds
+/// at least one byte to read.
+const MINIUART_LSR_DATA_READY: u32 = 1 << 0;
 
 impl ConsoleModel {
     /// The device-tree `compatible` string that selects each model.
@@ -152,6 +158,24 @@ impl ConsoleModel {
         match self {
             Self::Pl011 => status & PL011_FR_TXFF == 0,
             Self::MiniUart => status & MINIUART_LSR_TX_EMPTY != 0,
+        }
+    }
+
+    /// Decode a status-register value into "a received byte is available to
+    /// read now". The receive-status register coincides with the
+    /// transmit-status one ([`Self::status_offset`]) on both models —
+    /// PL011 `UARTFR`, mini-UART `AUX_MU_LSR_REG` — but the bit differs:
+    /// the PL011's `RXFE` (bit 4) is *set* when the FIFO is **empty**, the
+    /// mini-UART's `LSR` bit 0 is *set* when data is **ready**, so the
+    /// predicate is per-model, not shared. The read data register also
+    /// coincides with the transmit one ([`Self::data_offset`]) — PL011
+    /// `UARTDR`, mini-UART `AUX_MU_IO_REG` — so no extra offset accessor is
+    /// needed for the receive path.
+    #[must_use]
+    pub const fn rx_ready(self, status: u32) -> bool {
+        match self {
+            Self::Pl011 => status & PL011_FR_RXFE == 0,
+            Self::MiniUart => status & MINIUART_LSR_DATA_READY != 0,
         }
     }
 }
@@ -310,6 +334,18 @@ mod tests {
     }
 
     #[test]
+    fn pl011_rx_readiness() {
+        let m = ConsoleModel::Pl011;
+        // RXFE (bit 4) set => receive FIFO empty => no byte to read.
+        assert!(!m.rx_ready(0x10));
+        // RXFE clear => a received byte is available.
+        assert!(m.rx_ready(0x00));
+        // Other flag bits (e.g. TXFF bit 5) do not mark RX ready.
+        assert!(!m.rx_ready(0x30));
+        assert!(m.rx_ready(0x20));
+    }
+
+    #[test]
     fn miniuart_register_offsets_and_readiness() {
         let m = ConsoleModel::MiniUart;
         assert_eq!(m.data_offset(), 0x00);
@@ -319,6 +355,17 @@ mod tests {
         assert!(!m.tx_ready(0x00));
         // Other LSR bits (e.g. data-ready bit 0) do not mark TX ready.
         assert!(!m.tx_ready(0x01));
+    }
+
+    #[test]
+    fn miniuart_rx_readiness() {
+        let m = ConsoleModel::MiniUart;
+        // LSR bit 0 set => data ready => a byte is available.
+        assert!(m.rx_ready(0x01));
+        assert!(!m.rx_ready(0x00));
+        // Other LSR bits (e.g. TX-empty bit 5) do not mark RX ready.
+        assert!(!m.rx_ready(0x20));
+        assert!(m.rx_ready(0x21));
     }
 
     #[test]

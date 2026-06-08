@@ -593,13 +593,24 @@ on its own before the next.
     dispatcher reachability/fuzz/proptest doubles gained the new arm. **No
     device read is wired yet** — the aarch64 serial has no RX primitive, so
     `console_read` fails closed everywhere until P6e-2.
-  - **P6e-2 — UART RX device + wiring `[ ]`.** Add a non-blocking
-    console-input read primitive to the aarch64 serial path (PL011 + the
-    BCM2835 AUX mini-UART RX FIFO drain, no busy-wait §2.1), implement
-    `ConsoleRead` for the discovered-UART console device, and install it
-    through `BootInfo::with_console_read` in `boot_aarch64`. This completes
-    the **bootstrap backing**: it feeds fd 0's backing object (P6e-3a),
-    it is **not** called directly by the shell.
+  - **P6e-2 — UART RX device + wiring `[x]`.** A non-blocking
+    console-input read primitive was added to the aarch64 serial path:
+    `ConsoleModel::rx_ready` decodes each model's receive-status bit
+    (PL011 `UARTFR.RXFE` set = FIFO empty; mini-UART `AUX_MU_LSR_REG`
+    bit 0 set = data ready), reusing the existing data/status offsets
+    since the RX registers coincide with TX on both models;
+    `serial::getchar`/`read_console_bytes` drain the RX FIFO into the
+    caller's buffer and stop at the first absent byte — no busy-wait
+    (§2.1), so an empty read is a valid zero-length short read. The
+    zero-sized `UartConsole` now implements `ConsoleRead` (`Ok(0)` inert
+    on host), and `boot_aarch64::enter_kernel_core` installs it through
+    `BootInfo::with_console_read(&UART_CONSOLE)` beside the existing
+    `.with_console`. This completes the **bootstrap backing** — it feeds
+    fd 0's backing object (P6e-3a), it is **not** called directly by the
+    shell. The receive-bit decoders are host-unit-tested (2 new
+    `console` tests + 1 `arch_wrapper_aarch64` adapter test); the
+    freestanding aarch64 kernel builds clean. Real RX over silicon is
+    exercised once the stream layer binds fd 0 (P6e-3a).
   - **P6e-3a — standard-stream ABI + fd table `[ ]`.** Add the stream
     layer the shell binds to (AGENTS.md §20), since `abi-v1` has no
     descriptor table yet. Evolve the two console syscalls **in place**

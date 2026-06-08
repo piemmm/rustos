@@ -61,6 +61,74 @@ fn putchar(byte: u8) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn putchar(_byte: u8) {}
 
+/// Read one byte from the currently-configured console UART **without
+/// blocking**, returning `None` when the receive FIFO holds no byte.
+///
+/// This is the non-blocking counterpart of [`putchar`]: it polls the
+/// model's receive-ready bit once and, if a byte is waiting, reads the
+/// data register. It never busy-waits for input (`AGENTS.md` §2.1) — the
+/// caller drains what is available and returns, so a `console_read` with
+/// no pending input is a valid short (zero-length) read rather than a
+/// spin.
+///
+/// Freestanding-only: the host build returns `None` (no device), so the
+/// consuming [`read_console_bytes`] reports a zero-length read there.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn getchar() -> Option<u8> {
+    let (base, model) = console::current();
+    let status_reg = (base + model.status_offset()) as *const u32;
+    let data_reg = (base + model.data_offset()) as *const u32;
+    // SAFETY: `base` is the console UART's MMIO base — the `virt` PL011
+    // default or the value discovered from the firmware device tree
+    // (`console::configure_from_fdt`). The reads are naturally-aligned
+    // 32-bit accesses to device registers at the model's documented
+    // offsets and touch no Rust-managed memory. The data register is read
+    // only after `rx_ready` confirms a byte is present, so it never pops
+    // an empty receive FIFO.
+    unsafe {
+        if !model.rx_ready(core::ptr::read_volatile(status_reg)) {
+            return None;
+        }
+        // The received byte is in the low 8 bits of the data register;
+        // the upper bits carry framing/parity error flags this bootstrap
+        // backing does not surface.
+        Some((core::ptr::read_volatile(data_reg) & 0xff) as u8)
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn getchar() -> Option<u8> {
+    None
+}
+
+/// Fill `buf` with whatever console input is **immediately available**,
+/// returning the number of bytes read (`0..=buf.len()`).
+///
+/// Non-blocking: it drains the receive FIFO into `buf` and stops at the
+/// first byte that is not yet available (or when `buf` is full), so it
+/// never busy-waits for input (`AGENTS.md` §2.1). A read with no pending
+/// input returns `0` — a valid short read the `console_read` handler
+/// reports to the caller, which loops. This is the device-side **backing**
+/// the stream layer attaches to fd 0 (`plans/PI.md` P6e-2 / `AGENTS.md`
+/// §20); it is not a program-facing interface.
+///
+/// Freestanding-only receive (the host build's [`getchar`] yields
+/// `None`), so the host tests of the consuming `ConsoleRead` adapter
+/// observe a zero-length read without touching MMIO.
+pub fn read_console_bytes(buf: &mut [u8]) -> usize {
+    let mut read = 0;
+    for slot in buf.iter_mut() {
+        match getchar() {
+            Some(byte) => {
+                *slot = byte;
+                read += 1;
+            }
+            None => break,
+        }
+    }
+    read
+}
+
 /// Write `bytes` verbatim to the currently-configured console UART,
 /// returning the number written (always `bytes.len()` — the busy-wait
 /// transmit path accepts every byte).
