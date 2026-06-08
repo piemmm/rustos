@@ -506,12 +506,19 @@ This is staged (`plans/SPAWN.md` SP5):
   `AddressSpace::unmap` flush (the §17.2 `TlbShootdown` slice); the
   cross-CPU shootdown is part of SP5b-2 when the producer is driven from a
   live multi-CPU regime. Host-proven over `HostPageTable` + `SimPhysMap`.
-- **SP5b-2 (staged, not yet built).** The aarch64 EL0 `-M virt` vertical
-  that wires the SP5b-1 producer through the `kernel/core` `MemMap` seam:
-  a pure-Rust EL0 fixture program `mem_map`s a region, writes and reads
-  back a pattern, `mem_unmap`s it, and faults on use after unmap. The
-  sibling x86_64 / riscv64 verticals and the production per-task live-space
-  retention follow it; wasm32's linear-memory model is an honest n/a.
+- **SP5b-2 (landed).** The aarch64 EL0 `-M virt` vertical
+  (`tests/integration/mem_map_qemu_aarch64`) wires the SP5b-1 producer
+  through the `kernel/core` `MemMap` seam: it builds one isolated EL0 space
+  with `spawn_image`, **retains** it live behind a `MemMap` producer backed
+  by `map_anonymous` / `unmap_anonymous`, and routes the program's
+  `mem_map` / `mem_unmap` `svc`s through it. A pure-Rust EL0 fixture
+  (`tests/integration/mem_map_program`) `mem_map`s a region (FIXED), writes
+  and reads back a pattern (proving the pages are real `RW` memory),
+  `mem_unmap`s it, then touches the released range — the data abort the
+  fault handler reports as PASS. The `rustos_rt::mem_map` / `mem_unmap`
+  wrappers are the program's interface. The sibling x86_64 / riscv64
+  verticals and the production per-task live-space retention follow it;
+  wasm32's linear-memory model is an honest n/a.
 
 The binding invariants the producer must honour (settled here as the SP5
 design note, `AGENTS.md` §15.2):

@@ -1192,6 +1192,36 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
+    // `mem_unmap` vertical — the first proof that an EL0 process obtains and
+    // releases anonymous `RW` memory at runtime via `abi-v1`, on the `virt`
+    // board. It reads the GICv2 base + timer rate from the embedded `virt` DTB
+    // (P3/P4), brings up the EL1 vectors + GICv2, and builds **one** hardware-
+    // isolated EL0 address space from the pure-Rust `rustos-test-mem-map`
+    // fixture (built PIE + converted to `rxe` by `build.rs`) through the
+    // capability-checked, audited `kernel_core::spawn_image`. It **retains** that
+    // space live behind a `kernel_core::MemMap` producer backed by
+    // `kernel_mem::map_anonymous`/`unmap_anonymous`, admits the program as a
+    // resumable user kthread (`spawn_user_kthread`, §4), and routes the
+    // program's `mem_map`/`mem_unmap` `svc`s through the producer. The fixture
+    // maps a region (FIXED), writes+verifies a pattern, unmaps it, then touches
+    // the released range; the fault handler reports the use-after-unmap data
+    // abort as PASS. A verification failure exits early (a distinct finisher)
+    // and a missing fault stalls the drain (fail-loud, `AGENTS.md` §7). Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
+    QemuTest {
+        package: "rustos-test-mem-map-qemu-aarch64",
+        binary: "rustos-test-mem-map-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the

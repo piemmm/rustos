@@ -667,9 +667,19 @@ the dispatcher arms, and `kernel/core`'s `MemMap` seam (`NULL_MEM_MAP` /
 **SP5b-1 is also landed:** the reusable, host-proven `kernel/mem::anon`
 live-address-space producer (`map_anonymous`/`unmap_anonymous` — zero on
 map/free, W^X `RW|USER`, deterministic OOM, fail-closed all-or-nothing
-reclaim, per-page TLB flush). **SP5b-2 remains:** the `-M virt` EL0 vertical
-that wires the producer through the `kernel/core` `MemMap` seam
-(map→write→read→unmap→fault-on-use).
+reclaim, per-page TLB flush). **SP5b-2 is also landed (SP5 complete):** the
+aarch64 `-M virt` EL0 vertical `tests/integration/mem_map_qemu_aarch64`
+wires the producer through the `kernel/core` `MemMap` seam — it builds one
+isolated EL0 space with `spawn_image`, **retains** it live behind a `MemMap`
+producer over `map_anonymous`/`unmap_anonymous`, admits the program as a
+resumable user kthread, and routes the program's `mem_map`/`mem_unmap`
+`svc`s through it; the pure-Rust EL0 fixture
+`tests/integration/mem_map_program` (linking the new
+`rustos_rt::mem_map`/`mem_unmap` wrappers) maps a region (FIXED),
+writes+verifies a pattern, unmaps it, then faults on use — the fault handler
+reports PASS, **verified green under QEMU on `-M virt`**. Sibling
+(x86_64/riscv64) verticals + production per-task live-space retention
+follow.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

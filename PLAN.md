@@ -1878,9 +1878,21 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   `RW|USER`, deterministic OOM, fail-closed all-or-nothing
                   reclaim, per-page TLB flush) over a live `AddressSpace<P>`
                   (8 host tests on `HostPageTable`+`SimPhysMap`). **SP5b-2
-                  remains:** the `-M virt` EL0 vertical wiring the producer
-                  through the `kernel/core` `MemMap` seam
-                  (map→write→read→unmap→fault-on-use).
+                  also landed (SP5 complete):** the aarch64 `-M virt` EL0
+                  vertical `tests/integration/mem_map_qemu_aarch64` wires the
+                  producer through the `kernel/core` `MemMap` seam — it builds
+                  one isolated EL0 space with `spawn_image`, **retains** it
+                  live behind a `MemMap` producer over
+                  `map_anonymous`/`unmap_anonymous`, admits the program as a
+                  resumable user kthread, and routes the program's
+                  `mem_map`/`mem_unmap` `svc`s through it; the pure-Rust EL0
+                  fixture `tests/integration/mem_map_program` (linking the new
+                  `rustos_rt::mem_map`/`mem_unmap` wrappers) maps a region
+                  (FIXED), writes+verifies a pattern, unmaps it, then faults
+                  on use — the fault handler reports PASS (id 4282),
+                  **verified green under QEMU on this host**. Sibling
+                  (x86_64/riscv64) verticals + production per-task live-space
+                  retention follow.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

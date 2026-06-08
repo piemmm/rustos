@@ -387,13 +387,15 @@ the kernel-discovered console (`console_*` is only the bootstrap stream
 syscall and both run concurrently on `-M virt` — proven by the SP3b vertical.
 The real Pi is the on-metal acceptance item.
 
-### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[~]` (beyond P6d)
+### SP5 — `mem_map`/`mem_unmap`: dynamic per-process anonymous memory `[x]` (beyond P6d)
 
-**SP5-0, SP5a, and SP5b-1 are landed; SP5b-2 remains.** The `abi-v1`
+**SP5-0, SP5a, SP5b-1, and SP5b-2 are all landed.** The `abi-v1`
 surface, the C-callable stubs + generated header, the dispatcher arms, the
-fail-closed `kernel/core` seam, and the reusable `kernel/mem` live-address-
-space producer are host-proven; what is left is the `-M virt` EL0 vertical
-that wires the producer through the `kernel/core` `MemMap` seam.
+fail-closed `kernel/core` seam, the reusable `kernel/mem` live-address-
+space producer, **and** the aarch64 `-M virt` EL0 vertical that wires the
+producer through the `kernel/core` `MemMap` seam are all proven. The
+sibling x86_64 / riscv64 verticals and production per-task live-space
+retention are the remaining follow-ons (tracked beyond SP5).
 
 The natural follow-on abi-v1 process-runtime capability, scheduled here
 after the spawn tranche because it has the same precondition: a process
@@ -494,13 +496,24 @@ landing):**
   slice). Host-proven over `HostPageTable` + `SimPhysMap` (8 unit tests:
   zeroed RW|USER map, zero-on-free, OOM unwind, already-mapped unwind,
   validate-all unmap, zero-length/misaligned rejection, page-count rounding).
-- **SP5b-2 — `-M virt` EL0 vertical `[ ]`.** Wire the SP5b-1 producer
-  through the `kernel/core` `MemMap` seam in a self-contained aarch64 `-M
-  virt` vertical: a pure-Rust EL0 fixture program `mem_map`s a region,
-  writes a pattern, reads it back, then `mem_unmap`s it (and a fault-on-use
-  check after unmap), PASSing via an audited marker. Siblings (x86_64,
-  riscv64) and production per-task live-space retention follow; wasm32's
-  linear-memory model is an honest n/a (declared).
+- **SP5b-2 — `-M virt` EL0 vertical `[x]`.** **Landed.** The SP5b-1
+  producer is wired through the `kernel/core` `MemMap` seam in a
+  self-contained aarch64 `-M virt` vertical
+  (`tests/integration/mem_map_qemu_aarch64`): the test builds one isolated
+  EL0 space with `spawn_image`, **retains** it live behind a `MemMap`
+  producer (an `UnsafeCell<Option<LiveSpace>>` reached only from the
+  single-CPU cooperative dispatch path) backed by `map_anonymous` /
+  `unmap_anonymous` over its frame pool + `DirectPhysMap`, admits the
+  program as a resumable user kthread, and routes the program's `mem_map` /
+  `mem_unmap` `svc`s through the producer. The pure-Rust EL0 fixture
+  (`tests/integration/mem_map_program`, linking the new `rustos_rt::mem_map`
+  / `mem_unmap` wrappers) `mem_map`s a region (FIXED), writes and reads back
+  a pattern, `mem_unmap`s it, then touches the released range; the fault
+  handler reports the use-after-unmap data abort as PASS (id 4282), and a
+  verification failure exits early with a distinct finisher (fail-loud,
+  `AGENTS.md` §7). Verified green under QEMU on `-M virt`. Siblings
+  (x86_64, riscv64) and production per-task live-space retention follow;
+  wasm32's linear-memory model is an honest n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous
 `RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and

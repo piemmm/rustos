@@ -55,7 +55,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::{SyscallNumber, STDERR, STDIN, STDINFO, STDOUT};
+use rustos_abi::{MapFlags, SyscallNumber, STDERR, STDIN, STDINFO, STDOUT};
 use rustos_abi_trap::raw_syscall;
 
 #[cfg(rt_native)]
@@ -76,6 +76,12 @@ const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 
 /// `spawn` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
+
+/// `mem_map` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
+
+/// `mem_unmap` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -224,6 +230,62 @@ pub fn spawn(path: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Map `len` bytes of fresh, zeroed anonymous `RW` memory into the calling
+/// process's **own** address space (`SyscallNumber::MEM_MAP`,
+/// `plans/SPAWN.md` SP5).
+///
+/// `flags` ([`MapFlags`]) selects placement: with [`MapFlags::FIXED`] the
+/// kernel maps the region at exactly `addr_hint` (page-aligned, a free
+/// range) or fails closed; otherwise `addr_hint` is advisory and `0` means
+/// "kernel chooses". The region is zeroed before it is visible and is never
+/// executable (`AGENTS.md` §19.2 — W^X); mapping one's own isolated space
+/// grants no further authority, so no capability is required
+/// (`AGENTS.md` §16.6 / §4).
+///
+/// The kernel encodes the result as a signed register following the
+/// standard `abi-v1` convention: a non-negative value is the base address
+/// of the new region, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`) — a frame exhaustion is
+/// reported as [`rustos_abi::Errno::OutOfMemory`] (`AGENTS.md` §4 —
+/// deterministic OOM, never a panic). The wrapper surfaces that raw signed
+/// value so the caller decides how to react; it adds no authority and hides
+/// no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mem_map-result encoding (base ≥ 0, else -errno).
+pub fn mem_map(len: usize, flags: MapFlags, addr_hint: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `mem_map`
+    // dereferences no user pointer; it maps the region into the caller's own
+    // space and returns its base, so no memory operand is passed.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_MEM_MAP,
+            [len as u64, u64::from(flags.bits()), addr_hint, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Release the region of `len` bytes based at `base` previously returned by
+/// [`mem_map`] from the calling process's own address space
+/// (`SyscallNumber::MEM_UNMAP`, `plans/SPAWN.md` SP5).
+///
+/// The kernel zeroes the frames it reclaims (`AGENTS.md` §4 — secret
+/// hygiene) and fails closed when `(base, len)` does not name a region the
+/// caller mapped (`AGENTS.md` §5.4). Returns `0` on success or `-errno`
+/// (recover the [`rustos_abi::Errno`] discriminant as `-ret`), following the
+/// standard `abi-v1` signed-result convention; the wrapper hides no error
+/// (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mem_unmap-result encoding (0, else -errno).
+pub fn mem_unmap(base: u64, len: usize) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(base, len)` range against the caller's own address space before
+    // unmapping it (`AGENTS.md` §5.4). No user pointer is dereferenced.
+    let ret = unsafe { raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -352,6 +414,54 @@ mod tests {
         let (number, args) = capture(0, yield_now);
         assert_eq!(number, NUM_YIELD);
         assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_map_marshals_len_flags_and_addr_hint() {
+        // A FIXED placement at a page-aligned hint; the kernel returns the
+        // base address, which the wrapper surfaces as a non-negative i64.
+        let base = 0x10_0100_0000u64;
+        let want = i64::try_from(base).expect("base fits an i64");
+        let (number, args) = capture(base, || {
+            assert_eq!(mem_map(0x2000, MapFlags::FIXED, base), want);
+        });
+        assert_eq!(number, NUM_MEM_MAP);
+        assert_eq!(args[0], 0x2000);
+        assert_eq!(args[1], u64::from(MapFlags::FIXED.bits()));
+        assert_eq!(args[2], base);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_map_surfaces_negative_errno_encoding() {
+        // `OutOfMemory` is encoded by the kernel as the two's-complement
+        // negation; the wrapper hands that signed value back unchanged.
+        let want = -i64::from(rustos_abi::Errno::OutOfMemory.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(mem_map(0x1000, MapFlags::empty(), 0), want);
+        });
+    }
+
+    #[test]
+    fn mem_unmap_marshals_base_and_len() {
+        let base = 0x10_0100_0000u64;
+        let (number, args) = capture(0, || {
+            assert_eq!(mem_unmap(base, 0x2000), 0);
+        });
+        assert_eq!(number, NUM_MEM_UNMAP);
+        assert_eq!(args[0], base);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mem_unmap_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(mem_unmap(0x10_0100_0000, 0x1000), want);
+        });
     }
 
     #[test]
