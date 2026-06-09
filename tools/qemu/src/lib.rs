@@ -472,11 +472,22 @@ impl Runner {
         };
 
         let mut cmd = Command::new(spec.arch.qemu_binary());
-        match spec.arch {
-            Arch::X86_64 => x86_64::push_argv(&mut cmd, spec, &boot_artifact)?,
-            Arch::Riscv64 => riscv64::push_argv(&mut cmd, spec, &boot_artifact),
-            Arch::Aarch64 => aarch64::push_argv(&mut cmd, spec, &boot_artifact),
-        }
+        // x86_64 boots from a UEFI pflash pair whose writable VARS half is
+        // a per-run temp copy (`iso::find_ovmf`); hold its path in a guard
+        // that removes the file once this run completes, so a long matrix
+        // of guests leaves no stray NVRAM images behind. The other ports
+        // boot the ELF directly and own no such scratch file.
+        let _vars_guard = match spec.arch {
+            Arch::X86_64 => Some(TempFile(x86_64::push_argv(&mut cmd, spec, &boot_artifact)?)),
+            Arch::Riscv64 => {
+                riscv64::push_argv(&mut cmd, spec, &boot_artifact);
+                None
+            }
+            Arch::Aarch64 => {
+                aarch64::push_argv(&mut cmd, spec, &boot_artifact);
+                None
+            }
+        };
         // Caller-supplied extras are appended *after* the per-arch defaults
         // so a developer can override them ad-hoc (e.g. `-d int,cpu_reset`).
         for a in &spec.extra_args {
@@ -537,7 +548,22 @@ fn supervise(
         let marker_seen = Arc::clone(&marker_seen);
         let marker = spec.input_keyboard.as_ref().map(|k| k.ready_marker.clone());
         let stdout = child.stdout.take();
-        std::thread::spawn(move || drain_stdout(stdout, &captured, marker.as_deref(), &marker_seen))
+        std::thread::spawn(move || {
+            drain_stream(stdout, &captured, marker.as_deref(), Some(&marker_seen));
+        })
+    };
+
+    // Drain stderr on its own thread too. QEMU writes its own startup and
+    // runtime diagnostics there (not to the guest serial console), so a
+    // failure to even reach the guest — a corrupted pflash store, a bad
+    // device argument — would otherwise leave the serial log empty with
+    // nothing explaining the non-zero exit. Reading it also stops QEMU
+    // wedging on a full stderr pipe (`AGENTS.md` §7 — no flaky tests).
+    let captured_err = Arc::new(Mutex::new(String::new()));
+    let err_reader = {
+        let captured_err = Arc::clone(&captured_err);
+        let stderr = child.stderr.take();
+        std::thread::spawn(move || drain_stream(stderr, &captured_err, None, None))
     };
 
     // Poll for completion in short ticks so the deadline is precise to
@@ -566,6 +592,7 @@ fn supervise(
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = reader.join();
+                    let _ = err_reader.join();
                     let mut serial = captured
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -573,6 +600,7 @@ fn supervise(
                     serial.push_str("\nrustos-qemu: key injection failed: ");
                     serial.push_str(&e.to_string());
                     serial.push('\n');
+                    append_stderr(&mut serial, &captured_err);
                     return Ok(Outcome::Fail { status: -1, serial });
                 }
             }
@@ -593,16 +621,44 @@ fn supervise(
     // only now, once the run is complete.
     drop(monitor_conn);
     let _ = reader.join();
-    let serial = captured
+    let _ = err_reader.join();
+    let mut serial = captured
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    append_stderr(&mut serial, &captured_err);
     match done {
         DoneReason::Exited(code) => Ok(spec.arch.outcome_from_status(code, serial)),
         DoneReason::TimedOut => Ok(Outcome::Timeout {
             budget: spec.timeout,
             serial,
         }),
+    }
+}
+
+/// Append QEMU's captured stderr to the serial log under a labelled
+/// banner, but only when it carried something.
+///
+/// The serial console (stdout) is the guest's own output; QEMU's stderr
+/// is the host emulator's. Folding a non-empty stderr into the reported
+/// log — rather than discarding it — is what makes a guest that never
+/// reached its serial console (e.g. a status-1 exit on a corrupted
+/// pflash store) diagnosable instead of an opaque empty log. An empty
+/// stderr adds no banner so a clean run's log stays uncluttered.
+fn append_stderr(serial: &mut String, captured_err: &Mutex<String>) {
+    let stderr = captured_err
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stderr.trim().is_empty() {
+        return;
+    }
+    if !serial.is_empty() && !serial.ends_with('\n') {
+        serial.push('\n');
+    }
+    serial.push_str("--- qemu stderr ---\n");
+    serial.push_str(&stderr);
+    if !serial.ends_with('\n') {
+        serial.push('\n');
     }
 }
 
@@ -646,16 +702,41 @@ impl Drop for MonitorSocket {
     }
 }
 
-/// Read QEMU stdout to EOF, appending every chunk to `captured` and
-/// raising `marker_seen` once `marker` (if any) has appeared in the
-/// stream so far. Best-effort: a read error simply ends the drain.
-fn drain_stdout(
-    stdout: Option<impl Read>,
+/// Owns a scratch file for the lifetime of a single [`Runner::run`] and
+/// removes it on drop.
+///
+/// Today this is the per-run writable OVMF VARS pflash copy on x86_64
+/// (`iso::find_ovmf`): each run gets its own copy so concurrent guests
+/// never share — or truncate mid-boot — one another's NVRAM store, and
+/// the guard deletes it once the guest has exited so a long matrix of
+/// guests does not accumulate one stray image per run in the tempdir.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Read one of QEMU's output pipes to EOF, appending every chunk to
+/// `captured` and — when `marker_seen` is supplied — raising it once
+/// `marker` has appeared in the stream so far. Best-effort: a read error
+/// simply ends the drain.
+///
+/// Used for both stdout (serial, with the key-injection readiness marker)
+/// and stderr (QEMU's own diagnostics, marker-free), so the two pipes
+/// share one drain loop (`AGENTS.md` §2.2). Draining stderr is not
+/// optional cosmetics: QEMU prints startup failures — e.g. a corrupted
+/// pflash store: `pflash … has invalid size 0` — to stderr and exits
+/// status 1, and a piped-but-unread stderr both loses that diagnostic and
+/// can deadlock QEMU once the 64 KiB pipe buffer fills.
+fn drain_stream(
+    stream: Option<impl Read>,
     captured: &Mutex<String>,
     marker: Option<&str>,
-    marker_seen: &AtomicBool,
+    marker_seen: Option<&AtomicBool>,
 ) {
-    let Some(mut r) = stdout else { return };
+    let Some(mut r) = stream else { return };
     let mut buf = [0u8; 4096];
     loop {
         match r.read(&mut buf) {
@@ -666,9 +747,9 @@ fn drain_stdout(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.push_str(&chunk);
-                if let Some(m) = marker {
-                    if !marker_seen.load(Ordering::Acquire) && guard.contains(m) {
-                        marker_seen.store(true, Ordering::Release);
+                if let (Some(m), Some(seen)) = (marker, marker_seen) {
+                    if !seen.load(Ordering::Acquire) && guard.contains(m) {
+                        seen.store(true, Ordering::Release);
                     }
                 }
             }
@@ -712,6 +793,51 @@ mod tests {
             Outcome::from_qemu_status(s, String::new()),
             Outcome::Pass
         ));
+    }
+
+    #[test]
+    fn append_stderr_surfaces_qemu_diagnostics_under_a_banner() {
+        // Regression: a guest that fails before reaching its serial
+        // console (e.g. QEMU aborting on a corrupted pflash store) left
+        // the reported log empty, because the diagnostic landed on QEMU's
+        // stderr, which the supervisor discarded. The failure log must
+        // now carry that stderr.
+        let mut serial = String::from("partial guest serial");
+        let err = Mutex::new(String::from(
+            "qemu-system-x86_64: system firmware block device pflash1 has invalid size 0\n",
+        ));
+        append_stderr(&mut serial, &err);
+        assert!(serial.contains("--- qemu stderr ---"));
+        assert!(serial.contains("invalid size 0"));
+        assert!(serial.starts_with("partial guest serial\n"));
+    }
+
+    #[test]
+    fn append_stderr_is_a_noop_when_stderr_is_empty() {
+        let mut serial = String::from("clean serial log\n");
+        append_stderr(&mut serial, &Mutex::new(String::new()));
+        assert_eq!(serial, "clean serial log\n");
+        // Whitespace-only stderr is treated as empty too.
+        let mut serial = String::from("clean serial log\n");
+        append_stderr(&mut serial, &Mutex::new(String::from("   \n")));
+        assert_eq!(serial, "clean serial log\n");
+    }
+
+    #[test]
+    fn temp_file_guard_removes_its_file_on_drop() {
+        // The per-run writable OVMF VARS copy must not accumulate one
+        // stray image per guest across a long matrix; the guard deletes
+        // it once the run completes.
+        let path = std::env::temp_dir().join(format!(
+            "rustos-qemu-tempfile-test-{}.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"scratch").expect("write scratch file");
+        assert!(path.is_file());
+        {
+            let _guard = TempFile(path.clone());
+        }
+        assert!(!path.exists(), "TempFile drop must remove the scratch file");
     }
 
     #[test]

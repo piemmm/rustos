@@ -111,8 +111,36 @@ pub struct OvmfPaths {
     /// Read-only OVMF code image.
     pub code: PathBuf,
     /// Writable copy of the OVMF variables image. Created by
-    /// [`find_ovmf`] in the system tempdir.
+    /// [`find_ovmf`] in the system tempdir under a path unique to this
+    /// call (process id + a monotonic counter), so concurrent
+    /// [`crate::Runner::run`] invocations in one process never share — or
+    /// overwrite mid-boot — the same NVRAM store. The caller owns the
+    /// file's lifetime and removes it once the guest has exited.
     pub vars_copy: PathBuf,
+}
+
+/// Build a path for a writable OVMF VARS copy that is unique to this
+/// call.
+///
+/// QEMU's `find_ovmf` is invoked once per [`crate::Runner::run`], and the
+/// guests run concurrently inside one host process (the `cargo xtask`
+/// QEMU driver). Keying the copy only by process id would hand every
+/// concurrent x86_64 guest the *same* writable pflash file: a later run's
+/// `fs::copy` truncates and rewrites the store while an earlier run's QEMU
+/// still has it live, and the victim QEMU aborts with `pflash … has
+/// invalid size 0` (a status-1 exit whose diagnostic lands on stderr, not
+/// the serial console). The monotonic counter — mirroring
+/// [`crate::MonitorSocket`] — gives each run its own file. The id keeps
+/// runs in different host processes distinct.
+fn unique_vars_copy_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rustos-qemu-ovmf-vars-{}-{}.fd",
+        std::process::id(),
+        n
+    ))
 }
 
 /// Locate OVMF on common Linux distros and prepare a writable VARS copy.
@@ -166,8 +194,7 @@ pub fn find_ovmf() -> io::Result<OvmfPaths> {
         let code_path = PathBuf::from(code);
         let vars_path = PathBuf::from(vars);
         if code_path.is_file() && vars_path.is_file() {
-            let dst = std::env::temp_dir()
-                .join(format!("rustos-qemu-ovmf-vars-{}.fd", std::process::id()));
+            let dst = unique_vars_copy_path();
             fs::copy(&vars_path, &dst)?;
             return Ok(OvmfPaths {
                 code: code_path,
@@ -206,5 +233,43 @@ mod tests {
         let err = build_grub_iso(Path::new("/definitely/not/here"), &staging, &out)
             .expect_err("expected NotFound");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn each_vars_copy_path_is_unique_within_a_process() {
+        // Regression: keying the writable OVMF VARS copy only by process
+        // id handed every concurrent x86_64 guest in one host process
+        // (the `cargo xtask` QEMU driver) the same pflash file, so one
+        // run's `fs::copy` truncated another's live NVRAM store mid-boot
+        // and the victim QEMU aborted with `pflash … invalid size 0`
+        // (a status-1 exit). The monotonic counter must make successive
+        // paths distinct so each run owns its own copy.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(
+                seen.insert(unique_vars_copy_path()),
+                "unique_vars_copy_path handed out a duplicate path"
+            );
+        }
+    }
+
+    #[test]
+    fn vars_copy_paths_share_the_runner_prefix() {
+        // The cleanup guard and any stray-file sweep key off this prefix;
+        // pin it so a rename cannot silently orphan the temp files.
+        let path = unique_vars_copy_path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("temp path has a UTF-8 file name");
+        assert!(
+            name.starts_with("rustos-qemu-ovmf-vars-"),
+            "unexpected VARS copy file name: {name}"
+        );
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("fd"),
+            "unexpected VARS copy suffix: {name}"
+        );
     }
 }

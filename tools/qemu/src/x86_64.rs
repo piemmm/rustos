@@ -80,7 +80,8 @@ pub(crate) fn build_boot_artifact(spec: &Spec) -> io::Result<PathBuf> {
     iso::build_grub_iso(&spec.kernel, &staging, &iso_path)
 }
 
-/// Push the x86_64 QEMU argv onto `cmd`.
+/// Push the x86_64 QEMU argv onto `cmd`, returning the writable OVMF
+/// VARS copy the invocation references.
 ///
 /// Discovers OVMF on the host (see [`crate::iso::find_ovmf`]) and emits
 /// the canonical x86_64 invocation: UEFI pflash pair (read-only CODE +
@@ -89,17 +90,23 @@ pub(crate) fn build_boot_artifact(spec: &Spec) -> io::Result<PathBuf> {
 /// {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-no-reboot`, and the boot
 /// ISO as a CD-ROM.
 ///
+/// The returned path is the per-run writable VARS copy (unique to this
+/// call, see [`crate::iso::OvmfPaths::vars_copy`]). The caller owns its
+/// lifetime and removes it once the guest has exited, so a long matrix of
+/// concurrent guests does not leave one stray NVRAM image per run behind.
+///
 /// # Errors
 ///
 /// * Propagates every error from [`crate::iso::find_ovmf`] (typically
 ///   `NotFound` when OVMF is not installed).
-pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, iso: &Path) -> io::Result<()> {
+pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, iso: &Path) -> io::Result<PathBuf> {
     let ovmf = iso::find_ovmf()?;
+    let vars_copy = ovmf.vars_copy.clone();
     let argv = build_argv(spec, &ovmf, iso);
     for arg in argv {
         cmd.arg(arg);
     }
-    Ok(())
+    Ok(vars_copy)
 }
 
 /// Pure argv builder used by [`push_argv`] and the host unit tests.
