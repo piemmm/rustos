@@ -1015,6 +1015,124 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     guard-page fault-form (G1–G3) is complete on aarch64. Doc:
     `docs/src/platform/aarch64.md` ("Proving the overrun fault-form (G3c)").
 
+### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[~]`
+
+aarch64 reaches a full **concurrent, multi-process** user mode (SP2c EL0
+timeshare, SP3b/SP4 `spawn`, SP6 `wait`, all `[x]`). riscv64 and x86_64
+currently have only the SP5b-2 `mem_map` sibling — a **single** ring-3/U-mode
+task entered through a direct `EnterUser::enter_user` (no scheduler, no
+cooperative context switch). The next cross-port follow-on, **lowest-risk
+first per the standing direction**, is to bring **x86_64** up to the aarch64
+concurrent model, staged X1–X4 (one fully-gated chunk per landing, §0.8).
+
+x86_64 is the lower-risk port because the machinery already exists: ring-3
+entry (`rustos_arch_x86_64::userentry`), the `mem_map` producer path
+(`mem_map_qemu_x86_64`), a `syscall`/`sysret` stub that already switches to a
+kernel stack, an `X86_64Arch: SchedulerArch`, and an x86_64 `ContextSwitchHal`
+— so `spawn_user_kthread` is largely reachable. The **riscv64** timeshare
+sibling is a *separate, larger* follow-on deferred behind this arc (see the
+end of this section): its `trap.s` runs the handler on the interrupted **user**
+`sp` with no `sscratch` kernel-stack swap, so it needs a trap-entry redesign
+before a cooperative mid-handler park can work at all.
+
+**Binding design findings** (from the x86_64 `syscall` stub,
+`kernel/arch/x86_64/src/syscall_entry.rs::syscall_entry_stub`):
+
+- The stub loads the kernel stack from the **per-CPU** `SyscallTls.kernel_rsp0`
+  (`gs:0`) and saves the user `%rsp` into the **per-CPU** `user_rsp_save`
+  (`gs:8`); the saved user RIP (`%rcx`) and RFLAGS (`%r11`) are **pushed onto
+  the kernel stack** (already frame-resident, so they survive a park).
+- Unlike aarch64 — where an EL1 trap implicitly reuses the running kthread's
+  `SP_EL1`, so each user kthread's syscall lands on its own kernel stack with
+  no extra work — x86_64 must **explicitly** point `kernel_rsp0` at the
+  **current** user-kthread's own kernel stack on each resume, or two tasks'
+  syscall handlers collide on one stack (a correctness *and* isolation defect,
+  §4).
+- The per-CPU `user_rsp_save` (`gs:8`) is the x86_64 analogue of the aarch64
+  `ELR_EL1`/`SPSR_EL1`/`SP_EL0` errata (4c780bc): a task parked **mid-handler**
+  by a cooperative `yield`/`wait` (SP2) has its saved user `%rsp` overwritten
+  by another task's syscall before it resumes, so the durable save must move
+  onto the **per-task kernel-stack frame** (where `%rcx`/`%r11` already live).
+  This is a real structural fix — never a limit bump or a "works for one task"
+  shortcut (§2.17 / §2.1).
+
+**Security / correctness / performance invariants (all chunks).** Every
+syscall stays capability-checked **kernel-side** in `kernel/syscall` (§5.4);
+none of this adds authority. Task isolation is enforced by distinct top-level
+page tables (a fresh PML4 per space, §4) reactivated through CR3 on resume.
+The fixes are structural, fail-closed (§2.9), and carry no `unsafe` without a
+`// SAFETY:` block + a test (§2.10). The per-resume CR3 + `kernel_rsp0` reload
+is the minimal switch cost the aarch64 sibling already pays; no allocation or
+copy is added on the syscall hot path (§2.16).
+
+- **X1 — x86_64 single resumable user-kthread `[ ]`.**
+  - Add `rustos_arch_x86_64::paging::activate_user_root(root_phys)` (load CR3,
+    host no-op arm), mirroring the aarch64 one, behind the `pre_resume` hook.
+  - Make the user-kthread's kernel-stack top reach the x86_64 resume hook so
+    `pre_resume` can set `kernel_rsp0` to **this** task's kernel stack. The
+    arch-neutral `kernel/core::kthread`/`spawn_user_kthread` seam gains a
+    minimal, justified way to hand the per-task kernel-stack top to the arch
+    hook — this *closes the gap aarch64 fills implicitly via `SP_EL1`*, not
+    interface creep (§2.4). Add a light `syscall_entry::set_kernel_rsp0(cpu,
+    top)` that updates only the `SyscallTls.kernel_rsp0` field (no MSR rewrite,
+    unlike `install_kernel_rsp0`), with the same canonical/alignment/non-user
+    validation (§3.5 / §5.4).
+  - Prove with a new bare `tests/integration/spawn_el0_resume_qemu_x86_64`:
+    **one** ring-3 task admitted via `spawn_user_kthread`, yielding N times then
+    exiting, driven by the live `Scheduler::step` loop — proving the
+    cooperative park/resume round-trip lands back on the task's own kernel
+    stack at the right RIP/RSP. A single task does **not** yet exercise the
+    `gs:8` hazard (that is X2), so X1 needs no return-state change to pass,
+    keeping the chunk bounded and honest (the fix without a test that reaches
+    it would be speculative, §2.4 — it lands with its exerciser in X2).
+  - Host unit tests for the `activate_user_root` / `set_kernel_rsp0` value math
+    + validation; docs in `docs/src/platform/x86_64.md`.
+
+- **X2 — x86_64 return-state survives a concurrent park + two-task EL0
+  timeshare `[ ]`.**
+  - In `syscall_entry_stub`, move the **durable** user-`%rsp` save off the
+    per-CPU `gs:8` slot onto the **per-task kernel-stack frame** (the `gs:8`
+    use becomes a transient, park-free temp held only between `swapgs` and the
+    first kernel-stack push, before any cooperative switch can occur). A
+    mid-handler park/resume then restores the correct user `%rsp` per task.
+    Update the stub rustdoc + the host stub-layout reasoning/tests.
+  - Prove with `tests/integration/spawn_el0_timeshare_qemu_x86_64` (the SP2c
+    sibling), reusing the pure-Rust `el0_yielder_program` fixture: **two**
+    hardware-isolated ring-3 spaces (two PML4s, shared frame pool, §4), each
+    admitted as a resumable user kthread whose `pre_resume` reloads its CR3 +
+    `kernel_rsp0`, driven by the cooperative `step` loop mapping each task's
+    `yield`/`exit` to `reschedule_current`. PASS once both yielded their full
+    count and exited; a wrong resume PC/RSP stalls the drain or trips a
+    finisher (fail-loud, §7).
+
+- **X3 — x86_64 `spawn` concurrent sibling `[ ]`.** The real x86_64
+  `ProcessSpawn` producer (sibling of the aarch64
+  `kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh
+  isolated PML4 from a static pool **without** switching the spawning caller's
+  CR3, drives the audited `spawn_image` + `admit_process`, and is wired through
+  `BootInfo::with_spawn`. Proven by an x86_64 concurrent-spawn vertical (the
+  `spawn_session`/`spawn_program_qemu_x86_64` analogue) where two processes run
+  concurrently under the live scheduler.
+
+- **X4 — x86_64 `wait` sibling `[ ]`.** Wire the `KernelProcessWait` producer
+  on the x86_64 production pipeline (`register_child` on the spawn-admit path,
+  `record_exit` in `exit`) + an x86_64 `wait` vertical mirroring
+  `wait_qemu_aarch64` (a parent blocks on, reaps, and reads back a child's exit
+  code).
+
+**Done when (per chunk):** the chunk's QEMU vertical PASSes under `cargo xtask
+test --qemu` **and** the whole-project gate (§5) is green; docs + host tests
+land in the same change (§7 / §13).
+
+**riscv64 concurrent user mode (deferred follow-on) `[ ]`.** After the x86_64
+arc, the riscv64 spawn/wait timeshare needs `trap.s` to (1) swap to a per-task
+kernel stack via `sscratch` — it currently runs the handler on the interrupted
+**user** `sp`, which the cooperative `ContextSwitch::switch` would wrongly save
+— and (2) save/restore `sepc`/`sstatus` in the per-task trap frame (the same
+latent errata aarch64 fixed in 4c780bc, today unreachable on riscv64 because no
+cooperative mid-handler park exists yet). The 144-byte frame already has 16
+spare bytes for the two CSRs. Staged separately when reached.
+
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 
 - Implement the BCM2711 **mailbox** property-channel interface (a small
