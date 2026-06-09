@@ -824,6 +824,28 @@ an update to this section.
   it describes.
 - No "aimless waffle". If a paragraph does not change the reader's ability
   to use or maintain the system, delete it.
+- **Planning files state the current plan and state, not history. Git is the
+  changelog; `PLAN.md` and `plans/*.md` are not.** This binds `PLAN.md`, every
+  `plans/*.md`, and any other planning/status/roadmap document.
+  - Each item records only what it *is* now: the deliverables, the design
+    decisions and invariants a future reader needs, the current status
+    (`planned` / `in progress` / `done` / `blocked`), and the work that
+    *remains*. Keep the load-bearing implementation facts (key types, file
+    locations, capability/ABI contracts, deliberate carve-outs).
+  - **Do not** narrate how the work happened. No per-increment landing logs
+    ("X landed, then Y landed"), no commit hashes or dated session entries, no
+    "verified green"/quoted CI/test-run output, no superseded or "historical"
+    design discussion, no renumbering history, no restating a rule the charter
+    already states. When a piece of work completes, **replace** its plan/status
+    prose with a concise done-state summary — do not append a new log entry
+    beside the old one (§2.14: delete obsolete text).
+  - The test that a line belongs in a plan file: it tells a future contributor
+    what to build next or what a finished part now guarantees. If instead it
+    records *what was done when*, it belongs in the commit message (§14), not
+    here. Bloated, changelog-style plan files waste the limited context an AI
+    (or human) can hold and are a review blocker (§2.3).
+  - The exception is `PLAN.md`'s "Charter Amendments" section, which logs *why*
+    an `AGENTS.md` rule exists; keep each entry to a one-line rationale.
 - `cargo xtask docs-check` runs:
   - `cargo doc` with `RUSTDOCFLAGS="-D warnings"`,
   - mdBook build,
