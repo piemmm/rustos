@@ -1191,11 +1191,44 @@ copy is added on the syscall hot path (§2.16).
   `init`'s `wait`→reap→relaunch supervision cycle is **not** asserted here — it is
   the x86_64 `wait` validation (X4). **No ABI change.**
 
-- **X4 — x86_64 `wait` sibling `[ ]`.** Wire the `KernelProcessWait` producer
-  on the x86_64 production pipeline (`register_child` on the spawn-admit path,
-  `record_exit` in `exit`) + an x86_64 `wait` vertical mirroring
-  `wait_qemu_aarch64` (a parent blocks on, reaps, and reads back a child's exit
-  code).
+- **X4 — x86_64 `wait` sibling `[x]`.** The `KernelProcessWait` producer is
+  already installed on every production pipeline by `kernel/core`'s `run_phases`
+  (so `register_child` on the spawn-admit path and `record_exit` in `exit`
+  fire), so X4 added the proving vertical:
+  `tests/integration/wait_qemu_x86_64` (enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`), the cross-port sibling of
+  `wait_qemu_aarch64`. It boots the production `rustos-kernel` pipeline (GDT
+  ring-3 selectors / TSS / `syscall` entry), and on `BootCompleted` builds a
+  **parent** and a **child** hardware-isolated ring-3 space (two PML4s, one
+  shared frame pool) from the cross-arch `wait_program` fixture (built PIE in
+  both roles + converted to `rxe`), installs a `KernelProcessWait<X86_64Arch>`,
+  registers the link, and drives the cooperative `step` loop. It admits the
+  **parent first**, so the parent's `wait` runs while the child is still
+  registered-but-unexited and the producer **parks** it (`Reap::Blocked` →
+  `reschedule_current`); the child then runs, exits, and the parent is
+  re-dispatched to reap it and copy the reaped code out to its `status` pointer
+  — exercising the resume-after-cooperative-park return-state path on the x86_64
+  trap, then exiting 0. PASS verified under QEMU on `-M`/multiboot. The
+  resume-after-park path the X4 note flagged is therefore **proven sound on
+  x86_64** (X1/X2's durable user-`%rsp` save + `swapgs` balance cover it). **No
+  ABI change.**
+
+- **X4 follow-on — x86_64 `init` supervision cycle (relaunch-`spawn`) `[ ]`.**
+  Strengthening `spawn_session_qemu_x86_64` from the X3b concurrent-spawn proof
+  (2 `ProcessSpawned` / 2 audited syscalls) to the **full** `wait`→reap→relaunch
+  supervision cycle (3 / 4, like the aarch64 sibling) surfaced a separate,
+  **pre-existing** x86_64 defect that is *not* a resume-after-park trap-state
+  issue: PID 1 `init` spawns the session, `wait`s, the session exits, `init`'s
+  `wait` **returns correctly to ring 3** (resume-after-park works), `init`
+  issues its **relaunch `spawn`**, and the **second** `build_process_image`
+  hangs — frames are available, no allocator lock is held, the 64 MiB bump heap
+  is free, and the CPU spins in kernel/heap memory (wild execution), never
+  emitting the third `ProcessSpawned`. It only manifests on the no-input
+  relaunch path (on real hardware the session blocks on `stdin` and never
+  relaunches), so the X3b 2/2 assertion is the standing `spawn_session_qemu_x86_64`
+  proof until this is fixed. Root-causing the 2nd concurrent spawn-after-reap on
+  x86_64 needs GDB-level single-stepping; it is the next item before the
+  supervision-cycle assertion can land.
 
 **Done when (per chunk):** the chunk's QEMU vertical PASSes under `cargo xtask
 test --qemu` **and** the whole-project gate (§5) is green; docs + host tests

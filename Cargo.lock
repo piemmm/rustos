@@ -2182,6 +2182,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-wait-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-sec",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-sync",
+]
+
+[[package]]
 name = "rustos-theme"
 version = "0.0.0"
 
