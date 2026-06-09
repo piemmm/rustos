@@ -18,7 +18,7 @@
 //!   reader either returns a well-formed view or an [`rustos_fdt::FdtError`]
 //!   (fail closed, `AGENTS.md` §2.9). The run aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a fixed-seed
+//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
 //! LCG draws pseudo-random byte strings, flips bytes inside real device trees
 //! built by the shared `fixture` builder (`AGENTS.md` §2.2 — one DTB builder,
 //! not a second one rolled here), and splices a valid 40-byte header onto a
@@ -29,7 +29,7 @@
 use rustos_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
 use rustos_fdt::Fdt;
 
-/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
 /// Largest arbitrary byte string fed straight to the reader.
@@ -77,37 +77,6 @@ fn templates() -> Vec<Vec<u8>> {
             b.build()
         },
     ]
-}
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-fn budget() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
 }
 
 /// Low byte of `x`, without a narrowing `as` cast.
@@ -179,12 +148,15 @@ fn exercise_never_panics(bytes: &[u8]) {
 
 #[test]
 fn parsing_any_device_tree_never_panics() {
-    let deadline = budget();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed comes from `seed()`: fixed under a plain `cargo test`
-    // (reproducible), fresh per soak run under `cargo xtask fuzz`.
-    let mut state: u64 = seed(0x5DEE_CE66_D9B4_1AB5);
+    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
+    let mut state: u64 = rustos_fuzzseed::start(
+        "parsing_any_device_tree_never_panics",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    );
     let mut next = || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -230,7 +202,7 @@ fn parsing_any_device_tree_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

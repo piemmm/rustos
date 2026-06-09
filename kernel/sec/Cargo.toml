@@ -31,6 +31,12 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # Matching the pinned version already audited by `lib/caps`/`lib/crypto`.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The §19.7 model drives its programs through the shared seed/budget runner
+# (`rustos_fuzzseed::prop::drive`), so the seed selection, start-of-test
+# seed log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
+# scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
+
 # The capability-gated DMA tests in `dma::tests` exercise the
 # `kernel/mem` allocator end-to-end through its `HostPageTable` test
 # double, which is gated behind the `host-tests` feature so production

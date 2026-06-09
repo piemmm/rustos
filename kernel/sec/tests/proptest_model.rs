@@ -20,18 +20,18 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.7)
 //!
-//! A plain `cargo test` runs [`SMOKE_CASES`] sequences from proptest's fixed
-//! deterministic RNG; `cargo xtask proptest` exports
-//! `RUSTOS_PROPTEST_BUDGET_SECS` and [`drive`] then repeats batches until the
-//! budget elapses. The orchestrator also exports `RUSTOS_PROPTEST_SEED`
-//! ([`seeded_rng`]): a fresh seed each run so soaks draw new programs (§2.1),
-//! or a logged value via `--seed` to reproduce one.
+//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
+//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
+//! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
+//! deadline. The seed is logged at the start of each run (pinnable via
+//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+use proptest::test_runner::TestCaseError;
 use rustos_abi::CapabilityId;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId, UserId};
@@ -51,71 +51,6 @@ const TASKS: u64 = 4;
 struct NullSink;
 impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
-}
-
-fn budget_deadline() -> Option<Instant> {
-    let secs: u64 = std::env::var("RUSTOS_PROPTEST_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(Instant::now() + Duration::from_secs(secs))
-}
-
-/// The `ChaCha` RNG `drive` runs from.
-///
-/// `cargo xtask proptest` exports `RUSTOS_PROPTEST_SEED` so each soak run
-/// draws fresh programs (`AGENTS.md` §19.7 / §2.1) while a logged seed still
-/// reproduces a counterexample; a plain `cargo test` leaves it unset and uses
-/// proptest's fixed deterministic RNG, keeping the smoke sweep reproducible.
-fn seeded_rng() -> TestRng {
-    match std::env::var("RUSTOS_PROPTEST_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(seed) => TestRng::from_seed(RngAlgorithm::ChaCha, &expand_seed(seed)),
-        None => TestRng::deterministic_rng(RngAlgorithm::ChaCha),
-    }
-}
-
-/// Expand a 64-bit seed into proptest's 32-byte `ChaCha` seed via `SplitMix64`.
-fn expand_seed(seed: u64) -> [u8; 32] {
-    let mut state = seed;
-    let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
-    bytes
-}
-
-fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCaseError>) {
-    let deadline = budget_deadline();
-    let cases = if deadline.is_some() {
-        BUDGET_BATCH_CASES
-    } else {
-        SMOKE_CASES
-    };
-    let config = Config {
-        cases,
-        failure_persistence: None,
-        ..Config::default()
-    };
-    let mut runner = TestRunner::new_with_rng(config, seeded_rng());
-    loop {
-        if let Err(err) = runner.run(&strategy, &check) {
-            panic!("proptest stateful model found a counterexample: {err}");
-        }
-        if !matches!(deadline, Some(end) if Instant::now() < end) {
-            break;
-        }
-    }
 }
 
 fn cap(id: u16) -> CapabilityId {
@@ -190,99 +125,109 @@ fn program() -> impl Strategy<Value = Vec<Cmd>> {
 
 #[test]
 fn captable_tracks_reference_model() {
-    drive(program(), |cmds| {
-        let sink = NullSink;
-        let mut table = CapTable::new();
-        let mut model: BTreeMap<u64, TaskModel> = BTreeMap::new();
+    rustos_fuzzseed::prop::drive(
+        "captable_tracks_reference_model",
+        SMOKE_CASES,
+        BUDGET_BATCH_CASES,
+        program(),
+        |cmds| check_captable(&cmds),
+    );
+}
 
-        for c in &cmds {
-            match c {
-                Cmd::Insert {
-                    task,
-                    user_grant,
-                    manifest,
-                } => {
-                    let ug = build(user_grant);
-                    let mf = build(manifest);
-                    let caps = TaskCapabilities::derive(TaskId(*task), UserId(1), ug, mf, &sink);
-                    // Derive must intersect (§5.2): effective ⊆ both inputs.
-                    prop_assert!(caps.effective().is_subset_of(&ug));
-                    prop_assert!(caps.effective().is_subset_of(&mf));
-                    table.insert(caps);
+/// The per-program check `drive` runs, split out so the `#[test]` wrapper
+/// stays small (clippy `too_many_lines`).
+fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
+    let sink = NullSink;
+    let mut table = CapTable::new();
+    let mut model: BTreeMap<u64, TaskModel> = BTreeMap::new();
 
-                    let ug_m: BTreeSet<u16> = user_grant.iter().copied().collect();
-                    let mf_m: BTreeSet<u16> = manifest.iter().copied().collect();
-                    let eff_m: BTreeSet<u16> = ug_m.intersection(&mf_m).copied().collect();
-                    model.insert(
-                        *task,
-                        TaskModel {
-                            user_grant: ug_m,
-                            manifest: mf_m,
-                            effective: eff_m,
-                        },
-                    );
-                }
-                Cmd::Delegate { task, requested } => {
-                    let req = build(requested);
-                    let req_m: BTreeSet<u16> = requested.iter().copied().collect();
-                    let live = table.caps_for_mut(TaskId(*task));
-                    let entry = model.get_mut(task);
-                    match (live, entry) {
-                        (Some(caps), Some(state)) => {
-                            let before = to_model(caps.effective());
-                            let res = caps.delegate(&req, &sink);
-                            if req_m.is_subset(&state.effective) {
-                                prop_assert!(res.is_ok());
-                                prop_assert_eq!(to_model(caps.effective()), req_m.clone());
-                                state.effective = req_m;
-                            } else {
-                                prop_assert!(res.is_err());
-                                // Refused delegation leaves the set untouched.
-                                prop_assert_eq!(to_model(caps.effective()), before);
-                            }
+    for c in cmds {
+        match c {
+            Cmd::Insert {
+                task,
+                user_grant,
+                manifest,
+            } => {
+                let ug = build(user_grant);
+                let mf = build(manifest);
+                let caps = TaskCapabilities::derive(TaskId(*task), UserId(1), ug, mf, &sink);
+                // Derive must intersect (§5.2): effective ⊆ both inputs.
+                prop_assert!(caps.effective().is_subset_of(&ug));
+                prop_assert!(caps.effective().is_subset_of(&mf));
+                table.insert(caps);
+
+                let ug_m: BTreeSet<u16> = user_grant.iter().copied().collect();
+                let mf_m: BTreeSet<u16> = manifest.iter().copied().collect();
+                let eff_m: BTreeSet<u16> = ug_m.intersection(&mf_m).copied().collect();
+                model.insert(
+                    *task,
+                    TaskModel {
+                        user_grant: ug_m,
+                        manifest: mf_m,
+                        effective: eff_m,
+                    },
+                );
+            }
+            Cmd::Delegate { task, requested } => {
+                let req = build(requested);
+                let req_m: BTreeSet<u16> = requested.iter().copied().collect();
+                let live = table.caps_for_mut(TaskId(*task));
+                let entry = model.get_mut(task);
+                match (live, entry) {
+                    (Some(caps), Some(state)) => {
+                        let before = to_model(caps.effective());
+                        let res = caps.delegate(&req, &sink);
+                        if req_m.is_subset(&state.effective) {
+                            prop_assert!(res.is_ok());
+                            prop_assert_eq!(to_model(caps.effective()), req_m.clone());
+                            state.effective = req_m;
+                        } else {
+                            prop_assert!(res.is_err());
+                            // Refused delegation leaves the set untouched.
+                            prop_assert_eq!(to_model(caps.effective()), before);
                         }
-                        (None, None) => {}
-                        _ => return Err(TestCaseError::fail("registry/model membership diverged")),
                     }
-                }
-                Cmd::Revoke { task, cap: c } => {
-                    let live = table.caps_for_mut(TaskId(*task));
-                    let entry = model.get_mut(task);
-                    match (live, entry) {
-                        (Some(caps), Some(state)) => {
-                            let before = to_model(caps.effective());
-                            let was = caps.revoke(cap(*c), &sink);
-                            prop_assert_eq!(was, state.effective.remove(c));
-                            // Revoke only ever shrinks the effective set.
-                            prop_assert!(caps
-                                .effective()
-                                .is_subset_of(&build(&before.iter().copied().collect::<Vec<_>>())));
-                            prop_assert_eq!(to_model(caps.effective()), state.effective.clone());
-                        }
-                        (None, None) => {}
-                        _ => return Err(TestCaseError::fail("registry/model membership diverged")),
-                    }
-                }
-                Cmd::Remove { task } => {
-                    let live = table.remove(TaskId(*task)).is_some();
-                    let modelled = model.remove(task).is_some();
-                    prop_assert_eq!(live, modelled);
+                    (None, None) => {}
+                    _ => return Err(TestCaseError::fail("registry/model membership diverged")),
                 }
             }
-
-            // Registry-wide invariants after each command.
-            prop_assert_eq!(table.len(), model.len());
-            prop_assert_eq!(table.is_empty(), model.is_empty());
-            for (task, state) in &model {
-                let caps = table
-                    .caps_for(TaskId(*task))
-                    .ok_or_else(|| TestCaseError::fail("modelled task missing from registry"))?;
-                prop_assert_eq!(to_model(caps.effective()), state.effective.clone());
-                // The upstream bounds never change; effective stays within them.
-                prop_assert_eq!(to_model(caps.user_grant()), state.user_grant.clone());
-                prop_assert_eq!(to_model(caps.manifest_request()), state.manifest.clone());
+            Cmd::Revoke { task, cap: c } => {
+                let live = table.caps_for_mut(TaskId(*task));
+                let entry = model.get_mut(task);
+                match (live, entry) {
+                    (Some(caps), Some(state)) => {
+                        let before = to_model(caps.effective());
+                        let was = caps.revoke(cap(*c), &sink);
+                        prop_assert_eq!(was, state.effective.remove(c));
+                        // Revoke only ever shrinks the effective set.
+                        prop_assert!(caps
+                            .effective()
+                            .is_subset_of(&build(&before.iter().copied().collect::<Vec<_>>())));
+                        prop_assert_eq!(to_model(caps.effective()), state.effective.clone());
+                    }
+                    (None, None) => {}
+                    _ => return Err(TestCaseError::fail("registry/model membership diverged")),
+                }
+            }
+            Cmd::Remove { task } => {
+                let live = table.remove(TaskId(*task)).is_some();
+                let modelled = model.remove(task).is_some();
+                prop_assert_eq!(live, modelled);
             }
         }
-        Ok(())
-    });
+
+        // Registry-wide invariants after each command.
+        prop_assert_eq!(table.len(), model.len());
+        prop_assert_eq!(table.is_empty(), model.is_empty());
+        for (task, state) in &model {
+            let caps = table
+                .caps_for(TaskId(*task))
+                .ok_or_else(|| TestCaseError::fail("modelled task missing from registry"))?;
+            prop_assert_eq!(to_model(caps.effective()), state.effective.clone());
+            // The upstream bounds never change; effective stays within them.
+            prop_assert_eq!(to_model(caps.user_grant()), state.user_grant.clone());
+            prop_assert_eq!(to_model(caps.manifest_request()), state.manifest.clone());
+        }
+    }
+    Ok(())
 }

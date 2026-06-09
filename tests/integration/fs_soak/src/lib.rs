@@ -13,8 +13,10 @@
 //! harness consumes the OS's own formatters and read/write paths and
 //! asserts the OS reports the extremes cleanly (§5.4 / §2.9).
 //!
-//! The exerciser is deterministic: a per-iteration seed drives a small
-//! LCG so any failure reproduces from its seed.
+//! The exerciser drives a small LCG from a per-launch start seed (fresh from
+//! host entropy by default, or pinned by `RUSTOS_FSSOAK_SEED`). The start seed
+//! is logged at the start of each run, so every launch exercises different
+//! content yet any failure reproduces from its logged seed (`AGENTS.md` §2.2).
 //!
 //! Alongside that fixed-sequence body, [`random_exercise`] drives a
 //! genuinely *randomized*, model-checked op mix (create/move/delete/

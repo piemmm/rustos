@@ -11,7 +11,7 @@ There are two CI workloads, and they want different runners:
 
 | Workload | Workflow | Runner | Why |
 |----------|----------|--------|-----|
-| Per-push gate (`cargo xtask ci`) | `.github/workflows/ci.yml` | self-hosted `[self-hosted, linux]` | Runs the full `cargo xtask ci` pipeline plus the 20× test repeat and the `>= 120 s` per-PR soak gate on a machine we own. |
+| Per-push gate (`cargo xtask ci`) | `.github/workflows/ci.yml` | self-hosted `[self-hosted, linux]` | Runs the full `cargo xtask ci` pipeline (each test once) plus the `>= 120 s` per-PR parallel soak gate on a machine we own. |
 | Continuous 12 h soak blocks (§19.6 fuzz, §19.7 proptest, §7 repeated tests) | `.github/workflows/soak.yml` | self-hosted `[self-hosted, linux, soak]` | A 12 h block exceeds the GitHub-hosted per-job time cap; it must run on a machine we own, and on its own label so it never blocks `ci`. |
 
 `soak.yml` runs `tools/ci/soak.sh all`, which fans every fuzz harness, proptest

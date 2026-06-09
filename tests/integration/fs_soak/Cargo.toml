@@ -19,6 +19,10 @@ path = "src/lib.rs"
 # semantics (AGENTS.md §2.2).
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# Shared per-run start-seed selection + start-of-test seed logging, so the
+# soak picks (and replays) its seed through the one seam every fuzz/proptest
+# harness uses (`AGENTS.md` §2.2). Test scaffolding only.
+rustos-fuzzseed = { path = "../../fuzzseed", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
 rustos-drv-fs-ext4 = { path = "../../../drivers/filesystem/ext4", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }

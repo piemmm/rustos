@@ -106,6 +106,20 @@ Do **not** begin a stage before all its listed dependencies are complete.
   (POSIX utilities only) and put `${CARGO_HOME:-~/.cargo}/bin` on `PATH`, so
   they run identically on Linux and macOS. Logs land outside the tree (§3);
   no pipeline step lives in the scripts (§15).
+- **Run-once `ci`, fresh+logged seeds, time-limited soaks.** `cargo xtask ci`
+  runs each test exactly **once** — on a developer machine and a CI runner
+  alike (the GitHub Actions 20× matrix repeat is removed) — and runs the
+  §19.6 fuzz and §19.7 proptest gates for a single iteration (`--once`) rather
+  than a budget. The flake-hunting / fuzzing budget lives only in the
+  time-limited GitHub soaks: the per-PR parallel `tools/ci/soak.sh both
+  --secs 120` step in `ci.yml` and the nightly 12 h blocks in `soak.yml`. The
+  per-run PRNG seed selection, the **start-of-test seed log** (so any failure
+  replays from its logged seed), and the smoke-iteration / soak-budget loop are
+  one shared seam, `tests/fuzzseed` (`rustos_fuzzseed`), used by every fuzz
+  harness, every proptest model, and the filesystem soak (`AGENTS.md` §2.2):
+  each run draws a *fresh* seed by default (so repeated/parallel runs explore
+  new inputs, §2.1) and pins it from `RUSTOS_FUZZ_SEED` / `RUSTOS_PROPTEST_SEED`
+  / `RUSTOS_FSSOAK_SEED` for replay.
 - `LICENSE` (GPL-2.0-or-later, with the `RustOS-syscall-note` syscall / ABI
   exception), `README.md`, `AGENTS.md`, `PLAN.md` are all present at the
   repository root.

@@ -75,21 +75,30 @@ pub const MODELS: &[Model] = &[
 /// How long to run each model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// `--quick`: the per-PR budget wired into `ci` (≥ 5 s per model).
+    /// `--once`: a single smoke iteration per model, with a fresh, logged
+    /// seed. This is the per-PR `ci` gate: `ci` runs each test once (on a
+    /// developer machine and a CI runner alike); the wall-clock soak coverage
+    /// is the time-limited GitHub soak, not `ci`.
+    Once,
+    /// `--quick`: a short wall-clock budget (≥ 5 s per model), used by the
+    /// time-limited GitHub `ci` soak step (`tools/ci/soak.sh`).
     Quick,
     /// `--soak`: the nightly budget (≥ 24 h per model).
     Soak,
 }
 
 impl Mode {
-    /// Per-model wall-clock budget in seconds.
+    /// Per-model wall-clock budget, or `None` for [`Mode::Once`] (a single
+    /// smoke iteration with no budget).
     #[must_use]
-    pub fn budget(self) -> Duration {
+    pub fn budget(self) -> Option<Duration> {
         match self {
+            // A single iteration: no wall-clock budget is exported.
+            Mode::Once => None,
             // §19.7: "runs under `cargo xtask proptest` for ≥ 5 s".
-            Mode::Quick => Duration::from_secs(5),
+            Mode::Quick => Some(Duration::from_secs(5)),
             // Match the §19.6 soak floor so the nightly story is uniform.
-            Mode::Soak => Duration::from_secs(24 * 60 * 60),
+            Mode::Soak => Some(Duration::from_secs(24 * 60 * 60)),
         }
     }
 }
@@ -133,6 +142,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
             return Err(format!("proptest: argument {arg:?} is not valid UTF-8"));
         };
         match flag {
+            "--once" => set_mode(&mut mode, Mode::Once)?,
             "--quick" => set_mode(&mut mode, Mode::Quick)?,
             "--soak" => set_mode(&mut mode, Mode::Soak)?,
             "--list" => list = true,
@@ -168,7 +178,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
             other => {
                 return Err(format!(
                     "proptest: unexpected argument {other:?}; usage: \
-                     cargo xtask proptest [--quick | --soak] [--target NAME] [--secs N] \
+                     cargo xtask proptest [--once | --quick | --soak] [--target NAME] [--secs N] \
                      [--seed N] [--list]"
                 ));
             }
@@ -187,7 +197,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
 fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
     match slot {
         Some(existing) if *existing != mode => {
-            Err("proptest: `--quick` and `--soak` are mutually exclusive".to_string())
+            Err("proptest: `--once`, `--quick`, and `--soak` are mutually exclusive".to_string())
         }
         _ => {
             *slot = Some(mode);
@@ -222,8 +232,11 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         return Ok(());
     }
 
-    let budget = match opts.secs {
-        Some(s) => Duration::from_secs(s),
+    // An explicit `--secs N` always wins; otherwise the mode supplies the
+    // budget (`--once` is `None`: a single smoke iteration, no budget env).
+    let budget: Option<Duration> = match opts.secs {
+        Some(s) if s > 0 => Some(Duration::from_secs(s)),
+        Some(_) => None,
         None => opts.mode.budget(),
     };
     let models = selected(opts)?;
@@ -246,18 +259,25 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
                 "--",
                 "--nocapture",
             ]);
-            cmd.env("RUSTOS_PROPTEST_BUDGET_SECS", budget.as_secs().to_string());
+            // A budget turns the model into a soak loop; `--once` exports
+            // none, so the model runs its single smoke iteration.
+            if let Some(budget) = budget {
+                cmd.env(
+                    rustos_fuzzseed::PROPTEST_BUDGET_ENV,
+                    budget.as_secs().to_string(),
+                );
+            }
             // Each model reseeds its proptest RNG from this value instead of a
-            // fixed seed, so a fresh seed (the default) makes every soak draw
+            // fixed seed, so a fresh seed (the default) makes every run draw
             // new programs while `--seed N` reproduces a logged counterexample
             // (§19.7, §2.1). The seed is in the label so it reaches the log.
             let job_seed = seed::job_seed(opts.seed, i);
             cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
-            let label = format!(
-                "proptest {} ({} s, seed {job_seed})",
-                m.name,
-                budget.as_secs()
-            );
+            let budget_desc = match budget {
+                Some(b) => format!("{} s", b.as_secs()),
+                None => "1 iteration".to_string(),
+            };
+            let label = format!("proptest {} ({budget_desc}, seed {job_seed})", m.name);
             Job::new(label, cmd)
         })
         .collect();
@@ -284,14 +304,22 @@ mod tests {
     }
 
     #[test]
+    fn once_flag_selects_a_single_iteration_with_no_budget() {
+        let opts = parse(&argv(&["--once"])).expect("once parses");
+        assert_eq!(opts.mode, Mode::Once);
+        // No wall-clock budget: the model runs its single smoke iteration.
+        assert!(Mode::Once.budget().is_none());
+    }
+
+    #[test]
     fn quick_budget_meets_the_five_second_floor() {
-        // §19.7 mandates ≥ 5 s per model.
-        assert!(Mode::Quick.budget().as_secs() >= 5);
+        // §19.7 mandates ≥ 5 s per model for the budgeted soak step.
+        assert!(Mode::Quick.budget().expect("quick is budgeted").as_secs() >= 5);
     }
 
     #[test]
     fn soak_budget_meets_the_twenty_four_hour_floor() {
-        assert!(Mode::Soak.budget().as_secs() >= 24 * 60 * 60);
+        assert!(Mode::Soak.budget().expect("soak is budgeted").as_secs() >= 24 * 60 * 60);
     }
 
     #[test]

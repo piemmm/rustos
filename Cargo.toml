@@ -123,6 +123,12 @@ members = [
     "tools/qemu",
     "tools/cc",
 
+    # Shared host test-support: the per-run PRNG seed / start-of-test seed
+    # logging / smoke-iteration + soak-budget seam used by the fuzz (§19.6),
+    # proptest (§19.7), and filesystem-soak harnesses (AGENTS.md §2.2). A
+    # dev-dependency of those harness crates only; never in a RustOS build.
+    "tests/fuzzseed",
+
     # QEMU integration tests (Stage 2 deliverable; each is a freestanding
     # kernel binary built for `x86_64-unknown-none` and launched through
     # `tools/qemu` by `cargo xtask test --qemu`). Stage 3b/3c/3d add their

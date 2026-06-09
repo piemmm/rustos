@@ -9,7 +9,7 @@
 //! fuzz` target set.
 //!
 //! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
-//! deterministic, fixed-seed PRNG drives random `(sender capabilities,
+//! deterministic, per-run-seeded PRNG drives random `(sender capabilities,
 //! payload)` pairs against a port and asserts the invariants the dispatch
 //! path must uphold no matter what a caller crafts:
 //!
@@ -28,10 +28,11 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.6)
 //!
-//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep. When
+//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
+//! logged seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget elapses
-//! — the §19.6 "run each harness for ≥ 60 s" contract — while the fixed
+//! — the §19.6 "run each harness for its wall-clock budget" contract — while the logged
 //! seed keeps any crash reproducible.
 
 use std::collections::VecDeque;
@@ -43,7 +44,7 @@ use rustos_kernel_ipc::{EndpointId, Port};
 use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
 use rustos_log::{set_max_level, Event, Level, Sink};
 
-/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
 /// The port's payload bound; chosen well under the global ABI cap so the
@@ -71,39 +72,6 @@ const CAP_UNIVERSE: &[CapabilityId] = &[
 struct NullSink;
 impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
-}
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-fn fuzz_deadline() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-/// `true` while the wall-clock budget has time left; always `false` for
-/// the fixed smoke sweep so the loop body runs exactly once.
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
 }
 
 /// xor-shift* PRNG. Deterministic, fast, zero-allocation.
@@ -169,12 +137,15 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
         usize::try_from(u64::from(MAX_PAYLOAD).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN)))
             .expect("the port's payload bound fits usize on every supported target");
 
-    let mut rng = Rng::new(seed(0xDEAD_BEEF_F00D_CAFE));
+    let mut rng = Rng::new(rustos_fuzzseed::start(
+        "fuzz_send_is_fail_closed_and_recv_is_faithful",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let mut accepted = 0u64;
     let mut denied_caps = 0u64;
     let mut denied_size = 0u64;
     let mut denied_full = 0u64;
-    let deadline = fuzz_deadline();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for iter in 0..SMOKE_ITERATIONS {
             // Draw a random sender capability set from the universe.
@@ -247,7 +218,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
                 }
             }
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }
@@ -267,7 +238,10 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
     let port = authorised_port(&sink);
     port.destroy(&sink);
 
-    let mut rng = Rng::new(seed(0x0BAD_F00D_1234_5678));
+    let mut rng = Rng::new(rustos_fuzzseed::start(
+        "fuzz_closed_port_fails_closed_for_any_sender",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     for _ in 0..10_000 {
         // Even a sender holding every capability cannot send to a closed
         // port — destruction wins over authority (`AGENTS.md` §5.4 fail

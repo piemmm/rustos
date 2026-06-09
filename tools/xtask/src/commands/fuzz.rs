@@ -115,21 +115,31 @@ pub const TARGETS: &[Target] = &[
 /// How long to run each harness.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// `--quick`: the per-PR budget wired into `ci` (≥ 5 s per harness).
+    /// `--once`: a single smoke iteration per harness, with a fresh, logged
+    /// seed. This is the per-PR `ci` gate: `ci` runs each test once (on a
+    /// developer machine and a CI runner alike); the wall-clock soak coverage
+    /// is the time-limited GitHub soak, not `ci`.
+    Once,
+    /// `--quick`: a short wall-clock budget (≥ 5 s per harness), used by the
+    /// time-limited GitHub `ci` soak step (`tools/ci/soak.sh`).
     Quick,
     /// `--soak`: the nightly budget (≥ 24 h per harness).
     Soak,
 }
 
 impl Mode {
-    /// Per-harness wall-clock budget in seconds.
+    /// Per-harness wall-clock budget, or `None` for [`Mode::Once`] (a single
+    /// smoke iteration with no budget — the harness draws one input).
     #[must_use]
-    pub fn budget(self) -> Duration {
+    pub fn budget(self) -> Option<Duration> {
         match self {
-            // §19.6: "runs each harness for ≥ 5 s on every PR".
-            Mode::Quick => Duration::from_secs(5),
+            // A single iteration: no wall-clock budget is exported, so the
+            // harness runs its single smoke iteration.
+            Mode::Once => None,
+            // §19.6: "runs each harness for ≥ 5 s" (the GitHub soak step).
+            Mode::Quick => Some(Duration::from_secs(5)),
             // §19.6: "runs each harness for ≥ 24 h".
-            Mode::Soak => Duration::from_secs(24 * 60 * 60),
+            Mode::Soak => Some(Duration::from_secs(24 * 60 * 60)),
         }
     }
 }
@@ -176,6 +186,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
             return Err(format!("fuzz: argument {arg:?} is not valid UTF-8"));
         };
         match flag {
+            "--once" => set_mode(&mut mode, Mode::Once)?,
             "--quick" => set_mode(&mut mode, Mode::Quick)?,
             "--soak" => set_mode(&mut mode, Mode::Soak)?,
             "--list" => list = true,
@@ -211,7 +222,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
             other => {
                 return Err(format!(
                     "fuzz: unexpected argument {other:?}; usage: \
-                     cargo xtask fuzz [--quick | --soak] [--target NAME] [--secs N] \
+                     cargo xtask fuzz [--once | --quick | --soak] [--target NAME] [--secs N] \
                      [--seed N] [--list]"
                 ));
             }
@@ -230,7 +241,7 @@ pub fn parse(args: &[OsString]) -> Result<Options, String> {
 fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<(), String> {
     match slot {
         Some(existing) if *existing != mode => {
-            Err("fuzz: `--quick` and `--soak` are mutually exclusive".to_string())
+            Err("fuzz: `--once`, `--quick`, and `--soak` are mutually exclusive".to_string())
         }
         _ => {
             *slot = Some(mode);
@@ -269,8 +280,11 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
         return Ok(());
     }
 
-    let budget = match opts.secs {
-        Some(s) => Duration::from_secs(s),
+    // An explicit `--secs N` always wins; otherwise the mode supplies the
+    // budget (`--once` is `None`: a single smoke iteration, no budget env).
+    let budget: Option<Duration> = match opts.secs {
+        Some(s) if s > 0 => Some(Duration::from_secs(s)),
+        Some(_) => None,
         None => opts.mode.budget(),
     };
     let targets = selected(opts)?;
@@ -295,14 +309,25 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
                 "--",
                 "--nocapture",
             ]);
-            cmd.env("RUSTOS_FUZZ_BUDGET_SECS", budget.as_secs().to_string());
+            // A budget turns the harness into a soak loop; `--once` exports
+            // none, so the harness runs its single smoke iteration.
+            if let Some(budget) = budget {
+                cmd.env(
+                    rustos_fuzzseed::FUZZ_BUDGET_ENV,
+                    budget.as_secs().to_string(),
+                );
+            }
             // Each harness reads this seed instead of its built-in constant,
-            // so a fresh seed (the default) makes every soak explore new
+            // so a fresh seed (the default) makes every run explore new
             // inputs while `--seed N` reproduces a logged crash exactly
             // (§19.6, §2.1). The seed is in the label so it reaches the log.
             let job_seed = seed::job_seed(opts.seed, i);
             cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
-            let label = format!("fuzz {} ({} s, seed {job_seed})", t.test, budget.as_secs());
+            let budget_desc = match budget {
+                Some(b) => format!("{} s", b.as_secs()),
+                None => "1 iteration".to_string(),
+            };
+            let label = format!("fuzz {} ({budget_desc}, seed {job_seed})", t.test);
             Job::new(label, cmd)
         })
         .collect();
@@ -329,15 +354,23 @@ mod tests {
     }
 
     #[test]
+    fn once_flag_selects_a_single_iteration_with_no_budget() {
+        let opts = parse(&argv(&["--once"])).expect("once parses");
+        assert_eq!(opts.mode, Mode::Once);
+        // No wall-clock budget: the harness runs its single smoke iteration.
+        assert!(Mode::Once.budget().is_none());
+    }
+
+    #[test]
     fn quick_budget_meets_the_five_second_floor() {
-        // §19.6 mandates ≥ 5 s per harness on every PR.
-        assert!(Mode::Quick.budget().as_secs() >= 5);
+        // §19.6 mandates ≥ 5 s per harness for the budgeted soak step.
+        assert!(Mode::Quick.budget().expect("quick is budgeted").as_secs() >= 5);
     }
 
     #[test]
     fn soak_budget_meets_the_twenty_four_hour_floor() {
         // §19.6 mandates ≥ 24 h per harness for the nightly soak.
-        assert!(Mode::Soak.budget().as_secs() >= 24 * 60 * 60);
+        assert!(Mode::Soak.budget().expect("soak is budgeted").as_secs() >= 24 * 60 * 60);
     }
 
     #[test]

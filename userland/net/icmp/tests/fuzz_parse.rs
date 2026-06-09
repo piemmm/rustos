@@ -8,7 +8,7 @@
 //! dispatcher harness in the `cargo xtask fuzz` target set.
 //!
 //! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
-//! deterministic, fixed-seed LCG generates pseudo-random inputs and asserts
+//! deterministic, per-run-seeded LCG generates pseudo-random inputs and asserts
 //! the two invariants every parser must uphold no matter what bits a peer
 //! crafts:
 //!
@@ -24,15 +24,14 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.6)
 //!
-//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep so the
-//! suite stays fast and deterministic. When `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS`, [`budget`] returns a deadline and the
-//! PRNG-driven harness keeps drawing fresh inputs from the *same
-//! continuing* stream until it elapses — the §19.6 "run each harness for
-//! ≥ 60 s" contract. The seed is fixed, so a crash at draw N stays
-//! reproducible regardless of how far a given machine got. The structured
-//! bit-flip harness is an exhaustive boundary sweep, not a random one, so
-//! it runs once regardless of the budget.
+//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
+//! logged seed so the suite stays fast. When `cargo xtask fuzz --soak` exports
+//! `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness keeps drawing fresh
+//! inputs from the *same continuing* stream until the deadline elapses — the
+//! §19.6 "run each harness for its wall-clock budget" contract. The seed is
+//! logged at the start, so a fresh-seed crash stays reproducible via
+//! `RUSTOS_FUZZ_SEED`. The structured bit-flip harness is an exhaustive
+//! boundary sweep, not a random one, so it runs once regardless of the budget.
 
 use rustos_abi::driver::net::MacAddress;
 use rustos_net_icmp::arp::ArpPacket;
@@ -41,7 +40,7 @@ use rustos_net_icmp::icmp::IcmpEcho;
 use rustos_net_icmp::ipv4::Ipv4Header;
 use rustos_net_icmp::{Client, Ipv4Address, Responder};
 
-/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
 /// Link-layer address the responder/client answer for.
@@ -49,44 +48,6 @@ const LOCAL_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
 /// IPv4 address the responder/client answer for.
 const LOCAL_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-///
-/// `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` (`AGENTS.md`
-/// §19.6); a positive value turns the PRNG-driven harness into a
-/// wall-clock loop. An unset, empty, zero, or unparsable value preserves
-/// the deterministic smoke behaviour.
-fn budget() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-/// `true` while the wall-clock budget has time left; always `false` for
-/// the fixed smoke sweep so the loop body runs exactly once.
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
 
 /// Drive every parser in the crate on `bytes`.
 ///
@@ -211,16 +172,19 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(seed(0xC0FF_EE15_F00D_BABE));
+    let mut rng = Lcg::new(rustos_fuzzseed::start(
+        "random_inputs_never_panic",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let mut buf = [0u8; 256];
-    let deadline = budget();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }

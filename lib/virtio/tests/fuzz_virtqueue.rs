@@ -12,7 +12,7 @@
 //! device-supplied completions.
 //!
 //! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
-//! deterministic, fixed-seed PRNG drives random heads, lengths, and
+//! deterministic, per-run-seeded PRNG drives random heads, lengths, and
 //! descriptor-table corruption through the in-process [`MockTransport`]
 //! hostile-device seams and asserts the invariants the driver must
 //! uphold no matter what the device writes:
@@ -27,10 +27,11 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.6)
 //!
-//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep. When
+//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
+//! logged seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget
-//! elapses, while the fixed seed keeps any failure reproducible.
+//! elapses, while the logged seed keeps any failure reproducible.
 
 use rustos_virtio::{
     ChainSegment, ChainView, Direction, DmaSlab, MockHost, MockTransport, SplitQueue, VirtioError,
@@ -56,36 +57,6 @@ impl Rng {
     }
 }
 
-fn fuzz_deadline() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
-
 /// Build a `'static` `MockHost` the queue can borrow for the process.
 fn static_host() -> &'static MockHost {
     Box::leak(Box::new(MockHost::new()))
@@ -93,7 +64,10 @@ fn static_host() -> &'static MockHost {
 
 #[test]
 fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
-    let mut rng = Rng::new(seed(0xB1C7_DEAD_F00D_5A4E));
+    let mut rng = Rng::new(rustos_fuzzseed::start(
+        "fuzz_poll_used_is_fail_closed_against_a_hostile_device",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let mut t = MockTransport::new(1, QUEUE_SIZE, 0, 0);
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, QUEUE_SIZE).expect("queue setup");
@@ -133,7 +107,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
 
     let mut rejected = 0u64;
     let mut accepted = 0u64;
-    let deadline = fuzz_deadline();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Model a device DMA write scribbling a descriptor field (a
@@ -173,7 +147,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
             // matter how the device corrupts the reclaim walk.
             assert!(q.free_count() <= QUEUE_SIZE, "free count stays bounded");
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }

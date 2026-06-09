@@ -443,6 +443,13 @@ rustos/
 │                        #   `cargo xtask c-header` in CI. Do not hand-edit.
 │
 ├── tests/               # Cross-crate / integration tests only.
+│   ├── fuzzseed/        #   Shared host test-support: the per-run PRNG seed
+│   │                    #   selection, start-of-test seed logging, and
+│   │                    #   smoke-iteration / soak-budget seam used by the
+│   │                    #   §19.6 fuzz harnesses, §19.7 proptest models, and
+│   │                    #   the filesystem soak (one definition, §2.2). A
+│   │                    #   dev-dependency of those harnesses only; never in
+│   │                    #   a RustOS build.
 │   ├── integration/     #   Cross-crate / end-to-end (QEMU) test crates.
 │   └── SECURITY.md      #   Binding adversarial-test charter (§19) for the
 │                        #   memory subsystem and CPU privilege boundary.

@@ -16,25 +16,24 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.7)
 //!
-//! A plain `cargo test` runs [`SMOKE_CASES`] sequences from proptest's fixed
-//! deterministic RNG (so the smoke sweep is reproducible). When `cargo xtask
-//! proptest` exports `RUSTOS_PROPTEST_BUDGET_SECS`, [`drive`] keeps running
-//! batches until the budget elapses — the "≥ 5 s per model" per-PR contract
-//! (the nightly `--soak` is the real coverage). The orchestrator also exports
-//! `RUSTOS_PROPTEST_SEED` ([`seeded_rng`]): a fresh seed each run so soaks draw
-//! new programs (§2.1), or a logged value via `--seed` to reproduce one.
+//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
+//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner keeps drawing
+//! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
+//! deadline. The seed is logged at the start of each run (and pinnable via
+//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
 
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+use proptest::test_runner::TestCaseError;
 use rustos_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
 use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
 
-/// Sequences run by a plain `cargo test` (no budget set).
+/// Sequences run once by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 256;
 
 /// Sequences per batch under a wall-clock budget; the batch is repeated
@@ -44,74 +43,6 @@ const BUDGET_BATCH_CASES: u32 = 512;
 /// Highest capability id the model draws from. Spans the well-known
 /// `abi-v1` ids plus headroom so raw-id construction is exercised too.
 const CAP_MAX: u16 = 20;
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-fn budget_deadline() -> Option<Instant> {
-    let secs: u64 = std::env::var("RUSTOS_PROPTEST_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(Instant::now() + Duration::from_secs(secs))
-}
-
-/// The `ChaCha` RNG `drive` runs from.
-///
-/// `cargo xtask proptest` exports `RUSTOS_PROPTEST_SEED` so each soak run
-/// draws fresh programs (`AGENTS.md` §19.7 / §2.1) while a logged seed still
-/// reproduces a counterexample; a plain `cargo test` leaves it unset and uses
-/// proptest's fixed deterministic RNG, keeping the smoke sweep reproducible.
-fn seeded_rng() -> TestRng {
-    match std::env::var("RUSTOS_PROPTEST_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(seed) => TestRng::from_seed(RngAlgorithm::ChaCha, &expand_seed(seed)),
-        None => TestRng::deterministic_rng(RngAlgorithm::ChaCha),
-    }
-}
-
-/// Expand a 64-bit seed into proptest's 32-byte `ChaCha` seed via `SplitMix64`.
-fn expand_seed(seed: u64) -> [u8; 32] {
-    let mut state = seed;
-    let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
-    bytes
-}
-
-/// Run `check` over programs drawn from `strategy` for the configured
-/// budget, panicking with the shrunk counterexample on the first failure.
-fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCaseError>) {
-    let deadline = budget_deadline();
-    let cases = if deadline.is_some() {
-        BUDGET_BATCH_CASES
-    } else {
-        SMOKE_CASES
-    };
-    let config = Config {
-        cases,
-        failure_persistence: None,
-        ..Config::default()
-    };
-    let mut runner = TestRunner::new_with_rng(config, seeded_rng());
-    loop {
-        if let Err(err) = runner.run(&strategy, &check) {
-            panic!("proptest stateful model found a counterexample: {err}");
-        }
-        if !matches!(deadline, Some(end) if Instant::now() < end) {
-            break;
-        }
-    }
-}
 
 /// All capability ids `[0, CAP_MAX]` are valid by construction.
 fn cap(id: u16) -> CapabilityId {
@@ -161,79 +92,85 @@ fn program() -> impl Strategy<Value = Vec<Cmd>> {
 
 #[test]
 fn capability_set_tracks_reference_model() {
-    drive(program(), |cmds| {
-        let mut live = CapabilitySet::empty();
-        let mut model: BTreeSet<u16> = BTreeSet::new();
+    rustos_fuzzseed::prop::drive(
+        "capability_set_tracks_reference_model",
+        SMOKE_CASES,
+        BUDGET_BATCH_CASES,
+        program(),
+        |cmds| {
+            let mut live = CapabilitySet::empty();
+            let mut model: BTreeSet<u16> = BTreeSet::new();
 
-        for c in &cmds {
-            match c {
-                Cmd::Insert(i) => {
-                    live.insert(cap(*i));
-                    model.insert(*i);
-                }
-                Cmd::Remove(i) => {
-                    live.remove(cap(*i));
-                    model.remove(i);
-                }
-                Cmd::Revoke(i) => {
-                    let was = live.revoke(cap(*i));
-                    let model_was = model.remove(i);
-                    prop_assert_eq!(was, model_was, "revoke must report prior membership");
-                }
-                Cmd::Delegate(req) => {
-                    let requested = build(req);
-                    let req_model: BTreeSet<u16> = req.iter().copied().collect();
-                    let res = live.delegate(&requested);
-                    if req_model.is_subset(&model) {
-                        let granted = match res {
-                            Ok(g) => g,
-                            Err(e) => {
-                                return Err(TestCaseError::fail(format!(
-                                    "a subset delegation was refused: {e:?}"
-                                )))
-                            }
-                        };
-                        // Delegation returns exactly the requested subset and
-                        // never widens the parent's authority (§5.2).
-                        prop_assert_eq!(granted, requested);
-                        prop_assert!(granted.is_subset_of(&live));
-                    } else {
-                        prop_assert_eq!(res, Err(Errno::DelegationWiden));
+            for c in &cmds {
+                match c {
+                    Cmd::Insert(i) => {
+                        live.insert(cap(*i));
+                        model.insert(*i);
+                    }
+                    Cmd::Remove(i) => {
+                        live.remove(cap(*i));
+                        model.remove(i);
+                    }
+                    Cmd::Revoke(i) => {
+                        let was = live.revoke(cap(*i));
+                        let model_was = model.remove(i);
+                        prop_assert_eq!(was, model_was, "revoke must report prior membership");
+                    }
+                    Cmd::Delegate(req) => {
+                        let requested = build(req);
+                        let req_model: BTreeSet<u16> = req.iter().copied().collect();
+                        let res = live.delegate(&requested);
+                        if req_model.is_subset(&model) {
+                            let granted = match res {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    return Err(TestCaseError::fail(format!(
+                                        "a subset delegation was refused: {e:?}"
+                                    )))
+                                }
+                            };
+                            // Delegation returns exactly the requested subset and
+                            // never widens the parent's authority (§5.2).
+                            prop_assert_eq!(granted, requested);
+                            prop_assert!(granted.is_subset_of(&live));
+                        } else {
+                            prop_assert_eq!(res, Err(Errno::DelegationWiden));
+                        }
+                    }
+                    Cmd::CheckAgainst(other) => {
+                        let rhs = build(other);
+                        let rhs_model: BTreeSet<u16> = other.iter().copied().collect();
+                        let union = live.union(&rhs);
+                        let inter = live.intersection(&rhs);
+                        for k in 0..=CAP_MAX {
+                            let in_live = model.contains(&k);
+                            let in_rhs = rhs_model.contains(&k);
+                            prop_assert_eq!(union.contains(cap(k)), in_live || in_rhs);
+                            prop_assert_eq!(inter.contains(cap(k)), in_live && in_rhs);
+                        }
+                        prop_assert!(live.is_subset_of(&union));
+                        prop_assert!(inter.is_subset_of(&live));
+                        prop_assert_eq!(live.is_subset_of(&rhs), model.is_subset(&rhs_model));
                     }
                 }
-                Cmd::CheckAgainst(other) => {
-                    let rhs = build(other);
-                    let rhs_model: BTreeSet<u16> = other.iter().copied().collect();
-                    let union = live.union(&rhs);
-                    let inter = live.intersection(&rhs);
-                    for k in 0..=CAP_MAX {
-                        let in_live = model.contains(&k);
-                        let in_rhs = rhs_model.contains(&k);
-                        prop_assert_eq!(union.contains(cap(k)), in_live || in_rhs);
-                        prop_assert_eq!(inter.contains(cap(k)), in_live && in_rhs);
-                    }
-                    prop_assert!(live.is_subset_of(&union));
-                    prop_assert!(inter.is_subset_of(&live));
-                    prop_assert_eq!(live.is_subset_of(&rhs), model.is_subset(&rhs_model));
-                }
-            }
 
-            // Global invariants after every command.
-            prop_assert_eq!(live.len() as usize, model.len());
-            prop_assert_eq!(live.is_empty(), model.is_empty());
-            for k in 0..=CAP_MAX {
-                prop_assert_eq!(live.contains(cap(k)), model.contains(&k));
+                // Global invariants after every command.
+                prop_assert_eq!(live.len() as usize, model.len());
+                prop_assert_eq!(live.is_empty(), model.is_empty());
+                for k in 0..=CAP_MAX {
+                    prop_assert_eq!(live.contains(cap(k)), model.contains(&k));
+                }
+                let observed: Vec<u16> = live.iter().map(CapabilityId::as_u16).collect();
+                let expected: Vec<u16> = model.iter().copied().collect();
+                prop_assert_eq!(
+                    observed,
+                    expected,
+                    "iteration must be ascending and complete"
+                );
             }
-            let observed: Vec<u16> = live.iter().map(CapabilityId::as_u16).collect();
-            let expected: Vec<u16> = model.iter().copied().collect();
-            prop_assert_eq!(
-                observed,
-                expected,
-                "iteration must be ascending and complete"
-            );
-        }
-        Ok(())
-    });
+            Ok(())
+        },
+    );
 }
 
 /// Fixed, deterministic authority key. Tests must not depend on RNG for the
@@ -264,7 +201,10 @@ fn token_verify_matches_error_precedence_oracle() {
     // a subject drawn from a small range so the mismatch path is exercised.
     const ISSUE_SUBJECT: u64 = 7;
     let strategy = (id_vec(), id_vec(), 0u64..4, 0u64..4, any::<bool>(), 6u64..9);
-    drive(
+    rustos_fuzzseed::prop::drive(
+        "token_verify_matches_error_precedence_oracle",
+        SMOKE_CASES,
+        BUDGET_BATCH_CASES,
         strategy,
         |(caps_ids, parent_ids, issue_epoch, verify_epoch, tamper, verify_subject)| {
             let caps = build(&caps_ids);

@@ -37,3 +37,9 @@ rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # dispatch capability gate under randomised call sequences. Same pinned,
 # already-audited version the other kernel crates use; dev-only.
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The §19.7 model drives its programs through the shared seed/budget runner
+# (`rustos_fuzzseed::prop::drive`), so the seed selection, start-of-test
+# seed log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
+# scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
+

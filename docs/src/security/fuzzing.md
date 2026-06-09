@@ -77,29 +77,29 @@ cargo xtask fuzz --seed 42  # reproduce a logged run's input stream
 The orchestrator exports `RUSTOS_FUZZ_BUDGET_SECS`. A harness reads it
 and, when it is a positive value, keeps drawing fresh inputs from the
 *same continuing* PRNG stream until the budget elapses; when it is unset
-the harness runs the fixed smoke sweep.
+the harness runs its smoke sweep exactly once.
 
-## Seeding: deterministic CI, progressing soaks
+## Seeding: fresh per run, logged for replay
 
-A budget alone is not enough. If every run started the PRNG from the
-same fixed seed, a 24 h soak would merely replay the first *N* inputs of
-the identical stream the previous soak already explored — running longer
-would find nothing new (`AGENTS.md` §2.1 forbids that kind of
-busy-work). So the orchestrator also chooses a **per-harness seed** and
-exports it as `RUSTOS_FUZZ_SEED`:
+Seed selection, the start-of-test seed log, and the smoke/soak loop are
+the single shared seam `tests/fuzzseed` (`rustos_fuzzseed`), used by
+every fuzz harness, every proptest model, and the filesystem soak, so
+the policy has one definition (`AGENTS.md` §2.2). The seed comes from
+`RUSTOS_FUZZ_SEED`:
 
-* By default it draws a *fresh* seed for each harness from host entropy
-  (wall-clock time, pid, a monotonic counter — see
-  `tools/xtask/src/commands/seed.rs`), so two soaks never run the same
-  stream and coverage genuinely progresses night after night.
-* `--seed N` instead derives a *deterministic* per-harness seed from
-  `N`, so a crash a soak reported can be replayed exactly.
+* By default each run draws a *fresh* seed from host entropy (wall-clock
+  time, pid, a monotonic counter), so two runs never replay the same
+  stream — coverage genuinely progresses, and even repeated `cargo test`
+  runs explore new inputs (`AGENTS.md` §2.1).
+* Setting `RUSTOS_FUZZ_SEED=N` (the orchestrator's `--seed N` derives a
+  deterministic per-harness value from `N`) pins it, so a crash a run
+  reported can be replayed exactly.
 
-Every run logs the seed it picked (it is part of each job's label), so a
-non-deterministic soak stays reproducible: feed the logged value back
-via `--seed`. A plain `cargo test` leaves `RUSTOS_FUZZ_SEED` unset and
-each harness falls back to its built-in constant, keeping the normal
-suite fully deterministic. This is a *test-input* seed, not a security
+**Every test logs the seed at its start**, before the first input is
+drawn — `[fuzzseed] <test>: PRNG seed = N …; replay with
+RUSTOS_FUZZ_SEED=N` — so a fresh-seed crash is reproducible from the
+logged value regardless of how it was launched (a plain `cargo test`, a
+CI runner, or a soak job). This is a *test-input* seed, not a security
 seed; it deliberately does not go through `lib/crypto`/`lib/rng` (those
 govern the kernel CSPRNG, §22).
 
@@ -109,11 +109,14 @@ pattern through `cargo xtask proptest --seed N` and
 
 ## CI integration
 
-`cargo xtask fuzz --quick` is part of `cargo xtask ci`, running right
-after the supply-chain gate. It **fails closed**: a crash, hang, or
+`cargo xtask fuzz --once` is part of `cargo xtask ci`, running right
+after the supply-chain gate: `ci` runs each harness a single time (a
+fresh, logged seed) rather than for a budget, so it stays fast and
+exercises new inputs each run. It **fails closed**: a crash, hang, or
 invariant failure in any harness fails the pipeline, so a regression in
-a decoder cannot merge. The 24-hour `--soak` mode is run by the nightly
-job outside `ci`.
+a decoder cannot merge. The time-limited soaks — the per-PR parallel
+`tools/ci/soak.sh` step and the nightly 24-hour `--soak` job — run
+outside the `ci` pipeline and carry the wall-clock fuzzing budget.
 
 ## Regression corpus
 

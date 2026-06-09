@@ -14,7 +14,8 @@
 #
 # `cargo xtask test --soak` is the §7 counterpart: it repeats the whole test
 # matrix for the same 24 h budget so a flake too rare to surface in the
-# per-PR 100x run still gets a full night of exposure. It is a single job
+# per-PR single-pass run (where `ci` runs each test once) still gets a full
+# night of exposure. It is a single job
 # (the matrix is one unit), launched alongside the fuzz/proptest fan-out.
 #
 # Usage:

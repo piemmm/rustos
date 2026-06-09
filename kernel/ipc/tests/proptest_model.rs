@@ -19,18 +19,18 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.7)
 //!
-//! A plain `cargo test` runs [`SMOKE_CASES`] sequences from proptest's fixed
-//! deterministic RNG; `cargo xtask proptest` exports
-//! `RUSTOS_PROPTEST_BUDGET_SECS` and [`drive`] repeats batches until the budget
-//! elapses. The orchestrator also exports `RUSTOS_PROPTEST_SEED`
-//! ([`seeded_rng`]): a fresh seed each run so soaks draw new programs (§2.1),
-//! or a logged value via `--seed` to reproduce one.
+//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
+//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
+//! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
+//! deadline. The seed is logged at the start of each run (pinnable via
+//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+use proptest::test_runner::TestCaseError;
 use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use rustos_abi::{CapabilityId, Errno};
 use rustos_caps::CapabilitySet;
@@ -61,71 +61,6 @@ const CAP_UNIVERSE: &[CapabilityId] = &[
 struct NullSink;
 impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
-}
-
-fn budget_deadline() -> Option<Instant> {
-    let secs: u64 = std::env::var("RUSTOS_PROPTEST_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(Instant::now() + Duration::from_secs(secs))
-}
-
-/// The `ChaCha` RNG `drive` runs from.
-///
-/// `cargo xtask proptest` exports `RUSTOS_PROPTEST_SEED` so each soak run
-/// draws fresh programs (`AGENTS.md` §19.7 / §2.1) while a logged seed still
-/// reproduces a counterexample; a plain `cargo test` leaves it unset and uses
-/// proptest's fixed deterministic RNG, keeping the smoke sweep reproducible.
-fn seeded_rng() -> TestRng {
-    match std::env::var("RUSTOS_PROPTEST_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(seed) => TestRng::from_seed(RngAlgorithm::ChaCha, &expand_seed(seed)),
-        None => TestRng::deterministic_rng(RngAlgorithm::ChaCha),
-    }
-}
-
-/// Expand a 64-bit seed into proptest's 32-byte `ChaCha` seed via `SplitMix64`.
-fn expand_seed(seed: u64) -> [u8; 32] {
-    let mut state = seed;
-    let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
-    bytes
-}
-
-fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCaseError>) {
-    let deadline = budget_deadline();
-    let cases = if deadline.is_some() {
-        BUDGET_BATCH_CASES
-    } else {
-        SMOKE_CASES
-    };
-    let config = Config {
-        cases,
-        failure_persistence: None,
-        ..Config::default()
-    };
-    let mut runner = TestRunner::new_with_rng(config, seeded_rng());
-    loop {
-        if let Err(err) = runner.run(&strategy, &check) {
-            panic!("proptest stateful model found a counterexample: {err}");
-        }
-        if !matches!(deadline, Some(end) if Instant::now() < end) {
-            break;
-        }
-    }
 }
 
 fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -190,71 +125,78 @@ fn port_lifecycle_tracks_reference_model() {
         usize::try_from(u64::from(MAX_PAYLOAD).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN)))
             .expect("payload bound fits usize");
 
-    drive(program(), move |cmds| {
-        let sink = NullSink;
-        let port = authorised_port();
-        // Reference model: queued payloads (FIFO) and the closed flag.
-        let mut expected: VecDeque<Vec<u8>> = VecDeque::new();
-        let mut closed = false;
+    rustos_fuzzseed::prop::drive(
+        "port_lifecycle_tracks_reference_model",
+        SMOKE_CASES,
+        BUDGET_BATCH_CASES,
+        program(),
+        move |cmds| {
+            let sink = NullSink;
+            let port = authorised_port();
+            // Reference model: queued payloads (FIFO) and the closed flag.
+            let mut expected: VecDeque<Vec<u8>> = VecDeque::new();
+            let mut closed = false;
 
-        for c in &cmds {
-            match c {
-                Cmd::Send { cap_mask, len } => {
-                    let mut sender_caps = CapabilitySet::empty();
-                    for (bit, cap) in CAP_UNIVERSE.iter().enumerate() {
-                        if cap_mask & (1 << bit) != 0 {
-                            sender_caps.insert(*cap);
+            for c in &cmds {
+                match c {
+                    Cmd::Send { cap_mask, len } => {
+                        let mut sender_caps = CapabilitySet::empty();
+                        for (bit, cap) in CAP_UNIVERSE.iter().enumerate() {
+                            if cap_mask & (1 << bit) != 0 {
+                                sender_caps.insert(*cap);
+                            }
+                        }
+                        let sender = task_with(0x100, &sender_caps);
+                        let payload: Vec<u8> = (0..*len)
+                            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                            .collect();
+
+                        // Mirror of `Port::send`'s precedence, never touching the
+                        // live port: closed → caps → size → capacity.
+                        let caps_ok =
+                            caps_of(&[REQUIRED_SEND_CAP]).is_subset_of(sender.effective());
+                        let size_ok = payload.len() <= effective_max;
+                        let capacity_ok = expected.len() < MAILBOX_CAPACITY;
+                        let want = if closed {
+                            Err(Errno::NotFound)
+                        } else if !caps_ok {
+                            Err(Errno::PermissionDenied)
+                        } else if !size_ok {
+                            Err(Errno::MessageTooLarge)
+                        } else if !capacity_ok {
+                            Err(Errno::LengthOutOfRange)
+                        } else {
+                            Ok(())
+                        };
+
+                        let got = port.send(&sender, &payload, &sink);
+                        prop_assert_eq!(got, want);
+                        if want.is_ok() {
+                            expected.push_back(payload);
                         }
                     }
-                    let sender = task_with(0x100, &sender_caps);
-                    let payload: Vec<u8> = (0..*len)
-                        .map(|i| u8::try_from(i % 251).unwrap_or(0))
-                        .collect();
-
-                    // Mirror of `Port::send`'s precedence, never touching the
-                    // live port: closed → caps → size → capacity.
-                    let caps_ok = caps_of(&[REQUIRED_SEND_CAP]).is_subset_of(sender.effective());
-                    let size_ok = payload.len() <= effective_max;
-                    let capacity_ok = expected.len() < MAILBOX_CAPACITY;
-                    let want = if closed {
-                        Err(Errno::NotFound)
-                    } else if !caps_ok {
-                        Err(Errno::PermissionDenied)
-                    } else if !size_ok {
-                        Err(Errno::MessageTooLarge)
-                    } else if !capacity_ok {
-                        Err(Errno::LengthOutOfRange)
-                    } else {
-                        Ok(())
-                    };
-
-                    let got = port.send(&sender, &payload, &sink);
-                    prop_assert_eq!(got, want);
-                    if want.is_ok() {
-                        expected.push_back(payload);
+                    Cmd::Recv => match port.recv() {
+                        Some(msg) => {
+                            let want = expected.pop_front().ok_or_else(|| {
+                                TestCaseError::fail("recv returned an unmodelled message")
+                            })?;
+                            prop_assert_eq!(msg.payload, want);
+                        }
+                        None => prop_assert!(expected.is_empty(), "recv empty but model was not"),
+                    },
+                    Cmd::Destroy => {
+                        port.destroy(&sink);
+                        closed = true;
+                        // Destruction drains in-flight messages.
+                        expected.clear();
                     }
                 }
-                Cmd::Recv => match port.recv() {
-                    Some(msg) => {
-                        let want = expected.pop_front().ok_or_else(|| {
-                            TestCaseError::fail("recv returned an unmodelled message")
-                        })?;
-                        prop_assert_eq!(msg.payload, want);
-                    }
-                    None => prop_assert!(expected.is_empty(), "recv empty but model was not"),
-                },
-                Cmd::Destroy => {
-                    port.destroy(&sink);
-                    closed = true;
-                    // Destruction drains in-flight messages.
-                    expected.clear();
-                }
+
+                prop_assert_eq!(port.len(), expected.len());
+                prop_assert!(port.len() <= MAILBOX_CAPACITY);
+                prop_assert_eq!(port.is_closed(), closed);
             }
-
-            prop_assert_eq!(port.len(), expected.len());
-            prop_assert!(port.len() <= MAILBOX_CAPACITY);
-            prop_assert_eq!(port.is_closed(), closed);
-        }
-        Ok(())
-    });
+            Ok(())
+        },
+    );
 }

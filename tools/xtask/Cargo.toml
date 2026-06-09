@@ -52,3 +52,9 @@ rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", versio
 # and the guest's expectations share one source of truth (`AGENTS.md`
 # §2.2).
 rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+# The fuzz/proptest orchestrators and the in-tree harnesses share one
+# per-run seed/budget vocabulary: the orchestrator picks and logs the
+# seed, the harness reads it. Both sides use `rustos-fuzzseed` so the
+# seed primitives and the env-var names live in exactly one place
+# (`AGENTS.md` §2.2).
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

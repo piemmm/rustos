@@ -10,15 +10,16 @@
 //!   parser either emits well-formed [`rustos_vt::Op`] events or silently drops
 //!   the bytes it cannot interpret (fail closed, `AGENTS.md` §2.9).
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a fixed-seed LCG
+//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded LCG
 //! draws pseudo-random byte strings, mutates real escape-sequence templates, and
 //! splices structured-but-hostile sequences together. A plain `cargo test` runs
-//! the fixed [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
+//! the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
+//! fuzz --soak` exports
 //! `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
 use rustos_vt::{Op, Parser};
 
-/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
 /// Largest arbitrary byte string fed straight to the parser.
@@ -34,37 +35,6 @@ const TEMPLATES: &[&[u8]] = &[
     b"\x1bP1;2pignored device control\x1b\\done",
     b"\x1b[999999999999A\xff\xfe\xc3\x28text\xe2\x98\x83",
 ];
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-fn budget() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
 
 /// Low byte of `x`, without a narrowing `as` cast.
 fn low_byte(x: u64) -> u8 {
@@ -92,11 +62,14 @@ fn feed_never_panics(bytes: &[u8]) {
 
 #[test]
 fn feed_never_panics_for_any_input() {
-    let deadline = budget();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed comes from `seed()`: fixed under a plain `cargo test`
-    // (reproducible), fresh per soak run under `cargo xtask fuzz`.
-    let mut state: u64 = seed(0x9E37_79B9_7F4A_7C15);
+    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
+    let mut state: u64 = rustos_fuzzseed::start(
+        "feed_never_panics_for_any_input",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    );
     let mut next = || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -136,7 +109,7 @@ fn feed_never_panics_for_any_input() {
         feed_never_panics(&noise);
 
         iteration += 1;
-        if !within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

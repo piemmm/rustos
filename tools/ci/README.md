@@ -89,8 +89,8 @@ registries **sequentially**, 24 h per target — so the full nightly would take
 here) and launches one `--soak --target <name>` process per target, all sharing
 a single 24 h wall clock. The §7 repeated-test soak adds one more job,
 `cargo xtask test --qemu --soak`, that repeats the whole test matrix for the
-same budget (a flake too rare for the per-PR 100× run still gets a full
-night). Each job writes its own log under
+same budget (a flake too rare for the per-PR single-pass run, where `ci`
+runs each test once, still gets a full night). Each job writes its own log under
 `<logdir>/soak-<UTC-stamp>/<job>.log`, and the script exits non-zero if any job
 fails — §7/§19.6/§19.7 fail closed.
 

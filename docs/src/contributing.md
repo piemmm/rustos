@@ -11,10 +11,9 @@ rules, it points to them.
 2. Discuss non-trivial design changes in an issue first. Inventing public
    interfaces is forbidden; extend versioned ones instead.
 3. Run `cargo xtask ci` locally before pushing. The same command runs in
-   CI and must be green. Locally it runs the test matrix once; on the
-   GitHub Actions runners it repeats the matrix 20× to hunt flaky tests
-   ([§7][test]), so a local `ci` finishes quickly without that hours-long
-   repeat.
+   CI and must be green. It runs each test exactly once, on a developer
+   machine and a CI runner alike ([§7][test]); the flake-hunting
+   repetition lives in the time-limited GitHub soaks, not in `ci`.
 4. Update documentation in the same commit as the code it describes —
    rustdoc on every public item and the relevant page in `docs/src/`.
 
@@ -26,11 +25,11 @@ rules, it points to them.
 | `clippy`      | `cargo clippy --workspace --all-targets -- -D warnings`     |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
-| `test`        | `cargo test --workspace --all-targets` + QEMU matrix; repeated 20× on GitHub Actions to catch flaky tests, once locally ([§7][test]) |
+| `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test])                          |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
-| `fuzz --quick`| Runs each in-tree fuzz harness ≥ 5 s ([§19.6][fz])          |
+| `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 
 Other subcommands (`build`, `coverage`, `image`) exist for development and

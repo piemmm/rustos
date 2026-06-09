@@ -1,7 +1,6 @@
 //! The closed registry of soak filesystems and the per-target runner.
 
-use std::env;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use rustos_abi::DriverError;
@@ -37,10 +36,11 @@ impl EntropySource for SoakEntropy {
 /// `cargo xtask fssoak --list` and the `soak.sh` fan-out, so neither
 /// hard-codes the list (§2.2).
 ///
-/// `rustfs`/`ext4`/`fat32` run the deterministic, fixed-sequence
-/// [`exercise()`]; `rustfs-random` runs the randomized, model-checked
-/// [`random_exercise`] over rustfs, taking a different path on every
-/// launch (its start seed is drawn from entropy).
+/// `rustfs`/`ext4`/`fat32` run the fixed-sequence [`exercise()`];
+/// `rustfs-random` runs the randomized, model-checked [`random_exercise`]
+/// over rustfs, taking a different path on every launch. Both draw a fresh
+/// start seed each launch and log it (`AGENTS.md` §2.2), so every run differs
+/// and any failure replays from the logged seed.
 pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32", "rustfs-random"];
 
 /// A filesystem the soak can format on a [`RamBlock`] and remount,
@@ -120,10 +120,10 @@ impl SoakFs for Fat32<RamBlock> {
 /// filesystem is unknown or the exerciser finds an inconsistency.
 pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
     match name {
-        "rustfs" => run::<RustFs<RamBlock>>(device_bytes, budget_secs),
-        "ext4" => run::<Ext4<RamBlock>>(device_bytes, budget_secs),
-        "fat32" => run::<Fat32<RamBlock>>(device_bytes, budget_secs),
-        "rustfs-random" => run_random::<RustFs<RamBlock>>(device_bytes, budget_secs),
+        "rustfs" => run::<RustFs<RamBlock>>(name, device_bytes, budget_secs),
+        "ext4" => run::<Ext4<RamBlock>>(name, device_bytes, budget_secs),
+        "fat32" => run::<Fat32<RamBlock>>(name, device_bytes, budget_secs),
+        "rustfs-random" => run_random::<RustFs<RamBlock>>(name, device_bytes, budget_secs),
         other => Err(format!(
             "fssoak: unknown filesystem `{other}`; known: {}",
             TARGETS.join(", ")
@@ -131,40 +131,30 @@ pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(),
     }
 }
 
-/// Pick the randomized soak's *start* seed. It is drawn from platform
-/// entropy (wall-clock time mixed with the process id) so the run takes a
-/// different path on every launch — the issue's core requirement — unless
-/// `RUSTOS_FSSOAK_SEED` pins it, which lets a failure be replayed exactly.
-fn random_start_seed() -> u64 {
-    if let Some(seed) = env::var("RUSTOS_FSSOAK_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return seed;
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    // Compose without a truncating cast: seconds scaled into the nanosecond
-    // range, plus the sub-second nanos, mixed with the pid.
-    let time_mix = now
-        .as_secs()
-        .wrapping_mul(1_000_000_000)
-        .wrapping_add(u64::from(now.subsec_nanos()));
-    let pid_mix = u64::from(std::process::id()).rotate_left(32);
-    // One SplitMix64 round so adjacent launches don't share low bits.
-    let mut z = time_mix ^ pid_mix;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+/// Environment variable that pins the soak start seed for replay; unset
+/// draws a fresh seed each launch (`rustos_fuzzseed`, `AGENTS.md` §2.2).
+const FSSOAK_SEED_ENV: &str = "RUSTOS_FSSOAK_SEED";
+
+/// Resolve and log this launch's *start* seed for `target`.
+///
+/// Fresh from host entropy by default — so the run takes a different path on
+/// every launch (the issue's core requirement) — or pinned by
+/// `RUSTOS_FSSOAK_SEED` to replay a failure exactly. Logged at the start so a
+/// fresh-seed failure is still reproducible.
+fn start_seed(target: &str) -> u64 {
+    let seed = rustos_fuzzseed::resolve_seed(FSSOAK_SEED_ENV);
+    println!(
+        "fssoak {target}: start seed {seed} ({seed:#018x}); \
+         replay with {FSSOAK_SEED_ENV}={seed}"
+    );
+    seed
 }
 
 /// Drive [`random_exercise`] for one filesystem until the budget elapses,
-/// from an entropy-derived start seed (printed for reproducibility).
-fn run_random<F: SoakFs>(device_bytes: u64, budget_secs: u64) -> Result<(), String> {
+/// from a fresh, logged start seed.
+fn run_random<F: SoakFs>(target: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(budget_secs);
-    let mut seed = random_start_seed();
-    println!("fssoak rustfs-random: start seed {seed:#x} (set RUSTOS_FSSOAK_SEED to replay)");
+    let mut seed = start_seed(target);
     loop {
         random_exercise::<F>(device_bytes, seed)?;
         // SplitMix64-style advance: deterministic, full-period.
@@ -176,10 +166,12 @@ fn run_random<F: SoakFs>(device_bytes: u64, budget_secs: u64) -> Result<(), Stri
     Ok(())
 }
 
-/// Drive [`exercise()`] for one filesystem until the budget elapses.
-fn run<F: SoakFs>(device_bytes: u64, budget_secs: u64) -> Result<(), String> {
+/// Drive [`exercise()`] for one filesystem until the budget elapses, from a
+/// fresh, logged start seed (only the content bytes vary by seed, so each
+/// launch exercises the fixed op sequence over different data).
+fn run<F: SoakFs>(target: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(budget_secs);
-    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut seed = start_seed(target);
     loop {
         exercise::<F>(device_bytes, seed)?;
         // SplitMix64-style seed advance: deterministic, full-period.

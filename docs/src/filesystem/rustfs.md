@@ -804,7 +804,7 @@ The mount / metadata-decode path additionally has a `cargo xtask fuzz`
 harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
 path), a duplicated-copy sweep that corrupts *both* copies of each block
-pair, and a fixed-seed PRNG all drive `RustFs::open` over arbitrary bytes,
+pair, and a per-run-seeded PRNG all drive `RustFs::open` over arbitrary bytes,
 asserting it never panics and fails closed. Since Stage 7 the fuzz image is
 populated with duplicate-content files and a reflink, so the sweep also drives
 the **chunk/refcount** and **reverse-reference** record decode paths that

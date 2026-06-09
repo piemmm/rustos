@@ -6,7 +6,7 @@
 //! fuzz target") it is driven here against arbitrary device contents.
 //!
 //! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
-//! deterministic, fixed-seed PRNG drives random pages, slots, and byte-level
+//! deterministic, per-run-seeded PRNG drives random pages, slots, and byte-level
 //! tampering against an in-memory swap device and asserts the invariants the
 //! restore path must uphold no matter what is on the platter:
 //!
@@ -24,10 +24,11 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.6)
 //!
-//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep. When
+//! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
+//! logged seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget elapses,
-//! while the fixed seed keeps any failure reproducible.
+//! while the logged seed keeps any failure reproducible.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -128,40 +129,12 @@ impl SwapBackend for MockBackend {
     }
 }
 
-fn fuzz_deadline() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for the input driver. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. Only the page/tamper draw is
-/// reseeded — the swap key and nonce material stay fixed so the harness
-/// keeps exercising the same crypto state across runs.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
-
 #[test]
 fn fuzz_swap_restore_is_fail_closed() {
-    let mut rng = Rng::new(seed(0xF00D_5A4E_1234_BEEF));
+    let mut rng = Rng::new(rustos_fuzzseed::start(
+        "fuzz_swap_restore_is_fail_closed",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let device = MockBackend::new(SLOTS);
     let key = SwapKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
     let mut swap = EncryptedSwap::activate(device.clone(), key, &mut RngEntropy(Rng::new(2)))
@@ -169,7 +142,7 @@ fn fuzz_swap_restore_is_fail_closed() {
 
     let mut round_trips = 0u64;
     let mut tamper_rejected = 0u64;
-    let deadline = fuzz_deadline();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let slot = rng.next_u64() % SLOTS;
@@ -217,7 +190,7 @@ fn fuzz_swap_restore_is_fail_closed() {
                 _ => {}
             }
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }

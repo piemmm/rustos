@@ -18,11 +18,12 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.6)
 //!
-//! A plain `cargo test` runs the fixed [`ITERATIONS`] sweep. When
+//! A plain `cargo test` runs the [`ITERATIONS`] sweep once from a fresh, logged
+//! seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing fresh `(syscall, RawArgs)` pairs from the *same continuing*
-//! PRNG stream until the budget elapses — the §19.6 "run each harness for
-//! ≥ 60 s" contract — while the fixed seed keeps any crash reproducible.
+//! PRNG stream until the budget elapses — the §19.6 "run each harness for its
+//! wall-clock budget" contract — while the logged seed keeps any crash reproducible.
 
 use core::cell::RefCell;
 use rustos_abi::{
@@ -37,44 +38,6 @@ use rustos_log::{set_max_level, Event, Level, Sink};
 /// Iteration count of one sweep. Pinned at 100 000 to match the
 /// abi-decode fuzz harness in `lib/abi/tests/fuzz_decode.rs` (Stage 1).
 const ITERATIONS: u64 = 100_000;
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-///
-/// `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` (`AGENTS.md`
-/// §19.6); a positive value turns the harness into a wall-clock loop. An
-/// unset, empty, zero, or unparsable value preserves the deterministic
-/// single-sweep behaviour.
-fn fuzz_deadline() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-/// `true` while the wall-clock budget has time left; always `false` for
-/// the fixed smoke sweep so the loop body runs exactly once.
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
 
 /// xor-shift* PRNG. Deterministic, fast, and zero-allocation; not used
 /// for anything except generating fuzz inputs.
@@ -321,10 +284,13 @@ fn fuzz_dispatcher_matches_mirror() {
         caps: &caps,
     };
 
-    let mut rng = Rng::new(seed(0xCAFE_F00D_DEAD_BEEF));
+    let mut rng = Rng::new(rustos_fuzzseed::start(
+        "fuzz_dispatcher_matches_mirror",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let mut accepted = 0u64;
     let mut rejected = 0u64;
-    let deadline = fuzz_deadline();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..ITERATIONS {
             // Bias the syscall number towards the populated range so the
@@ -401,7 +367,7 @@ fn fuzz_dispatcher_matches_mirror() {
                 ));
             }
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }

@@ -1,0 +1,28 @@
+[package]
+name = "rustos-fuzzseed"
+description = "Shared host test-support seam for the §19.6 fuzz harnesses, the §19.7 proptest models, and the filesystem soak: one place that picks a per-run PRNG seed (fresh entropy by default, env-pinned for replay), logs it at the start of each test, and bounds the smoke iteration count / soak budget. Test scaffolding only — never linked into RustOS itself (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Off by default so the orchestrator (`tools/xtask`) can depend on the seed /
+# budget primitives without pulling in proptest. The §19.7 model crates turn
+# it on (`rustos-fuzzseed = { ..., features = ["proptest"] }`) to share the
+# one `prop::drive` runner instead of re-implementing it per model (§2.2).
+proptest = ["dep:proptest"]
+
+[dependencies]
+# Optional: only the §19.7 stateful-model harnesses enable the `proptest`
+# feature. Same pinned, already-audited version the model crates use as a
+# dev-dependency. Test scaffolding only — never in a RustOS build (§2.12).
+proptest = { version = "=1.5.0", default-features = false, features = ["std"], optional = true }

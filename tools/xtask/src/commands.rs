@@ -220,22 +220,6 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 /// The `userland/gui/*` crates excluded from the headless image (§17.3).
 const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-taskbar"];
 
-/// The number of times `cargo xtask ci` runs the whole test matrix on a
-/// GitHub Actions runner.
-///
-/// A flaky test only manifests across repeated runs, so `ci` exercises
-/// every host, QEMU, and (when opted in) wasm test this many times rather
-/// than once. The fuzz and proptest gates are *not* repeated here: they
-/// already run for a wall-clock budget (§19.6, §19.7), so re-running them a
-/// fixed number of times would be redundant. See `AGENTS.md` §7 (no flaky
-/// tests).
-///
-/// This 20× cost only buys flake coverage on the CI runners; a developer
-/// running `cargo xtask ci` locally before pushing wants a single, fast
-/// pass, not hours of repetition. The repeat is therefore gated on the
-/// runner-set GitHub Actions signal — see [`ci_test_iterations`].
-pub const CI_TEST_ITERATIONS: u32 = 20;
-
 /// The environment variable GitHub Actions sets to `"true"` on every runner.
 ///
 /// It is documented as always present (and equal to `"true"`) inside a
@@ -246,34 +230,22 @@ const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
 
 /// Whether we are executing inside a GitHub Actions job.
 ///
-/// Reads the runner-set [`GITHUB_ACTIONS_ENV`] signal. Kept as a thin
-/// wrapper so [`ci_test_iterations`] stays a pure function the tests can
-/// exercise without touching the process environment.
+/// Reads the runner-set [`GITHUB_ACTIONS_ENV`] signal. The QEMU matrix uses
+/// it only to scale per-test timeouts for the slower shared runners; the
+/// test count itself is no longer CI-dependent (`ci` runs the matrix once,
+/// §7).
 fn in_github_actions() -> bool {
     std::env::var_os(GITHUB_ACTIONS_ENV).is_some_and(|v| v == "true")
-}
-
-/// How many times `ci` should repeat the test matrix.
-///
-/// Only the GitHub Actions runners pay the [`CI_TEST_ITERATIONS`] 20×
-/// flake-hunting cost; a local `cargo xtask ci` (e.g. run from the IDE
-/// before pushing) repeats the matrix once so it finishes in a sensible
-/// time. The nightly 24 h soak (`cargo xtask test --soak`) remains the
-/// deeper flake net.
-fn ci_test_iterations(in_github_actions: bool) -> u32 {
-    if in_github_actions {
-        CI_TEST_ITERATIONS
-    } else {
-        1
-    }
 }
 
 /// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
 ///
 /// Matches the fuzz/proptest soak floor (§19.6/§19.7). The nightly `soak`
 /// workflow repeats the whole test matrix for this long via
-/// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR 20×
-/// run still gets a full night of exposure.
+/// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR
+/// single-pass run still gets a full night of exposure. Flake-hunting
+/// repetition lives in the time-limited GitHub soaks, not in `ci`: a
+/// developer-machine and per-PR `ci` run executes the matrix exactly once.
 pub const TEST_SOAK_SECS: u64 = 24 * 60 * 60;
 
 /// How many times the test matrix repeats.
@@ -451,10 +423,12 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // and every run has a strict, finite timeout.
     //
     // `--count N` (alias `--iterations N`) runs the whole matrix N times;
-    // it defaults to one and is driven to `CI_TEST_ITERATIONS` by `ci` so
-    // a flaky test surfaces across repeated runs (§7). `--soak` (tuned by
-    // `--secs N`) instead repeats the matrix for a wall-clock budget, which
-    // the nightly `soak` workflow uses to run the tests for 24 h.
+    // it defaults to one, and `ci` runs the matrix exactly once (§7). The
+    // flake-hunting repetition lives in the time-limited GitHub soaks:
+    // `--soak` (tuned by `--secs N`) repeats the matrix for a wall-clock
+    // budget, which the nightly `soak` workflow uses to run the tests for
+    // 24 h. `--count N` remains for the orchestrator's own tests and ad-hoc
+    // local repeat runs.
     let opts = parse_test_options(args)?;
 
     // Build the opt-in matrices once, before any repeated passes, so a soak
@@ -738,23 +712,12 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // they run before the test matrix to fail a non-conforming PR fast.
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
-    // §7 (no flaky tests): on a GitHub Actions runner, run the whole test
-    // matrix `CI_TEST_ITERATIONS` times, not once. A flake (like the drvhost
-    // register-count race) only shows up across repeated runs, so a single
-    // green pass is not enough to call a PR clean. Locally the same 20×
-    // would cost hours, so a developer running `ci` from the IDE gets a
-    // single pass; the runners carry the flake-hunting budget. Fuzz and
-    // proptest are excluded below: they already run for a wall-clock budget
-    // (§19.6, §19.7).
-    let iterations = ci_test_iterations(in_github_actions());
-    run_test(
-        ctx,
-        &[
-            OsString::from("--qemu"),
-            OsString::from("--count"),
-            OsString::from(iterations.to_string()),
-        ],
-    )?;
+    // §7: run the whole test matrix exactly once. `ci` runs each test a
+    // single time, on a developer machine and on a CI runner alike; the
+    // flake-hunting repetition lives in the time-limited GitHub soaks
+    // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
+    // fuzz and proptest gates below likewise run a single iteration here.
+    run_test(ctx, &[OsString::from("--qemu")])?;
     run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
     // §19.3 supply-chain integrity: the source-hash allow-list and the
@@ -762,16 +725,18 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // advisory immediately); this gate caps how long one may be accepted
     // and fails closed when a pin drifts from `Cargo.lock`.
     run_supply_chain(ctx, &[])?;
-    // §19.6: the per-PR fuzz budget. Runs each in-tree harness for its
-    // ≥ 60 s `--quick` budget; a crash, hang, or invariant failure fails
-    // the gate (fail-closed). The nightly soak is `cargo xtask fuzz
-    // --soak`, run outside `ci`.
-    run_fuzz(ctx, &[OsString::from("--quick")])?;
-    // §19.7 Bronze: the per-PR stateful-model budget. Runs each capability
-    // model for its ≥ 5 s `--quick` budget; a counterexample, hang, or
-    // invariant failure fails the gate (fail-closed). The nightly soak is
-    // `cargo xtask proptest --soak`, run outside `ci`.
-    run_proptest(ctx, &[OsString::from("--quick")])?;
+    // §19.6: the per-PR fuzz gate. Runs each in-tree harness for a single
+    // iteration with a fresh, logged seed (a crash, hang, or invariant
+    // failure fails the gate, fail-closed). `ci` does not budget the
+    // harnesses — the wall-clock soak coverage is the time-limited GitHub
+    // soak (`cargo xtask fuzz --soak`, run outside `ci`).
+    run_fuzz(ctx, &[OsString::from("--once")])?;
+    // §19.7 Bronze: the per-PR stateful-model gate. Runs each capability
+    // model for a single iteration with a fresh, logged seed; a
+    // counterexample, hang, or invariant failure fails the gate
+    // (fail-closed). The wall-clock soak is `cargo xtask proptest --soak`,
+    // run outside `ci`.
+    run_proptest(ctx, &[OsString::from("--once")])?;
     // §19.7 Silver: exhaustively model-check the capability + IPC state
     // machine on every PR. The check is exhaustive (not budgeted) and fast,
     // so it always runs; a reachable invariant violation fails closed.
@@ -861,10 +826,7 @@ fn relative(base: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        cargo_subcommand_available, ci_test_iterations, parse_test_options, RunBudget,
-        CI_TEST_ITERATIONS, TEST_SOAK_SECS,
-    };
+    use super::{cargo_subcommand_available, parse_test_options, RunBudget, TEST_SOAK_SECS};
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
@@ -885,15 +847,6 @@ mod tests {
             &ctx,
             "definitely-not-a-real-cargo-subcommand"
         ));
-    }
-
-    /// On a GitHub Actions runner `ci` repeats the matrix 20× to hunt
-    /// flakes (§7); locally it runs once so a developer's pre-push `ci`
-    /// does not take hours.
-    #[test]
-    fn ci_repeats_the_matrix_only_on_github_actions() {
-        assert_eq!(ci_test_iterations(true), CI_TEST_ITERATIONS);
-        assert_eq!(ci_test_iterations(false), 1);
     }
 
     #[test]

@@ -9,21 +9,21 @@
 //! disagrees with the round-trip encoder.
 //!
 //! The same set of decoder functions is the entry point the `cargo xtask
-//! fuzz` orchestrator drives for ≥ 60 s per PR (`AGENTS.md` §19.6); the
-//! helper [`exercise`] keeps the contract centralised so the two cannot
-//! drift.
+//! fuzz` orchestrator drives for its wall-clock budget per PR (`AGENTS.md`
+//! §19.6); the helper [`exercise`] keeps the contract centralised so the two
+//! cannot drift.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Seed and budget (`AGENTS.md` §19.6, §2.2)
 //!
-//! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep so the
-//! suite stays fast and deterministic. When `cargo xtask fuzz` sets
-//! `RUSTOS_FUZZ_BUDGET_SECS`, [`budget`] returns a deadline and the
-//! PRNG-driven harness keeps drawing fresh inputs from the *same
-//! continuing* stream until it elapses — the §19.6 "run each harness for
-//! ≥ 60 s" contract. The seed is fixed, so a crash at draw N stays
-//! reproducible regardless of how far a given machine got. The
-//! bit-flip harness is an exhaustive boundary sweep, not a random one,
-//! so it runs once regardless of the budget.
+//! Seed selection, the start-of-test seed log, and the smoke / soak loop are
+//! the shared `rustos_fuzzseed` seam (one definition). A plain `cargo test`
+//! runs the fixed [`SMOKE_ITERATIONS`] sweep **once** from a *fresh, logged*
+//! seed; `cargo xtask fuzz --soak` sets `RUSTOS_FUZZ_BUDGET_SECS` and the
+//! PRNG-driven harness keeps drawing inputs from the *same continuing* stream
+//! until the deadline elapses. The seed is logged at the start of the run (and
+//! pinnable via `--seed`/`RUSTOS_FUZZ_SEED`), so a fresh-seed crash is still
+//! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
+//! random one, so it does not draw a seed.
 
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
@@ -42,46 +42,8 @@ use rustos_abi::{
 /// before mapping anything; the point is that no input panics.
 const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN];
 
-/// Fixed-iteration sweep run by a plain `cargo test` (no budget set).
+/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
-
-/// Deadline for the current run, or `None` for the fixed smoke sweep.
-///
-/// `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`; a positive value
-/// turns the PRNG-driven harness into a wall-clock loop. An unset,
-/// empty, zero, or unparsable value preserves the deterministic smoke
-/// behaviour.
-fn budget() -> Option<std::time::Instant> {
-    let secs: u64 = std::env::var("RUSTOS_FUZZ_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(std::time::Instant::now() + std::time::Duration::from_secs(secs))
-}
-
-/// `true` while the wall-clock budget has time left; always `false` for
-/// the fixed smoke sweep so the loop body runs exactly once.
-fn within_budget(deadline: Option<std::time::Instant>) -> bool {
-    matches!(deadline, Some(end) if std::time::Instant::now() < end)
-}
-
-/// Initial PRNG seed for this harness. `cargo xtask fuzz` exports
-/// `RUSTOS_FUZZ_SEED` so each soak run explores fresh inputs (`AGENTS.md`
-/// §19.6 / §2.1); a plain `cargo test` leaves it unset and replays the fixed
-/// `salt` for a reproducible smoke sweep. `salt` distinguishes independent
-/// PRNG streams within one harness.
-fn seed(salt: u64) -> u64 {
-    match std::env::var("RUSTOS_FUZZ_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(env) => env ^ salt,
-        None => salt,
-    }
-}
 
 /// Drive every ABI decoder on `bytes`.
 ///
@@ -266,44 +228,14 @@ fn exercise_process_builder(bytes: &[u8]) {
     }
 }
 
-/// Lehmer LCG (Park–Miller) — deterministic, no_std, no allocator.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        // Seed must not collapse the multiplicative recurrence to zero.
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        // Multiplier from Steele/Vigna's PCG paper; full-period.
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = Lcg::new(seed(0xCAFE_F00D_DEAD_BEEF));
+    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+        "random_short_inputs_never_panic",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    ));
     let mut buf = [0u8; 256];
-    let deadline = budget();
+    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Random size in [0, buf.len()].
@@ -314,7 +246,7 @@ fn random_short_inputs_never_panic() {
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }
-        if !within_budget(deadline) {
+        if !rustos_fuzzseed::within_budget(deadline) {
             break;
         }
     }

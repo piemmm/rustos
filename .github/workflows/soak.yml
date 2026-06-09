@@ -7,7 +7,7 @@ name: soak
 # RAM for the three in parallel), and the whole test matrix in parallel, each
 # for one 12 h block; the job re-dispatches itself when the block finishes, so
 # back-to-back blocks give continuous, unbroken exposure to a flake too rare to
-# surface in the per-PR 100× test run.
+# surface in the per-PR single-pass test run (where `ci` runs each test once).
 #
 # These cannot run on GitHub-hosted runners: a hosted job is hard-capped well
 # below a 12 h block. They therefore run on a *self-hosted Linux runner* (see

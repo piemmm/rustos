@@ -1,23 +1,21 @@
 name: ci
 
-# Run on every push and PR. The workflow runs the same `cargo xtask ci`
-# pipeline contributors run locally (so a green CI run and a green local run
-# check the same things; the only difference is the 20× test repeat below,
-# which is gated on the runner), then drives the §19.6 fuzz harnesses and
-# §19.7 proptest models for a per-job budget.
+# Run on every push and PR. The workflow runs the exact `cargo xtask ci`
+# pipeline contributors run locally — a green CI run and a green local run
+# check the same things — then drives the §19.6 fuzz harnesses and §19.7
+# proptest models as a time-limited, parallel soak.
 #
-# `cargo xtask ci` runs the whole test matrix 20× here (AGENTS.md §7: a
-# flaky test only surfaces across repeated runs, so a single green pass is
-# not enough to call a PR clean). The 20× repeat is gated on the runner-set
-# `GITHUB_ACTIONS=true` signal, so it costs the CI runners — not a developer
-# running `cargo xtask ci` locally, which runs the matrix once. The fuzz and
-# proptest gates are *not* repeated
-# 20×: they already run for a wall-clock budget, so `cargo xtask ci` runs
-# their per-PR `--quick` gate once and this workflow additionally runs the
-# full soak registry in parallel for a minimum of 120 s each via
-# `tools/ci/soak.sh`, the same thin parallel-soak wrapper the nightly `soak`
-# workflow uses (AGENTS.md §15: pipeline logic lives in `cargo xtask`, never
-# in tools/ci).
+# `cargo xtask ci` runs the whole test matrix exactly **once** (AGENTS.md §7:
+# `ci` runs each test a single time, on a developer machine and a CI runner
+# alike). It likewise runs the fuzz and proptest gates for a single iteration
+# (`--once`, a fresh+logged seed per harness). The flake-hunting repetition is
+# *not* in `ci`: it lives in the time-limited GitHub soaks. This workflow runs
+# the full fuzz+proptest registry in parallel for a minimum of 120 s each via
+# `tools/ci/soak.sh` (the same thin parallel-soak wrapper the nightly `soak`
+# workflow uses), and the nightly `soak` workflow runs the 24 h budget. Each
+# soak run draws a fresh seed, logged per job, so consecutive runs explore new
+# inputs and any failure replays from its logged seed (AGENTS.md §2.1/§15:
+# pipeline logic lives in `cargo xtask`, never in tools/ci).
 
 on:
   push:

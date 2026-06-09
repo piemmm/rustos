@@ -21,18 +21,17 @@
 //!
 //! ## Wall-clock budget (`AGENTS.md` §19.7)
 //!
-//! A plain `cargo test` runs [`SMOKE_CASES`] sequences from proptest's fixed
-//! deterministic RNG; `cargo xtask proptest` exports
-//! `RUSTOS_PROPTEST_BUDGET_SECS` and [`drive`] repeats batches until the budget
-//! elapses. The orchestrator also exports `RUSTOS_PROPTEST_SEED`
-//! ([`seeded_rng`]): a fresh seed each run so soaks draw new programs (§2.1),
-//! or a logged value via `--seed` to reproduce one.
+//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
+//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
+//! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
+//! deadline. The seed is logged at the start of each run (pinnable via
+//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
 
 use core::cell::RefCell;
-use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 use rustos_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, RandomFlags, SyscallNumber, SyscallSpec, SYSCALLS,
     SYSCALL_MAX_ARGS,
@@ -162,71 +161,6 @@ impl SyscallHandlers for CountingHandlers {
     }
 }
 
-fn budget_deadline() -> Option<Instant> {
-    let secs: u64 = std::env::var("RUSTOS_PROPTEST_BUDGET_SECS")
-        .ok()?
-        .parse()
-        .ok()?;
-    if secs == 0 {
-        return None;
-    }
-    Some(Instant::now() + Duration::from_secs(secs))
-}
-
-/// The `ChaCha` RNG `drive` runs from.
-///
-/// `cargo xtask proptest` exports `RUSTOS_PROPTEST_SEED` so each soak run
-/// draws fresh programs (`AGENTS.md` §19.7 / §2.1) while a logged seed still
-/// reproduces a counterexample; a plain `cargo test` leaves it unset and uses
-/// proptest's fixed deterministic RNG, keeping the smoke sweep reproducible.
-fn seeded_rng() -> TestRng {
-    match std::env::var("RUSTOS_PROPTEST_SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(seed) => TestRng::from_seed(RngAlgorithm::ChaCha, &expand_seed(seed)),
-        None => TestRng::deterministic_rng(RngAlgorithm::ChaCha),
-    }
-}
-
-/// Expand a 64-bit seed into proptest's 32-byte `ChaCha` seed via `SplitMix64`.
-fn expand_seed(seed: u64) -> [u8; 32] {
-    let mut state = seed;
-    let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
-    bytes
-}
-
-fn drive<S: Strategy>(strategy: S, check: impl Fn(S::Value) -> Result<(), TestCaseError>) {
-    let deadline = budget_deadline();
-    let cases = if deadline.is_some() {
-        BUDGET_BATCH_CASES
-    } else {
-        SMOKE_CASES
-    };
-    let config = Config {
-        cases,
-        failure_persistence: None,
-        ..Config::default()
-    };
-    let mut runner = TestRunner::new_with_rng(config, seeded_rng());
-    loop {
-        if let Err(err) = runner.run(&strategy, &check) {
-            panic!("proptest stateful model found a counterexample: {err}");
-        }
-        if !matches!(deadline, Some(end) if Instant::now() < end) {
-            break;
-        }
-    }
-}
-
 /// The capabilities the `abi-v1` table actually gates on, in ascending id
 /// order — the universe the model draws caller capability sets from.
 fn required_universe() -> Vec<CapabilityId> {
@@ -276,53 +210,59 @@ fn dispatch_capability_gate_tracks_oracle() {
     let universe = required_universe();
     let unassigned = u16::try_from(SYSCALLS.len()).expect("table length fits u16");
 
-    drive(program(universe.len()), move |calls| {
-        let sink = NullSink;
-        let handlers = CountingHandlers::default();
-        let dispatcher = Dispatcher::new(&handlers, &sink);
-        let mut expected_invocations = 0u64;
+    rustos_fuzzseed::prop::drive(
+        "dispatch_capability_gate_tracks_oracle",
+        SMOKE_CASES,
+        BUDGET_BATCH_CASES,
+        program(universe.len()),
+        move |calls| {
+            let sink = NullSink;
+            let handlers = CountingHandlers::default();
+            let dispatcher = Dispatcher::new(&handlers, &sink);
+            let mut expected_invocations = 0u64;
 
-        for call in &calls {
-            // Build the caller's capability set from the mask.
-            let mut cap_set = CapabilitySet::empty();
-            for (bit, cap) in universe.iter().enumerate() {
-                if call.cap_mask & (1 << bit) != 0 {
-                    cap_set.insert(*cap);
+            for call in &calls {
+                // Build the caller's capability set from the mask.
+                let mut cap_set = CapabilitySet::empty();
+                for (bit, cap) in universe.iter().enumerate() {
+                    if call.cap_mask & (1 << bit) != 0 {
+                        cap_set.insert(*cap);
+                    }
                 }
+                let caps = TaskCapabilities::derive(TaskId(7), UserId(1), cap_set, cap_set, &sink);
+                let ctx = CallerContext {
+                    task_id: TaskId(7),
+                    caps: &caps,
+                };
+
+                let mut args = [0u64; SYSCALL_MAX_ARGS];
+                let (raw_number, want) = match call.selector {
+                    s if s < SYSCALLS.len() => {
+                        let spec = &SYSCALLS[s];
+                        populate_valid_args(spec, &mut args);
+                        let want = match spec.required_capability {
+                            Some(required) if !cap_set.contains(required) => {
+                                Err(Errno::PermissionDenied)
+                            }
+                            _ => {
+                                expected_invocations += 1;
+                                Ok(0)
+                            }
+                        };
+                        (spec.number.as_u16(), want)
+                    }
+                    // In range but unassigned (no gaps in abi-v1 today).
+                    s if s == SYSCALLS.len() => (unassigned, Err(Errno::NotFound)),
+                    // Out of range.
+                    _ => (SyscallNumber::MAX + 1, Err(Errno::OutOfRange)),
+                };
+
+                let got = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));
+                prop_assert_eq!(got, want);
+                // The handler is reached exactly on the calls the oracle accepts.
+                prop_assert_eq!(handlers.count(), expected_invocations);
             }
-            let caps = TaskCapabilities::derive(TaskId(7), UserId(1), cap_set, cap_set, &sink);
-            let ctx = CallerContext {
-                task_id: TaskId(7),
-                caps: &caps,
-            };
-
-            let mut args = [0u64; SYSCALL_MAX_ARGS];
-            let (raw_number, want) = match call.selector {
-                s if s < SYSCALLS.len() => {
-                    let spec = &SYSCALLS[s];
-                    populate_valid_args(spec, &mut args);
-                    let want = match spec.required_capability {
-                        Some(required) if !cap_set.contains(required) => {
-                            Err(Errno::PermissionDenied)
-                        }
-                        _ => {
-                            expected_invocations += 1;
-                            Ok(0)
-                        }
-                    };
-                    (spec.number.as_u16(), want)
-                }
-                // In range but unassigned (no gaps in abi-v1 today).
-                s if s == SYSCALLS.len() => (unassigned, Err(Errno::NotFound)),
-                // Out of range.
-                _ => (SyscallNumber::MAX + 1, Err(Errno::OutOfRange)),
-            };
-
-            let got = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));
-            prop_assert_eq!(got, want);
-            // The handler is reached exactly on the calls the oracle accepts.
-            prop_assert_eq!(handlers.count(), expected_invocations);
-        }
-        Ok(())
-    });
+            Ok(())
+        },
+    );
 }

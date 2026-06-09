@@ -26,6 +26,11 @@ test-fixtures = []
 [dependencies]
 
 [dev-dependencies]
+# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
+# §2.2). Test scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The §19.6 fuzz harness (`tests/fuzz_fdt.rs`) drives the parser against
 # mutated-but-structured device trees. It builds those templates with the
 # crate's own `fixture` DTB builder rather than re-rolling a second builder
