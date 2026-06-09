@@ -1215,7 +1215,7 @@ where
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut() + Send>,
+        pre_resume: Box<dyn FnMut(u64) + Send>,
         mut enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError> {
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -3913,7 +3913,7 @@ mod tests {
             child_caps.insert(CapabilityId::CONSOLE_WRITE);
             // Inert closures: a host test never enters user mode or
             // reactivates a page-table root.
-            let pre_resume: Box<dyn FnMut() + Send> = Box::new(|| {});
+            let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
             let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
             // The host double hands a plain software-canary `BoxStack` — the
             // arena-backed guard-page stack is the arch producer's job

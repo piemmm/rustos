@@ -1290,6 +1290,40 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
+    // vertical — the first proof that a ring-3 task is admitted as a *resumable*
+    // user kthread on x86_64 and cooperatively parks/resumes under the live
+    // scheduler, the cross-port sibling of the aarch64 SP2c timeshare (one task;
+    // the two-task `gs:8` durable-save hazard is X2). Like the x86_64 `mem_map`
+    // vertical it boots the production `rustos-kernel` pipeline (so the GDT user
+    // selectors, the TSS, and `syscall`/`IA32_LSTAR` entry are installed). On
+    // `BootCompleted` it enables `IA32_EFER.NXE`, builds **one** hardware-
+    // isolated user address space from the pure-Rust `rustos-test-el0-yielder`
+    // fixture (built PIE + converted to `rxe` by `build.rs`) through the
+    // capability-checked, audited `kernel_core::spawn_image`, and admits it via
+    // `spawn_user_kthread`. The task's `pre_resume` hook reloads CR3
+    // (`paging::activate_user_root`) and repoints the per-CPU `syscall` entry
+    // stack at *this* task's own kernel stack (`syscall_entry::set_kernel_rsp0`,
+    // the X1 primitive the kthread seam hands the stack top to). The cooperative
+    // `step` loop drives it; the dispatch callback maps each `yield`/`exit`
+    // `syscall` to `reschedule_current`, so it ping-pongs with the dispatcher on
+    // its own kernel stack. PASS once it yielded its full count and exited; a
+    // wrong drain count, an unexpected syscall, or a stall flips
+    // `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7). Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work x86_64
+    // tests.
+    QemuTest {
+        package: "rustos-test-spawn-el0-resume-qemu-x86-64",
+        binary: "rustos-test-spawn-el0-resume-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `rustos-rt` `mem_map`-backed
     // `#[global_allocator]` works end to end in an EL0 process on the `virt`

@@ -355,7 +355,7 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut() + Send>,
+        pre_resume: Box<dyn FnMut(u64) + Send>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);

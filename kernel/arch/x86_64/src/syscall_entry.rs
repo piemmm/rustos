@@ -400,6 +400,65 @@ pub unsafe fn install_kernel_rsp0(
     }
 }
 
+/// Repoint the per-CPU [`SyscallTls::kernel_rsp0`] for `cpu_index` at
+/// `kernel_rsp0` *without* touching `IA32_KERNEL_GS_BASE` or the
+/// `user_rsp_save` slot.
+///
+/// This is the per-resume half of the X1 user-kthread `pre_resume` hook
+/// (`plans/PI.md` §X). [`install_kernel_rsp0`] runs once per CPU at boot and
+/// returns the address to load into `IA32_KERNEL_GS_BASE`; thereafter the
+/// `gs:` base is fixed and only the *value* in the slot must change. When
+/// the scheduler is about to resume a user kthread, the kernel stack the
+/// next `syscall` from that task must pivot onto is **that task's own**
+/// kernel stack — on aarch64 the EL1 trap reuses the running kthread's
+/// `SP_EL1` implicitly, but on x86_64 the entry stub reads the stack top
+/// from this per-CPU field, so it must be repointed explicitly before each
+/// resume or two tasks' syscall handlers would collide on one stack (a
+/// correctness *and* isolation defect, `AGENTS.md` §4).
+///
+/// The value is validated exactly as [`install_kernel_rsp0`] validates it
+/// ([`validate_kernel_rsp0`]: non-null, 16-byte aligned, canonical, kernel
+/// half) before it is written, so a hostile or buggy stack top is rejected
+/// fail-closed (`AGENTS.md` §3.5 / §5.4) rather than installed as a stack-
+/// pivot vector.
+///
+/// # Errors
+///
+/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index`
+///   is out of range.
+/// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
+///   `kernel_rsp0` is null, misaligned, non-canonical, or in the user half.
+///
+/// On the host target the per-CPU TLS arena is not compiled (it is gated to
+/// `target_os = "none"`), so the host arm validates `kernel_rsp0` and
+/// returns without a write — exactly the validation the bare-metal arm
+/// performs before its write, which is the security-relevant behaviour the
+/// host tests cover.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::percpu::InitError> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    if cpu_index >= MAX_CPUS {
+        return Err(crate::percpu::InitError::CpuIndexOutOfRange);
+    }
+    // Reject a non-canonical / user-range / misaligned stack top before it
+    // can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
+    validate_kernel_rsp0(kernel_rsp0)?;
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    // SAFETY: `cpu_index < MAX_CPUS` (checked above) keeps the slot in
+    // bounds; the resume runs on the dispatcher's context on this CPU, which
+    // is the only writer of its own slot, so the write does not race. Only
+    // the `kernel_rsp0` field is touched; `user_rsp_save` is left to the
+    // entry stub.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(PER_CPU_TLS).cast::<SyscallTls>();
+        let slot = base.add(cpu_index);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    let _ = cpu_index;
+    Ok(())
+}
+
 // --- Dispatcher callback storage ------------------------------------
 
 /// Signature of the Rust callback the syscall trampoline forwards
@@ -894,6 +953,49 @@ mod tests {
         assert!(!is_canonical(CANONICAL_HIGHER_BASE - 1));
         assert!(is_canonical(CANONICAL_HIGHER_BASE));
         assert!(is_canonical(u64::MAX));
+    }
+
+    // -- X1 per-resume kernel-RSP0 repoint (plans/PI.md §X) --------------
+    //
+    // `set_kernel_rsp0` writes the per-CPU TLS arena only on the bare-metal
+    // target; on the host it validates `kernel_rsp0` and returns. These pin
+    // that it applies the same fail-closed stack-pivot check as
+    // `install_kernel_rsp0` before it would ever repoint the slot.
+
+    #[test]
+    fn set_kernel_rsp0_accepts_a_canonical_aligned_kernel_stack() {
+        assert_eq!(set_kernel_rsp0(0, 0xFFFF_8000_0010_0000), Ok(()));
+        assert_eq!(set_kernel_rsp0(0, CANONICAL_HIGHER_BASE), Ok(()));
+    }
+
+    #[test]
+    fn set_kernel_rsp0_rejects_null_and_misaligned() {
+        assert_eq!(
+            set_kernel_rsp0(0, 0),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+        assert_eq!(
+            set_kernel_rsp0(0, 0xFFFF_8000_0010_0008),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+    }
+
+    #[test]
+    fn set_kernel_rsp0_rejects_a_user_range_stack() {
+        // A 16-byte-aligned canonical user-half address: repointing the
+        // entry stack there would be a stack-pivot vector.
+        assert_eq!(
+            set_kernel_rsp0(0, 0x0000_7FFF_FFF0_0000),
+            Err(InitError::InvalidKernelStackPointer)
+        );
+    }
+
+    #[test]
+    fn set_kernel_rsp0_rejects_a_non_canonical_stack() {
+        assert_eq!(
+            set_kernel_rsp0(0, 0x0001_0000_0000_0000),
+            Err(InitError::InvalidKernelStackPointer)
+        );
     }
 
     // -- §5 copy_from_user user-buffer validation (CWE-367 / CWE-822) ----

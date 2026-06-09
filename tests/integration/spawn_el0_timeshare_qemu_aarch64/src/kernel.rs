@@ -331,7 +331,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let cs = ContextSwitchHal::new();
     for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b)] {
         let user_mode = UserMode::new();
-        let pre_resume = move || {
+        let pre_resume = move |_stack_top: u64| {
             // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a
             // space that identity-maps the low kernel window the running kernel
             // executes from — exactly `activate_user_root`'s contract.

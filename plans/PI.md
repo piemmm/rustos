@@ -1065,28 +1065,27 @@ The fixes are structural, fail-closed (§2.9), and carry no `unsafe` without a
 is the minimal switch cost the aarch64 sibling already pays; no allocation or
 copy is added on the syscall hot path (§2.16).
 
-- **X1 — x86_64 single resumable user-kthread `[ ]`.**
-  - Add `rustos_arch_x86_64::paging::activate_user_root(root_phys)` (load CR3,
-    host no-op arm), mirroring the aarch64 one, behind the `pre_resume` hook.
-  - Make the user-kthread's kernel-stack top reach the x86_64 resume hook so
-    `pre_resume` can set `kernel_rsp0` to **this** task's kernel stack. The
-    arch-neutral `kernel/core::kthread`/`spawn_user_kthread` seam gains a
-    minimal, justified way to hand the per-task kernel-stack top to the arch
-    hook — this *closes the gap aarch64 fills implicitly via `SP_EL1`*, not
-    interface creep (§2.4). Add a light `syscall_entry::set_kernel_rsp0(cpu,
-    top)` that updates only the `SyscallTls.kernel_rsp0` field (no MSR rewrite,
-    unlike `install_kernel_rsp0`), with the same canonical/alignment/non-user
-    validation (§3.5 / §5.4).
-  - Prove with a new bare `tests/integration/spawn_el0_resume_qemu_x86_64`:
-    **one** ring-3 task admitted via `spawn_user_kthread`, yielding N times then
-    exiting, driven by the live `Scheduler::step` loop — proving the
-    cooperative park/resume round-trip lands back on the task's own kernel
-    stack at the right RIP/RSP. A single task does **not** yet exercise the
-    `gs:8` hazard (that is X2), so X1 needs no return-state change to pass,
-    keeping the chunk bounded and honest (the fix without a test that reaches
-    it would be speculative, §2.4 — it lands with its exerciser in X2).
-  - Host unit tests for the `activate_user_root` / `set_kernel_rsp0` value math
-    + validation; docs in `docs/src/platform/x86_64.md`.
+- **X1 — x86_64 single resumable user-kthread `[x]`.** A single ring-3 task
+  is admitted as a resumable user kthread and cooperatively parks/resumes under
+  the live scheduler on x86_64. Two primitives, the siblings of the aarch64
+  `activate_user_root`: `rustos_arch_x86_64::paging::activate_user_root(root_phys)`
+  reloads CR3 (free `mov cr3`, host no-op; the load flushes non-global TLB
+  entries so no `invlpg`), and `syscall_entry::set_kernel_rsp0(cpu, top)`
+  repoints only the per-CPU `SyscallTls.kernel_rsp0` field (no MSR rewrite, no
+  `user_rsp_save` touch) after the same fail-closed `validate_kernel_rsp0`
+  stack-pivot check. The arch-neutral `kernel/core::kthread` `pre_resume` hook
+  now takes the task's own kernel-stack top (`PreResume = FnMut(u64)`; the
+  dispatcher passes `stack.top()`) — closing the gap aarch64 fills implicitly
+  via `SP_EL1` (§2.4, not interface creep). The aarch64 hooks ignore the arg.
+  Proven by `tests/integration/spawn_el0_resume_qemu_x86_64`: boots the
+  production pipeline, builds one isolated ring-3 space via `spawn_image`,
+  admits it via `spawn_user_kthread` whose `pre_resume` reloads CR3 +
+  `set_kernel_rsp0`, drives `Scheduler::step`, and PASSes once the task yielded
+  its full count and exited (dispatch maps `yield`/`exit` to
+  `reschedule_current`). The durable user-`%rsp` `gs:8` hazard is **not**
+  exercised by one task; its structural fix lands with its two-task exerciser
+  in X2. Host tests cover `set_kernel_rsp0`'s validation; docs in
+  `docs/src/platform/x86_64.md` ("Resumable ring-3 user kthread").
 
 - **X2 — x86_64 return-state survives a concurrent park + two-task EL0
   timeshare `[ ]`.**

@@ -269,8 +269,10 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // before every switch into the child, so it `eret`s into EL0 under
         // its own `TTBR0_EL1` root and stays hardware-isolated from the
         // spawning parent and every sibling (`AGENTS.md` §4). It captures only
-        // the `u64` root, so it is `Send`.
-        let pre_resume: Box<dyn FnMut() + Send> = Box::new(move || {
+        // the `u64` root, so it is `Send`. It is handed the task's kernel-
+        // stack top (the x86_64 port uses it to repoint its per-CPU syscall
+        // entry stack); aarch64 reuses `SP_EL1` and ignores it (§X).
+        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
             // SAFETY: the MMU is already enabled and `child_root_phys` is the
             // L1 root of the child's space, which identity-maps the low
             // kernel window the running kernel executes from — exactly

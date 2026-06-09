@@ -160,7 +160,7 @@ pub trait InitSpawnCtx {
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut() + Send>,
+        pre_resume: Box<dyn FnMut(u64) + Send>,
         enter: Box<dyn FnMut() + Send>,
     );
 }
@@ -499,7 +499,10 @@ pub trait SpawnCtx {
     /// task's kthread work body, run once on the task's first dispatch.
     /// `pre_resume` reactivates the task's page-table root before every
     /// switch into it, keeping it hardware-isolated from its siblings
-    /// (`AGENTS.md` §4).
+    /// (`AGENTS.md` §4). It is handed the task's own kernel-stack top so a
+    /// port whose syscall entry does not implicitly resume on that stack
+    /// (x86_64) can repoint its per-CPU entry stack at it (`plans/PI.md`
+    /// §X); aarch64 reuses `SP_EL1` and ignores the argument.
     ///
     /// `stack` is the child's kernel stack, built by the arch seam so the
     /// concrete stack source never leaks into this object-safe boundary
@@ -530,7 +533,7 @@ pub trait SpawnCtx {
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut() + Send>,
+        pre_resume: Box<dyn FnMut(u64) + Send>,
         enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError>;
 }

@@ -122,15 +122,28 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   traps). A `pre_resume` hook (carried by `spawn_user_kthread`) runs on the
   dispatcher side before every switch-in; its presence is what marks a task
   as a *user* kthread and what reactivates the task's address space so it
-  `eret`s under the correct translation regime (§4).
+  `eret`s under the correct translation regime (§4). The dispatcher passes
+  the hook the task's **own kernel-stack top** (`KernelStack::top`): a port
+  whose syscall entry does not implicitly resume on the running task's
+  kernel stack uses it to repoint its per-CPU entry stack (see x86_64,
+  below); a port that does (aarch64) ignores it.
 
 ### EL0 wiring (SP2b — implemented)
 
 * **Per-arch address-space reactivation.** The `pre_resume` hook captures
   only the user page-table root (a `u64`, keeping the runtime `Send`) and
   calls a small per-arch `activate_user_root` primitive (on aarch64:
-  reprogram `TTBR0_EL1` + `tlbi`/`isb`, MMU already on), so each task stays
-  hardware-isolated (§4).
+  reprogram `TTBR0_EL1` + `tlbi`/`isb`, MMU already on; on x86_64: reload
+  `CR3`), so each task stays hardware-isolated (§4).
+* **Per-arch syscall-entry stack (x86_64, `plans/PI.md` X1).** Where an EL1
+  trap implicitly reuses the running kthread's `SP_EL1` (aarch64), the
+  x86_64 `syscall` stub instead loads its kernel stack from a per-CPU slot,
+  so the x86_64 `pre_resume` hook additionally feeds the kernel-stack top
+  the dispatcher hands it to `syscall_entry::set_kernel_rsp0`, repointing
+  that slot at *this* task's own kernel stack before the switch-in — without
+  it two tasks' syscall handlers would collide on one stack (a correctness
+  *and* isolation defect, §4). See [the x86_64 platform
+  page](../platform/x86_64.md) ("Resumable ring-3 user kthread").
 * **The producer.** `KernelDispatchHook` maps the `yield` / `exit`
   syscalls to `DispatchOutcome::Reschedule`, and the arch trap callback
   acts on it by calling `reschedule_current` instead of returning to user

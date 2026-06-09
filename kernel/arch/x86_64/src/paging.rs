@@ -448,6 +448,61 @@ impl AddressSpace {
     }
 }
 
+/// Reactivate `root_phys` as the active top-level translation root (load
+/// `CR3`) on a CPU whose paging is already enabled.
+///
+/// This is the X1 user-kthread `pre_resume` primitive (`plans/PI.md` §X),
+/// the x86_64 sibling of the aarch64 `activate_user_root`: immediately
+/// before the kernel returns into a user task's ring 3, that task's own
+/// PML4 must be installed so its translations — and only its — are in
+/// force, keeping sibling processes hardware-isolated (`AGENTS.md` §4). It
+/// takes only the `u64` root, so the per-task hook that calls it captures a
+/// plain word and stays `Send`.
+///
+/// Unlike a full mode switch this only reloads `CR3`: the rest of the
+/// paging configuration (`EFER.NXE`, `CR0`/`CR4` paging controls) is
+/// already in force and identical across user spaces, and only the
+/// top-level root changes between them. Loading `CR3` flushes the
+/// non-global TLB entries as a side effect (Intel SDM Vol 3A §4.10.4), so
+/// no explicit invalidation is needed.
+///
+/// # Safety
+///
+/// Paging must already be enabled, and the PML4 at `root_phys` must map the
+/// currently-executing kernel `rip`, `rsp`, and the data the code touches
+/// (the per-CPU `swapgs` TLS, the dispatcher's stack) identically to the
+/// outgoing root — every RustOS user space maps the low identity window and
+/// the higher-half kernel window, so this holds for any task root, but a
+/// `root_phys` that does not faults the CPU on its next access.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    // SAFETY: `mov cr3, _` swaps the active translation root and flushes the
+    // non-global TLB entries; it touches no memory and no Rust spelling
+    // exists for `CR3`. The caller's contract guarantees the new root covers
+    // the running kernel context (see the `# Safety` paragraph above).
+    unsafe {
+        core::arch::asm!(
+            "mov cr3, {root}",
+            root = in(reg) root_phys,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: reloading `CR3` is meaningful only on the bare-metal
+/// x86_64 target. Never linked into a kernel image and never reached on the
+/// host (the QEMU verticals exercise the real reload).
+///
+/// # Safety
+///
+/// Carries the same contract as the bare-metal definition above (paging
+/// enabled; `root_phys` maps the running kernel context), so the two `cfg`
+/// arms present one `unsafe` API. The host body is inert.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    let _ = root_phys;
+}
+
 impl MmuAddressSpace for AddressSpace {
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 || (paddr & (PAGE_SIZE as u64 - 1)) != 0 {

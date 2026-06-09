@@ -517,7 +517,14 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
 }
 
 /// A user kthread's pre-resume hook: see [`ThreadControl::pre_resume`].
-type PreResume = Box<dyn FnMut() + Send + 'static>;
+///
+/// The dispatcher passes the task's own kernel-stack top (the value
+/// [`KernelStack::top`] returns for this task's stack) so a port whose
+/// syscall entry does not implicitly land on the running task's kernel
+/// stack can repoint its per-CPU entry stack at it before the switch-in.
+/// aarch64 reuses `SP_EL1` implicitly and ignores the argument; x86_64
+/// uses it to set the per-CPU `SyscallTls.kernel_rsp0` (`plans/PI.md` §X).
+type PreResume = Box<dyn FnMut(u64) + Send + 'static>;
 
 /// The entry point a freshly prepared kthread first runs.
 ///
@@ -680,7 +687,7 @@ where
     C: ContextSwitch + Copy + Send + 'static,
     A: SchedulerArch,
     P: SchedulerPolicy<A>,
-    R: FnMut() + Send + 'static,
+    R: FnMut(u64) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_user_kthread_with_stack(
@@ -717,7 +724,7 @@ where
     A: SchedulerArch,
     P: SchedulerPolicy<A>,
     S: KernelStack + Send + 'static,
-    R: FnMut() + Send + 'static,
+    R: FnMut(u64) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_control(
@@ -829,10 +836,15 @@ where
     // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
     let is_user = unsafe { (*ctl).pre_resume.is_some() };
     if is_user {
+        // The task's own kernel-stack top: a port whose syscall entry does
+        // not implicitly resume on the running task's kernel stack (x86_64)
+        // repoints its per-CPU entry stack at this before the switch-in
+        // (`plans/PI.md` §X). SAFETY: exclusive dispatcher-side access.
+        let stack_top = unsafe { (*ctl).stack.top() };
         // SAFETY: `pre_resume` is `Some`; the field is exclusively ours
         // between switches, so the `&mut` borrow does not alias.
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
-            pre();
+            pre(stack_top);
         }
         publish_resume::<C, S>(cpu, ctl);
     }
@@ -1048,7 +1060,7 @@ mod tests {
             state: RunState::NotStarted,
             stack,
             work: Some(Box::new(|_y: &mut Yielder<C>| {})),
-            pre_resume: Some(Box::new(move || {
+            pre_resume: Some(Box::new(move |_stack_top: u64| {
                 hits.fetch_add(1, Ordering::SeqCst);
             })),
         })
