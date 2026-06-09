@@ -1524,6 +1524,39 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
+    // fault-form. `rustos-test-stack-overrun-qemu-aarch64` proves that an
+    // overrunning kthread takes a synchronous data abort, not a
+    // next-reschedule canary detection. It builds a stage-1 identity
+    // `AddressSpace`, prepares a 2 MiB-aligned guard arena
+    // (`AddressSpace::prepare_guard_arena`, G2), carves one kthread stack
+    // region `[guard page | usable stack]` out of it, installs the EL1
+    // vectors + a `fault` handler, enables the MMU, then `unmap`s the guard
+    // page through the Arch HAL + `flush_page`s it — the production
+    // guard-page mechanism (G3b-2). It then builds the live
+    // `rustos-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`, admits a
+    // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
+    // drives the cooperative `step` loop. The kthread body overruns its
+    // stack (touches the highest guard byte, the first byte a contiguous
+    // downward overrun crosses); because the guard page is unmapped the
+    // access raises a synchronous data abort *while the kthread runs*, the
+    // handler confirms the cause / faulting address, and reports PASS via
+    // semihosting. A regression that left the page mapped lets the body
+    // return cleanly; the drain loop then reports FAILURE explicitly rather
+    // than passing. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-stack-overrun-qemu-aarch64",
+        binary: "rustos-test-stack-overrun-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
     // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
     // `rustos-test-irq-qemu-aarch64` installs the EL1 vectors, brings up the

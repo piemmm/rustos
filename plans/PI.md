@@ -825,8 +825,8 @@ canary on every switch-back, failing the task closed on an overrun rather
 than letting it reach the heap neighbour (`AGENTS.md` §4 / §2.9 / §2.17,
 host-proven; the same emulation `kernel/mem`'s slab guard documents). **This
 is the real, non-deferred defence — not the old 64 KiB limit bump.** The
-remaining work is the *deployment* form, which turns the overrun into an
-immediate hardware fault instead of a next-reschedule detection `[ ]`:
+*deployment* form, which turns the overrun into an immediate hardware fault
+instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
 - Lay the guard region on its own 4 KiB page (the stack allocation is
   already page-multiple) and **unmap** that page in the kernel's own
   (`TTBR0`) tables, so a write into it faults synchronously.
@@ -839,10 +839,11 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
   is the binding defence (§2.17 — a guard now, the fault-form staged, never
   "security later").
 
-  The fault-form is being built *properly* (the running kernel cannot
-  break-before-make-shatter the 1 GiB block it is itself executing on and
-  stacked in: the BBM "break" window would momentarily unmap the running
-  stack/code), so it is staged G1..G3:
+  **The fault-form is now complete on aarch64 (G1–G3c all `[x]`).** It was
+  built *properly* (the running kernel cannot break-before-make-shatter the
+  1 GiB block it is itself executing on and stacked in: the BBM "break"
+  window would momentarily unmap the running stack/code), so it was staged
+  G1..G3:
 
   - **G1 — aarch64 page-table block-split primitive `[x]`.** The missing
     foundation: `rustos_arch_aarch64::paging::AddressSpace::split_block(vaddr)`
@@ -988,9 +989,31 @@ immediate hardware fault instead of a next-reschedule detection `[ ]`:
       session still runs and is supervised, now on the arena stack. Doc:
       `docs/src/platform/aarch64.md` ("Routing the kthread stack through the
       arena (G3b-2)").
-  - **G3c — production fault-form on `-M virt` `[ ]`.** Prove an
+  - **G3c — production fault-form on `-M virt` `[x]`.** Proves an
     overrunning kthread takes a synchronous data abort, not a
-    next-reschedule canary detection.
+    next-reschedule canary detection. `tests/integration/stack_overrun_qemu_aarch64`
+    builds a stage-1 identity `AddressSpace`, prepares a 2 MiB-aligned guard
+    arena (`prepare_guard_arena`, G2), carves one kthread stack region
+    `[guard page | usable stack]` out of it, installs the EL1 vectors + a
+    `fault` handler, enables the MMU, then `unmap`s the guard page through
+    the Arch HAL + `flush_page`s it — exactly the G3b-2 production mechanism.
+    It then builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    `Aarch64Arch`, admits a kthread on that stack via
+    `kernel_core::spawn_kthread_with_stack` (the production runtime path),
+    and drives the cooperative `step` loop. The kthread body overruns its
+    stack by touching the highest byte of the guard region (the first byte a
+    contiguous downward overrun crosses); because that page is unmapped the
+    access raises a synchronous data abort *while the kthread runs* (the
+    abort is taken on the still-healthy usable stack above the guard, so the
+    EL1 trampoline does not nest-fault), the handler confirms the cause
+    (`ESR_EL1` abort) + faulting address (`FAR_EL1` in the guard page), and
+    reports PASS via semihosting. A regression that left the page mapped lets
+    the body return cleanly; the drain loop then reports FAILURE explicitly
+    rather than passing (§2.9). Enrolled in
+    `tools/xtask/src/commands/qemu_tests.rs` (single CPU, 60 s); **verified
+    green under QEMU on `-M virt` on this host**. With G3c landed the
+    guard-page fault-form (G1–G3) is complete on aarch64. Doc:
+    `docs/src/platform/aarch64.md` ("Proving the overrun fault-form (G3c)").
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

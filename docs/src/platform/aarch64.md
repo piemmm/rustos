@@ -875,8 +875,39 @@ false-positive). The allocator's bump arithmetic is host-tested
 writes its banner, and supervises the session — `init` and the session
 both on arena-backed stacks.
 
-One follow-on remains: proving an *overrunning* kthread takes the
-synchronous abort on `-M virt` is the separate **G3c** vertical.
+### Proving the overrun fault-form (G3c)
+
+G3b-2 unmaps each kthread stack's guard page; **G3c** proves the payoff on
+the `virt` board: a live, scheduled kthread that overruns its kernel stack
+takes a **synchronous data abort the instant the overrun crosses the guard
+page**, rather than the next-reschedule poison-canary detection the
+heap-backed `BoxStack` falls back to.
+`tests/integration/stack_overrun_qemu_aarch64`:
+
+- builds a stage-1 identity `AddressSpace`, prepares a 2 MiB-aligned guard
+  arena (`prepare_guard_arena`, G2), and carves one kthread stack region
+  `[guard page | usable stack]` out of it;
+- installs the EL1 vectors + a `fault` handler, enables the MMU, then
+  `unmap`s the guard page through the Arch HAL + `flush_page`s it — exactly
+  the G3b-2 production mechanism;
+- builds the live `rustos-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`
+  and admits a kthread on that stack through
+  `kernel_core::spawn_kthread_with_stack` (the production runtime path), then
+  drives the cooperative `step` loop;
+- the kthread body overruns its stack by touching the highest byte of the
+  guard region — the first byte a contiguous downward overrun crosses.
+  Because that page is unmapped the access faults synchronously *while the
+  kthread runs*; the abort is taken on the still-healthy usable stack above
+  the guard, so the EL1 trampoline does not nest-fault. The handler confirms
+  the cause (`ESR_EL1` is an abort) and the faulting address (`FAR_EL1`
+  inside the guard page) and reports PASS via the semihosting finisher.
+
+A regression that left the guard page mapped lets the body return cleanly;
+the drain loop then reports FAILURE explicitly rather than passing
+(`AGENTS.md` §2.9). The vertical is enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` (single CPU, 60 s) and is **verified
+green under QEMU on `-M virt`**. With G3c landed the guard-page fault-form
+(G1–G3) is complete on aarch64.
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

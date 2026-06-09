@@ -2053,9 +2053,20 @@ Each sub-stage delivers one architecture. They share the same checklist:
                   *own* never-switched-to `arch` root (`BoxStack`-canary
                   fallback). Host-proven (11 `spawn` admit + `stack_arena`
                   tests; aarch64 kernel builds clean) + the `spawn_session`/
-                  `spawn_init`/`wait` `-M virt` verticals green. Only the
-                  production fault-form proof on `-M virt` (G3c) follows.
-                  Docs: `docs/src/platform/aarch64.md`.
+                  `spawn_init`/`wait` `-M virt` verticals green. **G3c is now
+                  landed, completing the guard-page fault-form (G1–G3) on
+                  aarch64:** `tests/integration/stack_overrun_qemu_aarch64`
+                  builds an identity space + guard arena, carves one kthread
+                  stack region, `unmap`s its guard page through the Arch HAL,
+                  admits a kthread on it via
+                  `kernel_core::spawn_kthread_with_stack`, and drives the
+                  cooperative `step` loop; the kthread overruns into the
+                  unmapped guard page and takes a **synchronous data abort**
+                  while running (not a next-reschedule canary scan), the
+                  `fault` handler confirming the cause + `FAR_EL1` in the
+                  guard page → PASS, **verified green under QEMU on `-M virt`
+                  on this host** (enrolled single-CPU, 60 s). Docs:
+                  `docs/src/platform/aarch64.md`.
 
 **Stage 3c status: complete.**
 - The riscv64 boot stub, SBI console, FDT reader, `RiscvArch`

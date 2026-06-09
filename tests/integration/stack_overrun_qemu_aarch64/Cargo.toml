@@ -1,0 +1,47 @@
+[package]
+name = "rustos-test-stack-overrun-qemu-aarch64"
+description = "plans/PI.md guard-page fault-form (stage G3c) QEMU integration test: prove the production fault-form on the virt board — a live kthread running on an arena-backed kernel stack whose guard page is unmapped takes a synchronous data abort when it overruns into that guard page, rather than the deferred next-reschedule canary detection a heap-backed BoxStack falls back to."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "spawn a real kthread on an arena-backed kernel stack with an
+# unmapped guard page, have it overrun into the guard, and prove the MMU
+# raises a synchronous data abort" integration test: the `-M virt` proof of
+# the `plans/PI.md` stage-G3c production fault-form. It links the
+# `rustos-kernel-core` kthread runtime, the `rustos-arch-aarch64` port, and
+# the default `rustos-kernel-sched-eevdf` policy, builds a guard arena
+# (`AddressSpace::prepare_guard_arena`), allocates one kthread stack region in
+# it, unmaps the guard page through the Arch HAL, admits the kthread via
+# `spawn_kthread_with_stack`, and drives the cooperative `step` loop; the
+# kthread's overrun into the unmapped guard page faults synchronously and the
+# `fault` handler reports the result through the ARM semihosting finisher.
+# Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
+# library crate) prevents feature unification from leaking it into any
+# production build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-stack-overrun-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The Arch HAL MMU + TLB surface (`AGENTS.md` §17.2): the guard page is torn
+# down through `rustos_arch_api::mmu::AddressSpace::unmap` and the stale entry
+# flushed through `rustos_arch_api::tlb::TlbShootdown::flush_page`, so the
+# fault-form is proven *through the HAL*.
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
