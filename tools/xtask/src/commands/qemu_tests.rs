@@ -1334,6 +1334,41 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
+    // concurrent-producer vertical — the cross-port sibling of
+    // `spawn_session_qemu_aarch64` / `_x86_64`, proving a parent task's
+    // `CAP_PROC_SPAWN`-gated `spawn` builds a fresh, hardware-isolated Sv39
+    // child space and admits it Ready concurrently on the riscv64 `virt` board.
+    // The build script compiles the pure-Rust `rustos-test-spawn-session-program`
+    // fixture twice (the parent role and the child/session role, built PIE +
+    // converted to `rxe`). On boot it reads the generic-timer rate from the
+    // firmware device tree, installs the trap vector + a dispatch callback,
+    // builds the parent a hardware-isolated Sv39 U-mode space via
+    // `kernel_core::spawn_image` (capability-checked + audited), and admits it
+    // via `spawn_user_kthread` onto a leaked-`'static` live scheduler. The
+    // parent issues a real `spawn` `ecall`; the dispatch callback routes it to a
+    // riscv64 `ProcessSpawn` producer that builds the child a fresh isolated
+    // Sv39 space THROUGH THE PARENT'S IDENTITY WINDOW WITHOUT switching the
+    // running parent's `satp` and admits it Ready concurrently. The callback
+    // maps each `yield`/`exit` `ecall` to `reschedule_current`, so the parent
+    // and child timeshare the hart on their own kernel stacks (the RV1 park-safe
+    // path). PASS once the producer built the child and both tasks ran to
+    // `exit`; a failed spawn, an unexpected syscall, a wrong drain count, or a
+    // stall flips `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md`
+    // §7). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-session-qemu-riscv64",
+        binary: "rustos-test-spawn-session-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
     // `mem_unmap` vertical — the x86_64 sibling of the aarch64/riscv64
     // verticals above, proving a ring-3 process obtains and releases anonymous

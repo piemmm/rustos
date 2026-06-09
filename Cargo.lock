@@ -1958,6 +1958,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-spawn-session-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-test-spawn-session-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -1965,6 +1972,22 @@ dependencies = [
  "rustos-bumpalloc",
  "rustos-itest-harness",
  "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-spawn-session-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
  "rustos-log",
 ]
 

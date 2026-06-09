@@ -211,6 +211,42 @@ kernel stack). A trap from whichever task resumes therefore always lands
 on *its* kernel stack, so each `pre_resume` hook only reactivates its
 `satp` root and ignores the kernel-stack-top argument.
 
+### Runtime `spawn` concurrent producer (RV-X3)
+
+`tests/integration/spawn_session_qemu_riscv64` proves a parent U-mode
+task's `CAP_PROC_SPAWN`-gated `spawn` builds a fresh, hardware-isolated
+Sv39 child and admits it **Ready** concurrently on `-M virt` — the
+riscv64 sibling of `spawn_session_qemu_aarch64` / `_x86_64`. The
+pure-Rust `spawn_session_program` fixture is built in two roles from one
+source (`AGENTS.md` §2.2): the **parent** issues a `spawn` for the
+session, then yields; the **child** (session) yields and exits.
+
+On boot the test reads the timer rate, builds the parent a hardware-
+isolated Sv39 space through the audited `kernel_core::spawn_image`,
+admits it as a resumable user kthread, and drains the cooperative
+`Scheduler::step` loop. When the parent's `spawn` `ecall` reaches the
+dispatch callback it is routed to a riscv64 `ProcessSpawn` producer (the
+cross-port equal of `Aarch64ProcessSpawn` / the x86_64 producer): the
+producer builds the child its own Sv39 space over a separate
+`PageTablePool` (drawing data frames from the same monotonic pool, so the
+two spaces never alias, §4), then admits it Ready via
+`spawn_user_kthread` — returning the child's PID to the parent, which
+keeps running (a true concurrent spawn, not an `exec` hand-off, §4). The
+callback maps `yield`/`exit` to `reschedule_current` as in RV-X2, so the
+parent and child timeshare the hart on their own kernel stacks. PASS once
+the producer built the child and both tasks yielded their full count and
+exited.
+
+The crux mirrors the other ports: the producer builds the child's tables
+**without switching the running parent's `satp`**. It captures the
+child's Sv39 root but never activates the child space; instead it writes
+every child mapping through the parent's identity window (the child's
+`PageTablePool` and the data frames both live in the low 4 GiB the parent
+identity-maps), so the build touches only physical addresses the parent
+already maps and never moves the running parent out from under itself.
+The child's own root is installed by its `pre_resume` hook
+(`activate_user_root`) the first time the scheduler resumes it.
+
 ## Stage 3 architecture primitives
 
 These are the host-tested arch primitives the Stage-3 per-sub-stage

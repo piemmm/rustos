@@ -1309,8 +1309,29 @@ fully-gated chunk per landing:
   kernel-stack-top argument (the predicted per-task `sscratch` repointing is
   unnecessary, as aarch64 SP2c needed nothing over SP2b). Doc:
   `docs/src/platform/riscv64.md` ("Two-task U-mode timeshare (RV-X2)").
-- **RV-X3 `spawn` concurrent producer + RV-X4 `wait` `[ ]`** (SP3b/SP4/SP6
-  siblings), each its own fully-gated landing.
+- **RV-X3 — `spawn` concurrent producer `[x]`** (SP3b/SP4 sibling).
+  `tests/integration/spawn_session_qemu_riscv64` proves a parent U-mode
+  task's `CAP_PROC_SPAWN`-gated `spawn` builds a fresh, hardware-isolated
+  Sv39 child and admits it **Ready** concurrently on `-M virt`. The
+  `spawn_session_program` fixture is one source in two roles (parent
+  `spawn`s the session then yields; child/session yields then exits,
+  `AGENTS.md` §2.2). The mini-kernel admits the parent as a resumable user
+  kthread; its `spawn` `ecall` is routed by the dispatch callback to a
+  riscv64 `ProcessSpawn` producer (the cross-port equal of
+  `Aarch64ProcessSpawn` / the x86_64 producer) that builds the child its
+  own Sv39 space over a separate `PageTablePool` (data frames from the same
+  monotonic pool, never aliasing, §4) **through the parent's identity
+  window without switching the running parent's `satp`**, admits it Ready
+  via `spawn_user_kthread`, and returns its PID — the parent keeps running
+  (a true concurrent spawn). The child's own root is installed by its
+  `pre_resume` hook (`activate_user_root`) on first resume. PASS once the
+  producer built the child and both tasks yielded their full count and
+  exited (two `ProcessSpawned`). Doc: `docs/src/platform/riscv64.md`
+  ("Runtime `spawn` concurrent producer (RV-X3)").
+- **RV-X4 — `wait` `[ ]`** (SP6 sibling): the riscv64 cross-port equal of
+  `wait_qemu_aarch64` / `_x86_64` — a parent `wait`s on its spawned child,
+  parks until the child exits, reaps it, and reads its code. Its own
+  fully-gated landing.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

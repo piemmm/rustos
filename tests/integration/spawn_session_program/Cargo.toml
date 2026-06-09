@@ -1,0 +1,24 @@
+[package]
+name = "rustos-test-spawn-session-program"
+description = "plans/PI.md stage RV-X3 fixture: a minimal, separately-linked pure-Rust EL0 program built in two roles from one source. In the PARENT role it issues a real CAP_PROC_SPAWN-gated `spawn` syscall for the embedded session program, checks the returned PID is non-negative, yields a build-pinned number of times so the child interleaves, then exits 0; in the CHILD (session) role it yields a build-pinned number of times then exits 0. The consuming vertical (tests/integration/spawn_session_qemu_riscv64) compiles it twice, runs the parent under the live scheduler, and routes its `spawn` ecall to the riscv64 ProcessSpawn producer that builds the child a fresh isolated Sv39 space and admits it Ready concurrently. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-spawn-session-program"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`),
+# which exists solely for non-Rust programs (`AGENTS.md` §16.4). Only on the
+# three native Tier-1 targets (`target_os = "none"`); on the host it is an inert
+# stub so `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
