@@ -1216,19 +1216,40 @@ copy is added on the syscall hot path (§2.16).
 - **X4 follow-on — x86_64 `init` supervision cycle (relaunch-`spawn`) `[ ]`.**
   Strengthening `spawn_session_qemu_x86_64` from the X3b concurrent-spawn proof
   (2 `ProcessSpawned` / 2 audited syscalls) to the **full** `wait`→reap→relaunch
-  supervision cycle (3 / 4, like the aarch64 sibling) surfaced a separate,
+  supervision cycle (3 / 4, like the aarch64 sibling) surfaces a separate,
   **pre-existing** x86_64 defect that is *not* a resume-after-park trap-state
   issue: PID 1 `init` spawns the session, `wait`s, the session exits, `init`'s
-  `wait` **returns correctly to ring 3** (resume-after-park works), `init`
-  issues its **relaunch `spawn`**, and the **second** `build_process_image`
-  hangs — frames are available, no allocator lock is held, the 64 MiB bump heap
-  is free, and the CPU spins in kernel/heap memory (wild execution), never
-  emitting the third `ProcessSpawned`. It only manifests on the no-input
-  relaunch path (on real hardware the session blocks on `stdin` and never
-  relaunches), so the X3b 2/2 assertion is the standing `spawn_session_qemu_x86_64`
-  proof until this is fixed. Root-causing the 2nd concurrent spawn-after-reap on
-  x86_64 needs GDB-level single-stepping; it is the next item before the
-  supervision-cycle assertion can land.
+  `wait` **returns correctly to ring 3** (resume-after-park is proven sound by
+  X4), `init` issues its **relaunch `spawn`**, and that 2nd producer spawn
+  derails, never emitting the third `ProcessSpawned`. The
+  `spawn_session_qemu_x86_64` assertion therefore stays at **2/2** (the bin's
+  `SpawnSessionExitSink`) until this is fixed.
+
+  Narrowed under QEMU + GDB (findings of record, fix still open):
+  - It is **wild execution, not a fault**: `-d int` shows only timer ticks
+    (INT=0x20), no `#PF`/`#GP`/`#DF`; the CPU runs CPL=0 at RIPs in the
+    **frame-allocator region** (~0x0e–0x0f million, well above the kernel image,
+    whose `.bss` — incl. the 64 MiB bump heap and the `.bss` page-table pools —
+    ends ~68 MiB). So a kernel call/ret/jump transferred into a freshly
+    allocated data frame and executes garbage.
+  - It is **timing-sensitive**: free-run derails on the 2nd producer spawn;
+    pausing the vCPU (GDB breakpoints / single-step) shifts the derail several
+    launches later, so the trigger correlates with an asynchronous event landing
+    in a narrow window. `on_timer_tick` is observation-only (no IRQ-context
+    context switch) and the `define_isr!` timer stub is well-formed, so the
+    cause is subtler than plain preemption.
+  - The hang's `CR3` (a frame-region value, e.g. 0x0f80_1000) is a **symptom**:
+    init's PML4 (`INIT_PAGE_TABLES`) and the session's (`SPAWN_PAGE_TABLES`) are
+    both `.bss` pools (~67–68 MiB), so a frame-region CR3 means the wild code
+    reloaded it — the corruption precedes it.
+  - `freeze()` is **not** the cause: it walks only the ~300 bookkept user
+    mappings (`AddressSpace::live`), not the 4 GiB identity huge pages, so it is
+    not a heap blow-up.
+  - The exact derailing instruction/structural cause is **not yet isolated**
+    (single-step/breakpoint pausing suppresses the race, so the standard
+    catch-on-step approach does not reach it). The fix must be structural
+    (§2.17) + carry a regression test + pass the whole multi-arch gate; it is
+    the next item before the supervision-cycle assertion can land.
 
 **Done when (per chunk):** the chunk's QEMU vertical PASSes under `cargo xtask
 test --qemu` **and** the whole-project gate (§5) is green; docs + host tests

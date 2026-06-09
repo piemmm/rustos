@@ -16,9 +16,13 @@ workspace = true
 # including the `with_init` PID 1 spawn seam, the runtime `with_spawn`
 # producer + embedded-program registry (`plans/PI.md` X3b), and the COM1
 # console backing, and only replaces the audit Sink: observing two
-# `ProcessSpawned` (EventId 4030 — PID 1 and the session) plus at least four
-# audited `SyscallInvoked` (EventId 5000) flips `qemu_exit::exit_success`, so
-# the host-side `tools/qemu::Runner` registers the test as `Outcome::Pass`.
+# `ProcessSpawned` (EventId 4030 — PID 1 and the session) plus two audited
+# `SyscallInvoked` (EventId 5000 — init's spawn and the session's exit) flips
+# `qemu_exit::exit_success`, so the host-side `tools/qemu::Runner` registers
+# the test as `Outcome::Pass`. This is the X3b concurrent-spawn proof; the
+# full wait->reap->relaunch supervision cycle (3/4, like the aarch64 sibling)
+# is not asserted yet because the relaunch spawn wild-executes (the X4
+# follow-on defect — plans/PI.md §X).
 # Keeping the bin separate from the production binary (rather than a Cargo
 # feature) prevents feature unification from leaking the QEMU-exit behaviour
 # into a production image (`AGENTS.md` §5.4.5 — fail closed).
