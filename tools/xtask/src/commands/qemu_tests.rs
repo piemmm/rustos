@@ -1299,6 +1299,41 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
+    // timeshare vertical — the first proof that TWO U-mode tasks timeshare one
+    // hart as resumable user kthreads on riscv64 under the live scheduler over
+    // the RV1 park-safe trap path, the cross-port sibling of the x86_64 X2
+    // vertical and the aarch64 SP2c timeshare. On boot it reads the
+    // generic-timer rate from the firmware device tree, installs the trap vector
+    // + a dispatch callback, and builds **two** hardware-isolated U-mode address
+    // spaces (two `PageTablePool`s + a shared frame pool, `AGENTS.md` §4) from
+    // the pure-Rust `rustos-test-el0-yielder` fixture (built PIE + converted to
+    // `rxe` by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`, and admits each via `spawn_user_kthread`. Each
+    // task's `pre_resume` hook reactivates its own `satp` root
+    // (`paging::activate_user_root`); `sscratch` is per-task hardware state that
+    // `userentry::enter_user` arms on first entry and the RV1 trap vector
+    // re-arms from each task's own kernel-stack frame on every U-return, so no
+    // dispatcher-side stack repointing is needed (unlike x86_64's per-CPU
+    // `set_kernel_rsp0`). The cooperative `step` loop drives both; the dispatch
+    // callback maps each `yield`/`exit` `ecall` to `reschedule_current`, so the
+    // two ping-pong with the dispatcher on their own kernel stacks. PASS once
+    // both yielded their full count and exited; a wrong drain count, an
+    // unexpected syscall, or a stall flips `qemu_exit::exit_failure` or times
+    // out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match
+    // the other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-el0-timeshare-qemu-riscv64",
+        binary: "rustos-test-spawn-el0-timeshare-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
     // `mem_unmap` vertical — the x86_64 sibling of the aarch64/riscv64
     // verticals above, proving a ring-3 process obtains and releases anonymous

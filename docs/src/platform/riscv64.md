@@ -178,10 +178,38 @@ park-safe trap path above — the first exerciser of that safety on a user
 task. PASS once the task yielded its full count and exited.
 
 The kernel-stack top `spawn_user_kthread` hands the `pre_resume` hook
-(`FnMut(u64)`, the X1 cross-port argument) is unused on riscv64: a single
-user task arms `sscratch` with its own kernel-stack top on its first
-`enter_user`, and the trap path preserves it across a mid-handler park.
-Per-task `sscratch` repointing for *concurrent* tasks is RV-X2.
+(`FnMut(u64)`, the X1 cross-port argument) is unused on riscv64, and
+stays unused for *concurrent* tasks too (see RV-X2 below): `sscratch` is
+per-task hardware state, not a per-CPU field, so no dispatcher-side
+repointing is required.
+
+### Two-task U-mode timeshare (RV-X2)
+
+`tests/integration/spawn_el0_timeshare_qemu_riscv64` proves **two**
+isolated U-mode tasks timeshare one hart as resumable user kthreads on
+`-M virt` — the riscv64 sibling of the x86_64 X2 and aarch64 SP2c
+timeshares. It reads the generic-timer rate from the firmware device
+tree, builds two hardware-isolated Sv39 address spaces (two
+`PageTablePool`s + a shared frame pool, `AGENTS.md` §4) from the one
+`el0_yielder` `rxe` through the audited `kernel_core::spawn_image`,
+admits each as a resumable user kthread via
+`kernel_core::spawn_user_kthread`, installs the trap vector + dispatch
+callback, and drains the cooperative `Scheduler::step` loop while the
+callback maps each task's `yield`/`exit` `ecall` to `reschedule_current`.
+PASS once both tasks yielded their full count and exited.
+
+Unlike x86_64 — where the syscall entry stub switches to a *per-CPU*
+kernel stack that the dispatcher must repoint per task with
+`set_kernel_rsp0` — riscv64 needs **no** dispatcher-side stack
+repointing, so RV-X2 added only the vertical, no new structural code (as
+aarch64 SP2c added nothing over SP2b). `sscratch` is per-task hardware
+state: `userentry::enter_user` arms it with a task's own kernel-stack top
+on first entry, and the trap vector's U-return path re-arms it from that
+task's own kernel-stack frame on every return to U-mode (`trap.s`:
+`sscratch = sp + TRAP_FRAME_SIZE`, where `sp` is the resuming task's
+kernel stack). A trap from whichever task resumes therefore always lands
+on *its* kernel stack, so each `pre_resume` hook only reactivates its
+`satp` root and ignores the kernel-stack-top argument.
 
 ## Stage 3 architecture primitives
 

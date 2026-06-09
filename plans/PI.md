@@ -1293,9 +1293,24 @@ fully-gated chunk per landing:
   PASS once the task yielded its full count and exited — the first chunk that
   *exercises* RV1's mid-handler-park safety on a user task. Doc:
   `docs/src/platform/riscv64.md` ("Resumable U-mode user kthread").
-- **RV-X2 — two-task EL0 timeshare `[ ]`** (SP2c sibling), then **RV-X3
-  `spawn` concurrent producer + RV-X4 `wait` `[ ]`** (SP3b/SP4/SP6 siblings),
-  each its own fully-gated landing.
+- **RV-X2 — two-task EL0 timeshare `[x]`** (SP2c sibling).
+  `tests/integration/spawn_el0_timeshare_qemu_riscv64` proves **two**
+  hardware-isolated U-mode tasks timeshare one hart as resumable user kthreads
+  on `-M virt`: two Sv39 spaces (two `PageTablePool`s + a shared frame pool, §4)
+  built from the one `el0_yielder` `rxe` via `kernel_core::spawn_image`, each
+  admitted via `spawn_user_kthread`, driven by the cooperative `Scheduler::step`
+  loop with the dispatch callback mapping each `yield`/`exit` `ecall` to
+  `reschedule_current`. **No new structural code was needed** (the vertical
+  only): unlike x86_64's per-CPU `set_kernel_rsp0`, riscv64 `sscratch` is
+  per-task hardware state — `userentry::enter_user` arms it on first entry and
+  the RV1 trap vector re-arms it from each task's own kernel-stack frame on
+  every U-return (`trap.s`: `sscratch = sp + TRAP_FRAME_SIZE`), so each
+  `pre_resume` hook only reactivates its `satp` root and ignores the
+  kernel-stack-top argument (the predicted per-task `sscratch` repointing is
+  unnecessary, as aarch64 SP2c needed nothing over SP2b). Doc:
+  `docs/src/platform/riscv64.md` ("Two-task U-mode timeshare (RV-X2)").
+- **RV-X3 `spawn` concurrent producer + RV-X4 `wait` `[ ]`** (SP3b/SP4/SP6
+  siblings), each its own fully-gated landing.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

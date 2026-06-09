@@ -1860,6 +1860,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-spawn-el0-timeshare-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-spawn-el0-timeshare-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
