@@ -1015,3 +1015,12 @@ can see *why* a rule exists without diffing the charter's history.
   change, with stop-and-ask (§15.7) the only escape for genuinely large ones;
   "unrelated"/"pre-existing"/"out of scope"/"the gate didn't catch it" are not
   exits. Reinforced §7 and the §23 intro to match. Documentation only.
+
+- **2026-06-09 — Every fixed bug always gets a regression test.** Closed the
+  remaining nuance left by §2.18: the "write a test" duty was anchored to a
+  fix and silent on escalated-but-unfixed defects. Added a §2.18 bullet, a §7
+  bullet, and tightened §23.4 so every defect that is fixed lands with a
+  fail-before/pass-after regression test (fuzzer/proptest finds also enter the
+  corpus, §19.6) — there is no path that fixes a bug without its test, and an
+  escalated defect (§15.7) carries the test requirement with it until the fix
+  lands. Documentation only.

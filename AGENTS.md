@@ -261,6 +261,17 @@ These are absolute. They override any local convenience.
       tracks such work, record it in `PLAN.md`/`plans/` — before proceeding.
       Quietly ignoring it, burying it in a `// TODO`, or omitting it from the
       completion report is the §2.1 hack this rule forbids.
+    - **Every defect that is fixed carries a regression test, always (§7,
+      §23.4).** Closing a bug — whichever of the two channels above surfaced
+      it — is not complete until a test exists that fails before the fix and
+      passes after it (a fuzzer/proptest find also enters the regression
+      corpus, §19.6). There is no path that fixes a defect without landing its
+      test in the same change. When a noticed defect is too large to fix now
+      and is escalated (§15.7), the duty to write that regression test does
+      **not** lapse: the test requirement is recorded with the escalated work
+      and the test is written when the fix lands, so no bug is ever closed
+      untested. "Fixed it, but a test was awkward" is the §2.1 hack this rule
+      forbids.
     - This rule never overrides §2.5 (tests) or §2.6 (quality); it reinforces
       them. A change that ships a known defect of any kind — caused, revealed,
       or merely noticed — is a review blocker (§23), regardless of whether it
@@ -658,6 +669,15 @@ an update to this section.
   stubbed, postponed, marked `#[ignore]`, or tracked as a "tests to be
   added later" follow-up. A change whose tests are not written and passing
   is incomplete and must not be reported as done.
+- **Every bug found gets a regression test, always.** Whenever a defect is
+  fixed — whether the validation gate surfaced it or it was noticed by reading
+  or reasoning about the code (§2.18) — the fix lands with a test that fails
+  before and passes after (§23.4); a fuzzer/proptest find also enters the
+  regression corpus (§19.6). This applies to *every* bug the change closes,
+  not only the one the task was about. If a noticed defect is genuinely too
+  large to fix now and is escalated (§15.7), the regression test is part of
+  that escalated work and is written when the fix lands — a bug is never
+  closed without its test.
 - **No flaky tests.** A test that fails intermittently is a bug; fix the test
   or fix the code, never retry.
 - **Coverage targets** (enforced by `cargo xtask coverage`):
@@ -1935,7 +1955,11 @@ Trace, do not assume. For every entry point the change adds or touches
 - **Tests are part of this change (§7).** Bug → a reproducer that failed
   before and passes after; feature → core, negative, and edge-case tests;
   refactor → the existing covering tests identified and run. No `#[ignore]`,
-  no weakened assertion, no "tests later".
+  no weakened assertion, no "tests later". This applies to **every** bug the
+  change closes — the one you were asked about *and* any other the gate
+  surfaces or you notice (§2.18); a bug is never fixed without its regression
+  test, and an escalated-but-not-yet-fixed defect (§15.7) carries that
+  test requirement with it (§7).
 - **Whole-project gate run (§7, §15.6).** `cargo fmt --all`, the full
   `cargo xtask ci`, and `cargo xtask fuzz --secs 5` (plus anything else
   `.github/workflows/ci.yml` runs) were executed over the **entire**
