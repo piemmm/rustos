@@ -1007,3 +1007,11 @@ can see *why* a rule exists without diffing the charter's history.
   session entries, quoted CI output, and superseded/"historical" prose; a
   completed item's prose is *replaced* with a done-state summary (§2.14). This
   amendment is documentation only.
+
+- **2026-06-09 — Fix every defect, caused or noticed.** Added §2.18
+  generalizing §2.17's security "fix it now" to *every* defect via two explicit
+  channels: (1) any failure the whole-project gate surfaces and (2) any defect
+  noticed by reading/reasoning even with a green gate — both fixed in the same
+  change, with stop-and-ask (§15.7) the only escape for genuinely large ones;
+  "unrelated"/"pre-existing"/"out of scope"/"the gate didn't catch it" are not
+  exits. Reinforced §7 and the §23 intro to match. Documentation only.

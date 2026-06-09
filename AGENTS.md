@@ -234,6 +234,37 @@ These are absolute. They override any local convenience.
       §2.7 (security is the default) and §5.4 (fail closed). A change that
       defers or reduces a security defence is a review blocker (§23.1),
       regardless of whether it compiles or the tests pass.
+18. **Every defect you cause or notice is fixed now, not deferred.** §2.17
+    makes this absolute for *security* weaknesses; this rule makes it absolute
+    for **every** defect of any kind — a wrong result, a crash, a leak, a race,
+    a broken build, a failing or flaky test, a lint, a regression, a stale doc,
+    a layering or ABI violation, anything. There are exactly two ways a defect
+    reaches you, and **both** oblige you to act:
+    - **(1) The validation gate surfaces it.** Any failure the §7 / §2.15
+      whole-project gate produces — a failed test, a clippy or fmt error, a
+      fuzz or proptest crash, a deps/cfg/abi/docs-check failure, a coverage
+      miss — is fixed or reverted **in the same change**, whether it lives in
+      code you touched or anywhere else. This is already §2.5, §2.15, and §7;
+      it is restated here so the two cases sit together.
+    - **(2) You notice it by reading or reasoning about the code**, even though
+      the gate is green and no test flags it. A bug you can see is a bug you
+      own: you do not get to leave it because "the tests pass" or "it isn't
+      what I was asked to do". You fix it in the same change.
+    - The behaviour is identical whether the defect is one your change
+      *introduced*, one your change merely *revealed*, or one you simply
+      *spotted in passing*. "Unrelated", "pre-existing", "out of scope",
+      "not my change", "the gate didn't catch it", and "later" are **not**
+      exits — exactly as for security defects in §2.17.
+    - **The only escape is to stop and ask (§15.7), never to stay silent.** If
+      a noticed defect is genuinely too large to fix inside the current change,
+      you raise it explicitly — surface it to the user and, where the project
+      tracks such work, record it in `PLAN.md`/`plans/` — before proceeding.
+      Quietly ignoring it, burying it in a `// TODO`, or omitting it from the
+      completion report is the §2.1 hack this rule forbids.
+    - This rule never overrides §2.5 (tests) or §2.6 (quality); it reinforces
+      them. A change that ships a known defect of any kind — caused, revealed,
+      or merely noticed — is a review blocker (§23), regardless of whether it
+      compiles or the tests pass.
 
 ---
 
@@ -613,7 +644,13 @@ an update to this section.
 - **Every issue found is fixed, not deferred.** If any of the runs above
   fails — in code you touched or anywhere else — you MUST fix it (or revert
   the change that caused it) before the task is done. "Pre-existing
-  failure" and "unrelated crate" are not exemptions (see §2.5).
+  failure" and "unrelated crate" are not exemptions (see §2.5, §2.18).
+  This is not limited to failures the gate *prints*: a defect you notice by
+  reading or reasoning about the code — even with a green gate and no test
+  flagging it — is owned and fixed in the same change too, or, if genuinely
+  too large, raised explicitly under §15.7 before proceeding (§2.18). Burying
+  it, ignoring it because "the tests pass", or leaving it out of the
+  completion report is forbidden.
 - **A failing test blocks the change.** Whether or not the failure existed
   before is irrelevant.
 - **Tests are never deferred.** Writing the tests for a change is part of
@@ -1811,7 +1848,10 @@ Self-review is adversarial: read the diff as if it were written by someone
 trying to sneak a flaw past you. "I wrote it, so it is fine" is not a review.
 When the gate surfaces a defect anywhere — in code you touched or code you did
 not — you fix it or revert it (§2.5, §7); "pre-existing" and "out of scope" are
-not exits.
+not exits. The same obligation applies to a defect this review *notices* that
+the gate did not flag: a bug you can see with a green gate is still a bug you
+own. Fix it in the same change, or — only if it is genuinely too large — raise
+it explicitly under §15.7 before proceeding; never leave it silent (§2.18).
 
 ### 23.1 Security review (every change)
 
