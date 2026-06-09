@@ -1255,6 +1255,41 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
+    // `mem_unmap` vertical — the x86_64 sibling of the aarch64/riscv64
+    // verticals above, proving a ring-3 process obtains and releases anonymous
+    // `RW` memory at runtime via `abi-v1`. Unlike those self-contained test
+    // kernels the x86_64 ring-3 transition needs the GDT user selectors, the
+    // TSS, and `syscall`/`IA32_LSTAR` entry, so it boots the production
+    // `rustos-kernel` pipeline (like `spawn_program_qemu_x86_64`); that
+    // pipeline now also installs the dedicated, error-code-aware page-fault
+    // entry (`rustos_arch_x86_64::fault`), so the deliberate use-after-unmap
+    // `#PF` is observable. On `BootCompleted` it enables `IA32_EFER.NXE`,
+    // installs a `fault` observer, builds **one** hardware-isolated user
+    // address space from the same pure-Rust `rustos-test-mem-map` fixture
+    // (built PIE + converted to `rxe` by `build.rs`) through the capability-
+    // checked, audited `kernel_core::spawn_image`, **retains** it live behind a
+    // `kernel_core::MemMap` producer backed by
+    // `kernel_mem::map_anonymous`/`unmap_anonymous`, and `iretq`s into it; the
+    // dispatch callback routes the program's `mem_map`/`mem_unmap` `syscall`s
+    // through the producer. The fixture maps a region (FIXED), writes+verifies
+    // a pattern, unmaps it, then touches the released range; the fault observer
+    // reports the use-after-unmap `#PF` as PASS. A verification failure, an
+    // unexpected syscall, or a missing fault flips `qemu_exit::exit_failure` or
+    // times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget
+    // match the other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-mem-map-qemu-x86_64",
+        binary: "rustos-test-mem-map-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `rustos-rt` `mem_map`-backed
     // `#[global_allocator]` works end to end in an EL0 process on the `virt`

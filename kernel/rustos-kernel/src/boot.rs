@@ -56,7 +56,7 @@ use rustos_arch_x86_64::irq as arch_irq;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
 use rustos_arch_x86_64::multiboot2::BootInfo as Mb2BootInfo;
 use rustos_arch_x86_64::percpu::MAX_CPUS;
-use rustos_arch_x86_64::{percpu, preempt, smp, syscall_entry};
+use rustos_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
 use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use rustos_kernel_irq::IrqController;
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
@@ -188,6 +188,14 @@ pub enum BootError {
     /// Surfaces a defect in the per-CPU bootstrap latch or an
     /// out-of-range vector.
     IrqIdtInstall,
+    /// `percpu::install_vector` rejected the dedicated page-fault
+    /// (`#PF`, vector 14) IDT install. Surfaces a defect in the per-CPU
+    /// bootstrap latch.
+    PageFaultIsrInstall,
+    /// `percpu::install_tss_rsp0` rejected the ring-3-trap `RSP0`
+    /// install. Surfaces a defect in the per-CPU bootstrap latch or an
+    /// invalid kernel stack top.
+    TssRsp0Install,
     /// The arch-crate routing publisher refused the `(gsi, vector)`
     /// pair. The only documented failure is `VectorAlreadyBound`,
     /// which means the boot pipeline tried to publish the same
@@ -227,6 +235,8 @@ impl BootError {
             Self::NoIoApic => "no_io_apic",
             Self::IrqVectorExhausted => "irq_vector_exhausted",
             Self::IrqIdtInstall => "irq_idt_install_failed",
+            Self::PageFaultIsrInstall => "page_fault_isr_install_failed",
+            Self::TssRsp0Install => "tss_rsp0_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
@@ -345,6 +355,26 @@ fn try_boot(
     // disabled, satisfying `percpu::init`'s SAFETY contract.
     unsafe { percpu::init(0).map_err(|_| BootError::PercpuInit)? };
 
+    // 1b. Overwrite the page-fault vector (`#PF`, 14) with the
+    //     dedicated, error-code-aware entry. `percpu::init` populated
+    //     every vector with the no-error default thunk, which mishandles
+    //     the hardware error code the CPU pushes for `#PF`. The dedicated
+    //     entry decodes the error code, captures the faulting address
+    //     (`CR2`), and routes to the set-once `fault` observer — or, with
+    //     none installed, preserves the exact fail-closed default
+    //     (`AGENTS.md` §2.9 / §2.17 — no security regression). This makes
+    //     a `#PF` correctly handled and observable on x86_64, the parity
+    //     the riscv64/aarch64 `fault` hooks already have.
+    //
+    // SAFETY: BSP after `percpu::init(0)`; interrupts are still disabled
+    // (the boot trampoline leaves `IF=0` and nothing has `sti`'d), so the
+    // IDT write cannot race a delivery. `PAGE_FAULT_VECTOR` is neither
+    // `#NMI` (2) nor `#DF` (8), so it does not disturb their IST routing.
+    unsafe {
+        percpu::install_vector(0, fault::PAGE_FAULT_VECTOR, fault::page_fault_isr_addr())
+            .map_err(|_| BootError::PageFaultIsrInstall)?;
+    }
+
     // 2. Software-enable the BSP LAPIC and read its ID.
     let mut lapic = make_bsp_lapic();
     lapic.software_enable(0xFF);
@@ -453,6 +483,26 @@ fn try_boot(
     unsafe {
         syscall_entry::init_local_syscalls(0, sel.kernel_cs, sysret_user_base, kernel_rsp0)
             .map_err(|_| BootError::SyscallInit)?;
+    }
+
+    // 10a. Install the TSS `RSP0` the CPU loads on a ring-3 -> ring-0 CPU
+    //      exception or hardware interrupt. `init_local_syscalls` programs
+    //      the *syscall* entry stack (loaded via `swapgs`), but a ring-3
+    //      `#PF`/`#GP` or a timer IRQ that preempts a user task is delivered
+    //      through the IDT, for which the CPU reads `TSS.RSP0`. Left zero
+    //      (the `percpu::init` default), the interrupt-frame push faults and
+    //      escalates to `#DF`, so a user trap is *undeliverable* — a security
+    //      gap, not a feature (`AGENTS.md` §2.9 / §2.17). The trap stack is
+    //      the same already-mapped per-CPU kernel stack the syscall path uses
+    //      (Linux likewise shares one kernel stack for syscalls and traps):
+    //      `RSP0` is only loaded on a ring-3 -> ring-0 transition, when that
+    //      stack is idle, so there is no overlap with an in-flight syscall.
+    //
+    // SAFETY: BSP after `percpu::init(0)`; interrupts disabled; `kernel_rsp0`
+    // is the validated top of the 16-KiB, 16-byte-aligned per-CPU kernel
+    // stack, mapped in every address space this CPU runs.
+    unsafe {
+        percpu::install_tss_rsp0(0, kernel_rsp0).map_err(|_| BootError::TssRsp0Install)?;
     }
 
     // 10b. Stage 4.D Item 2-tail.2: discover every IO-APIC the MADT

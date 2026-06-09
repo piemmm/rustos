@@ -86,6 +86,14 @@ pub mod context;
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
+/// x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook: the
+/// dedicated, error-code-aware page-fault ISR the production IDT installs
+/// on vector 14 and the set-once fault observer the kernel reaches it
+/// through. The x86_64 analogue of the riscv64/aarch64 `fault` modules
+/// (`AGENTS.md` §2.9 — fail closed, §17.2). The error-code decode + the
+/// observer slot build on the host (so their unit tests run under `cargo
+/// test`); the naked ISR stub + `CR2` read are freestanding-only.
+pub mod fault;
 pub mod gdt;
 /// Stage 3a (c7-arch): Arch HAL [`rustos_arch_api::SchedulerArch`]
 /// implementation for x86_64.

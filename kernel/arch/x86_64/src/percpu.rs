@@ -311,6 +311,71 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
     Ok(())
 }
 
+/// Install the ring-0 stack the CPU loads into `RSP` on a ring-3 → ring-0
+/// CPU exception or hardware interrupt — the `TSS.RSP0` the hardware reads
+/// on every privilege-raising transition, distinct from the `syscall`
+/// entry stack [`crate::syscall_entry::install_kernel_rsp0`] keeps in the
+/// per-CPU TLS.
+///
+/// [`init`] does **not** set `RSP0`: the `syscall` path pivots onto its own
+/// TLS stack via `swapgs`, so a kernel that only ever leaves ring 3 through
+/// `syscall`/`sysret` never reads `TSS.RSP0`. The first time a ring-3 task
+/// takes a CPU exception (`#PF`, `#GP`, …) or is preempted by a hardware
+/// IRQ, the CPU loads `TSS.RSP0`; a zero (or unmapped) value makes the
+/// interrupt-frame push fault and escalate to `#DF`. Installing a valid
+/// `RSP0` makes a ring-3 trap *deliverable* to the kernel — a user fault
+/// the kernel cannot field is a security gap, not a feature (`AGENTS.md`
+/// §2.9 / §2.17). This is the x86_64 counterpart of the single kernel trap
+/// stack the riscv64/aarch64 ports already program.
+///
+/// The CPU re-reads `TSS.RSP0` from memory on every transition, so writing
+/// it after the `ltr` [`init`] issued takes effect immediately; the caller
+/// must keep interrupts disabled across the write so a delivery cannot
+/// observe a half-written field.
+///
+/// # Errors
+///
+/// * [`InitError::CpuIndexOutOfRange`] if `cpu_index >= MAX_CPUS`.
+/// * [`InitError::NotInitialised`] if [`init`] has not finalised
+///   `cpu_index` (fail-closed, `AGENTS.md` §10).
+/// * [`InitError::InvalidKernelStackPointer`] if `rsp0` is null, not
+///   16-byte aligned, non-canonical, or in the user half — the same
+///   stack-pivot guard the syscall stack uses (`AGENTS.md` §3.5 / §5.4).
+///
+/// # Safety
+///
+/// * Interrupts on the calling CPU must be disabled.
+/// * `cpu_index` must be this CPU's index (the one passed to [`init`]).
+/// * `rsp0` must be one byte past the top of a kernel stack reserved for
+///   ring-3 trap entry on this CPU and mapped in **every** address space
+///   this CPU runs (including each user address space), so the
+///   interrupt-frame push always lands on mapped memory.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn install_tss_rsp0(cpu_index: usize, rsp0: u64) -> Result<(), InitError> {
+    if cpu_index >= MAX_CPUS {
+        return Err(InitError::CpuIndexOutOfRange);
+    }
+    if !PER_CPU_INITIALISED[cpu_index].load(Ordering::Acquire) {
+        return Err(InitError::NotInitialised);
+    }
+    // Strong stack-pivot guard, shared with the syscall-entry stack so the
+    // two kernel-stack-top validators stay one definition (`AGENTS.md`
+    // §2.2). It is a superset of `set_privilege_stack`'s alignment/null
+    // check, additionally rejecting non-canonical / user-half tops.
+    crate::syscall_entry::validate_kernel_rsp0(rsp0)?;
+    // SAFETY: the latch above is `true`, so `init` finalised this slot and
+    // the only writer from here on is the CPU it belongs to; the caller's
+    // contract keeps interrupts disabled so a delivery cannot race the
+    // write. The in-memory `TSS.RSP0` the CPU re-reads on each transition
+    // lives in this slot's GDT bundle.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(PER_CPU).cast::<PerCpu>();
+        let gdt = &mut (*base.add(cpu_index)).gdt;
+        gdt.set_privilege_stack(0, rsp0)?;
+    }
+    Ok(())
+}
+
 // --- Host-test surface ---------------------------------------------
 
 /// Tests-only mirror of the bring-up logic, with the actual `lgdt` /

@@ -394,8 +394,10 @@ surface, the C-callable stubs + generated header, the dispatcher arms, the
 fail-closed `kernel/core` seam, the reusable `kernel/mem` live-address-
 space producer, **and** the aarch64 `-M virt` EL0 vertical that wires the
 producer through the `kernel/core` `MemMap` seam are all proven. The
-sibling x86_64 / riscv64 verticals and production per-task live-space
-retention are the remaining follow-ons (tracked beyond SP5).
+sibling riscv64 **and x86_64** `-M virt`/OVMF verticals are now landed too
+(the x86_64 one also closed a production ring-3 fault-delivery gap — boot
+now installs the dedicated `#PF` entry and `TSS.RSP0`); production per-task
+live-space retention is the remaining follow-on (tracked beyond SP5).
 
 The natural follow-on abi-v1 process-runtime capability, scheduled here
 after the spawn tranche because it has the same precondition: a process
@@ -520,9 +522,28 @@ landing):**
   `EnterUser::enter_user` rather than the scheduler, keeping the riscv64
   cooperative-switch trap-save path off the critical path; its fault handler
   reports the use-after-unmap page fault as PASS on `-M virt` (ids 4284–4287,
-  verified green on this host). The x86_64 sibling and production per-task
-  live-space retention still follow; wasm32's linear-memory model is an honest
-  n/a (declared).
+  verified green on this host). The **x86_64 sibling**
+  (`tests/integration/mem_map_qemu_x86_64`) is now landed: it reuses the same
+  pure-Rust `mem_map_program` fixture and SP5b-1 producer (its own
+  `AnonProducer` over an x86_64 four-level space), but — needing the GDT
+  ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry — boots the
+  production `rustos-kernel` pipeline (like `spawn_program_qemu_x86_64`), then
+  `iretq`s into the program through `EnterUser::enter_user`; its `fault`
+  observer reports the use-after-unmap `#PF` as PASS on the OVMF/GRUB-ISO boot
+  (ids 4274–4277, verified green on this host). Reaching it required closing a
+  **production x86_64 gap**: a ring-3 CPU exception (or a hardware IRQ that
+  preempts a user task) is delivered through the IDT, for which the CPU loads
+  `TSS.RSP0` — but boot only ever set the *syscall* entry stack (loaded via
+  `swapgs`), leaving `TSS.RSP0 = 0`, so a user fault's frame-push faulted and
+  escalated to `#DF` (the trap was *undeliverable*, a security gap, §2.9/§2.17).
+  Boot now installs the dedicated, error-code-aware `#PF` entry
+  (`rustos_arch_x86_64::fault`, the x86_64 analogue of the riscv64/aarch64
+  `fault` hooks) **and** programs `TSS.RSP0` (`percpu::install_tss_rsp0`, reusing
+  the one shared stack-pivot validator `validate_kernel_rsp0`, §2.2) to the
+  same already-mapped per-CPU kernel stack the syscall path uses, bringing
+  x86_64 to the ring-3 fault-delivery parity the other ports already had.
+  Production per-task live-space retention still follows; wasm32's
+  linear-memory model is an honest n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous
 `RW` memory at runtime via `abi-v1` on aarch64 `-M virt`, zeroed on map and

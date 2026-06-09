@@ -1,0 +1,294 @@
+//! x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook.
+//!
+//! The production IDT ([`crate::interrupts`]) routes every vector at
+//! `percpu::init` time through the fail-closed default thunk,
+//! and the LAPIC timer / external-IRQ vectors are then overwritten with
+//! their dedicated stubs. A page fault, however, *pushes a hardware
+//! error code* (Intel SDM Vol 3A §6.14.2, §4.7), which the no-error
+//! default thunk does not account for — so vector 14 needs its own
+//! dedicated entry. This module is that entry, plus a single settable
+//! fault observer the kernel cannot otherwise reach.
+//!
+//! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
+//! `rustos_arch_riscv64::fault`) and aarch64
+//! (`rustos_arch_aarch64::fault`) synchronous-fault hooks: every other
+//! synchronous exception remains unrecoverable in this kernel slice
+//! (resuming the faulting instruction without fix-up logic would re-trap
+//! forever), so the default posture is to fail closed (`AGENTS.md`
+//! §2.9 — never silently reset). A single fault handler may be installed
+//! through [`crate::fault::set_fault_handler`] before any fault can fire; the
+//! dedicated `#PF` entry then invokes it with the decoded error code, the
+//! linear address (`CR2`), and the faulting instruction pointer. With no
+//! observer installed the entry preserves the exact fail-closed behaviour
+//! the default thunk had (a `#PF` halts the binary through
+//! `qemu_exit::exit_failure`) — installing the dedicated entry
+//! *strengthens* x86_64 (the error code is now decoded correctly and the
+//! fault is observable) without weakening the default (`AGENTS.md`
+//! §2.17 — no security regression, §23.1 — fail closed).
+//!
+//! The faulting address lives in `CR2` on x86_64 (it is *not* pushed on
+//! the stack), so the dedicated entry captures it in the prologue before
+//! any further fault could clobber it. The handler **must not return** —
+//! see [`crate::fault::FaultHandlerFn`].
+//!
+//! # No global mutable state
+//!
+//! The slot is set-once, backed by an atomic the entry reads without a
+//! lock; a second publish fails closed (`AGENTS.md` §2.1). The error-code
+//! decode and the slot build on the host, so their unit tests run under
+//! `cargo test`; only the dedicated entry stub and the `CR2` read it
+//! feeds the handler are gated to the freestanding x86_64 target.
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// IDT vector the CPU raises for a page fault (`#PF`, Intel SDM Vol 3A
+/// Table 6-1).
+pub const PAGE_FAULT_VECTOR: u8 = 14;
+
+/// `#PF` error-code bit `P` (bit 0): `0` = the access referenced a
+/// not-present page, `1` = a page-level protection violation
+/// (Intel SDM Vol 3A §4.7).
+pub const PF_ERR_PRESENT: u64 = 1 << 0;
+
+/// `#PF` error-code bit `W/R` (bit 1): `1` = the access was a write.
+pub const PF_ERR_WRITE: u64 = 1 << 1;
+
+/// `#PF` error-code bit `U/S` (bit 2): `1` = the access originated at
+/// CPL 3 (user mode).
+pub const PF_ERR_USER: u64 = 1 << 2;
+
+/// `#PF` error-code bit `RSVD` (bit 3): `1` = a reserved bit was set in
+/// a paging-structure entry on the translation path.
+pub const PF_ERR_RESERVED: u64 = 1 << 3;
+
+/// `#PF` error-code bit `I/D` (bit 4): `1` = the fault was an
+/// instruction fetch.
+pub const PF_ERR_INSTR: u64 = 1 << 4;
+
+/// `true` iff the fault referenced a **not-present** page (error-code
+/// `P` bit clear) — the cause raised when user code touches an address
+/// the active page tables do not map, e.g. a use-after-unmap.
+#[must_use]
+pub const fn is_not_present(error_code: u64) -> bool {
+    error_code & PF_ERR_PRESENT == 0
+}
+
+/// `true` iff the fault originated in user mode (error-code `U/S` bit
+/// set).
+#[must_use]
+pub const fn is_user(error_code: u64) -> bool {
+    error_code & PF_ERR_USER != 0
+}
+
+/// `true` iff the faulting access was a write (error-code `W/R` bit set).
+#[must_use]
+pub const fn is_write(error_code: u64) -> bool {
+    error_code & PF_ERR_WRITE != 0
+}
+
+/// Signature of the fault handler the dedicated `#PF` entry invokes.
+///
+/// `error_code` is the architectural `#PF` error code (decode it through
+/// [`is_not_present`] / [`is_user`] / [`is_write`]); `faulting_addr` is
+/// the faulting linear address read from `CR2`; `rip` is the PC of the
+/// faulting instruction. The handler **must not return**: this kernel
+/// slice has no fix-up logic to resume the faulting instruction, so a
+/// return would re-trap forever. Test handlers report the outcome to
+/// QEMU through [`crate::qemu_exit`].
+pub type FaultHandlerFn = extern "C" fn(error_code: u64, faulting_addr: u64, rip: u64) -> !;
+
+/// Slot holding the installed fault handler as a raw function pointer
+/// (`0` = none installed).
+static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Failure modes of [`set_fault_handler`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SetFaultHandlerError {
+    /// A handler was already published; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1).
+    AlreadyInstalled,
+}
+
+/// Install the page-fault observer.
+///
+/// Must be called once, on the boot CPU, before any fault can fire.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_fault_handler(cb: FaultHandlerFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    FAULT_HANDLER
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed fault handler, if any. The dedicated `#PF`
+/// entry calls this on a page fault; it is also a test/diagnostic
+/// observer.
+#[must_use]
+pub fn fault_handler() -> Option<FaultHandlerFn> {
+    let raw = FAULT_HANDLER.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `FaultHandlerFn` through `set_fault_handler`; function pointers
+        // are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, FaultHandlerFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_fault_handler_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a handler.
+    // Production code never clears the slot (`AGENTS.md` §2.1).
+    FAULT_HANDLER.store(0, Ordering::Release);
+}
+
+// --- Freestanding dedicated `#PF` entry ----------------------------
+
+/// Linear address of the dedicated `#PF` ISR stub, for
+/// [`crate::percpu::install_vector`].
+///
+/// Only meaningful on the freestanding target — the symbol is the
+/// `#[unsafe(naked)]` stub below.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub fn page_fault_isr_addr() -> u64 {
+    page_fault_isr as *const () as usize as u64
+}
+
+/// Dedicated `#PF` (vector 14) ISR stub.
+///
+/// On entry the CPU has pushed the hardware error code and the 5-word
+/// [`crate::interrupts::InterruptStackFrame`] on the destination stack
+/// (RSP0 for a ring-3 fault), so `%rsp` points at the error code and
+/// `[%rsp + 8]` at the faulting `rip`. The stub marshals
+/// `(error_code, CR2, rip)` into the SysV argument registers and tail-
+/// calls [`rustos_arch_x86_64_page_fault_dispatch`], which is `-> !`;
+/// there is therefore no epilogue or `iretq` (a returning page-fault
+/// handler would re-trap, `AGENTS.md` §2.9).
+///
+/// `CR2` is read in the prologue before any other memory access that
+/// could itself fault and overwrite it.
+///
+/// # Safety
+///
+/// Only the CPU's IDT may invoke this symbol (installed via
+/// [`crate::percpu::install_vector`] on [`PAGE_FAULT_VECTOR`]). Calling
+/// it directly from Rust is undefined behaviour because it expects the
+/// CPU-pushed error code + interrupt frame on the stack, not a return
+/// address.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn page_fault_isr() {
+    core::arch::naked_asm!(
+        // %rdi <- error code (top of stack), %rsi <- CR2 (faulting
+        // linear address), %rdx <- faulting rip ([rsp + 8]).
+        "movq (%rsp), %rdi",
+        "mov %cr2, %rsi",
+        "movq 8(%rsp), %rdx",
+        // The CPU 16-aligns %rsp before pushing the frame on a stack switch
+        // (ring 3 -> RSP0), so after the error code + 5-word frame (48 bytes,
+        // a multiple of 16) %rsp is 16-aligned on entry. A `call` from a
+        // 16-aligned %rsp lands the SysV callee with %rsp ≡ 8 (mod 16) after
+        // its return-address push — exactly the System V AMD64 §3.2.2 entry
+        // state — so no further adjustment is needed (matching the proven
+        // `idt.rs` `pf_thunk`, which does no adjustment either).
+        "call {dispatch}",
+        dispatch = sym rustos_arch_x86_64_page_fault_dispatch,
+        options(att_syntax),
+    )
+}
+
+/// Rust dispatcher the dedicated `#PF` stub tail-calls.
+///
+/// Forwards to the installed [`FaultHandlerFn`] when one is present;
+/// otherwise preserves the fail-closed default the no-error default
+/// thunk had — a page fault with no observer halts the binary through
+/// [`crate::qemu_exit::exit_failure`] (`AGENTS.md` §2.9 / §23.1).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[no_mangle]
+extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
+    error_code: u64,
+    faulting_addr: u64,
+    rip: u64,
+) -> ! {
+    match fault_handler() {
+        Some(handler) => handler(error_code, faulting_addr, rip),
+        None => crate::qemu_exit::exit_failure(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_fault_vector_matches_intel_sdm() {
+        // Intel SDM Vol 3A Table 6-1: #PF is vector 14.
+        assert_eq!(PAGE_FAULT_VECTOR, 14);
+    }
+
+    #[test]
+    fn error_code_bits_match_intel_sdm() {
+        // Intel SDM Vol 3A §4.7 Figure 4-12.
+        assert_eq!(PF_ERR_PRESENT, 1);
+        assert_eq!(PF_ERR_WRITE, 2);
+        assert_eq!(PF_ERR_USER, 4);
+        assert_eq!(PF_ERR_RESERVED, 8);
+        assert_eq!(PF_ERR_INSTR, 16);
+    }
+
+    #[test]
+    fn not_present_is_the_cleared_present_bit() {
+        // A bare not-present supervisor read is error code 0.
+        assert!(is_not_present(0));
+        // A not-present user write keeps P clear but sets W and U/S.
+        assert!(is_not_present(PF_ERR_WRITE | PF_ERR_USER));
+        // A protection violation has P set, so it is *not* not-present.
+        assert!(!is_not_present(PF_ERR_PRESENT));
+    }
+
+    #[test]
+    fn user_and_write_decode_independently() {
+        assert!(is_user(PF_ERR_USER));
+        assert!(!is_user(PF_ERR_WRITE));
+        assert!(is_write(PF_ERR_WRITE));
+        assert!(!is_write(PF_ERR_USER));
+        // A user-mode not-present write sets both U/S and W.
+        let code = PF_ERR_USER | PF_ERR_WRITE;
+        assert!(is_user(code) && is_write(code) && is_not_present(code));
+    }
+
+    extern "C" fn host_fault_handler(_error_code: u64, _faulting_addr: u64, _rip: u64) -> ! {
+        panic!("host test handler must never be invoked");
+    }
+
+    // Both the set-once and the round-trip assertions mutate the single
+    // process-wide `FAULT_HANDLER` slot, so they live in one test: cargo
+    // runs `#[test]`s in parallel threads and two of them clearing and
+    // reinstalling the same static would race (`AGENTS.md` §7 — no flaky
+    // tests).
+    #[test]
+    fn slot_is_set_once_and_round_trips() {
+        clear_fault_handler_for_tests();
+        assert!(fault_handler().is_none());
+
+        set_fault_handler(host_fault_handler).expect("first install");
+        let got = fault_handler().expect("handler present");
+        assert_eq!(
+            got as *const () as usize,
+            host_fault_handler as *const () as usize
+        );
+
+        assert_eq!(
+            set_fault_handler(host_fault_handler),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_fault_handler_for_tests();
+    }
+}

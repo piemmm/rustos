@@ -1,0 +1,55 @@
+[package]
+name = "rustos-test-mem-map-qemu-x86_64"
+description = "SPAWN stage SP5b-2 QEMU integration test (x86_64 sibling of rustos-test-mem-map-qemu-aarch64/riscv64): prove a ring-3 process can obtain and release anonymous RW memory at runtime via abi-v1 on x86_64. The build script compiles the pure-Rust EL0 program (tests/integration/mem_map_program) PIE and converts it to an rxe blob; the test boots the production rustos-kernel pipeline (so the GDT ring-3 selectors, the TSS, syscall/IA32_LSTAR entry, and the dedicated #PF entry are installed), materialises one hardware-isolated user address space with rustos_kernel_core::spawn_image, retains it live, installs a rustos_kernel_core::MemMap producer backed by rustos_kernel_mem::map_anonymous/unmap_anonymous over that space, and iretq's into the program; the dispatch callback routes the program's mem_map/mem_unmap syscalls through the producer, and the rustos_arch_x86_64::fault observer reports the deliberate use-after-unmap #PF as PASS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/SPAWN.md` stage SP5b-2 x86_64 mem_map/mem_unmap
+# vertical, the sibling of `rustos-test-mem-map-qemu-{aarch64,riscv64}`. The
+# fixture program (`rustos-test-mem-map`) is built position-independent by
+# `build.rs` and converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+# carrying the kernel's compiled-in syscall CFI tag. It boots the production
+# `rustos-kernel` pipeline (so the GDT ring-3 selectors, the TSS,
+# `syscall`/`IA32_LSTAR` entry, and the dedicated, error-code-aware page-fault
+# entry are all installed) and, on `AuditEvent::BootCompleted`, enables
+# `IA32_EFER.NXE`, installs a `rustos_arch_x86_64::fault` observer, builds one
+# isolated user address space via `rustos_kernel_core::spawn_image`
+# (capability-checked + audited), retains it live, installs a `MemMap` producer
+# over `map_anonymous` / `unmap_anonymous`, and `iretq`s into the program; the
+# dispatch callback routes the program's `mem_map` / `mem_unmap` `syscall`s
+# through the producer. The fault observer reports the deliberate
+# use-after-unmap `#PF` as PASS. Any shortfall (the program returning a failure
+# exit code, an unexpected syscall, or no fault) flips `qemu_exit::exit_failure`
+# or times out (fail-loud, `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-mem-map-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

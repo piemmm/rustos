@@ -254,7 +254,7 @@ const fn is_canonical(addr: u64) -> bool {
 /// [`crate::percpu::InitError::InvalidKernelStackPointer`] if `rsp0` is
 /// null, misaligned, non-canonical, or in the user half.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu::InitError> {
+pub(crate) const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu::InitError> {
     if rsp0 == 0 || rsp0 % 16 != 0 {
         return Err(crate::percpu::InitError::InvalidKernelStackPointer);
     }
