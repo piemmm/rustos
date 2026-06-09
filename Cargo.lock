@@ -1937,6 +1937,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-spawn-session-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-stack-arena-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

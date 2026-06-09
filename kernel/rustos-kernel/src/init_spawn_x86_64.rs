@@ -141,8 +141,8 @@ pub static X86_64_INIT_SPAWN: X86_64InitSpawn = X86_64InitSpawn;
 /// `init`'s effective capability set: `CAP_CONSOLE_WRITE`, so PID 1 can write
 /// its startup banner through the `stream_write` syscall, plus
 /// `CAP_PROC_SPAWN`, so it can launch the user's session program through the
-/// `spawn` syscall (a no-op fail-closed until the x86_64 `ProcessSpawn`
-/// producer lands — `plans/PI.md` X3b). The boot path passes this as both the
+/// `spawn` syscall (served by the x86_64 `ProcessSpawn` producer
+/// `spawn_producer_x86_64`, `plans/PI.md` X3b). The boot path passes this as both the
 /// user grant and the manifest request, so the intersection the kernel derives
 /// is the same set — `init` is granted no more (`AGENTS.md` §5.2), and the
 /// child it later launches receives only *its own* set, never `init`'s

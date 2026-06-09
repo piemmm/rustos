@@ -123,10 +123,21 @@ pub mod boot;
 // `init` `rxe` blob.
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod init_spawn_x86_64;
+
+// The x86_64 runtime `spawn` producer + embedded-program registry
+// (`plans/PI.md` X3b): the `rustos_kernel_core::ProcessSpawn` implementation
+// `boot` installs into the `BootInfo` hand-off so the `spawn` syscall can
+// build a fresh, hardware-isolated child PML4 and admit it Ready, so PID 1
+// `init` can launch the user's session — the cross-port sibling of the
+// aarch64 `spawn_producer`. Freestanding+x86_64-only: it links the x86_64
+// port's page-table / `EnterUser` / `set_kernel_rsp0` primitives and
+// `include!`s the build-time `Shell` `rxe` blob.
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod panic_ctx;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod serial_sink;
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub mod spawn_producer_x86_64;
 
 // The aarch64 (Raspberry Pi 4) production boot path (`plans/PI.md` P1).
 // Freestanding-only: it links the aarch64 port's console / FP-enable /

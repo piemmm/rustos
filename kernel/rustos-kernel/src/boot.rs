@@ -587,9 +587,17 @@ fn try_boot(
     .with_console(&COM1_CONSOLE)
     // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
     // builds `init`'s ring-3 image and drops into it as a resumable user
-    // kthread (`plans/PI.md` X3a). The runtime `spawn` producer is wired
-    // separately (X3b); until then `init`'s session launch fails closed.
-    .with_init(&X86_64_INIT_SPAWN);
+    // kthread (`plans/PI.md` X3a).
+    .with_init(&X86_64_INIT_SPAWN)
+    // The runtime `spawn` producer + embedded-program registry
+    // (`plans/PI.md` X3b): the `spawn` syscall resolves a path against the
+    // registry and drives the producer to build a fresh, isolated child PML4,
+    // so PID 1 `init` can launch the user's session concurrently — the
+    // cross-port sibling of the aarch64 `boot_aarch64` wiring.
+    .with_spawn(
+        &crate::spawn_producer_x86_64::X86_64_PROGRAM_REGISTRY,
+        &crate::spawn_producer_x86_64::X86_64_PROCESS_SPAWN,
+    );
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;

@@ -1161,15 +1161,35 @@ copy is added on the syscall hot path (§2.16).
     a per-target link recipe). Proven by `tests/integration/spawn_init_qemu_x86_64`
     (PASS on `ProcessSpawned` + an audited `SyscallInvoked`). **No ABI change.**
 
-- **X3b — x86_64 `spawn` concurrent producer `[ ]`.** With X3a's ring-3 path in
-  place, add the real x86_64 `ProcessSpawn` producer (sibling of the aarch64
-  `kernel/rustos-kernel/src/spawn_producer.rs`) building each child a fresh
-  isolated PML4 from a static pool (reuse `new_identity_first_gib`), driving the
-  audited `spawn_image` + `admit_process`, wired through `BootInfo::with_spawn`
-  with the embedded session-program registry. `init`'s session `spawn` (today
-  rejected `NotImplemented`) then succeeds. Proven by an x86_64 concurrent-spawn
-  vertical (the `spawn_session_qemu_aarch64` analogue) where PID 1 and the
-  session run concurrently under the live scheduler.
+- **X3b — x86_64 `spawn` concurrent producer `[x]`.** The real x86_64
+  `ProcessSpawn` producer — `kernel/rustos-kernel/src/spawn_producer_x86_64.rs`,
+  the cross-port sibling of the aarch64 `spawn_producer.rs` — is wired through
+  `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
+  with the embedded `X86_64_PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
+  already bakes for x86_64). On `init`'s `CAP_PROC_SPAWN`-gated `spawn` for
+  `/Apps/Shell.app/Run`, it claims a fresh `PageTablePool` from a `.bss` reserve
+  (fail-closed `NoSpace`), builds a 4 GiB-identity child PML4 with
+  `new_identity_first_gib`, drives the audited `spawn_image` + `admit_process`
+  (the child gets only `{CAP_CONSOLE_WRITE}`, no ambient authority), and admits
+  it **Ready** — returning the PID without entering it (a true concurrent spawn).
+  **Key decision:** unlike the X3a PID-1 seam (which switches `CR3` to build the
+  image), the producer runs under PID 1's own `CR3` — whose
+  `new_identity_first_gib` map covers the low 4 GiB identity (existing-table
+  physical derefs + the `.bss` child pool + the allocator's frames) **and** the
+  higher-half kernel window (new-table static pointers + the `DirectPhysMap`) —
+  so it builds the child's tables **without switching `CR3`**, never moving the
+  running parent out from under itself, exactly as the aarch64 producer builds
+  through its identity window (§2.2). The child's own `CR3` is reloaded by its
+  `pre_resume` hook (CR3 + `set_kernel_rsp0`); its kernel stack is a software-
+  canary `BoxStack` (the hardware guard-page fault-form is aarch64-only —
+  riscv64/x86_64 `Pending`). Proven by
+  `tests/integration/spawn_session_qemu_x86_64` (enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`): PASS on two `ProcessSpawned`
+  (PID 1 + the session) and two audited `SyscallInvoked` — the second necessarily
+  the session's `exit`, since `init`'s `wait` only completes after the session is
+  reaped, proving the session actually *ran* in its own ring-3 space.
+  `init`'s `wait`→reap→relaunch supervision cycle is **not** asserted here — it is
+  the x86_64 `wait` validation (X4). **No ABI change.**
 
 - **X4 — x86_64 `wait` sibling `[ ]`.** Wire the `KernelProcessWait` producer
   on the x86_64 production pipeline (`register_child` on the spawn-admit path,
