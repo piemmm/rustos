@@ -66,7 +66,16 @@ use rustos_log::{Event, EventId, Field, Level, Sink};
 
 use crate::arch_wrapper::BinArch;
 use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
+use crate::init_spawn_x86_64::X86_64_INIT_SPAWN;
 use crate::ioapic_controller::IoApicController;
+use crate::serial_sink::COM1_CONSOLE;
+
+/// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
+/// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
+/// data/rodata pages and the user stack be honoured rather than treated as a
+/// reserved bit that faults the page-table walk (`AGENTS.md` §19.2).
+const IA32_EFER: u32 = 0xC000_0080;
+const EFER_NXE: u64 = 1 << 11;
 
 // --- BSP boot configuration ----------------------------------------
 
@@ -375,6 +384,21 @@ fn try_boot(
             .map_err(|_| BootError::PageFaultIsrInstall)?;
     }
 
+    // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
+    //     process-image builder sets on a ring-3 program's data/rodata
+    //     pages and its stack is honoured (`AGENTS.md` §19.2). Without it,
+    //     bit 63 is reserved and the first non-executable user mapping the
+    //     `init` spawn seam builds would fault the page-table walk. Enabling
+    //     it on the BSP before any user image is built is the production W^X
+    //     contract; it preserves `SCE`/`LME`/`LMA` the boot trampoline set.
+    //
+    // SAFETY: BSP after `percpu::init(0)`; interrupts disabled. The
+    // read-modify-write only sets bit 11, leaving every other `IA32_EFER`
+    // bit (long-mode enable/active, syscall enable) intact.
+    unsafe {
+        enable_nxe();
+    }
+
     // 2. Software-enable the BSP LAPIC and read its ID.
     let mut lapic = make_bsp_lapic();
     lapic.software_enable(0xFF);
@@ -555,7 +579,17 @@ fn try_boot(
         // is the *kernel-side* publication point for the eventual
         // production dispatch hook.
         &DISPATCH_SLOT,
-    );
+    )
+    // The COM1 console backing for the standard streams: `stream_write` on
+    // fd 1/2/3 reaches the same serial line the log sink uses, so PID 1
+    // `init`'s banner lands (`plans/PI.md` X3a, `AGENTS.md` §20). It is a
+    // stream *backing*, not a program-facing device.
+    .with_console(&COM1_CONSOLE)
+    // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
+    // builds `init`'s ring-3 image and drops into it as a resumable user
+    // kthread (`plans/PI.md` X3a). The runtime `spawn` producer is wired
+    // separately (X3b); until then `init`'s session launch fails closed.
+    .with_init(&X86_64_INIT_SPAWN);
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;
@@ -563,6 +597,41 @@ fn try_boot(
     // The caller forwards to `kernel_main`, which returns `!` and
     // never re-enters this function.
     Ok(boot_info)
+}
+
+/// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.
+///
+/// # Safety
+///
+/// Must run in ring 0 with interrupts disabled (the BSP after
+/// `percpu::init`). Performs a `rdmsr`/`wrmsr` read-modify-write that only
+/// sets [`EFER_NXE`], preserving every other `IA32_EFER` bit.
+unsafe fn enable_nxe() {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: `rdmsr` of `IA32_EFER` is well-defined in ring 0; it has no
+    // memory effects and clobbers only the named registers.
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") IA32_EFER,
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, preserves_flags),
+        );
+    }
+    let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
+    // SAFETY: writing `IA32_EFER` back with only bit 11 newly set is the
+    // documented enable sequence; `SCE`/`LME`/`LMA` are preserved.
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_EFER,
+            in("eax") efer as u32,
+            in("edx") (efer >> 32) as u32,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {

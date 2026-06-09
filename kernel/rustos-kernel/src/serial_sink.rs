@@ -27,6 +27,7 @@
 use core::fmt::Write as _;
 
 use rustos_arch_x86_64::serial::{self, Serial, COM1_BASE};
+use rustos_kernel_core::ConsoleWrite;
 use rustos_log::{Event, Level, Sink};
 
 /// `Sink` implementation that emits one formatted line per event to
@@ -95,3 +96,53 @@ pub static SERIAL_SINK: SerialSink = SerialSink::new();
 // arch crate by name for the few items they touch (panic-handler
 // fallback, COM1 base).
 pub use serial::COM1_BASE as REEXPORT_COM1_BASE;
+
+/// A [`ConsoleWrite`] backing over the COM1 16550 UART.
+///
+/// The x86_64 production boot path installs this through
+/// `rustos_kernel_core::BootInfo::with_console`, so the `stream_write`
+/// syscall on fd 1/2/3 reaches the same serial line the [`SerialSink`] logs
+/// to (`plans/PI.md` X3a). It is the x86_64 counterpart of the aarch64
+/// `UartConsole`: the bootstrap stream **backing**, not a program-facing
+/// device interface — a program names only its inherited descriptors and
+/// the kernel routes the bytes here (`AGENTS.md` §20).
+///
+/// Zero-sized and shared through a `&'static` reference: every call
+/// constructs a fresh [`Serial`] handle (the UART itself is the shared
+/// mutable state, not the wrapper), matching [`SerialSink`]'s discipline of
+/// holding no global mutable static (`AGENTS.md` §2).
+#[derive(Debug)]
+pub struct Com1Console;
+
+impl Com1Console {
+    /// Construct the console handle. `const` so it can live in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Com1Console {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConsoleWrite for Com1Console {
+    fn write(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
+        // The 16550 init is idempotent (sticky divisor + line-control), so a
+        // fresh handle per call avoids a shared mutable static. `write_byte`
+        // busy-polls the transmitter-holding register, so every byte lands;
+        // the count returned is therefore the full slice length, and the
+        // gated banner write in PID 1 `init` (`run.rs`) sees a full write.
+        let mut serial = Serial::init(COM1_BASE);
+        for &b in bytes {
+            serial.write_byte(b);
+        }
+        Ok(bytes.len())
+    }
+}
+
+/// The single `'static` [`Com1Console`] the x86_64 boot path installs as the
+/// console backing through `BootInfo::with_console`.
+pub static COM1_CONSOLE: Com1Console = Com1Console::new();

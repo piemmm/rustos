@@ -1136,14 +1136,40 @@ copy is added on the syscall hot path (§2.16).
     the host stub-layout test still pins the 16-byte two-word layout. Docs in
     `docs/src/platform/x86_64.md` + `docs/src/architecture/multitasking.md`.
 
-- **X3 — x86_64 `spawn` concurrent sibling `[ ]`.** The real x86_64
-  `ProcessSpawn` producer (sibling of the aarch64
-  `kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh
-  isolated PML4 from a static pool **without** switching the spawning caller's
-  CR3, drives the audited `spawn_image` + `admit_process`, and is wired through
-  `BootInfo::with_spawn`. Proven by an x86_64 concurrent-spawn vertical (the
-  `spawn_session`/`spawn_program_qemu_x86_64` analogue) where two processes run
-  concurrently under the live scheduler.
+- **X3a — x86_64 PID 1 (`init`) reaches ring 3 (production path) `[x]`.** The
+  prerequisite for the x86_64 `spawn` producer: the **production**
+  `rustos_kernel::boot` pipeline now spawns PID 1 into ring 3 through the real
+  `kernel_main` + `InitSpawn` path (not a test-driven ad-hoc scheduler like
+  X1/X2), the cross-port sibling of the aarch64 P6c-3 milestone. Three pieces,
+  all wired into `BootInfo`:
+  - `init_spawn_x86_64::X86_64InitSpawn` (`with_init`): builds `init`'s ring-3
+    image through the audited `spawn_image` and admits it as a resumable user
+    kthread (`admit_init`); `pre_resume` reloads CR3 (`activate_user_root`) +
+    repoints the entry stack (`set_kernel_rsp0`); `BoxStack` kernel stack
+    (software canary — the hardware guard-page form is aarch64-only).
+  - `serial_sink::Com1Console` (`with_console`): the COM1 `ConsoleWrite` stream
+    backing, so `init`'s fd-1 banner lands (§20); the x86_64 `UartConsole`
+    sibling.
+  - `boot::try_boot` enables `IA32_EFER.NXE` (production W^X step, §19.2).
+  - **Key invariant:** the seam switches CR3 to the fresh space to build the
+    image, and the x86_64 page-table walk dereferences tables by their **low
+    physical address**, so the space must identity-map all of RAM (not the
+    32 MiB `new_identity_first_32mib` window the X1/X2 verticals use). The new
+    `paging::AddressSpace::new_identity_first_gib` (shared `new_identity`
+    helper) maps 4 GiB, mirroring the boot trampoline (covers RAM + the LAPIC).
+    Embedded program rxes now build for x86_64 too (`build.rs` generalised over
+    a per-target link recipe). Proven by `tests/integration/spawn_init_qemu_x86_64`
+    (PASS on `ProcessSpawned` + an audited `SyscallInvoked`). **No ABI change.**
+
+- **X3b — x86_64 `spawn` concurrent producer `[ ]`.** With X3a's ring-3 path in
+  place, add the real x86_64 `ProcessSpawn` producer (sibling of the aarch64
+  `kernel/rustos-kernel/src/spawn_producer.rs`) building each child a fresh
+  isolated PML4 from a static pool (reuse `new_identity_first_gib`), driving the
+  audited `spawn_image` + `admit_process`, wired through `BootInfo::with_spawn`
+  with the embedded session-program registry. `init`'s session `spawn` (today
+  rejected `NotImplemented`) then succeeds. Proven by an x86_64 concurrent-spawn
+  vertical (the `spawn_session_qemu_aarch64` analogue) where PID 1 and the
+  session run concurrently under the live scheduler.
 
 - **X4 — x86_64 `wait` sibling `[ ]`.** Wire the `KernelProcessWait` producer
   on the x86_64 production pipeline (`register_child` on the spawn-admit path,

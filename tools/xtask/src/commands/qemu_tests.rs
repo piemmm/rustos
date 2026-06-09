@@ -1374,6 +1374,38 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
+    // bring-up vertical — the cross-port sibling of the aarch64
+    // `spawn-init-qemu-aarch64` (P6c-3), proving the production x86_64 boot
+    // pipeline reaches ring 3 through the real `kernel_main` + `InitSpawn`
+    // path (not a test-driven ad-hoc scheduler like X1/X2). It reuses
+    // `rustos_kernel::boot`, which now installs the x86_64 PID 1 spawn seam
+    // (`init_spawn_x86_64`, via `BootInfo::with_init`) and the COM1 console
+    // backing (`BootInfo::with_console`); only the audit sink is replaced.
+    // After `BootCompleted`, `kernel_main` builds `init`'s ring-3 image
+    // through the capability-checked, audited `kernel_core::spawn_image`
+    // (emitting `ProcessSpawned`, EventId 4030) and admits it as a resumable
+    // user kthread, then drains the run queue. PID 1 `init` writes its gated
+    // banner to fd 1 over the COM1 backing, then issues its (audited) `spawn`
+    // syscall (EventId 5000; the runtime producer is X3b, so it fails closed)
+    // and `exit`s. PASS once a `ProcessSpawned` and an audited `SyscallInvoked`
+    // are observed — proving PID 1 reached and executed in ring 3 (the gated
+    // banner landed before the audited syscall). A bad image, an entry fault,
+    // or an unhandled first `syscall` never emits the audited syscall, so the
+    // run times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second
+    // budget match the other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-init-qemu-x86-64",
+        binary: "rustos-test-spawn-init-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `rustos-rt` `mem_map`-backed
     // `#[global_allocator]` works end to end in an EL0 process on the `virt`

@@ -113,6 +113,16 @@ pub mod virtio_boot;
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod boot;
+
+// The x86_64 PID 1 (`init`) spawn seam (`plans/PI.md` X3a): the
+// `rustos_kernel_core::InitSpawn` implementation `boot` installs into the
+// `BootInfo` hand-off so `kernel_main` drops into ring 3 after boot
+// completes — the cross-port sibling of the aarch64 `init_spawn`.
+// Freestanding+x86_64-only: it links the x86_64 port's page-table /
+// `EnterUser` / `set_kernel_rsp0` primitives and `include!`s the build-time
+// `init` `rxe` blob.
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub mod init_spawn_x86_64;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod panic_ctx;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
@@ -194,4 +204,4 @@ pub use boot::{boot, BootError};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use panic_ctx::handle_panic_via_kernel_core;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use serial_sink::{SerialSink, SERIAL_SINK};
+pub use serial_sink::{Com1Console, SerialSink, COM1_CONSOLE, SERIAL_SINK};

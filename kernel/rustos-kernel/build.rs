@@ -44,6 +44,25 @@ use build_support::{is_freestanding, kernel_isa, linker_script_for};
 /// Rust target triple of the freestanding aarch64 (Raspberry Pi 4) build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
+/// Rust target triple of the freestanding x86_64 build.
+const X86_64_TARGET: &str = "x86_64-unknown-none";
+
+/// The `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` environment variable that scopes
+/// the PIE link recipe to a given freestanding target (and to it alone, so
+/// the embedded program's own host build script is never affected).
+///
+/// Returns `None` for any target that is not one of the two bare-metal
+/// production targets — host builds, clippy, and fmt then emit inert empty
+/// fixtures (the boot-path modules that consume them compile only for a
+/// freestanding production target).
+fn program_rustflags_var(target: &str) -> Option<&'static str> {
+    match target {
+        AARCH64_TARGET => Some("CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS"),
+        X86_64_TARGET => Some("CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS"),
+        _ => None,
+    }
+}
+
 /// Virtual base each spawned program (`Run`) image is mapped at when the
 /// aarch64 boot path builds it (`plans/PI.md` P6c-3, `plans/SPAWN.md` `SP3b`).
 ///
@@ -124,23 +143,25 @@ fn main() {
     emit_program_rxes(&target);
 }
 
-/// Build every embedded [`PROGRAMS`] `Run` PIE and embed its `rxe` image so
-/// the aarch64 boot path can spawn PID 1 `init` into EL0 (`plans/PI.md`
-/// P6c-3) and `init` can launch the session program (`plans/SPAWN.md` `SP3b`).
+/// Build every embedded [`PROGRAMS`] `Run` PIE and embed its `rxe` image so a
+/// boot path can spawn PID 1 `init` into user mode (`plans/PI.md` P6c-3 on
+/// aarch64, X3a on x86_64) and `init` can launch the session program
+/// (`plans/SPAWN.md` `SP3b`).
 ///
-/// On the freestanding aarch64 target each program is compiled
-/// position-independent against its own `Run.ld` into a private target
-/// directory under `OUT_DIR` (so it never collides with the outer kernel
-/// build — `AGENTS.md` §2.2, one program source built two ways), then the
-/// linked PIE ELF is converted into an `rxe` blob with
+/// On a freestanding production target ([`program_rustflags_var`] returns the
+/// target-scoped link var) each program is compiled position-independent
+/// against its own `Run.ld` into a private target directory under `OUT_DIR`
+/// (so it never collides with the outer kernel build — `AGENTS.md` §2.2, one
+/// program source built for each target), then the linked PIE ELF is
+/// converted into an `rxe` blob with
 /// [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
 /// [`USER_BIAS`] and stamping the kernel's compiled-in syscall CFI tag
 /// (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
 /// [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2).
 ///
-/// On every other target (host `cargo build --workspace`, clippy, the
-/// x86_64 image) each fixture is an inert empty blob: the boot-path modules
-/// that consume them compile only for the freestanding aarch64 target.
+/// On every other target (host `cargo build --workspace`, clippy) each
+/// fixture is an inert empty blob: the boot-path modules that consume them
+/// compile only for a freestanding production target.
 fn emit_program_rxes(target: &str) {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
@@ -158,22 +179,33 @@ fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &P
         println!("cargo:rerun-if-changed={prog_dir}/{rel}");
     }
 
-    let rxe = if target == AARCH64_TARGET {
-        build_and_convert(manifest_dir, out_dir, &prog_dir, program)
-    } else {
-        Vec::new()
+    let rxe = match program_rustflags_var(target) {
+        Some(rustflags_var) => build_and_convert(
+            manifest_dir,
+            out_dir,
+            &prog_dir,
+            program,
+            target,
+            rustflags_var,
+        ),
+        None => Vec::new(),
     };
     let fixture_path = PathBuf::from(out_dir).join(program.fixture);
     write_fixture(&fixture_path, program, &rxe);
 }
 
-/// Compile a program's `Run` bin PIE for the freestanding aarch64 target and
-/// convert the linked ELF into an `rxe` blob.
+/// Compile a program's `Run` bin PIE for the given freestanding `target` and
+/// convert the linked ELF into an `rxe` blob. `rustflags_var` is the
+/// target-scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` variable that carries the
+/// PIE link recipe (one build path for every production target, `AGENTS.md`
+/// §2.2).
 fn build_and_convert(
     manifest_dir: &str,
     out_dir: &str,
     prog_dir: &str,
     program: &Program,
+    target: &str,
+    rustflags_var: &str,
 ) -> Vec<u8> {
     let run_ld = format!("{prog_dir}/Run.ld");
     let target_dir = format!("{out_dir}/{}-target", program.pkg);
@@ -194,8 +226,8 @@ fn build_and_convert(
     // build-std`). `alloc` is required because the program packages name it
     // transitively, even though the banner-printing `Run` binaries never
     // allocate (the unreachable allocating paths are dead-stripped, so no
-    // global allocator is needed). Scope the PIE link flags to the aarch64
-    // target so the program's own host build script is unaffected.
+    // global allocator is needed). Scope the PIE link flags to the chosen
+    // production target so the program's own host build script is unaffected.
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(manifest_dir)
@@ -203,12 +235,12 @@ fn build_and_convert(
         // into this build script's environment; both outrank the
         // target-scoped var below, so a nested cargo would inherit the
         // outer kernel's flags and drop the PIE link recipe. Clear them so
-        // the target-scoped flags win and apply only to the aarch64 program
-        // crates (not the program's own host build script).
+        // the target-scoped flags win and apply only to the program crates
+        // for this target (not the program's own host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
+            rustflags_var,
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),
         )
         .args([
@@ -218,7 +250,7 @@ fn build_and_convert(
             "--bin",
             program.bin,
             "--target",
-            AARCH64_TARGET,
+            target,
             "-Z",
             "build-std=core,compiler_builtins,alloc",
             "--target-dir",
@@ -232,7 +264,7 @@ fn build_and_convert(
         program.pkg
     );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/{}", program.bin);
+    let elf_path = format!("{target_dir}/{target}/debug/{}", program.bin);
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
     rustos_itest_harness::elf2rxe::elf_to_rxe(

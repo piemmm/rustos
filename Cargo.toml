@@ -175,6 +175,7 @@ members = [
     "tests/integration/mem_map_qemu_x86_64",
     "tests/integration/spawn_el0_resume_qemu_x86_64",
     "tests/integration/spawn_el0_timeshare_qemu_x86_64",
+    "tests/integration/spawn_init_qemu_x86_64",
     "tests/integration/wait_program",
     "tests/integration/wait_qemu_aarch64",
     "tests/integration/heap_program",

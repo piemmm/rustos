@@ -201,6 +201,43 @@ impl AddressSpace {
     ///
     /// Returns `None` if the frame source is exhausted.
     pub fn new_identity_first_32mib(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        // 16 × 2 MiB = 32 MiB.
+        Self::new_identity(frames, 16)
+    }
+
+    /// Build a new address space identity-mapping `[0, gib GiB)` with 2 MiB
+    /// huge pages, plus the higher-half kernel window.
+    ///
+    /// Unlike [`Self::new_identity_first_32mib`], this maps whole gigabytes so
+    /// the low identity map covers all of the physical RAM the page-table walk
+    /// dereferences intermediate tables through (the walk recovers each table
+    /// from its low physical address — see [`ensure_child`]) **and** the frames
+    /// the live allocator hands a process image. A fresh per-process space the
+    /// kernel switches to while building an image (`init_spawn_x86_64`,
+    /// `plans/PI.md` X3a) needs this broad map; the 32 MiB window is only
+    /// enough when every table and frame lives in low memory. `gib` is sized to
+    /// cover the platform's RAM (and the architectural LAPIC MMIO page at
+    /// ~3.98 GiB when `gib >= 4`), mirroring the boot trampoline's identity
+    /// map.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source is exhausted or `gib` overflows the
+    /// 2 MiB-page count.
+    pub fn new_identity_first_gib(
+        frames: &'static dyn PageTableFrames,
+        gib: usize,
+    ) -> Option<Self> {
+        // 512 × 2 MiB = 1 GiB.
+        Self::new_identity(frames, gib.checked_mul(512)?)
+    }
+
+    /// Shared constructor backing [`Self::new_identity_first_32mib`] and
+    /// [`Self::new_identity_first_gib`] (`AGENTS.md` §2.2 — one definition).
+    ///
+    /// Identity-maps the first `pages_2mib` 2 MiB pages (allocating one PD per
+    /// 512 pages) and mirrors the boot trampoline's higher-half kernel window.
+    fn new_identity(frames: &'static dyn PageTableFrames, pages_2mib: usize) -> Option<Self> {
         let TableFrame {
             phys: pml4_phys,
             entries: pml4,
@@ -209,16 +246,26 @@ impl AddressSpace {
             phys: pdpt_phys,
             entries: pdpt,
         } = frames.alloc_table()?;
-        let TableFrame {
-            phys: pd_phys,
-            entries: pd,
-        } = frames.alloc_table()?;
-
         pml4[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
-        pdpt[0] = pd_phys | flags::PRESENT | flags::WRITABLE;
-        // 16 × 2 MiB = 32 MiB identity-mapped.
-        for (i, slot) in pd.iter_mut().take(16).enumerate() {
-            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+
+        // Identity-map `pages_2mib` 2 MiB pages, one PD (512 entries = 1 GiB)
+        // at a time, linking each into the low PDPT.
+        let mut mapped = 0usize;
+        let mut pdpt_idx = 0usize;
+        while mapped < pages_2mib {
+            let TableFrame {
+                phys: pd_phys,
+                entries: pd,
+            } = frames.alloc_table()?;
+            pdpt[pdpt_idx] = pd_phys | flags::PRESENT | flags::WRITABLE;
+            for slot in pd.iter_mut() {
+                if mapped >= pages_2mib {
+                    break;
+                }
+                *slot = ((mapped as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+                mapped += 1;
+            }
+            pdpt_idx += 1;
         }
 
         // Mirror the boot trampoline's higher-half kernel window so the
