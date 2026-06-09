@@ -498,6 +498,18 @@ fn run_fmt(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
 fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // rustdoc with warnings denied — broken intra-doc links fail the build.
+    //
+    // Cargo already runs one `rustdoc` per crate in parallel, but each
+    // `rustdoc` is single-threaded by default, so the tail of the run — where
+    // the workspace dependency graph funnels into the top crates
+    // (`rustos-kernel`, the userland binaries) and only a couple of doc units
+    // remain runnable — pins the build to a single core. `-Z threads=0` turns
+    // on rustdoc's parallel front-end (`0` = all logical CPUs), which
+    // parallelises *within* each `rustdoc` invocation and so keeps the
+    // many-core CI host busy through that serial tail. Nightly-only and
+    // experimental, but the toolchain is pinned nightly already (it likewise
+    // backs `-Z build-std`), so this is consistent with the project's posture.
+    // The `-Z` flag carries this rationale comment per `AGENTS.md` §2.11.
     let mut doc = ctx.cargo();
     doc.args([
         "doc",
@@ -506,7 +518,7 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
         "--locked",
         "--document-private-items",
     ])
-    .env("RUSTDOCFLAGS", "-D warnings");
+    .env("RUSTDOCFLAGS", "-D warnings -Z threads=0");
     ctx.run("docs-check (rustdoc)", doc)?;
 
     // mdBook build. The book lives in `docs/`.
