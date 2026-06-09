@@ -510,6 +510,16 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // experimental, but the toolchain is pinned nightly already (it likewise
     // backs `-Z build-std`), so this is consistent with the project's posture.
     // The `-Z` flag carries this rationale comment per `AGENTS.md` §2.11.
+    //
+    // `-Z rustdoc-mergeable-info` (a cargo `-Z` flag, RFC 3662) makes cargo
+    // drive rustdoc's mergeable cross-crate-info: each crate writes its
+    // partial cross-crate info (`doc.parts`) and a final cheap merge step
+    // links them, instead of every `rustdoc` invocation loading and rewriting
+    // the shared `target/doc` cross-crate index. That shared-mutable index is
+    // O(crates) work per crate (so O(crates²) overall) and serialises doc
+    // units on the doc root; the parts-then-merge model removes that
+    // contention, which matters across this 167-crate workspace. Nightly-only
+    // like the flags above and consistent with the pinned-nightly posture.
     let mut doc = ctx.cargo();
     doc.args([
         "doc",
@@ -517,6 +527,8 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
         "--no-deps",
         "--locked",
         "--document-private-items",
+        "-Z",
+        "rustdoc-mergeable-info",
     ])
     .env("RUSTDOCFLAGS", "-D warnings -Z threads=0");
     ctx.run("docs-check (rustdoc)", doc)?;
