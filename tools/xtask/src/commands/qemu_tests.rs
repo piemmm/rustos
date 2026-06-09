@@ -1433,6 +1433,36 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
+    // vertical — the proof that x86_64, the last `BlockSplit::Pending` port,
+    // is now `BlockSplit::Supported`, the sibling of
+    // `stack_guard_qemu_{aarch64,riscv64}`. Unlike those self-contained test
+    // kernels, x86_64 long-mode bring-up (GDT, the dedicated error-code-aware
+    // `#PF` entry, the bump heap) is the production boot pipeline's job, so it
+    // boots the real `rustos-kernel` pipeline (like the x86_64 `mem_map`
+    // vertical) and does the split / unmap / fault work on `BootCompleted`. It
+    // builds a 4 GiB-identity `paging::AddressSpace`, activates it (CR3),
+    // `split_block`s the 2 MiB huge page covering a dedicated guard static
+    // (reached through its low-identity physical alias), proves the split
+    // preserved the mapping (sentinel write/read-back), then `unmap`s +
+    // `flush_page`s the single guard page and reads it — the
+    // `rustos_arch_x86_64::fault` observer reports the supervisor not-present
+    // `#PF` on exactly that page as PASS. A split/unmap failure, a read that
+    // does not fault, or a fault elsewhere flips `qemu_exit::exit_failure` or
+    // times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget
+    // match the other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-stack-guard-qemu-x86_64",
+        binary: "rustos-test-stack-guard-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
     // vertical — the first proof that a ring-3 task is admitted as a *resumable*
     // user kthread on x86_64 and cooperatively parks/resumes under the live

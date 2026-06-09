@@ -44,6 +44,13 @@ pub const PAGE_SIZE: usize = 4096;
 /// Number of 64-bit entries in a page-table page (PML4 / PDPT / PD / PT).
 pub const ENTRIES_PER_TABLE: usize = 512;
 
+/// Span of a single PD-level (2 MiB) huge-page block.
+///
+/// The unit [`AddressSpace::prepare_guard_arena`] walks an arena in: every
+/// 2 MiB block the arena spans is re-expressed at 4 KiB granularity so a
+/// single guard page inside it can be unmapped (`plans/PI.md` G2).
+pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
+
 /// Base virtual address of the -2 GiB higher-half kernel window.
 ///
 /// A kernel symbol linked at `KERNEL_VMA_BASE + p` is loaded at physical
@@ -463,6 +470,172 @@ impl AddressSpace {
         Some(())
     }
 
+    /// Re-express the coarse huge-page leaf(s) covering `vaddr` at 4 KiB
+    /// granularity, preserving the mapped output address and every
+    /// permission bit, so the single 4 KiB page containing `vaddr` can
+    /// then be torn down with [`MmuAddressSpace::unmap`] (+ a
+    /// [`TlbShootdown::flush_page`]) without disturbing its neighbours.
+    ///
+    /// This is the x86_64 foundation of the kthread guard page
+    /// (`plans/PI.md` G1, the sibling of the aarch64 / riscv64 block
+    /// split): a guard page that falls inside a region the boot path
+    /// mapped with a coarse 1 GiB (PDPTE) or 2 MiB (PDE) *huge page*
+    /// cannot be unmapped while it is part of that leaf, because the huge
+    /// leaf has no per-4 KiB entry to clear. Splitting re-expresses the
+    /// same translation as a table of finer leaves — a 1 GiB huge page
+    /// becomes a PD of 512 × 2 MiB huge pages, then the 2 MiB huge page
+    /// covering `vaddr` becomes a PT of 512 × 4 KiB pages — leaving every
+    /// address translating identically but now at 4 KiB granularity.
+    ///
+    /// Each new table pointer carries `PRESENT | WRITABLE` plus the huge
+    /// leaf's own `USER` / `NO_EXECUTE` bits, so user-accessibility and
+    /// non-executability of the re-expressed region are preserved exactly
+    /// (the effective permission is the AND across the walk, and every
+    /// shattered child carries the same leaf permissions). The 2 MiB → 4 KiB
+    /// step **clears** the page-size bit on the PT leaves: at PT level bit 7
+    /// ([`flags::HUGE`]) is the PAT attribute, not a page-size flag (Intel
+    /// SDM Vol 3A §4.5), so leaving it set would change the memory type.
+    ///
+    /// The split is **break-before-make-free for the running region**: it
+    /// only ever *adds* table levels that reproduce the existing
+    /// translation, never invalidating a live address, so it is safe to
+    /// run against the active translation regime. It is idempotent — a
+    /// level that is already a table pointer is left untouched — so
+    /// re-splitting an already-fine region succeeds without allocating.
+    /// The split itself changes no translation result and so needs no TLB
+    /// maintenance; the caller flushes after a subsequent
+    /// [`MmuAddressSpace::unmap`].
+    ///
+    /// Like the rest of the four-level walk this recovers intermediate
+    /// tables through the low identity map, so it is only valid on the
+    /// bare-metal target; it is proven by the
+    /// `tests/integration/stack_guard_qemu_x86_64` QEMU vertical, not a
+    /// host conformance test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
+    /// [`MapError::NotMapped`] if `vaddr` has no live mapping at the level
+    /// being split, or [`MapError::PoolExhausted`] if the page-table pool
+    /// cannot supply a replacement table. On [`MapError::PoolExhausted`]
+    /// any level already split stays split (still a faithful identity
+    /// re-expression of the same translation), so the address space is
+    /// never left describing a *different* mapping (`AGENTS.md` §2.9).
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        let frames = self.frames;
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+
+        // --- PML4 level: always a table pointer (x86_64 has no PML4-level
+        // huge leaf), so a present entry resolves to a live PDPT.
+        let e4 = self.pml4[i4];
+        if e4 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        // SAFETY: a present PML4 entry holds the low physical address of a
+        // PDPT (the same round-trip `translate`/`ensure_child` rely on);
+        // the low identity map makes that address dereferenceable, and
+        // `&mut self` makes the borrow exclusive.
+        let pdpt = unsafe { &mut *((e4 & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
+
+        // --- PDPT level (1 GiB): a 1 GiB huge leaf becomes a PD of 512 ×
+        // 2 MiB huge leaves (the page-size bit stays set — PD entries use
+        // it too).
+        let e3 = pdpt[i3];
+        if e3 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        if e3 & flags::HUGE != 0 {
+            let TableFrame { phys, entries } =
+                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
+            shatter_huge_into(entries, e3, 21, true);
+            pdpt[i3] =
+                phys | flags::PRESENT | flags::WRITABLE | (e3 & (flags::USER | flags::NO_EXECUTE));
+        }
+
+        // The PDPT slot now holds a table pointer; recover the PD.
+        // SAFETY: present non-huge PDPT entry → low identity-mapped PD (as
+        // above); `&mut self` keeps the borrow exclusive.
+        let pd = unsafe { &mut *((pdpt[i3] & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
+
+        // --- PD level (2 MiB): a 2 MiB huge leaf becomes a PT of 512 ×
+        // 4 KiB page leaves (the page-size bit is CLEARED — at PT level
+        // bit 7 is PAT, not page-size).
+        let e2 = pd[i2];
+        if e2 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        if e2 & flags::HUGE != 0 {
+            let TableFrame { phys, entries } =
+                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
+            shatter_huge_into(entries, e2, 12, false);
+            pd[i2] =
+                phys | flags::PRESENT | flags::WRITABLE | (e2 & (flags::USER | flags::NO_EXECUTE));
+        }
+        // The PD now resolves `vaddr` through a 4 KiB page leaf.
+        Ok(())
+    }
+
+    /// Re-express every coarse huge-page leaf covering the arena
+    /// `[base, base + len)` at 4 KiB granularity, so any single page in
+    /// the arena (e.g. a kthread kernel-stack guard page) can later be
+    /// torn down with [`MmuAddressSpace::unmap`] (+ a
+    /// [`TlbShootdown::flush_page`]) without disturbing the block the
+    /// running CPU executes on (`plans/PI.md` guard-page fault-form, stage
+    /// G2).
+    ///
+    /// This is [`Self::split_block`] applied to every 2 MiB block the arena
+    /// spans: a guard-page arena that the boot path laid down inside the
+    /// coarse identity huge pages has no per-4 KiB leaf to clear, so the
+    /// whole arena is split up-front, at boot, while it holds no running
+    /// context. Because `split_block` only ever *adds* table levels that
+    /// reproduce the existing translation, preparing the arena changes no
+    /// address's mapping and needs no TLB maintenance — it is safe against
+    /// the active translation regime and is idempotent.
+    ///
+    /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
+    /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
+    /// arena is walked from the 2 MiB block containing `base` through the
+    /// block containing its last byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError::Misaligned`] if `len` is zero, `base` is not
+    /// 4 KiB-aligned, or `base + len` wraps; [`MapError::NotMapped`] if any
+    /// covering block has no live mapping; or [`MapError::PoolExhausted`]
+    /// if the page-table pool cannot supply a replacement table. On a
+    /// mid-arena failure the blocks already split stay split (a faithful
+    /// re-expression of the same translation), so the space never describes
+    /// a *different* mapping (`AGENTS.md` §2.9 — fail closed, never
+    /// corrupt).
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
+        if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(MapError::Misaligned);
+        }
+        // The last byte the arena occupies; `len != 0`, so `len - 1` does
+        // not underflow. A `base + len` that wraps `u64` is rejected as a
+        // fail-closed `Misaligned`, never silently truncated.
+        let last = base.checked_add(len - 1).ok_or(MapError::Misaligned)?;
+        let first_block = base & !(BLOCK_2MIB - 1);
+        let last_block = last & !(BLOCK_2MIB - 1);
+        let mut block = first_block;
+        loop {
+            self.split_block(block)?;
+            if block == last_block {
+                break;
+            }
+            block += BLOCK_2MIB;
+        }
+        Ok(())
+    }
+
     /// Switch the active page table to this address space.
     ///
     /// # Safety
@@ -699,15 +872,47 @@ impl MmuAddressSpace for AddressSpace {
     }
 
     fn block_split_support(&self) -> BlockSplit {
-        // The four-level walk has 1 GiB / 2 MiB huge leaves a split *could*
-        // re-express at 4 KiB granularity (pure page-table work, no silicon
-        // dependency), but the primitive has not been written for x86_64
-        // yet: it lands with this port's own guard-page fault-form. aarch64
-        // has it (`plans/PI.md` G1/G2). Honest `Pending`, never a pretend
-        // no-op (`AGENTS.md` §2.17).
-        BlockSplit::Pending(
-            "x86_64 huge-page split lands with the x86_64 guard-page fault-form (plans/PI.md G3)",
-        )
+        // The four-level walk re-expresses a 1 GiB (PDPTE) / 2 MiB (PDE)
+        // huge leaf as a table of finer leaves (`plans/PI.md` G1/G2 — the
+        // x86_64 guard-page fault-form foundation, proven on the production
+        // pipeline by `stack_guard_qemu_x86_64`), the sibling of the
+        // aarch64 / riscv64 block split.
+        BlockSplit::Supported
+    }
+
+    fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        // The HAL view of the inherent, QEMU-proven
+        // `AddressSpace::split_block` (G1): one body, reached either
+        // directly by the arch boot path / verticals or through the HAL
+        // trait here (`AGENTS.md` §2.2). Inherent methods take precedence
+        // over a same-named trait method, so this forwards to the inherent
+        // body rather than recursing into itself.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            self.split_block(vaddr)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = vaddr;
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
+    }
+
+    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
+        // The HAL view of the inherent, QEMU-proven
+        // `AddressSpace::prepare_guard_arena` (G2): one body, reached either
+        // directly or through the HAL trait here (`AGENTS.md` §2.2). As with
+        // `split_block`, inherent-method resolution forwards to the inherent
+        // body rather than recursing.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            self.prepare_guard_arena(base, len)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = (base, len);
+            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        }
     }
 
     unsafe fn activate(&self) {
@@ -777,6 +982,45 @@ fn page_flags_from_pte(pte: u64) -> PageFlags {
 fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
     let region_mask = (1u64 << region_shift) - 1;
     (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
+}
+
+/// Populate the freshly-allocated table `child` with 512 entries that
+/// reproduce the huge leaf `block` at the next finer granularity,
+/// preserving every permission/attribute bit.
+///
+/// `sub_shift` is the base-2 log of each sub-entry's coverage (21 for the
+/// 2 MiB huge pages a 1 GiB leaf shatters into, 12 for the 4 KiB pages a
+/// 2 MiB leaf shatters into). `keep_huge` carries the page-size bit:
+/// shattering a 1 GiB PDPTE leaf yields 2 MiB PD leaves that are *still*
+/// huge (PD `PS = 1`), but shattering a 2 MiB PD leaf yields 4 KiB PT
+/// leaves where bit 7 ([`flags::HUGE`]) is the PAT attribute rather than a
+/// page-size flag (Intel SDM Vol 3A §4.5), so it is cleared. The address
+/// base is masked to the parent block's natural alignment so a stray PAT
+/// bit on the source leaf never bleeds into a sub-entry's frame address
+/// (`AGENTS.md` §2.2 — one attribute decode, never re-derived).
+///
+/// Only compiled on the bare-metal target, where the page-table walk runs.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn shatter_huge_into(
+    child: &mut [u64; ENTRIES_PER_TABLE],
+    block: u64,
+    sub_shift: u32,
+    keep_huge: bool,
+) {
+    const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+    let sub_size = 1u64 << sub_shift;
+    // The parent block spans 512 sub-entries; align the base to that span
+    // so PAT / reserved bits below the parent page size are discarded.
+    let region_size = sub_size << 9;
+    let base = (block & ADDR_MASK) & !(region_size - 1);
+    let mut attr = block & !ADDR_MASK;
+    if !keep_huge {
+        attr &= !flags::HUGE;
+    }
+    for (i, slot) in child.iter_mut().enumerate() {
+        let sub_pa = base + (i as u64) * sub_size;
+        *slot = sub_pa | attr;
+    }
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

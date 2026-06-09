@@ -908,9 +908,10 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     no-ops, §2.9). aarch64 reports `Supported` and the HAL `split_block`
     forwards to its tested inherent body (one implementation, §2.2);
     riscv64 now reports `Supported` too (its Sv39 split landed — see
-    "riscv64 Sv39 block split" below); x86_64 reports honest `Pending`
-    (its four-level huge-page split lands with its own guard-page
-    fault-form); the `kernel/mem` `HostPageTable` double + `from_map_error`
+    "riscv64 Sv39 block split" below); x86_64 now reports `Supported` too
+    (its four-level huge-page split landed — see "x86_64 four-level
+    huge-page split" below); the `kernel/mem` `HostPageTable` double +
+    `from_map_error`
     carry the new cases (`PageTableError::Unsupported`). Host-proven: the
     `mmu` conformance suite gained a block-split honesty check (declaration
     justified; non-`Supported` ports fail `split_block` closed — 4 new
@@ -932,9 +933,8 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     forward to its inherent, fully-tested body (one implementation, §2.2).
     The `mmu::conformance` honesty check now also requires a non-`Supported`
     port to fail `prepare_guard_arena` closed; aarch64 `paging_tests` proves
-    the HAL method reaches the inherent body over `dyn AddressSpace` (x86_64,
-    still `Pending`, proves the arena fail-closed beside its `split_block`
-    one). Host-proven; **no QEMU vertical needed** — G2 already proves the
+    the HAL method reaches the inherent body over `dyn AddressSpace`.
+    Host-proven; **no QEMU vertical needed** — G2 already proves the
     live aarch64 arena, now reached through the promoted surface. Doc:
     `docs/src/platform/aarch64.md` ("Promoting the arena onto the Arch HAL
     (G3b)").
@@ -1040,9 +1040,40 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     under QEMU on `-M virt` on this host.** Wiring `BoxStack`/the kthread stack
     arena through it on riscv64 (the aarch64 G3b-2/G3c sibling) is the
     follow-on; until then riscv64 keeps the software-canary guard (§2.17).
-    x86_64 remains the last `BlockSplit::Pending` port. Doc:
-    `docs/src/platform/riscv64.md` ("Sv39 block split + guard-page fault-form
-    (G1/G2)").
+    Doc: `docs/src/platform/riscv64.md` ("Sv39 block split + guard-page
+    fault-form (G1/G2)").
+  - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
+    `[x]`.** The last `BlockSplit::Pending` port brought to `Supported`, so
+    all three bare-metal ports now declare and implement the split.
+    `rustos_arch_x86_64::paging::AddressSpace` implements the inherent
+    `split_block(vaddr)` (1 GiB PDPTE huge leaf → PD of 512 × 2 MiB huge
+    leaves, keeping the page-size bit; then the 2 MiB PD huge leaf → PT of
+    512 × 4 KiB pages, **clearing** the page-size bit since at PT level bit 7
+    is PAT — Intel SDM Vol 3A §4.5) + `prepare_guard_arena(base, len)`
+    (`split_block` over every 2 MiB block the arena spans), with the
+    HAL-trait overrides forwarding to the inherent bodies (one body, §2.2,
+    `unreachable!` host arm — the four-level walk recovers tables by their
+    low physical address, so it is only valid bare-metal). The shared
+    `shatter_huge_into` helper copies the leaf's `USER`/`NO_EXECUTE` bits onto
+    every sub-entry + the new table pointer, so the split is an attribute-
+    faithful, break-before-make-free, idempotent re-expression that fails
+    closed (`Misaligned`/`NotMapped`/`PoolExhausted`). Proven end to end by
+    the new `tests/integration/stack_guard_qemu_x86_64` (enrolled in
+    `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s, the sibling of
+    `stack_guard_qemu_{aarch64,riscv64}`): it boots the production
+    `rustos-kernel` pipeline (so the GDT, the dedicated error-code-aware `#PF`
+    entry, and the bump heap are installed) and, on `BootCompleted`, builds a
+    4 GiB-identity space, activates it (`CR3`), `split_block`s the 2 MiB huge
+    page covering a dedicated guard static (reached through its low-identity
+    physical alias, distinct from the higher-half RIP/stack), proves the split
+    preserved the mapping (sentinel write/read-back), then `unmap`s +
+    `flush_page`s the single guard page and reads it → supervisor not-present
+    `#PF` (`fault` observer confirms `is_not_present` + `!is_user` + `CR2` in
+    the guard page) → PASS. **Verified green under QEMU on this host.** Wiring
+    the kthread `BoxStack`/stack arena through it (the aarch64 G3b-2/G3c
+    sibling) is the follow-on; until then x86_64 keeps the software-canary
+    guard (§2.17). **No ABI change.** Doc: `docs/src/platform/x86_64.md`
+    ("Block split + guard-page fault-form (G1/G2)").
 
 ### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[x]`
 
