@@ -41,17 +41,21 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Caller-saved integer registers saved by `rustos_riscv64_trap_vector`
-/// before it calls the Rust handler, laid out to match the store/load
-/// offsets in `trap.s` exactly.
+/// Caller-saved integer registers plus the return-state CSRs saved by
+/// `rustos_riscv64_trap_vector` before it calls the Rust handler, laid
+/// out to match the store/load offsets in `trap.s` exactly.
 ///
-/// The asm reserves a 144-byte frame and stores `ra`, `t0`–`t6`, and
-/// `a0`–`a7` at the byte offsets the field order below reproduces. The
-/// Rust handler receives a `*mut TrapFrame` (the saved-frame `sp`) so it
-/// can read the user's `ecall` arguments from `a0`–`a7` and write the
-/// return value back into `a0` before the asm epilogue restores them.
-/// The `offset_of!` asserts in the unit tests pin the layout against
-/// `trap.s`; a desync fails the host build.
+/// The asm reserves a 160-byte frame and stores `ra`, `t0`–`t6`,
+/// `a0`–`a7`, then `sepc`, `sstatus`, and the interrupted `sp` at the
+/// byte offsets the field order below reproduces. The Rust handler
+/// receives a `*mut TrapFrame` (the saved-frame `sp`) so it can read the
+/// user's `ecall` arguments from `a0`–`a7`, write the return value back
+/// into `a0`, and advance the saved [`TrapFrame::sepc`] past the `ecall`
+/// (the asm epilogue reloads `sepc`/`sstatus`/`sp` from the frame, so a
+/// task parked mid-handler resumes at its own return state rather than
+/// whatever the live CSRs hold after another task ran). The `offset_of!`
+/// asserts in the unit tests pin the layout against `trap.s`; a desync
+/// fails the host build.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TrapFrame {
@@ -87,6 +91,17 @@ pub struct TrapFrame {
     pub a6: u64,
     /// Argument register / syscall number a7 (x17).
     pub a7: u64,
+    /// Saved `sepc`: the interrupted PC (the `ecall` address on the
+    /// syscall path). The handler advances it past the `ecall` so the
+    /// asm epilogue's `sret` resumes at the following instruction.
+    pub sepc: u64,
+    /// Saved `sstatus`: the interrupted privilege/interrupt state. Its
+    /// `SPP` bit (8) selects the asm epilogue's U-mode vs S-mode return.
+    pub sstatus: u64,
+    /// Saved interrupted stack pointer: the user `sp` for a trap from
+    /// U-mode (restored before `sret`), or the kernel `sp` for a nested
+    /// S-mode trap (unused on the S-return path).
+    pub user_sp: u64,
 }
 
 /// `scause` bit set when the trap is an interrupt (cleared for a
@@ -191,6 +206,10 @@ pub unsafe fn init_traps() {
     // sequence; none has memory side effects beyond the CSRs named.
     unsafe {
         core::arch::asm!("csrw stvec, {}", in(reg) base, options(nomem, nostack));
+        // Establish the S-mode `sscratch == 0` invariant the trap vector
+        // relies on to recognise a nested S-mode trap before any
+        // interrupt source is armed (`trap.s`).
+        core::arch::asm!("csrw sscratch, zero", options(nomem, nostack));
         core::arch::asm!("csrs sie, {}", in(reg) SIE_SEIE, options(nomem, nostack));
         core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
     }
@@ -243,19 +262,17 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
                 // installed its dispatcher — fail closed.
                 crate::kernel_arch::halt_current_hart();
             }
-            // Advance `sepc` past the `ecall` so `sret` resumes at the
-            // following instruction instead of re-trapping.
-            // SAFETY: reading and rewriting `sepc` has no side effect
-            // beyond the CSR; the new value is the address after the
-            // 4-byte `ecall`.
+            // Advance the *saved* `sepc` past the `ecall` so the asm
+            // epilogue's `sret` resumes at the following instruction
+            // instead of re-trapping. The epilogue reloads `sepc` from
+            // the frame, so writing the live CSR here would be lost
+            // across a cooperative mid-handler park (the whole point of
+            // making the return state frame-resident).
+            // SAFETY: `frame` is the live saved-register frame.
             unsafe {
-                let sepc: u64;
-                core::arch::asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack));
-                core::arch::asm!(
-                    "csrw sepc, {}",
-                    in(reg) sepc.wrapping_add(crate::syscall_entry::ECALL_INSTR_LEN),
-                    options(nomem, nostack),
-                );
+                (*frame).sepc = (*frame)
+                    .sepc
+                    .wrapping_add(crate::syscall_entry::ECALL_INSTR_LEN);
             }
             return;
         }

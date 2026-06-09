@@ -96,16 +96,59 @@ interrupts disabled (it neither calls `trap::init_traps` nor builds a
   `IrqTable::fire` calls; it forwards to that inherent `mask`. See
   `docs/src/security/irq.md`.
 - **S-mode trap vector.** `trap::init_traps` installs
-  `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode)
-  and enables `sie.SEIE` + `sstatus.SIE`. The vector saves the
-  caller-saved registers into a `trap::TrapFrame` and passes its pointer
-  to the Rust handler, which dispatches by `scause`: a U-mode `ecall`
-  goes to the syscall path, a supervisor external interrupt forwards to
-  the one-shot PLIC dispatch callback (claim → `IrqTable::fire` →
-  complete), a supervisor timer interrupt drives the scheduler tick, and
-  any other synchronous exception is forwarded to the installed
-  `fault::FaultHandlerFn` (passing `scause`/`stval`/`sepc`) if one is
-  present, otherwise fails closed (parks the hart).
+  `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode),
+  zeroes `sscratch` (the S-mode invariant, below), and enables
+  `sie.SEIE` + `sstatus.SIE`. The vector swaps to a kernel stack via
+  `sscratch`, saves the caller-saved registers **plus** the return-state
+  CSRs (`sepc`, `sstatus`, and the interrupted `sp`) into a
+  `trap::TrapFrame`, and passes its pointer to the Rust handler, which
+  dispatches by `scause`: a U-mode `ecall` goes to the syscall path, a
+  supervisor external interrupt forwards to the one-shot PLIC dispatch
+  callback (claim → `IrqTable::fire` → complete), a supervisor timer
+  interrupt drives the scheduler tick, and any other synchronous
+  exception is forwarded to the installed `fault::FaultHandlerFn`
+  (passing `scause`/`stval`/`sepc`) if one is present, otherwise fails
+  closed (parks the hart).
+
+### Per-task kernel stack + frame-resident return state (`trap.s`)
+
+A trap taken from U-mode must not run the handler on the interrupted
+*user* `sp`: a cooperative `ContextSwitch::switch` taken **mid-handler**
+(a parking `yield`/`wait`) would otherwise persist the user stack pointer
+as the task's saved kernel context, and a different task's later `sret`
+would clobber the live `sepc`/`sstatus`/`sp` the parked task needs. This
+is the riscv64 sibling of the aarch64 `ELR_EL1`/`SPSR_EL1`/`SP_EL0`
+return-state errata; it is the trap-entry redesign the concurrent
+user-mode bring-up (`plans/PI.md` §X) requires.
+
+The vector therefore:
+
+- **Swaps `sp` with `sscratch` on entry.** The port-wide invariant is
+  that `sscratch` holds this hart's current user task's **kernel-stack
+  top** while running U-mode code, and **0** while running S-mode code.
+  A trap from U-mode lands a non-zero kernel top in `sp`; a nested trap
+  from S-mode (a timer/IPI taken while running kernel code) lands 0 and
+  is recovered onto the interrupted kernel `sp`, so the handler never
+  runs on the user stack and a nested kernel trap stays on the kernel
+  stack. `userentry::enter_user` arms `sscratch` before its first `sret`;
+  `init_traps` zeroes it at boot; the vector re-arms it on every
+  U-return and forces it to 0 for the duration of every handler.
+- **Saves `sepc`/`sstatus`/`sp` into the per-trap frame** (160 bytes,
+  the GP-register offsets unchanged so the `[u64; …]` syscall view is
+  intact) and reloads them before `sret`, choosing the U-mode vs S-mode
+  return path from the saved `sstatus.SPP`. Each exception's resume is
+  thus self-contained across a cooperative context switch. The syscall
+  path advances the **saved** `frame.sepc` past the 4-byte `ecall` (not
+  the live CSR, which the epilogue overwrites). The `offset_of!` asserts
+  in `syscall_entry_tests.rs` pin every field offset against `trap.s`.
+
+The whole riscv64 QEMU matrix exercises every line of the redesigned
+vector — U-mode `ecall`s and faults (`mem_map`/`spawn_program`/
+`abi_sys`/`memory_isolation`) drive the from-U swap and the U-return
+path, and S-mode timer/IPI traps (`sched_drive`/`ipi_smp`/
+`timer_preempt`) drive the nested-S recovery and the S-return path. The
+mid-handler-park safety the frame-resident return state guarantees is
+consumed by the resumable-user-kthread bring-up that follows.
 
 ## Stage 3 architecture primitives
 
@@ -161,8 +204,9 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   marshals `a0`–`a5` into the frozen `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
   layout (the same one x86_64 builds — `AGENTS.md` §2.2), `dispatch_ecall`
   forwards `(a7, &args)` to the set-once dispatch callback and writes the
-  result into the frame's `a0`, and the handler advances `sepc` past the
-  4-byte `ecall`. Absent a callback it fails closed. The
+  result into the frame's `a0`, and the handler advances the saved
+  `frame.sepc` past the 4-byte `ecall` (the trap epilogue reloads `sepc`
+  from the frame). Absent a callback it fails closed. The
   architecture-neutral validation/capability/audit dispatcher lives in
   `kernel/syscall` and is installed by the downstream binary.
 

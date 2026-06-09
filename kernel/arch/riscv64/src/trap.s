@@ -2,29 +2,60 @@
 #
 # Installed into `stvec` (direct mode) by `trap::init_traps`. Every
 # S-mode trap — synchronous exception or interrupt — enters here with
-# `sstatus.SIE` cleared by hardware. The vector saves the interrupted
-# context's caller-saved integer registers, calls the Rust handler
-# (`rustos_riscv64_trap_handler`, which preserves callee-saved registers
-# per the C ABI), restores, and returns with `sret`.
+# `sstatus.SIE` cleared by hardware. The vector swaps to a kernel stack,
+# saves the interrupted context's caller-saved integer registers plus the
+# return-state CSRs (`sepc`, `sstatus`, and the interrupted `sp`), calls
+# the Rust handler (`rustos_riscv64_trap_handler`, which preserves
+# callee-saved registers per the C ABI and may advance the saved `sepc`),
+# restores, and returns with `sret`.
 #
-# Only caller-saved registers are saved: the Rust handler is an
-# `extern "C"` function, so the compiler preserves `s0..s11` for us; the
-# interrupted code's `gp`/`tp` are not clobbered by the handler. `sp` is
-# restored by the symmetric `addi`.
+# # Per-task kernel stack via `sscratch`
+#
+# A trap taken from U-mode must NOT run the handler on the interrupted
+# user `sp`: a cooperative `ContextSwitch::switch` taken mid-handler
+# (a parking `yield`/`wait`) would otherwise persist the *user* stack
+# pointer as the task's saved kernel context. So the vector swaps `sp`
+# with `sscratch` on entry. The invariant the rest of the port upholds is:
+#
+#   * while running U-mode code, `sscratch` holds this hart's current
+#     user task's kernel-stack top (set by `userentry::enter_user` before
+#     the first `sret`, and re-set by this vector's U-return path);
+#   * while running S-mode code, `sscratch` holds 0 (set by `init_traps`
+#     at boot and by this vector on every U->S entry).
+#
+# The entry swap therefore distinguishes the two trap directions: a trap
+# from U-mode lands a non-zero kernel-stack top in `sp`, while a nested
+# trap from S-mode (a timer/IPI taken while running kernel code) lands 0
+# and is recovered onto the interrupted kernel `sp`. The return path
+# restores `sscratch` per `sstatus.SPP`: returning to U re-arms it with
+# this task's kernel-stack top; returning to S leaves it 0.
+#
+# # `sepc`/`sstatus`/`sp` are frame-resident
+#
+# Saving the three return-state values into the per-trap frame makes each
+# exception's resume self-contained across a cooperative context switch:
+# a task parked mid-handler resumes at its own `sepc`/`sstatus`/user `sp`,
+# not whatever the live CSRs hold after another task ran (the riscv64
+# sibling of the aarch64 `ELR_EL1`/`SPSR_EL1`/`SP_EL0` errata fix).
 #
 # SAFETY-INVARIANTs:
 #   1. `.align 2` keeps the vector 4-byte aligned so `stvec` direct mode
 #      (mode bits = 0) addresses it correctly.
-#   2. The frame is 16-byte aligned (144 bytes) per the riscv64 ABI.
+#   2. The frame is 16-byte aligned (160 bytes) per the riscv64 ABI; the
+#      `offset_of!` asserts in `syscall_entry_tests.rs` pin every field
+#      offset against the stores/loads below.
 #   3. Interrupts stay disabled for the whole handler (hardware clears
 #      `sstatus.SIE` on trap entry; `sret` restores the pre-trap value
-#      from `sstatus.SPIE`).
+#      from `sstatus.SPIE`), so no nested trap occurs while `sscratch`
+#      is transiently 0 mid-handler.
 
-.section .text
-.align 2
-.global rustos_riscv64_trap_vector
-rustos_riscv64_trap_vector:
-    addi    sp, sp, -144
+.equ TRAP_FRAME_SIZE, 160
+.equ OFF_SEPC,    128
+.equ OFF_SSTATUS, 136
+.equ OFF_USP,     144
+
+# Save the caller-saved integer registers into the frame at `sp`.
+.macro SAVE_GPRS
     sd      ra, 0(sp)
     sd      t0, 8(sp)
     sd      t1, 16(sp)
@@ -41,14 +72,10 @@ rustos_riscv64_trap_vector:
     sd      a5, 104(sp)
     sd      a6, 112(sp)
     sd      a7, 120(sp)
+.endm
 
-    # Pass the saved-frame pointer (sp) to the Rust handler as its first
-    # argument so it can read the user's `ecall` registers and write the
-    # syscall return value back into the saved a0 slot. a0 was already
-    # spilled to 64(sp) above, so clobbering it here is safe.
-    mv      a0, sp
-    call    rustos_riscv64_trap_handler
-
+# Restore the caller-saved integer registers from the frame at `sp`.
+.macro RESTORE_GPRS
     ld      ra, 0(sp)
     ld      t0, 8(sp)
     ld      t1, 16(sp)
@@ -65,6 +92,71 @@ rustos_riscv64_trap_vector:
     ld      a5, 104(sp)
     ld      a6, 112(sp)
     ld      a7, 120(sp)
-    addi    sp, sp, 144
+.endm
 
+.section .text
+.align 2
+.global rustos_riscv64_trap_vector
+rustos_riscv64_trap_vector:
+    # Swap `sp` with `sscratch`. From U-mode `sp` now holds the kernel
+    # stack top (non-zero) and `sscratch` holds the user `sp`; from
+    # S-mode `sp` holds 0 (the S-mode invariant) and `sscratch` holds the
+    # interrupted kernel `sp`.
+    csrrw   sp, sscratch, sp
+    bnez    sp, 1f
+    # Nested S-mode trap: recover the interrupted kernel `sp` from
+    # `sscratch`. `sscratch` is left holding that kernel `sp` for now and
+    # forced back to the S-mode invariant (0) once the frame is built.
+    csrr    sp, sscratch
+1:
+    # Build the per-trap frame on the kernel stack.
+    addi    sp, sp, -TRAP_FRAME_SIZE
+    SAVE_GPRS
+
+    # Save the return-state CSRs. `t0` is already spilled, so it is free.
+    csrr    t0, sepc
+    sd      t0, OFF_SEPC(sp)
+    csrr    t0, sstatus
+    sd      t0, OFF_SSTATUS(sp)
+    # The interrupted `sp` is whatever `sscratch` now holds (the user
+    # `sp` for a U-mode trap, or the kernel `sp` for a nested S-mode
+    # trap — unused on the S-return path).
+    csrr    t0, sscratch
+    sd      t0, OFF_USP(sp)
+    # Re-establish the S-mode `sscratch == 0` invariant for the duration
+    # of the handler (so any nested trap is recognised as from-S).
+    csrw    sscratch, zero
+
+    # Pass the saved-frame pointer (sp) to the Rust handler as its first
+    # argument so it can read the user's `ecall` registers, write the
+    # syscall return value back into the saved a0 slot, and advance the
+    # saved `sepc` past the `ecall`.
+    mv      a0, sp
+    call    rustos_riscv64_trap_handler
+
+    # Restore the return-state CSRs the handler may have updated.
+    ld      t0, OFF_SSTATUS(sp)
+    csrw    sstatus, t0
+    ld      t1, OFF_SEPC(sp)
+    csrw    sepc, t1
+
+    # Decide the return target from `sstatus.SPP` (bit 8): set means the
+    # trap came from S-mode, clear means from U-mode.
+    andi    t1, t0, (1 << 8)
+    bnez    t1, 2f
+
+    # Returning to U-mode: re-arm `sscratch` with this task's kernel
+    # stack top (the frame base plus the frame size) for the next U->S
+    # trap, restore the integer registers, then load the user `sp` last.
+    addi    t1, sp, TRAP_FRAME_SIZE
+    csrw    sscratch, t1
+    RESTORE_GPRS
+    ld      sp, OFF_USP(sp)
+    sret
+
+2:
+    # Returning to S-mode (nested trap): `sscratch` stays 0, the kernel
+    # `sp` is simply the frame base plus the frame size.
+    RESTORE_GPRS
+    addi    sp, sp, TRAP_FRAME_SIZE
     sret

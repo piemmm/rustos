@@ -39,6 +39,12 @@ fn trap_frame_layout_matches_trap_s_offsets() {
     assert_eq!(offset_of!(TrapFrame, a0), 64);
     assert_eq!(offset_of!(TrapFrame, a5), 104);
     assert_eq!(offset_of!(TrapFrame, a7), 120);
+    // The return-state CSRs the redesigned vector saves, appended after
+    // the GP registers (their offsets are pinned by the `OFF_*` `.equ`s
+    // in `trap.s`).
+    assert_eq!(offset_of!(TrapFrame, sepc), 128);
+    assert_eq!(offset_of!(TrapFrame, sstatus), 136);
+    assert_eq!(offset_of!(TrapFrame, user_sp), 144);
 }
 
 /// Records the (number, args) it was handed and returns a fixed value.

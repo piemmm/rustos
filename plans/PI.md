@@ -1247,14 +1247,45 @@ copy is added on the syscall hot path (§2.16).
 test --qemu` **and** the whole-project gate (§5) is green; docs + host tests
 land in the same change (§7 / §13).
 
-**riscv64 concurrent user mode (deferred follow-on) `[ ]`.** After the x86_64
-arc, the riscv64 spawn/wait timeshare needs `trap.s` to (1) swap to a per-task
-kernel stack via `sscratch` — it currently runs the handler on the interrupted
-**user** `sp`, which the cooperative `ContextSwitch::switch` would wrongly save
-— and (2) save/restore `sepc`/`sstatus` in the per-task trap frame (the same
-latent errata aarch64 fixed in 4c780bc, today unreachable on riscv64 because no
-cooperative mid-handler park exists yet). The 144-byte frame already has 16
-spare bytes for the two CSRs. Staged separately when reached.
+**riscv64 concurrent user mode (in progress) `[~]`.** The riscv64 spawn/wait
+timeshare sibling of the x86_64 X-series, staged lowest-risk-first, one
+fully-gated chunk per landing:
+
+- **RV1 — `trap.s` per-task kernel stack + frame-resident return state
+  `[x]`.** The prerequisite trap-entry redesign. The vector now swaps `sp`
+  with `sscratch` on entry (port invariant: `sscratch` = this hart's current
+  user task's kernel-stack top while in U-mode, 0 while in S-mode; a nested
+  S-mode trap lands `sp == 0` and is recovered onto the interrupted kernel
+  `sp`), so the handler never runs on the interrupted **user** `sp` (which a
+  cooperative `ContextSwitch::switch` taken mid-handler would wrongly persist).
+  It saves `sepc`/`sstatus`/the interrupted `sp` into an enlarged 160-byte
+  `trap::TrapFrame` (GP-register offsets unchanged, so the `[u64; …]` syscall
+  view is intact) and reloads them before `sret`, picking the U-mode vs S-mode
+  return path from the saved `sstatus.SPP`; the syscall path advances the
+  **saved** `frame.sepc`. `userentry::enter_user` arms `sscratch` before its
+  first `sret`; `init_traps` zeroes it at boot. This is the riscv64 sibling of
+  the aarch64 `ELR_EL1`/`SPSR_EL1`/`SP_EL0` return-state errata. Host-proven
+  (the `TrapFrame` `offset_of!` asserts pin the layout against `trap.s`) and
+  every line of the redesigned vector is exercised by the existing riscv64
+  matrix: U-mode `ecall`s/faults (`mem_map`/`spawn_program`/`abi_sys`/
+  `memory_isolation`) drive the from-U swap + U-return path, and S-mode
+  timer/IPI traps (`sched_drive`/`ipi_smp`/`timer_preempt`) drive the nested-S
+  recovery + S-return path — all green under QEMU. No ABI/C-header impact
+  (`TrapFrame` is internal to the arch crate). Doc:
+  `docs/src/platform/riscv64.md` ("Per-task kernel stack + frame-resident
+  return state").
+- **RV-X1 — single resumable user-kthread `[ ]`.** The riscv64 sibling of
+  x86_64 X1 / aarch64 SP2b: add `paging::activate_user_root(satp)` (the
+  per-task `pre_resume` reactivation primitive), admit one U-mode task as a
+  **resumable user kthread** via `kernel_core::spawn_user_kthread`, and drive
+  the cooperative `Scheduler::step` loop so the task parks (cooperative
+  mid-handler `yield`) and resumes on the RV1 trap path — proven by a new
+  `tests/integration/spawn_el0_resume_qemu_riscv64` vertical reusing the
+  arch-neutral `el0_yielder` fixture. This is the first chunk that *exercises*
+  the RV1 mid-handler-park safety.
+- **RV-X2 — two-task EL0 timeshare `[ ]`** (SP2c sibling), then **RV-X3
+  `spawn` concurrent producer + RV-X4 `wait` `[ ]`** (SP3b/SP4/SP6 siblings),
+  each its own fully-gated landing.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

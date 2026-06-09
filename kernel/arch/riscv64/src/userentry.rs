@@ -56,14 +56,17 @@ const SSTATUS_SPP_SPIE: u64 = (1 << 8) | (1 << 5);
 unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
     // SAFETY: the §1-sanctioned assembly carve-out (no Rust spelling for
     // `sret` or the `sstatus` CSR edits). `csrs`/`csrc` set/clear exactly
-    // the named bits; `csrw sepc` and the `sp`/`a0` moves load the U-mode
-    // entry state; `sret` performs the documented S→U transition. The
-    // caller's safety contract guarantees the mapped entry/stack.
-    // `options(noreturn)` matches the divergence.
+    // the named bits; `csrw sscratch, sp` (with `sp` still the kernel
+    // stack pointer) arms the per-task kernel-stack top the trap vector
+    // swaps to on the next U->S trap (`trap.s`); `csrw sepc` and the
+    // `sp`/`a0` moves load the U-mode entry state; `sret` performs the
+    // documented S→U transition. The caller's safety contract guarantees
+    // the mapped entry/stack. `options(noreturn)` matches the divergence.
     unsafe {
         core::arch::asm!(
             "csrs sstatus, {sum}",
             "csrc sstatus, {clr}",
+            "csrw sscratch, sp",
             "csrw sepc, {entry}",
             "mv sp, {sp}",
             "sret",
