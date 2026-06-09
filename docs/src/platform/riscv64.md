@@ -150,6 +150,39 @@ path, and S-mode timer/IPI traps (`sched_drive`/`ipi_smp`/
 mid-handler-park safety the frame-resident return state guarantees is
 consumed by the resumable-user-kthread bring-up that follows.
 
+### Resumable U-mode user kthread (RV-X1)
+
+`paging::activate_user_root(root_phys)` is the per-task `pre_resume`
+reactivation primitive — the riscv64 sibling of the aarch64/x86_64
+`activate_user_root`. Immediately before the kernel `sret`s back into a
+user task's U-mode, that task's own page-table root must be installed so
+its translations, and only its, are in force (`AGENTS.md` §4). It writes
+`satp` (`satp_sv39(root_phys)` + `sfence.vma`) on a hart whose paging is
+already on. Unlike `AddressSpace::switch` it is a free function over the
+raw `u64` root rather than the owned (`!Send`) `AddressSpace`, so the
+per-task hook captures a plain word and stays `Send`; the `satp` write is
+otherwise identical, because Sv39 has a single translation regime.
+
+`tests/integration/spawn_el0_resume_qemu_riscv64` proves the resumable
+path on `-M virt`, the sibling of the x86_64 X1 vertical and the aarch64
+SP2c timeshare (one task). It reads the generic-timer rate from the
+firmware device tree, stands up an Sv39 address space, installs the trap
+vector + a syscall-dispatch callback, builds one isolated U-mode space
+from the pure-Rust `el0_yielder` fixture through the audited
+`kernel_core::spawn_image`, and admits it as a resumable user kthread via
+`kernel_core::spawn_user_kthread`. The task's `pre_resume` hook calls
+`activate_user_root`; the cooperative `Scheduler::step` loop drives it,
+and the dispatch callback maps each `yield`/`exit` `ecall` to
+`reschedule_current`, so it ping-pongs with the dispatcher across the
+park-safe trap path above — the first exerciser of that safety on a user
+task. PASS once the task yielded its full count and exited.
+
+The kernel-stack top `spawn_user_kthread` hands the `pre_resume` hook
+(`FnMut(u64)`, the X1 cross-port argument) is unused on riscv64: a single
+user task arms `sscratch` with its own kernel-stack top on its first
+`enter_user`, and the trap path preserves it across a mid-handler park.
+Per-task `sscratch` repointing for *concurrent* tasks is RV-X2.
+
 ## Stage 3 architecture primitives
 
 These are the host-tested arch primitives the Stage-3 per-sub-stage

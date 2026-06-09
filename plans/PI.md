@@ -1274,15 +1274,25 @@ fully-gated chunk per landing:
   (`TrapFrame` is internal to the arch crate). Doc:
   `docs/src/platform/riscv64.md` ("Per-task kernel stack + frame-resident
   return state").
-- **RV-X1 — single resumable user-kthread `[ ]`.** The riscv64 sibling of
-  x86_64 X1 / aarch64 SP2b: add `paging::activate_user_root(satp)` (the
-  per-task `pre_resume` reactivation primitive), admit one U-mode task as a
-  **resumable user kthread** via `kernel_core::spawn_user_kthread`, and drive
-  the cooperative `Scheduler::step` loop so the task parks (cooperative
-  mid-handler `yield`) and resumes on the RV1 trap path — proven by a new
-  `tests/integration/spawn_el0_resume_qemu_riscv64` vertical reusing the
-  arch-neutral `el0_yielder` fixture. This is the first chunk that *exercises*
-  the RV1 mid-handler-park safety.
+- **RV-X1 — single resumable user-kthread `[x]`.** The riscv64 sibling of
+  x86_64 X1 / aarch64 SP2b. `rustos_arch_riscv64::paging::activate_user_root(
+  root_phys)` is the per-task `pre_resume` reactivation primitive: it
+  reprograms `satp` (`satp_sv39(root_phys)` + `sfence.vma`) on a hart whose
+  paging is already on — a free function over the raw `u64` root (so the hook
+  stays `Send`), lighter than `AddressSpace::switch`, with a bare-metal arm and
+  an inert host arm presenting one `unsafe` API. The
+  `tests/integration/spawn_el0_resume_qemu_riscv64` vertical (reusing the
+  arch-neutral `el0_yielder` fixture) reads the timer rate from the firmware
+  tree, builds one isolated Sv39 U-mode space via `kernel_core::spawn_image`,
+  admits it as a **resumable user kthread** via `spawn_user_kthread` (its
+  `pre_resume` hook calls `activate_user_root`; the handed kernel-stack top is
+  unused on riscv64 — `sscratch` is armed by `userentry::enter_user` and
+  preserved across a park by RV1, with per-task `sscratch` repointing deferred
+  to RV-X2), and drives the cooperative `Scheduler::step` loop while the
+  dispatch callback maps each `yield`/`exit` `ecall` to `reschedule_current`.
+  PASS once the task yielded its full count and exited — the first chunk that
+  *exercises* RV1's mid-handler-park safety on a user task. Doc:
+  `docs/src/platform/riscv64.md` ("Resumable U-mode user kthread").
 - **RV-X2 — two-task EL0 timeshare `[ ]`** (SP2c sibling), then **RV-X3
   `spawn` concurrent producer + RV-X4 `wait` `[ ]`** (SP3b/SP4/SP6 siblings),
   each its own fully-gated landing.

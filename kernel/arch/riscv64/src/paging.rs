@@ -584,6 +584,62 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
     }
 }
 
+/// Reactivate `root_phys` as the active Sv39 translation root (write
+/// `satp`) on a hart whose paging is already on.
+///
+/// This is the RV-X1 user-kthread `pre_resume` primitive (`plans/PI.md`
+/// §X), the riscv64 sibling of the aarch64/x86_64 `activate_user_root`:
+/// immediately before the kernel `sret`s back into a user task's U-mode,
+/// that task's own page-table root must be installed so its translations —
+/// and only its — are in force, keeping sibling processes hardware-isolated
+/// (`AGENTS.md` §4). It takes only the `u64` root, so the per-task hook
+/// that calls it captures a plain word and stays `Send`.
+///
+/// Unlike [`AddressSpace::switch`] this is a free function over a raw
+/// `root_phys` rather than an owned [`AddressSpace`]: the per-task hook
+/// holds only the captured root word, not the (`!Send`) space. The `satp`
+/// write + `sfence.vma` sequence is identical — Sv39 has a single
+/// translation regime, so reprogramming the root reprograms everything.
+///
+/// # Safety
+///
+/// Paging must already be enabled, and the root table at `root_phys` must
+/// map the currently-executing kernel `pc`, `sp`, and the MMIO the code
+/// touches identically to the outgoing root — every RustOS user space
+/// identity-maps the low kernel window, so this holds for any task root,
+/// but a `root_phys` that does not faults the hart on its next access.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    let satp = satp_sv39(root_phys);
+    // SAFETY: writing `satp` swaps the Sv39 translation root; `sfence.vma`
+    // (with both operands `x0`) flushes the stale entries so the new root
+    // is in force before the next access. No memory is touched and no Rust
+    // spelling exists for `satp`. The caller's contract guarantees the new
+    // root covers the running kernel context.
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {satp}",
+            "sfence.vma",
+            satp = in(reg) satp,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: reprogramming `satp` is meaningful only on the
+/// bare-metal riscv64 target. Never linked into a kernel image and never
+/// reached on the host (the QEMU verticals exercise the real switch).
+///
+/// # Safety
+///
+/// Carries the same contract as the bare-metal definition above (paging
+/// enabled; `root_phys` maps the running kernel context), so the two `cfg`
+/// arms present one `unsafe` API. The host body is inert.
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+pub unsafe fn activate_user_root(root_phys: u64) {
+    let _ = root_phys;
+}
+
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
 // reference points at a freshly-alloc'd table from `frames` or at a
 // sibling recovered through the identity map, never a borrow of

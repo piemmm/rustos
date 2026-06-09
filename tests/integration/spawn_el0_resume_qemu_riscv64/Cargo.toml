@@ -1,0 +1,56 @@
+[package]
+name = "rustos-test-spawn-el0-resume-qemu-riscv64"
+description = "plans/PI.md stage RV-X1 QEMU integration test (riscv64 sibling of rustos-test-spawn-el0-resume-qemu-x86-64 / the aarch64 SP2c timeshare): prove a single U-mode task can be admitted as a resumable user kthread on the riscv64 virt board and cooperatively park/resume under the live scheduler on the RV1 park-safe trap path. The build script compiles the pure-Rust EL0 fixture program (tests/integration/el0_yielder_program) PIE and converts it to an rxe blob; the kernel reads the generic-timer rate from the firmware device tree, stands up an Sv39 U-mode address space with rustos_kernel_core::spawn_image, admits it via spawn_user_kthread whose pre_resume hook reactivates the task's satp root (paging::activate_user_root), and drives the cooperative Scheduler::step loop. The task yields N times then exits; the dispatch callback maps each yield/exit to reschedule_current, and the test PASSes once the task yielded its full count and exited."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/PI.md` stage RV-X1 vertical: the first riscv64
+# resumable U-mode user kthread, the cross-port sibling of the x86_64 X1
+# vertical and the aarch64 SP2c timeshare (single task). The fixture program
+# (`rustos-test-el0-yielder`) is built position-independent by `build.rs` and
+# converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
+# kernel's compiled-in syscall CFI tag. On boot the test reads the generic-timer
+# rate from the firmware device tree, stands up an Sv39 address space (identity-
+# mapping the kernel + MMIO), activates `satp`, installs the trap vector + a
+# dispatch callback, builds one isolated U-mode address space via
+# `rustos_kernel_core::spawn_image` (capability-checked + audited), and admits it
+# as a resumable user kthread whose `pre_resume` hook reactivates the task's
+# `satp` root (`paging::activate_user_root`). The cooperative `Scheduler::step`
+# loop drives it; the dispatch callback maps the task's `yield`/`exit` `ecall`s
+# to `reschedule_current`, so it ping-pongs with the dispatcher across the RV1
+# park-safe trap path. Any shortfall (an unexpected syscall, a wrong-count
+# drain, or a deadlock) flips `qemu_exit::exit_failure` or times out (fail-loud,
+# `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-spawn-el0-resume-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
