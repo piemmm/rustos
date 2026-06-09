@@ -992,6 +992,35 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
+    // `rustos-test-stack-guard-qemu-riscv64` is the riscv64 sibling of
+    // `rustos-test-stack-guard-qemu-aarch64` — it proves the live Sv39
+    // block-split the riscv64 kthread kernel-stack guard page is built on.
+    // It builds one `paging::AddressSpace` (identity-maps the low 4 GiB),
+    // calls `AddressSpace::split_block` to shatter the coarse identity leaf
+    // covering a dedicated `GUARD_PAGE` static down to 4 KiB pages
+    // (preserving every mapping), installs the S-mode trap vector + a
+    // `fault` handler, turns paging on, writes+reads-back a sentinel
+    // through the guard page (proving the split preserved the mapping
+    // live), then `unmap`s that single page through the Arch HAL +
+    // `flush_page`s its stale TLB entry and reads it: the MMU raises a load
+    // page fault, the handler confirms the cause / faulting address, and
+    // writes the `SiFive` Test PASS finisher. A regression that fails to
+    // split, preserve, or unmap either reports FAILURE explicitly or never
+    // faults (timing out). Single CPU and a 60-second budget match the
+    // other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-stack-guard-qemu-riscv64",
+        binary: "rustos-test-stack-guard-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
     // vertical — boot → build the virtio-MMIO bus from the device tree →

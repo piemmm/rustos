@@ -221,27 +221,232 @@ fn passes_mmu_conformance() {
     mmu::conformance::run_all(erased, va, pa);
 }
 
+/// Host-side Sv39 walk returning the *leaf* PTE a 4 KiB-aligned `vaddr`
+/// resolves to (at whatever level the leaf lives) plus the level it was
+/// found at (2 = gigapage, 1 = megapage, 0 = 4 KiB page), or `None` if any
+/// level is invalid. Mirrors the hardware MMU's stop-at-leaf walk so the
+/// split tests can assert the granularity a region is mapped at.
+fn leaf_pte(space: &AddressSpace, vaddr: u64) -> Option<(u64, usize)> {
+    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
+    let mut table = root;
+    for level in (0..SV39_LEVELS).rev() {
+        let pte = table[vpn_index(vaddr, level)];
+        if (pte & flags::VALID) == 0 {
+            return None;
+        }
+        if pte_is_leaf(pte) {
+            return Some((pte, level));
+        }
+        table = unsafe { &*(phys_from_pte(pte) as *const [u64; ENTRIES_PER_TABLE]) };
+    }
+    None
+}
+
 #[test]
-fn block_split_is_pending_and_fails_closed() {
-    use rustos_arch_api::mmu::{self, MapError};
-    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
-    // riscv64 honestly declares the Sv39 block-split a tracked gap, not a
-    // pretend no-op (`AGENTS.md` §2.17): the profile is `Pending` with a
-    // non-empty tracking note.
-    let support = space.block_split_support();
-    assert!(support.is_pending());
-    assert!(support.detail().is_some_and(|n| !n.trim().is_empty()));
-    // The default `split_block` therefore fails closed rather than
-    // silently doing nothing (`AGENTS.md` §2.9), and so does the
-    // guard-page arena (G3b) that builds on it — riscv64 falls back to the
-    // software canary until its Sv39 split lands.
-    assert_eq!(
-        mmu::AddressSpace::split_block(&mut space, 100u64 << 30),
-        Err(MapError::Unsupported)
+fn declares_block_split_supported_with_no_justification() {
+    use rustos_arch_api::mmu::BlockSplit;
+    let space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    // riscv64 now re-expresses coarse Sv39 leaves at 4 KiB granularity
+    // (G1/G2), so it declares `Supported` (the sibling of aarch64).
+    assert_eq!(space.block_split_support(), BlockSplit::Supported);
+}
+
+#[test]
+fn split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping() {
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+    // A page well inside identity gigapage slot 1. Before the split it is
+    // mapped by the 1 GiB gigapage *leaf* — there is no 4 KiB entry.
+    let va: u64 = (1u64 << 30) + 0x10_0000;
+    let (_, level) = leaf_pte(&space, va).expect("gigapage maps va");
+    assert_eq!(level, 2, "va starts out mapped by a level-2 gigapage leaf");
+
+    space.split_block(va).expect("split the gigapage to pages");
+
+    // The same address now resolves through a 4 KiB page leaf (level 0),
+    // translates to the same physical frame (identity), and carries the
+    // identical R|W|X|A|D bits the gigapage had.
+    let (leaf, level) = leaf_pte(&space, va).expect("page maps va");
+    assert_eq!(level, 0, "va is now mapped by a level-0 4 KiB page leaf");
+    assert_eq!(phys_from_pte(leaf), va, "identity translation preserved");
+    let expected = pte_from_phys(
+        va,
+        flags::VALID | flags::READ | flags::WRITE | flags::EXEC | flags::ACCESSED | flags::DIRTY,
     );
     assert_eq!(
-        mmu::AddressSpace::prepare_guard_arena(&mut space, 100u64 << 30, 0x20_0000),
-        Err(MapError::Unsupported)
+        leaf, expected,
+        "the page leaf reproduces the gigapage's bits"
+    );
+
+    // A neighbouring page in the same shattered region resolves identically.
+    let nbr = va + PAGE_SIZE as u64;
+    assert_eq!(translate(&space, nbr), Some(nbr));
+}
+
+#[test]
+fn split_block_then_unmap_tears_down_exactly_one_page() {
+    use rustos_arch_api::mmu::{self, MapError};
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x20_0000;
+
+    // A 4 KiB page cannot be unmapped while it is part of a coarse leaf.
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, va),
+        Err(MapError::NotMapped),
+        "a page inside a live coarse leaf has no 4 KiB entry to tear down"
+    );
+
+    space.split_block(va).expect("split");
+    // After the split the page exists as a level-0 leaf and unmaps cleanly,
+    // returning its (identity) frame; its neighbour stays mapped.
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, va),
+        Ok(va),
+        "the split page unmaps to its identity frame"
+    );
+    assert_eq!(translate(&space, va), None, "page is gone");
+    assert_eq!(
+        translate(&space, va + PAGE_SIZE as u64),
+        Some(va + PAGE_SIZE as u64),
+        "the neighbouring page is untouched"
+    );
+}
+
+#[test]
+fn split_block_is_idempotent_and_fails_closed() {
+    use rustos_arch_api::mmu::MapError;
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x30_0000;
+
+    space.split_block(va).expect("first split");
+    let leaf_once = leaf_pte(&space, va).expect("mapped");
+    // Re-splitting an already-fine region changes nothing and allocates
+    // nothing (idempotent).
+    space.split_block(va).expect("second split is a no-op");
+    assert_eq!(
+        leaf_pte(&space, va),
+        Some(leaf_once),
+        "an already-split region is left untouched"
+    );
+
+    // Fail closed: a misaligned address and an address with no live
+    // mapping are both rejected without mutating the space.
+    assert_eq!(space.split_block(va | 0x1), Err(MapError::Misaligned));
+    assert_eq!(space.split_block(100u64 << 30), Err(MapError::NotMapped));
+}
+
+#[test]
+fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
+    use rustos_arch_api::mmu::{self};
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+
+    // An arena that straddles a 2 MiB boundary inside identity gigapage 1:
+    // it starts 2 MiB-aligned and is 2 MiB + one page long, so it spans
+    // two distinct megapage blocks. Both must end up as 4 KiB leaves.
+    let base: u64 = (1u64 << 30) + 4 * BLOCK_2MIB;
+    let len: u64 = BLOCK_2MIB + PAGE_SIZE as u64;
+    assert_eq!(
+        leaf_pte(&space, base).expect("gigapage maps base").1,
+        2,
+        "base starts out under a gigapage leaf"
+    );
+
+    space
+        .prepare_guard_arena(base, len)
+        .expect("prepare the arena");
+
+    // A page in the first covering block, a page in the second, and the
+    // arena's last page all resolve through 4 KiB page leaves now, each
+    // identity-translating exactly as the gigapage did.
+    for va in [base, base + BLOCK_2MIB, base + len - PAGE_SIZE as u64] {
+        let (leaf, level) = leaf_pte(&space, va).expect("page maps va");
+        assert_eq!(level, 0, "arena page {va:#x} is now a 4 KiB leaf");
+        assert_eq!(phys_from_pte(leaf), va, "identity preserved at {va:#x}");
+    }
+
+    // A single arena page now unmaps cleanly while its neighbour stays
+    // mapped — the property the guard page relies on.
+    let guard = base + 3 * PAGE_SIZE as u64;
+    assert_eq!(mmu::AddressSpace::unmap(&mut space, guard), Ok(guard));
+    assert_eq!(translate(&space, guard), None);
+    assert_eq!(
+        translate(&space, guard + PAGE_SIZE as u64),
+        Some(guard + PAGE_SIZE as u64),
+    );
+}
+
+#[test]
+fn prepare_guard_arena_is_idempotent_and_fails_closed() {
+    use rustos_arch_api::mmu::MapError;
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+    let base: u64 = (1u64 << 30) + 6 * BLOCK_2MIB;
+
+    space.prepare_guard_arena(base, BLOCK_2MIB).expect("first");
+    let leaf_once = leaf_pte(&space, base).expect("mapped");
+    space
+        .prepare_guard_arena(base, BLOCK_2MIB)
+        .expect("re-prepare is a no-op");
+    assert_eq!(
+        leaf_pte(&space, base),
+        Some(leaf_once),
+        "an already-fine arena is left untouched",
+    );
+
+    // Zero length, a misaligned base, an arena over unmapped memory, and a
+    // length that wraps the address space are each rejected (`AGENTS.md`
+    // §2.9).
+    assert_eq!(
+        space.prepare_guard_arena(base, 0),
+        Err(MapError::Misaligned)
+    );
+    assert_eq!(
+        space.prepare_guard_arena(base | 0x1, BLOCK_2MIB),
+        Err(MapError::Misaligned),
+    );
+    assert_eq!(
+        space.prepare_guard_arena(100u64 << 30, BLOCK_2MIB),
+        Err(MapError::NotMapped),
+    );
+    assert_eq!(
+        space.prepare_guard_arena(base, u64::MAX),
+        Err(MapError::Misaligned),
+    );
+}
+
+#[test]
+fn hal_split_and_arena_forward_to_the_inherent_bodies() {
+    use rustos_arch_api::mmu;
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+
+    // Driving `split_block` through the object-safe HAL trait must reach
+    // the same body as the inherent method: a page inside a gigapage
+    // becomes a 4 KiB page leaf that then unmaps cleanly.
+    let va: u64 = (1u64 << 30) + 0x40_0000;
+    {
+        let erased: &mut dyn mmu::AddressSpace = &mut space;
+        erased
+            .split_block(va)
+            .expect("HAL split_block forwards to the inherent split");
+    }
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, va),
+        Ok(va),
+        "the HAL-split page unmaps to its identity frame"
+    );
+
+    // `prepare_guard_arena` likewise forwards through the object-safe HAL
+    // trait to the inherent body.
+    let arena: u64 = (1u64 << 30) + 10 * BLOCK_2MIB;
+    {
+        let erased: &mut dyn mmu::AddressSpace = &mut space;
+        erased
+            .prepare_guard_arena(arena, BLOCK_2MIB)
+            .expect("HAL prepare_guard_arena forwards to the inherent body");
+    }
+    let arena_page = arena + 2 * PAGE_SIZE as u64;
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, arena_page),
+        Ok(arena_page),
+        "a page in the HAL-prepared arena unmaps to its identity frame"
     );
 }
 

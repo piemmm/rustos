@@ -726,3 +726,58 @@ identity map (phys == virt), the whole `map_page` path is host-runnable:
 the resulting leaf bits. The `satp` write itself is proven by
 `memory_isolation_qemu_riscv64`, which now builds its victim/attacker
 spaces through this trait.
+
+### Sv39 block split + guard-page fault-form (G1/G2)
+
+The riscv64 `AddressSpace` declares `block_split_support() ==
+BlockSplit::Supported` (`AGENTS.md` §17.2, the sibling of aarch64): it
+re-expresses a coarse Sv39 *leaf* at 4 KiB granularity so a single page
+inside a boot-time identity gigapage/megapage can be unmapped — the
+foundation of the kthread kernel-stack guard page's hardware fault-form
+(`plans/PI.md` G1/G2, `AGENTS.md` §4 / §2.17).
+
+`AddressSpace::split_block(vaddr)` re-expresses the coarse leaf covering
+`vaddr` one level at a time: a level-2 1 GiB gigapage leaf becomes a table
+of 512 × 2 MiB megapage leaves, then the covering level-1 megapage leaf
+becomes a table of 512 × 4 KiB page leaves. Sv39 carries the same
+R/W/X/U/A/D encoding at *every* level, so the shared `shatter_pte_into`
+helper only changes the PPN per sub-entry (`block & !PTE_PPN_MASK`
+captures `VALID` + every permission bit), reproducing the identical
+translation at the finer granularity (`AGENTS.md` §2.2 — one attribute
+vocabulary). The split only ever *adds* table levels that reproduce the
+existing translation, so it is **break-before-make-free** for the running
+region, is idempotent (a level that is already a table pointer is left
+untouched), and needs no TLB maintenance; it fails closed
+(`Misaligned`/`NotMapped`/`PoolExhausted`). After the split the single
+4 KiB page tears down with the existing `unmap` + `TlbShootdown::flush_page`.
+
+`AddressSpace::prepare_guard_arena(base, len)` is `split_block` applied to
+every 2 MiB block the arena spans, done up-front at boot while the arena
+holds no running context (`plans/PI.md` G2). Both are the inherent bodies;
+the HAL-trait `split_block`/`prepare_guard_arena` overrides forward to them
+(one implementation, §2.2), and `paging_tests.rs` proves the split, the
+identity preservation, idempotency, fail-closed paths, the arena, and the
+object-safe HAL forwarding on the host.
+
+The deployment form (unmapping the guard page so an overrun faults
+synchronously) is proven end to end on `-M virt` by
+`stack_guard_qemu_riscv64` (below). Wiring `BoxStack`/the kthread stack
+arena through it on riscv64 is the follow-on (the aarch64 G3b-2/G3c
+sibling); until then the port keeps the software-canary guard
+(`AGENTS.md` §2.17).
+
+### Stack-guard fault-form QEMU vertical
+
+`stack_guard_qemu_riscv64` (the riscv64 sibling of
+`stack_guard_qemu_aarch64`, `plans/PI.md` G1) proves the live Sv39 split
+end to end on `-M virt`. It builds one `paging::AddressSpace`
+(identity-maps the low 4 GiB), `split_block`s the coarse leaf covering a
+dedicated page-aligned `GUARD_PAGE` static, installs the S-mode trap
+vector + a `fault` handler, turns paging on, and writes+reads-back a
+sentinel through the guard page (proving the split preserved the mapping
+live). It then `unmap`s that single page through the Arch HAL +
+`flush_page`s its stale TLB entry and reads it: the MMU raises a load page
+fault (`scause` 13), the handler confirms the cause and that `stval` is
+exactly the guard page, and writes the `SiFive` Test PASS finisher. A
+regression that fails to split, preserve, or unmap either reports FAILURE
+explicitly or never faults (timing out).
