@@ -91,6 +91,37 @@ impl ContextSwitch for ContextSwitchHal {
             unreachable!("context switch is only meaningful on the x86_64 bare-metal target")
         }
     }
+
+    unsafe fn enter_cooperative_park(&self) {
+        // Balance the entry `swapgs` (`crate::syscall_entry`) before a user
+        // task parks mid-handler: flip `%gs` back to the *between-handler*
+        // convention (current GS = user value, `IA32_KERNEL_GS_BASE` = kernel
+        // TLS) the dispatcher and `crate::userentry::enter_user` expect, so
+        // the next ring-3 entry of a *different* task sees a balanced state
+        // (`plans/PI.md` X2). The matching `leave_cooperative_park` flips it
+        // back on resume.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        // SAFETY: `swapgs` is privileged and runs in ring 0 here, on the
+        // running user task's own syscall-handler control flow, exactly once
+        // before its park (the trait contract). It touches no memory and no
+        // flags, only the GS-base/`KERNEL_GS_BASE` swap.
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
+    }
+
+    unsafe fn leave_cooperative_park(&self) {
+        // Inverse of `enter_cooperative_park`: re-establish the *in-handler*
+        // convention (current GS = kernel TLS) the parked syscall handler
+        // resumes into, so its `gs:`-relative accesses and the stub's exit
+        // `swapgs` remain balanced (`plans/PI.md` X2).
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        // SAFETY: as `enter_cooperative_park`, paired with the prior call on
+        // the same task's control flow on resume from its cooperative park.
+        unsafe {
+            core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        }
+    }
 }
 
 #[cfg(test)]

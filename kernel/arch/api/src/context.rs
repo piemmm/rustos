@@ -184,6 +184,51 @@ pub trait ContextSwitch: Send + Sync {
     ///
     /// Switching into a non-runnable `next` is a kernel bug.
     unsafe fn switch(&self, prev: *mut TaskContext, next: *mut TaskContext);
+
+    /// Restore this CPU's *between-handler* privilege-entry convention
+    /// immediately **before** a user task cooperatively parks
+    /// mid-syscall-handler (the [`Self::leave_cooperative_park`] partner
+    /// runs the instant the task is switched back in).
+    ///
+    /// A resumable user kthread can suspend itself from inside its own
+    /// syscall handler (a `yield`/`wait` that reschedules), so the kernel
+    /// switches *away* from a CPU that is mid-handler and may later switch a
+    /// *different* task in. On ports whose syscall entry leaves a per-CPU
+    /// register convention flipped for the duration of the handler — x86_64,
+    /// where `swapgs` makes `%gs` the kernel TLS only between entry and exit
+    /// — that flipped state must be balanced back to the convention the
+    /// dispatcher and the next user-entry path expect before the park, or the
+    /// next ring-3 entry of another task would observe an unbalanced `swapgs`
+    /// and fault (`plans/PI.md` X2). This pair brackets exactly the park so
+    /// the two `swapgs` always pair on the *same* task's control flow.
+    ///
+    /// The default is a no-op: ports with no such per-handler convention
+    /// (aarch64 saves `SP_EL0`/`ELR_EL1`/`SPSR_EL1` in the trap frame;
+    /// riscv64 has no cooperative mid-handler park yet) need nothing here.
+    /// Only the cooperative-park path
+    /// ([`reschedule_current`](../../rustos_kernel_core/index.html)) calls it;
+    /// the first trampoline→user entry never does, so it stays balanced.
+    ///
+    /// # Safety
+    ///
+    /// Must be called only from the running user task's own syscall-handler
+    /// control flow, exactly once before each cooperative park, paired with
+    /// [`Self::leave_cooperative_park`] on resume. Calling it elsewhere would
+    /// leave the CPU's privilege-entry convention unbalanced.
+    unsafe fn enter_cooperative_park(&self) {}
+
+    /// Re-establish this CPU's *in-handler* privilege-entry convention
+    /// immediately **after** a parked user task is switched back in, undoing
+    /// [`Self::enter_cooperative_park`].
+    ///
+    /// The default is a no-op. See [`Self::enter_cooperative_park`] for the
+    /// full contract; this is its exact inverse and the two must be paired.
+    ///
+    /// # Safety
+    ///
+    /// Must be called only on resume from a cooperative park, paired with a
+    /// prior [`Self::enter_cooperative_park`] on the same task's control flow.
+    unsafe fn leave_cooperative_park(&self) {}
 }
 
 /// The §17.2 context-switch conformance vertical.

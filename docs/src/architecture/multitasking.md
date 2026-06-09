@@ -165,3 +165,27 @@ task back to the dispatcher so the scheduler interleaves the two through real
 EL0→EL0 context switches — each switching back into its own page-table root
 via its `pre_resume` hook. The run passes once both tasks have yielded their
 full count and exited, with no task left live.
+
+### Two ring-3 tasks timeshare a CPU on x86_64 (`plans/PI.md` X2)
+
+The same two-task timeshare on x86_64 needs one extra, x86_64-specific piece
+of the kthread runtime, because the x86_64 `syscall` entry flips a per-CPU
+register convention (`swapgs`) that stays flipped for the duration of a
+handler. When a user kthread parks *mid-handler*, the dispatcher may enter a
+**different** task whose own `enter_user` path does no `swapgs`, so that
+task's next `syscall` would observe an unbalanced GS-swap and fault. The
+arch-neutral fix is a cooperative-park hook pair on
+`rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
+`leave_cooperative_park`, both **default no-op** — that the kthread runtime
+calls in `suspend_thunk` around the suspend switch (the user-kthread
+mid-handler park path). They are the exact analogue of the `pre_resume`
+stack-top argument: a seam ports that need nothing (aarch64 saves its return
+state in the trap frame; riscv64 has no cooperative mid-handler park yet)
+leave at the default, and only x86_64 overrides — there with a `swapgs` that
+balances the GS convention across the park. The x86_64 durable user-`%rsp`
+save also moves onto each task's own kernel-stack frame so a parked task's
+saved user stack pointer is not clobbered by another task's syscall through
+the shared per-CPU slot. Both fixes are detailed on [the x86_64 platform
+page](../platform/x86_64.md) ("Two-task ring-3 timeshare") and proven by
+`tests/integration/spawn_el0_timeshare_qemu_x86_64`, the x86_64 sibling of
+the aarch64 vertical above.

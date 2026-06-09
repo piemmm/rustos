@@ -1334,6 +1334,46 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
+    // cross-port sibling of the aarch64 SP2c timeshare, and the exerciser for
+    // the two X2 structural fixes a concurrent mid-handler park needs: (1) the
+    // durable user-`%rsp` save moved onto each task's own kernel-stack frame in
+    // `syscall_entry_stub` (a concurrent task's syscall entry no longer
+    // clobbers a parked task's saved user stack pointer through the shared
+    // per-CPU `gs:8` slot), and (2) the `ContextSwitch::enter`/
+    // `leave_cooperative_park` `swapgs` balance around the cooperative
+    // mid-handler park in `kernel/core`'s kthread runtime (a parked task's entry
+    // `swapgs` is balanced before the dispatcher enters a *different* task, so
+    // the next ring-3 entry never observes an unbalanced GS-swap and `#DF`s).
+    // Like the x86_64 `mem_map`/X1 verticals it boots the production
+    // `rustos-kernel` pipeline (so the GDT user selectors, the TSS, and
+    // `syscall`/`IA32_LSTAR` entry are installed). On `BootCompleted` it enables
+    // `IA32_EFER.NXE`, builds **two** hardware-isolated user address spaces (two
+    // PML4s, one shared frame pool) from the pure-Rust `rustos-test-el0-yielder`
+    // fixture (built PIE + converted to `rxe` by `build.rs`) through the
+    // capability-checked, audited `kernel_core::spawn_image`, and admits each
+    // via `spawn_user_kthread`. Each task's `pre_resume` hook reloads CR3
+    // (`paging::activate_user_root`) and repoints the per-CPU `syscall` entry
+    // stack at *this* task's own kernel stack (`syscall_entry::set_kernel_rsp0`).
+    // The cooperative `step` loop drives them; the dispatch callback maps each
+    // `yield`/`exit` `syscall` to `reschedule_current`, so the two tasks
+    // ping-pong with the dispatcher on their own kernel stacks. PASS once both
+    // yielded their full count and exited; a wrong drain count, an unexpected
+    // syscall, or a stall flips `qemu_exit::exit_failure` or times out
+    // (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match the
+    // other boot-then-do-fixed-work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-el0-timeshare-qemu-x86-64",
+        binary: "rustos-test-spawn-el0-timeshare-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `rustos-rt` `mem_map`-backed
     // `#[global_allocator]` works end to end in an EL0 process on the `virt`

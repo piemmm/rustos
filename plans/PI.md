@@ -1088,21 +1088,53 @@ copy is added on the syscall hot path (§2.16).
   `docs/src/platform/x86_64.md` ("Resumable ring-3 user kthread").
 
 - **X2 — x86_64 return-state survives a concurrent park + two-task EL0
-  timeshare `[ ]`.**
-  - In `syscall_entry_stub`, move the **durable** user-`%rsp` save off the
-    per-CPU `gs:8` slot onto the **per-task kernel-stack frame** (the `gs:8`
-    use becomes a transient, park-free temp held only between `swapgs` and the
-    first kernel-stack push, before any cooperative switch can occur). A
-    mid-handler park/resume then restores the correct user `%rsp` per task.
-    Update the stub rustdoc + the host stub-layout reasoning/tests.
-  - Prove with `tests/integration/spawn_el0_timeshare_qemu_x86_64` (the SP2c
-    sibling), reusing the pure-Rust `el0_yielder_program` fixture: **two**
-    hardware-isolated ring-3 spaces (two PML4s, shared frame pool, §4), each
-    admitted as a resumable user kthread whose `pre_resume` reloads its CR3 +
-    `kernel_rsp0`, driven by the cooperative `step` loop mapping each task's
-    `yield`/`exit` to `reschedule_current`. PASS once both yielded their full
-    count and exited; a wrong resume PC/RSP stalls the drain or trips a
-    finisher (fail-loud, §7).
+  timeshare `[x]`.** Two x86_64 tasks timeshare one CPU as resumable user
+  kthreads, proven by `tests/integration/spawn_el0_timeshare_qemu_x86_64` (the
+  SP2c sibling: two hardware-isolated ring-3 spaces — two PML4s, one shared
+  frame pool, §4 — each admitted as a resumable user kthread whose `pre_resume`
+  reloads its CR3 + `kernel_rsp0`, driven by the cooperative `step` loop
+  mapping each `yield`/`exit` to `reschedule_current`; PASS once both yielded
+  their full count and exited). It required **two** independent structural
+  fixes, both shipped here (a one-task X1 run exposes neither):
+  - **(1) Durable user-`%rsp` save on the per-task kernel frame.**
+    `syscall_entry_stub` now `pushq %gs:8`s the just-stashed user `%rsp` onto
+    *this task's* kernel-stack frame (beside the frame-resident `%rcx`/`%r11`)
+    and restores it with a single `popq %rsp`. The user-`%rsp` slot doubles as
+    the System V alignment pad, so the frame size — hence alignment — is
+    unchanged (no hot-path cost). `gs:8` is now a transient temp held only
+    between the entry `swapgs` and the first kernel-stack push, before any
+    cooperative switch can occur, so a task parked mid-handler no longer has
+    its saved user `%rsp` clobbered by a *different* task's syscall through the
+    shared per-CPU slot. The x86_64 analogue of the aarch64
+    `ELR_EL1`/`SPSR_EL1`/`SP_EL0` errata (4c780bc); structural, never a limit
+    bump (§2.17).
+  - **(2) `swapgs` balance across a cooperative mid-handler park (the blocker,
+    not anticipated by the original X2 text).** Fix (1) is necessary but **not
+    sufficient**: the two-task vertical (and the *original* pre-(1) stub)
+    double-faults identically — a `v=08` #DF with `rsp=0` at
+    `syscall_entry_stub`, CR2=-8 — because the per-CPU GS-swap state is left
+    unbalanced across a park. The kernel's convention outside the stub's
+    swapgs window is current GS = user value, `KERNEL_GS_BASE` = kernel TLS
+    (`enter_user` relies on it). When task A's `syscall` runs the entry
+    `swapgs` then parks mid-handler via `reschedule_current`, the dispatcher
+    enters task B through `enter_user`/`iretq` (no `swapgs`), so B runs ring-3
+    with kernel GS still active; B's first `syscall` `swapgs` flips GS the
+    wrong way → `movq %gs:0,%rsp` reads address 0 → push faults → #PF on a
+    null stack → #DF. X1 never exposes it because the same task always does the
+    matching exit `swapgs`. Fix: a HAL cooperative-park hook pair on
+    `rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
+    `leave_cooperative_park`, default no-op (aarch64/riscv64 need nothing) —
+    that `kernel/core`'s kthread runtime calls in `suspend_thunk` around the
+    suspend switch (the user-kthread mid-handler park path). x86_64 implements
+    them as a `swapgs` back to the between-handler convention immediately before
+    the park and back into the stub-window convention immediately after resume;
+    both are on the *task's* control flow and pair exactly, and the first
+    trampoline→`enter_user` entry never goes through `suspend_thunk`, so it
+    correctly does no swapgs. Structural, fail-closed, no limit bump (§2.17),
+    capability checks unchanged (§5.4), per-PML4 isolation intact (§4). No ABI
+    change. Stub rustdoc + the `SyscallTls` (transient-`gs:8`) docs updated;
+    the host stub-layout test still pins the 16-byte two-word layout. Docs in
+    `docs/src/platform/x86_64.md` + `docs/src/architecture/multitasking.md`.
 
 - **X3 — x86_64 `spawn` concurrent sibling `[ ]`.** The real x86_64
   `ProcessSpawn` producer (sibling of the aarch64

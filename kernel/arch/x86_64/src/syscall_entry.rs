@@ -183,9 +183,16 @@ pub const fn pack_raw_args(
 /// Per-CPU thread-local-storage block addressed via `IA32_KERNEL_GS_BASE`.
 ///
 /// `swapgs` on syscall entry exposes this block as `gs:`. The stub
-/// loads the kernel stack pointer from `gs:0` and saves the user
-/// `%rsp` into `gs:8`; on `sysretq` the user `%rsp` is restored from
-/// the same slot before the matching `swapgs`.
+/// loads the kernel stack pointer from `gs:0` and stashes the user
+/// `%rsp` into `gs:8` only **transiently** — it is read straight back
+/// out and pushed onto *this task's* kernel-stack frame (beside the
+/// frame-resident saved RIP `%rcx`/RFLAGS `%r11`) before any
+/// cooperative switch can occur. The durable user-`%rsp` save is the
+/// per-task frame slot, not `gs:8`: a task parked mid-handler by a
+/// cooperative `yield`/`wait` would otherwise have a *shared* per-CPU
+/// `gs:8` overwritten by another task's syscall entry before it
+/// resumed (`plans/PI.md` X2). `gs:8` is therefore live only in the
+/// window between the entry `swapgs` and the first kernel-stack push.
 ///
 /// `#[repr(C, align(16))]` ensures the offsets are stable across
 /// targets and that the field addresses inherit 16-byte alignment
@@ -195,7 +202,9 @@ pub const fn pack_raw_args(
 pub struct SyscallTls {
     /// Top of the kernel stack to switch to on entry.
     pub kernel_rsp0: u64,
-    /// Save slot for the user `%rsp` (between entry and `sysretq`).
+    /// Transient stash for the user `%rsp`, live only between the entry
+    /// `swapgs` and the first kernel-stack push (the durable save is the
+    /// per-task kernel-stack frame — see the type docs).
     pub user_rsp_save: u64,
 }
 
@@ -212,7 +221,8 @@ impl SyscallTls {
 /// `gs:0` to load the kernel stack pointer.
 pub const KERNEL_RSP0_OFFSET: usize = 0;
 /// Offset of [`SyscallTls::user_rsp_save`] — the entry stub uses
-/// `gs:8` to save/restore the user `%rsp`.
+/// `gs:8` to transiently stash the user `%rsp` before pushing it onto
+/// the per-task kernel-stack frame.
 pub const USER_RSP_SAVE_OFFSET: usize = 8;
 
 /// First non-canonical address above the lower (user) half of the
@@ -587,20 +597,25 @@ pub fn syscall_entry_addr() -> u64 {
 /// Sequence:
 ///
 /// 1. `swapgs` — `%gs` now points at this CPU's [`SyscallTls`].
-/// 2. Save the user `%rsp` into `gs:USER_RSP_SAVE_OFFSET` and load
-///    the kernel `%rsp` from `gs:KERNEL_RSP0_OFFSET`.
-/// 3. Push the user `RFLAGS` (`%r11`) and saved RIP (`%rcx`) so they
-///    survive the Rust call (System V allows callees to clobber both).
-///    Add an alignment padding slot so the System V "rsp ≡ 0 (mod 16)
-///    at `call`" rule holds.
+/// 2. Transiently stash the user `%rsp` into `gs:USER_RSP_SAVE_OFFSET`
+///    and load the kernel `%rsp` from `gs:KERNEL_RSP0_OFFSET`.
+/// 3. Push the user `%rsp` (read straight back out of `gs:8`) so its
+///    **durable** save lives on *this task's* kernel-stack frame, not
+///    the shared per-CPU `gs:8` slot a concurrent task's syscall would
+///    clobber across a cooperative mid-handler park (`plans/PI.md` X2).
+///    Then push the user `RFLAGS` (`%r11`) and saved RIP (`%rcx`) so
+///    they survive the Rust call (System V allows callees to clobber
+///    both). The user-`%rsp` slot doubles as the System V alignment pad,
+///    so the frame size — hence the "rsp ≡ 0 (mod 16) at `call`" rule —
+///    is unchanged.
 /// 4. Build the [`SYSCALL_MAX_ARGS`]-wide argument array on the
 ///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
 ///    `%rsi = &args[0]`. Call [`rustos_arch_x86_64_syscall_dispatch`].
 /// 6. The return value is in `%rax` already — leave it.
-/// 7. Pop the arg array + padding + `%r11` + `%rcx` in reverse order.
-/// 8. Restore user `%rsp` from `gs:USER_RSP_SAVE_OFFSET`, `swapgs`,
-///    `sysretq`.
+/// 7. Pop the arg array + `%r11` + `%rcx` in reverse order.
+/// 8. Restore user `%rsp` with a single `popq %rsp` from the frame
+///    slot, `swapgs`, `sysretq`.
 ///
 /// # Safety
 ///
@@ -615,11 +630,13 @@ pub unsafe extern "C" fn syscall_entry_stub() {
     core::arch::naked_asm!(
         // 1. Switch to kernel GS.
         "swapgs",
-        // 2. Save user rsp, load kernel rsp.
+        // 2. Transiently stash user rsp, load kernel rsp.
         "movq %rsp, %gs:8",
         "movq %gs:0, %rsp",
-        // 3. Preserve user RIP (rcx) and RFLAGS (r11) + alignment pad.
-        "pushq $0",
+        // 3. Durably save the user rsp on this task's kernel frame (the
+        //    slot also serves as the System V alignment pad), then
+        //    preserve user RIP (rcx) and RFLAGS (r11).
+        "pushq %gs:8",
         "pushq %rcx",
         "pushq %r11",
         // 4. Build args[5..0] on the stack.
@@ -633,13 +650,12 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
         "call {dispatch}",
-        // 7. Tear down args + saved registers + pad.
+        // 7. Tear down args + saved registers.
         "addq $48, %rsp",   // 6 * 8 = pop args[0..6]
         "popq %r11",
         "popq %rcx",
-        "addq $8, %rsp",    // padding
-        // 8. Restore user rsp and return to user space.
-        "movq %gs:8, %rsp",
+        // 8. Restore user rsp from the frame slot and return to user space.
+        "popq %rsp",
         "swapgs",
         "sysretq",
         dispatch = sym rustos_arch_x86_64_syscall_dispatch,

@@ -421,15 +421,33 @@ where
     let ctl = data as *mut ThreadControl<C, S>;
     // SAFETY: `ctl` is the live control block per this function's contract;
     // `cs` is `Copy`, and the three fields are distinct and live.
-    let mut yielder = unsafe {
-        Yielder {
-            cs: (*ctl).cs,
+    let (cs, mut yielder) = unsafe {
+        let cs = (*ctl).cs;
+        let yielder = Yielder {
+            cs,
             task_ctx: addr_of_mut!((*ctl).task_ctx),
             dispatch_ctx: addr_of_mut!((*ctl).dispatch_ctx),
             action: addr_of_mut!((*ctl).action),
-        }
+        };
+        (cs, yielder)
     };
-    yielder.suspend(action);
+    // Bracket the suspend with the port's cooperative-park hook so a port
+    // that flips a per-CPU privilege-entry convention inside its syscall
+    // handler (x86_64's entry `swapgs`) balances it across the park: this is
+    // the user-kthread mid-handler park path (the syscall trap reaches it via
+    // `reschedule_current`), the one place the imbalance arises (`plans/PI.md`
+    // X2). The pair is a no-op on ports that need nothing (aarch64/riscv64).
+    // SAFETY: we run on the parking user task's own syscall-handler control
+    // flow (the kthread raw-pointer protocol, this function's contract); the
+    // two calls bracket exactly one `Yielder::suspend`, so `enter`/`leave`
+    // pair on this task. `Exit` never returns from `suspend`, leaving the CPU
+    // in the balanced between-handler convention `enter` restored — correct,
+    // since the task never resumes.
+    unsafe {
+        cs.enter_cooperative_park();
+        yielder.suspend(action);
+        cs.leave_cooperative_park();
+    }
 }
 
 /// Suspend the EL0 user kthread currently switched in on `cpu` with
