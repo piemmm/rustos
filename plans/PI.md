@@ -1247,9 +1247,12 @@ copy is added on the syscall hot path (§2.16).
 test --qemu` **and** the whole-project gate (§5) is green; docs + host tests
 land in the same change (§7 / §13).
 
-**riscv64 concurrent user mode (in progress) `[~]`.** The riscv64 spawn/wait
-timeshare sibling of the x86_64 X-series, staged lowest-risk-first, one
-fully-gated chunk per landing:
+**riscv64 concurrent user mode `[x]`.** The riscv64 spawn/wait
+timeshare sibling of the x86_64 X-series, landed lowest-risk-first, one
+fully-gated chunk per landing. All of RV1–RV-X4 are done: the riscv64 port
+now brings up concurrent, multi-process user mode (resumable user kthreads,
+two-task timeshare, runtime `spawn`, and blocking `wait`/reap), reaching
+parity with the aarch64 and x86_64 ports.
 
 - **RV1 — `trap.s` per-task kernel stack + frame-resident return state
   `[x]`.** The prerequisite trap-entry redesign. The vector now swaps `sp`
@@ -1328,10 +1331,24 @@ fully-gated chunk per landing:
   producer built the child and both tasks yielded their full count and
   exited (two `ProcessSpawned`). Doc: `docs/src/platform/riscv64.md`
   ("Runtime `spawn` concurrent producer (RV-X3)").
-- **RV-X4 — `wait` `[ ]`** (SP6 sibling): the riscv64 cross-port equal of
-  `wait_qemu_aarch64` / `_x86_64` — a parent `wait`s on its spawned child,
-  parks until the child exits, reaps it, and reads its code. Its own
-  fully-gated landing.
+- **RV-X4 — `wait` `[x]`** (SP6 sibling): the riscv64 cross-port equal of
+  `wait_qemu_aarch64` / `_x86_64`. `tests/integration/wait_qemu_riscv64`
+  proves a parent U-mode task `wait`s on its spawned child, parks until the
+  child exits, reaps it, and reads back its code on `-M virt`. It reuses the
+  arch-neutral `wait_program` two-role fixture (child exits with a
+  build-pinned code; parent `wait`s + verifies), builds a child + parent as
+  isolated Sv39 spaces (the RV-X3 mini-kernel shape) via
+  `kernel_core::spawn_image`, installs the shared
+  `kernel_core::KernelProcessWait<RiscvArch>` producer, registers the
+  parent→child link, and drives the cooperative `step` loop: the child
+  `exit`s, the parent's `wait` parks (`reschedule_current`, no busy-spin §2.1)
+  then reaps it, the kernel copies the reaped code out to the parent's
+  `status` through the retained frozen parent space (`copy_out`), and the
+  parent verifies it and exits 0 (PASS, ids 4332-4334). The first riscv64
+  exerciser of the resume-after-cooperative-park return-state path on a
+  *user* task (RV1's per-task kernel stack + frame-resident return state).
+  No ABI change. Doc: `docs/src/platform/riscv64.md` ("`wait`: blocking reap
+  of a child (RV-X4)").
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

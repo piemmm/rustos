@@ -247,6 +247,40 @@ already maps and never moves the running parent out from under itself.
 The child's own root is installed by its `pre_resume` hook
 (`activate_user_root`) the first time the scheduler resumes it.
 
+### `wait`: blocking reap of a child (RV-X4)
+
+`tests/integration/wait_qemu_riscv64` proves a parent U-mode task can
+`wait` on, reap, and read back the exit code of its own child under the
+live scheduler on `-M virt` — the riscv64 sibling of `wait_qemu_aarch64`
+/ `_x86_64`. The pure-Rust `wait_program` fixture is built in two roles
+from one source (`AGENTS.md` §2.2): the **child** exits with a
+build-pinned code; the **parent** calls `wait`, reaps the child, and
+verifies the reaped code before exiting 0.
+
+On boot the test reads the timer rate from the live OpenSBI device tree,
+builds a child and a parent hardware-isolated Sv39 space through the
+audited `kernel_core::spawn_image`, and admits each as a resumable user
+kthread. It records the parent/child link with a
+`kernel_core::KernelProcessWait` producer (the shared `ProcessWait` seam)
+and drains the cooperative `Scheduler::step` loop. The dispatch callback
+routes the child's `exit` and the parent's `wait`/`exit` `ecall`s through
+the producer + `reschedule_current`, exactly as the production handler
+does: the producer parks the parent (via `reschedule_current(cpu,
+Yield)`) until the child is reapable — never busy-spinning (§2.1) — then
+the kernel copies the reaped exit code out to the parent's `status`
+pointer through the retained frozen parent space (`copy_out`, fail-closed
+on a faulting pointer, §5.4). PASS once the parent reaped the child, read
+back the agreed code, and exited 0.
+
+This exercises the resume-after-cooperative-park return-state path on a
+*user* task: the parent is parked mid-handler by `wait` and re-dispatched
+once the child has exited, so RV1's per-task kernel-stack + frame-resident
+return state (the `sscratch` swap and the frame `sepc`/`sstatus`/`sp`
+save) must round-trip the parent's trap state across the park. No new
+structural code was needed beyond the vertical — the `KernelProcessWait`
+producer, `reschedule_current`, and the RV1 trap path are all already in
+place.
+
 ## Stage 3 architecture primitives
 
 These are the host-tested arch primitives the Stage-3 per-sub-stage

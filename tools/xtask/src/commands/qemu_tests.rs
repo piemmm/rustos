@@ -1647,6 +1647,39 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
+    // the cross-port sibling of the aarch64 `wait_qemu_aarch64` / x86_64
+    // `wait_qemu_x86_64`, proving a parent U-mode process can block on, reap,
+    // and read back the exit code of its own child under the live scheduler on
+    // the riscv64 `virt` board. The build script compiles the pure-Rust
+    // `rustos-test-wait` fixture twice (child + parent roles, built PIE +
+    // converted to `rxe`). On boot it reads the generic-timer rate from the
+    // live OpenSBI device tree, installs the trap vector + a dispatch callback,
+    // and builds **two** hardware-isolated Sv39 U-mode address spaces — a child
+    // and a parent — through the capability-checked, audited
+    // `kernel_core::spawn_image`. It records the parent/child link with a
+    // `kernel_core::KernelProcessWait` producer, admits each as a resumable
+    // user kthread (`spawn_user_kthread`, §4), and routes the child's `exit`
+    // and the parent's `wait`/`exit` `ecall`s through the producer +
+    // `reschedule_current`: the producer parks the parent until the child is
+    // reapable (the RV1 mid-handler-park-safe path), then the kernel copies the
+    // reaped exit code out to the parent's `status` pointer. PASS once the
+    // parent reaped the child, read back the agreed code, and exited 0; a wrong
+    // code, a missing reap, an unexpected syscall, or a stall writes a distinct
+    // failure finisher or times out (fail-loud, `AGENTS.md` §7). Single CPU and
+    // a 60-second budget match the other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-wait-qemu-riscv64",
+        binary: "rustos-test-wait-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the
