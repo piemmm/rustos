@@ -3,15 +3,25 @@
 //! AGENTS.md §7 mandates that the QEMU tests share the same orchestrator
 //! as host-side tests and that each QEMU run has a *strict* per-test
 //! timeout with **no retries**. This module enforces both: it builds the
-//! enrolled kernels for `x86_64-unknown-none`, then drives each one
-//! through [`rustos_qemu::Runner::run`] in series, failing the whole
-//! `xtask test` invocation on the first failure or timeout.
+//! enrolled kernels per target triple, then drives each one through
+//! [`rustos_qemu::Runner::run`], failing the whole `xtask test` invocation
+//! if any guest fails or times out.
+//!
+//! The guests run **concurrently** through the shared weighted-concurrency
+//! runner ([`super::parallel`]): each enrolment is independent (its own
+//! per-binary backing images, a `-serial stdio` console, and a unique unix
+//! monitor socket), so the only resource they contend for is host CPU. The
+//! runner weights each guest by its emulated-CPU count against a budget of
+//! the host's logical CPUs, so concurrent guest vCPUs never oversubscribe the
+//! host and no guest is starved past its wall-clock deadline (§7's
+//! no-flaky-tests / no-retry rules hold). See [`run_once`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rustos_qemu::{Outcome, Runner, Spec};
 
+use super::parallel::{self, Job};
 use crate::Context;
 
 /// Per-test wall-clock ceiling enforced on a developer machine (a
@@ -1734,9 +1744,8 @@ pub fn build_all(ctx: &Context) -> Result<(), String> {
     // single `cargo build`. One invocation per triple (rather than one per
     // enrolment) lets cargo compile that triple's packages concurrently and
     // share a single build-lock acquisition, instead of serialising behind the
-    // lock once per test. The QEMU *runs* themselves stay one-at-a-time — a
-    // hard wall-clock deadline plus tick-counting guests make co-scheduled
-    // VMs flaky under TCG (§7); see `commands::parallel`.
+    // lock once per test. The QEMU *runs* then execute concurrently under a
+    // host-CPU budget — see [`run_once`] and `commands::parallel`.
     for target in build_targets() {
         let packages: Vec<&str> = TESTS
             .iter()
@@ -1766,20 +1775,40 @@ fn build_targets() -> Vec<&'static str> {
     targets
 }
 
-/// Execute every enrolled QEMU test once. Returns the first failure.
+/// Execute every enrolled QEMU test once, running guests concurrently.
 ///
 /// The caller ([`super::run_test`]) owns the repeat loop so a duration
 /// budget covers the whole matrix as a unit; this runs exactly one pass and
 /// never retries on failure (`AGENTS.md` §7).
+///
+/// The enrolments are independent — each plants its own per-binary backing
+/// images and drives a guest whose serial console is `-serial stdio` and
+/// whose QEMU monitor is a unique per-run unix socket, so two guests share
+/// no host resource except CPU. They are therefore run through the shared
+/// weighted-concurrency runner ([`super::parallel`]): each guest's weight is
+/// its emulated-CPU count and the budget is the host's logical-CPU count, so
+/// the sum of concurrently-running guest vCPUs never oversubscribes the host.
+/// That keeps every guest's wall-clock deadline as reachable as it is for a
+/// solo run (no TCG starvation), so co-scheduling does not make a test flaky
+/// (§7). On a single-core host the budget collapses to one and the matrix
+/// runs strictly sequentially.
 pub fn run_once(ctx: &Context) -> Result<(), String> {
-    for t in TESTS {
-        run_one(ctx, t)?;
-    }
-    Ok(())
+    let target_dir = ctx.target_dir();
+    let budget = parallel::host_parallelism();
+    let jobs: Vec<Job> = TESTS
+        .iter()
+        .map(|t| {
+            let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
+            let weight = usize::try_from(t.cpus).unwrap_or(1);
+            let target_dir = target_dir.clone();
+            Job::closure(label, weight, move || run_one(&target_dir, t))
+        })
+        .collect();
+    parallel::run(jobs, budget)
 }
 
-fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
-    let kernel: PathBuf = ctx.target_dir().join(t.target).join("debug").join(t.binary);
+fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
+    let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
     // `virt` board through OpenSBI; everything else uses the x86_64
     // `isa-debug-exit` convention.
@@ -1862,14 +1891,6 @@ fn run_one(ctx: &Context, t: &QemuTest) -> Result<(), String> {
     if let Some((marker, key)) = t.keyboard {
         spec = spec.with_virtio_keyboard(marker, key);
     }
-
-    eprintln!(
-        "xtask: [test --qemu (run {})] kernel={} cpus={} timeout={:?}",
-        t.package,
-        kernel.display(),
-        t.cpus,
-        timeout
-    );
 
     match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
         Outcome::Pass => Ok(()),
