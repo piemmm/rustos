@@ -110,6 +110,68 @@ impl BootMemoryMap {
         self.regions.push(region);
     }
 
+    /// Carve the physical range `[start, end)` out of every
+    /// [`RegionKind::Usable`] region so the frame allocator can never hand
+    /// out a frame overlapping it.
+    ///
+    /// Each usable region that overlaps the range is split into the (up to
+    /// two) usable sub-ranges that fall *outside* `[start, end)`; the
+    /// overlapping middle is dropped, becoming an implicit reserved gap (a
+    /// gap in the map is treated as [`RegionKind::Reserved`], §85). Reserved
+    /// regions pass through untouched. The no-overlap invariant
+    /// [`crate::FrameAllocator::new`] enforces is preserved, since this only
+    /// shrinks or splits existing usable regions — it never introduces a new
+    /// overlapping one.
+    ///
+    /// This is how the boot path reserves the running kernel image (and its
+    /// bump heap) out of firmware-usable RAM on platforms whose firmware
+    /// memory map reports the loader-placed kernel as conventional/usable
+    /// memory (e.g. the UEFI `EfiLoaderData`/`EfiConventionalMemory` the
+    /// x86_64 boot path sees). A zero-width or inverted range is a no-op.
+    pub fn reserve_range(&mut self, start: PhysAddr, end: PhysAddr) {
+        let (cs, ce) = (start.as_u64(), end.as_u64());
+        if ce <= cs {
+            return;
+        }
+        let mut out: Vec<MemoryRegion> = Vec::with_capacity(self.regions.len() + 1);
+        for r in self.regions.drain(..) {
+            if r.kind != RegionKind::Usable {
+                out.push(r);
+                continue;
+            }
+            let Some(r_end) = r.end() else {
+                // A region whose end overflows is left untouched; the
+                // allocator constructor rejects it on its own merits.
+                out.push(r);
+                continue;
+            };
+            let (rs, re) = (r.start.as_u64(), r_end.as_u64());
+            if re <= cs || rs >= ce {
+                // Disjoint from the carved range.
+                out.push(r);
+                continue;
+            }
+            // Left remainder `[rs, cs)` stays usable.
+            if rs < cs {
+                out.push(MemoryRegion {
+                    start: PhysAddr::new(rs),
+                    length: cs - rs,
+                    kind: RegionKind::Usable,
+                });
+            }
+            // Right remainder `[ce, re)` stays usable.
+            if ce < re {
+                out.push(MemoryRegion {
+                    start: PhysAddr::new(ce),
+                    length: re - ce,
+                    kind: RegionKind::Usable,
+                });
+            }
+            // The overlapping middle is dropped (becomes a reserved gap).
+        }
+        self.regions = out;
+    }
+
     /// View the regions in insertion order.
     #[must_use]
     pub fn regions(&self) -> &[MemoryRegion] {
@@ -216,5 +278,127 @@ mod tests {
             kind: RegionKind::Usable,
         });
         assert!(m.highest_address().is_none());
+    }
+
+    /// `reserve_range` splits a usable region straddling the carved range
+    /// into the two outside remainders and drops the overlapping middle.
+    /// This is the exact shape the x86_64 boot path relies on to reserve the
+    /// kernel image out of one big `EfiConventionalMemory` run (`plans/PI.md`
+    /// X4 follow-on — the frame-allocator-vs-kernel-image fix).
+    #[test]
+    fn reserve_range_splits_straddling_usable_region() {
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0x100_0000,
+            kind: RegionKind::Usable,
+        });
+        // Carve out [0x10_0000, 0x44_0000) — the "kernel image".
+        m.reserve_range(PhysAddr::new(0x10_0000), PhysAddr::new(0x44_0000));
+        let regions = m.regions();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].start, PhysAddr::new(0));
+        assert_eq!(regions[0].length, 0x10_0000);
+        assert_eq!(regions[0].kind, RegionKind::Usable);
+        assert_eq!(regions[1].start, PhysAddr::new(0x44_0000));
+        assert_eq!(regions[1].length, 0x100_0000 - 0x44_0000);
+        assert_eq!(regions[1].kind, RegionKind::Usable);
+        // The carved frames are no longer in any usable region, so the frame
+        // allocator (gap == reserved) can never hand them out.
+        for r in regions {
+            let end = r.end().unwrap().as_u64();
+            assert!(
+                end <= 0x10_0000 || r.start.as_u64() >= 0x44_0000,
+                "carved range still usable: {r:?}"
+            );
+        }
+    }
+
+    /// `reserve_range` leaves `Reserved` regions and disjoint usable regions
+    /// untouched, and truncates a usable region overlapped only at one end.
+    #[test]
+    fn reserve_range_truncates_and_skips() {
+        let mut m = BootMemoryMap::new();
+        // Reserved region overlapping the carve: must pass through unchanged.
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0x2000),
+            length: 0x1000,
+            kind: RegionKind::Reserved,
+        });
+        // Usable region overlapped only at its low end by the carve.
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0x10_0000),
+            length: 0x10_0000,
+            kind: RegionKind::Usable,
+        });
+        // Disjoint usable region far above the carve.
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0x80_0000),
+            length: 0x1000,
+            kind: RegionKind::Usable,
+        });
+        // Carve [0, 0x10_8000): clips the low end of the middle region,
+        // overlaps the reserved one (left untouched), misses the high one.
+        m.reserve_range(PhysAddr::new(0), PhysAddr::new(0x10_8000));
+        let regions = m.regions();
+        assert_eq!(regions.len(), 3);
+        assert!(regions.contains(&MemoryRegion {
+            start: PhysAddr::new(0x2000),
+            length: 0x1000,
+            kind: RegionKind::Reserved,
+        }));
+        assert!(regions.contains(&MemoryRegion {
+            start: PhysAddr::new(0x10_8000),
+            length: 0x10_0000 - 0x8000,
+            kind: RegionKind::Usable,
+        }));
+        assert!(regions.contains(&MemoryRegion {
+            start: PhysAddr::new(0x80_0000),
+            length: 0x1000,
+            kind: RegionKind::Usable,
+        }));
+    }
+
+    /// A zero-width or inverted carve range is a no-op.
+    #[test]
+    fn reserve_range_zero_width_is_noop() {
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0x10_0000,
+            kind: RegionKind::Usable,
+        });
+        m.reserve_range(PhysAddr::new(0x4000), PhysAddr::new(0x4000));
+        m.reserve_range(PhysAddr::new(0x8000), PhysAddr::new(0x4000));
+        assert_eq!(m.regions().len(), 1);
+        assert_eq!(m.regions()[0].length, 0x10_0000);
+    }
+
+    /// The carved range becomes an implicit reserved gap, so a frame
+    /// allocator built from the clipped map never marks those frames usable.
+    /// Locks the `reserve_range` ↔ `FrameAllocator` contract (`AGENTS.md`
+    /// §2.2 — one reservation mechanism).
+    #[test]
+    fn reserve_range_frames_are_not_allocatable() {
+        use crate::frame::{FrameAllocator, PAGE_SIZE};
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: 0x100_0000,
+            kind: RegionKind::Usable,
+        });
+        // Reserve [0x10_0000, 0x44_0000) — the simulated kernel image.
+        let (kstart, kend) = (0x10_0000u64, 0x44_0000u64);
+        m.reserve_range(PhysAddr::new(kstart), PhysAddr::new(kend));
+        let alloc = FrameAllocator::new(&m).expect("allocator builds");
+        // Every frame the allocator hands out must lie outside the carve.
+        for _ in 0..2048 {
+            let Ok(frame) = alloc.alloc() else { break };
+            let pa = frame.0 as u64 * PAGE_SIZE as u64;
+            assert!(
+                pa < kstart || pa >= kend,
+                "allocator handed out a reserved kernel-image frame at {pa:#x}"
+            );
+        }
     }
 }

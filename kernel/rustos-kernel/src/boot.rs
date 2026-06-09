@@ -684,7 +684,48 @@ fn build_memory_map(mb2: &Mb2BootInfo<'_>) -> Result<BootMemoryMap, BootError> {
         return Err(BootError::NoMemoryMap);
     }
 
+    // Reserve the running kernel image (boot trampoline through the end of
+    // .bss, which includes the bump heap) out of the firmware-usable RAM.
+    //
+    // GRUB loads this multiboot2 kernel into memory the UEFI map reports as
+    // `EfiLoaderData`/`EfiConventionalMemory` — both of which
+    // `bootmemory::from_uefi` (correctly, post-`ExitBootServices`) classifies
+    // `Usable`. Without this carve-out the frame allocator eventually hands
+    // out frames overlapping the running kernel's code and heap, and the
+    // `spawn` image builder's zero-fill / page-table writes corrupt the live
+    // kernel (`plans/PI.md` X4 follow-on). This is the x86_64 sibling of the
+    // aarch64 `mem_map` `[ram_base, __kernel_end)` reservation (`plans/PI.md`
+    // P6c-1) — without it nothing protected the kernel image (`AGENTS.md`
+    // §2.17, §4).
+    let (kstart, kend) = kernel_image_phys_bounds();
+    map.reserve_range(kstart, kend);
+
     Ok(map)
+}
+
+/// Physical `[start, end)` bounds of the running kernel image — the boot
+/// trampoline (`__boot_phys_start`, fixed at 1 MiB) through the end of `.bss`
+/// (`__kernel_phys_end`, which the linker emits as a *physical* address; see
+/// `kernel/arch/x86_64/linker.ld`). The bump heap lives in `.bss`, so the
+/// range covers it too.
+fn kernel_image_phys_bounds() -> (PhysAddr, PhysAddr) {
+    // `__boot_phys_start` / `__kernel_phys_end` are absolute symbols the
+    // linker script defines; only their *addresses* (i.e. their linked
+    // values) are read here — they are never dereferenced, so taking the
+    // address is safe.
+    let start = core::ptr::addr_of!(__boot_phys_start) as u64;
+    let end = core::ptr::addr_of!(__kernel_phys_end) as u64;
+    (PhysAddr::new(start), PhysAddr::new(end))
+}
+
+extern "C" {
+    /// Physical start of the kernel image (the boot trampoline at 1 MiB).
+    /// Defined by `kernel/arch/x86_64/linker.ld`.
+    static __boot_phys_start: u8;
+    /// Physical one-past-the-end of the kernel image (end of `.bss`,
+    /// including the bump heap). Defined by `kernel/arch/x86_64/linker.ld`
+    /// as `. - KERNEL_VMA_BASE`, so its linked value is a physical address.
+    static __kernel_phys_end: u8;
 }
 
 fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescriptor) {

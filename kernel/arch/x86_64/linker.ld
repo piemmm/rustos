@@ -107,6 +107,16 @@ SECTIONS
         *(COMMON)
     }
 
+    /* One-past-the-end *physical* address of the whole kernel image
+     * (boot trampoline through the end of .bss, which includes the bin's
+     * bump heap). The boot path reserves [__boot_phys_start,
+     * __kernel_phys_end) out of the firmware-usable RAM so the frame
+     * allocator never hands out a frame overlapping the running kernel or
+     * its heap (the higher-half VA `.` maps to physical `. - KERNEL_VMA_BASE`,
+     * the LMA every section above is loaded at). */
+    . = ALIGN(4K);
+    __kernel_phys_end = . - KERNEL_VMA_BASE;
+
     /DISCARD/ :
     {
         *(.eh_frame .eh_frame.*)

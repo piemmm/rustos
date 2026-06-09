@@ -1406,12 +1406,13 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
-    // PI Stage X3b (`plans/PI.md` §X): the x86_64 runtime `spawn` concurrent
-    // producer vertical — the cross-port sibling of the aarch64
-    // `spawn-session-qemu-aarch64`, proving PID 1 `init` launches a second,
-    // hardware-isolated process under the live scheduler. It reuses
-    // `rustos_kernel::boot`, which now installs the runtime `ProcessSpawn`
-    // producer + embedded-program registry (`spawn_producer_x86_64`, via
+    // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
+    // `spawn` concurrent producer **and** `init` session-supervision vertical —
+    // the cross-port sibling of the aarch64 `spawn-session-qemu-aarch64`,
+    // proving PID 1 `init` launches a second, hardware-isolated process under
+    // the live scheduler and then reaps+relaunches it. It reuses
+    // `rustos_kernel::boot`, which installs the runtime `ProcessSpawn` producer
+    // + embedded-program registry (`spawn_producer_x86_64`, via
     // `BootInfo::with_spawn`) beside the X3a `with_init` seam and the COM1
     // console backing; only the audit sink is replaced. After `BootCompleted`,
     // `kernel_main` builds PID 1 `init`'s ring-3 image (`ProcessSpawned`,
@@ -1420,22 +1421,19 @@ const TESTS: &[QemuTest] = &[
     // `/Apps/Shell.app/Run`; the producer builds the session a fresh isolated
     // PML4 (`ProcessSpawned` #2) and admits it Ready, then `init` `wait`s on
     // it; the cooperative drain runs the session, which writes its prompt,
-    // reads end-of-input (no input backing), and `exit`s. PASS keys on **two**
-    // `ProcessSpawned` and **two** audited `SyscallInvoked` (EventId 5000 —
-    // `init`'s `spawn` and the session's `exit`; the session's `exit` is
-    // necessarily the second audited record because `init`'s `wait` only
-    // completes after the session is reaped). That is the X3b concurrent-spawn
-    // proof: it shows the producer built a second isolated ring-3 space and the
-    // session actually *ran* there. The full `wait`→reap→relaunch supervision
-    // cycle (3 `ProcessSpawned` / 4 audited syscalls, like the aarch64 sibling)
-    // is **not** asserted here: the relaunch (2nd producer) `spawn` currently
-    // wild-executes — the X4 follow-on defect tracked in `plans/PI.md` §X and
-    // `docs/src/platform/x86_64.md`. Until that is fixed the assertion stays at
-    // 2/2 (the bin's `SpawnSessionExitSink` is the source of truth). A
-    // regression that never builds or never runs the session never reaches the
-    // threshold, so the run times out (fail-loud, `AGENTS.md` §7). Single CPU
-    // and a 60-second budget match the other boot-then-do-fixed-work x86_64
-    // tests.
+    // reads end-of-input (no input backing), and `exit`s; `init`'s `wait` reaps
+    // it, returns to ring 3, and **relaunches** the session (`ProcessSpawned`
+    // #3). PASS keys on **three** `ProcessSpawned` and **four** audited
+    // `SyscallInvoked` (EventId 5000 — `init`'s `spawn`, the session's `exit`,
+    // `init`'s `wait`, and `init`'s relaunch `spawn`), proving the full
+    // `wait`→reap→relaunch supervision cycle on x86_64. (The earlier 2/2
+    // assertion was raised once the X4 follow-on frame-allocator defect was
+    // fixed — the boot path now reserves the kernel image out of usable RAM, so
+    // the relaunch producer no longer corrupts the kernel; see boot.rs
+    // `build_memory_map` and `plans/PI.md` §X.) A regression that never builds,
+    // runs, reaps, or relaunches the session never reaches the threshold, so
+    // the run times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second
+    // budget match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-x86-64",
         binary: "rustos-test-spawn-session-qemu-x86-64",

@@ -1,10 +1,11 @@
-//! `plans/PI.md` X3b QEMU integration test (x86_64 port): boot the production
-//! `rustos-kernel` pipeline, spawn PID 1 (`init`) into **ring 3**, and prove
-//! `init` launches the embedded `Shell` session through the runtime `spawn`
-//! producer so a **second, hardware-isolated, concurrently-runnable** process
-//! runs under the live scheduler — the cross-port sibling of the aarch64
-//! `spawn_session_qemu_aarch64` (`plans/SPAWN.md` `SP3b` / `plans/PI.md`
-//! `P6e-3b-ii`).
+//! `plans/PI.md` X3b + X4-follow-on QEMU integration test (x86_64 port): boot
+//! the production `rustos-kernel` pipeline, spawn PID 1 (`init`) into **ring
+//! 3**, and prove `init` launches the embedded `Shell` session through the
+//! runtime `spawn` producer (a **hardware-isolated, concurrently-runnable**
+//! process under the live scheduler — X3b) **and** then runs the full
+//! `wait`→reap→relaunch **supervision cycle** (X4 follow-on) — the cross-port
+//! sibling of the aarch64 `spawn_session_qemu_aarch64` (`plans/SPAWN.md` `SP3b`
+//! / `plans/PI.md` `P6e-3b-ii`).
 //!
 //! ## What this test asserts
 //!
@@ -24,30 +25,31 @@
 //!    The X3b producer resolves it against the registry and builds the session
 //!    a *fresh, hardware-isolated* PML4 (emitting `ProcessSpawned`, #2), admits
 //!    it **Ready**, and returns its PID — the X3b deliverable.
-//! 3. Calls `wait` on that child. The cooperative drain then steps the session,
+//! 3. Calls `wait` on that child. The cooperative drain steps the session,
 //!    which writes its prompt, reads end-of-input (its `stream_read` on fd 0 is
 //!    denied — the session holds only `CAP_CONSOLE_WRITE`, so `stdin` clamps to
-//!    a zero-length read), and `exit`s. (`init`'s subsequent `wait`→reap→relaunch
-//!    supervision cycle is the x86_64 `wait` validation — `plans/PI.md` X4 — and
-//!    is *not* asserted here; this vertical proves only the X3b concurrent
-//!    spawn.)
+//!    a zero-length read), and `exit`s. `init`'s `wait` then reaps it, returns
+//!    to ring 3, and **relaunches** the session with a second `spawn` — the
+//!    full `wait`→reap→relaunch supervision cycle (`plans/PI.md` X4 follow-on,
+//!    the cross-port sibling of the aarch64 `spawn_session_qemu_aarch64`).
 //!
-//! ## Why the PASS keys on two spawns and two audited syscalls
+//! ## Why the PASS keys on three spawns and four audited syscalls
 //!
-//! The **second** `ProcessSpawned` is the X3b witness: it proves the runtime
-//! producer authorised the `spawn`, built a second isolated address space, and
-//! admitted it. The two audited `SyscallInvoked` records are `init`'s `spawn`
-//! (the dispatcher emits it once the handler completes) and the **session's**
-//! `exit`: `init` cannot reach any later audited syscall (its `wait` only
-//! completes *after* the session exits and is reaped), so the second audited
-//! `SyscallInvoked` can only be the session's `exit`, proving the session
-//! actually *ran* in its own ring-3 space, not merely that its image was built.
-//! A regression that never builds the session (`< 2` spawns) or never runs it
-//! (`< 2` audited syscalls) never reaches the threshold, so the run times out
-//! and the harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour (`AGENTS.md` §7). (`stream_write`/`stream_read` are unaudited
-//! high-frequency I/O, so the session contributes no audited record but its
-//! `exit`.)
+//! The **second** `ProcessSpawned` proves the runtime producer authorised the
+//! first `spawn`, built an isolated address space, and admitted it (the X3b
+//! deliverable). The **third** `ProcessSpawned` is the supervision-cycle
+//! witness: it can only be emitted if `init`'s `wait` reaped the first session,
+//! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
+//! cycle, not just a single concurrent spawn. The four audited `SyscallInvoked`
+//! records are, in order, `init`'s `spawn`, the session's `exit`, `init`'s
+//! `wait`, and `init`'s relaunch `spawn` (`init`'s `wait` only completes after
+//! the session exits and is reaped, so the session's `exit` necessarily
+//! precedes the `wait` record). A regression that never reaps+relaunches (`< 3`
+//! spawns / `< 4` audited syscalls) never reaches the threshold, so the run
+//! times out and the harness reports `Outcome::Timeout` — the documented
+//! fail-loud behaviour (`AGENTS.md` §7). (`stream_write`/`stream_read` are
+//! unaudited high-frequency I/O, so the session contributes no audited record
+//! but its `exit`.)
 //!
 //! ## How it differs from the production binary
 //!
@@ -94,9 +96,10 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires two: PID 1 `init` and the session it launches — the second is
-    /// the witness that the runtime `spawn` producer built a concurrent
-    /// process (`plans/PI.md` X3b).
+    /// requires three: PID 1 `init`, the session it launches, and the session
+    /// it **relaunches** after reaping the first — the third is the witness
+    /// that the `wait`→reap→relaunch supervision cycle completed (`plans/PI.md`
+    /// X4 follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` the syscall dispatcher emits for a successfully dispatched
@@ -111,10 +114,11 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **two** processes were built and **two** audited syscalls
+    /// QEMU once **three** processes were built and **four** audited syscalls
     /// have run — proving PID 1 launched the session into its own isolated
-    /// ring-3 space and the session executed there (`init`'s `spawn` is the
-    /// first audited syscall; the session's `exit` is necessarily the second).
+    /// ring-3 space, the session executed there, and `init` reaped it and
+    /// relaunched a fresh session (the full supervision cycle, `plans/PI.md`
+    /// X4 follow-on).
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
@@ -125,7 +129,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 2 && SYSCALLS.load(Ordering::Acquire) >= 2 {
+            if SPAWNED.load(Ordering::Acquire) >= 3 && SYSCALLS.load(Ordering::Acquire) >= 4 {
                 qemu_exit::exit_success();
             }
         }

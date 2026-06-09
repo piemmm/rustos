@@ -1015,25 +1015,23 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     guard-page fault-form (G1–G3) is complete on aarch64. Doc:
     `docs/src/platform/aarch64.md` ("Proving the overrun fault-form (G3c)").
 
-### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[~]`
+### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[x]`
 
-aarch64 reaches a full **concurrent, multi-process** user mode (SP2c EL0
-timeshare, SP3b/SP4 `spawn`, SP6 `wait`, all `[x]`). riscv64 and x86_64
-currently have only the SP5b-2 `mem_map` sibling — a **single** ring-3/U-mode
-task entered through a direct `EnterUser::enter_user` (no scheduler, no
-cooperative context switch). The next cross-port follow-on, **lowest-risk
-first per the standing direction**, is to bring **x86_64** up to the aarch64
-concurrent model, staged X1–X4 (one fully-gated chunk per landing, §0.8).
+**x86_64 now reaches a full concurrent, multi-process user mode** to match
+aarch64 (SP2c EL0 timeshare, SP3b/SP4 `spawn`, SP6 `wait`): X1–X4 and the X4
+follow-on are all `[x]`, so PID 1 `init` spawns the session, reaps it, and
+relaunches it under the live scheduler on x86_64 (`spawn_session_qemu_x86_64`,
+3/4). The **riscv64** timeshare sibling is the remaining cross-port follow-on,
+a *separate, larger* one deferred behind this arc (see the end of this
+section): its `trap.s` runs the handler on the interrupted **user** `sp` with no
+`sscratch` kernel-stack swap, so it needs a trap-entry redesign before a
+cooperative mid-handler park can work at all.
 
-x86_64 is the lower-risk port because the machinery already exists: ring-3
-entry (`rustos_arch_x86_64::userentry`), the `mem_map` producer path
-(`mem_map_qemu_x86_64`), a `syscall`/`sysret` stub that already switches to a
-kernel stack, an `X86_64Arch: SchedulerArch`, and an x86_64 `ContextSwitchHal`
-— so `spawn_user_kthread` is largely reachable. The **riscv64** timeshare
-sibling is a *separate, larger* follow-on deferred behind this arc (see the
-end of this section): its `trap.s` runs the handler on the interrupted **user**
-`sp` with no `sscratch` kernel-stack swap, so it needs a trap-entry redesign
-before a cooperative mid-handler park can work at all.
+The X1–X4 chunks (below) were staged lowest-risk-first because the x86_64
+machinery already existed: ring-3 entry (`rustos_arch_x86_64::userentry`), the
+`mem_map` producer path (`mem_map_qemu_x86_64`), a `syscall`/`sysret` stub that
+already switches to a kernel stack, an `X86_64Arch: SchedulerArch`, and an
+x86_64 `ContextSwitchHal`.
 
 **Binding design findings** (from the x86_64 `syscall` stub,
 `kernel/arch/x86_64/src/syscall_entry.rs::syscall_entry_stub`):
@@ -1213,43 +1211,37 @@ copy is added on the syscall hot path (§2.16).
   x86_64** (X1/X2's durable user-`%rsp` save + `swapgs` balance cover it). **No
   ABI change.**
 
-- **X4 follow-on — x86_64 `init` supervision cycle (relaunch-`spawn`) `[ ]`.**
-  Strengthening `spawn_session_qemu_x86_64` from the X3b concurrent-spawn proof
-  (2 `ProcessSpawned` / 2 audited syscalls) to the **full** `wait`→reap→relaunch
-  supervision cycle (3 / 4, like the aarch64 sibling) surfaces a separate,
-  **pre-existing** x86_64 defect that is *not* a resume-after-park trap-state
-  issue: PID 1 `init` spawns the session, `wait`s, the session exits, `init`'s
-  `wait` **returns correctly to ring 3** (resume-after-park is proven sound by
-  X4), `init` issues its **relaunch `spawn`**, and that 2nd producer spawn
-  derails, never emitting the third `ProcessSpawned`. The
-  `spawn_session_qemu_x86_64` assertion therefore stays at **2/2** (the bin's
-  `SpawnSessionExitSink`) until this is fixed.
+- **X4 follow-on — x86_64 `init` supervision cycle (relaunch-`spawn`) `[x]`.**
+  `spawn_session_qemu_x86_64` now asserts the **full** `wait`→reap→relaunch
+  supervision cycle (**3** `ProcessSpawned` / **4** audited syscalls, the
+  cross-port equal of the aarch64 sibling): PID 1 `init` spawns the session,
+  `wait`s, the session exits, `init`'s `wait` reaps it and returns to ring 3,
+  and `init`'s relaunch `spawn` builds a third process — proven green under QEMU.
 
-  Narrowed under QEMU + GDB (findings of record, fix still open):
-  - It is **wild execution, not a fault**: `-d int` shows only timer ticks
-    (INT=0x20), no `#PF`/`#GP`/`#DF`; the CPU runs CPL=0 at RIPs in the
-    **frame-allocator region** (~0x0e–0x0f million, well above the kernel image,
-    whose `.bss` — incl. the 64 MiB bump heap and the `.bss` page-table pools —
-    ends ~68 MiB). So a kernel call/ret/jump transferred into a freshly
-    allocated data frame and executes garbage.
-  - It is **timing-sensitive**: free-run derails on the 2nd producer spawn;
-    pausing the vCPU (GDB breakpoints / single-step) shifts the derail several
-    launches later, so the trigger correlates with an asynchronous event landing
-    in a narrow window. `on_timer_tick` is observation-only (no IRQ-context
-    context switch) and the `define_isr!` timer stub is well-formed, so the
-    cause is subtler than plain preemption.
-  - The hang's `CR3` (a frame-region value, e.g. 0x0f80_1000) is a **symptom**:
-    init's PML4 (`INIT_PAGE_TABLES`) and the session's (`SPAWN_PAGE_TABLES`) are
-    both `.bss` pools (~67–68 MiB), so a frame-region CR3 means the wild code
-    reloaded it — the corruption precedes it.
-  - `freeze()` is **not** the cause: it walks only the ~300 bookkept user
-    mappings (`AddressSpace::live`), not the 4 GiB identity huge pages, so it is
-    not a heap blow-up.
-  - The exact derailing instruction/structural cause is **not yet isolated**
-    (single-step/breakpoint pausing suppresses the race, so the standard
-    catch-on-step approach does not reach it). The fix must be structural
-    (§2.17) + carry a regression test + pass the whole multi-arch gate; it is
-    the next item before the supervision-cycle assertion can land.
+  **Root cause (was a frame-allocator-vs-kernel-image overlap, not a trap-state
+  bug).** The x86_64 `boot::build_memory_map` built the `BootMemoryMap` straight
+  from the UEFI map, where `bootmemory::from_uefi` (correctly) classifies
+  `EfiLoaderCode`/`EfiLoaderData`/`EfiBootServicesCode`/`Data`/
+  `EfiConventionalMemory` as `Usable` — but GRUB loads *this* kernel into that
+  memory, and **nothing reserved the running kernel image** (unlike aarch64
+  P6c-1's `[ram_base, __kernel_end)`). By the 2nd (relaunch) `spawn`, the low
+  usable RAM consumed by boot + PID 1 + the 1st session pushed the allocator
+  cursor across 1 MiB into the kernel image; `spawn`'s `build_process_image`
+  zero-fill / page-table writes (through the higher-half direct map) corrupted
+  live `.text` (the derail target was `0xffffffff80120000` = physical
+  `0x120000`, the kernel image), producing the wild CPL=0 execution.
+
+  **Fix (structural, with regression tests).** `kernel/arch/x86_64/linker.ld`
+  now emits a `__kernel_phys_end` physical symbol (end of `.bss`, incl. the bump
+  heap), `BootMemoryMap::reserve_range` clips a physical range out of every
+  `Usable` region (preserving the allocator's no-overlap invariant; leaving the
+  range an implicit reserved gap), and `build_memory_map` reserves
+  `[__boot_phys_start, __kernel_phys_end)`. Host-tested in
+  `kernel/mem/src/bootinfo.rs` (split/truncate/skip/zero-width + an
+  allocator-never-hands-out-a-reserved-frame contract test); proven end to end
+  by the strengthened `spawn_session_qemu_x86_64` (3/4). Docs:
+  `docs/src/platform/x86_64.md` ("Reserving the kernel image out of usable
+  RAM").
 
 **Done when (per chunk):** the chunk's QEMU vertical PASSes under `cargo xtask
 test --qemu` **and** the whole-project gate (§5) is green; docs + host tests

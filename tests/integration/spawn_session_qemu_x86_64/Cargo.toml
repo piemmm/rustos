@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-spawn-session-qemu-x86-64"
-description = "plans/PI.md X3b QEMU integration test: boot the x86_64 rustos-kernel pipeline, spawn PID 1 init into ring 3, have init launch the embedded Shell session program through the spawn syscall, and prove both processes run concurrently under the live scheduler — the cross-port sibling of spawn-session-qemu-aarch64."
+description = "plans/PI.md X3b + X4-follow-on QEMU integration test: boot the x86_64 rustos-kernel pipeline, spawn PID 1 init into ring 3, have init launch the embedded Shell session through the spawn syscall, and prove init runs the full wait->reap->relaunch supervision cycle under the live scheduler — the cross-port sibling of spawn-session-qemu-aarch64."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,14 +15,17 @@ workspace = true
 # `rustos-kernel`'s library half (`kernel/rustos-kernel/src/lib.rs`),
 # including the `with_init` PID 1 spawn seam, the runtime `with_spawn`
 # producer + embedded-program registry (`plans/PI.md` X3b), and the COM1
-# console backing, and only replaces the audit Sink: observing two
-# `ProcessSpawned` (EventId 4030 — PID 1 and the session) plus two audited
-# `SyscallInvoked` (EventId 5000 — init's spawn and the session's exit) flips
+# console backing, and only replaces the audit Sink: observing three
+# `ProcessSpawned` (EventId 4030 — PID 1, the session, and the relaunched
+# session) plus four audited `SyscallInvoked` (EventId 5000 — init's spawn,
+# the session's exit, init's wait, and init's relaunch spawn) flips
 # `qemu_exit::exit_success`, so the host-side `tools/qemu::Runner` registers
-# the test as `Outcome::Pass`. This is the X3b concurrent-spawn proof; the
-# full wait->reap->relaunch supervision cycle (3/4, like the aarch64 sibling)
-# is not asserted yet because the relaunch spawn wild-executes (the X4
-# follow-on defect — plans/PI.md §X).
+# the test as `Outcome::Pass`. This proves the full wait->reap->relaunch
+# supervision cycle on x86_64 (the X4 follow-on): it was raised from the
+# earlier 2/2 X3b-only proof once the frame-allocator defect was fixed (the
+# boot path now reserves the kernel image out of usable RAM, so the relaunch
+# producer no longer corrupts the kernel — boot.rs build_memory_map,
+# plans/PI.md §X).
 # Keeping the bin separate from the production binary (rather than a Cargo
 # feature) prevents feature unification from leaking the QEMU-exit behaviour
 # into a production image (`AGENTS.md` §5.4.5 — fail closed).
