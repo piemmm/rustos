@@ -12,28 +12,21 @@ Do not "just make it work".**
 ## 1. Project Identity
 
 - **Name:** RustOS
-- **Language:** Rust only. No C, no C++, no assembly except where the architecture
-  *strictly* requires it (boot stubs, context switches, MMU/TLB primitives). Every
-  such file must be justified in a header comment and reviewed.
-  - **Every line of RustOS is written in Rust.** This is absolute and binds
-    every contributor, human or AI. The *only* exceptions are the small,
-    individually justified assembly fragments named above (CPU bring-up and
-    the MMU/TLB/context-switch primitives the silicon cannot express in
-    Rust). There are no other exceptions.
-  - **Do not write C (or C++) programs, source files, headers, or build
-    glue as part of RustOS.** The C-language surface (§9, §16.4) exists for
-    **third-party developers** who write their *own* programs against
-    `abi-v1` from *outside* this repository. It is an outward-facing
-    compatibility contract, **not** a licence to author C inside RustOS.
-    No `.c`/`.h`/`.cc`/`.cpp` file is a legitimate deliverable of any task
-    in this workspace.
-  - The committed C artefacts are the few host-only items §9/§16.4 already
-    enumerate — the **generated** headers in `include/` (emitted from the
-    `lib/abi` Rust source of truth, never hand-edited; §9), the host build
-    glue under `tools/cc/`, and the host-only C-ABI conformance fixture it
-    drives. They are produced, pinned, and audited as described there; they
-    are not an invitation to hand-write new C. If a task seems to require
-    writing C, you have misread it — stop and ask (§15.7).
+- **Language:** Rust only. **Every line of RustOS is Rust**, and this binds
+  every contributor, human or AI. The *only* exception is small, individually
+  justified, header-documented and reviewed assembly fragments where the
+  architecture *strictly* requires it (CPU bring-up, MMU/TLB/context-switch
+  primitives the silicon cannot express in Rust). There are no others.
+  - **Do not write C or C++ as part of RustOS** — no `.c`/`.h`/`.cc`/`.cpp`
+    source, header, or build glue is a legitimate deliverable. The C-language
+    surface (§9, §16.4) is an outward-facing contract for **third-party**
+    developers to call `abi-v1` from *their own* projects, not a licence to
+    author C here. If a task seems to require writing C, you have misread it —
+    stop and ask (§15.7).
+  - The only committed C artefacts are the host-only items §9/§16.4 enumerate:
+    the **generated** `include/` headers (emitted from `lib/abi`, never
+    hand-edited), the `tools/cc/` build glue, and the host-only C-ABI
+    conformance fixture it drives — produced, pinned, and audited there.
 - **Targets (Tier-1):**
   - `x86_64-unknown-none` (BIOS + UEFI PCs)
   - `aarch64-unknown-none` (Raspberry Pi 3/4/5, generic ARMv8)
@@ -165,117 +158,82 @@ These are absolute. They override any local convenience.
       "Pre-existing" and "out of scope" are not exits (§2.5, §7).
     - Skipping, deferring ("CI will catch it"), faking, or partially running
       the gate is a §2.1 hack and a review blocker (§15.3, §15.6).
-16. **Performance is a first-class goal, never an afterthought.** RustOS must
-    be **fast as well as secure**: a correct, secure result that is needlessly
-    slow is not finished work. Every contributor weighs the runtime cost of
-    what they write and chooses the efficient design when a clean one exists —
-    this is part of the §2.6 senior-developer bar, not an optional polish pass.
+16. **Performance is a first-class goal, never an afterthought.** A correct,
+    secure result that is needlessly slow is not finished work; choosing the
+    efficient design when a clean one exists is part of the §2.6 bar.
     - **Order of precedence.** Security (§2.7), correctness (§2.5, §2.6), and
-      the safety rules (§2.1, §2.9, §2.10) come first; performance is the next
-      priority after them and ahead of convenience. Performance never licenses
-      a hack (§2.1), a weakened or skipped test (§2.5), an unchecked input or
-      ambient-authority shortcut (§5.4), an `unsafe` block without its §2.10
-      obligations, or a `panic!` on an error path (§2.9). When a genuine,
-      *measured* security-vs-speed conflict exists, security wins and the cost
-      is documented — but the two are usually reconcilable, and "it's for
-      security" is not an excuse to stop caring about speed.
-    - **Hot paths are designed, not discovered.** The paths that run often —
-      syscall and IPC dispatch (§9), the capability check (§5.4), the scheduler
-      pick/yield/wake (§17.1), context switch and TLB handling (§17.2), the
-      allocator (§4), interrupt entry/exit, the compositor blit/blend path
-      (§10), and the filesystem and network data paths — are written to be
-      efficient by construction: no needless allocation, copying, locking, or
-      per-call work that can be hoisted, precomputed, or amortised. Security
-      checks on these paths are mandatory (§5.4) and must themselves be
-      efficient, not skipped.
+      the safety rules (§2.1, §2.9, §2.10) come first; performance is next,
+      ahead of convenience. It never licenses a hack (§2.1), a weakened or
+      skipped test (§2.5), an unchecked input or ambient-authority shortcut
+      (§5.4), an `unsafe` block without its §2.10 obligations, or a `panic!` on
+      an error path (§2.9). On a genuine, *measured* security-vs-speed conflict,
+      security wins and the cost is documented.
+    - **Hot paths are designed, not discovered.** Syscall/IPC dispatch (§9),
+      the capability check (§5.4), scheduler pick/yield/wake (§17.1), context
+      switch and TLB handling (§17.2), the allocator (§4), interrupt
+      entry/exit, the compositor blit/blend path (§10), and the filesystem and
+      network data paths are efficient by construction — no needless
+      allocation, copying, locking, or per-call work that can be hoisted,
+      precomputed, or amortised. Their mandatory security checks (§5.4) must
+      themselves be efficient, not skipped.
     - **No premature pessimisation, no blind micro-optimisation.** Do not write
       gratuitously wasteful code (redundant copies, O(n²) where O(n) is as
-      clear, locks held longer than needed, allocation in a tight loop). Do not
-      contort code or reach for `unsafe` for speculative speed without a
-      measurement: clarity (§2.11) and the safety rules are not traded away on
-      a hunch. Optimise where it is measured to matter.
+      clear, over-long locks, allocation in a tight loop), nor contort code or
+      reach for `unsafe` for speculative speed without a measurement (§2.11).
     - **Measure, do not guess (§15.7).** Performance claims and regressions are
-      backed by evidence — a benchmark, a complexity argument, or a profile —
-      not by intuition. Where a subsystem has a stated latency or throughput
-      budget, a change that blows it is a defect to be fixed or reverted in the
-      same change, exactly like a failed test (§2.5).
-    - **Scope discipline still applies.** This rule is a duty of care, not a
-      licence to add bloat (§2.3), speculative interfaces (§2.4), or
-      sibling-collapsing "fast paths" that duplicate logic (§2.2). The fastest
-      code is often the code you did not write.
+      evidence-backed (benchmark, complexity argument, or profile). A change
+      that blows a stated latency/throughput budget is a defect, fixed or
+      reverted in the same change like a failed test (§2.5).
+    - **Scope discipline still applies.** Not a licence for bloat (§2.3),
+      speculative interfaces (§2.4), or sibling-collapsing "fast paths" that
+      duplicate logic (§2.2).
 17. **Never defer, weaken, or trade away a security defence. Fix it now.**
     A known security weakness — a missing guard page, an absent bounds or
-    capability check, an unchecked input, a fail-open path, a use-after-free,
-    a missing zeroisation of secrets, an `unsafe` invariant without its proof —
-    is fixed **in the change that discovers or touches it**, not parked behind
-    a `TODO`, a "future work" comment, a follow-up issue, or a "good enough for
-    now" rationalisation. This is absolute and binds every contributor, human
-    or AI.
-    - **No security regressions, ever.** A change must never leave the system
-      *less* defended than it found it: do not remove, bypass, loosen, or
+    capability check, an unchecked input, a fail-open path, a use-after-free, a
+    missing zeroisation of secrets, an `unsafe` invariant without its proof —
+    is fixed **in the change that discovers or touches it**, never parked behind
+    a `TODO`, "future work", a follow-up issue, or a "good enough for now".
+    - **No security regressions, ever.** Never remove, bypass, loosen, or
       "temporarily" disable a guard page, canary, capability gate, validation,
       sandbox, encryption, or any other defence to make code compile, a test
-      pass, a deadline, or a diff smaller. Lowering a defence "to get it
-      working" is the §2.1 hack this rule forbids by name.
-    - **Bumping a limit is not a fix.** Enlarging a buffer, a stack, a timeout,
-      or a quota so a problem "stops happening" is mitigation, not a defence,
-      and never a substitute for the structural control (e.g. a guard page that
-      turns the overrun into a deterministic fault or a fail-closed detection).
-      If the structural control is genuinely large, you still land a real,
-      *non-deferred* defence now (§4's guard-page discipline, the §19.10
-      software tag check, a fail-closed check) and **stage** the deployment
-      form explicitly in `PLAN.md`/`plans/` — you do not ship the bare limit
-      bump and call the security work "later".
-    - **"Later", "out of scope", and "pre-existing" are not exits.** If you
-      notice a security defect while doing something else, you own it: fix it in
-      the same change or, if it is genuinely too large, stop and ask (§15.7)
-      before proceeding — never quietly leave it.
-    - This rule never overrides §2.5 (tests) or §2.6 (quality); it reinforces
-      §2.7 (security is the default) and §5.4 (fail closed). A change that
-      defers or reduces a security defence is a review blocker (§23.1),
-      regardless of whether it compiles or the tests pass.
-18. **Every defect you cause or notice is fixed now, not deferred.** §2.17
-    makes this absolute for *security* weaknesses; this rule makes it absolute
-    for **every** defect of any kind — a wrong result, a crash, a leak, a race,
-    a broken build, a failing or flaky test, a lint, a regression, a stale doc,
-    a layering or ABI violation, anything. There are exactly two ways a defect
-    reaches you, and **both** oblige you to act:
-    - **(1) The validation gate surfaces it.** Any failure the §7 / §2.15
-      whole-project gate produces — a failed test, a clippy or fmt error, a
-      fuzz or proptest crash, a deps/cfg/abi/docs-check failure, a coverage
-      miss — is fixed or reverted **in the same change**, whether it lives in
-      code you touched or anywhere else. This is already §2.5, §2.15, and §7;
-      it is restated here so the two cases sit together.
-    - **(2) You notice it by reading or reasoning about the code**, even though
-      the gate is green and no test flags it. A bug you can see is a bug you
-      own: you do not get to leave it because "the tests pass" or "it isn't
-      what I was asked to do". You fix it in the same change.
-    - The behaviour is identical whether the defect is one your change
-      *introduced*, one your change merely *revealed*, or one you simply
-      *spotted in passing*. "Unrelated", "pre-existing", "out of scope",
-      "not my change", "the gate didn't catch it", and "later" are **not**
-      exits — exactly as for security defects in §2.17.
-    - **The only escape is to stop and ask (§15.7), never to stay silent.** If
-      a noticed defect is genuinely too large to fix inside the current change,
-      you raise it explicitly — surface it to the user and, where the project
-      tracks such work, record it in `PLAN.md`/`plans/` — before proceeding.
-      Quietly ignoring it, burying it in a `// TODO`, or omitting it from the
-      completion report is the §2.1 hack this rule forbids.
-    - **Every defect that is fixed carries a regression test, always (§7,
-      §23.4).** Closing a bug — whichever of the two channels above surfaced
-      it — is not complete until a test exists that fails before the fix and
-      passes after it (a fuzzer/proptest find also enters the regression
-      corpus, §19.6). There is no path that fixes a defect without landing its
-      test in the same change. When a noticed defect is too large to fix now
-      and is escalated (§15.7), the duty to write that regression test does
-      **not** lapse: the test requirement is recorded with the escalated work
-      and the test is written when the fix lands, so no bug is ever closed
-      untested. "Fixed it, but a test was awkward" is the §2.1 hack this rule
-      forbids.
-    - This rule never overrides §2.5 (tests) or §2.6 (quality); it reinforces
-      them. A change that ships a known defect of any kind — caused, revealed,
-      or merely noticed — is a review blocker (§23), regardless of whether it
-      compiles or the tests pass.
+      pass, a deadline, or a diff smaller — that is the §2.1 hack.
+    - **Bumping a limit is not a fix.** Enlarging a buffer, stack, timeout, or
+      quota so a problem "stops happening" is mitigation, not the structural
+      control (e.g. a guard page that turns the overrun into a deterministic
+      fault, or a fail-closed check). If that control is genuinely large, still
+      land a real, *non-deferred* defence now (§4, §19.10, a fail-closed check)
+      and **stage** the deployment form in `PLAN.md`/`plans/`.
+    - **"Later", "out of scope", and "pre-existing" are not exits.** A security
+      defect you notice you own: fix it in the same change or, if genuinely too
+      large, stop and ask (§15.7) — never quietly leave it.
+    - This never overrides §2.5 or §2.6; it reinforces §2.7 and §5.4. Deferring
+      or reducing a security defence is a review blocker (§23.1).
+18. **Every defect you cause or notice is fixed now, not deferred.** §2.17 is
+    this for *security*; this rule makes it absolute for **every** defect — a
+    wrong result, crash, leak, race, broken build, failing or flaky test, lint,
+    regression, stale doc, layering or ABI violation, anything. Two channels
+    both oblige you to act:
+    - **(1) The validation gate surfaces it** — any failure the §7 / §2.15
+      whole-project gate produces (failed test, clippy/fmt error, fuzz/proptest
+      crash, deps/cfg/abi/docs-check failure, coverage miss) is fixed or
+      reverted **in the same change**, in code you touched or anywhere else.
+    - **(2) You notice it by reading or reasoning about the code**, even with a
+      green gate and no test flagging it. You fix it in the same change too.
+    - This holds whether the defect was *introduced*, *revealed*, or merely
+      *spotted in passing*: "unrelated", "pre-existing", "out of scope", "not my
+      change", "the gate didn't catch it", and "later" are **not** exits.
+    - **The only escape is to stop and ask (§15.7), never to stay silent.** If a
+      noticed defect is genuinely too large for the current change, raise it
+      explicitly — surface it and record it in `PLAN.md`/`plans/` — before
+      proceeding. Burying it in a `// TODO` or omitting it from the completion
+      report is the §2.1 hack this rule forbids.
+    - **Every fixed defect carries a regression test, always (§7, §23.4)** —
+      one that fails before the fix and passes after (a fuzzer/proptest find
+      also enters the corpus, §19.6); no path fixes a defect without landing its
+      test in the same change. An escalated defect (§15.7) carries the test
+      requirement until the fix lands, so no bug is ever closed untested.
+    - This never overrides §2.5 or §2.6; a change that ships a known defect of
+      any kind is a review blocker (§23).
 
 ---
 
@@ -340,65 +298,32 @@ rustos/
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
-│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: one
-│   │                    #   export-name-pinned ros_sys_<name> per syscall
-│   │                    #   that marshals its args and issues the shared
-│   │                    #   per-arch trap (lib/abi-trap), panic-free, no added
-│   │                    #   authority — the implementation behind the generated
-│   │                    #   C header and the curated /System/Libraries/ "System
-│   │                    #   runtime / C ABI" class for NON-Rust programs only
-│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC2).
-│   ├── abi-trap/        # Raw abi-v1 user->kernel syscall trap primitive: the
-│   │                    #   single per-arch syscall/svc/ecall carve-out (§1),
-│   │                    #   shared by the C-ABI stubs (lib/abi-sys) and the
-│   │                    #   pure-Rust runtime (lib/rt) so the trap assembly
-│   │                    #   exists exactly once (§2.2). Adds no authority (§5.4).
+│   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: the
+│   │                    #   export-name-pinned ros_sys_<name> stubs over
+│   │                    #   lib/abi-trap, for NON-Rust programs (§9, §16.4).
+│   ├── abi-trap/        # The single per-arch user->kernel syscall trap
+│   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
 │   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
-│   ├── compress/        # First-party LZ (zstd-fast-style) codec. RustFS
-│   │                    #   compresses every data record with it; no external
-│   │                    #   zstd/compression dependency (§2.12, §16.4).
-│   ├── crt0/            # C-callable abi-v1 program startup/teardown object:
-│   │                    #   the per-arch _start trampoline that marshals the
-│   │                    #   kernel startup vector (rustos_abi::process) into C
-│   │                    #   argc/argv/envp, installs the §19.2 stack canary,
-│   │                    #   calls main, and routes its return through the exit
-│   │                    #   syscall — the crt0 half of the curated
-│   │                    #   /System/Libraries/ "System runtime / C ABI" class
-│   │                    #   (§9, §16.4; plans/CCOMPAT.md CC3).
+│   ├── compress/        # First-party LZ codec; RustFS compresses every record
+│   │                    #   with it, no external dependency (§2.12, §16.4).
+│   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
+│   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library
-│   │                    #   (plans/CURSES.md C4): client Window/pad draw model,
-│   │                    #   a minimal-diff renderer that emits the smallest
-│   │                    #   lib/vt op set the TermType supports (colour
-│   │                    #   downgrade truecolour->256->16->mono), and an input
-│   │                    #   decoder to typed key/mouse/paste events. One
-│   │                    #   vocabulary (§2.2); part of the OS, so apps
-│   │                    #   dynamically link it as a curated /System/Libraries/
-│   │                    #   class (§16.4); fail closed (§2.9), outside
-│   │                    #   userland/gui (§17.3/§17.4).
-│   ├── cursor/          # Shared pointer cursors: scalable, colourful,
-│   │                    #   vectorised cursor shapes rasterised onto a raster
-│   │                    #   Surface + replaceable cursor sets keyed by the
-│   │                    #   theme's CursorKind (§10, §17.4).
-│   ├── fdt/             # Shared flattened-device-tree (FDT/DTB) reader: the
-│   │                    #   one device-tree parser the aarch64 + riscv64
-│   │                    #   ports build their §18.2 platform discovery on
-│   │                    #   (memory map, riscv timebase, generic property
-│   │                    #   lookup), with a feature-gated DTB test fixture.
-│   │                    #   One parser, not one per arch (§2.2).
-│   ├── font/            # Shared text rasterisation: a built-in monospace
-│   │                    #   bitmap font + glyph blitter onto a raster Surface
-│   │                    #   for the taskbar and apps (§16.4, §17.4).
-│   ├── geometry/        # Shared integer screen geometry (Point/Rect) plus
-│   │                    #   the desktop DPI / UI Scale (logical->physical
-│   │                    #   pixels) for the WM, taskbar, cursors, and apps
-│   │                    #   (§10, §17.4).
-│   ├── icon/            # Shared desktop icons: scalable, themeable vector
-│   │                    #   notification/status glyphs rasterised onto a
-│   │                    #   raster Surface via the shared fill_polygon path
-│   │                    #   for the taskbar (§10, §17.4).
+│   │                    #   (plans/CURSES.md C4) over lib/vt (§2.2): a curated
+│   │                    #   /System/Libraries/ class, fail closed (§2.9).
+│   ├── cursor/          # Shared pointer cursors rasterised onto a raster
+│   │                    #   Surface, keyed by the theme's CursorKind (§10, §17.4).
+│   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
+│   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
+│   ├── font/            # Shared text rasterisation: monospace bitmap font +
+│   │                    #   glyph blitter onto a raster Surface (§16.4, §17.4).
+│   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
+│   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
+│   ├── icon/            # Shared desktop icons: themeable vector glyphs
+│   │                    #   rasterised via fill_polygon onto a Surface (§10).
 │   ├── input/           # Shared pointer input-event vocabulary
 │   │                    #   (PointerButton/InputEvent) routed by the WM and
 │   │                    #   taskbar (§17.4).
@@ -406,43 +331,27 @@ rustos/
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
-│   │                    #   Color/Pixel + Surface (fill_rect, the single
-│   │                    #   supersampled fill_polygon, blit) for the WM,
-│   │                    #   taskbar, cursors, and icons (§2.2, §17.4).
-│   ├── rng/             # Random number generation: a NIST SP 800-90A
-│   │                    #   HMAC-SHA256 CSPRNG (composed over lib/crypto's
-│   │                    #   audited HMAC, §1/§2.12), a pluggable entropy /
-│   │                    #   hardware-RNG seam (§17.2, §19.2), and a fast
-│   │                    #   non-crypto xoshiro256++ generator.
-│   ├── rt/              # The pure-Rust userland runtime a first-party RustOS
-│   │                    #   program links (§1): the _start trampoline, the
-│   │                    #   §19.2 stack canary, the panic handler, idiomatic
-│   │                    #   abi-v1 syscall wrappers, and the entry! macro, over
-│   │                    #   the shared lib/abi-trap trap. The Rust counterpart
-│   │                    #   of the C-only crt0+abi-sys; RustOS code never uses
-│   │                    #   the C ABI (§2.2, §16.4).
-│   ├── svg/             # Shared SVG image decoding (§16.4): a fail-closed,
-│   │                    #   first-party no_std decoder for the WM/desktop
-│   │                    #   SVG-first asset subset, producing the shared
-│   │                    #   filled-polygon vector form the cursors and icons
-│   │                    #   rasterise through lib/raster (§2.2, §2.12, §10).
+│   │                    #   Surface (fill_rect, fill_polygon, blit) (§2.2, §17.4).
+│   ├── rng/             # RNG: a NIST SP 800-90A HMAC-SHA256 CSPRNG over
+│   │                    #   lib/crypto (§2.12), an entropy seam (§19.2), and a
+│   │                    #   fast non-crypto xoshiro256++ generator.
+│   ├── rt/              # The pure-Rust userland runtime a first-party program
+│   │                    #   links (§1): _start, stack canary, panic handler,
+│   │                    #   syscall wrappers, entry! macro, over lib/abi-trap.
+│   ├── svg/             # Shared fail-closed no_std SVG decoder for the
+│   │                    #   WM/desktop SVG-first assets (§2.2, §2.12, §10, §16.4).
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
-│   ├── termcap/         # Compiled-in terminal capability database
-│   │                    #   (plans/CURSES.md C3): the closed, versioned TermType
-│   │                    #   set + a per-terminal capability record expressed in
-│   │                    #   lib/vt terms (§2.2), with a fail-closed from_term
-│   │                    #   over an untrusted TERM (§2.9, §16.1 — no file read).
+│   ├── termcap/         # Compiled-in TERM->capability database (plans/CURSES.md
+│   │                    #   C3): closed versioned TermType set in lib/vt terms,
+│   │                    #   fail-closed from_term (§2.2, §2.9, §16.1).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── util/            # Strictly justified utilities.
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
 │   │                    #   (Transport trait, queues, DMA slabs).
-│   └── vt/              # Shared ANSI/VT/xterm escape + attribute vocabulary
-│                        #   (plans/CURSES.md C1): one control-set / SGR /
-│                        #   colour / screen-op definition with an emitter and
-│                        #   a streaming parser over the same tables, shared by
-│                        #   the terminal consumer and the curses emitter
-│                        #   (§2.2, §2.9, §17.3/§17.4).
+│   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
+│                        #   one control/SGR/colour/screen-op definition with an
+│                        #   emitter + streaming parser over the same tables (§2.2).
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
 │   ├── system/          # Long-running system services.
@@ -485,13 +394,9 @@ rustos/
 │                        #   `cargo xtask c-header` in CI. Do not hand-edit.
 │
 ├── tests/               # Cross-crate / integration tests only.
-│   ├── fuzzseed/        #   Shared host test-support: the per-run PRNG seed
-│   │                    #   selection, start-of-test seed logging, and
-│   │                    #   smoke-iteration / soak-budget seam used by the
-│   │                    #   §19.6 fuzz harnesses, §19.7 proptest models, and
-│   │                    #   the filesystem soak (one definition, §2.2). A
-│   │                    #   dev-dependency of those harnesses only; never in
-│   │                    #   a RustOS build.
+│   ├── fuzzseed/        #   Shared host test-support: per-run PRNG seed, seed
+│   │                    #   logging, smoke/soak budget for the §19.6/§19.7
+│   │                    #   harnesses (§2.2); dev-dependency only, never shipped.
 │   ├── integration/     #   Cross-crate / end-to-end (QEMU) test crates.
 │   └── SECURITY.md      #   Binding adversarial-test charter (§19) for the
 │                        #   memory subsystem and CPU privilege boundary.
@@ -541,19 +446,16 @@ an update to this section.
   - No `unsafe` global allocator that performs raw pointer arithmetic without
     bounds-checked wrappers.
   - Deterministic OOM behaviour: allocation failure is a `Result`, never a panic.
-- **Encrypted swap is the default, and there is no plaintext-swap mode.**
-  Any backing store the kernel pages anonymous, stack, or capability-bearing
-  memory out to is encrypted with `lib/crypto`. The zero-on-free guarantee
-  above is void if those bytes can be read back from an unencrypted swap
-  device, so swap inherits the same secret-handling bar as RAM.
-  - The swap key is an ephemeral random key drawn from the platform RNG at
-    boot (the §19.2 KASLR/entropy source) and is **never persisted** — it is
-    discarded on shutdown, so paged-out secrets cannot be recovered across a
-    power cycle and there is nothing at rest to attack.
-  - Enabling swap without encryption is not a supported configuration: the
-    kernel refuses to activate a swap device that is not wrapped by the
-    encrypted-swap layer, and fails closed (§5.4) rather than falling back to
-    plaintext. The installer never lays out plaintext swap (§11).
+- **Encrypted swap is the default; there is no plaintext-swap mode.** Any
+  backing store the kernel pages anonymous, stack, or capability-bearing memory
+  out to is encrypted with `lib/crypto` — swap inherits the same secret bar as
+  RAM (the zero-on-free guarantee is void otherwise).
+  - The swap key is an ephemeral per-boot random key from the platform RNG (the
+    §19.2 entropy source), **never persisted** and discarded on shutdown, so
+    paged-out secrets are unrecoverable at rest.
+  - The kernel refuses to activate a swap device not wrapped by the
+    encrypted-swap layer and fails closed (§5.4) rather than falling back to
+    plaintext; the installer never lays out plaintext swap (§11).
 - **No ambient authority.** Every syscall takes the calling task's capability
   set explicitly; there is no "root can do anything" backdoor in kernel code.
 
@@ -722,50 +624,33 @@ an update to this section.
   architecture. The table lives in `kernel/syscall/src/table.rs` and is
   generated from `lib/abi/src/syscalls.rs` — do not edit either by hand
   without updating the other; `cargo xtask abi-check` enforces this.
-- The ABI must be callable from programs not written in Rust (C, …), and
-  **all of `lib/abi` is part of that surface**, not just the syscalls. This is
-  a one-way, outward-facing contract: it exists so a **third-party** developer
-  can call `abi-v1` from C (or any other language) in *their own* project. It
-  is **not** a reason to write C inside RustOS (§1). The in-tree obligation is
-  only to keep the *generated* C view (`include/`, emitted from `lib/abi`) and
-  the Rust-authored stub/`crt0` runtime correct — never to hand-author C
-  programs against it. `lib/abi`
-  is the single source of truth for every type a program exchanges with the
-  kernel and with system services, and it is a public developer surface for
-  third-party programs, not only the OS. The C-language view — every public
-  `#[repr(C)]` type, every constant and enum discriminant, the syscall numbers,
-  the error codes, the capability identifiers, and a prototype per syscall
-  entry point — is **generated** from the same `lib/abi` source of truth into
-  `include/` (§3), never hand-maintained as a parallel definition (§2.2).
-  `cargo xtask c-header --write` regenerates it and `cargo xtask c-header` (run
-  by `cargo xtask ci`) fails closed if the committed header has drifted. Each
-  syscall is exported under the stable symbol `ros_sys_<name>`; the
-  user-space stub runtime pins that symbol with
-  `#[export_name = "ros_sys_<name>"]` (or `#[unsafe(no_mangle)]`) so the
-  compiler does not mangle it (`extern "C"` alone fixes only the calling
-  convention, not the symbol name). That stub runtime and the matching program
-  startup object (crt0) are an OS-provided shared library (§16.4); they only
-  marshal to the kernel and are **not** a privileged bypass — every capability
-  and input check still happens kernel-side (§5.4), and non-Rust binaries obey
-  the `rxe`/`abi-v1` hardening invariants (PIE, W^X, CFI tag, §19.2)
-  identically. The staged build plan for this surface is `plans/CCOMPAT.md`.
+- **The ABI is callable from non-Rust programs (C, …), and all of `lib/abi`
+  is part of that surface** — every type a program exchanges with the kernel
+  and system services, not just the syscalls. This is a one-way, outward-facing
+  contract for **third-party** developers, not a reason to write C inside RustOS
+  (§1). The C view — every public `#[repr(C)]` type, constant, enum
+  discriminant, syscall number, error code, capability id, and a prototype per
+  syscall — is **generated** from `lib/abi` into `include/` (§3), never
+  hand-maintained (§2.2); `cargo xtask c-header --write` regenerates it and
+  `cargo xtask c-header` (in `ci`) fails closed on drift. Each syscall is
+  exported as the stable symbol `ros_sys_<name>`, pinned with
+  `#[export_name = …]` / `#[unsafe(no_mangle)]` (so it is not mangled — `extern
+  "C"` fixes only the calling convention). The stub runtime and program startup
+  object (crt0) are an OS-provided shared library (§16.4) that only marshals to
+  the kernel: **not** a privileged bypass — every capability and input check
+  stays kernel-side (§5.4), and non-Rust binaries obey the `rxe`/`abi-v1`
+  hardening invariants (PIE, W^X, CFI tag, §19.2) identically. Staged plan:
+  `plans/CCOMPAT.md`.
 - **C-ABI naming prefix (`ros_` / `ROS_`).** The C-visible surface is
-  namespaced with the short `ros_` prefix: exported symbols are
-  `ros_sys_<name>`, public macros are `ROS_*` (e.g. `ROS_E_*` error codes,
-  `ROS_CAP_*` capability ids, `ROS_SYS_*` syscall numbers), and `#[repr(C)]`
-  type names are `ros_<snake_case>_t`. This is the standard, correct defence
-  for C's single flat symbol namespace against hostile or sloppy third-party
-  code (§16.5 hosts non-Rust apps), and it is required because the names are
-  frozen on the first release (an unprefixed name you can never change later
-  is reckless, and `extern "C"` fixes only the calling convention, not
-  mangling, so the symbol is pinned explicitly anyway). It is not vanity:
-  Linux's bare `read`/`open` are prefix-free only because POSIX *owns* that
-  namespace, and Windows self-namespaces heavily (`Nt*`/`Zw*`/`Rtl*`); RustOS
-  has no external standard owning its names, so it self-namespaces. **The
-  prefix belongs only on the C-visible boundary** — exported symbols, public
-  macros, and `#[repr(C)]` type names. It must never creep onto internal
-  `lib/abi` Rust items, kernel-side functions, or anything that does not cross
-  the FFI line; that would be the bloat §2.3 forbids.
+  namespaced: exported symbols are `ros_sys_<name>`, public macros are `ROS_*`
+  (`ROS_E_*` errors, `ROS_CAP_*` capability ids, `ROS_SYS_*` syscall numbers),
+  and `#[repr(C)]` type names are `ros_<snake_case>_t`. This defends C's single
+  flat symbol namespace against hostile/sloppy third-party code (§16.5), and
+  the names freeze on the first release. **The prefix belongs only on the
+  C-visible boundary** — exported symbols, public macros, and `#[repr(C)]` type
+  names; it must never creep onto internal `lib/abi` Rust items, kernel-side
+  functions, or anything that does not cross the FFI line (that would be §2.3
+  bloat).
 
 ---
 
@@ -788,36 +673,27 @@ an update to this section.
   default apps through one shared theme definition; adding a theme is data,
   not new code.
 - Graphical assets are SVG-first. SVG is the canonical, scalable **source**
-  format for every WM/desktop graphical asset — cursors, icons,
-  notification-area glyphs, window-chrome artwork, and theme decorations — so
-  one authored asset stays crisp at any DPI / UI scale (the variable-DPI rule
-  below). SVG is never parsed or drawn on the hot compositing path: each asset
+  format for every WM/desktop asset (cursors, icons, notification glyphs,
+  window chrome, theme decorations), so one asset stays crisp at any DPI/UI
+  scale. SVG is never parsed or drawn on the hot compositing path: each asset
   is rasterised/converted **once** at the active `rustos_geometry::Scale` into
-  the fast-draw form the compositor blits (a `lib/raster` `Surface`, or an
-  intermediate vector form such as `lib/cursor`'s), and that converted form is
-  cached and re-rendered only when the scale or theme changes — so the desktop
-  stays quick. There is exactly one rasterisation/blend path (`lib/raster`); an
-  asset pipeline must not grow a second one (§2.2). SVG decoding is untrusted
-  input: it goes through the curated §16.4 image-decoding shared library run in
-  a §19.5 minimum-capability parser sandbox, never an ad-hoc per-asset parser,
-  and a malformed or unrenderable asset fails closed to a fallback rather than
-  crashing the compositor (§2.9). Pre-rasterised bitmap assets may exist as a
-  cache/fallback but are never the only path.
-- Variable DPI is a first-class, **settable** desktop property, not an
-  afterthought: the same image must be comfortable on a low-DPI monitor and
-  a high-DPI panel, with the user free to pick the density that suits them.
-  Every desktop length — theme corner radii and border thicknesses, font
-  sizes, taskbar extents, window chrome — is authored in *logical* pixels at
-  a fixed reference density (`rustos_geometry::REFERENCE_DPI`) and converted
-  to a panel's *physical* pixels through one shared DPI / UI scale factor
-  (`rustos_geometry::Scale`). There is exactly one logical→physical
-  conversion (`Scale::scale_length`); the WM, taskbar, cursors, and apps all
-  consume it, so the scaling arithmetic is never duplicated (§2.2). The scale
-  is changeable at runtime (like the theme) and an out-of-range scale is
-  rejected at construction rather than producing a degenerate desktop (§5.4 /
-  §2.9). Cursors are SVG-authored vector artwork (the SVG-first asset rule
-  above) rasterised at the active scale, so the pointer is crisp at any DPI;
-  bitmap assets are never the only path.
+  the fast-draw form the compositor blits, cached, and re-rendered only when
+  the scale or theme changes. There is exactly one rasterisation/blend path
+  (`lib/raster`); a second is forbidden (§2.2). SVG is untrusted input: it is
+  decoded through the curated §16.4 image-decoding library in a §19.5
+  minimum-capability sandbox, never an ad-hoc parser, and a malformed asset
+  fails closed to a fallback rather than crashing the compositor (§2.9).
+  Pre-rasterised bitmaps may exist as a cache/fallback but never as the only
+  path.
+- Variable DPI is a first-class, **settable** desktop property. Every desktop
+  length — corner radii, border thicknesses, font sizes, taskbar extents,
+  window chrome — is authored in *logical* pixels at a fixed reference density
+  (`rustos_geometry::REFERENCE_DPI`) and converted to *physical* pixels through
+  one shared scale factor (`rustos_geometry::Scale`). There is exactly one
+  logical→physical conversion (`Scale::scale_length`), consumed by the WM,
+  taskbar, cursors, and apps, so the arithmetic is never duplicated (§2.2). The
+  scale is changeable at runtime; an out-of-range scale is rejected at
+  construction (§5.4 / §2.9).
 - Login: `userland/session/login` always starts in text mode and offers to launch the
   graphical session. If no graphics driver loads, the graphical option is
   hidden — never crashed, never errored.
@@ -1083,45 +959,27 @@ The permitted classes are:
   escape-sequence vocabulary it builds on (`lib/termcap`, `lib/vt`).
   It is part of the OS, so apps dynamically link it like any other
   `/System/Libraries/` library (§10 — text-mode infrastructure).
-- System runtime / C ABI: the minimal libc-equivalent that lets a
-  program **not** written in Rust call `abi-v1` (§9) — the
-  `ros_sys_<name>` syscall stubs and the program startup object
-  (crt0). It is deliberately minimal: it marshals to the kernel and
-  starts/stops the program, nothing more. It is **not** a privileged
-  path — every capability and input check happens kernel-side (§5.4),
-  and third-party native code is treated as potentially hostile (§5,
-  §19). Like every curated library it is dynamically linked, so one
-  security update covers every consumer. Staged in `plans/CCOMPAT.md`.
+- System runtime / C ABI: the minimal libc-equivalent that lets a **non**-Rust
+  program call `abi-v1` (§9) — the `ros_sys_<name>` syscall stubs and the
+  startup object (crt0). It only marshals to the kernel and starts/stops the
+  program; it is **not** a privileged path (every check stays kernel-side,
+  §5.4) and third-party native code is treated as hostile (§5, §19). Staged
+  in `plans/CCOMPAT.md`.
 
 Adding a new class of OS-provided shared library requires an update to
 this list **and** to `PLAN.md`. "Convenience" libraries are forbidden.
 
-Applications link against the curated `/System/Libraries/` set
-**dynamically**. This is explicitly allowed and is the expected
-mechanism for both OS-bundled apps and third-party apps: a single
-security update to a `/System/Libraries/` library then covers every
-app that uses it. OS-bundled apps **must not** statically compile-in
-(vendor) the OS-provided libraries — they always dynamically link
-them.
-
-Third-party apps are expected to bring any *additional* (non-OS)
-libraries they need with them. Such bundled libraries may be linked
-statically, or shipped inside the app's own bundle `Libraries/` and
-dynamically linked **from there** (§16.5); either way they live in the
-app's bundle, never installed system-wide. A third-party app is still
-expected to dynamically link the OS libraries rather than re-implement
-or vendor them. Code that is neither an OS-provided `/System/Libraries/`
-library nor shipped inside the app's own bundle does not exist on the
-system to link against.
-
-The dynamic loader refuses to resolve a shared-library reference that
-points anywhere other than the requesting app's own `Libraries/` or
-`/System/Libraries/`. (Internal `lib/*` building blocks that are *not*
-in any curated `/System/Libraries/` class above — kernel/runtime
-plumbing never exposed to apps — are not OS-provided shared libraries;
-code that needs one links it statically. A `lib/*` crate that *is*
-part of a curated class, such as the curses/terminal client, is an
-OS-provided library and is dynamically linked.)
+Apps link the curated `/System/Libraries/` set **dynamically** (so one
+security update covers every consumer); OS-bundled apps **must not** vendor or
+statically compile-in OS libraries. Third-party apps bring any *additional*
+(non-OS) libraries in their own bundle — statically, or dynamically from the
+bundle's `Libraries/` (§16.5), never installed system-wide — and still
+dynamically link the OS libraries rather than re-implement them. The dynamic
+loader refuses any shared-library reference outside the requesting app's own
+`Libraries/` or `/System/Libraries/`. (Internal `lib/*` building blocks not in
+a curated class are linked statically; a `lib/*` crate that *is* part of a
+curated class — e.g. the curses/terminal client — is an OS-provided library and
+dynamically linked.)
 
 ### 16.5 Application bundles (`.app`)
 
@@ -1222,37 +1080,15 @@ as non-negotiable as §2.
 
 - The architecture surface is a closed set of traits in
   **`kernel/arch/api/`** — the *Arch HAL*. It enumerates exactly:
-  context switch, MMU/page-table primitives, TLB shootdown, IPI,
-  timer, interrupt entry/exit, atomics/fences, per-CPU storage, and
-  early-boot platform discovery. Adding to this surface requires a
-  PLAN.md entry and updates this section. The slices migrated into
-  `kernel/arch/api` so far are `SchedulerArch` (per-CPU id, ticks, IPI,
-  `core_class`), `SideChannelMitigation` (§19.1), `MemoryTagging`
-  (§19.10), `EnterUser` (user entry), `PlatformDiscovery` — the
-  early-boot platform-discovery slice that normalises each target's
-  native source (ACPI / FDT / host query) into the `lib/abi` hardware
-  tree (`hwtree`, §18.1/§18.2) — and `PerCpu`, the per-CPU storage slice
-  that reads/writes the calling CPU's per-CPU base word (GS base on
-  x86_64, `TPIDR_EL1` on aarch64, `tp` on riscv64, a worker slot on
-  wasm32) — and the interrupt entry/exit slice: `IrqController`
-  (controller line masking) and `InterruptEntry` (the claim/complete
-  prologue/epilogue, implemented by the claim-based ports — riscv64 PLIC,
-  aarch64 GICv2; vectored x86_64 implements `IrqController` only) — and
-  the TLB-shootdown slices: `TlbShootdown` (the local per-page
-  invalidation `kernel/mem` drives) and `CrossCpuTlbShootdown` (the
-  system-wide shootdown implemented on each port's `SchedulerArch`
-  handle: an x86_64 IPI + software acknowledge, an aarch64 inner-shareable
-  `tlbi ...is` broadcast, a riscv64 SBI RFENCE `remote_sfence_vma`; wasm32
-  is an honest n/a — isolated linear memory, no shared TLB); each carries
-  a conformance vertical in `kernel/arch/api` — and `SecondaryBringup`
-  (the SMP secondary-CPU bring-up slice, implemented on each port's
-  `SchedulerArch` handle: an x86_64 INIT-SIPI-SIPI handshake, an aarch64
-  PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web Worker
-  spawn; it fails closed for an unstartable CPU and never panics), which
-  also carries a `kernel/arch/api` conformance vertical. With
-  `SecondaryBringup` landed every architecture primitive enumerated above
-  now lives behind the HAL; the §17.2 burn-down is complete
-  (`plans/WIRING.md`).
+  context switch, MMU/page-table primitives, TLB shootdown (local and
+  cross-CPU), IPI, timer, interrupt entry/exit, atomics/fences, per-CPU
+  storage, side-channel mitigation (§19.1), memory tagging (§19.10), user
+  entry, SMP secondary bring-up, and early-boot platform discovery (which
+  normalises each target's native source — ACPI / FDT / host query — into
+  the `lib/abi` hardware tree, §18.1/§18.2). Each slice carries a
+  conformance vertical in `kernel/arch/api`. Adding to this surface
+  requires a PLAN.md entry and updates this section; per-slice migration
+  status lives in `plans/WIRING.md`, not here (§13).
 - Each architecture is a crate under `kernel/arch/<target>/` that
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the
@@ -1604,34 +1440,26 @@ prevents false claims:
 
 ### 19.10 Hardware memory tagging (use-after-free hardening)
 
-- Use-after-free (and a class of buffer over-runs) is turned into a
-  deterministic fault by **memory tagging**: every aligned granule of
-  memory carries a small tag, every pointer carries a matching tag, and
-  an access whose pointer tag does not match the granule tag faults.
-  Rotating the tag when a region is freed — so a dangling pointer keeps
-  the stale tag — is what hardens use-after-free.
-- Only the architecture port can drive the tag-storage and tag-check
-  silicon (Arm MTE, SPARC ADI, the RISC-V tagging proposals), so this is
-  a **closed trait set on the Arch HAL**, alongside the §19.1
-  side-channel set, in `kernel/arch/api` (`rustos_arch_api::memtag`). It
-  defines the `MemoryTagging` per-port handle, the honest
-  `TaggingProfile` (`tag_storage` and `tag_check_faults`, each
-  `Supported` / `Unsupported(reason)` / `Pending(note)`, same honesty
-  discipline as §19.1), the architecture-neutral `MemTag` /
-  `next_free_tag` tag rotation, and the `memtag::conformance` vertical
-  every port runs (§17.2). A `Pending` slot is honest but not
-  release-ready; an `Unsupported` claim is permitted **only** where the
-  silicon genuinely lacks tagging, and must be justified.
-- The tag rotation has exactly one definition (`next_free_tag`), shared
-  by the hardware ports and the architecture-neutral *software* tag
-  check, so they agree on the tag space (§2.2 — no duplicated algebra).
-- Because hardware tag checking depends on the Stage 6 page-table work
-  and most targets lack tagging silicon, the slab allocator in
-  `kernel/mem` hardens use-after-free **today**, on every target, in
-  software: a `SlabHandle` carries the tag its slot held when issued, the
-  slot's tag is rotated on every allocation, and a handle that outlives
-  its allocation mismatches the rotated tag and is rejected. This never
-  weakens to "trust the caller" (§5.4) and never panics (§2.9).
+- Use-after-free (and a class of over-runs) is turned into a deterministic
+  fault by **memory tagging**: each memory granule and each pointer carries a
+  tag, a tag mismatch faults, and rotating the tag on free leaves a dangling
+  pointer with a stale tag.
+- Only the architecture port can drive the silicon (Arm MTE, SPARC ADI, RISC-V
+  proposals), so this is a **closed Arch HAL trait set**
+  (`rustos_arch_api::memtag`, alongside §19.1): the `MemoryTagging` per-port
+  handle, the honest `TaggingProfile` (`tag_storage` / `tag_check_faults`, each
+  `Supported` / `Unsupported(reason)` / `Pending(note)`), the
+  architecture-neutral `MemTag` / `next_free_tag` rotation, and the
+  `memtag::conformance` vertical every port runs (§17.2). `Unsupported` is
+  permitted **only** where the silicon genuinely lacks tagging, and must be
+  justified; `Pending` is honest but not release-ready.
+- The rotation has exactly one definition (`next_free_tag`), shared by the
+  hardware ports and the architecture-neutral *software* check (§2.2).
+- Until hardware tag checking lands, the `kernel/mem` slab allocator hardens
+  use-after-free **today**, on every target, in software: a `SlabHandle`
+  carries its slot's tag, the slot's tag is rotated on every allocation, and a
+  handle that outlives its allocation mismatches and is rejected — never
+  weakening to "trust the caller" (§5.4), never panicking (§2.9).
 
 ---
 
@@ -1649,24 +1477,18 @@ are the only text-I/O surface a program is given:
 
 Binding rules for the standard text-I/O streams:
 
-- **Bind to the streams, never to a device.** Every command-line / text
-  program — the shell, `sysinfo`, every tool in `userland/shell/` and
-  `userland/apps/`, every system service that talks text — reads `stdin`,
-  writes `stdout`/`stderr`, and emits `stdinfo`, and does so **only**
-  through the standard descriptors it inherited from whoever spawned it.
-  A program **must not** call a console / UART / framebuffer syscall (e.g.
-  the bootstrap `console_read` / `console_write` device seam, §4) as its
-  text interface, and must not reach for "whichever console the kernel
-  discovered". That is ambient authority (§4) and hidden device coupling
-  (§17.3/§17.4); the spawner grants the streams explicitly, the program
-  never reaches for a global device.
-- **Device independence is a property of the stream layer, not the
-  program.** Because a program only names fd 0/1/2/3, the same binary
-  "just works" when started on a UART, a framebuffer console, a network
-  socket, or a terminal surface inside the window manager — only the
-  *backing* of its descriptors differs. What a descriptor is backed by is
-  decided by the spawner / kernel stream layer, never hard-coded into the
-  program.
+- **Bind to the streams, never to a device.** Every text program — the shell,
+  `sysinfo`, every tool in `userland/shell/` and `userland/apps/`, every text
+  service — reads `stdin`, writes `stdout`/`stderr`, and emits `stdinfo` only
+  through the descriptors it inherited from its spawner. It **must not** call a
+  console / UART / framebuffer syscall (e.g. the bootstrap `console_read` /
+  `console_write` seam, §4) or reach for "whichever console the kernel
+  discovered": that is ambient authority (§4) and hidden device coupling
+  (§17.3/§17.4).
+- **Device independence is the stream layer's property, not the program's.**
+  Because a program only names fd 0/1/2/3, the same binary "just works" on a
+  UART, framebuffer console, network socket, or a WM terminal surface — only
+  the *backing* differs, decided by the spawner / kernel, never hard-coded.
 - **Pipes and redirection require fd semantics.** `cmd | next` pipes fd 1
   into the next program's fd 0; `cmd 3>info.jsonl` captures fd 3. These
   only have meaning because programs read and write *descriptors*. A
