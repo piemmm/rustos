@@ -26,17 +26,26 @@
 //! invariant: it returns a `Result`, never panics, and fails closed.
 //!
 //! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
-//! LCG draws pseudo-random images, and a structured sweep flips every byte of
-//! a real formatted image to hammer the §8 block-identity checks (magic, type,
+//! LCG draws pseudo-random images, and a structured sweep flips bytes of a real
+//! formatted image to hammer the §8 block-identity checks (magic, type,
 //! address, keyed authenticator). Stage 3 added the keyed metadata
 //! authenticator and a redundant mirror copy of every metadata block, so the
 //! single-byte sweep also exercises the authenticate-then-fall-back-to-the-
 //! mirror path, and a dedicated **duplicated-copy sweep** corrupts *both*
-//! copies of each block pair to hammer the both-copies-bad fail-closed path. A
-//! plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
-//! logged seed; `cargo xtask
-//! fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a
-//! wall-clock budget.
+//! copies of each block pair to hammer the both-copies-bad fail-closed path.
+//!
+//! Each `exercise` mounts and fully re-checks an encrypted volume (open, a
+//! directory walk, scrub, the offline `check`, health, a reopen, and a raw
+//! `rescue` scan), so it is orders of magnitude heavier than a byte decoder.
+//! A plain `cargo test` — a developer machine and the per-PR `ci` gate, with no
+//! budget — therefore runs a single quick smoke pass: a small, seed-driven
+//! [`SMOKE_FLIP_SAMPLES`] sample of the single-byte sweep plus
+//! [`SMOKE_ITERATIONS`] PRNG images, all from a fresh, logged seed. The
+//! time-limited GitHub soak (`cargo xtask fuzz`) exports
+//! `RUSTOS_FUZZ_BUDGET_SECS`, which switches the harness to its exhaustive
+//! coverage — every byte of the image is flipped in turn and the PRNG loop runs
+//! to the wall-clock budget. The cheap, deterministic both-copies-bad sweep
+//! runs in either mode.
 
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
@@ -95,8 +104,15 @@ const BLOCK_COUNT: u64 = 64;
 /// the const needs no `u64`-to-`usize` cast.
 const IMAGE_LEN: usize = BLOCK_SIZE as usize * 64;
 
-/// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 50_000;
+/// PRNG-image count for the quick smoke pass a plain `cargo test` runs (no
+/// budget set). Small on purpose: each iteration mounts and fully re-checks an
+/// encrypted volume, so the exhaustive coverage belongs to the time-limited
+/// soak, not the per-PR run.
+const SMOKE_ITERATIONS: u64 = 512;
+
+/// Number of seed-driven single-byte-flip positions the smoke pass samples from
+/// the structured sweep. The soak flips every byte of the image instead.
+const SMOKE_FLIP_SAMPLES: u64 = 256;
 
 /// Byte offset inside the 32-byte keyed-tag slot (72..104) of the 128-byte
 /// block header; flipping it always breaks a block's authenticator.
@@ -313,15 +329,41 @@ fn formatted_image() -> Vec<u8> {
 #[test]
 fn open_never_panics_on_arbitrary_images() {
     let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let soak = deadline.is_some();
     let base = formatted_image();
 
-    // Structured sweep: flip every single byte of a valid image once. This
-    // exhaustively probes the §8 identity/checksum rejection on a near-valid
-    // image and runs regardless of the wall-clock budget.
-    for i in 0..base.len() {
-        let mut image = base.clone();
-        image[i] ^= 0xff;
-        exercise(&image);
+    // Draw and log the seed up front so every sampled byte position and every
+    // PRNG image below replays exactly from the logged value (§19.6, §2.1):
+    // fresh per run, fresh per soak run under `cargo xtask fuzz`.
+    let mut state: u64 = rustos_fuzzseed::start(
+        "open_never_panics_on_arbitrary_images",
+        rustos_fuzzseed::FUZZ_SEED_ENV,
+    );
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        state
+    };
+
+    // Structured single-byte sweep over a valid image, probing the §8
+    // identity/checksum rejection on a near-valid image. The soak flips every
+    // byte exhaustively; a plain `cargo test` (no budget) samples a small,
+    // seed-driven subset so the per-PR run stays quick — each `exercise` is a
+    // full encrypted mount + re-check, far heavier than a byte decoder.
+    if soak {
+        for i in 0..base.len() {
+            let mut image = base.clone();
+            image[i] ^= 0xff;
+            exercise(&image);
+        }
+    } else {
+        for _ in 0..SMOKE_FLIP_SAMPLES {
+            let mut image = base.clone();
+            let i = index(next(), base.len());
+            image[i] ^= 0xff;
+            exercise(&image);
+        }
     }
 
     // Duplicated-copy sweep (Stage 3): every metadata block is mirrored at the
@@ -329,7 +371,8 @@ fn open_never_panics_on_arbitrary_images() {
     // when one copy fails the keyed authenticator. Corrupt the keyed-tag byte
     // of BOTH a block and its companion so neither copy authenticates,
     // exercising the both-copies-bad path. `open` must still return a
-    // `Result`, never panic (`AGENTS.md` §2.9 / §19.6).
+    // `Result`, never panic (`AGENTS.md` §2.9 / §19.6). One image per block, so
+    // it is cheap enough to run in either mode.
     let bs = BLOCK_SIZE as usize;
     let blocks = usize::try_from(BLOCK_COUNT).unwrap_or(0);
     for b in 0..blocks {
@@ -344,19 +387,9 @@ fn open_never_panics_on_arbitrary_images() {
         exercise(&image);
     }
 
-    // PRNG sweep: an LCG mutates the valid image at random offsets. The seed
-    // is drawn and logged by `rustos_fuzzseed::start`: fresh per run,
-    // fresh per soak run under `cargo xtask fuzz`.
-    let mut state: u64 = rustos_fuzzseed::start(
-        "open_never_panics_on_arbitrary_images",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    // PRNG sweep: an LCG mutates the valid image at random offsets. The smoke
+    // pass does SMOKE_ITERATIONS images; the soak loops the continuing stream
+    // until the wall-clock budget elapses.
     let mut iteration: u64 = 0;
     loop {
         let mut image = base.clone();

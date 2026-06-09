@@ -805,7 +805,14 @@ harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
 path), a duplicated-copy sweep that corrupts *both* copies of each block
 pair, and a per-run-seeded PRNG all drive `RustFs::open` over arbitrary bytes,
-asserting it never panics and fails closed. Since Stage 7 the fuzz image is
+asserting it never panics and fails closed. Because each input mounts and
+fully re-checks an encrypted volume — far heavier than a byte decoder — a
+plain `cargo test` (a developer machine and the per-PR `ci` gate, no budget)
+runs a single quick smoke pass: a small, seed-driven sample of the byte sweep
+plus a bounded PRNG batch, from a fresh, logged seed; the time-limited GitHub
+soak (`cargo xtask fuzz`, `RUSTOS_FUZZ_BUDGET_SECS`) switches to exhaustive
+coverage — every byte flipped in turn and the PRNG loop run to the wall-clock
+budget. Since Stage 7 the fuzz image is
 populated with duplicate-content files and a reflink, so the sweep also drives
 the **chunk/refcount** and **reverse-reference** record decode paths that
 mount rebuilds the dedupe index from. Since Stage 8 the base image is left with
