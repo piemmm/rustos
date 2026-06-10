@@ -127,59 +127,95 @@ const _ARENA_GROW_BLOCK_FITS_A_REGION: () = {
     assert!(ARENA_GROW_BLOCK_BYTES >= BLOCK_HEADER_BYTES + STACK_REGION_BYTES);
 };
 
+/// VA offset from a stack region's physical/identity base to the virtual
+/// address the kernel runs the stack at (its `SP`/`RSP`) and unmaps the
+/// guard page at.
+///
+/// aarch64 runs the kernel on the identity map (and sets `SP_EL1` from the
+/// stack top directly), so the offset is **zero** — the identity address is
+/// the stack address. x86_64 runs the kernel in the -2 GiB higher-half
+/// window, and its `set_kernel_rsp0`/`validate_kernel_rsp0` *requires* a
+/// canonical **kernel-half** RSP0 (a CVE-2019-1125 / Meltdown-class defence,
+/// `AGENTS.md` §19.1 / §2.17): a low-identity RSP0 is rejected fail-closed,
+/// which would leave a ring-3 task's syscall stack pointing at a stale,
+/// shared stack. So on x86_64 the stack is addressed through its **per-task**
+/// higher-half alias `KERNEL_VMA_BASE + phys` (the window `new_identity`
+/// builds with fresh, per-root tables), and the guard page is unmapped at
+/// that same higher-half VA — so an overrun via the kernel-half RSP faults in
+/// the task's own root, exactly as on aarch64. The offset is sourced from the
+/// arch port (`KERNEL_VMA_BASE`), never re-hardcoded (`AGENTS.md` §2.2).
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+const STACK_VA_OFFSET: u64 = rustos_arch_x86_64::paging::KERNEL_VMA_BASE;
+#[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+const STACK_VA_OFFSET: u64 = 0;
+
 /// A kthread kernel stack carved from a guard-arena block.
 ///
-/// The region is `[guard, guard + STACK_REGION_BYTES)` of identity-mapped,
+/// The region is `[guard, guard + STACK_REGION_BYTES)` of
 /// allocator-reserved RAM, laid out as a one-page guard region below the
 /// usable stack. [`Self::guard_page`] is the page the spawn seam unmaps in
 /// the owning task's root; [`KernelStack::top`] is the exclusive upper
-/// bound of the usable region above it.
+/// bound of the usable region above it. Both are expressed at the virtual
+/// address the kernel runs the stack at — the identity base on aarch64, the
+/// per-task higher-half alias on x86_64 (see [`STACK_VA_OFFSET`]) — while the
+/// stored [`Self::guard`] field stays the **physical/identity** base the
+/// arena's block bookkeeping ([`StackArena::free`]) locates the region by.
 ///
 /// It is **not** `Copy`: it owns its region for as long as it lives, and its
 /// [`Drop`] returns that region to the arena ([`StackArena::free`]) so the
 /// capacity shrinks when a task exits (`AGENTS.md` §24.1). On the host build
 /// the `Drop` is inert (the unit tests call `free` explicitly through a test
-/// [`BlockStore`]); only the freestanding aarch64 build wires the production
-/// reclaim path.
+/// [`BlockStore`]); only the freestanding `aarch64`/`x86_64` builds wire the
+/// production reclaim path.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ArenaStack {
-    /// First byte of the region — the low edge of the one-page guard.
+    /// First byte of the region's **physical/identity** base — the low edge
+    /// of the one-page guard. The arena's [`BlockStore`] bookkeeping and
+    /// [`StackArena::free`] locate the owning block by this physical address,
+    /// so it is stored unmodified; the kernel-visible VA (which adds
+    /// [`STACK_VA_OFFSET`]) is computed in [`Self::guard_page`]/
+    /// [`KernelStack::top`].
     guard: u64,
 }
 
 impl ArenaStack {
-    /// The guard page's base address (4 KiB-aligned): the page the spawn
-    /// seam re-expresses and unmaps in the owning task's page-table root so
-    /// an overrun faults (`plans/PI.md` G3b-2).
+    /// The guard page's **virtual** address (4 KiB-aligned): the page the
+    /// spawn seam re-expresses and unmaps in the owning task's page-table
+    /// root so an overrun faults (`plans/PI.md` G3b-2). This is the address
+    /// the kernel runs the stack at — the identity base on aarch64, the
+    /// per-task higher-half alias on x86_64 ([`STACK_VA_OFFSET`]) — so the
+    /// page unmapped is exactly the one a stack overrun reaches.
     pub(crate) fn guard_page(&self) -> u64 {
-        self.guard
+        STACK_VA_OFFSET + self.guard
     }
 }
 
 impl Drop for ArenaStack {
     fn drop(&mut self) {
         // The host build exercises reclamation through `StackArena::free`
-        // directly (with a test `BlockStore`); only the freestanding aarch64
-        // build owns the single `'static` arena + frame allocator the
-        // production reclaim path needs, so the `Drop` is inert elsewhere
-        // and never references state that build lacks (`AGENTS.md` §2.3).
-        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        // directly (with a test `BlockStore`); only the freestanding
+        // aarch64/x86_64 builds own the single `'static` arena + frame
+        // allocator the production reclaim path needs, so the `Drop` is inert
+        // elsewhere and never references state that build lacks (`AGENTS.md`
+        // §2.3).
+        #[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
         reclaim_arena_stack(self.guard);
     }
 }
 
-// SAFETY: `top` returns the region's base plus its full length, rounded
-// down to `STACK_ALIGN` — the aligned exclusive upper bound of the usable
-// stack above the guard. The arena is `RegionKind::Reserved` (boot block)
-// or a `FrameAllocator`-reserved chained block, so the frames are not
-// handed elsewhere, and the bump cursor hands each region out exactly once,
-// so the region is exclusive to its owner for as long as the `ArenaStack`
-// lives. The guard page aside (which the spawn seam deliberately unmaps in
-// the task's own root), every byte of the usable region stays
-// identity-mapped and writable.
+// SAFETY: `top` returns the region's base plus its full length (at the
+// kernel-visible VA — see `STACK_VA_OFFSET`), rounded down to `STACK_ALIGN`:
+// the aligned exclusive upper bound of the usable stack above the guard. The
+// arena is `RegionKind::Reserved` (boot block) or a `FrameAllocator`-reserved
+// chained block, so the frames are not handed elsewhere, and the bump cursor
+// hands each region out exactly once, so the region is exclusive to its owner
+// for as long as the `ArenaStack` lives. The guard page aside (which the
+// spawn seam deliberately unmaps in the task's own root, at this same VA),
+// every byte of the usable region stays mapped and writable — via the
+// identity map on aarch64, via the per-task higher-half window on x86_64.
 unsafe impl KernelStack for ArenaStack {
     fn top(&self) -> u64 {
-        let top = self.guard + STACK_REGION_BYTES;
+        let top = STACK_VA_OFFSET + self.guard + STACK_REGION_BYTES;
         // Round down to `STACK_ALIGN`; the region is page-aligned so this
         // wastes nothing, but keeps the contract explicit.
         top & !(STACK_ALIGN - 1)
@@ -623,10 +659,10 @@ unsafe fn scrub_block(base: u64, len: usize) {
 
 /// The production [`BlockStore`]: read/write the intrusive [`BlockHeader`]
 /// in the identity-mapped header page at the block's own base.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 pub(crate) struct IdentityBlockStore;
 
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 impl BlockStore for IdentityBlockStore {
     fn read(&self, base: u64) -> BlockHeader {
         // SAFETY: `base` is a block base the arena installed/chained — a
@@ -646,25 +682,25 @@ impl BlockStore for IdentityBlockStore {
 /// used when no live [`FrameAllocator`] has been published for reclamation,
 /// so a freed region's bookkeeping is still updated but no block is returned
 /// (fail closed, `AGENTS.md` §2.17).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 struct RetainShrink;
 
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 impl ArenaShrink for RetainShrink {
     fn release_block(&self, _base: u64, _len: u64) -> bool {
         false
     }
 }
 
-/// The single, `'static` guard-stack arena the aarch64 boot path installs
-/// (`boot_aarch64`) and the spawn seams draw from (`init_spawn`,
-/// `spawn_producer`).
+/// The single, `'static` guard-stack arena the boot path installs
+/// (`boot_aarch64` / `boot`) and the spawn seams draw from (`init_spawn` /
+/// `init_spawn_x86_64`, `spawn_producer` / `spawn_producer_x86_64`).
 ///
-/// Only the bare-metal aarch64 build instantiates it; the host-test build
-/// exercises the allocator through locally constructed [`StackArena`]s, so
-/// the shared instance is gated out there to stay free of an unused-static
+/// Only the bare-metal `aarch64`/`x86_64` builds instantiate it; the host-test
+/// build exercises the allocator through locally constructed [`StackArena`]s,
+/// so the shared instance is gated out there to stay free of an unused-static
 /// warning (`AGENTS.md` §2.3).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 
 /// The live `'static` [`FrameAllocator`] reclamation returns idle chained
@@ -672,14 +708,14 @@ pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 /// ([`publish_reclaim_frames`]). A region freed before any allocator is
 /// published is still accounted (its block's live count decremented) but no
 /// block is released — fail safe (`AGENTS.md` §2.17).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 static SHRINK_FRAMES: rustos_sync::Once<&'static FrameAllocator> = rustos_sync::Once::new();
 
 /// Publish the live `'static` frame allocator the [`ArenaStack`] `Drop`
 /// reclaim path returns idle chained blocks to. Idempotent (set-once); a
 /// later call with a different allocator is ignored, matching the one
 /// boot-threaded allocator the spawn path already uses.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 pub(crate) fn publish_reclaim_frames(frames: &'static FrameAllocator) {
     let _ = SHRINK_FRAMES.call_once_infallible(|| frames);
 }
@@ -688,7 +724,7 @@ pub(crate) fn publish_reclaim_frames(frames: &'static FrameAllocator) {
 /// [`KTHREAD_STACK_ARENA`], releasing its (chained) block to the published
 /// `'static` allocator when the one-free-block grace allows, or retaining it
 /// when none is published (fail safe).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
 fn reclaim_arena_stack(guard: u64) {
     match SHRINK_FRAMES.get() {
         Ok(Some(frames)) => {

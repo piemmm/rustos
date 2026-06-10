@@ -62,12 +62,15 @@ use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
+use rustos_util::fmt::format_hex_u64;
 
 use crate::arch_wrapper::BinArch;
 use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
 use crate::init_spawn_x86_64::X86_64_INIT_SPAWN;
 use crate::ioapic_controller::IoApicController;
+use crate::mem_map::carve_guard_arena_from_map;
 use crate::serial_sink::COM1_CONSOLE;
+use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
 /// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
@@ -299,6 +302,25 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// and may not be renumbered (`AGENTS.md` §5.4.4).
 const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
+/// Security-relevant boot decision: whether the kthread-stack guard arena
+/// was carved from firmware-usable RAM and installed (`AGENTS.md` §4 — a
+/// guarded per-task kernel stack whose guard page faults a stack overrun).
+/// When no usable region can host a whole 2 MiB-aligned arena below the
+/// identity window, the seam falls back to the software canary; logged on
+/// every boot so the choice is audited, not assumed. Sits in the
+/// `kernel/core`-owned `4000..5000` range, just below
+/// [`KERNEL_BOOT_TSC_INVARIANCE`]; the id is part of the audit contract and
+/// may not be renumbered (`AGENTS.md` §5.4.4).
+const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4097);
+
+/// Upper bound (exclusive) for the kthread-stack guard arena: the low
+/// identity window the x86_64 spawn seams (`init_spawn_x86_64`,
+/// `spawn_producer_x86_64`) build each task's root with (their
+/// `IDENTITY_GIB` = 4 GiB). A stack outside it could not be reached — nor
+/// its guard page faulted — under the task's own `CR3` (`AGENTS.md` §4), so
+/// the arena carve refuses to place the arena there.
+const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
+
 // --- The boot entry -------------------------------------------------
 
 /// Boot the kernel on the BSP and forward to
@@ -359,6 +381,49 @@ fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
                 key: "invariant_tsc",
                 value: if invariant { "true" } else { "false" },
             }],
+        },
+    );
+}
+
+fn log_guard_arena(sink: &(dyn Sink + Sync), arena: Option<(u64, u64)>) {
+    // Record the decision on every boot so the guard posture is audited,
+    // not silently trusted (`AGENTS.md` §4 / §5.4.4). A carved+installed
+    // arena logs at Info with its base/len; a fall-back to the software
+    // canary logs at Warn so a machine that could not host an arena is
+    // visible in the boot record.
+    let mut base_buf = [0u8; 16];
+    let mut len_buf = [0u8; 16];
+    let (base, len) = arena.unwrap_or((0, 0));
+    let base_hex = format_hex_u64(base, &mut base_buf);
+    let len_hex = format_hex_u64(len, &mut len_buf);
+    let (level, message) = if arena.is_some() {
+        (Level::Info, "kthread guard arena installed")
+    } else {
+        (
+            Level::Warn,
+            "no kthread guard arena; software-canary stacks used",
+        )
+    };
+    rustos_log::log(
+        sink,
+        &Event {
+            level,
+            id: KERNEL_BOOT_GUARD_ARENA,
+            message,
+            fields: &[
+                Field {
+                    key: "installed",
+                    value: if arena.is_some() { "true" } else { "false" },
+                },
+                Field {
+                    key: "base",
+                    value: base_hex,
+                },
+                Field {
+                    key: "len",
+                    value: len_hex,
+                },
+            ],
         },
     );
 }
@@ -457,7 +522,39 @@ fn try_boot(
     // 4. Multiboot2 parsing — first the memory map, then the RSDP.
     let mb2 = parse_multiboot2(multiboot_info)?;
 
-    let memory_map = build_memory_map(&mb2)?;
+    let mut memory_map = build_memory_map(&mb2)?;
+
+    // Carve a 2 MiB-aligned kthread-stack guard arena out of the firmware
+    // map and install it so the PID 1 spawn seam (`init_spawn_x86_64`) can
+    // draw `init`'s kernel stack from it and unmap that stack's guard page
+    // in `init`'s own `CR3` — turning a stack overrun into a synchronous
+    // fault rather than a poison-canary detection (`plans/PI.md` G3b-2, the
+    // cross-port sibling of the aarch64 `boot_aarch64` wiring). The arena is
+    // sized from the discovered *usable* RAM (§24.2 policy) and bounded to
+    // the seams' 4 GiB identity window so the stack is reachable under the
+    // task's own root. When no usable region fits a whole arena the carve
+    // returns `None`, the install is skipped, and the seam falls back to a
+    // software-canary `BoxStack` (fail closed, never fatal to boot,
+    // `AGENTS.md` §2.9 / §2.17).
+    //
+    // The policy input is the sum of `Usable` region lengths, *not*
+    // `highest_address()`: a PC firmware map spans the reserved MMIO/PCI hole
+    // up to (and past) 4 GiB, so the highest address wildly over-states RAM
+    // and would always saturate the arena to its 64 MiB cap. Summing usable
+    // bytes (after the kernel-image reservation) is the RAM actually
+    // available, the aarch64 single-window sizing's multi-region analogue.
+    let ram_bytes: u64 = memory_map
+        .regions()
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .fold(0u64, |acc, region| acc.saturating_add(region.length));
+    let guard_arena =
+        carve_guard_arena_from_map(&mut memory_map, ram_bytes, KTHREAD_ARENA_IDENTITY_LIMIT);
+    if let Some(arena) = guard_arena {
+        KTHREAD_STACK_ARENA.install(arena.base, arena.len, &IdentityBlockStore);
+    }
+    log_guard_arena(log_sink, guard_arena.map(|a| (a.base, a.len)));
+
     let rsdp_bytes = mb2.rsdp().ok_or(BootError::NoRsdp)?;
     let rsdp = acpi::Rsdp::validate(rsdp_bytes).map_err(|_| BootError::BadRsdp)?;
 

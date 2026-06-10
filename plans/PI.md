@@ -995,6 +995,33 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
       session still runs and is supervised, now on the arena stack. Doc:
       `docs/src/platform/aarch64.md` ("Routing the kthread stack through the
       arena (G3b-2)").
+    - **G3b-2-iii — x86_64 PID 1 + runtime `spawn` paths `[x]`.** The
+      x86_64 cross-port sibling of G3b-2-i/-ii: both production seams
+      (`init_spawn_x86_64`, `spawn_producer_x86_64`) now run on
+      arena-backed, hardware-guarded kernel stacks instead of the
+      software-canary `BoxStack`. The boot path carves the arena out of the
+      *firmware* memory map — `mem_map::carve_guard_arena_from_map(map,
+      ram_bytes, max_addr)` scans the multi-region Multiboot2 map for the
+      first `Usable` region that can host a whole 2 MiB-aligned, §24.2
+      policy-sized block below the 4 GiB identity window, `reserve_range`s
+      it, and `boot::try_boot` `install`s it into `KTHREAD_STACK_ARENA`
+      (audited, `EventId(4097)`; no usable region ⇒ no arena ⇒ software
+      canary, fail closed §2.9). Each seam then allocates an `ArenaStack`
+      (chained-grow bounded to the identity window) and `split_block(guard)`
+      + `unmap(guard)` on the task's *own* PML4 — `init` before its
+      `arch.switch()`, the `spawn` producer on the inactive child root — so
+      an overrun faults synchronously under the task's own CR3 (§4 / §2.17),
+      with the `BoxStack` fallback where no arena region is available or the
+      split/unmap fails. `publish_reclaim_frames` returns idle chained
+      blocks to the live allocator on `ArenaStack` drop (§24.1). The
+      `mem_map`/`stack_arena` infra and the production glue are shared with
+      aarch64, gated to `kernel_isa = "aarch64"`/`"x86_64"` (one body, §2.2);
+      the firmware carve is host-tested (7 cases). The
+      `spawn_init`/`spawn_session`/`spawn_program`/`wait`/`stack_overrun`
+      `-M virt` x86_64 verticals prove `init` still spawns + supervises the
+      session and an overrun still faults, now on the arena stack. **No ABI
+      change.** Doc: `docs/src/platform/x86_64.md` ("Routing the kthread
+      stack through the arena (G3b-2)").
   - **G3c — production fault-form on `-M virt` `[x]`.** Proves an
     overrunning kthread takes a synchronous data abort, not a
     next-reschedule canary detection. `tests/integration/stack_overrun_qemu_aarch64`
@@ -1075,10 +1102,8 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `flush_page`s the single guard page and reads it → supervisor not-present
     `#PF` (`fault` observer confirms `is_not_present` + `!is_user` + `CR2` in
     the guard page) → PASS. **Verified green under QEMU on this host.** The
-    production runtime fault-form is now proven on x86_64 too (G3c below);
-    routing the production `init`/`spawn` kernel stacks onto the arena (the
-    aarch64 G3b-2 rewire) is the remaining follow-on, until which x86_64's
-    production seams keep the software-canary guard (§2.17). **No ABI
+    production runtime fault-form is proven on x86_64 too (G3c below), and
+    both production seams now run on the arena (G3b-2-iii). **No ABI
     change.** Doc: `docs/src/platform/x86_64.md` ("Block split + guard-page
     fault-form (G1/G2)").
   - **x86_64 production guard-page fault-form (G3c) `[x]`.** The cross-port
@@ -1102,11 +1127,9 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     observer confirms `is_not_present` + `!is_user` + `CR2` in the guard page)
     → PASS; a body that returns without faulting drains the `step` loop and
     fails loudly (§2.9). **Verified green under QEMU on this host.** This
-    proves the *mechanism*; routing the production `init_spawn_x86_64` /
-    `spawn_producer_x86_64` kernel stacks onto a boot-reserved arena (the
-    aarch64 G3b-2 rewire — a 2 MiB arena carved in the x86_64 boot memory map,
-    each seam allocating an `ArenaStack` and unmapping its guard in the
-    child's own root) is the remaining follow-on. **No ABI change.** Doc:
+    proves the *mechanism*; the production `init_spawn_x86_64` /
+    `spawn_producer_x86_64` kernel stacks now run on the boot-reserved arena
+    (G3b-2-iii). **No ABI change.** Doc:
     `docs/src/platform/x86_64.md` ("Proving the overrun fault-form (G3c)").
 
 ### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[x]`

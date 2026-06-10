@@ -76,6 +76,13 @@ rustos-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
 # implements the same interrupt-controller HAL trait every port does
 # (`plans/WIRING.md` Stage W3).
 rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
+# Allocation-free, panic-free integer formatting for the boot audit
+# lines: the aarch64 `/memory` discovery summary (`plans/PI.md` P6c-1)
+# and the x86_64 guard-arena install decision (`boot`, `plans/PI.md`
+# G3b-2). The project-wide first-party formatter; re-implementing it
+# locally would duplicate `lib/util` (`AGENTS.md` §2.2). Consumed by
+# both ports' boot paths, so it is a common dependency.
+rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 # --- Per-architecture boot dependencies ----------------------------
 #
@@ -108,12 +115,6 @@ rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # firmware device tree the loader hands the kernel to discover the board
 # console base (`plans/PI.md` P2).
 rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
-# Allocation-free, panic-free integer formatting for the aarch64 boot
-# audit line's `/memory` discovery summary (`plans/PI.md` P6c-1).
-# Re-implementing it locally would duplicate `lib/util` (`AGENTS.md`
-# §2.2); the crate is the project-wide first-party formatter. Scoped to
-# the aarch64 target because only `boot_aarch64` consumes it.
-rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]
 # The aarch64 build script embeds the `init` `Run` rxe so the boot path can

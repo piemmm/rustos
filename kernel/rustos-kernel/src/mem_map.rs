@@ -14,17 +14,26 @@
 //! (`AGENTS.md` §2.2 carve-out: each port owns its discovery, but the
 //! arithmetic here is self-contained and host-tested).
 //!
-//! The arithmetic is deliberately free of the aarch64 architecture crate
-//! so it is exercised by host unit tests under `cargo test`
-//! (`AGENTS.md` §7): the `boot_aarch64` module that calls it links the
-//! bare-metal-only port and cannot be host-compiled, so the
-//! correctness-critical bounds checks would otherwise never run on the
-//! CI host. The module compiles on the aarch64 production build (where
-//! `boot_aarch64` consumes it) and on any host `cargo test` build (where
-//! the tests below consume it), and on no other configuration, so it is
-//! never dead code (`AGENTS.md` §2.3).
+//! The arithmetic is deliberately free of the architecture crates so it is
+//! exercised by host unit tests under `cargo test` (`AGENTS.md` §7): the
+//! `boot_aarch64` / `boot` modules that call it link the bare-metal-only
+//! ports and cannot be host-compiled, so the correctness-critical bounds
+//! checks would otherwise never run on the CI host. The module compiles on
+//! the aarch64 and x86_64 production builds (where `boot_aarch64` / `boot`
+//! consume it) and on any host `cargo test` build (where the tests below
+//! consume it), and on no other configuration, so it is never dead code
+//! (`AGENTS.md` §2.3). The single-window [`build_memory_map`] (aarch64) and
+//! the firmware-map [`carve_guard_arena_from_map`] (x86_64) are each gated
+//! to the port that uses them; the arena-sizing policy is shared.
 
-use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
+use rustos_kernel_mem::{BootMemoryMap, PhysAddr, RegionKind};
+// `MemoryRegion` and `PAGE_SIZE` are named only by the aarch64 single-window
+// `build_memory_map` and the host tests; the x86_64 carve reads regions
+// through `BootMemoryMap` without naming the element type, so the import is
+// gated to those configurations to stay free of an unused-import warning
+// (`AGENTS.md` §2.3).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+use rustos_kernel_mem::{MemoryRegion, PAGE_SIZE};
 
 /// Alignment of the kthread-stack guard arena: one L2 block (2 MiB).
 ///
@@ -88,6 +97,11 @@ fn stack_arena_bytes(ram_size: u64) -> u64 {
 /// Each variant is a fail-closed refusal (`AGENTS.md` §2.9): the boot
 /// path records the cause in its audit line and parks rather than
 /// handing the allocator a map it cannot trust.
+///
+/// Produced only by the aarch64 single-window [`build_memory_map`]; the
+/// x86_64 path carves its arena out of an already-built firmware map
+/// ([`carve_guard_arena_from_map`]) and never reaches these.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryMapError {
     /// `ram_base + ram_size`, or the page-aligned kernel-image end,
@@ -99,6 +113,7 @@ pub(crate) enum MemoryMapError {
     UsableRegionEmpty,
 }
 
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 impl MemoryMapError {
     /// Stable cause string for the boot audit line (`AGENTS.md` §5.4.4).
     pub(crate) const fn as_str(self) -> &'static str {
@@ -129,9 +144,11 @@ pub(crate) struct GuardArena {
 
 /// The physical-memory map plus the reserved guard arena carved from it.
 ///
-/// [`build_memory_map`] returns both so the boot path hands the allocator
-/// the [`map`](Self::map) and fine-maps the [`arena`](Self::arena) (when
-/// one fits) through the page-table block-split.
+/// The aarch64 [`build_memory_map`] returns both so the boot path hands the
+/// allocator the [`map`](Self::map) and fine-maps the [`arena`](Self::arena)
+/// (when one fits) through the page-table block-split. The x86_64 path keeps
+/// its map and arena as separate values, so this pairing is aarch64-only.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 #[derive(Clone, Debug)]
 pub(crate) struct MemoryLayout {
     /// The physical-memory map the frame allocator consumes.
@@ -153,6 +170,11 @@ pub(crate) struct MemoryLayout {
 /// the whole `arena_bytes` block does not fit before `ram_end`, so a tiny
 /// RAM window degrades to no arena rather than a wrapped or overlapping
 /// region (`AGENTS.md` §2.9).
+///
+/// This is the aarch64 single-window carve consumed by [`build_memory_map`];
+/// the x86_64 boot path carves out of a firmware region list instead
+/// ([`carve_guard_arena_from_map`]).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Option<GuardArena> {
     let base = align_up(usable_start, GUARD_ARENA_ALIGN)?;
     let end = base.checked_add(arena_bytes)?;
@@ -192,6 +214,7 @@ fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Optio
 /// page-aligned kernel end overflows `u64`, or
 /// [`MemoryMapError::UsableRegionEmpty`] if the page-aligned kernel end
 /// is not strictly inside the RAM window (no usable span remains).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 pub(crate) fn build_memory_map(
     ram_base: u64,
     ram_size: u64,
@@ -259,8 +282,11 @@ pub(crate) fn build_memory_map(
 }
 
 /// Total bytes the map covers of each [`RegionKind`], in `(usable,
-/// reserved)` order. Used by the boot path to record the discovered
-/// split in its audit line.
+/// reserved)` order. Used by the aarch64 boot path to record the discovered
+/// split in its audit line (and by the host tests); the x86_64 boot path
+/// logs its guard-arena decision directly, so this is gated to the
+/// configurations that name it to stay free of dead code (`AGENTS.md` §2.3).
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
     let mut usable = 0u64;
     let mut reserved = 0u64;
@@ -271,6 +297,73 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
         }
     }
     (usable, reserved)
+}
+
+/// Carve a 2 MiB-aligned kthread-stack guard arena out of an
+/// already-built firmware [`BootMemoryMap`] and reserve it.
+///
+/// This is the x86_64 counterpart of the aarch64 single-window
+/// [`build_memory_map`]: that port discovers one `/memory` window and lays
+/// the whole map out itself, whereas x86_64 receives a multi-region
+/// firmware map (`boot::build_memory_map`) and only needs to carve the
+/// arena out of it. The arena is sized by the same §24.2 policy
+/// ([`stack_arena_bytes`], a whole multiple of [`GUARD_ARENA_ALIGN`]) from
+/// `ram_bytes` — the discovered RAM the caller passes (the x86_64 boot path
+/// sums the `Usable` regions, *not* the highest address, since a PC firmware
+/// map spans the reserved MMIO hole to 4 GiB and beyond) — so a 256 MiB box
+/// and a 256 GiB server each get a workable arena from one code path
+/// (`AGENTS.md` §2.2 / §24.2).
+///
+/// The arena is placed at the first 2 MiB boundary inside the first
+/// [`RegionKind::Usable`] region that can host the whole policy-sized block
+/// at or below `max_addr` (exclusive). `max_addr` is the spawn seams'
+/// identity-window limit: a stack outside it could not be reached — nor its
+/// guard page faulted — under the task's own root (`AGENTS.md` §4), so the
+/// carve refuses to place the arena there. On success the range is removed
+/// from the usable map ([`BootMemoryMap::reserve_range`]) so the frame
+/// allocator never hands those frames out, and the [`GuardArena`] is
+/// returned for [`crate::stack_arena::StackArena::install`].
+///
+/// Returns `None` (the boot path then leaves the kthread-stack guard in its
+/// software-canary form — fail closed, never fatal, `AGENTS.md` §2.9 /
+/// §2.17) when no usable region can host a whole 2 MiB-aligned arena below
+/// `max_addr`.
+#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+pub(crate) fn carve_guard_arena_from_map(
+    map: &mut BootMemoryMap,
+    ram_bytes: u64,
+    max_addr: u64,
+) -> Option<GuardArena> {
+    let arena_bytes = stack_arena_bytes(ram_bytes);
+    let mut chosen: Option<u64> = None;
+    for region in map.regions() {
+        if region.kind != RegionKind::Usable {
+            continue;
+        }
+        let region_start = region.start.as_u64();
+        let Some(region_end) = region_start.checked_add(region.length) else {
+            continue;
+        };
+        let Some(base) = align_up(region_start, GUARD_ARENA_ALIGN) else {
+            continue;
+        };
+        let Some(end) = base.checked_add(arena_bytes) else {
+            continue;
+        };
+        // The whole arena must fit inside this usable region *and* below the
+        // identity-window limit, or the stack it hosts could not be reached
+        // (its guard page faulted) under the task's own root.
+        if end <= region_end && end <= max_addr {
+            chosen = Some(base);
+            break;
+        }
+    }
+    let base = chosen?;
+    map.reserve_range(PhysAddr::new(base), PhysAddr::new(base + arena_bytes));
+    Some(GuardArena {
+        base,
+        len: arena_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -504,5 +597,143 @@ mod tests {
             "more than one block reserved"
         );
         assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
+    }
+
+    // --- `carve_guard_arena_from_map` (the x86_64 firmware-map carve) ----
+
+    use super::carve_guard_arena_from_map;
+    use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr};
+
+    /// A single usable region spanning `[start, start + len)`.
+    fn usable(start: u64, len: u64) -> MemoryRegion {
+        MemoryRegion {
+            start: PhysAddr::new(start),
+            length: len,
+            kind: RegionKind::Usable,
+        }
+    }
+
+    /// The total usable bytes the map still describes.
+    fn usable_bytes(map: &BootMemoryMap) -> u64 {
+        region_byte_totals(map).0
+    }
+
+    #[test]
+    fn firmware_carve_reserves_a_policy_sized_block_out_of_usable_ram() {
+        // A 256 MiB usable region (the QEMU `-m 256M` box): 256 MiB / 64 =
+        // 4 MiB, a two-block arena, carved out and reserved.
+        let ram = 256u64 * 1024 * 1024;
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, ram));
+        let before = usable_bytes(&map);
+
+        let arena =
+            carve_guard_arena_from_map(&mut map, ram, 4 << 30).expect("256 MiB fits an arena");
+        assert_eq!(arena.len, stack_arena_bytes(ram));
+        assert_eq!(arena.base % GUARD_ARENA_ALIGN, 0, "arena is 2 MiB-aligned");
+
+        // The arena's frames are gone from the usable map, and no usable
+        // frame overlaps the reserved range.
+        assert_eq!(usable_bytes(&map), before - arena.len);
+        for region in map.regions() {
+            if region.kind != RegionKind::Usable {
+                continue;
+            }
+            let rs = region.start.as_u64();
+            let re = rs + region.length;
+            assert!(
+                re <= arena.base || rs >= arena.base + arena.len,
+                "no usable region overlaps the reserved arena",
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_carve_aligns_base_up_inside_an_unaligned_region() {
+        // A usable region starting 1 MiB in: the arena base is rounded up to
+        // the next 2 MiB boundary, never below the region start.
+        let ram = 64u64 * 1024 * 1024;
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0x10_0000, ram));
+        let arena = carve_guard_arena_from_map(&mut map, ram, 4 << 30).expect("fits");
+        assert_eq!(arena.base % GUARD_ARENA_ALIGN, 0);
+        assert!(arena.base >= 0x10_0000, "base stays inside the region");
+    }
+
+    #[test]
+    fn firmware_carve_skips_a_region_too_small_and_uses_a_later_one() {
+        // The first usable region cannot host even one 2 MiB-aligned block;
+        // the carve walks on to the ample second region rather than failing.
+        let ram = 64u64 * 1024 * 1024;
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0x1000, 0x1000)); // a single 4 KiB sliver
+        map.push(usable(0x40_0000, ram));
+        let arena = carve_guard_arena_from_map(&mut map, ram, 4 << 30).expect("second region fits");
+        assert!(arena.base >= 0x40_0000, "arena landed in the ample region");
+    }
+
+    #[test]
+    fn firmware_carve_skips_reserved_regions() {
+        // A reserved region big enough for an arena is never carved into;
+        // only usable RAM hosts the arena.
+        let ram = 64u64 * 1024 * 1024;
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: ram,
+            kind: RegionKind::Reserved,
+        });
+        map.push(usable(0x400_0000, ram));
+        let arena = carve_guard_arena_from_map(&mut map, ram, 8 << 30).expect("usable region fits");
+        assert!(
+            arena.base >= 0x400_0000,
+            "arena avoided the reserved region"
+        );
+    }
+
+    #[test]
+    fn firmware_carve_refuses_a_region_above_the_identity_limit() {
+        // The only usable region sits entirely above the identity window, so
+        // a stack there could not be reached under the task's own root: fail
+        // closed to no arena (the seam falls back to the software canary).
+        let ram = 64u64 * 1024 * 1024;
+        let mut map = BootMemoryMap::new();
+        map.push(usable(8u64 << 30, ram));
+        assert!(
+            carve_guard_arena_from_map(&mut map, ram, 4 << 30).is_none(),
+            "no arena above the 4 GiB identity limit",
+        );
+        // The map is left untouched on the fail-closed path.
+        assert_eq!(usable_bytes(&map), ram);
+    }
+
+    #[test]
+    fn firmware_carve_clamps_the_arena_end_to_the_identity_limit() {
+        // A region that straddles the identity limit only yields an arena if
+        // the *whole* block fits below it. Here the limit cuts through the
+        // policy-sized block, so the carve refuses.
+        let ram = 8u64 * 1024 * 1024 * 1024; // policy size = 64 MiB cap
+        let limit = (4u64 << 30) + 0x10_0000; // 4 GiB + 1 MiB
+        let mut map = BootMemoryMap::new();
+        // One usable region from just below the limit; a 64 MiB arena would
+        // run well past `limit`.
+        map.push(usable(4u64 << 30, ram));
+        assert!(
+            carve_guard_arena_from_map(&mut map, ram, limit).is_none(),
+            "the whole arena must fit below the identity limit",
+        );
+    }
+
+    #[test]
+    fn firmware_carve_none_leaves_the_map_unchanged() {
+        // No usable region can host a whole 2 MiB-aligned arena: the map is
+        // returned untouched and the boot path keeps the software canary.
+        let ram = 1024u64 * 1024; // 1 MiB, below one 2 MiB block
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, ram));
+        let before = map.regions().len();
+        assert!(carve_guard_arena_from_map(&mut map, ram, 4 << 30).is_none());
+        assert_eq!(map.regions().len(), before, "map untouched on no-arena");
+        assert_eq!(usable_bytes(&map), ram);
     }
 }
