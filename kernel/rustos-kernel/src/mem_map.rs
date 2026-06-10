@@ -19,12 +19,13 @@
 //! `boot_aarch64` / `boot` modules that call it link the bare-metal-only
 //! ports and cannot be host-compiled, so the correctness-critical bounds
 //! checks would otherwise never run on the CI host. The module compiles on
-//! the aarch64 and x86_64 production builds (where `boot_aarch64` / `boot`
-//! consume it) and on any host `cargo test` build (where the tests below
-//! consume it), and on no other configuration, so it is never dead code
-//! (`AGENTS.md` §2.3). The single-window [`build_memory_map`] (aarch64) and
-//! the firmware-map [`carve_guard_arena_from_map`] (x86_64) are each gated
-//! to the port that uses them; the arena-sizing policy is shared.
+//! the bare-metal production builds (where `boot_aarch64` / `boot` /
+//! `boot_riscv64` consume it) and on any host `cargo test` build (where the
+//! tests below consume it), and on no other configuration, so it is never
+//! dead code (`AGENTS.md` §2.3). The single-window [`build_memory_map`]
+//! (aarch64) and the map-carve [`carve_guard_arena_from_map`] (x86_64 +
+//! riscv64) are each gated to the port(s) that use them; the arena-sizing
+//! policy is shared.
 
 use rustos_kernel_mem::{BootMemoryMap, PhysAddr, RegionKind};
 // `MemoryRegion` and `PAGE_SIZE` are named only by the aarch64 single-window
@@ -302,14 +303,15 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 /// Carve a 2 MiB-aligned kthread-stack guard arena out of an
 /// already-built firmware [`BootMemoryMap`] and reserve it.
 ///
-/// This is the x86_64 counterpart of the aarch64 single-window
+/// This is the x86_64 + riscv64 counterpart of the aarch64 single-window
 /// [`build_memory_map`]: that port discovers one `/memory` window and lays
 /// the whole map out itself, whereas x86_64 receives a multi-region
-/// firmware map (`boot::build_memory_map`) and only needs to carve the
-/// arena out of it. The arena is sized by the same §24.2 policy
-/// ([`stack_arena_bytes`], a whole multiple of [`GUARD_ARENA_ALIGN`]) from
-/// `ram_bytes` — the discovered RAM the caller passes (the x86_64 boot path
-/// sums the `Usable` regions, *not* the highest address, since a PC firmware
+/// firmware map (`boot::build_memory_map`) — and riscv64 builds its own
+/// two-region map (`boot_riscv64::build_boot_memory_map`) — and each only
+/// needs to carve the arena out of it. The arena is sized by the same §24.2
+/// policy ([`stack_arena_bytes`], a whole multiple of [`GUARD_ARENA_ALIGN`])
+/// from `ram_bytes` — the discovered RAM the caller passes (both boot paths
+/// sum the `Usable` regions, *not* the highest address, since a PC firmware
 /// map spans the reserved MMIO hole to 4 GiB and beyond) — so a 256 MiB box
 /// and a 256 GiB server each get a workable arena from one code path
 /// (`AGENTS.md` §2.2 / §24.2).
@@ -328,7 +330,10 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 /// software-canary form — fail closed, never fatal, `AGENTS.md` §2.9 /
 /// §2.17) when no usable region can host a whole 2 MiB-aligned arena below
 /// `max_addr`.
-#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+#[cfg(any(
+    all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
+    test
+))]
 pub(crate) fn carve_guard_arena_from_map(
     map: &mut BootMemoryMap,
     ram_bytes: u64,
@@ -364,6 +369,62 @@ pub(crate) fn carve_guard_arena_from_map(
         base,
         len: arena_bytes,
     })
+}
+
+/// Record the boot path's kthread guard-arena decision on every boot so the
+/// guard posture is audited, not silently trusted (`AGENTS.md` §4 /
+/// §5.4.4).
+///
+/// A carved+installed arena logs at Info with its base/len; a fall-back to
+/// the software canary logs at Warn so a machine that could not host an
+/// arena is visible in the boot record. `id` is the per-port boot-audit
+/// event id (each boot module's `KERNEL_BOOT_GUARD_ARENA`); the body is
+/// shared so the x86_64 and riscv64 boot paths emit one record shape
+/// (`AGENTS.md` §2.2).
+#[cfg(all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")))]
+pub(crate) fn log_guard_arena(
+    sink: &(dyn rustos_log::Sink + Sync),
+    id: rustos_log::EventId,
+    arena: Option<(u64, u64)>,
+) {
+    use rustos_log::{Event, Field, Level};
+    use rustos_util::fmt::format_hex_u64;
+
+    let mut base_buf = [0u8; 16];
+    let mut len_buf = [0u8; 16];
+    let (base, len) = arena.unwrap_or((0, 0));
+    let base_hex = format_hex_u64(base, &mut base_buf);
+    let len_hex = format_hex_u64(len, &mut len_buf);
+    let (level, message) = if arena.is_some() {
+        (Level::Info, "kthread guard arena installed")
+    } else {
+        (
+            Level::Warn,
+            "no kthread guard arena; software-canary stacks used",
+        )
+    };
+    rustos_log::log(
+        sink,
+        &Event {
+            level,
+            id,
+            message,
+            fields: &[
+                Field {
+                    key: "installed",
+                    value: if arena.is_some() { "true" } else { "false" },
+                },
+                Field {
+                    key: "base",
+                    value: base_hex,
+                },
+                Field {
+                    key: "len",
+                    value: len_hex,
+                },
+            ],
+        },
+    );
 }
 
 #[cfg(test)]
@@ -722,6 +783,38 @@ mod tests {
             carve_guard_arena_from_map(&mut map, ram, limit).is_none(),
             "the whole arena must fit below the identity limit",
         );
+    }
+
+    #[test]
+    fn firmware_carve_serves_the_riscv64_virt_window() {
+        // The riscv64 boot path's two-region map (`boot_riscv64`): the
+        // kernel image reserved at the `virt` board's RAM base
+        // (0x8000_0000, GiB 2) and the remainder usable. The carve places
+        // the policy-sized arena just above the kernel image, wholly below
+        // the spawn seams' 4 GiB identity window, and reserves it
+        // (`plans/PI.md` riscv64 G3b-2).
+        let ram_base = 0x8000_0000u64; // QEMU `virt` RAM base (GiB 2)
+        let ram = 256u64 * 1024 * 1024; // the `-m 256M` vertical box
+        let kernel_end = ram_base + 0x40_0000; // 4 MiB image + boot heap
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(ram_base),
+            length: kernel_end - ram_base,
+            kind: RegionKind::Reserved,
+        });
+        map.push(usable(kernel_end, ram_base + ram - kernel_end));
+        let usable_before = usable_bytes(&map);
+
+        let arena = carve_guard_arena_from_map(&mut map, usable_before, 4 << 30)
+            .expect("a 256 MiB virt window hosts an arena");
+        assert_eq!(arena.len, stack_arena_bytes(usable_before));
+        assert_eq!(arena.base % GUARD_ARENA_ALIGN, 0, "arena is 2 MiB-aligned");
+        assert!(arena.base >= kernel_end, "arena sits above the kernel");
+        assert!(
+            arena.base + arena.len <= 4 << 30,
+            "arena fits the seams' 4 GiB identity window"
+        );
+        assert_eq!(usable_bytes(&map), usable_before - arena.len);
     }
 
     #[test]

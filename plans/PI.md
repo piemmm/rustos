@@ -1015,13 +1015,39 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
       split/unmap fails. `publish_reclaim_frames` returns idle chained
       blocks to the live allocator on `ArenaStack` drop (§24.1). The
       `mem_map`/`stack_arena` infra and the production glue are shared with
-      aarch64, gated to `kernel_isa = "aarch64"`/`"x86_64"` (one body, §2.2);
-      the firmware carve is host-tested (7 cases). The
+      aarch64, gated to the bare-metal `kernel_isa` ports (one body, §2.2);
+      the firmware carve is host-tested. The
       `spawn_init`/`spawn_session`/`spawn_program`/`wait`/`stack_overrun`
       `-M virt` x86_64 verticals prove `init` still spawns + supervises the
       session and an overrun still faults, now on the arena stack. **No ABI
       change.** Doc: `docs/src/platform/x86_64.md` ("Routing the kthread
       stack through the arena (G3b-2)").
+    - **G3b-2-iv — riscv64 PID 1 + runtime `spawn` paths `[x]`.** The
+      riscv64 cross-port sibling of G3b-2-iii: both production seams
+      (`init_spawn_riscv64`, `spawn_producer_riscv64`) now run on
+      arena-backed, hardware-guarded kernel stacks instead of the
+      software-canary `BoxStack`. `boot_riscv64::try_boot` carves the arena
+      out of its FDT-derived two-region map with the same shared
+      `mem_map::carve_guard_arena_from_map` (§24.2 policy sized from the
+      summed `Usable` bytes, bounded to the seams' 4 GiB Sv39 identity
+      window), `install`s it into `KTHREAD_STACK_ARENA`, and audits the
+      decision through the shared `mem_map::log_guard_arena` body
+      (`EventId(4098)`; the former per-port copy in `boot` was folded into
+      it, §2.2). Each seam allocates an `ArenaStack` (chained-grow bounded
+      to the identity window; `publish_reclaim_frames` returns idle blocks
+      on drop, §24.1) and `split_block(guard)` + `unmap(guard)` on the
+      task's *own* Sv39 root — `init` before its `arch.switch()`, the
+      `spawn` producer on the never-activated child root — so an overrun
+      faults synchronously under the task's own `satp` (§4 / §2.17), with
+      the `BoxStack` fallback where no arena region is available or the
+      split/unmap fails (§2.9). The `mem_map`/`stack_arena` infra is the
+      same shared body, its gates widened to `kernel_isa = "riscv64"`; the
+      carve gained a riscv64 `virt`-shaped host regression case (8 cases
+      total). The `spawn_init`/`spawn_program`/`spawn_session`/`wait`/
+      `stack_overrun` `-M virt` riscv64 verticals prove `init` still spawns
+      + supervises the session and an overrun still faults, now on the
+      arena stack. **No ABI change.** Doc: `docs/src/platform/riscv64.md`
+      (PID 1 seam / spawn producer bullets + the G1/G2 deployment note).
   - **G3c — production fault-form on `-M virt` `[x]`.** Proves an
     overrunning kthread takes a synchronous data abort, not a
     next-reschedule canary detection. `tests/integration/stack_overrun_qemu_aarch64`
@@ -1092,16 +1118,11 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `fault` observer confirms the cause + faulting address → PASS; a body that
     returns without faulting drains the `step` loop and fails loudly (§2.9).
     **Verified green under QEMU on `-M virt` on this host.** This proves the
-    *mechanism*; rewiring the production riscv64 boot kthread stacks onto a
-    boot-reserved arena (the aarch64/x86_64 G3b-2-iii seam) remains the
-    follow-on. The production riscv64 `rustos-kernel` boot path now boots
-    paged (RV-P1 boot-to-`BootCompleted`, RV-P2 Sv39 MMU + trap vector +
-    dispatch), but it has no kthread-spawning seam yet (no
-    `init_spawn`/`spawn_producer` analogue), so there are no production
-    kthread stacks to rewire — that seam (RV-P3) is the precondition, and
-    until it lands those (future) stacks keep the software-canary guard
-    (§2.17). **No ABI change.** Doc: `docs/src/platform/riscv64.md` ("Proving
-    the overrun fault-form (G3c)").
+    *mechanism*; the production `init_spawn_riscv64` /
+    `spawn_producer_riscv64` kernel stacks now run on the boot-reserved
+    arena (G3b-2-iv). **No ABI change.** Doc:
+    `docs/src/platform/riscv64.md` ("Proving the overrun fault-form
+    (G3c)").
   - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
     `[x]`.** The last `BlockSplit::Pending` port brought to `Supported`, so
     all three bare-metal ports now declare and implement the split.
@@ -1549,17 +1570,16 @@ riscv64, mirroring the aarch64 P-stage arc.
   `with_console` backing (`RiscvUartConsole` over the new verbatim
   `serial::write_console_bytes`). After `BootCompleted`, `kernel_main`
   drops PID 1 `init` into U-mode (its own Sv39 root, `IDENTITY_GIB = 4`,
-  `BoxStack` kernel stack — the guarded kthread-stack arena is the
-  G3b-2-iii rewire), `init` writes its banner through `stream_write` and
+  an arena-backed hardware-guarded kernel stack since G3b-2-iv), `init`
+  writes its banner through `stream_write` and
   issues the `CAP_PROC_SPAWN`-gated `spawn` for `/Apps/Shell.app/Run`; the
   producer builds the session a fresh, hardware-isolated space from the
   allocator-backed `FrameTableSource` (no fixed reserve, §24.1) and admits
   it Ready. The kernel `build.rs` now also builds the embedded `init`/`Shell`
   `rxe` blobs for the riscv64 target. Proven by `spawn_init_qemu_riscv64`
   (`id=4030` PID 1 → `RustOS init: reached user mode` banner → `id=4030`
-  Shell → `id=5000 sc=spawn` → SiFive PASS). The riscv64 timeshare and the
-  G3b-2-iii guard-arena rewire now have their precondition. **No ABI
-  change.** Doc: `docs/src/platform/riscv64.md` ("PID 1 into user mode").
+  Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
+  `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

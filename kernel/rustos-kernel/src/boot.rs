@@ -62,7 +62,6 @@ use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
-use rustos_util::fmt::format_hex_u64;
 
 use crate::arch_wrapper::BinArch;
 use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
@@ -385,49 +384,6 @@ fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
     );
 }
 
-fn log_guard_arena(sink: &(dyn Sink + Sync), arena: Option<(u64, u64)>) {
-    // Record the decision on every boot so the guard posture is audited,
-    // not silently trusted (`AGENTS.md` §4 / §5.4.4). A carved+installed
-    // arena logs at Info with its base/len; a fall-back to the software
-    // canary logs at Warn so a machine that could not host an arena is
-    // visible in the boot record.
-    let mut base_buf = [0u8; 16];
-    let mut len_buf = [0u8; 16];
-    let (base, len) = arena.unwrap_or((0, 0));
-    let base_hex = format_hex_u64(base, &mut base_buf);
-    let len_hex = format_hex_u64(len, &mut len_buf);
-    let (level, message) = if arena.is_some() {
-        (Level::Info, "kthread guard arena installed")
-    } else {
-        (
-            Level::Warn,
-            "no kthread guard arena; software-canary stacks used",
-        )
-    };
-    rustos_log::log(
-        sink,
-        &Event {
-            level,
-            id: KERNEL_BOOT_GUARD_ARENA,
-            message,
-            fields: &[
-                Field {
-                    key: "installed",
-                    value: if arena.is_some() { "true" } else { "false" },
-                },
-                Field {
-                    key: "base",
-                    value: base_hex,
-                },
-                Field {
-                    key: "len",
-                    value: len_hex,
-                },
-            ],
-        },
-    );
-}
-
 fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
     rustos_log::log(
         sink,
@@ -553,7 +509,11 @@ fn try_boot(
     if let Some(arena) = guard_arena {
         KTHREAD_STACK_ARENA.install(arena.base, arena.len, &IdentityBlockStore);
     }
-    log_guard_arena(log_sink, guard_arena.map(|a| (a.base, a.len)));
+    crate::mem_map::log_guard_arena(
+        log_sink,
+        KERNEL_BOOT_GUARD_ARENA,
+        guard_arena.map(|a| (a.base, a.len)),
+    );
 
     let rsdp_bytes = mb2.rsdp().ok_or(BootError::NoRsdp)?;
     let rsdp = acpi::Rsdp::validate(rsdp_bytes).map_err(|_| BootError::BadRsdp)?;

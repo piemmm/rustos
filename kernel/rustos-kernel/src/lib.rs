@@ -208,15 +208,18 @@ pub mod spawn_producer;
 
 // The boot memory-map arithmetic (`plans/PI.md` P6c-1, G3b-2): the aarch64
 // `/memory` → `BootMemoryMap` window translation and the shared
-// guard-arena sizing / carving both ports use to reserve the kthread-stack
+// guard-arena sizing / carving every port uses to reserve the kthread-stack
 // guard arena. The arithmetic is free of the bare-metal-only ports, so it
 // compiles — and its bounds-check unit tests run — on the CI host under
 // `cargo test` as well as on each production build that consumes it
-// (`boot_aarch64`, `boot`). Gated to exactly those configurations so it is
-// never dead code (`AGENTS.md` §2.3); the per-port carve helpers are
-// further gated to the port that uses them.
+// (`boot_aarch64`, `boot`, `boot_riscv64`). Gated to exactly those
+// configurations so it is never dead code (`AGENTS.md` §2.3); the per-port
+// carve helpers are further gated to the port(s) that use them.
 #[cfg(any(
-    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")),
+    all(
+        freestanding,
+        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+    ),
     test
 ))]
 mod mem_map;
@@ -225,13 +228,16 @@ mod mem_map;
 // forward-only bump allocator that hands kthread kernel stacks out of the
 // boot-reserved guard arena (`mem_map`) so a stack's guard page can be
 // unmapped in the owning task's root and an overrun faults in hardware
-// (`init_spawn` on aarch64, `init_spawn_x86_64` on x86_64). Its bump
-// arithmetic is free of the bare-metal ports, so it compiles — and its
-// unit tests run — on the CI host as well as on the aarch64/x86_64
-// production builds that consume it, and on no other configuration, so it
-// is never dead code (`AGENTS.md` §2.3).
+// (`init_spawn` on aarch64, `init_spawn_x86_64` on x86_64,
+// `init_spawn_riscv64` on riscv64). Its bump arithmetic is free of the
+// bare-metal ports, so it compiles — and its unit tests run — on the CI
+// host as well as on the bare-metal production builds that consume it, and
+// on no other configuration, so it is never dead code (`AGENTS.md` §2.3).
 #[cfg(any(
-    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")),
+    all(
+        freestanding,
+        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+    ),
     test
 ))]
 mod stack_arena;

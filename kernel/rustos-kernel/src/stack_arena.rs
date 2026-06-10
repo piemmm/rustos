@@ -47,9 +47,9 @@
 //! the allocator arithmetic is exercised on CI without real RAM.
 //!
 //! Like [`crate::mem_map`], the bump/list arithmetic is free of the
-//! bare-metal aarch64 port, so it compiles — and its unit tests run — on the
-//! CI host as well as on the aarch64 production build that consumes it, and
-//! on no other configuration, so it is never dead code (`AGENTS.md` §2.3).
+//! bare-metal ports, so it compiles — and its unit tests run — on the
+//! CI host as well as on the bare-metal production builds that consume it,
+//! and on no other configuration, so it is never dead code (`AGENTS.md` §2.3).
 
 use rustos_kernel_core::{KernelStack, KTHREAD_STACK_BYTES};
 use rustos_kernel_mem::{Frame, FrameAllocator, PhysAddr};
@@ -165,8 +165,8 @@ const STACK_VA_OFFSET: u64 = 0;
 /// [`Drop`] returns that region to the arena ([`StackArena::free`]) so the
 /// capacity shrinks when a task exits (`AGENTS.md` §24.1). On the host build
 /// the `Drop` is inert (the unit tests call `free` explicitly through a test
-/// [`BlockStore`]); only the freestanding `aarch64`/`x86_64` builds wire the
-/// production reclaim path.
+/// [`BlockStore`]); only the freestanding `aarch64`/`x86_64`/`riscv64`
+/// builds wire the production reclaim path.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ArenaStack {
     /// First byte of the region's **physical/identity** base — the low edge
@@ -194,11 +194,14 @@ impl Drop for ArenaStack {
     fn drop(&mut self) {
         // The host build exercises reclamation through `StackArena::free`
         // directly (with a test `BlockStore`); only the freestanding
-        // aarch64/x86_64 builds own the single `'static` arena + frame
+        // bare-metal builds own the single `'static` arena + frame
         // allocator the production reclaim path needs, so the `Drop` is inert
         // elsewhere and never references state that build lacks (`AGENTS.md`
         // §2.3).
-        #[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+        #[cfg(all(
+            freestanding,
+            any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+        ))]
         reclaim_arena_stack(self.guard);
     }
 }
@@ -659,10 +662,16 @@ unsafe fn scrub_block(base: u64, len: usize) {
 
 /// The production [`BlockStore`]: read/write the intrusive [`BlockHeader`]
 /// in the identity-mapped header page at the block's own base.
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 pub(crate) struct IdentityBlockStore;
 
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 impl BlockStore for IdentityBlockStore {
     fn read(&self, base: u64) -> BlockHeader {
         // SAFETY: `base` is a block base the arena installed/chained — a
@@ -682,10 +691,16 @@ impl BlockStore for IdentityBlockStore {
 /// used when no live [`FrameAllocator`] has been published for reclamation,
 /// so a freed region's bookkeeping is still updated but no block is returned
 /// (fail closed, `AGENTS.md` §2.17).
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 struct RetainShrink;
 
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 impl ArenaShrink for RetainShrink {
     fn release_block(&self, _base: u64, _len: u64) -> bool {
         false
@@ -693,14 +708,18 @@ impl ArenaShrink for RetainShrink {
 }
 
 /// The single, `'static` guard-stack arena the boot path installs
-/// (`boot_aarch64` / `boot`) and the spawn seams draw from (`init_spawn` /
-/// `init_spawn_x86_64`, `spawn_producer` / `spawn_producer_x86_64`).
+/// (`boot_aarch64` / `boot` / `boot_riscv64`) and the spawn seams draw from
+/// (`init_spawn` / `init_spawn_x86_64` / `init_spawn_riscv64`,
+/// `spawn_producer` / `spawn_producer_x86_64` / `spawn_producer_riscv64`).
 ///
-/// Only the bare-metal `aarch64`/`x86_64` builds instantiate it; the host-test
+/// Only the bare-metal builds instantiate it; the host-test
 /// build exercises the allocator through locally constructed [`StackArena`]s,
 /// so the shared instance is gated out there to stay free of an unused-static
 /// warning (`AGENTS.md` §2.3).
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 
 /// The live `'static` [`FrameAllocator`] reclamation returns idle chained
@@ -708,14 +727,20 @@ pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 /// ([`publish_reclaim_frames`]). A region freed before any allocator is
 /// published is still accounted (its block's live count decremented) but no
 /// block is released — fail safe (`AGENTS.md` §2.17).
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 static SHRINK_FRAMES: rustos_sync::Once<&'static FrameAllocator> = rustos_sync::Once::new();
 
 /// Publish the live `'static` frame allocator the [`ArenaStack`] `Drop`
 /// reclaim path returns idle chained blocks to. Idempotent (set-once); a
 /// later call with a different allocator is ignored, matching the one
 /// boot-threaded allocator the spawn path already uses.
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 pub(crate) fn publish_reclaim_frames(frames: &'static FrameAllocator) {
     let _ = SHRINK_FRAMES.call_once_infallible(|| frames);
 }
@@ -724,7 +749,10 @@ pub(crate) fn publish_reclaim_frames(frames: &'static FrameAllocator) {
 /// [`KTHREAD_STACK_ARENA`], releasing its (chained) block to the published
 /// `'static` allocator when the one-free-block grace allows, or retaining it
 /// when none is published (fail safe).
-#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")))]
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
 fn reclaim_arena_stack(guard: u64) {
     match SHRINK_FRAMES.get() {
         Ok(Some(frames)) => {

@@ -916,8 +916,9 @@ and fail-closed (§24.4) — this work must not loosen them.
   exhaustion (`FrameArenaGrow` over the live `FrameAllocator`'s
   `alloc_order(9)`), bounded to the per-space identity window, preserving the
   §17.2 break-before-make and §4 guard-page invariants and failing closed to
-  `BoxStack` only on physical exhaustion (§2.9); both aarch64 production spawn
-  seams draw through it. **Done** (L3b — stack-arena *shrink*): the capacity
+  `BoxStack` only on physical exhaustion (§2.9); the aarch64, x86_64, and
+  riscv64 production spawn seams all draw through it. **Done** (L3b —
+  stack-arena *shrink*): the capacity
   falls as well as rises (§24.1 — grow *and* shrink, never a one-way ratchet):
     - **Per-block live-count accounting.** The arena is a linked list of blocks
       (boot-carved + each chained); each tracks the count of guarded regions

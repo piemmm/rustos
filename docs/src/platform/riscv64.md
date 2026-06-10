@@ -116,9 +116,13 @@ three things on the `BootInfo` hand-off:
   Its `pre_resume` hook reactivates PID 1's `satp` root before every
   switch-in (isolation, §4); the kernel-stack-top argument is unused on
   riscv64, since `sscratch` is re-armed per-task by `userentry::enter_user`
-  and the trap vector. PID 1's kernel stack is a heap-backed
-  software-canary `BoxStack` (the guarded kthread-stack arena is the later
-  G3b-2 rewire), never an unguarded raw stack (§2.9).
+  and the trap vector. PID 1's kernel stack is drawn from the boot-reserved
+  guard arena (G3b-2): the seam splits the coarse identity block covering
+  the stack's guard page in PID 1's *own* root and unmaps that single page,
+  so an overrun faults synchronously under PID 1's `satp`; when no arena
+  region is available (or the split/unmap fails) it falls back to a
+  heap-backed software-canary `BoxStack`, never an unguarded raw stack
+  (§2.9).
 - **Runtime `spawn` producer (`with_spawn`).**
   `spawn_producer_riscv64::RiscvProcessSpawn` + a one-entry program
   registry mapping `/Apps/Shell.app/Run` → the embedded `Shell` `rxe`.
@@ -127,7 +131,10 @@ three things on the `BootInfo` hand-off:
   **without** switching the running caller's `satp`, drawing its page
   tables from the allocator-backed `kernel_mem::FrameTableSource` (no fixed
   reserve, so the spawn capacity scales with RAM and grows on demand,
-  §24.1) and admits it Ready — a true concurrent spawn.
+  §24.1) and admits it Ready — a true concurrent spawn. Each child's
+  kernel stack is an arena-backed guard stack with its guard page
+  split+unmapped in the *child's own* (never-activated) root, mirroring
+  the PID 1 seam, with the same fail-closed `BoxStack` fallback (§2.9).
 
 The embedded `init`/`Shell` `rxe` blobs are built for the riscv64 target
 by the kernel `build.rs` (the same one-build-path the aarch64/x86_64
@@ -883,14 +890,16 @@ The deployment form (unmapping the guard page so an overrun faults
 synchronously) is proven end to end on `-M virt` by
 `stack_guard_qemu_riscv64` (below), and the *production runtime*
 fault-form — a scheduled kthread overrunning its arena-backed stack — by
-`stack_overrun_qemu_riscv64` (G3c, below). Rewiring the production
-riscv64 boot kthread stacks onto a boot-reserved arena (the aarch64 /
-x86_64 G3b-2-iii seam) is the remaining follow-on: the production
-`rustos_kernel::boot_riscv64` pipeline now boots the board to
-`BootCompleted`, but it has no kthread-spawning seam yet (no
-`init_spawn`/`spawn_producer` analogue), so there are no production
-kthread stacks to rewire. Until that seam lands those (future) stacks
-keep the software-canary guard (`AGENTS.md` §2.17).
+`stack_overrun_qemu_riscv64` (G3c, below). The production pipeline is
+wired the same way (G3b-2): `boot_riscv64::try_boot` carves a
+2 MiB-aligned guard arena out of the discovered memory map (§24.2 policy,
+bounded to the spawn seams' 4 GiB identity window), installs it into the
+shared `rustos-kernel` kthread-stack allocator, and audits the decision
+(`EventId(4098)`); the `init_spawn_riscv64` / `spawn_producer_riscv64`
+seams then draw PID 1's and every spawned child's kernel stack from that
+arena and split+unmap each stack's guard page in the owning task's own
+Sv39 root. A machine whose map cannot host an arena falls back to
+software-canary `BoxStack` stacks (fail closed, `AGENTS.md` §2.17).
 
 ### Stack-guard fault-form QEMU vertical
 
