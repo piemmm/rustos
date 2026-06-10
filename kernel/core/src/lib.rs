@@ -82,6 +82,7 @@ pub mod memmap;
 pub mod panic;
 pub mod procwait;
 pub mod random;
+pub mod rlimit;
 // The single scheduler selection point (`AGENTS.md` §17.1). Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
@@ -120,6 +121,7 @@ pub use procwait::{
     NULL_PROCESS_WAIT,
 };
 pub use random::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
+pub use rlimit::{authorize_set, LimitSet};
 pub use spawn::{
     spawn_and_enter, spawn_image, AdmitError, EmbeddedProgram, InitSpawn, InitSpawnCtx,
     NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,

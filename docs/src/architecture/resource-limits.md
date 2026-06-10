@@ -8,9 +8,9 @@ itself or its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
 
 This page describes the binding §24 contract and its staged build-out. The
 ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
-syscalls, and the `CAP_RLIMIT_RAISE` capability) is **landed**; the kernel
-enforcement, the growable kernel-stack arena, and the `ulimit` shell command
-are staged behind it (see *Status* below).
+syscalls, and the `CAP_RLIMIT_RAISE` capability) and the **kernel enforcement**
+of it are **landed**; the growable kernel-stack arena and the `ulimit` shell
+command are staged behind them (see *Status* below).
 
 ## Capacities scale; security bounds stay fixed
 
@@ -67,6 +67,34 @@ The first-party Rust wrappers are `rustos_rt::rlimit_get` /
 `rustos_rt::rlimit_set`; non-Rust programs call `ros_sys_rlimit_get` /
 `ros_sys_rlimit_set` over the generated `rustos_rlimit.h` view.
 
+## Kernel enforcement
+
+The kernel holds each task's effective limits as a `LimitSet` (one
+`ResourceLimit` per `LimitKind`) in the per-task `AddressSpaceRegistry`,
+alongside the standard-stream descriptor table — both share the per-process
+lifecycle (established at spawn, withdrawn at exit) and the same `TaskId` key,
+so there is no parallel registry (`AGENTS.md` §2.2). A task with no imposed
+limit reads `LimitSet::DEFAULT`: every resource `RLIMIT_INFINITY` for now, the
+single place a discovered-hardware default policy slots in later (L3) without a
+second code path.
+
+- **`rlimit_get`** validates `kind` against the closed `LimitKind` set, reads
+  the caller's *own* effective limit, and copies it out through the validated
+  `copy_to_user` boundary. It is keyed by the kernel-trusted `caller.task_id`,
+  never a caller-supplied id (§5.4.1), so a process can only read its own
+  limits; an unregistered caller fails closed with `BadAddress` (§19.1).
+- **`rlimit_set`** validates `kind`, copies the requested limit in (the decoder
+  rejects a malformed `soft > hard` pair, fail closed), then applies the §24.3
+  rule: lowering — or any change that does not raise the hard bound above the
+  current ceiling — is free, while raising the hard bound requires
+  `CAP_RLIMIT_RAISE` and is otherwise refused with `PermissionDenied`. The
+  authorised limit is stored against the caller's own id. Because the syscall
+  is audited, a rejection is logged automatically (§19.4).
+- **Inheritance.** When a process is admitted by `spawn`, the child's limit set
+  is the parent's intersected against the system default (`LimitSet::inherit`),
+  so a child can never hold a bound wider than either the parent's ceiling or
+  the default — the never-widen rule, mirroring capability delegation (§5.2).
+
 ## Status
 
 - **L1 — ABI (landed).** `lib/abi` `LimitKind` / `ResourceLimit` /
@@ -74,10 +102,11 @@ The first-party Rust wrappers are `rustos_rt::rlimit_get` /
   `CAP_RLIMIT_RAISE` capability, the `abi-sys` C stubs, the `lib/rt`
   wrappers, and the generated C header. The dispatcher routes both syscalls;
   the kernel handler default fails closed with `NotImplemented` until L2.
-- **L2 — kernel enforcement (planned).** Per-task limit storage, inheritance
-  on spawn, intersection (never widened) on delegation, the typed-`Result`
-  denial-and-audit path, and the `CAP_RLIMIT_RAISE` gate on raising a hard
-  bound.
+- **L2 — kernel enforcement (landed).** Per-task `LimitSet` storage in the
+  address-space registry, inheritance on spawn intersected against the default
+  policy (never widened), the typed-`Result` denial-and-audit path, and the
+  `CAP_RLIMIT_RAISE` gate on raising a hard bound. The `rlimit_get`/`rlimit_set`
+  handlers are wired in `kernel/core`.
 - **L3 — growable capacities (planned).** A growable kernel-stack arena and
   discovered-hardware sizing for the per-arch CPU/hart arrays, preserving the
   §17.2 break-before-make and §4 guard-page invariants, plus a release-tuned

@@ -46,9 +46,11 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
-use rustos_abi::DescriptorTable;
+use rustos_abi::{DescriptorTable, LimitKind, ResourceLimit};
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
+
+use crate::rlimit::LimitSet;
 
 /// Why registering a task's address space was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +93,14 @@ pub struct AddressSpaceRegistry {
     /// [`DescriptorTable::closed`] default, so an unestablished process
     /// can reach no stream backing (§5.4).
     streams: BTreeMap<TaskId, DescriptorTable>,
+    /// Each live task's effective resource limits (`AGENTS.md` §24). Held
+    /// here for the same reason as [`Self::streams`]: it shares the exact
+    /// per-process lifecycle (inherited at spawn, withdrawn at exit) and is
+    /// keyed by the same [`TaskId`], so a parallel registry + lock would be
+    /// near-duplicate plumbing (`AGENTS.md` §2.2 / §2.3). A task with no
+    /// entry resolves to the [`LimitSet::DEFAULT`] policy via
+    /// [`Self::limits`].
+    limits: BTreeMap<TaskId, LimitSet>,
 }
 
 impl AddressSpaceRegistry {
@@ -100,6 +110,7 @@ impl AddressSpaceRegistry {
         Self {
             tasks: BTreeMap::new(),
             streams: BTreeMap::new(),
+            limits: BTreeMap::new(),
         }
     }
 
@@ -132,7 +143,8 @@ impl AddressSpaceRegistry {
     /// dead task's streams (`AGENTS.md` §5.4 — fail closed).
     pub fn withdraw(&mut self, task: TaskId) -> bool {
         let had_streams = self.streams.remove(&task).is_some();
-        self.tasks.remove(&task).is_some() || had_streams
+        let had_limits = self.limits.remove(&task).is_some();
+        self.tasks.remove(&task).is_some() || had_streams || had_limits
     }
 
     /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`
@@ -160,6 +172,43 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn streams(&self, task: TaskId) -> DescriptorTable {
         self.streams.get(&task).copied().unwrap_or_default()
+    }
+
+    /// Establish `task`'s full effective resource-limit set (`AGENTS.md`
+    /// §24).
+    ///
+    /// Called by the spawner when it admits a process, recording the limits
+    /// the child inherited (already intersected against the system default,
+    /// [`LimitSet::inherit`]). Replacing an existing set is permitted, as
+    /// for [`Self::set_streams`]; a task whose set is never established
+    /// resolves to [`LimitSet::DEFAULT`] via [`Self::limits`].
+    pub fn set_limits(&mut self, task: TaskId, limits: LimitSet) {
+        self.limits.insert(task, limits);
+    }
+
+    /// Update `task`'s effective limit for a single [`LimitKind`],
+    /// leaving the other kinds untouched (`AGENTS.md` §24.3).
+    ///
+    /// The `rlimit_set` handler calls this once a request has been
+    /// authorised ([`crate::authorize_set`]). A task with no established
+    /// set starts from [`LimitSet::DEFAULT`], so the first imposed bound on
+    /// any kind leaves every other kind at the default policy.
+    pub fn set_limit(&mut self, task: TaskId, kind: LimitKind, limit: ResourceLimit) {
+        let mut set = self.limits.get(&task).copied().unwrap_or_default();
+        set.set(kind, limit);
+        self.limits.insert(task, set);
+    }
+
+    /// Resolve `task`'s effective resource-limit set, or the
+    /// [`LimitSet::DEFAULT`] policy when none is established.
+    ///
+    /// The `rlimit_get` / `rlimit_set` handlers consult this to read a
+    /// caller's own effective limit (`AGENTS.md` §24.3). An unregistered
+    /// task (a kernel task, or one withdrawn on `exit`) reads the default
+    /// policy — reading one's own limit grants no authority (§16.6).
+    #[must_use]
+    pub fn limits(&self, task: TaskId) -> LimitSet {
+        self.limits.get(&task).copied().unwrap_or_default()
     }
 
     /// Resolve `task` to the `(address space, physical map)` pair the
@@ -323,5 +372,51 @@ mod tests {
         // reports the slot was present and clears the table.
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
+    }
+
+    #[test]
+    fn unset_limits_resolve_to_the_default_policy() {
+        let reg = AddressSpaceRegistry::new();
+        // A task with no established set runs under the default policy.
+        assert_eq!(reg.limits(TaskId(9)), LimitSet::DEFAULT);
+    }
+
+    #[test]
+    fn set_limit_updates_one_kind_and_leaves_the_rest_at_default() {
+        let mut reg = AddressSpaceRegistry::new();
+        let lo = ResourceLimit::new(4, 8).expect("well-formed");
+        reg.set_limit(TaskId(2), LimitKind::Processes, lo);
+        let set = reg.limits(TaskId(2));
+        assert_eq!(set.get(LimitKind::Processes), lo);
+        // Every other kind stays at the default policy.
+        assert_eq!(set.get(LimitKind::OpenStreams), ResourceLimit::UNLIMITED);
+        // A different task is unaffected and stays at the default policy.
+        assert_eq!(reg.limits(TaskId(3)), LimitSet::DEFAULT);
+    }
+
+    #[test]
+    fn set_limits_replaces_the_full_set() {
+        let mut reg = AddressSpaceRegistry::new();
+        let mut wanted = LimitSet::DEFAULT;
+        wanted.set(
+            LimitKind::StackBytes,
+            ResourceLimit::new(1024, 4096).expect("well-formed"),
+        );
+        reg.set_limits(TaskId(7), wanted);
+        assert_eq!(reg.limits(TaskId(7)), wanted);
+    }
+
+    #[test]
+    fn withdraw_clears_the_limit_set() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_limit(
+            TaskId(4),
+            LimitKind::Processes,
+            ResourceLimit::new(1, 2).expect("well-formed"),
+        );
+        // Withdrawing a task with limits but no address space still reports
+        // the slot was present and resets it to the default policy.
+        assert!(reg.withdraw(TaskId(4)));
+        assert_eq!(reg.limits(TaskId(4)), LimitSet::DEFAULT);
     }
 }

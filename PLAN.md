@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1 landed; L2–L4 next]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2 landed; L3–L4 next]**
 
-**Status: L1 (ABI) landed; L2–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) landed; L3–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -945,10 +945,18 @@ and fail-closed (§24.4) — this work must not loosen them.
   (`ros_sys_rlimit_get`/`_set`), `lib/rt` wrappers, generated `rustos_rlimit.h`,
   decoder added to the `fuzz_decode` harness; docs in
   `docs/src/architecture/resource-limits.md` + `syscalls.md`.
-- L2 — kernel enforcement: limits stored per task, inherited on spawn,
-  intersected (never widened) on delegation (§5.2); a request exceeding an
-  effective limit is denied as a typed `Result` and logged (§19.4); raising a
-  hard bound requires `CAP_RLIMIT_RAISE` (§24.3).
+- L2 — **DONE.** Kernel enforcement in `kernel/core`. A per-task `LimitSet`
+  (one `ResourceLimit` per `LimitKind`, default `LimitSet::DEFAULT` =
+  unlimited until L3 derives it from hardware) lives in the per-task
+  `AddressSpaceRegistry` (`kernel/core/src/aspace.rs`) beside the stream
+  table, withdrawn on exit. `rlimit_get`/`rlimit_set` are wired
+  (`kernel/core/src/syscalls.rs`): both validate `kind`, copy through the
+  `copy_to_user`/`copy_from_user` boundary, key off the kernel-trusted
+  `caller.task_id`. `authorize_set` (`kernel/core/src/rlimit.rs`) refuses
+  raising a hard bound above the current ceiling with `PermissionDenied`
+  unless the caller holds `CAP_RLIMIT_RAISE` (§24.3); the audited `rlimit_set`
+  logs the rejection (§19.4). A spawned child inherits the parent's set
+  intersected against the default (`LimitSet::inherit`), never widened (§5.2).
 - L3 — growable kernel stack arena + discovered-hardware sizing for the stack
   arena and per-arch CPU/hart arrays (the sweep above), with the §17.2/§4
   safety invariants preserved and a release-tuned `KTHREAD_STACK_BYTES`.

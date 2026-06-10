@@ -75,8 +75,8 @@
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{
-    CapabilityId, DescriptorTable, Errno, IrqHandle, MapFlags, RandomFlags, StreamMode,
-    SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
+    CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags, RandomFlags,
+    ResourceLimit, StreamMode, SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
@@ -104,6 +104,7 @@ use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
+use crate::rlimit::{authorize_set, LimitSet};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
@@ -1163,6 +1164,72 @@ where
             None => Err(Errno::BadAddress),
         }
     }
+
+    fn rlimit_get(&self, caller: &CallerContext<'_>, kind: u32, out: u64) -> SyscallResult {
+        // §5.4: validate `kind` against the closed abi-v1 set before
+        // touching any state. An unassigned discriminant fails closed with
+        // `OutOfRange` rather than indexing past the limit set.
+        let kind = LimitKind::from_u32(kind)?;
+
+        // Read the caller's *own* effective limit (the default policy until
+        // one is imposed). Reading one's own limit grants no authority and
+        // needs no capability (`AGENTS.md` §16.6 / §24.3); the dispatcher
+        // leaves this call ungated and unaudited.
+        let limit = self.aspaces.read().limits(caller.task_id).get(kind);
+        let encoded = limit.encode();
+
+        // Copy the encoded limit out to the caller's `out` pointer through
+        // the validated `copy_to_user` boundary (`AGENTS.md` §5.4). A caller
+        // with no registered address space (a kernel task, or one withdrawn
+        // on `exit`) and any copy fault both collapse onto `BadAddress`,
+        // never leaking which case occurred (§19.1).
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &encoded)
+        }) {
+            Some(Ok(())) => Ok(0),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn rlimit_set(&self, caller: &CallerContext<'_>, kind: u32, value: u64) -> SyscallResult {
+        // §5.4: validate `kind` before touching any state.
+        let kind = LimitKind::from_u32(kind)?;
+
+        // Copy the requested limit in from the caller's `value` pointer
+        // through the validated `copy_from_user` boundary (`AGENTS.md` §5.4)
+        // *before* applying any policy. A caller with no registered address
+        // space and any copy fault collapse onto the same fail-closed
+        // `BadAddress` (§19.1).
+        let mut buf = [0u8; ResourceLimit::WIRE_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(value), &mut buf)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        // `decode` validates `soft <= hard` and fails closed on a malformed
+        // pair, so a hostile buffer never yields a usable limit (§5.4).
+        let requested = ResourceLimit::decode(&buf)?;
+
+        // §24.3: lowering (or any change that does not raise the hard bound)
+        // is free; raising the hard bound above the current ceiling requires
+        // `CAP_RLIMIT_RAISE`. `authorize_set` returns `PermissionDenied`
+        // otherwise, fail closed (§5.4). This call is audited per spec, so
+        // the dispatcher logs a rejection automatically (§19.4) — no
+        // bespoke audit record is needed here.
+        let current = self.aspaces.read().limits(caller.task_id).get(kind);
+        let can_raise = caller.caps.has(CapabilityId::RLIMIT_RAISE);
+        let stored = authorize_set(current, requested, can_raise)?;
+
+        // Commit the authorised limit to the caller's own per-task set. The
+        // task is identified by the kernel-trusted `caller.task_id`, never a
+        // caller-supplied id (§5.4.1), so a process can only set its own
+        // limits.
+        self.aspaces.write().set_limit(caller.task_id, kind, stored);
+        Ok(0)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -1286,6 +1353,17 @@ where
         self.aspaces
             .write()
             .set_streams(sec_id, DescriptorTable::standard());
+
+        // Inherit the parent's effective resource limits (`AGENTS.md` §24.3):
+        // the child's set is the parent's intersected against the system
+        // default policy, so it can never hold a bound wider than either the
+        // parent's ceiling or the default (the never-widen rule, mirroring
+        // capability delegation §5.2). A parent with no established set
+        // resolves to `LimitSet::DEFAULT`, so the child does too. Read and
+        // write are separate lock acquisitions because a fresh child id is
+        // never concurrently mutated by another path.
+        let inherited = LimitSet::inherit(&self.aspaces.read().limits(self.parent));
+        self.aspaces.write().set_limits(sec_id, inherited);
 
         // Record the parent/child link with the process-wait producer so the
         // spawning parent can later `wait` on this child and reap its exit
@@ -4012,6 +4090,62 @@ mod tests {
         assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
     }
 
+    /// A spawned child inherits the parent's effective resource limits,
+    /// intersected against the system default so it can never widen past
+    /// the parent's ceiling (`AGENTS.md` §24.3 — inheritance across spawn).
+    #[test]
+    fn spawn_child_inherits_the_parents_resource_limits() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        // The parent caps its own child-process fan-out below the default.
+        let parent_cap = ResourceLimit::new(2, 4).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(SecTaskId(2), LimitKind::Processes, parent_cap);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        );
+
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .expect("spawn succeeds");
+        // The child carries the parent's tighter Processes ceiling and the
+        // default policy for every other kind.
+        let child = aspaces.read().limits(SecTaskId(pid));
+        assert_eq!(child.get(LimitKind::Processes), parent_cap);
+        assert_eq!(child.get(LimitKind::StackBytes), ResourceLimit::UNLIMITED);
+    }
+
     /// The spawn admit path records the new child against the spawning
     /// caller (the parent) with the process-wait producer, so a later `wait`
     /// from that parent can reap it (`plans/SPAWN.md` SP6).
@@ -4712,5 +4846,320 @@ mod tests {
         assert_eq!(h.exit(&ctx, 42), Ok(0));
         // The producer saw this task's id and its exit code.
         assert_eq!(*producer.last_exit.lock(), Some((7, 42)));
+    }
+
+    /// `rlimit_get` for a registered caller copies the effective limit out:
+    /// with none imposed, every kind reads the default policy
+    /// ([`LimitSet::DEFAULT`], unlimited) (`AGENTS.md` §24.1 / §24.3).
+    #[test]
+    fn rlimit_get_returns_the_default_policy_for_a_fresh_task() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.rlimit_get(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Ok(0)
+        );
+        // The encoded default limit landed at the caller's pointer.
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; ResourceLimit::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                ResourceLimit::decode(&buf).expect("well-formed")
+            })
+            .expect("caller has a registered space");
+        assert_eq!(delivered, ResourceLimit::UNLIMITED);
+    }
+
+    /// `rlimit_get` validates `kind` against the closed abi-v1 set before
+    /// touching state: an unassigned discriminant fails closed with
+    /// `OutOfRange` (`AGENTS.md` §5.4).
+    #[test]
+    fn rlimit_get_rejects_an_unassigned_kind() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let bad_kind = u32::try_from(LimitKind::COUNT).expect("small count");
+        assert_eq!(h.rlimit_get(&ctx, bad_kind, 0x1000), Err(Errno::OutOfRange));
+    }
+
+    /// `rlimit_get` from a caller with no registered address space fails
+    /// closed with `BadAddress` — the limit cannot be copied out and the
+    /// missing-space case is not leaked (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn rlimit_get_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.rlimit_get(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// `rlimit_set` lowering a bound is free (no capability) and the new
+    /// ceiling is stored against the caller's own task id (`AGENTS.md`
+    /// §24.3).
+    #[test]
+    fn rlimit_set_lowers_freely_and_stores_against_the_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let lower = ResourceLimit::new(10, 50).expect("well-formed");
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &lower.encode(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No CAP_RLIMIT_RAISE: lowering still succeeds.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Ok(0)
+        );
+        assert_eq!(
+            aspaces
+                .read()
+                .limits(SecTaskId(2))
+                .get(LimitKind::Processes),
+            lower
+        );
+    }
+
+    /// Stage the encoded `limit` at the caller's page-1 pointer (`0x1000`)
+    /// so a following `rlimit_set` reads it. Used to drive a second `set`
+    /// in the raise tests after the first lowered the bound.
+    fn stage_limit<A: KernelArch + 'static>(
+        h: &KernelSyscallHandlers<'_, A>,
+        ctx: &CallerContext<'_>,
+        limit: ResourceLimit,
+    ) {
+        h.with_caller_aspace(ctx, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(0x1000), &limit.encode()).expect("writable");
+        })
+        .expect("caller has a registered space");
+    }
+
+    /// `rlimit_set` raising a hard bound above the current ceiling without
+    /// `CAP_RLIMIT_RAISE` is refused with `PermissionDenied`, and the stored
+    /// limit is left unchanged (`AGENTS.md` §24.3 — fail closed).
+    #[test]
+    fn rlimit_set_raising_hard_without_capability_is_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let lower = ResourceLimit::new(10, 50).expect("well-formed");
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &lower.encode(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // Lower the ceiling to (10, 50) first — this is free.
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Ok(0)
+        );
+        // Now attempt to raise the hard bound above the new ceiling.
+        let higher = ResourceLimit::new(10, 100).expect("well-formed");
+        stage_limit(&h, &ctx, higher);
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        // The stored ceiling is unchanged.
+        assert_eq!(
+            aspaces
+                .read()
+                .limits(SecTaskId(2))
+                .get(LimitKind::Processes),
+            lower
+        );
+    }
+
+    /// `rlimit_set` raising a hard bound *with* `CAP_RLIMIT_RAISE` succeeds
+    /// and the higher ceiling is stored (`AGENTS.md` §24.3).
+    #[test]
+    fn rlimit_set_raising_hard_with_capability_succeeds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let lower = ResourceLimit::new(10, 50).expect("well-formed");
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &lower.encode(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::RLIMIT_RAISE], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Ok(0)
+        );
+        let higher = ResourceLimit::new(10, 100).expect("well-formed");
+        stage_limit(&h, &ctx, higher);
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Ok(0)
+        );
+        assert_eq!(
+            aspaces
+                .read()
+                .limits(SecTaskId(2))
+                .get(LimitKind::Processes),
+            higher
+        );
+    }
+
+    /// `rlimit_set` fed a malformed pair (`soft > hard`) fails closed with
+    /// `OutOfRange` at decode and stores nothing (`AGENTS.md` §5.4).
+    #[test]
+    fn rlimit_set_rejects_a_malformed_pair() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // soft (10) > hard (5): a hand-built buffer the kernel must reject.
+        let mut bytes = [0u8; ResourceLimit::WIRE_LEN];
+        bytes[0] = 10;
+        bytes[8] = 5;
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::RLIMIT_RAISE], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.rlimit_set(&ctx, LimitKind::Processes.as_u32(), 0x1000),
+            Err(Errno::OutOfRange)
+        );
+        // Nothing was stored: the caller still runs under the default.
+        assert_eq!(aspaces.read().limits(SecTaskId(2)), LimitSet::DEFAULT);
     }
 }
