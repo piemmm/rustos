@@ -1,4 +1,4 @@
-# RustOS - read the [documentation](./docs/book/index.html)
+# RustOS - An experiment in letting an AI generate an OS.
 
 A security-first, multi-user, multi-core operating system written in Rust,
 targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via
@@ -14,7 +14,7 @@ code:
 
 ## Status
 **Work in progress.** - There is a long way to go before this project is ready
-for prime time, if ever. <span style="color:red">**Do not expect anything to work yet.**</span>
+for prime time, if it ever will be. <span style="color:red">**Do not expect anything to work yet, Do *not* use it.**</span>
 
 ## Building
 
