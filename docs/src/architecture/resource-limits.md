@@ -184,7 +184,9 @@ hardware), under two knobs:
 Growing the kernel-stack arena *past* its policy size on genuine exhaustion —
 chaining a fresh, independently block-split arena rather than failing over to a
 `BoxStack` — is the staged growable-arena follow-on (L3b), as is sizing the
-per-arch CPU/hart arrays from §18 discovery.
+per-arch CPU/hart bookkeeping from §18 discovery (see *Per-arch CPU/hart handle
+bookkeeping* below — done on wasm32, with a noted constraint on the bare-metal
+ports).
 
 ## Userland heap free-span table (grow-on-demand)
 
@@ -253,6 +255,43 @@ frames is a later stage. aarch64 and x86_64 (the two ports with a production
 spawn producer) share this conversion; riscv64 has no production spawn
 producer yet, so the capacity does not exist there to convert.
 
+## Per-arch CPU/hart handle bookkeeping (discovered-count-sized)
+
+Each architecture handle keeps per-CPU bookkeeping — the dense-`CpuId` →
+hardware-id affinity map, the host-only IPI ledger, and (on the SMP ports) the
+per-core `CoreClass` table — historically in fixed `[T; MAX_*]` arrays whose
+hand-picked length (`MAX_CPUS` / `MAX_HARTS` / `MAX_WORKERS`) a larger machine
+outgrew and a single-CPU machine wasted (§24.1).
+
+**wasm32 (`WasmArch`) — done.** The `cpu_to_worker` map and `host_ipi_count`
+ledger are now allocator-backed boxed slices sized to the **discovered worker
+count** — `with_workers(workers).len()`, floored at `boot_cpu + 1`
+(`worker_storage_len`) so the boot slot is always representable. Web-Worker
+contexts are fixed at boot, so the discovered count *is* the hardware quantity;
+no speculative headroom is reserved beyond it (§24.2). Every per-slot access is
+bounds-checked and fails closed (a stray IPI target is dropped and counted),
+and the handle is `Arc`-constructed, so the one-shot allocation is safe (§4).
+`WasmArch::worker_capacity()` reports the size. (`MAX_WORKERS` survives only as
+the `smp::start_worker` host worker-index bound — the secondary-bring-up item
+below.)
+
+**Bare-metal (`Aarch64Arch` / `RiscvArch` / `X86_64Arch`) — pending, with a
+hard design constraint.** The same conversion cannot use the boxed-slice
+approach directly: introducing `extern crate alloc` into a bare-metal arch
+crate puts the `alloc` crate in the *dependency graph* of **every** freestanding
+binary that links it, so rustc then demands a `#[global_allocator]`. The
+deliberately minimal Stage-2 QEMU bins (e.g. `memory_isolation_qemu_aarch64`,
+which "links only the arch port" and tests page-table isolation without ever
+constructing the arch handle) would be forced to carry a 64 MiB bump heap they
+have no use for — the opposite of the §2.3 / §5.4.5 minimalism those bins were
+built for. The proper, scalable fix is therefore **no `alloc` in the arch
+crate**: the handle holds `&'static` per-CPU slices the caller provides — the
+allocator-having callers (the production boot path, the `Arc`-using test
+kernels) leak a right-sized backing, while the allocator-free handle-constructing
+bins supply a small `static`; paging-only bins are untouched. This is a
+self-contained but sizable redesign of the three bare-metal constructors and
+their call sites, tracked as the next L3b increment.
+
 ## Status
 
 - **L1 — ABI (landed).** `lib/abi` `LimitKind` / `ResourceLimit` /
@@ -273,14 +312,19 @@ producer yet, so the capacity does not exist there to convert.
 - **L3b — growable arena + per-arch arrays (in progress).** The userland-heap
   free-span table is now a grow-on-demand capacity (see *Userland heap
   free-span table* above), the `kernel/sec` supplementary-group ceiling is now
-  a capability-raisable capacity (see *Supplementary-group ceiling* above), and
-  the spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
+  a capability-raisable capacity (see *Supplementary-group ceiling* above), the
+  spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
   capacity on both production producers (see *Spawn page-table capacity*
-  above). Still planned: growing the kthread-stack arena *past* its policy size
-  on genuine exhaustion (chaining a fresh, independently block-split arena
-  rather than failing over to a `BoxStack`), and sizing the per-arch CPU/hart
-  arrays from §18 discovery, preserving the §17.2 break-before-make and §4
-  guard-page invariants.
+  above), and the **wasm32** per-CPU handle bookkeeping is now
+  discovered-count-sized (see *Per-arch CPU/hart handle bookkeeping* above).
+  Still planned: growing the kthread-stack arena *past* its policy size on
+  genuine exhaustion (chaining a fresh, independently block-split arena rather
+  than failing over to a `BoxStack`); the **bare-metal** per-CPU handle
+  bookkeeping via the no-`alloc` caller-provided-`&'static` design (the
+  boxed-slice approach is blocked by the allocator-free Stage-2 bins — see
+  above); and the per-arch **secondary-bring-up** bound (the `smp.s`
+  secondary-stack pools and per-CPU `static` storage), preserving the §17.2
+  break-before-make and §4 guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

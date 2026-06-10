@@ -36,14 +36,34 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup, SmpError};
 
-/// Maximum number of Web Worker contexts the port tracks.
+/// Upper bound on the *worker-index value* the host may be asked to
+/// spawn as a secondary logical CPU ([`crate::smp::start_worker`]).
 ///
-/// The cooperative scheduler addresses workers by a dense index below
-/// this bound; the boot context is `0`. Matching the bare-metal ports'
-/// `MAX_HARTS`, it caps the per-worker bookkeeping arrays.
+/// This is the host worker-addressing bound, **not** the size of the
+/// per-worker bookkeeping: [`WasmArch`] now sizes its bookkeeping from
+/// the discovered worker count (`AGENTS.md` §24.1, see
+/// [`WasmArch::worker_capacity`]). Converting this remaining bound to a
+/// discovered-hardware capacity is tracked as the next §24 L3b
+/// increment (the secondary-bring-up item).
 pub const MAX_WORKERS: usize = 8;
+
+/// §24.1 per-CPU sizing policy for [`WasmArch`]: one bookkeeping slot
+/// per discovered worker context, with a floor that always covers the
+/// boot context's own slot.
+///
+/// Web-Worker contexts are fixed at boot — the host reports them once —
+/// so the discovered count *is* the hardware quantity and no speculative
+/// headroom is reserved beyond it (`AGENTS.md` §24.2). The floor of
+/// `boot_cpu + 1` guarantees the boot CPU's slot is always representable
+/// even for a single-worker handle.
+fn worker_storage_len(boot_cpu: CpuId, discovered: usize) -> usize {
+    discovered.max(boot_cpu as usize + 1)
+}
 
 /// wasm32 architecture handle the downstream boot consumer wraps for
 /// `kernel_core::kernel_main`.
@@ -57,14 +77,18 @@ pub struct WasmArch {
     boot_cpu: CpuId,
 
     /// Forward map: dense `CpuId` index → host worker index of that CPU.
-    /// `None` for unpopulated slots. Set once at construction.
-    cpu_to_worker: [Option<CpuId>; MAX_WORKERS],
+    /// `None` for unpopulated slots. Set once at construction; its length
+    /// is the discovered worker count (`AGENTS.md` §24.1, see
+    /// `worker_storage_len`), never a fixed ceiling.
+    cpu_to_worker: Box<[Option<CpuId>]>,
 
     /// Host-only IPI accounting — incremented on every `send_ipi` with
     /// an in-range, mapped target. Never read on the wasm path; the host
-    /// `MessageChannel` post replaces it there.
+    /// `MessageChannel` post replaces it there. Sized to match
+    /// [`Self::cpu_to_worker`], so a target index that resolves through
+    /// [`Self::worker_of`] is always in range here too.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    host_ipi_count: [AtomicU64; MAX_WORKERS],
+    host_ipi_count: Box<[AtomicU64]>,
 
     /// Host-only stray-IPI counter for unmapped / out-of-range targets.
     host_stray_ipi: AtomicU64,
@@ -77,36 +101,47 @@ impl WasmArch {
     /// Use [`Self::with_workers`] to register a multi-worker map.
     #[must_use]
     pub fn new(boot_cpu: CpuId) -> Self {
-        let mut cpu_to_worker = [None; MAX_WORKERS];
-        if (boot_cpu as usize) < MAX_WORKERS {
-            cpu_to_worker[boot_cpu as usize] = Some(boot_cpu);
-        }
-        Self::from_map(boot_cpu, cpu_to_worker)
+        let cap = worker_storage_len(boot_cpu, 0);
+        let mut cpu_to_worker: Vec<Option<CpuId>> = (0..cap).map(|_| None).collect();
+        // `boot_cpu < cap` holds by construction of `worker_storage_len`.
+        cpu_to_worker[boot_cpu as usize] = Some(boot_cpu);
+        Self::from_map(boot_cpu, cpu_to_worker.into_boxed_slice())
     }
 
     /// Construct a multi-worker handle from a dense `CpuId` →
     /// worker-index slice (`workers[cpu] == worker_index`).
     ///
-    /// Entries beyond [`MAX_WORKERS`] are ignored. `boot_cpu` names the
-    /// logical CPU of the boot context.
+    /// The handle's per-worker bookkeeping is sized to the discovered
+    /// worker count — `workers.len()`, floored at `boot_cpu + 1` (see
+    /// `worker_storage_len`) — so a larger machine is never silently
+    /// truncated to a fixed ceiling (`AGENTS.md` §24.1). `boot_cpu` names
+    /// the logical CPU of the boot context.
     #[must_use]
     pub fn with_workers(boot_cpu: CpuId, workers: &[CpuId]) -> Self {
-        let mut cpu_to_worker = [None; MAX_WORKERS];
-        let mut cpu = 0;
-        while cpu < workers.len() && cpu < MAX_WORKERS {
-            cpu_to_worker[cpu] = Some(workers[cpu]);
-            cpu += 1;
-        }
-        Self::from_map(boot_cpu, cpu_to_worker)
+        let cap = worker_storage_len(boot_cpu, workers.len());
+        let cpu_to_worker: Vec<Option<CpuId>> =
+            (0..cap).map(|cpu| workers.get(cpu).copied()).collect();
+        Self::from_map(boot_cpu, cpu_to_worker.into_boxed_slice())
     }
 
-    fn from_map(boot_cpu: CpuId, cpu_to_worker: [Option<CpuId>; MAX_WORKERS]) -> Self {
+    fn from_map(boot_cpu: CpuId, cpu_to_worker: Box<[Option<CpuId>]>) -> Self {
+        let host_ipi_count: Vec<AtomicU64> = (0..cpu_to_worker.len())
+            .map(|_| AtomicU64::new(0))
+            .collect();
         Self {
             boot_cpu,
             cpu_to_worker,
-            host_ipi_count: [const { AtomicU64::new(0) }; MAX_WORKERS],
+            host_ipi_count: host_ipi_count.into_boxed_slice(),
             host_stray_ipi: AtomicU64::new(0),
         }
+    }
+
+    /// Number of dense `CpuId` slots this handle tracks — the discovered
+    /// worker count its per-worker bookkeeping was sized to
+    /// (`AGENTS.md` §24.1).
+    #[must_use]
+    pub fn worker_capacity(&self) -> usize {
+        self.cpu_to_worker.len()
     }
 
     /// Worker index mapped to `cpu`, or `None` for an unpopulated slot.
@@ -121,7 +156,7 @@ impl WasmArch {
     #[must_use]
     pub fn cpu_for_worker(&self, worker: CpuId) -> Option<CpuId> {
         let mut cpu = 0;
-        while cpu < MAX_WORKERS {
+        while cpu < self.cpu_to_worker.len() {
             if self.cpu_to_worker[cpu] == Some(worker) {
                 #[allow(clippy::cast_possible_truncation)]
                 return Some(cpu as CpuId);
@@ -136,7 +171,7 @@ impl WasmArch {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn host_ipi_count(&self, target: CpuId) -> u64 {
         let idx = match usize::try_from(target) {
-            Ok(i) if i < MAX_WORKERS => i,
+            Ok(i) if i < self.host_ipi_count.len() => i,
             _ => return 0,
         };
         self.host_ipi_count[idx].load(Ordering::Relaxed)

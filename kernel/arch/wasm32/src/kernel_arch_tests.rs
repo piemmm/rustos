@@ -56,14 +56,36 @@ fn multi_worker_map_round_trips_cpu_and_worker_indices() {
 }
 
 #[test]
-fn with_workers_ignores_entries_beyond_capacity() {
-    let many: [CpuId; MAX_WORKERS + 2] = [0; MAX_WORKERS + 2];
-    let arch = WasmArch::with_workers(0, &many);
-    // The last two entries are dropped; indexing them is `None`.
+fn bookkeeping_scales_to_the_discovered_worker_count() {
+    // §24.1: a machine with more worker contexts than the legacy fixed
+    // ceiling (`MAX_WORKERS`) is sized to its discovered count, never
+    // truncated. A dense map of `MAX_WORKERS + 2` distinct workers keeps
+    // every slot addressable.
+    let discovered = MAX_WORKERS + 2;
+    let workers: Vec<CpuId> = (0..discovered)
+        .map(|w| u32::try_from(w).expect("fits u32"))
+        .collect();
+    let arch = WasmArch::with_workers(0, &workers);
+
+    assert_eq!(arch.worker_capacity(), discovered);
+    // The slot at the old ceiling — which the fixed-array port dropped —
+    // is now populated.
+    let at_old_ceiling = u32::try_from(MAX_WORKERS).expect("fits u32");
+    assert_eq!(arch.worker_of(at_old_ceiling), Some(at_old_ceiling));
+    // One past the discovered count remains unmapped (fail closed).
     assert_eq!(
-        arch.worker_of(u32::try_from(MAX_WORKERS).expect("fits u32")),
+        arch.worker_of(u32::try_from(discovered).expect("fits u32")),
         None
     );
+}
+
+#[test]
+fn single_worker_handle_sizes_to_the_boot_slot() {
+    // §24.1 floor: a single-worker handle reserves exactly the boot
+    // CPU's own slot, no speculative headroom.
+    let arch = WasmArch::new(0);
+    assert_eq!(arch.worker_capacity(), 1);
+    assert_eq!(arch.worker_of(1), None);
 }
 
 #[test]

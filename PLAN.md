@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out done; kernel-stack arena + per-arch arrays remain)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 per-CPU handle bookkeeping done; growable kernel-stack arena + bare-metal per-CPU handle bookkeeping + secondary-bring-up bound remain)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, and the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers; the kernel stack arena + per-arch arrays remain).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, and the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized; the growable kernel stack arena + the bare-metal per-CPU handle bookkeeping (a no-`alloc` `&'static`-storage redesign, since the boxed approach is blocked by the allocator-free Stage-2 bins) + the per-arch secondary-bring-up bound remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -918,12 +918,28 @@ and fail-closed (§24.4) — this work must not loosen them.
 - Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`:
   **done** (L3a) — now a release-tuned policy value (32 KiB release / 64 KiB
   debug, §24.2).
-- Per-arch CPU/hart array caps — `kernel/arch/x86_64/src/percpu.rs`
-  (`MAX_CPUS = 16`), `kernel/arch/aarch64/src/kernel_arch.rs` (`MAX_CPUS = 8`),
-  `kernel/arch/riscv64/src/smp.rs` (`MAX_HARTS = 8`),
-  `kernel/arch/wasm32/src/kernel_arch.rs` (`MAX_WORKERS = 8`): size per-CPU
-  storage from §18 discovery with a documented headroom policy, not a hand-
-  picked literal.
+- Per-arch CPU/hart handle bookkeeping — the dense-`CpuId`→hardware-id maps,
+  host IPI ledgers, and per-core `CoreClass` tables in the arch handles.
+  **wasm32 done** (`kernel/arch/wasm32/src/kernel_arch.rs`): `WasmArch`'s
+  `cpu_to_worker`/`host_ipi_count` are now allocator-backed boxed slices sized
+  to the discovered worker count (`worker_storage_len`, floor `boot_cpu+1`,
+  §24.1/§24.2); `MAX_WORKERS` survives only as the `smp::start_worker`
+  host worker-index bound (the secondary-bring-up item below). **Bare-metal
+  pending** (`aarch64`/`riscv64`/`x86_64` `kernel_arch.rs`, `MAX_CPUS`/
+  `MAX_HARTS`): the boxed-slice approach is **blocked** — `extern crate alloc`
+  in a bare-metal arch crate forces `alloc` into the dependency graph of every
+  freestanding bin that links it, so the deliberately allocator-free Stage-2
+  QEMU bins (e.g. `memory_isolation_qemu_aarch64`) would be forced to carry a
+  64 MiB bump heap they never use. The proper fix is **no `alloc` in the arch
+  crate**: the handle holds caller-provided `&'static` per-CPU slices
+  (allocator-having callers leak a right-sized backing; allocator-free
+  handle-constructing bins pass a small `static`; paging-only bins untouched).
+  A self-contained but sizable redesign of the three bare-metal constructors +
+  call sites, tracked as the next L3b increment.
+- Per-arch secondary-bring-up bound — the assembly secondary-stack pools
+  (`smp.s` `SECONDARY_MAX_*`) + per-CPU `static` storage (`preempt`/`percpu`)
+  still keyed to `MAX_CPUS`/`MAX_HARTS`/`MAX_WORKERS`: size from §18 discovery
+  (a later L3b increment; an SMP-bring-up redesign, not a bookkeeping resize).
 - Process/identity capacities — spawn fan-out (`spawn_producer*.rs`
   `MAX_SPAWNS = 8`): convert to grow-or-limit-governed capacities. **Done**
   (L3b): the spawn fan-out itself is now allocator-backed and grows on demand —

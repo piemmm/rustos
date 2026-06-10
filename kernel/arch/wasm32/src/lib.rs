@@ -52,6 +52,13 @@
 #![no_std]
 #![deny(missing_docs)]
 
+// The per-worker bookkeeping in [`WasmArch`] is sized from the
+// discovered worker count (`AGENTS.md` §24.1), so it lives in an
+// allocator-backed boxed slice rather than a fixed array. The
+// freestanding wasm image links the binary's `#[global_allocator]`
+// (`lib/bumpalloc`); the host test build uses `std`'s allocator below.
+extern crate alloc;
+
 // Host unit tests use `std` (e.g. `std::vec::Vec` in fixtures). The
 // crate itself stays `no_std` for the freestanding wasm build
 // (`AGENTS.md` §1 — no hacks), mirroring the riscv64 port.
