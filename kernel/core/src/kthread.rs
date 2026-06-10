@@ -70,22 +70,38 @@ use rustos_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
 
-/// Default per-kthread kernel-stack size, in bytes.
+/// Default per-kthread kernel-stack size, in bytes — a **release-tuned
+/// policy value**, not a single worst-case constant (`AGENTS.md` §24.2).
 ///
 /// A **user** kthread's body does not merely set up a suspension point: once
 /// it `eret`s into EL0, every syscall the task makes is handled *on this
 /// stack* (the EL1 trap runs on the kthread's kernel stack). The deepest such
 /// path is a full syscall dispatch — the arch trap prologue, the
 /// `KernelDispatchHook` layers, a handler, and the validated user-memory copy
-/// boundary ([`rustos_kernel_mem::uaccess`]) with its staging — and an
-/// unoptimised debug build spills generously at every frame, so the real
-/// working set is far above the "modest" depth a plain kernel kthread reaches.
-/// Sixteen KiB was *not* enough: a `wait` handler (reap + `copy_to_user`)
-/// overran a 16 KiB stack and silently corrupted the adjacent heap allocation
-/// — the next task's frozen address-space snapshot (`plans/PI.md` P6e-3b-ii).
-/// 64 KiB clears the deepest dispatch with margin and is a whole number of
-/// 4 KiB pages so the guard page below it (see [`BoxStack`]) sits on a clean
-/// page boundary.
+/// boundary ([`rustos_kernel_mem::uaccess`]) with its staging.
+///
+/// The working set of that path depends sharply on the optimisation level:
+/// an unoptimised **debug** build spills generously at every frame, so its
+/// real depth is far above an optimised build's. §24.2 requires a
+/// resource sizing to prefer a release-tuned value over a worst-case debug
+/// value where the two differ, so this bound is split by profile rather than
+/// frozen at the debug worst case:
+///
+/// * **Debug** (`debug_assertions`): 64 KiB. Sixteen KiB was *not* enough — a
+///   `wait` handler (reap + `copy_to_user`) overran a 16 KiB debug stack and
+///   silently corrupted the adjacent heap allocation, the next task's frozen
+///   address-space snapshot (`plans/PI.md` P6e-3b-ii) — so the debug profile
+///   keeps the proven-ample 64 KiB.
+/// * **Release**: 32 KiB. An optimised build's deepest dispatch frame is well
+///   under half the debug working set, so 32 KiB clears it with margin while
+///   halving the per-stack reservation — doubling how many stacks a given
+///   arena block holds, which matters for the server profile (`AGENTS.md`
+///   §24.2). The production kernel image is a release build, so 32 KiB is the
+///   value that actually ships.
+///
+/// Both values are a whole number of 4 KiB pages, so the guard page below the
+/// usable region (see [`BoxStack`]) sits on a clean page boundary in either
+/// profile.
 ///
 /// This bound is **defence in depth**, not the only line of defence: the
 /// [`BoxStack`] places a poison-filled guard page (`AGENTS.md` §4) immediately
@@ -95,9 +111,17 @@ use crate::dispatch_slot::RescheduleAction;
 /// checks every time the task hands the CPU back, and the task is then failed
 /// closed rather than allowed to run on a corrupt stack (`AGENTS.md` §2.9,
 /// §2.17). The sizing still matters — the guard absorbs an overrun but a
-/// generous stack avoids one in the first place — so this bound must
-/// comfortably exceed the deepest syscall-handler call depth.
+/// generous stack avoids one in the first place — so each profile's bound
+/// must comfortably exceed that profile's deepest syscall-handler call depth.
+#[cfg(debug_assertions)]
 pub const KTHREAD_STACK_BYTES: usize = 64 * 1024;
+
+/// Release-tuned per-kthread kernel-stack size (see the `debug_assertions`
+/// variant above for the full rationale): 32 KiB, half the debug worst case,
+/// so a release image fits twice as many guarded stacks per arena block
+/// (`AGENTS.md` §24.2).
+#[cfg(not(debug_assertions))]
+pub const KTHREAD_STACK_BYTES: usize = 32 * 1024;
 
 /// Width of the [`BoxStack`] guard region, in bytes: one 4 KiB page.
 ///

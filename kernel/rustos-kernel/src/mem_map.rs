@@ -36,16 +36,52 @@ use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_
 /// running CPU executes on (`plans/PI.md` guard-page fault-form, stage G2).
 const GUARD_ARENA_ALIGN: u64 = 2 * 1024 * 1024;
 
-/// Size of the reserved kthread-stack guard arena: one 2 MiB block.
+/// Smallest reserved kthread-stack guard arena: one 2 MiB block.
 ///
-/// One block holds many guarded kthread kernel stacks (each a few pages of
-/// stack plus a one-page guard); wiring `BoxStack` onto the arena is the
-/// staged follow-on (`plans/PI.md` stage G3), so G2 reserves a single
-/// representative block. The arena is carved out of the usable window and
-/// marked [`RegionKind::Reserved`] so the frame allocator never hands its
-/// frames to another use (`AGENTS.md` §4 — the guard would otherwise
-/// corrupt an unrelated allocation).
-const GUARD_ARENA_BYTES: u64 = GUARD_ARENA_ALIGN;
+/// One block still holds tens of guarded kthread kernel stacks (each a few
+/// pages of stack plus a one-page guard), so even the tiniest discovered RAM
+/// window that can spare a block gets a working arena. A window too small to
+/// carve even this floor degrades to no arena and the software-canary
+/// `BoxStack` fallback ([`carve_guard_arena`]).
+const STACK_ARENA_MIN_BYTES: u64 = GUARD_ARENA_ALIGN;
+
+/// Largest reserved kthread-stack guard arena: 64 MiB.
+///
+/// A cap on the §24.2 "fraction of discovered RAM" policy so a very large
+/// server does not reserve an unbounded slab up front for kthread stacks it
+/// will never all use at once. 64 MiB holds well over a thousand guarded
+/// stacks (`AGENTS.md` §24.2 — a workable headroom for both desktop and
+/// server without waste). Growth past this on genuine exhaustion is the
+/// staged follow-on (the growable/chained arena, `plans/PI.md`/PLAN §24 L3b).
+const STACK_ARENA_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Headroom policy: reserve roughly 1/64 of the discovered RAM window for
+/// kthread kernel stacks (`AGENTS.md` §24.1 — a capacity derived from
+/// discovered hardware, never a hand-picked literal that caps a large
+/// machine or wastes a small one).
+const STACK_ARENA_RAM_SHIFT: u32 = 6;
+
+/// Size the reserved kthread-stack guard arena from the discovered RAM
+/// window `ram_size`, per the §24.2 default policy.
+///
+/// The target is a fixed fraction of RAM ([`STACK_ARENA_RAM_SHIFT`]),
+/// clamped to `[STACK_ARENA_MIN_BYTES, STACK_ARENA_MAX_BYTES]` and rounded
+/// **down** to a whole [`GUARD_ARENA_ALIGN`] (2 MiB) block so every guard
+/// page in the arena still lands on its own L3 leaf after
+/// [`rustos_arch_aarch64::paging::AddressSpace::prepare_guard_arena`]. The
+/// result is therefore always a non-zero multiple of 2 MiB. This is a
+/// *policy* (a function of discovered hardware), not a frozen scalar, so a
+/// 64 MiB embedded board and a 256 GiB server each get a workable arena from
+/// the same code (`AGENTS.md` §24.2). Whether that arena actually fits the
+/// usable remainder is decided by [`carve_guard_arena`], which fails closed
+/// to no arena when it does not.
+fn stack_arena_bytes(ram_size: u64) -> u64 {
+    let target = ram_size >> STACK_ARENA_RAM_SHIFT;
+    let clamped = target.clamp(STACK_ARENA_MIN_BYTES, STACK_ARENA_MAX_BYTES);
+    // Round down to a whole 2 MiB block; the minimum is already a multiple of
+    // `GUARD_ARENA_ALIGN`, so the floored result stays >= one block.
+    clamped & !(GUARD_ARENA_ALIGN - 1)
+}
 
 /// Why the discovered RAM window could not be turned into a usable map.
 ///
@@ -86,7 +122,8 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
 pub(crate) struct GuardArena {
     /// First physical byte of the arena (2 MiB-aligned).
     pub(crate) base: u64,
-    /// Arena length in bytes ([`GUARD_ARENA_BYTES`]).
+    /// Arena length in bytes — a whole multiple of [`GUARD_ARENA_ALIGN`]
+    /// sized from the discovered RAM window by [`stack_arena_bytes`].
     pub(crate) len: u64,
 }
 
@@ -106,24 +143,25 @@ pub(crate) struct MemoryLayout {
     pub(crate) arena: Option<GuardArena>,
 }
 
-/// Carve a 2 MiB-aligned guard arena out of the usable window
-/// `[usable_start, ram_end)`.
+/// Carve a 2 MiB-aligned guard arena of `arena_bytes` out of the usable
+/// window `[usable_start, ram_end)`.
 ///
-/// The arena is placed at the first 2 MiB boundary at or after
-/// `usable_start` (above the kernel image, so it never overlaps the
-/// running code or boot stack). Returns `None` if a whole
-/// [`GUARD_ARENA_BYTES`] block does not fit before `ram_end`, so a tiny
+/// `arena_bytes` is the §24.2 policy size from [`stack_arena_bytes`] (a
+/// whole multiple of [`GUARD_ARENA_ALIGN`]). The arena is placed at the
+/// first 2 MiB boundary at or after `usable_start` (above the kernel image,
+/// so it never overlaps the running code or boot stack). Returns `None` if
+/// the whole `arena_bytes` block does not fit before `ram_end`, so a tiny
 /// RAM window degrades to no arena rather than a wrapped or overlapping
 /// region (`AGENTS.md` §2.9).
-fn carve_guard_arena(usable_start: u64, ram_end: u64) -> Option<GuardArena> {
+fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Option<GuardArena> {
     let base = align_up(usable_start, GUARD_ARENA_ALIGN)?;
-    let end = base.checked_add(GUARD_ARENA_BYTES)?;
+    let end = base.checked_add(arena_bytes)?;
     if end > ram_end {
         return None;
     }
     Some(GuardArena {
         base,
-        len: GUARD_ARENA_BYTES,
+        len: arena_bytes,
     })
 }
 
@@ -168,7 +206,7 @@ pub(crate) fn build_memory_map(
         return Err(MemoryMapError::UsableRegionEmpty);
     }
 
-    let arena = carve_guard_arena(usable_start, ram_end);
+    let arena = carve_guard_arena(usable_start, ram_end, stack_arena_bytes(ram_size));
 
     let mut map = BootMemoryMap::new();
     // The kernel image + boot heap: always reserved, from the RAM base
@@ -237,12 +275,15 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_memory_map, region_byte_totals, MemoryMapError, GUARD_ARENA_BYTES};
+    use super::{
+        build_memory_map, region_byte_totals, stack_arena_bytes, MemoryMapError, GUARD_ARENA_ALIGN,
+        STACK_ARENA_MAX_BYTES, STACK_ARENA_MIN_BYTES,
+    };
     use rustos_kernel_mem::{RegionKind, PAGE_SIZE};
 
     /// The QEMU `virt` board's RAM base (GiB 1).
     const VIRT_RAM_BASE: u64 = 0x4000_0000;
-    /// 2 MiB block alignment (and arena size), mirrored from the module.
+    /// 2 MiB block alignment, mirrored from the module.
     const TWO_MIB: u64 = 0x20_0000;
 
     #[test]
@@ -263,8 +304,8 @@ mod tests {
         assert_eq!(regions[1].kind, RegionKind::Usable);
         assert_eq!(regions[1].start.as_u64(), kernel_end);
 
-        let arena = layout.arena.expect("a 2 MiB arena fits in a 1 GiB window");
-        assert_eq!(arena.len, GUARD_ARENA_BYTES);
+        let arena = layout.arena.expect("an arena fits in a 1 GiB window");
+        assert_eq!(arena.len, stack_arena_bytes(ram_size));
         assert_eq!(arena.base % TWO_MIB, 0, "arena is 2 MiB-aligned");
         assert!(
             arena.base >= kernel_end,
@@ -319,8 +360,8 @@ mod tests {
         let kernel_end = VIRT_RAM_BASE + TWO_MIB; // 2 MiB, already aligned
         let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
         let (usable, reserved) = region_byte_totals(&layout.map);
-        // The kernel image (2 MiB) plus the reserved arena (2 MiB).
-        assert_eq!(reserved, TWO_MIB + GUARD_ARENA_BYTES);
+        // The kernel image (2 MiB) plus the policy-sized reserved arena.
+        assert_eq!(reserved, TWO_MIB + stack_arena_bytes(ram_size));
         assert_eq!(usable, ram_size - reserved);
         assert_eq!(usable + reserved, ram_size);
     }
@@ -408,5 +449,60 @@ mod tests {
             MemoryMapError::UsableRegionEmpty.as_str(),
             "usable_region_empty",
         );
+    }
+
+    #[test]
+    fn arena_policy_floors_at_one_block_on_a_tiny_window() {
+        // 64 MiB / 64 = 1 MiB, below the one-block floor, so a tiny machine
+        // still gets a working arena rather than nothing (§24.2 default
+        // policy) — and never wastes more than a single 2 MiB block.
+        assert_eq!(stack_arena_bytes(64 * 1024 * 1024), STACK_ARENA_MIN_BYTES);
+        // Even a degenerate, sub-block window floors to one block (the
+        // separate fit check in `carve_guard_arena` is what refuses it).
+        assert_eq!(stack_arena_bytes(0), STACK_ARENA_MIN_BYTES);
+    }
+
+    #[test]
+    fn arena_policy_scales_with_ram() {
+        // 1 GiB / 64 = 16 MiB: a desktop gets many more stacks than the old
+        // single fixed 2 MiB block, derived from discovered RAM (§24.1).
+        let one_gib = 0x4000_0000;
+        assert_eq!(stack_arena_bytes(one_gib), 16 * 1024 * 1024);
+        assert!(stack_arena_bytes(one_gib) > STACK_ARENA_MIN_BYTES);
+    }
+
+    #[test]
+    fn arena_policy_caps_a_huge_window() {
+        // 256 GiB / 64 = 4 GiB, well past the cap: a big server reserves the
+        // bounded headroom, not an unbounded slab up front (§24.2). Growth
+        // past this is the staged growable-arena follow-on (L3b).
+        let huge = 256u64 * 1024 * 1024 * 1024;
+        assert_eq!(stack_arena_bytes(huge), STACK_ARENA_MAX_BYTES);
+    }
+
+    #[test]
+    fn arena_policy_is_always_a_whole_block_in_range() {
+        for gib in [0u64, 1, 2, 5, 16, 64, 512] {
+            let bytes = stack_arena_bytes(gib * 1024 * 1024 * 1024);
+            assert_eq!(bytes % GUARD_ARENA_ALIGN, 0, "arena is whole 2 MiB blocks");
+            assert!(bytes >= STACK_ARENA_MIN_BYTES, "never below the floor");
+            assert!(bytes <= STACK_ARENA_MAX_BYTES, "never above the cap");
+        }
+    }
+
+    #[test]
+    fn large_window_reserves_more_than_one_block() {
+        // An 8 GiB machine reserves a multi-block arena (capped at 64 MiB),
+        // proving the carve consumes the policy size, not a fixed 2 MiB.
+        let ram_size = 8u64 * 1024 * 1024 * 1024;
+        let kernel_end = VIRT_RAM_BASE + TWO_MIB;
+        let layout = build_memory_map(VIRT_RAM_BASE, ram_size, kernel_end).expect("well-formed");
+        let arena = layout.arena.expect("a large window carves an arena");
+        assert_eq!(arena.len, STACK_ARENA_MAX_BYTES);
+        assert!(
+            arena.len > GUARD_ARENA_ALIGN,
+            "more than one block reserved"
+        );
+        assert_regions_tile_window(&layout, VIRT_RAM_BASE, ram_size);
     }
 }

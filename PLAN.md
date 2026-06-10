@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2 landed; L3–L4 next]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a landed; L3b–L4 next]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) landed; L3–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) landed; L3b–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -910,13 +910,14 @@ and fail-closed (§24.4) — this work must not loosen them.
   (`GUARD_ARENA_BYTES`/`GUARD_ARENA_ALIGN`, single 2 MiB block, single-shot
   carve) and `kernel/rustos-kernel/src/stack_arena.rs`
   (`StackArena` forward-only bump over a fixed `[base,end)`,
-  `STACK_REGION_BYTES`). Make it size from the discovered RAM window and
-  **chain/grow** a fresh 2 MiB-aligned, independently block-split arena on
-  exhaustion (preserving the §17.2 break-before-make and §4 guard-page
-  invariants), instead of failing over to `BoxStack` at ~30 stacks.
-- Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`
-  (fixed 64 KiB worst-case debug value): make it a release-tuned policy value
-  (§24.2).
+  `STACK_REGION_BYTES`). Sizing from the discovered RAM window is **done**
+  (L3a — `stack_arena_bytes`); the remaining L3b work is to **chain/grow** a
+  fresh 2 MiB-aligned, independently block-split arena on exhaustion
+  (preserving the §17.2 break-before-make and §4 guard-page invariants),
+  instead of failing over to `BoxStack`.
+- Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`:
+  **done** (L3a) — now a release-tuned policy value (32 KiB release / 64 KiB
+  debug, §24.2).
 - Per-arch CPU/hart array caps — `kernel/arch/x86_64/src/percpu.rs`
   (`MAX_CPUS = 16`), `kernel/arch/aarch64/src/kernel_arch.rs` (`MAX_CPUS = 8`),
   `kernel/arch/riscv64/src/smp.rs` (`MAX_HARTS = 8`),
@@ -947,7 +948,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   `docs/src/architecture/resource-limits.md` + `syscalls.md`.
 - L2 — **DONE.** Kernel enforcement in `kernel/core`. A per-task `LimitSet`
   (one `ResourceLimit` per `LimitKind`, default `LimitSet::DEFAULT` =
-  unlimited until L3 derives it from hardware) lives in the per-task
+  unlimited until a later increment derives it from hardware) lives in the per-task
   `AddressSpaceRegistry` (`kernel/core/src/aspace.rs`) beside the stream
   table, withdrawn on exit. `rlimit_get`/`rlimit_set` are wired
   (`kernel/core/src/syscalls.rs`): both validate `kind`, copy through the
@@ -957,9 +958,25 @@ and fail-closed (§24.4) — this work must not loosen them.
   unless the caller holds `CAP_RLIMIT_RAISE` (§24.3); the audited `rlimit_set`
   logs the rejection (§19.4). A spawned child inherits the parent's set
   intersected against the default (`LimitSet::inherit`), never widened (§5.2).
-- L3 — growable kernel stack arena + discovered-hardware sizing for the stack
-  arena and per-arch CPU/hart arrays (the sweep above), with the §17.2/§4
-  safety invariants preserved and a release-tuned `KTHREAD_STACK_BYTES`.
+- L3a — **DONE.** Discovered-hardware capacity policies for the kthread
+  kernel stack. `rustos_kernel_core::KTHREAD_STACK_BYTES` is now release-tuned
+  (32 KiB release / 64 KiB debug, both whole 4 KiB pages, §24.2). The guard
+  arena is no longer a fixed 2 MiB block: `rustos_kernel::mem_map::
+  stack_arena_bytes(ram_size)` sizes it from the discovered RAM window
+  (≈1/64 of RAM, clamped `[2 MiB, 64 MiB]`, rounded down to a whole 2 MiB
+  block so each guard page still becomes its own L3 leaf after
+  `prepare_guard_arena`), threaded through `carve_guard_arena`/
+  `build_memory_map`; a window too small to carve one block still degrades to
+  the software-canary `BoxStack` (fail closed, §2.17). Host-tested (mem_map
+  policy floor/scale/cap/whole-block/large-window + the existing region-tiling
+  suite); the existing aarch64 guard verticals continue to prove the
+  mechanism on the now-policy-sized arena. Docs in
+  `docs/src/architecture/resource-limits.md`.
+- L3b — growable kernel stack arena (grow *past* the policy size on genuine
+  exhaustion by chaining a fresh, independently block-split arena rather than
+  failing over to `BoxStack`) + discovered-hardware sizing for the per-arch
+  CPU/hart arrays (the remaining sweep above), with the §17.2/§4 safety
+  invariants preserved.
 - L4 — `ulimit` shell command (`userland/shell/`) over the L1 ABI, plus a
   `sysinfo` (§16.6) query exposing effective limits + live usage behind the
   appropriate capability.

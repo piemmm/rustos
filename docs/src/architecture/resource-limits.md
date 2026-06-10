@@ -95,6 +95,36 @@ second code path.
   so a child can never hold a bound wider than either the parent's ceiling or
   the default — the never-widen rule, mirroring capability delegation (§5.2).
 
+## Discovered-hardware capacity policies
+
+The kthread kernel-stack capacity is the first capacity converted off a
+hand-picked constant onto a §24.2 *policy* (a function of discovered
+hardware), under two knobs:
+
+- **Per-task kernel-stack size** (`rustos_kernel_core::KTHREAD_STACK_BYTES`)
+  is **release-tuned**, not a single worst-case constant (§24.2): a release
+  image — the form that ships — reserves 32 KiB per kthread kernel stack,
+  while an unoptimised debug build keeps the proven-ample 64 KiB its deeper
+  frames need. Both are whole 4 KiB pages so the guard page below the usable
+  region lands on a clean boundary in either profile. Halving the release
+  reservation doubles how many guarded stacks a given arena block holds — the
+  server profile's win.
+- **Guard-arena size** (`rustos_kernel::mem_map::stack_arena_bytes`) is
+  **derived from the discovered RAM window**, not a fixed 2 MiB block (§24.1).
+  The boot path reserves roughly 1/64 of discovered RAM for kthread kernel
+  stacks, clamped to `[2 MiB, 64 MiB]` and rounded down to a whole 2 MiB
+  block (so every guard page still becomes its own L3 leaf after
+  `prepare_guard_arena`). A 64 MiB embedded board floors at one 2 MiB block
+  (tens of stacks); a 1 GiB desktop gets 16 MiB (hundreds); a large server
+  caps at 64 MiB (over a thousand) rather than reserving an unbounded slab up
+  front. A RAM window too small to carve even one block degrades to no arena
+  and the software-canary `BoxStack` fallback (fail closed, §2.17).
+
+Growing the arena *past* its policy size on genuine exhaustion — chaining a
+fresh, independently block-split arena rather than failing over to a
+`BoxStack` — is the staged growable-arena follow-on (L3b), as is sizing the
+per-arch CPU/hart arrays from §18 discovery.
+
 ## Status
 
 - **L1 — ABI (landed).** `lib/abi` `LimitKind` / `ResourceLimit` /
@@ -107,10 +137,16 @@ second code path.
   policy (never widened), the typed-`Result` denial-and-audit path, and the
   `CAP_RLIMIT_RAISE` gate on raising a hard bound. The `rlimit_get`/`rlimit_set`
   handlers are wired in `kernel/core`.
-- **L3 — growable capacities (planned).** A growable kernel-stack arena and
-  discovered-hardware sizing for the per-arch CPU/hart arrays, preserving the
-  §17.2 break-before-make and §4 guard-page invariants, plus a release-tuned
-  per-task stack size.
+- **L3a — discovered-hardware capacity policies (landed).** The release-tuned
+  per-task kernel-stack size (`KTHREAD_STACK_BYTES`, 32 KiB release / 64 KiB
+  debug) and the RAM-window-derived guard-arena policy
+  (`stack_arena_bytes`, ≈1/64 of RAM clamped to `[2 MiB, 64 MiB]`,
+  2 MiB-rounded). See *Discovered-hardware capacity policies* above.
+- **L3b — growable arena + per-arch arrays (planned).** Growing the
+  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
+  fresh, independently block-split arena rather than failing over to a
+  `BoxStack`), and sizing the per-arch CPU/hart arrays from §18 discovery,
+  preserving the §17.2 break-before-make and §4 guard-page invariants.
 - **L4 — `ulimit` + `sysinfo` (planned).** The `ulimit` shell command over the
   L1 ABI and a System Information query (§16.6) exposing effective limits and
   live usage behind the appropriate capability.
