@@ -46,7 +46,7 @@ mod kernel {
     use rustos_arch_api::{CrossCpuTlbShootdown, SecondaryBringup};
     use rustos_arch_x86_64::acpi::{self, MadtEntry};
     use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-    use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+    use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
     use rustos_arch_x86_64::multiboot2::BootInfo;
     use rustos_arch_x86_64::percpu::MAX_CPUS;
     use rustos_arch_x86_64::smp;
@@ -226,7 +226,12 @@ mod kernel {
         let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
         cpu_to_lapic[0] = Some(bsp_id);
         cpu_to_lapic[1] = Some(ap_id);
-        let arch = match X86_64Arch::new(0, bsp_id, cpu_to_lapic) {
+        // The arch handle borrows its per-CPU bookkeeping from a
+        // caller-sized `&'static` backing (`AGENTS.md` §24.1); `kernel_main`
+        // runs once, so a function-local `static` is sound and needs no
+        // allocator. `shootdown_page` walks exactly this two-CPU map.
+        static ARCH_STORAGE: X86_64ArchStorage<{ MAX_CPUS }> = X86_64ArchStorage::new();
+        let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
             Ok(a) => a,
             Err(_) => qemu_exit::exit_failure(),
         };

@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::percpu;
 use rustos_arch_x86_64::{qemu_exit, serial, smp};
 use rustos_kernel_core::spawn_kthread;
@@ -128,7 +128,11 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let bsp_id = smp::bsp_lapic_id();
     let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
     cpu_to_lapic[0] = Some(bsp_id);
-    let arch = match X86_64Arch::new(0, bsp_id, cpu_to_lapic) {
+    // The arch handle borrows its per-CPU bookkeeping from a caller-sized
+    // `&'static` backing (`AGENTS.md` §24.1); `kernel_main` runs once, so
+    // a function-local `static` is sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
         Ok(handle) => Arc::new(handle),
         Err(e) => {
             let _ = writeln!(

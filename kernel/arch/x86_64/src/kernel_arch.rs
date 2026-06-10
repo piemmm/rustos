@@ -36,19 +36,78 @@
 //!   two pre-existing freestanding Stage-2 QEMU test bins — see the
 //!   note in `kernel/arch/x86_64/Cargo.toml`.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 use rustos_arch_api::{
     CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
 use crate::hybrid;
-use crate::percpu::MAX_CPUS;
+
+/// Sentinel stored in an [`X86_64ArchStorage::cpu_to_lapic`] slot that no
+/// CPU maps to. A real LAPIC ID is a `u8` (`0..=255`), so `u16::MAX` can
+/// never collide with a populated entry — it is the encoded `None`
+/// (`AGENTS.md` §2.9 — an unmapped slot is unambiguously absent, never a
+/// guessed id).
+const NO_LAPIC: u16 = u16::MAX;
+
+/// Caller-owned, `&'static` per-CPU backing for an [`X86_64Arch`] handle
+/// (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the caller from
+/// discovered hardware, never a fixed `const` ceiling baked into the
+/// arch crate).
+///
+/// The const parameter `N` is the number of logical-CPU slots the
+/// constructing caller sizes for its machine: a single-CPU vertical uses
+/// `X86_64ArchStorage<1>`, and a multi-core boot path sizes `N` from the
+/// ACPI MADT processor count. The arch crate stays allocator-free
+/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// which would force a bump heap onto the allocator-free Stage-2 QEMU
+/// bins), so the caller provides the storage as a `static` (allocator-free
+/// bins) or a leaked allocation (allocator-having callers); [`X86_64Arch`]
+/// borrows it as `&'static` slices.
+#[derive(Debug)]
+pub struct X86_64ArchStorage<const N: usize> {
+    /// Forward map: dense `CpuId` index → LAPIC ID, [`NO_LAPIC`] for an
+    /// unpopulated slot. Written once by the constructor through the
+    /// shared `&'static` borrow (atomically, so no `&'static mut` is
+    /// needed) and read-only thereafter.
+    cpu_to_lapic: [AtomicU16; N],
+
+    /// Host-only IPI accounting — incremented on every `send_ipi` with
+    /// an in-range, mapped target. Bare-metal builds never touch it.
+    #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
+    host_ipi_count: [AtomicU64; N],
+
+    /// Static [`CoreClass`] of each CPU, indexed by dense [`CpuId`];
+    /// initialised to [`CoreClass::Performance`] (a homogeneous machine).
+    core_classes: [AtomicU8; N],
+}
+
+impl<const N: usize> X86_64ArchStorage<N> {
+    /// A zeroed backing: every map slot is the `u16::MAX` (`NO_LAPIC`)
+    /// unmapped sentinel, every IPI counter is `0`, and every core class
+    /// is the homogeneous [`CoreClass::Performance`] default. `const` so
+    /// the allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cpu_to_lapic: [const { AtomicU16::new(NO_LAPIC) }; N],
+            host_ipi_count: [const { AtomicU64::new(0) }; N],
+            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; N],
+        }
+    }
+}
+
+impl<const N: usize> Default for X86_64ArchStorage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Failure modes of [`X86_64Arch::new`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ArchInitError {
-    /// `boot_cpu_id` was outside `0..MAX_CPUS`.
+    /// `boot_cpu_id` was outside the caller-provided storage capacity.
     BootCpuOutOfRange,
     /// The slot `cpu_to_lapic[boot_cpu_id as usize]` was `None`,
     /// implying the caller forgot to populate the boot CPU's entry
@@ -81,17 +140,18 @@ impl ArchInitError {
 /// tests, see the module docs).
 #[derive(Debug)]
 pub struct X86_64Arch {
-    /// Forward mapping: dense `CpuId` index → LAPIC ID of that CPU.
-    ///
-    /// `None` for unallocated slots above the configured CPU count.
-    /// Populated once at construction; never mutated thereafter.
-    cpu_to_lapic: [Option<u8>; MAX_CPUS],
+    /// Forward mapping: dense `CpuId` index → LAPIC ID of that CPU,
+    /// [`NO_LAPIC`] for an unpopulated slot. Borrowed from the caller's
+    /// [`X86_64ArchStorage`]; its length is the caller's CPU count, so
+    /// the handle imposes no compile-time CPU ceiling (`AGENTS.md`
+    /// §24.1). Populated once at construction; never mutated thereafter.
+    cpu_to_lapic: &'static [AtomicU16],
 
     /// Dense `CpuId` of the boot processor.
     boot_cpu_id: CpuId,
 
-    /// LAPIC ID of the boot processor — must equal
-    /// `cpu_to_lapic[boot_cpu_id as usize].unwrap()`.
+    /// LAPIC ID of the boot processor — must equal the value stored in
+    /// `cpu_to_lapic[boot_cpu_id as usize]`.
     boot_cpu_lapic_id: u8,
 
     /// Host-only monotonic counter backing [`SchedulerArch::ticks_now`].
@@ -109,9 +169,10 @@ pub struct X86_64Arch {
     host_tick_counter: AtomicU64,
 
     /// Host-only IPI accounting — incremented on every `send_ipi`
-    /// with an in-range target. Bare-metal builds never touch it.
+    /// with an in-range target. Borrowed from the caller's
+    /// [`X86_64ArchStorage`]; bare-metal builds never touch it.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
-    host_ipi_count: [AtomicU64; MAX_CPUS],
+    host_ipi_count: &'static [AtomicU64],
 
     /// Host-only stray-IPI counter for out-of-range targets.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
@@ -125,8 +186,9 @@ pub struct X86_64Arch {
     /// in [`Self::new`]. The scheduler reads the table through the
     /// [`SchedulerArch::core_class`] override so it can place background
     /// work on efficiency cores (`AGENTS.md` §17.2 — static per-CPU
-    /// identity discovered by the arch port).
-    core_classes: [AtomicU8; MAX_CPUS],
+    /// identity discovered by the arch port). Borrowed from the caller's
+    /// [`X86_64ArchStorage`].
+    core_classes: &'static [AtomicU8],
 }
 
 impl X86_64Arch {
@@ -136,27 +198,48 @@ impl X86_64Arch {
     ///
     /// See [`ArchInitError`]. The constructor refuses to silently
     /// repair caller mistakes — fail closed per `AGENTS.md` §5.4.5.
-    pub fn new(
+    ///
+    /// `storage` is the caller-owned, `&'static` per-CPU backing sized
+    /// to the machine (`AGENTS.md` §24.1); the handle borrows its slices
+    /// and imposes no compile-time CPU ceiling. `cpu_to_lapic` is the
+    /// dense `CpuId` → LAPIC-ID map read from the ACPI MADT; entries
+    /// beyond `storage`'s capacity `N` are ignored — the caller sizes
+    /// `N` to its discovered processor count.
+    pub fn new<const N: usize>(
+        storage: &'static X86_64ArchStorage<N>,
         boot_cpu_id: CpuId,
         boot_cpu_lapic_id: u8,
-        cpu_to_lapic: [Option<u8>; MAX_CPUS],
+        cpu_to_lapic: &[Option<u8>],
     ) -> Result<Self, ArchInitError> {
         let idx = usize::try_from(boot_cpu_id).map_err(|_| ArchInitError::BootCpuOutOfRange)?;
-        if idx >= MAX_CPUS {
+        if idx >= N {
             return Err(ArchInitError::BootCpuOutOfRange);
         }
-        let recorded = cpu_to_lapic[idx].ok_or(ArchInitError::BootCpuMissingFromLapicMap)?;
+        let recorded = cpu_to_lapic
+            .get(idx)
+            .copied()
+            .flatten()
+            .ok_or(ArchInitError::BootCpuMissingFromLapicMap)?;
         if recorded != boot_cpu_lapic_id {
             return Err(ArchInitError::BootCpuLapicMismatch);
         }
+        // Populate the caller's `&'static` map through the shared borrow
+        // (atomic stores, so no `&'static mut` is needed). An entry whose
+        // dense id exceeds capacity `N` is silently dropped — fail closed
+        // (`AGENTS.md` §5.4), never index out of bounds.
+        for (cpu, slot) in cpu_to_lapic.iter().enumerate() {
+            if let (Some(lapic), Some(dst)) = (slot, storage.cpu_to_lapic.get(cpu)) {
+                dst.store(u16::from(*lapic), Ordering::Relaxed);
+            }
+        }
         let this = Self {
-            cpu_to_lapic,
+            cpu_to_lapic: &storage.cpu_to_lapic,
             boot_cpu_id,
             boot_cpu_lapic_id,
             host_tick_counter: AtomicU64::new(0),
-            host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
+            host_ipi_count: &storage.host_ipi_count,
             host_stray_ipi: AtomicU64::new(0),
-            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; MAX_CPUS],
+            core_classes: &storage.core_classes,
         };
         // `new` runs on the boot processor, so CPUID here reflects the
         // boot core. Each application processor records its own class as
@@ -169,8 +252,9 @@ impl X86_64Arch {
     ///
     /// Each CPU calls this once as it comes online, passing the value
     /// from [`crate::hybrid::detect_current_core_class`]. An out-of-range
-    /// `cpu` is ignored — the table is bounded to `MAX_CPUS`, so a stray
-    /// call cannot corrupt memory (`AGENTS.md` §5.4 fail-closed).
+    /// `cpu` is ignored — the table is bounded to the caller-provided
+    /// storage length, so a stray call cannot corrupt memory
+    /// (`AGENTS.md` §5.4 fail-closed).
     pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
         if let Some(slot) = usize::try_from(cpu)
             .ok()
@@ -196,7 +280,10 @@ impl X86_64Arch {
     #[must_use]
     pub fn lapic_id_of(&self, cpu: CpuId) -> Option<u8> {
         let idx = usize::try_from(cpu).ok()?;
-        self.cpu_to_lapic.get(idx).copied().flatten()
+        match self.cpu_to_lapic.get(idx)?.load(Ordering::Relaxed) {
+            NO_LAPIC => None,
+            raw => u8::try_from(raw).ok(),
+        }
     }
 
     /// Host-test accessor: total IPIs dispatched to `target`.
@@ -208,11 +295,10 @@ impl X86_64Arch {
     #[must_use]
     #[cfg(any(test, not(target_os = "none")))]
     pub fn host_ipi_count(&self, target: CpuId) -> u64 {
-        let idx = match usize::try_from(target) {
-            Ok(i) if i < MAX_CPUS => i,
-            _ => return 0,
-        };
-        self.host_ipi_count[idx].load(Ordering::Relaxed)
+        usize::try_from(target)
+            .ok()
+            .and_then(|idx| self.host_ipi_count.get(idx))
+            .map_or(0, |counter| counter.load(Ordering::Relaxed))
     }
 
     /// Host-test accessor: IPIs whose target was out of range.
@@ -336,9 +422,16 @@ impl SchedulerArch for X86_64Arch {
         {
             // Host: count the IPI; ignore the resolved APIC ID.
             let _ = target_apic_id;
-            // `lapic_id_of` already validated the index.
-            let idx = target as usize;
-            self.host_ipi_count[idx].fetch_add(1, Ordering::Relaxed);
+            // `lapic_id_of` already confirmed `target` maps to a CPU, so
+            // the counter slot exists; an absent slot is dropped rather
+            // than panicking (`AGENTS.md` §2.9). Bound by the borrowed
+            // slice length, never a fixed ceiling (`AGENTS.md` §24.1).
+            if let Some(counter) = usize::try_from(target)
+                .ok()
+                .and_then(|idx| self.host_ipi_count.get(idx))
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -347,23 +440,22 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_page(&self, vaddr: u64) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // Gather the LAPIC ids of every *other* online CPU; the
-            // caller invalidates itself inside `shootdown`. The fixed
-            // array is bounded by `MAX_CPUS`, so there is no allocation
-            // on the shootdown path.
+            // Stream the LAPIC ids of every *other* online CPU straight
+            // to `shootdown`; the caller invalidates itself inside it.
+            // The iterator walks the caller-sized per-CPU map
+            // (`AGENTS.md` §24.1 — no fixed `MAX_CPUS` buffer), and is
+            // `Clone` because it captures only `Copy` data (`self` and
+            // `me`), so `shootdown` can take its length and re-walk it
+            // without an allocation (`AGENTS.md` §2.16).
             let me = self.current_cpu();
-            let mut targets = [0u8; MAX_CPUS];
-            let mut n = 0;
-            for cpu in 0..MAX_CPUS as CpuId {
+            let targets = (0..self.cpu_to_lapic.len()).filter_map(move |idx| {
+                let cpu = CpuId::try_from(idx).ok()?;
                 if cpu == me {
-                    continue;
+                    return None;
                 }
-                if let Some(lapic) = self.lapic_id_of(cpu) {
-                    targets[n] = lapic;
-                    n += 1;
-                }
-            }
-            crate::tlb_shootdown::shootdown(vaddr, &targets[..n]);
+                self.lapic_id_of(cpu)
+            });
+            crate::tlb_shootdown::shootdown(vaddr, targets);
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
@@ -469,18 +561,18 @@ pub fn halt() -> ! {
 mod tests {
     use super::*;
 
-    fn live_map(entries: &[(usize, u8)]) -> [Option<u8>; MAX_CPUS] {
-        let mut m = [None; MAX_CPUS];
-        for &(idx, lapic) in entries {
-            m[idx] = Some(lapic);
-        }
-        m
-    }
+    // Each test owns a distinct function-local `static` backing — the
+    // same allocator-free `&'static`-storage pattern the bare-metal
+    // verticals use (`AGENTS.md` §24.1) — so no two handles alias one
+    // another's per-CPU bookkeeping under the parallel test runner
+    // (`AGENTS.md` §7 — no flaky shared state). Each test constructs
+    // exactly one handle, so a single local `static` per test suffices.
 
     #[test]
     fn new_accepts_consistent_mapping() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)]))
-            .expect("valid construction");
+        static S: X86_64ArchStorage<3> = X86_64ArchStorage::new();
+        let arch =
+            X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).expect("valid construction");
         assert_eq!(arch.boot_cpu_id(), 0);
         assert_eq!(arch.boot_cpu_lapic_id(), 0xA0);
         assert_eq!(arch.lapic_id_of(0), Some(0xA0));
@@ -490,35 +582,41 @@ mod tests {
 
     #[test]
     fn new_rejects_boot_cpu_out_of_range() {
-        let err =
-            X86_64Arch::new(u32::try_from(MAX_CPUS).unwrap(), 0, live_map(&[(0, 0)])).unwrap_err();
+        // Boot CPU id equal to the storage capacity is one past the last
+        // valid slot — fail closed (`AGENTS.md` §5.4), no fixed `MAX_CPUS`.
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let err = X86_64Arch::new(&S, 2, 0, &[Some(0)]).unwrap_err();
         assert_eq!(err, ArchInitError::BootCpuOutOfRange);
         assert_eq!(err.as_str(), "boot_cpu_out_of_range");
     }
 
     #[test]
     fn new_rejects_missing_boot_cpu_slot() {
-        let err = X86_64Arch::new(2, 0, live_map(&[(0, 0)])).unwrap_err();
+        static S: X86_64ArchStorage<4> = X86_64ArchStorage::new();
+        let err = X86_64Arch::new(&S, 2, 0, &[Some(0)]).unwrap_err();
         assert_eq!(err, ArchInitError::BootCpuMissingFromLapicMap);
         assert_eq!(err.as_str(), "boot_cpu_missing_from_lapic_map");
     }
 
     #[test]
     fn new_rejects_lapic_id_mismatch() {
-        let err = X86_64Arch::new(0, 0xAA, live_map(&[(0, 0xBB)])).unwrap_err();
+        static S: X86_64ArchStorage<1> = X86_64ArchStorage::new();
+        let err = X86_64Arch::new(&S, 0, 0xAA, &[Some(0xBB)]).unwrap_err();
         assert_eq!(err, ArchInitError::BootCpuLapicMismatch);
         assert_eq!(err.as_str(), "boot_cpu_lapic_mismatch");
     }
 
     #[test]
     fn current_cpu_on_host_returns_boot_cpu_id() {
-        let arch = X86_64Arch::new(3, 0xC3, live_map(&[(3, 0xC3)])).unwrap();
+        static S: X86_64ArchStorage<4> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 3, 0xC3, &[None, None, None, Some(0xC3)]).unwrap();
         assert_eq!(arch.current_cpu(), 3);
     }
 
     #[test]
     fn ticks_now_is_monotonic_on_host() {
-        let arch = X86_64Arch::new(0, 0, live_map(&[(0, 0)])).unwrap();
+        static S: X86_64ArchStorage<1> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0, &[Some(0)]).unwrap();
         let a = arch.ticks_now();
         let b = arch.ticks_now();
         let c = arch.ticks_now();
@@ -528,7 +626,8 @@ mod tests {
 
     #[test]
     fn send_ipi_records_in_range_target_on_host() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         arch.send_ipi(1);
         arch.send_ipi(1);
         arch.send_ipi(0);
@@ -539,8 +638,10 @@ mod tests {
 
     #[test]
     fn send_ipi_drops_unmapped_target_into_stray_counter() {
-        let arch = X86_64Arch::new(0, 0, live_map(&[(0, 0)])).unwrap();
-        // CPU 5 is unmapped — no entry in `cpu_to_lapic`.
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0, &[Some(0)]).unwrap();
+        // CPU 5 is out of range for this 2-slot storage — `lapic_id_of`
+        // returns None and the stray counter ticks.
         arch.send_ipi(5);
         // CPU u32::MAX is out of range — `usize::try_from` succeeds
         // (u32 → usize) on 64-bit hosts but the index is OOB, so
@@ -552,7 +653,8 @@ mod tests {
 
     #[test]
     fn core_class_defaults_to_performance_then_tracks_recorded_class() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         // Every CPU starts as a performance core (homogeneous default);
         // on the host the boot-CPU detection also yields Performance.
         assert_eq!(arch.core_class(0), CoreClass::Performance);
@@ -573,7 +675,8 @@ mod tests {
     /// `MemoryTags` handles (`plans/WIRING.md` Stage W0).
     #[test]
     fn passes_arch_hal_conformance_suite() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         // One enabled Local APIC + one I/O APIC, the minimal MADT the
         // discovery suite needs (`AGENTS.md` §18.2). The entry bytes are a
         // fixed array (LocalApic 8 bytes + IoApic 12 bytes) so the test
@@ -601,7 +704,8 @@ mod tests {
     /// `cross_cpu_tlb_shootdown_qemu_x86_64`.
     #[test]
     fn passes_cross_cpu_tlb_shootdown_conformance() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         rustos_arch_api::xtlb::conformance::run_all(&arch, 0x10_0000_0000);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
         rustos_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
@@ -616,7 +720,8 @@ mod tests {
     /// `cross_cpu_tlb_shootdown_qemu_x86_64`).
     #[test]
     fn passes_secondary_bringup_conformance() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
         let erased: &dyn SecondaryBringup = &arch;
         rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
@@ -630,7 +735,8 @@ mod tests {
     /// `AGENTS.md` §7.)
     #[test]
     fn start_secondary_rejects_boot_and_unmapped_ids() {
-        let arch = X86_64Arch::new(0, 0xA0, live_map(&[(0, 0xA0), (1, 0xA1)])).unwrap();
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         // SAFETY: every call below is refused before any hardware
         // action, so the test takes no platform action and touches no
         // shared global state.

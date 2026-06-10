@@ -11,7 +11,7 @@ use rustos_arch_api::SecondaryBringup;
 use rustos_arch_x86_64::acpi::{self, MadtEntry};
 use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
 use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
-use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::multiboot2::BootInfo;
 use rustos_arch_x86_64::smp;
 use rustos_arch_x86_64::{percpu, preempt};
@@ -409,7 +409,13 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     for i in 0..ap_ids.count {
         cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
     }
-    let bringup = match X86_64Arch::new(0, bsp_id, cpu_to_lapic) {
+    // The bring-up handle borrows its per-CPU bookkeeping from a
+    // caller-sized `&'static` backing (`AGENTS.md` §24.1 — sized to this
+    // vertical's discovered CPU count, no fixed ceiling in the arch
+    // crate). `kernel_main` runs once, so a function-local `static` is
+    // sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
         Ok(handle) => handle,
         Err(e) => {
             let _ = writeln!(

@@ -326,9 +326,25 @@ statics — the secondary-bring-up item below). The production boot path supplie
 a `static Aarch64ArchStorage<1>` (the boot slice brings up the boot core only)
 and every aarch64 QEMU vertical constructs through a right-sized `static`.
 
-**x86_64 (`X86_64Arch`) — pending.** The same `&'static`-slice conversion
-(plus the `core_classes` table and the `shootdown_page` target buffer) is the
-next L3b increment, mirroring the riscv64/aarch64 shape.
+**x86_64 (`X86_64Arch`) — done.** `X86_64Arch` no longer holds
+`[T; MAX_CPUS]` arrays; it borrows three `&'static` slices — the dense-`CpuId`
+→ LAPIC-ID map (`&[AtomicU16]`), the host-only IPI ledger (`&[AtomicU64]`), and
+the per-core `CoreClass` table (`&[AtomicU8]`) — from a caller-provided
+`X86_64ArchStorage<N>` backing, exactly as riscv64/aarch64 borrow from their
+storage. The LAPIC map encodes an unpopulated slot as the `u16::MAX`
+(`NO_LAPIC`) sentinel — a real LAPIC ID is a `u8`, so it can never collide —
+and the constructor populates the map from the caller's `&[Option<u8>]` MADT
+map through the shared borrow with atomic stores. Every per-slot access is
+bounds-checked against the slice length, `send_ipi` bounds its target by it,
+and `shootdown_page` no longer fills a fixed `[u8; MAX_CPUS]` scratch buffer —
+it streams the other CPUs' LAPIC ids straight out of the borrowed map into
+`tlb_shootdown::shootdown` (now an `Iterator + Clone` consumer that walks the
+ids twice: once to publish the acknowledge count, once to raise the IPIs), so
+there is no `MAX_CPUS` ceiling in the handle. (`MAX_CPUS` survives only for the
+`smp.s` secondary-stack pool and the per-CPU `percpu`/`syscall_entry` statics —
+the secondary-bring-up item below.) The production boot path supplies a
+`static X86_64ArchStorage<1>` (production `rustos-kernel` runs single-CPU) and
+every x86_64 QEMU vertical constructs through a right-sized `static`.
 
 ## Status
 
@@ -354,17 +370,15 @@ next L3b increment, mirroring the riscv64/aarch64 shape.
   spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
   capacity on both production producers (see *Spawn page-table capacity*
   above), the **wasm32** per-CPU handle bookkeeping is now
-  discovered-count-sized, and the **riscv64** and **aarch64** per-CPU handle
-  bookkeeping are now caller-provided `&'static`-slice capacities via
-  `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` (see *Per-arch CPU/hart handle
-  bookkeeping* above). Still planned: growing the kthread-stack arena *past* its
-  policy size on genuine exhaustion (chaining a fresh, independently
-  block-split arena rather than failing over to a `BoxStack`); the **x86_64**
-  per-CPU handle bookkeeping via the same no-`alloc`
-  caller-provided-`&'static` design (riscv64 and aarch64 are done); and the
-  per-arch **secondary-bring-up** bound (the `smp.s` secondary-stack pools and
-  per-CPU `static` storage), preserving the §17.2 break-before-make and §4
-  guard-page invariants.
+  discovered-count-sized, and the **riscv64**, **aarch64**, and **x86_64**
+  per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities
+  via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>`
+  (see *Per-arch CPU/hart handle bookkeeping* above). Still planned: growing the
+  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
+  fresh, independently block-split arena rather than failing over to a
+  `BoxStack`); and the per-arch **secondary-bring-up** bound (the `smp.s`
+  secondary-stack pools and per-CPU `static` storage), preserving the §17.2
+  break-before-make and §4 guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

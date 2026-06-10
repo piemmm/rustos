@@ -86,13 +86,21 @@ static SHOOTDOWN: ShootdownMailbox = ShootdownMailbox {
 };
 
 /// Invalidate the 4 KiB page containing `vaddr` on the calling CPU and on
-/// every CPU whose LAPIC ID appears in `target_lapics`, returning once
-/// all of them have acknowledged.
+/// every CPU whose LAPIC ID `targets` yields, returning once all of them
+/// have acknowledged.
 ///
-/// `target_lapics` must list the *other* online CPUs (never the caller).
-/// Passing an empty slice degrades to a purely local `invlpg`.
+/// `targets` must yield the *other* online CPUs' LAPIC ids (never the
+/// caller). An empty iterator degrades to a purely local `invlpg`. The
+/// iterator is taken `Clone` rather than as a `&[u8]` so the caller can
+/// stream the ids straight out of its caller-sized per-CPU map without a
+/// fixed `MAX_CPUS` scratch buffer (`AGENTS.md` §24.1); `shootdown` walks
+/// it twice — once to publish the acknowledge count, once to raise the
+/// IPIs — so it must be cheap to re-walk (`AGENTS.md` §2.16).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub fn shootdown(vaddr: u64, target_lapics: &[u8]) {
+pub fn shootdown<I>(vaddr: u64, targets: I)
+where
+    I: Iterator<Item = u8> + Clone,
+{
     // Acquire the global descriptor. `Acquire` pairs with the `Release`
     // store in the unlock below so a previous shootdown's writes are
     // visible before this one reuses the mailbox.
@@ -112,7 +120,7 @@ pub fn shootdown(vaddr: u64, target_lapics: &[u8]) {
     SHOOTDOWN.vaddr.store(vaddr, Ordering::Release);
     SHOOTDOWN
         .pending
-        .store(target_lapics.len(), Ordering::Release);
+        .store(targets.clone().count(), Ordering::Release);
 
     // SAFETY: `LAPIC_BASE_PHYS` is identity-mapped (boot.s
     // SAFETY-INVARIANT 4). Each CPU accesses its own per-CPU LAPIC at
@@ -122,7 +130,7 @@ pub fn shootdown(vaddr: u64, target_lapics: &[u8]) {
     let mmio =
         unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32) };
     let mut lapic = crate::apic::Lapic::new(mmio);
-    for &target in target_lapics {
+    for target in targets {
         lapic.send_ipi(
             target,
             crate::apic::DeliveryMode::Fixed,

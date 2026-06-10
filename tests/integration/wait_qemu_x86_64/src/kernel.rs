@@ -14,7 +14,7 @@ use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno, SyscallNumber, SYSCALL_MAX_ARGS};
 use rustos_arch_api::{EnterUser, UserEntry};
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
-use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use rustos_arch_x86_64::userentry::UserMode;
 use rustos_arch_x86_64::{percpu, qemu_exit, smp, syscall_entry};
@@ -472,7 +472,12 @@ fn run_wait() -> ! {
     let bsp_id = smp::bsp_lapic_id();
     let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
     cpu_to_lapic[0] = Some(bsp_id);
-    let Ok(arch) = X86_64Arch::new(0, bsp_id, cpu_to_lapic) else {
+    // The arch handle borrows its per-CPU bookkeeping from a caller-sized
+    // `&'static` backing (`AGENTS.md` §24.1); this vertical is single-CPU,
+    // and `run_wait` runs once, so a function-local `static` per handle is
+    // sound and needs no allocator.
+    static SCHED_ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    let Ok(arch) = X86_64Arch::new(&SCHED_ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
         note(TEST_FAIL, "X4 test: X86_64Arch::new failed");
         qemu_exit::exit_failure();
     };
@@ -485,7 +490,10 @@ fn run_wait() -> ! {
     *SCHED.lock() = Some(sched);
 
     // Build the process-wait producer over its own leaked arch handle.
-    let Ok(producer_arch) = X86_64Arch::new(0, bsp_id, cpu_to_lapic) else {
+    static PRODUCER_ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> =
+        X86_64ArchStorage::new();
+    let Ok(producer_arch) = X86_64Arch::new(&PRODUCER_ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic)
+    else {
         note(TEST_FAIL, "X4 test: producer X86_64Arch::new failed");
         qemu_exit::exit_failure();
     };

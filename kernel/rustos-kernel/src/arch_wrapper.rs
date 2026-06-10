@@ -329,12 +329,22 @@ const _BIN_ARCH_IS_SCHED_ARCH: fn(&BinArch) -> u32 = <BinArch as SchedulerArch>:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::boxed::Box;
+    use rustos_arch_x86_64::kernel_arch::X86_64ArchStorage;
     use rustos_arch_x86_64::percpu::MAX_CPUS;
 
     fn arch_with_boot_cpu(boot_cpu: u32, lapic: u8) -> X86_64Arch {
+        // Each construction leaks its own per-CPU backing so no two
+        // handles share IPI counters under the parallel test runner
+        // (`AGENTS.md` §7); the leak is bounded (one per host test) and
+        // the bin crate already has an allocator (`AGENTS.md` §24.1 —
+        // allocator-having callers may provide leaked storage). `MAX_CPUS`
+        // is a convenient test capacity, not a production ceiling.
+        let storage: &'static X86_64ArchStorage<MAX_CPUS> =
+            Box::leak(Box::new(X86_64ArchStorage::new()));
         let mut map = [None; MAX_CPUS];
         map[boot_cpu as usize] = Some(lapic);
-        X86_64Arch::new(boot_cpu, lapic, map).expect("valid X86_64Arch")
+        X86_64Arch::new(storage, boot_cpu, lapic, &map).expect("valid X86_64Arch")
     }
 
     /// Host-test convenience: build a [`BinArch`] with the
@@ -380,13 +390,8 @@ mod tests {
 
     #[test]
     fn send_ipi_delegates_to_inner_host_counter() {
-        let arch = X86_64Arch::new(0, 0xA0, {
-            let mut m = [None; MAX_CPUS];
-            m[0] = Some(0xA0);
-            m[1] = Some(0xA1);
-            m
-        })
-        .unwrap();
+        let storage: &'static X86_64ArchStorage<2> = Box::leak(Box::new(X86_64ArchStorage::new()));
+        let arch = X86_64Arch::new(storage, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         let bin = BinArch::new(arch, test_calibration(), IrqRouting::unsupported());
         bin.send_ipi(1);
         bin.send_ipi(1);

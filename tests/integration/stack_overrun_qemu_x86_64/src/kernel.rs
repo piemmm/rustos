@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use rustos_arch_api::mmu::AddressSpace as _;
 use rustos_arch_api::tlb::TlbShootdown as _;
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
-use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::paging::{self, BLOCK_2MIB, KERNEL_VMA_BASE, PAGE_SIZE};
 use rustos_arch_x86_64::{fault, percpu, qemu_exit, smp};
 use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
@@ -300,7 +300,11 @@ fn run_overrun_test() -> ! {
     let bsp_id = smp::bsp_lapic_id();
     let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
     cpu_to_lapic[0] = Some(bsp_id);
-    let Ok(handle) = X86_64Arch::new(0, bsp_id, cpu_to_lapic) else {
+    // The arch handle borrows its per-CPU bookkeeping from a caller-sized
+    // `&'static` backing (`AGENTS.md` §24.1); `run_overrun_test` runs once,
+    // so a function-local `static` is sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    let Ok(handle) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
         fail("X86_64Arch::new failed");
     };
     let arch = Arc::new(handle);

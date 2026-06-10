@@ -237,17 +237,22 @@ mod kernel {
         //    sound and is the cleanest way to keep the test isolated
         //    from `KernelState`'s borrows.
         use rustos_arch_x86_64::apic_timer::Calibration;
-        use rustos_arch_x86_64::kernel_arch::X86_64Arch;
+        use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
         use rustos_arch_x86_64::percpu::MAX_CPUS;
 
-        let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
         // The BSP LAPIC id is recorded during `boot::try_boot` step 5;
         // we don't need its exact value here — `X86_64Arch::new`
         // accepts any `(boot_cpu, bsp_lapic_id, map)` triple where the
         // map contains the BSP. Using `0` keeps the test deterministic
         // and avoids reading the LAPIC ID register a second time.
-        cpu_to_lapic[0] = Some(0);
-        let Ok(arch_inner) = X86_64Arch::new(0, 0, cpu_to_lapic) else {
+        //
+        // The arch handle borrows its per-CPU bookkeeping from a
+        // caller-sized `&'static` backing (`AGENTS.md` §24.1);
+        // `run_synthesised_test` runs once, so a function-local `static`
+        // is sound and needs no allocator.
+        static ARCH_STORAGE: X86_64ArchStorage<{ MAX_CPUS }> = X86_64ArchStorage::new();
+        let cpu_to_lapic: [Option<u8>; 1] = [Some(0)];
+        let Ok(arch_inner) = X86_64Arch::new(&ARCH_STORAGE, 0, 0, &cpu_to_lapic) else {
             qemu_exit::exit_failure();
         };
         // A synthetic 1 GHz TSC calibration. `monotonic_ns` is not

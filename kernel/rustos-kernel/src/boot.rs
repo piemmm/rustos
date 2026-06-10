@@ -53,7 +53,7 @@ use rustos_arch_x86_64::apic_timer::{self, PolledPit, Rdtsc};
 use rustos_arch_x86_64::bootmemory;
 use rustos_arch_x86_64::gdt::PerCpuGdt;
 use rustos_arch_x86_64::irq as arch_irq;
-use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
+use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::multiboot2::BootInfo as Mb2BootInfo;
 use rustos_arch_x86_64::percpu::MAX_CPUS;
 use rustos_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
@@ -436,11 +436,14 @@ fn try_boot(
     verify_bsp_present(&madt, bsp_lapic_id)?;
 
     // 6. Build the `cpu_to_lapic` map with **only** the BSP populated.
-    //    Stage 2.7 AP bring-up will fill in the remaining slots; for
-    //    (c7-bin) the kernel is single-CPU and `scheduler_config.cpus`
-    //    matches that.
-    let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
-    cpu_to_lapic[0] = Some(bsp_lapic_id);
+    //    Production `rustos-kernel` runs single-CPU (it never calls the
+    //    `SecondaryBringup` HAL method — that handshake is proven by the
+    //    QEMU verticals), so the arch handle's per-CPU bookkeeping is
+    //    sized to one slot (`AGENTS.md` §24.1 — capacity matches the
+    //    machine the caller actually drives, no global `MAX_CPUS`
+    //    ceiling baked into the arch crate). The per-CPU kernel-stack
+    //    pool keeps its own `MAX_CPUS` secondary-bring-up bound.
+    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_lapic_id)];
 
     // 6b. Validate the TSC before trusting `RDTSC` as the cross-CPU
     //     monotonic clock source. The contract is recorded on every
@@ -458,7 +461,12 @@ fn try_boot(
         return Err(BootError::TscNotInvariant);
     }
 
-    let arch = X86_64Arch::new(0, bsp_lapic_id, cpu_to_lapic).map_err(|_| BootError::ArchInit)?;
+    // The arch handle borrows its per-CPU bookkeeping from this
+    // process-static backing (`AGENTS.md` §24.1); `boot` runs once, so a
+    // single `static` is sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
+    let arch = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_lapic_id, &cpu_to_lapic)
+        .map_err(|_| BootError::ArchInit)?;
 
     // 7. Install the production syscall-dispatch callback **before**
     //    `init_local_syscalls` enables `syscall` on any CPU. The
