@@ -90,11 +90,12 @@ pub use syscalls::{
 };
 pub use sysinfo::{
     encoded_query_table, spec_for as sysinfo_spec_for, KernelMemoryStats, MountListRequest,
-    MountRecord, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoQuerySpec,
-    SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
-    HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    MountRecord, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
+    SysinfoQueryId, SysinfoQuerySpec, SysinfoRequestHeader, SystemIdentity, Uptime,
+    ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN,
+    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
 pub use time::{coarsen_clock_ns, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC};
 

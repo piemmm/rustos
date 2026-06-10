@@ -20,6 +20,7 @@
 
 use crate::driver::filesystem::MountFlags;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::rlimit::{LimitKind, ResourceLimit};
 use crate::time::{Duration64, Time64};
 use crate::{CapabilityId, Errno};
 
@@ -66,6 +67,14 @@ impl SysinfoQueryId {
     /// §16.6). The privileged *act* of mounting is gated separately by
     /// `CAP_FS_MOUNT`; this query only reports.
     pub const MOUNT_LIST: Self = Self(6);
+    /// Read the calling principal's own effective resource limits together
+    /// with its current live usage of each (`AGENTS.md` §24.3, §16.6).
+    ///
+    /// Requires no capability: the answer is scoped to the caller's own
+    /// task, exposing no other principal's state — like
+    /// [`Self::SELF_PROCESS_LIST`]. Observing *another* principal's limits
+    /// would be a separate, capability-gated query.
+    pub const RESOURCE_LIMITS: Self = Self(7);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -179,6 +188,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::MOUNT_LIST,
         name: "mount_list",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::RESOURCE_LIMITS,
+        name: "resource_limits",
         required_capability: None,
         audit: false,
     },
@@ -992,17 +1007,108 @@ impl MountRecord {
     }
 }
 
+/// One row of the [`SysinfoQueryId::RESOURCE_LIMITS`] response: a resource's
+/// effective soft/hard bound and the caller's current live usage of it.
+///
+/// The full response is exactly [`LimitKind::COUNT`] records packed
+/// back-to-back in [`LimitKind`] discriminant order — its byte length is
+/// [`RESOURCE_LIMITS_REPORT_LEN`] — so a client reads them positionally and
+/// the `kind` field is a self-describing cross-check rather than a sort key.
+///
+/// `usage` is expressed in the resource's natural unit: bytes for the
+/// `*Bytes` kinds and a plain count otherwise. It is informational; unlike
+/// `limit` it carries no well-formedness invariant.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ResourceLimitRecord {
+    /// Which resource this row describes.
+    pub kind: LimitKind,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: u32,
+    /// The effective limit (soft/hard) currently in force for the caller.
+    pub limit: ResourceLimit,
+    /// Current live usage of the resource, in its natural unit (see the
+    /// type-level note). Informational; carries no invariant.
+    pub usage: u64,
+}
+
+impl ResourceLimitRecord {
+    /// Encoded size on the wire.
+    ///
+    /// Layout, little-endian: `kind` (`u32`, offset 0), `reserved` (`u32`,
+    /// offset 4), `limit` ([`ResourceLimit`], offset 8), `usage` (`u64`,
+    /// offset 24).
+    pub const WIRE_LEN: usize = 8 + ResourceLimit::WIRE_LEN + 8;
+
+    /// Construct a record for `kind` with effective `limit` and live `usage`.
+    #[must_use]
+    pub const fn new(kind: LimitKind, limit: ResourceLimit, usage: u64) -> Self {
+        Self {
+            kind,
+            reserved: 0,
+            limit,
+            usage,
+        }
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.kind.as_u32());
+        put_u32(&mut out, 4, self.reserved);
+        out[8..8 + ResourceLimit::WIRE_LEN].copy_from_slice(&self.limit.encode());
+        put_u64(&mut out, 24, self.usage);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    ///   [`WIRE_LEN`](Self::WIRE_LEN).
+    /// * [`Errno::BadMagic`] if the reserved field is non-zero (a
+    ///   reserved-must-be-zero violation is wire corruption).
+    /// * [`Errno::OutOfRange`] if `kind` is not an `abi-v1` [`LimitKind`]
+    ///   discriminant, or the embedded [`ResourceLimit`] is not well-formed
+    ///   (`soft > hard`).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let reserved = read_u32(bytes, 4);
+        if reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let kind = LimitKind::from_u32(read_u32(bytes, 0))?;
+        let limit = ResourceLimit::decode(&bytes[8..8 + ResourceLimit::WIRE_LEN])?;
+        Ok(Self {
+            kind,
+            reserved,
+            limit,
+            usage: read_u64(bytes, 24),
+        })
+    }
+}
+
+/// Byte length of a full [`SysinfoQueryId::RESOURCE_LIMITS`] response: one
+/// [`ResourceLimitRecord`] per [`LimitKind`], in discriminant order.
+pub const RESOURCE_LIMITS_REPORT_LEN: usize = ResourceLimitRecord::WIRE_LEN * LimitKind::COUNT;
+
 #[cfg(test)]
 mod tests {
     use super::{
         encoded_query_table, spec_for, KernelMemoryStats, MountListRequest, MountRecord,
-        ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-        MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX,
-        SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
+        HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
     use crate::driver::filesystem::MountFlags;
+    use crate::rlimit::{LimitKind, ResourceLimit};
     use crate::time::{Duration64, Time64};
     use crate::{CapabilityId, Errno};
 
@@ -1016,6 +1122,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::SYSTEM_IDENTITY.as_u16(), 4);
         assert_eq!(SysinfoQueryId::UPTIME.as_u16(), 5);
         assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6);
+        assert_eq!(SysinfoQueryId::RESOURCE_LIMITS.as_u16(), 7);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -1085,6 +1192,59 @@ mod tests {
         assert!(!spec_for(SysinfoQueryId::SELF_PROCESS_LIST).unwrap().audit);
         assert!(!spec_for(SysinfoQueryId::UPTIME).unwrap().audit);
         assert!(!spec_for(SysinfoQueryId::MOUNT_LIST).unwrap().audit);
+        // A principal reads its own limits + usage; self-scoped, so ungated
+        // and unaudited like the other self-scoped observers (§24.3, §16.6).
+        assert_eq!(
+            spec_for(SysinfoQueryId::RESOURCE_LIMITS)
+                .unwrap()
+                .required_capability,
+            None
+        );
+        assert!(!spec_for(SysinfoQueryId::RESOURCE_LIMITS).unwrap().audit);
+    }
+
+    #[test]
+    fn resource_limit_record_round_trips() {
+        let limit = ResourceLimit::new(4096, 1 << 20).expect("well-formed");
+        let rec = ResourceLimitRecord::new(LimitKind::AddressSpaceBytes, limit, 2048);
+        assert_eq!(ResourceLimitRecord::WIRE_LEN, 32);
+        assert_eq!(RESOURCE_LIMITS_REPORT_LEN, 32 * LimitKind::COUNT);
+        let bytes = rec.to_le_bytes();
+        assert_eq!(bytes.len(), ResourceLimitRecord::WIRE_LEN);
+        assert_eq!(ResourceLimitRecord::from_bytes(&bytes), Ok(rec));
+    }
+
+    #[test]
+    fn resource_limit_record_fails_closed() {
+        let rec = ResourceLimitRecord::new(LimitKind::Processes, ResourceLimit::UNLIMITED, 7);
+        let good = rec.to_le_bytes();
+        // Short buffer.
+        assert_eq!(
+            ResourceLimitRecord::from_bytes(&good[..ResourceLimitRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Non-zero reserved word is wire corruption.
+        let mut reserved = good;
+        reserved[4] = 1;
+        assert_eq!(
+            ResourceLimitRecord::from_bytes(&reserved),
+            Err(Errno::BadMagic)
+        );
+        // Unassigned LimitKind discriminant.
+        let mut bad_kind = good;
+        bad_kind[0] = 0xFF;
+        assert_eq!(
+            ResourceLimitRecord::from_bytes(&bad_kind),
+            Err(Errno::OutOfRange)
+        );
+        // Malformed embedded limit (soft > hard).
+        let mut bad_limit = good;
+        bad_limit[8] = 10; // soft low byte
+        bad_limit[16] = 5; // hard low byte
+        assert_eq!(
+            ResourceLimitRecord::from_bytes(&bad_limit),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

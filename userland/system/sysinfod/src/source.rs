@@ -10,8 +10,10 @@
 //! two keeps the security-relevant code free of any particular kernel
 //! plumbing.
 
-use rustos_abi::sysinfo::{KernelMemoryStats, MountRecord, ProcessRecord, SystemIdentity, Uptime};
-use rustos_abi::{CapabilityQuery, Errno};
+use rustos_abi::sysinfo::{
+    KernelMemoryStats, MountRecord, ProcessRecord, ResourceLimitRecord, SystemIdentity, Uptime,
+};
+use rustos_abi::{CapabilityQuery, Errno, LimitKind};
 
 /// The authenticated principal on whose behalf a request is served.
 ///
@@ -90,4 +92,18 @@ pub trait SysinfoSource {
     /// the slice is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn mount_records(&self, caller: &Caller<'_>) -> Result<&[MountRecord], Errno>;
+
+    /// Return `caller`'s effective resource limits and current live usage,
+    /// one record per [`LimitKind`] in discriminant order (`AGENTS.md`
+    /// §24.3). The query is self-scoped — the answer describes the caller's
+    /// own task only — so it carries no capability gate (§16.6).
+    ///
+    /// The fixed-length array (one entry per kind) is returned whole; the
+    /// dispatcher packs it. A source that cannot read a particular usage
+    /// figure reports it conservatively rather than omitting the record, so
+    /// the array is always [`LimitKind::COUNT`] long and positional.
+    fn resource_limits(
+        &self,
+        caller: &Caller<'_>,
+    ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno>;
 }

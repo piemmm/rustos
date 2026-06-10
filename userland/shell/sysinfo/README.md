@@ -24,12 +24,15 @@ memory              kernel memory statistics (needs CAP_SYSINFO_KERNEL)
 hardware            detected hardware tree (needs CAP_SYSINFO_HW)
 identity            machine identity and OS version
 uptime              time since boot and boot wall-clock time
+limits              your effective resource limits and live usage
 help                show the usage banner
 ```
 
-`processes` (without `--all`) and `identity`/`uptime` require no
-capability; the privileged queries are gated by `sysinfod`, not by this
-tool.
+`processes` (without `--all`), `identity`/`uptime`, and `limits` require
+no capability; the privileged queries are gated by `sysinfod`, not by this
+tool. `limits` (alias `rlimits`) is self-scoped — it reports the calling
+process's *own* effective resource limits and live usage (`AGENTS.md`
+§24.3); the `ulimit` shell builtin is the counterpart that *changes* them.
 
 ## A request/render machine, not a data source
 

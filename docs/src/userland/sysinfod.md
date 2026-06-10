@@ -43,6 +43,7 @@ a privileged query without first passing its capability gate.
 | `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
 | `UPTIME`              | none                 | no      | `Uptime`                       |
 | `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
+| `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
 
 ## Response encoding
 
@@ -54,6 +55,11 @@ There is no response envelope: the typed payload *is* the response.
   the end of the list when it receives fewer than `limit` records. The
   paging bounds live in one shared helper in the dispatcher, not in the
   data source.
+- `RESOURCE_LIMITS` packs exactly one `ResourceLimitRecord` per
+  `LimitKind` in discriminant order (a small, closed set, so it is not
+  paged): each record carries the resource's effective `ResourceLimit`
+  and the caller's current live usage. It is self-scoped (the caller's
+  own task), so it needs no capability (`AGENTS.md` §24.3, §16.6).
 - The scalar queries return the little-endian wire image of their
   response struct.
 - The hardware-tree query passes the source's encoded bytes through
@@ -64,7 +70,8 @@ There is no response envelope: the typed payload *is* the response.
 ## The data seam
 
 The live data — the process table, memory accounting, the hardware
-tree, machine identity, uptime, mount table — is read through the `SysinfoSource`
+tree, machine identity, uptime, mount table, per-task resource limits and
+usage — is read through the `SysinfoSource`
 trait, injected by `init` when it starts the service. On a running
 kernel this is a thin shim over the kernel's bookkeeping; in tests it is
 an in-memory fixture. Splitting policy from data keeps the
@@ -99,7 +106,7 @@ drowning the log; the cross-principal, kernel, and hardware queries are.
 `SysinfoSource` fixture and a recording log sink, covering every query,
 paging (`offset`/`limit` and the empty page past the end), the capability
 gates and their denial records, the audited-served record, the
-hardware-tree pass-through, the ungated mount-table listing, and the
-malformed-header / truncated-payload
+hardware-tree pass-through, the ungated mount-table and resource-limit
+listings, and the malformed-header / truncated-payload
 / unassigned-query / undersized-buffer fail-closed paths, plus the
 `EventId` range and uniqueness invariants.

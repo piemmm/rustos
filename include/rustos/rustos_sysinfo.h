@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include "rustos_time.h"
+#include "rustos_rlimit.h"
 
 /* sysinfo protocol version tag for the frozen v1 surface. */
 #define ROS_SYSINFO_VERSION_V1 1u
@@ -32,7 +33,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define ROS_SYSINFO_QUERY_NAME_MAX 20u
 #define ROS_SYSINFO_QUERY_RECORD_LEN 26u
-#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 182u
+#define ROS_SYSINFO_ENCODED_QUERY_TABLE_LEN 208u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
 #define ROS_SYSINFO_QUERY_SELF_PROCESS_LIST ((uint16_t)0u)
@@ -42,6 +43,7 @@
 #define ROS_SYSINFO_QUERY_SYSTEM_IDENTITY ((uint16_t)4u)
 #define ROS_SYSINFO_QUERY_UPTIME ((uint16_t)5u)
 #define ROS_SYSINFO_QUERY_MOUNT_LIST ((uint16_t)6u)
+#define ROS_SYSINFO_QUERY_RESOURCE_LIMITS ((uint16_t)7u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define ROS_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -67,6 +69,10 @@
 #define ROS_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define ROS_MOUNT_LIST_REQUEST_WIRE_LEN 8u
 #define ROS_MOUNT_RECORD_WIRE_LEN 152u
+#define ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
+
+/* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
+#define ROS_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 128u
 
 /* Envelope prefixing every sysinfo request; encoded little-endian on the wire. */
 typedef struct ros_sysinfo_request_header {
@@ -143,5 +149,15 @@ typedef struct ros_mount_record {
     uint8_t target[ROS_MOUNT_TARGET_MAX];
     uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];
 } ros_mount_record_t;
+
+/* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard
+* bound (a ros_resource_limit_t) and the caller's current live usage of it.
+* The full response is ROS_LIMIT_KIND_COUNT records in LimitKind order. */
+typedef struct ros_resource_limit_record {
+    uint32_t kind;
+    uint32_t reserved;
+    ros_resource_limit_t limit;
+    uint64_t usage;
+} ros_resource_limit_record_t;
 
 #endif /* ROS_SYSINFO_H */

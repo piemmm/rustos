@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a landed; L3b+L4b next]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b next]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) landed; L3b + L4b planned.** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b planned.** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -990,8 +990,22 @@ and fail-closed (§24.4) — this work must not loosen them.
   double drives 13 host tests. The `CAP_RLIMIT_RAISE` denial surfaces as a
   reported error (§2.9). Docs: `docs/src/architecture/resource-limits.md`
   ("The `ulimit` shell command") + the shell `README.md`.
-- L4b — `sysinfo` (§16.6) query exposing effective limits + live usage behind
-  the appropriate capability.
+- L4b — **DONE.** The `SysinfoQueryId::RESOURCE_LIMITS` (id 7) System
+  Information query (§16.6) exposing the caller's own effective limits + live
+  usage. `lib/abi/src/sysinfo.rs` gained the query id + spec row + the
+  `ResourceLimitRecord` wire type (`kind`/`reserved`/`ResourceLimit`/`usage`,
+  32-byte `#[repr(C)]`) and `RESOURCE_LIMITS_REPORT_LEN` (one record per
+  `LimitKind`, discriminant order); the query is self-scoped, so — like
+  `SELF_PROCESS_LIST` — it is ungated and unaudited (§16.6). `sysinfod` serves
+  it through a new `SysinfoSource::resource_limits` seam (the per-task
+  `LimitSet` + live usage); the `sysinfo` CLI gained the `limits`/`rlimits`
+  command rendering one aligned row per resource (`unlimited` for
+  `RLIMIT_INFINITY`), fail-closed on a wrong-length reply. C header
+  regenerated (`ros_resource_limit_record_t`, `ROS_SYSINFO_QUERY_RESOURCE_LIMITS`,
+  `rustos_rlimit.h` include); the new decoder is in the `fuzz_decode` harness
+  (§19.6). **No syscall/hash change.** Docs:
+  `docs/src/architecture/resource-limits.md`, `docs/src/abi/sysinfo.md`,
+  `docs/src/userland/{sysinfod,utilities}.md` + the two READMEs.
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

@@ -37,6 +37,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `SYSTEM_IDENTITY`       | none                   | no      |
 | `UPTIME`                | none                   | no      |
 | `MOUNT_LIST`            | none                   | no      |
+| `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -46,7 +47,10 @@ the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` is ungated:
 the mount table is system-wide and secret-free, so — like `UPTIME` and
 `SYSTEM_IDENTITY` — any task may read it; the privileged *act* of
 mounting is gated separately by `CAP_FS_MOUNT` (`AGENTS.md` §5.2) and is
-not part of this read-only API.
+not part of this read-only API. `RESOURCE_LIMITS` is self-scoped — it
+returns the *caller's own* effective resource limits and live usage
+(`AGENTS.md` §24.3) — so, like `SELF_PROCESS_LIST`, it needs no capability;
+observing another principal's limits would be a separate, gated query.
 
 ## Wire framing
 
@@ -86,6 +90,12 @@ fails closed: bad magic or a non-zero reserved field is
   mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`). The flag field
   reuses the filesystem-driver ABI's `MountFlags` rather than re-declaring
   the flag algebra (`AGENTS.md` §2.2).
+- [`ResourceLimitRecord`] — one row of the `RESOURCE_LIMITS` response: a
+  resource's `kind` ([`LimitKind`]), its effective [`ResourceLimit`]
+  (soft/hard), and the caller's current live `usage`. The query takes no
+  request payload; its response is exactly `LimitKind::COUNT` records in
+  discriminant order ([`RESOURCE_LIMITS_REPORT_LEN`] bytes), read
+  positionally. See [Resource limits and scalability](../architecture/resource-limits.md).
 
 Every payload is `#[repr(C)]`, allocation-free, and exposes a
 `to_le_bytes`/`from_bytes` pair; every `from_bytes` is exercised by the
@@ -114,6 +124,10 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`MOUNT_TARGET_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
 [`MOUNT_FSTYPE_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
 [`MountFlags`]: ../../rustos_abi/driver/filesystem/struct.MountFlags.html
+[`ResourceLimitRecord`]: ../../rustos_abi/sysinfo/struct.ResourceLimitRecord.html
+[`RESOURCE_LIMITS_REPORT_LEN`]: ../../rustos_abi/sysinfo/constant.RESOURCE_LIMITS_REPORT_LEN.html
+[`LimitKind`]: ../../rustos_abi/rlimit/enum.LimitKind.html
+[`ResourceLimit`]: ../../rustos_abi/rlimit/struct.ResourceLimit.html
 [`CapabilityId`]: ../../rustos_abi/capability/struct.CapabilityId.html
 [`Errno::BadMagic`]: ../../rustos_abi/error/enum.Errno.html
 [`Errno::AbiVersionUnsupported`]: ../../rustos_abi/error/enum.Errno.html

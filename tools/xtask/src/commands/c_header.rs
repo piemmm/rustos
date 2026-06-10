@@ -47,21 +47,22 @@ use rustos_abi::{
     HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryScope,
     LimitKind, LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord, NamedKeyCode,
     NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
-    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, RxePermission, Segment, Severity,
-    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
-    ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES,
-    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
-    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
-    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
-    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
-    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RLIMIT_INFINITY, RXE_PAGE_SIZE,
+    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
+    RxePermission, Segment, Severity, StdInfoKind, StringSlot, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
+    MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
+    PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE,
     SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT,
     STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
     SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
@@ -1160,18 +1161,21 @@ fn generate_process() -> String {
 /// the [`ProcessState`] `#[repr(u8)]` discriminants, the inline-buffer size
 /// limits (`ROS_PROCESS_NAME_MAX`, `ROS_MACHINE_ID_LEN`, `ROS_HOSTNAME_MAX`,
 /// `ROS_MOUNT_*_MAX`), and a `#[repr(C)]` C struct mirror plus a packed
-/// `*_WIRE_LEN` macro for each of the eight wire types
+/// `*_WIRE_LEN` macro for each of the nine wire types
 /// ([`SysinfoRequestHeader`], [`ProcessListRequest`], [`ProcessRecord`],
 /// [`KernelMemoryStats`], [`Uptime`], [`SystemIdentity`], [`MountListRequest`],
-/// [`MountRecord`]). [`Uptime`]'s members are the `ros_duration64_t` /
-/// `ros_time64_t` types from `rustos_time.h`. Every numeric value and
+/// [`MountRecord`], [`ResourceLimitRecord`]). [`Uptime`]'s members are the
+/// `ros_duration64_t` / `ros_time64_t` types from `rustos_time.h`; a
+/// [`ResourceLimitRecord`]'s `limit` is the `ros_resource_limit_t` from
+/// `rustos_rlimit.h`. Every numeric value and
 /// discriminant is read from `lib/abi`, never re-typed; only the C spelling
 /// lives here.
 fn generate_sysinfo() -> String {
     let mut out = banner("System Information API surface (AGENTS.md sec.16.6).");
     out.push_str("#ifndef ROS_SYSINFO_H\n#define ROS_SYSINFO_H\n\n");
     out.push_str("#include <stdint.h>\n");
-    out.push_str("#include \"rustos_time.h\"\n\n");
+    out.push_str("#include \"rustos_time.h\"\n");
+    out.push_str("#include \"rustos_rlimit.h\"\n\n");
 
     sysinfo_emit_framing(&mut out);
     sysinfo_emit_record_sizes(&mut out);
@@ -1252,6 +1256,10 @@ fn sysinfo_emit_framing(out: &mut String) {
         ),
         ("ROS_SYSINFO_QUERY_UPTIME", SysinfoQueryId::UPTIME),
         ("ROS_SYSINFO_QUERY_MOUNT_LIST", SysinfoQueryId::MOUNT_LIST),
+        (
+            "ROS_SYSINFO_QUERY_RESOURCE_LIMITS",
+            SysinfoQueryId::RESOURCE_LIMITS,
+        ),
     ];
     for (name, id) in query_ids {
         let _ = writeln!(out, "#define {name} ((uint16_t){}u)", id.as_u16());
@@ -1306,14 +1314,26 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             MountListRequest::WIRE_LEN,
         ),
         ("ROS_MOUNT_RECORD_WIRE_LEN", MountRecord::WIRE_LEN),
+        (
+            "ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN",
+            ResourceLimitRecord::WIRE_LEN,
+        ),
     ];
     for (name, len) in wire_lens {
         let _ = writeln!(out, "#define {name} {len}u");
     }
     out.push('\n');
+    out.push_str(
+        "/* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_SYSINFO_RESOURCE_LIMITS_REPORT_LEN {RESOURCE_LIMITS_REPORT_LEN}u"
+    );
+    out.push('\n');
 }
 
-/// The C struct mirrors of the eight `#[repr(C)]` System Information wire
+/// The C struct mirrors of the nine `#[repr(C)]` System Information wire
 /// types, as static text (the field names/order are part of the frozen ABI
 /// view; the in-module pinning test checks the layout against `lib/abi`).
 const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
@@ -1385,6 +1405,15 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t target[ROS_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[ROS_MOUNT_FSTYPE_MAX];\n\
          } ros_mount_record_t;\n\n",
+    "/* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard\n\
+         * bound (a ros_resource_limit_t) and the caller's current live usage of it.\n\
+         * The full response is ROS_LIMIT_KIND_COUNT records in LimitKind order. */\n\
+         typedef struct ros_resource_limit_record {\n\
+         \x20   uint32_t kind;\n\
+         \x20   uint32_t reserved;\n\
+         \x20   ros_resource_limit_t limit;\n\
+         \x20   uint64_t usage;\n\
+         } ros_resource_limit_record_t;\n\n",
 );
 
 /// Emit the driver-manifest magic / count / key-length / wire-size constants
@@ -2635,11 +2664,12 @@ mod tests {
     fn sysinfo_header_pins_layout_constants_and_discriminants() {
         use rustos_abi::{
             KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-            ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-            ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
-            MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX, SYSINFO_MAX_PAYLOAD_LEN,
-            SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-            SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+            ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+            SystemIdentity, Uptime, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN,
+            MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX,
+            RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+            SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+            SYSINFO_VERSION_V1,
         };
         let h = body("rustos_sysinfo.h");
         assert!(h.contains("#ifndef ROS_SYSINFO_H"), "guard present");
@@ -2648,18 +2678,10 @@ mod tests {
             h.contains("#include \"rustos_time.h\""),
             "time header included for ros_uptime"
         );
-        for typedef in [
-            "typedef struct ros_sysinfo_request_header {",
-            "typedef struct ros_process_list_request {",
-            "typedef struct ros_process_record {",
-            "typedef struct ros_kernel_memory_stats {",
-            "typedef struct ros_uptime {",
-            "typedef struct ros_system_identity {",
-            "typedef struct ros_mount_list_request {",
-            "typedef struct ros_mount_record {",
-        ] {
-            assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
-        }
+        assert!(
+            h.contains("#include \"rustos_rlimit.h\""),
+            "rlimit header included for ros_resource_limit_t"
+        );
         // Values are read from lib/abi, never re-typed: assert they match.
         let expected = [
             format!("#define ROS_SYSINFO_VERSION_V1 {SYSINFO_VERSION_V1}u"),
@@ -2721,6 +2743,15 @@ mod tests {
                 "#define ROS_MOUNT_RECORD_WIRE_LEN {}u",
                 MountRecord::WIRE_LEN
             ),
+            format!(
+                "#define ROS_SYSINFO_QUERY_RESOURCE_LIMITS ((uint16_t){}u)",
+                SysinfoQueryId::RESOURCE_LIMITS.as_u16()
+            ),
+            format!(
+                "#define ROS_RESOURCE_LIMIT_RECORD_WIRE_LEN {}u",
+                ResourceLimitRecord::WIRE_LEN
+            ),
+            format!("#define ROS_SYSINFO_RESOURCE_LIMITS_REPORT_LEN {RESOURCE_LIMITS_REPORT_LEN}u"),
         ];
         for line in &expected {
             assert!(h.contains(line), "missing `{line}` in:\n{h}");
@@ -2728,10 +2759,29 @@ mod tests {
     }
 
     #[test]
+    fn sysinfo_header_declares_every_record_typedef() {
+        let h = body("rustos_sysinfo.h");
+        for typedef in [
+            "typedef struct ros_sysinfo_request_header {",
+            "typedef struct ros_process_list_request {",
+            "typedef struct ros_process_record {",
+            "typedef struct ros_kernel_memory_stats {",
+            "typedef struct ros_uptime {",
+            "typedef struct ros_system_identity {",
+            "typedef struct ros_mount_list_request {",
+            "typedef struct ros_mount_record {",
+            "typedef struct ros_resource_limit_record {",
+        ] {
+            assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
+        }
+    }
+
+    #[test]
     fn sysinfo_header_struct_layout_matches_lib_abi() {
         use rustos_abi::{
             KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-            ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+            ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+            SystemIdentity, Uptime,
         };
         // The C struct mirrors are the naturally-aligned #[repr(C)] in-memory
         // layout (the separate *_WIRE_LEN macros give the packed wire size).
@@ -2792,6 +2842,13 @@ mod tests {
                 core::mem::align_of::<MountRecord>(),
                 4,
             ),
+            (
+                "ResourceLimitRecord",
+                core::mem::size_of::<ResourceLimitRecord>(),
+                32,
+                core::mem::align_of::<ResourceLimitRecord>(),
+                8,
+            ),
         ];
         for (name, size, want_size, align, want_align) in sizes_aligns {
             assert_eq!(size, want_size, "{name} repr(C) size");
@@ -2804,6 +2861,11 @@ mod tests {
             "self list id"
         );
         assert_eq!(SysinfoQueryId::MOUNT_LIST.as_u16(), 6, "mount list id");
+        assert_eq!(
+            SysinfoQueryId::RESOURCE_LIMITS.as_u16(),
+            7,
+            "resource limits id"
+        );
         assert_eq!(ProcessState::Runnable as u8, 0, "Runnable discriminant");
         assert_eq!(ProcessState::Stopped as u8, 4, "Stopped discriminant");
     }
@@ -2968,8 +3030,8 @@ mod tests {
         use rustos_abi::{
             AppInfoHeader, DriverManifest, Duration64, IpcMessageHeader, KernelMemoryStats,
             LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
-            ProcessListRequest, ProcessRecord, ProcessStartHeader, ResourceLimit, StringSlot,
-            SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+            ProcessListRequest, ProcessRecord, ProcessStartHeader, ResourceLimit,
+            ResourceLimitRecord, StringSlot, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
         };
 
         // (header file, typedef-closing line, type, frozen size, frozen align).
@@ -3007,6 +3069,7 @@ mod tests {
             ("rustos_driver.h", "} ros_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("rustos_driver.h", "} ros_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
             ("rustos_rlimit.h", "} ros_resource_limit_t;", size_of::<ResourceLimit>(), 16, align_of::<ResourceLimit>(), 8),
+            ("rustos_sysinfo.h", "} ros_resource_limit_record_t;", size_of::<ResourceLimitRecord>(), 32, align_of::<ResourceLimitRecord>(), 8),
         ];
         for &(header, typedef, size, want_size, align, want_align) in registry {
             let h = body(header);

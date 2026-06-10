@@ -25,6 +25,9 @@ pub enum Command {
     Identity,
     /// Read system uptime and boot time (`UPTIME`).
     Uptime,
+    /// Read the caller's own effective resource limits and live usage
+    /// (`RESOURCE_LIMITS`).
+    Limits,
     /// Print the usage banner. The default when no arguments are given.
     Help,
 }
@@ -48,6 +51,7 @@ pub enum Command {
 /// | `hardware`, `hw`      | [`Command::Hardware`]            |
 /// | `identity`, `id`      | [`Command::Identity`]            |
 /// | `uptime`              | [`Command::Uptime`]              |
+/// | `limits`, `rlimits`   | [`Command::Limits`]              |
 ///
 /// # Errors
 ///
@@ -63,6 +67,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "hardware" | "hw" => no_more(rest).map(|()| Command::Hardware),
         "identity" | "id" => no_more(rest).map(|()| Command::Identity),
         "uptime" => no_more(rest).map(|()| Command::Uptime),
+        "limits" | "rlimits" => no_more(rest).map(|()| Command::Limits),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -125,6 +130,8 @@ mod tests {
         assert_eq!(parse(&["identity"]), Ok(Command::Identity));
         assert_eq!(parse(&["id"]), Ok(Command::Identity));
         assert_eq!(parse(&["uptime"]), Ok(Command::Uptime));
+        assert_eq!(parse(&["limits"]), Ok(Command::Limits));
+        assert_eq!(parse(&["rlimits"]), Ok(Command::Limits));
     }
 
     #[test]

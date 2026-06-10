@@ -38,6 +38,8 @@ and is fully testable against an in-memory fixture.
 | `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | encoded hardware tree (opaque) |
 | `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
 | `UPTIME`              | none                 | no      | `Uptime`                       |
+| `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
+| `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
 
 ## Response encoding
 

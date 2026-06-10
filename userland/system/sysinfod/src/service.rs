@@ -2,10 +2,10 @@
 //! capability-checked, audited, and answered (`AGENTS.md` §16.6).
 
 use rustos_abi::sysinfo::{
-    spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, SysinfoQueryId,
-    SysinfoRequestHeader,
+    spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+    ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
 };
-use rustos_abi::Errno;
+use rustos_abi::{Errno, LimitKind};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
@@ -146,9 +146,36 @@ fn dispatch(
         write_bytes(&source.uptime(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::MOUNT_LIST {
         mount_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::RESOURCE_LIMITS {
+        resource_limits(source, caller, response)
     } else {
         Err(Errno::NotImplemented)
     }
+}
+
+/// Encode the caller's per-[`LimitKind`] effective-limit + live-usage report
+/// into `response`.
+///
+/// The response is the fixed `LimitKind::COUNT` records packed back-to-back
+/// in discriminant order (no paging — the set is small and closed). Fails
+/// closed with [`Errno::BufferTooSmall`] if `response` cannot hold them.
+fn resource_limits(
+    source: &dyn SysinfoSource,
+    caller: &Caller<'_>,
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let records = source.resource_limits(caller)?;
+    let needed = ResourceLimitRecord::WIRE_LEN * LimitKind::COUNT;
+    if response.len() < needed {
+        return Err(Errno::BufferTooSmall);
+    }
+    let mut written = 0;
+    for record in &records {
+        response[written..written + ResourceLimitRecord::WIRE_LEN]
+            .copy_from_slice(&record.to_le_bytes());
+        written += ResourceLimitRecord::WIRE_LEN;
+    }
+    Ok(written)
 }
 
 /// Decode the [`ProcessListRequest`], apply paging, and pack the selected
@@ -261,11 +288,12 @@ mod tests {
     use rustos_abi::driver::filesystem::MountFlags;
     use rustos_abi::sysinfo::{
         KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, MACHINE_ID_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
+        Uptime, MACHINE_ID_LEN, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT,
     };
     use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
+    use rustos_abi::{CapabilityId, CapabilityQuery, Errno, LimitKind, ResourceLimit};
     use rustos_log::{Event, Level, Sink};
 
     /// A capability view granting exactly the listed capabilities.
@@ -393,6 +421,30 @@ mod tests {
         }
         fn mount_records(&self, _caller: &Caller<'_>) -> Result<&[MountRecord], Errno> {
             Ok(&self.mounts)
+        }
+        fn resource_limits(
+            &self,
+            _caller: &Caller<'_>,
+        ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno> {
+            // A distinct usage per kind so the positional decode is checkable.
+            Ok([
+                ResourceLimitRecord::new(
+                    LimitKind::AddressSpaceBytes,
+                    ResourceLimit::new(1 << 20, 1 << 21).unwrap(),
+                    4096,
+                ),
+                ResourceLimitRecord::new(
+                    LimitKind::OpenStreams,
+                    ResourceLimit::new(4, 8).unwrap(),
+                    3,
+                ),
+                ResourceLimitRecord::new(LimitKind::Processes, ResourceLimit::UNLIMITED, 2),
+                ResourceLimitRecord::new(
+                    LimitKind::StackBytes,
+                    ResourceLimit::new(64 * 1024, 64 * 1024).unwrap(),
+                    0,
+                ),
+            ])
         }
     }
 
@@ -540,6 +592,39 @@ mod tests {
         assert_eq!(id.hostname_bytes(), b"rustos-box");
         // Neither query is audited.
         assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn resource_limits_needs_no_capability_and_round_trips() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::RESOURCE_LIMITS, &[]);
+        let mut resp = [0u8; 256];
+        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, RESOURCE_LIMITS_REPORT_LEN);
+        // The records decode positionally, one per LimitKind in order.
+        for (index, kind) in LimitKind::ALL.iter().enumerate() {
+            let base = index * ResourceLimitRecord::WIRE_LEN;
+            let rec =
+                ResourceLimitRecord::from_bytes(&resp[base..base + ResourceLimitRecord::WIRE_LEN])
+                    .unwrap();
+            assert_eq!(rec.kind, *kind);
+        }
+        let first =
+            ResourceLimitRecord::from_bytes(&resp[..ResourceLimitRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.kind, LimitKind::AddressSpaceBytes);
+        assert_eq!(first.limit, ResourceLimit::new(1 << 20, 1 << 21).unwrap());
+        assert_eq!(first.usage, 4096);
+        // Self-scoped, so unaudited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // Fails closed when the response buffer cannot hold the report.
+        let mut tiny = [0u8; RESOURCE_LIMITS_REPORT_LEN - 1];
+        assert_eq!(
+            serve(&source, &caller(&caps), &sink, &req, &mut tiny),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

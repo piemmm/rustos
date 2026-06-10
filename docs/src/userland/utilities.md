@@ -33,10 +33,14 @@ crate (`AGENTS.md` §17.4).
 | `hardware`           | `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     |
 | `identity`           | `SYSTEM_IDENTITY`     | none                 |
 | `uptime`             | `UPTIME`              | none                 |
+| `limits`             | `RESOURCE_LIMITS`     | none (self-scoped)   |
 | `help` (the default) | —                     | none                 |
 
 `processes` accepts the `-a`/`--all` flag; the other subcommands take no
-arguments and `ps`/`mem`/`hw`/`id` are accepted as short aliases. The
+arguments and `ps`/`mem`/`hw`/`id`/`rlimits` are accepted as short
+aliases. `limits` reports the calling process's *own* effective resource
+limits and live usage (`AGENTS.md` §24.3) — the read-only counterpart of
+the `ulimit` shell builtin that *changes* them. The
 capability gate lives in `sysinfod`, not in this tool — `sysinfo` only
 ever issues the queries the frozen registry defines, never a free-form
 "raw query id".
@@ -65,8 +69,8 @@ call, and the process-list paging and row rendering are shared with `ps`
 through the `lib/procinfo` crate. Sibling userland crates may not depend
 on one another (`AGENTS.md` §17.4), so the common piece lives in `lib/*`
 rather than being copied (`AGENTS.md` §2.2); `sysinfo` adds only the
-scalar queries (`memory`/`hardware`/`identity`/`uptime`) and its own
-command grammar on top.
+scalar queries (`memory`/`hardware`/`identity`/`uptime`/`limits`) and its
+own command grammar on top.
 
 ### Paging
 

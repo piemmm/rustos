@@ -9,9 +9,9 @@ itself or its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
 This page describes the binding §24 contract and its staged build-out. The
 ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
 syscalls, and the `CAP_RLIMIT_RAISE` capability), the **kernel enforcement**
-of it, and the **`ulimit` shell command** are **landed**; the growable
-kernel-stack arena and a System Information limits query are staged behind
-them (see *Status* below).
+of it, the **`ulimit` shell command**, and the **System Information limits
+query** are **landed**; the growable kernel-stack arena is staged behind them
+(see *Status* below).
 
 ## Capacities scale; security bounds stay fixed
 
@@ -131,6 +131,31 @@ soft bound set above its hard ceiling is rejected without touching the
 kernel (fail closed, `AGENTS.md` §2.1/§2.9); the store is never written on a
 rejected request.
 
+## The `sysinfo limits` query
+
+Because there is no `/proc`, a principal observes its *own* effective limits
+and its current live usage of each through the System Information API
+(`AGENTS.md` §16.6), not a virtual file. The query is
+`SysinfoQueryId::RESOURCE_LIMITS` (id 7); its response is exactly
+`LimitKind::COUNT` `ResourceLimitRecord`s packed back-to-back in `LimitKind`
+discriminant order (`RESOURCE_LIMITS_REPORT_LEN` bytes), each carrying the
+resource's `kind`, its effective `ResourceLimit { soft, hard }`, and the
+caller's current `usage` (bytes for the `*Bytes` kinds, a count otherwise).
+
+The query is **self-scoped** — its answer describes the caller's own task
+only — so, like `self_process_list`, it carries no capability gate and is not
+audited (§16.6); observing *another* principal's limits would be a separate,
+gated query. The kernel exposes no path that bypasses this; `sysinfod` serves
+it from the per-task `LimitSet` (effective limits) and the live accounting
+behind each `LimitKind` (usage), keyed by the kernel-trusted caller identity.
+
+The command-line face is `sysinfo limits` (alias `rlimits`) in
+`userland/shell/sysinfo`: it issues the query and prints one aligned row per
+resource (soft, hard, usage), spelling `RLIMIT_INFINITY` as `unlimited`. A
+reply of the wrong length fails closed rather than rendering a partial table
+(`AGENTS.md` §2.1). Where `ulimit` *changes* a principal's own limits, the
+`sysinfo limits` query *observes* limits and usage together.
+
 ## Discovered-hardware capacity policies
 
 The kthread kernel-stack capacity is the first capacity converted off a
@@ -187,6 +212,9 @@ per-arch CPU/hart arrays from §18 discovery.
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`
   binary). See *The `ulimit` shell command* above.
-- **L4b — `sysinfo` limits query (planned).** A System Information query
-  (§16.6) exposing effective limits and live usage behind the appropriate
-  capability.
+- **L4b — `sysinfo` limits query (landed).** The
+  `SysinfoQueryId::RESOURCE_LIMITS` System Information query (§16.6) returning
+  one `ResourceLimitRecord` per `LimitKind` (effective soft/hard bound + live
+  usage), self-scoped and ungated; served by `sysinfod` over the per-task
+  `LimitSet`, with the `sysinfo limits` command-line face. See *The `sysinfo
+  limits` query* above.

@@ -2,11 +2,14 @@
 //! requests, decode the typed replies, and render human-readable lines.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use rustos_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId, SystemIdentity, Uptime};
+use rustos_abi::sysinfo::{
+    KernelMemoryStats, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
+};
+use rustos_abi::{Errno, LimitKind, RLIMIT_INFINITY};
 
 use rustos_procinfo::{call, for_each_process, render_process, Output, Transport, PROCESS_HEADER};
 
@@ -23,6 +26,7 @@ queries:
   hardware            detected hardware tree (needs CAP_SYSINFO_HW)
   identity            machine identity and OS version
   uptime              time since boot and boot wall-clock time
+  limits              your effective resource limits and live usage
   help                show this message";
 
 /// Run one [`Command`], issuing its query through `transport` and writing the
@@ -47,6 +51,7 @@ pub fn run(
         Command::Hardware => run_hardware(transport, out),
         Command::Identity => run_identity(transport, out),
         Command::Uptime => run_uptime(transport, out),
+        Command::Limits => run_limits(transport, out),
     }
 }
 
@@ -150,6 +155,46 @@ fn run_uptime(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
     )
 }
 
+/// Fetch and render the caller's effective resource limits and live usage.
+///
+/// The reply is exactly [`LimitKind::COUNT`] [`ResourceLimitRecord`]s in
+/// discriminant order; the CLI decodes them positionally and prints one
+/// aligned row per resource. A reply of the wrong length fails closed
+/// (`AGENTS.md` §2.1) rather than rendering a partial table.
+fn run_limits(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    let reply = service_call(transport, SysinfoQueryId::RESOURCE_LIMITS, &[])?;
+    if reply.len() != ResourceLimitRecord::WIRE_LEN * LimitKind::COUNT {
+        return Err(SysinfoError::Service(Errno::BufferTooSmall));
+    }
+    emit(out, "resource              soft         hard         usage")?;
+    for index in 0..LimitKind::COUNT {
+        let base = index * ResourceLimitRecord::WIRE_LEN;
+        let record =
+            ResourceLimitRecord::from_bytes(&reply[base..base + ResourceLimitRecord::WIRE_LEN])
+                .map_err(SysinfoError::Service)?;
+        emit(
+            out,
+            &format!(
+                "{:<20}  {:>11}  {:>11}  {:>11}",
+                record.kind.name(),
+                bound(record.limit.soft),
+                bound(record.limit.hard),
+                record.usage,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Render a soft/hard bound, spelling [`RLIMIT_INFINITY`] as `unlimited`.
+fn bound(value: u64) -> String {
+    if value == RLIMIT_INFINITY {
+        "unlimited".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// Render `bytes` as lowercase hex with no separators.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -175,11 +220,11 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use rustos_abi::sysinfo::{
-        KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime,
+        KernelMemoryStats, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
     };
     use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::Errno;
+    use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
     use rustos_procinfo::{Output, Transport};
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
@@ -258,6 +303,16 @@ mod tests {
                 Ok(self.identity.to_le_bytes().to_vec())
             } else if header.query == SysinfoQueryId::UPTIME {
                 Ok(self.uptime.to_le_bytes().to_vec())
+            } else if header.query == SysinfoQueryId::RESOURCE_LIMITS {
+                let mut out = Vec::new();
+                for (index, kind) in LimitKind::ALL.iter().enumerate() {
+                    let usage = index as u64;
+                    let limit = ResourceLimit::new(index as u64, RLIMIT_INFINITY).unwrap();
+                    out.extend_from_slice(
+                        &ResourceLimitRecord::new(*kind, limit, usage).to_le_bytes(),
+                    );
+                }
+                Ok(out)
             } else {
                 Err(Errno::NotImplemented)
             }
@@ -437,6 +492,35 @@ mod tests {
         let lines = out.lines();
         assert!(lines[0].contains('9'));
         assert!(lines[1].contains("1000"));
+    }
+
+    #[test]
+    fn limits_render_one_row_per_kind() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(run(Command::Limits, &fixture, &out), Ok(()));
+        let lines = out.lines();
+        // Header + one row per LimitKind.
+        assert_eq!(lines.len(), 1 + LimitKind::COUNT);
+        assert!(lines[0].contains("resource"));
+        assert!(lines[1].contains(LimitKind::AddressSpaceBytes.name()));
+        // The infinite hard bound renders as `unlimited`.
+        assert!(lines[1].contains("unlimited"));
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::RESOURCE_LIMITS]
+        );
+    }
+
+    #[test]
+    fn limits_short_reply_fails_closed() {
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.short_scalar = true;
+        let out = Recorder::new();
+        assert_eq!(
+            run(Command::Limits, &fixture, &out),
+            Err(SysinfoError::Service(Errno::BufferTooSmall))
+        );
     }
 
     #[test]

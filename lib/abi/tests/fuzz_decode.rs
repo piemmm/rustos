@@ -30,7 +30,7 @@ use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::rlimit::ResourceLimit;
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    SysinfoRequestHeader, SystemIdentity, Uptime,
+    ResourceLimitRecord, SysinfoRequestHeader, SystemIdentity, Uptime,
 };
 use rustos_abi::time::{Duration64, Time64};
 use rustos_abi::{
@@ -167,6 +167,14 @@ fn exercise_rlimit(bytes: &[u8]) {
         assert_eq!(limit, redecoded);
         // An accepted limit is always well-formed (`soft <= hard`).
         assert!(limit.is_well_formed());
+    }
+    if let Ok(rec) = ResourceLimitRecord::from_bytes(bytes) {
+        let redecoded = ResourceLimitRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted resource-limit record must succeed");
+        assert_eq!(rec, redecoded);
+        // The embedded limit is always well-formed and the reserved word zero.
+        assert!(rec.limit.is_well_formed());
+        assert_eq!(rec.reserved, 0);
     }
 }
 
