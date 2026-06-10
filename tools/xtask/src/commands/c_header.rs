@@ -45,10 +45,10 @@ use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
     DriverKind, DriverManifest, Duration64, Errno, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
     HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryScope,
-    LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord, NamedKeyCode,
+    LimitKind, LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord, NamedKeyCode,
     NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
-    ProcessStartHeader, ProcessState, RandomFlags, RxePermission, Segment, Severity, StdInfoKind,
-    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, RxePermission, Segment, Severity,
+    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
     ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_CAPABILITIES,
@@ -61,11 +61,11 @@ use rustos_abi::{
     MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
     PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
-    SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RLIMIT_INFINITY, RXE_PAGE_SIZE,
+    SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT,
+    STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
+    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -295,6 +295,60 @@ fn generate_random() -> String {
     out.push('\n');
 
     out.push_str("#endif /* ROS_RANDOM_H */\n");
+    out
+}
+
+/// `rustos_rlimit.h` — the resource-limit ABI (`AGENTS.md` §24).
+///
+/// Declares the closed [`LimitKind`] discriminants as `ROS_LIMIT_KIND_*`
+/// macros, the no-limit sentinel `ROS_RLIMIT_INFINITY`, the wire length, and
+/// the `#[repr(C)]` [`ResourceLimit`] pair as a typedef. Every numeric value
+/// is read from `lib/abi`; only the C spelling lives here.
+fn generate_rlimit() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("Resource-limit ABI (AGENTS.md sec.24).");
+    out.push_str("#ifndef ROS_RLIMIT_H\n#define ROS_RLIMIT_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* A bound value meaning \"no limit imposed\" (AGENTS.md sec.24.3). */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RLIMIT_INFINITY ((uint64_t){RLIMIT_INFINITY}u)"
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* Resource kinds a ros_resource_limit_t can govern (uint32_t; AGENTS.md sec.24.3). */\n",
+    );
+    for kind in LimitKind::ALL {
+        let raw = kind.as_u32();
+        let suffix = kind.name().to_ascii_uppercase().replace('-', "_");
+        let _ = writeln!(out, "#define ROS_LIMIT_KIND_{suffix} ((uint32_t){raw}u)");
+    }
+    let _ = writeln!(
+        out,
+        "#define ROS_LIMIT_KIND_COUNT ((uint32_t){}u)",
+        LimitKind::COUNT
+    );
+    out.push('\n');
+
+    out.push_str("/* Length, in bytes, of the little-endian ros_resource_limit_t encoding. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_RESOURCE_LIMIT_WIRE_LEN {}u",
+        ResourceLimit::WIRE_LEN
+    );
+    out.push('\n');
+
+    out.push_str("/* A soft/hard resource-limit pair (AGENTS.md sec.24.3). */\n");
+    out.push_str(
+        "typedef struct ros_resource_limit {\n\
+         \x20   uint64_t soft;\n\
+         \x20   uint64_t hard;\n\
+         } ros_resource_limit_t;\n\n",
+    );
+
+    out.push_str("#endif /* ROS_RLIMIT_H */\n");
     out
 }
 
@@ -1775,6 +1829,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
+    out.push_str("#include \"rustos_rlimit.h\"\n");
     out.push_str("#include \"rustos_memory.h\"\n");
     out.push_str("#include \"rustos_hwtree.h\"\n");
     out.push_str("#include \"rustos_ipc.h\"\n");
@@ -1814,6 +1869,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_random.h",
             body: generate_random(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_rlimit.h",
+            body: generate_rlimit(),
         },
         GeneratedHeader {
             file_name: "rustos_memory.h",
@@ -1966,6 +2025,7 @@ mod tests {
             "rustos_capability.h",
             "rustos_time.h",
             "rustos_random.h",
+            "rustos_rlimit.h",
             "rustos_memory.h",
             "rustos_hwtree.h",
             "rustos_ipc.h",
@@ -2018,6 +2078,41 @@ mod tests {
         assert!(
             h.contains("int32_t ros_sys_ipc_send(uint64_t a0, void * a1, uintptr_t a2);"),
             "typed prototype: {h}"
+        );
+    }
+
+    #[test]
+    fn rlimit_header_pins_kinds_and_struct() {
+        let h = body("rustos_rlimit.h");
+        assert!(h.contains("#ifndef ROS_RLIMIT_H"), "guard present");
+        assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // The no-limit sentinel and a representative kind are read from
+        // lib/abi, never re-typed.
+        assert!(
+            h.contains(&format!(
+                "#define ROS_RLIMIT_INFINITY ((uint64_t){RLIMIT_INFINITY}u)"
+            )),
+            "infinity sentinel: {h}"
+        );
+        assert!(
+            h.contains("#define ROS_LIMIT_KIND_PROCESSES ((uint32_t)2u)"),
+            "processes kind macro: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define ROS_LIMIT_KIND_COUNT ((uint32_t){}u)",
+                LimitKind::COUNT
+            )),
+            "kind count: {h}"
+        );
+        assert!(
+            h.contains("typedef struct ros_resource_limit {"),
+            "resource-limit struct: {h}"
+        );
+        assert_eq!(
+            core::mem::size_of::<ResourceLimit>(),
+            16,
+            "ResourceLimit repr(C) size"
         );
     }
 
@@ -2873,7 +2968,7 @@ mod tests {
         use rustos_abi::{
             AppInfoHeader, DriverManifest, Duration64, IpcMessageHeader, KernelMemoryStats,
             LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
-            ProcessListRequest, ProcessRecord, ProcessStartHeader, StringSlot,
+            ProcessListRequest, ProcessRecord, ProcessStartHeader, ResourceLimit, StringSlot,
             SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
         };
 
@@ -2911,6 +3006,7 @@ mod tests {
             ("rustos_driver.h", "} ros_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("rustos_driver.h", "} ros_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("rustos_driver.h", "} ros_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
+            ("rustos_rlimit.h", "} ros_resource_limit_t;", size_of::<ResourceLimit>(), 16, align_of::<ResourceLimit>(), 8),
         ];
         for &(header, typedef, size, want_size, align, want_align) in registry {
             let h = body(header);

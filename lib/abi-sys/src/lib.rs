@@ -80,6 +80,8 @@ const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
+const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
+const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -365,6 +367,40 @@ pub extern "C" fn sys_wait(pid: i32, status: *mut c_void) -> u64 {
     unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr_arg(status), 0, 0, 0, 0]) }
 }
 
+/// `rlimit_get`: read the calling process's effective limit for resource
+/// `kind`, writing the encoded `ros_resource_limit_t` to `out`
+/// (`SyscallNumber::RLIMIT_GET`). Returns a `ROS_E_*` code (`AGENTS.md`
+/// §24.3).
+#[must_use]
+#[export_name = "ros_sys_rlimit_get"]
+pub extern "C" fn sys_rlimit_get(kind: u32, out: *mut c_void) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `out` pointer
+    // against the caller's address space before writing the limit to it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_RLIMIT_GET,
+            [u64::from(kind), ptr_arg(out), 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `rlimit_set`: install the calling process's limit for resource `kind`
+/// from the encoded `ros_resource_limit_t` at `value`
+/// (`SyscallNumber::RLIMIT_SET`). Returns a `ROS_E_*` code; raising a hard
+/// bound requires `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3).
+#[must_use]
+#[export_name = "ros_sys_rlimit_set"]
+pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `value` pointer
+    // against the caller's address space before reading the limit from it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_RLIMIT_SET,
+            [u64::from(kind), ptr_arg(value), 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +433,8 @@ mod tests {
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
         (NUM_WAIT, "wait", 2),
+        (NUM_RLIMIT_GET, "rlimit_get", 2),
+        (NUM_RLIMIT_SET, "rlimit_set", 2),
     ];
 
     #[test]
@@ -626,6 +664,32 @@ mod tests {
         assert_eq!(number, NUM_WAIT);
         // `WAIT_ANY` (-1) sign-extends to all-ones in the argument register.
         assert_eq!(args[0], u64::MAX);
+    }
+
+    #[test]
+    fn rlimit_get_marshals_kind_and_pointer() {
+        let mut limit = [0u8; 16];
+        let ptr = limit.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_rlimit_get(2, ptr), 0);
+        });
+        assert_eq!(number, NUM_RLIMIT_GET);
+        assert_eq!(args[0], 2);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rlimit_set_marshals_kind_and_pointer() {
+        let mut limit = [0u8; 16];
+        let ptr = limit.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_rlimit_set(3, ptr), 0);
+        });
+        assert_eq!(number, NUM_RLIMIT_SET);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

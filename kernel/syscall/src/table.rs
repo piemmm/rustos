@@ -318,6 +318,43 @@ pub trait SyscallHandlers {
     /// fail closed with [`Errno::NotImplemented`] rather than fabricating a
     /// reaped child (`AGENTS.md` §2.9).
     fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult;
+
+    /// Read the calling task's effective limit for resource `kind`, writing
+    /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer
+    /// (`AGENTS.md` §24.3).
+    ///
+    /// The dispatcher has already validated that `kind` fits in a `u32`
+    /// (upper bits zero) and that `out` is a non-null `UserPtr`. The
+    /// implementation validates `kind` against [`rustos_abi::LimitKind`] and
+    /// fails closed on an unassigned value (`AGENTS.md` §5.4 — validate every
+    /// input). Returns `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]
+    /// (`AGENTS.md` §2.9): a kernel build with no resource-limit service
+    /// wired never fabricates a limit. The enforcement is installed in
+    /// `kernel/core`.
+    fn rlimit_get(&self, _caller: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Install the calling task's limit for resource `kind` from the encoded
+    /// [`rustos_abi::ResourceLimit`] at the user `value` pointer (`AGENTS.md`
+    /// §24.3).
+    ///
+    /// The dispatcher has already validated that `kind` fits in a `u32` and
+    /// that `value` is a non-null `UserPtr`. The implementation copies the
+    /// limit in through the validated `copy_from_user` boundary, validates
+    /// `kind` and the soft/hard pair, and — when the request would *raise* a
+    /// hard bound above the inherited ceiling — refuses with
+    /// [`Errno::PermissionDenied`] unless the caller holds
+    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3). Returns `Ok(0)` on
+    /// success.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]
+    /// (`AGENTS.md` §2.9); the enforcement is installed in `kernel/core`.
+    fn rlimit_set(&self, _caller: &CallerContext<'_>, _kind: u32, _value: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -501,6 +538,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 #[allow(clippy::cast_possible_wrap)]
                 let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
                 self.handlers.wait(caller, pid, args.0[1])
+            }
+            SyscallNumber::RLIMIT_GET => {
+                // `validate_arg` constrained args[0] to fit in u32 (upper
+                // bits zero), so the narrowing is lossless, and args[1] is a
+                // non-null `UserPtr`.
+                #[allow(clippy::cast_possible_truncation)]
+                let kind = (args.0[0] & 0xFFFF_FFFF) as u32;
+                self.handlers.rlimit_get(caller, kind, args.0[1])
+            }
+            SyscallNumber::RLIMIT_SET => {
+                #[allow(clippy::cast_possible_truncation)]
+                let kind = (args.0[0] & 0xFFFF_FFFF) as u32;
+                self.handlers.rlimit_set(caller, kind, args.0[1])
             }
             _ => Err(Errno::NotFound),
         }
@@ -860,6 +910,17 @@ mod tests {
             // here. The reachability test passes pid 0 (a valid I32).
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
+        }
+        fn rlimit_get(&self, _c: &CallerContext<'_>, kind: u32, _out: u64) -> SyscallResult {
+            self.record("rlimit_get");
+            // Echo the kind back so the reachability test can assert the
+            // dispatcher decoded `(kind, out)` without wiring a real
+            // resource-limit service here.
+            Ok(u64::from(kind))
+        }
+        fn rlimit_set(&self, _c: &CallerContext<'_>, kind: u32, _value: u64) -> SyscallResult {
+            self.record("rlimit_set");
+            Ok(u64::from(kind))
         }
     }
 
@@ -1360,6 +1421,67 @@ mod tests {
         bad.0[1] = 0; // null status
         assert_eq!(
             d2.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), bad),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(h2.last(), None);
+    }
+
+    #[test]
+    fn rlimit_get_decodes_kind_and_pointer_unaudited() {
+        // `rlimit_get` reads the caller's own effective limit: ungated and
+        // not audited per call (`AGENTS.md` §24.3). With a well-typed
+        // `(kind, out)` tuple the dispatcher narrows the `u32` kind, forwards
+        // the `out` pointer, reaches the handler, and emits no audit record.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink); // no capability needed
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 2; // kind
+        args.0[1] = 0x1000; // out — a non-null user pointer
+        let r = d.dispatch(&ctx, SyscallNumber::RLIMIT_GET.as_u16(), args);
+        // The Mock echoes the decoded kind back.
+        assert_eq!(r, Ok(2));
+        assert_eq!(h.last(), Some("rlimit_get"));
+        assert!(sink.ids().is_empty(), "rlimit_get must not audit");
+    }
+
+    #[test]
+    fn rlimit_set_decodes_kind_and_pointer_and_is_audited() {
+        // `rlimit_set` is ungated at the dispatcher (lowering a bound needs
+        // no capability; the `CAP_RLIMIT_RAISE` check is fine-grained in the
+        // handler) but IS audited — it changes enforced policy (§24.3).
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 3; // kind
+        args.0[1] = 0x1000; // value — a non-null user pointer
+        let r = d.dispatch(&ctx, SyscallNumber::RLIMIT_SET.as_u16(), args);
+        assert_eq!(r, Ok(3));
+        assert_eq!(h.last(), Some("rlimit_set"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+
+        // A null pointer is rejected by the per-arg `UserPtr` validator
+        // before the handler is reached (`AGENTS.md` §5.4).
+        let h2 = MockHandlers::default();
+        let d2 = Dispatcher::new(&h2, &sink);
+        let mut bad = RawArgs::ZERO;
+        bad.0[0] = 0; // kind
+        bad.0[1] = 0; // null pointer
+        assert_eq!(
+            d2.dispatch(&ctx, SyscallNumber::RLIMIT_SET.as_u16(), bad),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);

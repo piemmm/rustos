@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[DO NEXT — highest priority]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1 landed; L2–L4 next]**
 
-**Status: planned (do now).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) landed; L2–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -935,10 +935,16 @@ and fail-closed (§24.4) — this work must not loosen them.
   path/name/command-line/config length caps. These are §24.4 defences.)
 
 **Deliverables**
-- L1 — `lib/abi` resource-limit ABI (`lib/abi/src/rlimit.rs`): closed
-  versioned `LimitKind` enum, `ResourceLimit { soft, hard }`, the get/set
-  syscalls, and the new `CAP_RLIMIT_RAISE` capability id. Held to the §9 ABI
-  discipline (versioned, hashed; regenerate the C header + syscall table).
+- L1 — **DONE.** `lib/abi` resource-limit ABI (`lib/abi/src/rlimit.rs`): closed
+  versioned `LimitKind` enum (`AddressSpaceBytes`/`OpenStreams`/`Processes`/
+  `StackBytes`, `COUNT`/`ALL`/`from_u32`/`name`), `ResourceLimit { soft, hard }`
+  (`RLIMIT_INFINITY`, `intersect` never-widen, `encode`/`decode` fail-closed),
+  the `rlimit_get` (#17) / `rlimit_set` (#18) syscalls, and `CAP_RLIMIT_RAISE`
+  (id 20). Dispatcher arms route both to `SyscallHandlers::rlimit_get`/`_set`
+  (default fail-closed `NotImplemented` until L2). `abi-sys` stubs
+  (`ros_sys_rlimit_get`/`_set`), `lib/rt` wrappers, generated `rustos_rlimit.h`,
+  decoder added to the `fuzz_decode` harness; docs in
+  `docs/src/architecture/resource-limits.md` + `syscalls.md`.
 - L2 — kernel enforcement: limits stored per task, inherited on spawn,
   intersected (never widened) on delegation (§5.2); a request exceeding an
   effective limit is denied as a typed `Result` and logged (§19.4); raising a

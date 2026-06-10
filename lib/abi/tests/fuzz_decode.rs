@@ -27,6 +27,7 @@
 
 use rustos_abi::input::{KeyInput, PointerInput};
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
+use rustos_abi::rlimit::ResourceLimit;
 use rustos_abi::sysinfo::{
     KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
     SysinfoRequestHeader, SystemIdentity, Uptime,
@@ -128,6 +129,7 @@ fn exercise(bytes: &[u8]) {
             .expect("round-trip of an accepted key event must succeed");
         assert_eq!(event, redecoded);
     }
+    exercise_rlimit(bytes);
     if let Ok(name) = PortName::from_bytes(bytes) {
         let redecoded = PortName::from_bytes(&name.to_le_bytes())
             .expect("round-trip of an accepted port name must succeed");
@@ -151,6 +153,21 @@ fn exercise(bytes: &[u8]) {
         }
     }
     exercise_process(bytes);
+}
+
+/// Drive the resource-limit decoder on `bytes` (§19.6).
+///
+/// Split out of [`exercise`] to keep that function within the line budget;
+/// the contract is identical (must not panic; an accepted decode round-trips
+/// through its encoder and is well-formed).
+fn exercise_rlimit(bytes: &[u8]) {
+    if let Ok(limit) = ResourceLimit::decode(bytes) {
+        let redecoded = ResourceLimit::decode(&limit.encode())
+            .expect("round-trip of an accepted resource limit must succeed");
+        assert_eq!(limit, redecoded);
+        // An accepted limit is always well-formed (`soft <= hard`).
+        assert!(limit.is_well_formed());
+    }
 }
 
 /// Drive the `process` startup-vector decoders on `bytes`.

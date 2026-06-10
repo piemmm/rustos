@@ -28,6 +28,7 @@ pub mod manifest;
 pub mod memory;
 pub mod process;
 pub mod random;
+pub mod rlimit;
 pub mod rxe;
 pub mod stdinfo;
 pub mod syscall;
@@ -72,6 +73,7 @@ pub use process::{
     STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
 };
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
+pub use rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
 pub use rxe::{
     kaslr_bias, LoadHeader, LoadImage, NeededLibrary, RxeError, RxePermission, Segment, LIBREF_MAX,
     LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE, SEG_FLAG_EXEC,

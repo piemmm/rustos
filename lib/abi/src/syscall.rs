@@ -183,6 +183,33 @@ impl SyscallNumber {
     /// process-wait service wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const WAIT: Self = Self(16);
+    /// Read the calling process's effective limit for one resource
+    /// (`AGENTS.md` §24.3).
+    ///
+    /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
+    /// `out: *mut ros_resource_limit_t` (a non-null user pointer the kernel
+    /// writes the encoded [`crate::ResourceLimit`] into). Returns an error
+    /// code (`Ok(0)` on success). Observing one's *own* effective limit is
+    /// the unprivileged baseline — it grants no authority and needs no
+    /// capability (`AGENTS.md` §16.6 precedent) — but the kernel validates
+    /// `kind` and the pointer and fails closed (`AGENTS.md` §5.4). An
+    /// unassigned `kind` fails with [`crate::Errno::OutOfRange`]; a build
+    /// with no resource-limit service wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
+    pub const RLIMIT_GET: Self = Self(17);
+    /// Set the calling process's limit for one resource (`AGENTS.md` §24.3).
+    ///
+    /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
+    /// `in: *const ros_resource_limit_t` (a non-null user pointer to the
+    /// encoded [`crate::ResourceLimit`] to install). Returns an error code
+    /// (`Ok(0)` on success). A process may freely *lower* a bound, but
+    /// *raising* a hard bound — or setting any bound above the inherited
+    /// ceiling — requires [`crate::CapabilityId::RLIMIT_RAISE`] (§24.3) and
+    /// otherwise fails with [`crate::Errno::PermissionDenied`]. A malformed
+    /// pair (`soft > hard`) or an unassigned `kind` fails closed with
+    /// [`crate::Errno::OutOfRange`]; a build with no resource-limit service
+    /// wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const RLIMIT_SET: Self = Self(18);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -275,6 +302,8 @@ mod tests {
         assert_eq!(SyscallNumber::MEM_MAP.as_u16(), 14);
         assert_eq!(SyscallNumber::MEM_UNMAP.as_u16(), 15);
         assert_eq!(SyscallNumber::WAIT.as_u16(), 16);
+        assert_eq!(SyscallNumber::RLIMIT_GET.as_u16(), 17);
+        assert_eq!(SyscallNumber::RLIMIT_SET.as_u16(), 18);
     }
 
     #[test]

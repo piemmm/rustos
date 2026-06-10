@@ -39,5 +39,6 @@
 #define ROS_CAP_PROC_SPAWN ((uint16_t)17u)
 #define ROS_CAP_CONSOLE_WRITE ((uint16_t)18u)
 #define ROS_CAP_CONSOLE_READ ((uint16_t)19u)
+#define ROS_CAP_RLIMIT_RAISE ((uint16_t)20u)
 
 #endif /* ROS_CAPABILITY_H */

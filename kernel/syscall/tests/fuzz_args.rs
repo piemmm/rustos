@@ -156,6 +156,14 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn rlimit_get(&self, _c: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn rlimit_set(&self, _c: &CallerContext<'_>, _kind: u32, _value: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

@@ -55,7 +55,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::{MapFlags, SyscallNumber, STDERR, STDIN, STDINFO, STDOUT};
+use rustos_abi::{
+    LimitKind, MapFlags, ResourceLimit, SyscallNumber, STDERR, STDIN, STDINFO, STDOUT,
+};
 use rustos_abi_trap::raw_syscall;
 
 #[cfg(rt_native)]
@@ -93,6 +95,12 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
 /// `wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
+
+/// `rlimit_get` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
+
+/// `rlimit_set` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -342,6 +350,64 @@ pub fn wait(pid: i32, status: &mut i32) -> i64 {
     ret as i64
 }
 
+/// Read the calling process's effective limit for resource `kind`
+/// (`SyscallNumber::RLIMIT_GET`, `AGENTS.md` §24.3).
+///
+/// On success the kernel writes the encoded [`ResourceLimit`] into a local
+/// buffer this wrapper decodes and returns. Reading one's own limit grants
+/// no authority and needs no capability (`AGENTS.md` §16.6 / §24.3). The
+/// kernel encodes a failure as a negative register (`-errno`, the standard
+/// `abi-v1` convention); the wrapper surfaces it as `Err(-ret)` (the raw
+/// negative value) and hides no error (`AGENTS.md` §2.9).
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure, including
+/// the case where the kernel returned a malformed limit (`soft > hard`),
+/// which fails closed rather than yielding a usable value.
+pub fn rlimit_get(kind: LimitKind) -> Result<ResourceLimit, i64> {
+    let mut buf = [0u8; ResourceLimit::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `out` pointer against the caller's address space before writing
+    // the encoded limit to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // local for the duration of the call, so the pointer denotes writable
+    // memory the kernel may fill.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+    let ret =
+        unsafe { raw_syscall(NUM_RLIMIT_GET, [u64::from(kind.as_u32()), ptr, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // The kernel reported success, so the buffer holds a well-formed encoded
+    // limit. Defence in depth: decode validates `soft <= hard` and fails
+    // closed, so a buggy kernel cannot hand back a malformed pair.
+    ResourceLimit::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
+/// Install the calling process's limit for resource `kind`
+/// (`SyscallNumber::RLIMIT_SET`, `AGENTS.md` §24.3).
+///
+/// The wrapper encodes `value` into a local buffer the kernel reads. A
+/// process may freely *lower* a bound, but *raising* a hard bound above the
+/// inherited ceiling requires [`rustos_abi::CapabilityId::RLIMIT_RAISE`]
+/// (§24.3). Returns `0` on success or `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
+/// signed-result convention; the wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
+    let buf = value.encode();
+    let ptr = buf.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `value` pointer against the caller's address space before reading
+    // the encoded limit from it (`AGENTS.md` §5.4). `buf` is a live local
+    // for the duration of the call, so the pointer denotes readable memory.
+    let ret = unsafe { raw_syscall(NUM_RLIMIT_SET, [u64::from(kind.as_u32()), ptr, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -578,6 +644,55 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(wait(9, &mut status), want);
+        });
+    }
+
+    #[test]
+    fn rlimit_get_marshals_kind_and_pointer_and_decodes_result() {
+        // The seam returns 0 (success) and leaves the buffer zeroed, so the
+        // wrapper decodes a `{soft: 0, hard: 0}` limit and reports it.
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                rlimit_get(LimitKind::Processes),
+                Ok(ResourceLimit::new(0, 0).expect("well-formed"))
+            );
+        });
+        assert_eq!(number, NUM_RLIMIT_GET);
+        assert_eq!(args[0], u64::from(LimitKind::Processes.as_u32()));
+        assert_ne!(args[1], 0); // a non-null out pointer
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rlimit_get_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(rlimit_get(LimitKind::OpenStreams), Err(want));
+        });
+    }
+
+    #[test]
+    fn rlimit_set_marshals_kind_and_pointer() {
+        let limit = ResourceLimit::new(0x1000, 0x2000).expect("well-formed");
+        let (number, args) = capture(0, || {
+            assert_eq!(rlimit_set(LimitKind::AddressSpaceBytes, limit), 0);
+        });
+        assert_eq!(number, NUM_RLIMIT_SET);
+        assert_eq!(args[0], u64::from(LimitKind::AddressSpaceBytes.as_u32()));
+        assert_ne!(args[1], 0); // a non-null value pointer
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rlimit_set_surfaces_negative_errno_encoding() {
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(
+                rlimit_set(LimitKind::StackBytes, ResourceLimit::UNLIMITED),
+                want
+            );
         });
     }
 

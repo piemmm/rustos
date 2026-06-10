@@ -70,6 +70,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
 |  16 | `wait`         | `i32 pid`, `user_ptr` (status)          | `u64` (pid) | —                   | yes     |
+|  17 | `rlimit_get`   | `u32 kind`, `user_ptr` (out)            | `errno` | —                       | no      |
+|  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 
 ### Capability matrix
 
@@ -118,6 +120,22 @@ scheduler reschedule path) until a matching child is reapable, then reaps
 it. A `wait` issued before that install (or by a non-parkable task) fails
 closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
 (`AGENTS.md` §2.9). The first-party Rust wrapper is `rustos_rt::wait`.
+
+`rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
+`ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
+`rustos_abi::LimitKind` resource via a `u32 kind` and carry a
+`rustos_abi::ResourceLimit` (`{ soft, hard }`, `RLIMIT_INFINITY` =
+"no limit") through a 16-byte user buffer. Both are **ungated at the
+dispatcher**: reading one's own limit and *lowering* a bound need no
+capability (the §16.6 own-process baseline). `rlimit_set` performs the
+finer check **handler-side** — a request that *raises* a hard bound above
+the inherited ceiling is refused with `PermissionDenied` unless the caller
+holds `CAP_RLIMIT_RAISE`, mirroring the §5.2 "never widen on delegation"
+rule. `rlimit_get` is unaudited (a pure observer); `rlimit_set` **is**
+audited — it changes enforced policy (`AGENTS.md` §5.4.4). The first-party
+Rust wrappers are `rustos_rt::rlimit_get` / `rlimit_set`; the §24 policy,
+the discovered-hardware defaults, and the kernel enforcement are detailed
+in [`resource-limits.md`](./resource-limits.md).
 
 ## Standard streams (fd 0/1/2/3)
 
@@ -229,6 +247,8 @@ re-validates arguments — the dispatcher does that first.
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
 | `wait`          | hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship, blocks until a child is reapable, and reaps it; the reaped child's exit code is then copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
+| `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
+| `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

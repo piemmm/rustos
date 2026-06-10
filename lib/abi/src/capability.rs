@@ -162,6 +162,19 @@ impl CapabilityId {
     /// the system console (`AGENTS.md` §4 — no ambient authority; §5.4 —
     /// capability checks before state touches).
     pub const CONSOLE_READ: Self = Self(19);
+    /// Raise a hard resource limit above its inherited ceiling (`AGENTS.md`
+    /// §24.3).
+    ///
+    /// A process may always *lower* its own soft or hard resource bounds
+    /// ([`crate::ResourceLimit`]) without any capability, but *raising* a
+    /// hard bound — or setting any bound above the ceiling it inherited —
+    /// is the privileged operation this capability gates (`AGENTS.md` §24.3;
+    /// the resource-limit analogue of the §5.2 "never widen on delegation"
+    /// rule). The `rlimit_set` syscall (`abi-v1` number 18) refuses such a
+    /// request with [`Errno::PermissionDenied`] unless the caller holds this
+    /// capability (`AGENTS.md` §5.4 — capability checks before state
+    /// touches; §4 — no ambient authority).
+    pub const RLIMIT_RAISE: Self = Self(20);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -193,6 +206,7 @@ impl CapabilityId {
         (Self::PROC_SPAWN, "CAP_PROC_SPAWN"),
         (Self::CONSOLE_WRITE, "CAP_CONSOLE_WRITE"),
         (Self::CONSOLE_READ, "CAP_CONSOLE_READ"),
+        (Self::RLIMIT_RAISE, "CAP_RLIMIT_RAISE"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -307,6 +321,7 @@ mod tests {
         assert_eq!(CapabilityId::PROC_SPAWN.as_u16(), 17);
         assert_eq!(CapabilityId::CONSOLE_WRITE.as_u16(), 18);
         assert_eq!(CapabilityId::CONSOLE_READ.as_u16(), 19);
+        assert_eq!(CapabilityId::RLIMIT_RAISE.as_u16(), 20);
     }
 
     #[test]
@@ -323,6 +338,7 @@ mod tests {
             Some("CAP_CONSOLE_WRITE")
         );
         assert_eq!(CapabilityId::CONSOLE_READ.name(), Some("CAP_CONSOLE_READ"));
+        assert_eq!(CapabilityId::RLIMIT_RAISE.name(), Some("CAP_RLIMIT_RAISE"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -333,9 +349,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=19 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=20 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=19 {
+        for raw in 1..=20 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

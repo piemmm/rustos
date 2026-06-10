@@ -448,6 +448,49 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::RLIMIT_GET,
+        name: "rlimit_get",
+        arg_count: 2,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Reading one's *own* effective resource limit grants no authority
+        // over anything else, so — like the other own-process observers
+        // (`mem_map`, `wait`'s self-scoping) — it is the unprivileged
+        // baseline (`AGENTS.md` §16.6 / §24.3) and is not audited per call.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::RLIMIT_SET,
+        name: "rlimit_set",
+        arg_count: 2,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Lowering one's own bound needs no capability; the dispatcher
+        // therefore leaves the syscall ungated and the handler performs the
+        // finer `CAP_RLIMIT_RAISE` check only when a request would *raise* a
+        // hard bound (`AGENTS.md` §24.3) — the same pattern `stream_*` uses
+        // (coarse syscall gate, fine handler-side check). It changes a
+        // task's enforced limits, a security-relevant policy change, so it
+        // IS audited per call (`AGENTS.md` §5.4.4).
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -647,6 +690,17 @@ mod tests {
         let mem_unmap = spec_for(SyscallNumber::MEM_UNMAP).unwrap();
         assert_eq!(mem_unmap.required_capability, None);
         assert!(!mem_unmap.audit, "mem_unmap must not audit per call");
+        // rlimit_get reads the caller's own effective limit, so it is the
+        // unprivileged baseline and is not audited per call (`AGENTS.md`
+        // §24.3). rlimit_set is ungated at the dispatcher (lowering a bound
+        // needs no capability; the `CAP_RLIMIT_RAISE` check is fine-grained
+        // in the handler) but IS audited — it changes enforced policy.
+        let rlimit_get = spec_for(SyscallNumber::RLIMIT_GET).unwrap();
+        assert_eq!(rlimit_get.required_capability, None);
+        assert!(!rlimit_get.audit, "rlimit_get must not audit per call");
+        let rlimit_set = spec_for(SyscallNumber::RLIMIT_SET).unwrap();
+        assert_eq!(rlimit_set.required_capability, None);
+        assert!(rlimit_set.audit, "rlimit_set must be audited");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,
