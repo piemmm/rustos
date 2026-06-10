@@ -17,7 +17,7 @@ use rustos_arch_api::tlb::TlbShootdown as _;
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
 use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::paging::{self, BLOCK_2MIB, KERNEL_VMA_BASE, PAGE_SIZE};
-use rustos_arch_x86_64::{fault, percpu, qemu_exit, smp};
+use rustos_arch_x86_64::{fault, qemu_exit, smp};
 use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
 use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
 use rustos_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
@@ -298,12 +298,13 @@ fn run_overrun_test() -> ! {
     // cooperative `step` loop drives dispatch; interrupts are masked, so the
     // spawn-time self-IPI is latched and never delivered).
     let bsp_id = smp::bsp_lapic_id();
-    let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
-    cpu_to_lapic[0] = Some(bsp_id);
+    // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
+    // to one slot (`AGENTS.md` §24.1 — no baked-in `MAX_CPUS`).
+    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing (`AGENTS.md` §24.1); `run_overrun_test` runs once,
     // so a function-local `static` is sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(handle) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
         fail("X86_64Arch::new failed");
     };

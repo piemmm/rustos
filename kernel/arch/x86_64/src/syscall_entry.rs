@@ -82,13 +82,10 @@
 //! `Dispatcher::dispatch`. Argument validation, capability checks,
 //! and audit emission all stay in `kernel/syscall`.
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use rustos_abi::SYSCALL_MAX_ARGS;
-
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use crate::percpu::MAX_CPUS;
 
 // --- MSR addresses (Intel SDM Vol 3A §2.7, §5.8.8) ------------------
 
@@ -357,11 +354,129 @@ pub const fn validate_user_buffer(ptr: u64, len: u64) -> Result<(), UserBufferEr
     Ok(())
 }
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static mut PER_CPU_TLS: [SyscallTls; MAX_CPUS] = {
-    const Z: SyscallTls = SyscallTls::ZERO;
-    [Z; MAX_CPUS]
-};
+// --- Caller-provided per-CPU syscall TLS storage --------------------
+
+/// Published base of the registered [`SyscallTlsStorage::tls`] array
+/// (`null` until a storage is registered, so the per-CPU TLS entry
+/// points fail closed before registration — `AGENTS.md` §2.9 / §24.1).
+static SYSCALL_TLS_BASE: AtomicPtr<SyscallTls> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Number of logical-CPU TLS slots the registered storage covers (`0`
+/// until a storage is registered — every index is out of range, so an
+/// unregistered system fails closed).
+static SYSCALL_TLS_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Set-once guard so a second [`SyscallTlsStorage::register`] is refused
+/// rather than silently re-pointing the live TLS slice.
+static SYSCALL_TLS_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Failure mode of [`SyscallTlsStorage::register`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SyscallTlsStorageError {
+    /// Storage was already registered; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live arena).
+    AlreadyRegistered,
+}
+
+/// Caller-owned, `&'static` per-CPU [`SyscallTls`] arena, sized by the
+/// constructing caller for its machine (`AGENTS.md` §24.1 — the per-CPU
+/// syscall-TLS arena is derived from the §18-discovered logical-CPU
+/// count, never a fixed `const` ceiling baked into the arch crate).
+///
+/// The const parameter `N` is the number of logical CPUs the caller
+/// sizes for, matching the [`crate::percpu::PerCpuStorage`] it registers
+/// alongside. The arch crate stays allocator-free, so the caller places
+/// the storage in a `static` (allocator-free bins) or a leaked
+/// allocation and publishes it through [`SyscallTlsStorage::register`]
+/// before the first `install_kernel_rsp0`.
+#[repr(C, align(16))]
+pub struct SyscallTlsStorage<const N: usize> {
+    /// Per-CPU syscall TLS blocks, one slot per logical CPU. The
+    /// `UnsafeCell` is load-bearing: `install_kernel_rsp0` /
+    /// `set_kernel_rsp0` and the `swapgs`-relative entry stub mutate a
+    /// slot through the published base while the storage is only
+    /// borrowed `&'static` (shared), so the interior mutability is what
+    /// makes those writes sound *and* keeps the `static` in writable
+    /// memory rather than read-only `.rodata`.
+    tls: UnsafeCell<[SyscallTls; N]>,
+}
+
+// SAFETY: the `UnsafeCell<[SyscallTls; N]>` is mutated only through the
+// published base, and each CPU owns its own slot (the `cpu_index` it was
+// brought up with); no slot is shared mutably across threads/CPUs, so the
+// storage is `Sync`.
+unsafe impl<const N: usize> Sync for SyscallTlsStorage<N> {}
+
+impl<const N: usize> SyscallTlsStorage<N> {
+    /// A zeroed arena of `N` syscall-TLS blocks. `const` so the
+    /// allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            tls: UnsafeCell::new([const { SyscallTls::ZERO }; N]),
+        }
+    }
+
+    /// Publish this arena to the per-CPU syscall-TLS entry points, then
+    /// return the covered CPU count `N`. Must be called on the boot CPU,
+    /// exactly once, before any `install_kernel_rsp0`.
+    ///
+    /// # Errors
+    ///
+    /// [`SyscallTlsStorageError::AlreadyRegistered`] on the second
+    /// publish (set-once per boot — never silently re-points the live
+    /// arena, `AGENTS.md` §2.1).
+    pub fn register(&'static self) -> Result<usize, SyscallTlsStorageError> {
+        if SYSCALL_TLS_REGISTERED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SyscallTlsStorageError::AlreadyRegistered);
+        }
+        SYSCALL_TLS_BASE.store(self.tls.get().cast::<SyscallTls>(), Ordering::Release);
+        SYSCALL_TLS_LEN.store(N, Ordering::Release);
+        Ok(N)
+    }
+}
+
+impl<const N: usize> Default for SyscallTlsStorage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Number of logical-CPU TLS slots the registered [`SyscallTlsStorage`]
+/// covers (`0` until a storage is registered). Diagnostic observer.
+#[must_use]
+pub fn registered_syscall_cpu_count() -> usize {
+    SYSCALL_TLS_LEN.load(Ordering::Acquire)
+}
+
+/// Raw pointer to the registered per-CPU [`SyscallTls`] slot for
+/// `cpu_index`, or `None` if `cpu_index` is out of range or no storage
+/// is registered yet (fail closed, `AGENTS.md` §2.9).
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn syscall_tls_ptr(cpu_index: usize) -> Option<*mut SyscallTls> {
+    if cpu_index >= SYSCALL_TLS_LEN.load(Ordering::Acquire) {
+        return None;
+    }
+    let base = SYSCALL_TLS_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: a non-zero `SYSCALL_TLS_LEN` (checked above) is published
+    // in the same `register` call that stores the non-null base from a
+    // `&'static SyscallTlsStorage`'s `tls` array of that length, and
+    // `cpu_index < len`, so `base.add(cpu_index)` is in bounds.
+    Some(unsafe { base.add(cpu_index) })
+}
+
+#[cfg(test)]
+fn reset_syscall_tls_storage_for_tests() {
+    SYSCALL_TLS_REGISTERED.store(false, Ordering::Release);
+    SYSCALL_TLS_LEN.store(0, Ordering::Release);
+    SYSCALL_TLS_BASE.store(core::ptr::null_mut(), Ordering::Release);
+}
 
 /// Return the linear address of the per-CPU [`SyscallTls`] slot for
 /// `cpu_index`, populating its `kernel_rsp0` field with `kernel_rsp0`.
@@ -371,8 +486,9 @@ static mut PER_CPU_TLS: [SyscallTls; MAX_CPUS] = {
 ///
 /// # Errors
 ///
-/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if
-///   `cpu_index >= MAX_CPUS`.
+/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index` is
+///   outside the registered [`SyscallTlsStorage`] (or no storage is
+///   registered).
 /// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
 ///   `kernel_rsp0` is null, not 16-byte aligned, non-canonical, or in
 ///   the user half (`AGENTS.md` §3.5 — stack-pivot / CVE-2019-1125).
@@ -393,17 +509,17 @@ pub unsafe fn install_kernel_rsp0(
     cpu_index: usize,
     kernel_rsp0: u64,
 ) -> Result<u64, crate::percpu::InitError> {
-    if cpu_index >= MAX_CPUS {
-        return Err(crate::percpu::InitError::CpuIndexOutOfRange);
-    }
+    // Fail closed before registration or for an out-of-range index
+    // (`AGENTS.md` §2.9 / §24.1): the registered storage's published
+    // length is the only bound, not a baked-in `MAX_CPUS`.
+    let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
     // Reject a non-canonical / user-range / misaligned stack top before
     // it can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
     validate_kernel_rsp0(kernel_rsp0)?;
     // SAFETY: caller's contract pins `cpu_index` to this CPU; no
-    // other CPU writes to the same slot.
+    // other CPU writes to the same slot. `slot` points inside the
+    // `&'static` registered storage (proved by `syscall_tls_ptr`).
     unsafe {
-        let base = core::ptr::addr_of_mut!(PER_CPU_TLS).cast::<SyscallTls>();
-        let slot = base.add(cpu_index);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).user_rsp_save), 0);
         Ok(slot as u64)
@@ -434,38 +550,30 @@ pub unsafe fn install_kernel_rsp0(
 ///
 /// # Errors
 ///
-/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index`
-///   is out of range.
+/// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index` is
+///   outside the registered [`SyscallTlsStorage`] (or no storage is
+///   registered).
 /// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
 ///   `kernel_rsp0` is null, misaligned, non-canonical, or in the user half.
 ///
-/// On the host target the per-CPU TLS arena is not compiled (it is gated to
-/// `target_os = "none"`), so the host arm validates `kernel_rsp0` and
-/// returns without a write — exactly the validation the bare-metal arm
-/// performs before its write, which is the security-relevant behaviour the
-/// host tests cover.
+/// Indexes the registered [`SyscallTlsStorage`] on every target: a host
+/// test registers a backing first, so the same bound-then-validate-then-
+/// write path the bare-metal resume takes is exercised on the host.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::percpu::InitError> {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    if cpu_index >= MAX_CPUS {
-        return Err(crate::percpu::InitError::CpuIndexOutOfRange);
-    }
+    // Fail closed before registration or for an out-of-range index
+    // (`AGENTS.md` §2.9 / §24.1).
+    let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
     // Reject a non-canonical / user-range / misaligned stack top before it
     // can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
     validate_kernel_rsp0(kernel_rsp0)?;
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    // SAFETY: `cpu_index < MAX_CPUS` (checked above) keeps the slot in
-    // bounds; the resume runs on the dispatcher's context on this CPU, which
+    // SAFETY: the resume runs on the dispatcher's context on this CPU, which
     // is the only writer of its own slot, so the write does not race. Only
     // the `kernel_rsp0` field is touched; `user_rsp_save` is left to the
-    // entry stub.
+    // entry stub. `slot` points inside the `&'static` registered storage.
     unsafe {
-        let base = core::ptr::addr_of_mut!(PER_CPU_TLS).cast::<SyscallTls>();
-        let slot = base.add(cpu_index);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    let _ = cpu_index;
     Ok(())
 }
 
@@ -675,7 +783,8 @@ pub unsafe extern "C" fn syscall_entry_stub() {
 /// # Errors
 ///
 /// Returns [`crate::percpu::InitError::CpuIndexOutOfRange`] if
-/// `cpu_index >= MAX_CPUS`.
+/// `cpu_index` is outside the registered [`SyscallTlsStorage`] (or no
+/// storage is registered).
 ///
 /// # Safety
 ///
@@ -973,19 +1082,38 @@ mod tests {
 
     // -- X1 per-resume kernel-RSP0 repoint (plans/PI.md §X) --------------
     //
-    // `set_kernel_rsp0` writes the per-CPU TLS arena only on the bare-metal
-    // target; on the host it validates `kernel_rsp0` and returns. These pin
-    // that it applies the same fail-closed stack-pivot check as
-    // `install_kernel_rsp0` before it would ever repoint the slot.
-
+    // `set_kernel_rsp0` indexes the registered `SyscallTlsStorage` and, for
+    // an in-range slot, applies the same fail-closed stack-pivot check as
+    // `install_kernel_rsp0` before it repoints the slot. Driving it through
+    // a host-registered backing exercises the bound-then-validate-then-write
+    // path the bare-metal resume takes. Registration is global set-once, so
+    // all the per-resume assertions live in one test that owns it.
     #[test]
-    fn set_kernel_rsp0_accepts_a_canonical_aligned_kernel_stack() {
+    fn set_kernel_rsp0_indexes_registered_storage_and_validates_stack_top() {
+        // Declared first so the static precedes the statements that drive it.
+        static STORAGE: SyscallTlsStorage<4> = SyscallTlsStorage::new();
+        static STORAGE2: SyscallTlsStorage<2> = SyscallTlsStorage::new();
+
+        reset_syscall_tls_storage_for_tests();
+
+        // Before any storage is registered the repoint fails closed rather
+        // than dereferencing a null base (`AGENTS.md` §2.9 / §24.1) — even
+        // for an otherwise-valid stack top.
+        assert_eq!(registered_syscall_cpu_count(), 0);
+        assert_eq!(
+            set_kernel_rsp0(0, 0xFFFF_8000_0010_0000),
+            Err(InitError::CpuIndexOutOfRange)
+        );
+
+        assert_eq!(STORAGE.register(), Ok(4));
+        assert_eq!(registered_syscall_cpu_count(), 4);
+
+        // A canonical, 16-byte-aligned kernel-half stack top is accepted.
         assert_eq!(set_kernel_rsp0(0, 0xFFFF_8000_0010_0000), Ok(()));
-        assert_eq!(set_kernel_rsp0(0, CANONICAL_HIGHER_BASE), Ok(()));
-    }
+        assert_eq!(set_kernel_rsp0(3, CANONICAL_HIGHER_BASE), Ok(()));
 
-    #[test]
-    fn set_kernel_rsp0_rejects_null_and_misaligned() {
+        // Null / misaligned / user-range / non-canonical tops are rejected
+        // fail-closed for an in-range slot (the stack-pivot guard).
         assert_eq!(
             set_kernel_rsp0(0, 0),
             Err(InitError::InvalidKernelStackPointer)
@@ -994,24 +1122,28 @@ mod tests {
             set_kernel_rsp0(0, 0xFFFF_8000_0010_0008),
             Err(InitError::InvalidKernelStackPointer)
         );
-    }
-
-    #[test]
-    fn set_kernel_rsp0_rejects_a_user_range_stack() {
-        // A 16-byte-aligned canonical user-half address: repointing the
-        // entry stack there would be a stack-pivot vector.
         assert_eq!(
             set_kernel_rsp0(0, 0x0000_7FFF_FFF0_0000),
             Err(InitError::InvalidKernelStackPointer)
         );
-    }
-
-    #[test]
-    fn set_kernel_rsp0_rejects_a_non_canonical_stack() {
         assert_eq!(
             set_kernel_rsp0(0, 0x0001_0000_0000_0000),
             Err(InitError::InvalidKernelStackPointer)
         );
+
+        // An out-of-range index is rejected before the stack-top check.
+        assert_eq!(
+            set_kernel_rsp0(4, 0xFFFF_8000_0010_0000),
+            Err(InitError::CpuIndexOutOfRange)
+        );
+
+        // Registration is set-once: a second backing is refused.
+        assert_eq!(
+            STORAGE2.register(),
+            Err(SyscallTlsStorageError::AlreadyRegistered)
+        );
+
+        reset_syscall_tls_storage_for_tests();
     }
 
     // -- §5 copy_from_user user-buffer validation (CWE-367 / CWE-822) ----

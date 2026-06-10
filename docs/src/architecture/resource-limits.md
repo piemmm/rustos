@@ -11,9 +11,10 @@ ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
 syscalls, and the `CAP_RLIMIT_RAISE` capability), the **kernel enforcement**
 of it, the **`ulimit` shell command**, and the **System Information limits
 query**, and the **growable *and* shrinkable kernel-stack arena** are
-**landed**, as is the **aarch64** per-arch secondary-bring-up bound (the
-`smp.s` stack pool and per-CPU `preempt` slots are now caller-sized); only the
-**riscv64** and **x86_64** secondary-bring-up bounds remain staged behind them
+**landed**, as are the **aarch64**, **riscv64**, and **x86_64** per-arch
+secondary-bring-up bounds (each port's secondary-stack pool and per-CPU
+`preempt`/`percpu`/`syscall_entry` state are now caller-sized); no per-arch
+secondary-bring-up bound remains staged
 (see *Status* below).
 
 ## Capacities scale; security bounds stay fixed
@@ -425,9 +426,10 @@ and `shootdown_page` no longer fills a fixed `[u8; MAX_CPUS]` scratch buffer —
 it streams the other CPUs' LAPIC ids straight out of the borrowed map into
 `tlb_shootdown::shootdown` (now an `Iterator + Clone` consumer that walks the
 ids twice: once to publish the acknowledge count, once to raise the IPIs), so
-there is no `MAX_CPUS` ceiling in the handle. (`MAX_CPUS` survives only for the
-`smp.s` secondary-stack pool and the per-CPU `percpu`/`syscall_entry` statics —
-the secondary-bring-up item below.) The production boot path supplies a
+there is no `MAX_CPUS` ceiling in the handle. (The per-CPU
+`percpu`/`syscall_entry` arenas and the AP stack pool are *also* now
+caller-sized — see *Per-arch secondary-bring-up bound* below — so x86_64 no
+longer has a `MAX_CPUS` constant at all.) The production boot path supplies a
 `static X86_64ArchStorage<1>` (production `rustos-kernel` runs single-CPU) and
 every x86_64 QEMU vertical constructs through a right-sized `static`.
 
@@ -490,9 +492,37 @@ range. The per-stack size (`SECONDARY_STACK_BYTES`, 16 KiB) stays a fixed
 `SecondaryStackPool<2>`; the single-hart `timer_preempt_qemu_riscv64` registers
 a `PreemptStorage<1>`.
 
-**x86_64 — planned.** The same redesign is still owed on x86_64: its AP
-trampoline secondary-stack pool and the `percpu`/`syscall_entry` per-CPU
-statics. (wasm32 has no secondary-stack pool; its worker contexts are
+**x86_64 — done.** The `percpu::MAX_CPUS` constant is gone, and the three
+per-CPU `[T; MAX_CPUS]` `static` arenas it sized are now caller-provided,
+runtime-sized storages published through set-once `register` calls before the
+first use, each failing closed (every index out of range → `CpuIndexOutOfRange`
+/ `CpuIdOutOfRange`, no panic) before registration (§2.9 / §24.1):
+
+- `percpu::PerCpuStorage<N>` — the per-CPU GDT/TSS/IST + IDT arena `percpu::init`
+  finalises and `install_vector`/`install_tss_rsp0` mutate. Its payload is held
+  in an `UnsafeCell` so the `static` lands in writable memory and the
+  through-the-published-base writes are sound (the GDT/IDT are mutated by Rust
+  and reached by `gs`-relative / computed addressing, not atomics).
+- `syscall_entry::SyscallTlsStorage<N>` — the per-CPU `syscall`-entry TLS
+  (`kernel_rsp0` + transient user-`rsp` save) `install_kernel_rsp0` /
+  `set_kernel_rsp0` write and the `swapgs`-relative stub reaches; also
+  `UnsafeCell`-backed.
+- `smp::ApStackPool<N>` — the AP bootstrap-stack pool `start_secondary` computes
+  each AP's stack top from (`base + (cpu - 1) * stride`, in-bounds-checked
+  against the published length). Slot `idx` backs the AP with dense `CpuId`
+  `idx + 1`. The per-stack 16 KiB size stays a fixed §24.4 *bound*.
+
+(Unlike aarch64/riscv64, the x86_64 AP trampoline reads its stack top from the
+per-AP boot slot the BSP stamps, so the *Rust* `start_secondary` computes it —
+no assembly `.bss` reserve and no asm change.) Production `rustos-kernel` runs
+single-CPU: it registers `PerCpuStorage<1>` + `SyscallTlsStorage<1>` and no AP
+pool. The single-CPU x86_64 verticals register a `PerCpuStorage<1>` (when they
+drive `percpu::init` directly) and size their arch handle / TLS to one slot; the
+two-CPU `cross_cpu_tlb_shootdown_qemu_x86_64` registers `PerCpuStorage<2>` +
+`ApStackPool<1>`, and `scheduler_stress_qemu` registers a
+`PerCpuStorage<MAX_CPUS>` + `ApStackPool<MAX_CPUS - 1>` sized to its own test
+capacity (the old `MAX_CPUS <= percpu::MAX_CPUS` agreement const-assert is
+deleted). (wasm32 has no secondary-stack pool; its worker contexts are
 host-provided.)
 
 ## Status
@@ -536,8 +566,12 @@ host-provided.)
   `SecondaryStackPool<N>` published to the `smp.s` trampoline and the timer
   slots a caller-sized `PreemptStorage<N>` — see *Per-arch secondary-bring-up
   bound* above), preserving the §17.2 break-before-make and §4 guard-page
-  invariants. Still planned: the same conversion on **x86_64** (the AP
-  trampoline pool + `percpu`/`syscall_entry` statics).
+  invariants. The same conversion is now also done on **x86_64**: the
+  `percpu::MAX_CPUS` constant is gone and the per-CPU GDT/IDT/IST arena, the
+  `syscall`-entry TLS, and the AP bootstrap-stack pool are caller-provided
+  `PerCpuStorage<N>` / `SyscallTlsStorage<N>` / `ApStackPool<N>` storages
+  (`UnsafeCell`-backed where Rust writes them), fail-closed before their
+  set-once `register`. No per-arch secondary-bring-up bound remains.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

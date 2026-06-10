@@ -331,18 +331,21 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use rustos_arch_x86_64::kernel_arch::X86_64ArchStorage;
-    use rustos_arch_x86_64::percpu::MAX_CPUS;
+
+    /// Convenient per-CPU capacity for the host tests — a local test
+    /// constant, not a production ceiling (the arch crate no longer
+    /// exposes a `MAX_CPUS`; capacity is the caller's `N`).
+    const TEST_CPUS: usize = 8;
 
     fn arch_with_boot_cpu(boot_cpu: u32, lapic: u8) -> X86_64Arch {
         // Each construction leaks its own per-CPU backing so no two
         // handles share IPI counters under the parallel test runner
         // (`AGENTS.md` §7); the leak is bounded (one per host test) and
         // the bin crate already has an allocator (`AGENTS.md` §24.1 —
-        // allocator-having callers may provide leaked storage). `MAX_CPUS`
-        // is a convenient test capacity, not a production ceiling.
-        let storage: &'static X86_64ArchStorage<MAX_CPUS> =
+        // allocator-having callers may provide leaked storage).
+        let storage: &'static X86_64ArchStorage<TEST_CPUS> =
             Box::leak(Box::new(X86_64ArchStorage::new()));
-        let mut map = [None; MAX_CPUS];
+        let mut map = [None; TEST_CPUS];
         map[boot_cpu as usize] = Some(lapic);
         X86_64Arch::new(storage, boot_cpu, lapic, &map).expect("valid X86_64Arch")
     }

@@ -46,17 +46,17 @@ static SCHED_PTR: AtomicPtr<Scheduler<SmpArch>> = AtomicPtr::new(core::ptr::null
 /// APs observe it in their step loop and break out.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Per-CPU execution counter (debug aid; verifies tasks ran on multiple
-/// physical cores). Sized to the maximum supported CPU count.
-///
-/// Must not exceed `rustos_arch_x86_64::percpu::MAX_CPUS` — the arch
-/// crate's per-CPU arena is the source of truth for the bound. The
-/// const-assert immediately below makes a future divergence a
-/// compile-time error.
+/// Maximum number of CPUs this stress vertical brings up. It is the
+/// *test harness*'s chosen capacity (the BSP brings up
+/// `min(discovered, MAX_CPUS)` cores), and every per-CPU backing this
+/// binary owns — the execution counter, the arch handle, the per-CPU
+/// arena, and the AP stack pool — is sized to it. The arch crate no
+/// longer imposes a `MAX_CPUS` ceiling: capacity is the caller's `N`
+/// (`AGENTS.md` §24.1).
 const MAX_CPUS: usize = 16;
 
-#[allow(dead_code)] // const-assert; not referenced at runtime.
-const MAX_CPUS_FITS_PERCPU_ARENA: () = assert!(MAX_CPUS <= rustos_arch_x86_64::percpu::MAX_CPUS);
+/// Per-CPU execution counter (debug aid; verifies tasks ran on multiple
+/// physical cores), sized to [`MAX_CPUS`].
 static PER_CPU_EXEC: [AtomicU64; MAX_CPUS] = {
     // `AtomicU64::new` is `const`. Hand-roll the array; the
     // `[AtomicU64::new(0); MAX_CPUS]` syntax requires `Copy`. The
@@ -307,6 +307,20 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // interrupts are enabled. The boot trampoline (`boot.s` SAFETY-
     // INVARIANT 6) guarantees the IDTR is invalid on entry; replacing
     // it now is the documented sequencing.
+    //
+    // Publish the caller-owned per-CPU GDT/IDT/IST arena (sized to this
+    // vertical's `MAX_CPUS` capacity) before any `percpu::init`, on the
+    // BSP and before any AP is started so each AP's `percpu::init(cpu_id)`
+    // sees it (`AGENTS.md` §24.1 — no baked-in arch-crate ceiling).
+    // Set-once; `kernel_main` runs once.
+    static PER_CPU_STORAGE: percpu::PerCpuStorage<MAX_CPUS> = percpu::PerCpuStorage::new();
+    if PER_CPU_STORAGE.register().is_err() {
+        let _ = writeln!(
+            com1,
+            "[scheduler_stress_qemu] FAIL: PerCpuStorage::register"
+        );
+        qemu_exit::exit_failure();
+    }
     unsafe {
         if percpu::init(0).is_err() {
             let _ = writeln!(com1, "[scheduler_stress_qemu] FAIL: percpu::init(BSP)");
@@ -404,7 +418,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // INIT-SIPI-SIPI orchestration now lives in `rustos_arch_x86_64::smp`
     // (`plans/WIRING.md` Stage W14); this vertical exercises it
     // end-to-end on ≥ 4 real (emulated) cores.
-    let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
+    let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
     cpu_to_lapic[0] = Some(bsp_id);
     for i in 0..ap_ids.count {
         cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
@@ -414,7 +428,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // vertical's discovered CPU count, no fixed ceiling in the arch
     // crate). `kernel_main` runs once, so a function-local `static` is
     // sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    static ARCH_STORAGE: X86_64ArchStorage<MAX_CPUS> = X86_64ArchStorage::new();
     let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
         Ok(handle) => handle,
         Err(e) => {
@@ -432,6 +446,18 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         let _ = writeln!(
             com1,
             "[scheduler_stress_qemu] FAIL: secondary entry already installed"
+        );
+        qemu_exit::exit_failure();
+    }
+    // Publish the caller-owned AP bootstrap-stack pool (one stack per
+    // application processor, sized to `MAX_CPUS - 1`) before any
+    // `start_secondary` (`AGENTS.md` §24.1). Set-once; fails closed
+    // before registration.
+    static AP_STACKS: smp::ApStackPool<{ MAX_CPUS - 1 }> = smp::ApStackPool::new();
+    if AP_STACKS.register().is_err() {
+        let _ = writeln!(
+            com1,
+            "[scheduler_stress_qemu] FAIL: AP stack pool already registered"
         );
         qemu_exit::exit_failure();
     }

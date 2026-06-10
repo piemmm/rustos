@@ -46,6 +46,12 @@
 // requires; the Rust-side struct never receives an AP write directly).
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+// The caller-provided `ApStackPool` payload is held in an `UnsafeCell`
+// so its `static` lands in writable memory; only the freestanding
+// bring-up path materialises one.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+use core::cell::UnsafeCell;
+
 use rustos_arch_api::CpuId;
 
 use crate::apic::{DeliveryMode, Lapic, LapicMmio};
@@ -476,15 +482,6 @@ fn clear_secondary_entry_for_tests() {
 
 // --- Bare-metal bring-up orchestration ------------------------------
 
-/// Maximum number of logical CPUs the per-AP stack pool covers, locked
-/// to the per-CPU arena bound (`crate::percpu::MAX_CPUS`).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-const MAX_CPUS: usize = crate::percpu::MAX_CPUS;
-
-/// Number of application processors (every CPU except the boot CPU).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-const MAX_APS: usize = MAX_CPUS - 1;
-
 /// Spin budget the boot CPU waits for an AP's `ready` flag before
 /// declaring the start timed out. Generous: each iteration is a single
 /// acquire-load, and a healthy AP sets `ready` within a few thousand.
@@ -497,24 +494,125 @@ const AP_READY_SPIN_BUDGET: u64 = 10_000_000;
 #[repr(C, align(16))]
 struct ApStack([u8; 16 * 1024]);
 
-/// Reserved AP stack pool — one 16 KiB stack per application processor.
-/// Zeroed by `boot.s` (`.bss`); each stack is handed to exactly one AP.
+/// Published base of the registered [`ApStackPool::stacks`] array
+/// (`null` until a pool is registered, so [`start_secondary`] fails
+/// closed before registration — `AGENTS.md` §2.9 / §24.1).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static mut AP_STACKS: [ApStack; MAX_APS] = {
-    const Z: ApStack = ApStack([0; 16 * 1024]);
-    [Z; MAX_APS]
-};
+static AP_STACK_BASE: core::sync::atomic::AtomicPtr<ApStack> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Top-of-stack (one past the last byte, 16-byte aligned) of AP stack
-/// pool entry `idx`. The caller guarantees `idx < MAX_APS`.
+/// Number of application-processor bootstrap stacks the registered pool
+/// covers (`0` until a pool is registered — every AP index is out of
+/// range, so an unregistered system fails closed).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn ap_stack_top(idx: usize) -> u64 {
-    // SAFETY: `idx < MAX_APS` (checked by the caller). The struct and
-    // the array are both `align(16)`, so `base + size_of` preserves the
+static AP_STACK_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Set-once guard so a second [`ApStackPool::register`] is refused
+/// rather than silently re-pointing the live stack pool.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static AP_STACK_REGISTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Failure mode of [`ApStackPool::register`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ApStackPoolError {
+    /// Pool was already registered; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live pool).
+    AlreadyRegistered,
+}
+
+/// Caller-owned, `&'static` application-processor bootstrap-stack pool,
+/// sized by the constructing caller for its machine (`AGENTS.md` §24.1 —
+/// the AP stack count is derived from the §18-discovered application-
+/// processor count, never a fixed `MAX_CPUS - 1` ceiling baked into the
+/// arch crate).
+///
+/// The const parameter `N` is the number of *application* processors the
+/// caller brings up (every logical CPU except the boot CPU): a machine
+/// that boots `C` CPUs sizes `ApStackPool<{C - 1}>`. Pool entry `idx`
+/// backs the AP whose dense [`CpuId`] is `idx + 1`. The arch crate stays
+/// allocator-free, so the caller places the pool in a `static`
+/// (allocator-free bins) and publishes it through
+/// [`ApStackPool::register`] before the first [`start_secondary`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[repr(C, align(16))]
+pub struct ApStackPool<const N: usize> {
+    /// One 16 KiB bootstrap stack per application processor. The
+    /// `UnsafeCell` keeps the `static` in writable memory (an AP pushes
+    /// onto its stack the instant the trampoline pivots `rsp` onto it)
+    /// rather than read-only `.rodata`; Rust never forms a reference to
+    /// the bytes, only computes the per-slot top.
+    stacks: UnsafeCell<[ApStack; N]>,
+}
+
+// SAFETY: each pool slot backs exactly one application processor's
+// bootstrap stack (slot `idx` → AP with dense `CpuId` `idx + 1`); no slot
+// is ever shared between CPUs, so the pool is `Sync`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+unsafe impl<const N: usize> Sync for ApStackPool<N> {}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+impl<const N: usize> ApStackPool<N> {
+    /// A zeroed pool of `N` AP bootstrap stacks. `const` so the
+    /// allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stacks: UnsafeCell::new([const { ApStack([0; 16 * 1024]) }; N]),
+        }
+    }
+
+    /// Publish this pool to [`start_secondary`], then return the covered
+    /// AP count `N`. Must be called on the boot CPU, exactly once, before
+    /// the first [`start_secondary`].
+    ///
+    /// # Errors
+    ///
+    /// [`ApStackPoolError::AlreadyRegistered`] on the second publish
+    /// (set-once per boot — never silently re-points the live pool,
+    /// `AGENTS.md` §2.1).
+    pub fn register(&'static self) -> Result<usize, ApStackPoolError> {
+        if AP_STACK_REGISTERED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ApStackPoolError::AlreadyRegistered);
+        }
+        AP_STACK_BASE.store(self.stacks.get().cast::<ApStack>(), Ordering::Release);
+        AP_STACK_LEN.store(N, Ordering::Release);
+        Ok(N)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+impl<const N: usize> Default for ApStackPool<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Top-of-stack (one past the last byte, 16-byte aligned) of registered
+/// AP stack pool entry `idx`, or `None` if `idx` is out of range or no
+/// pool is registered yet (fail closed, `AGENTS.md` §2.9).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn ap_stack_top(idx: usize) -> Option<u64> {
+    if idx >= AP_STACK_LEN.load(Ordering::Acquire) {
+        return None;
+    }
+    let base = AP_STACK_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: a non-zero `AP_STACK_LEN` (checked above) is published in
+    // the same `register` call that stores the non-null base from a
+    // `&'static ApStackPool`'s `stacks` array of that length, and
+    // `idx < len`, so `base.add(idx)` is in bounds. The struct and the
+    // array are both `align(16)`, so `base + size_of` preserves the
     // 16-byte alignment the System V ABI requires for RSP on entry.
     unsafe {
-        let base = core::ptr::addr_of!(AP_STACKS[idx]) as u64;
-        base + core::mem::size_of::<ApStack>() as u64
+        let slot = base.add(idx) as u64;
+        Some(slot + core::mem::size_of::<ApStack>() as u64)
     }
 }
 
@@ -603,9 +701,11 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
     let Some(stack_idx) = (cpu as usize).checked_sub(1) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
-    if stack_idx >= MAX_APS {
+    // The registered pool's published length is the only bound (no baked-in
+    // `MAX_APS`); an unregistered pool or an out-of-range AP fails closed.
+    let Some(stack_top) = ap_stack_top(stack_idx) else {
         return Err(StartCpuError::CpuIdOutOfRange);
-    }
+    };
     let entry_addr = secondary_entry_addr();
     if entry_addr == 0 {
         return Err(StartCpuError::NoEntryInstalled);
@@ -622,7 +722,6 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
         return Err(StartCpuError::CpuIdOutOfRange);
     }
 
-    let stack_top = ap_stack_top(stack_idx);
     // Read CR3 — the boot CPU's PML4; APs inherit it.
     let cr3: u64;
     // SAFETY: reading CR3 in ring 0 is well-defined and side-effect-free.

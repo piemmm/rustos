@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 & x86_64 per-CPU handle bookkeeping + growable AND shrinkable kernel-stack arena done; per-arch secondary-bring-up bound remains)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L3b+L4a+L4b landed; the §24.1 sweep (heap span table, supplementary-group ceiling, spawn fan-out, all-arch per-CPU handle bookkeeping, growable AND shrinkable kernel-stack arena, and the per-arch secondary-bring-up bound on all three bare-metal ports) is complete]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, the riscv64 `RiscvArch`, aarch64 `Aarch64Arch`, and x86_64 `X86_64Arch` per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` (the no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins), and the kernel stack arena now both grows (chaining a fresh `FrameAllocator`-backed 2 MiB block on genuine exhaustion, `FrameArenaGrow`, bounded to the per-space identity window, failing closed to `BoxStack` only on physical exhaustion) and shrinks (per-block live-count accounting plus a one-free-block grace — hysteresis, amortised, no thrash, no busy loop — returns idle chained blocks via `FrameArenaShrink`/`free_order(9)`, zeroed-on-free §4, double-/foreign-/misaligned-free failing closed §2.9, reclaimed on `ArenaStack` drop at task exit); only the per-arch secondary-bring-up bound remains).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L3b (the §24.1 fixed-capacity sweep) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) are all landed. The L3b sweep converted: the userland-heap free-span table (grow-on-demand `SpanStore`), the `kernel/sec` supplementary-group ceiling (`CAP_RLIMIT_RAISE`-gated configurable capacity), the spawn fan-out `MAX_SPAWNS` (allocator-backed grow-on-demand page-table capacity on both production producers), the wasm32/riscv64/aarch64/x86_64 per-CPU handle bookkeeping (caller-provided `&'static`-slice capacities — `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` for the bare-metal ports, since the boxed approach is blocked by the allocator-free Stage-2 bins), the kernel stack arena (grows by chaining a fresh `FrameAllocator`-backed 2 MiB block on exhaustion and shrinks by returning idle chained blocks under a one-free-block grace, zeroed-on-free §4, fail-closed §2.9), and — on all three bare-metal ports — the per-arch secondary-bring-up bound (x86_64's `percpu::MAX_CPUS` is gone; its per-CPU GDT/IDT/IST arena, syscall-entry TLS, and AP bootstrap-stack pool are now caller-provided `PerCpuStorage<N>` / `SyscallTlsStorage<N>` / `ApStackPool<N>` storages, matching the aarch64/riscv64 `SecondaryStackPool<N>` + `PreemptStorage<N>` shape).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -992,9 +992,10 @@ and fail-closed (§24.4) — this work must not loosen them.
   fixed `[u8; MAX_CPUS]` scratch buffer — it streams the other CPUs' LAPIC ids
   out of the borrowed map into `tlb_shootdown::shootdown`, now an `Iterator +
   Clone` consumer that walks them twice (count, then send). So the handle imposes
-  no `MAX_CPUS` ceiling (`MAX_CPUS` survives only for the `smp.s` secondary-stack
-  pool and the per-CPU `percpu`/`syscall_entry` statics — the bring-up item
-  below). Production `boot.rs` supplies a `static X86_64ArchStorage<1>`
+  no `MAX_CPUS` ceiling — and `percpu::MAX_CPUS` is now gone entirely (the
+  per-CPU `percpu`/`syscall_entry` arenas and the AP stack pool are also
+  caller-sized — the secondary-bring-up item below). Production `boot.rs`
+  supplies a `static X86_64ArchStorage<1>`
   (single-CPU) and every x86_64 vertical a right-sized `static`. The boxed-slice
   approach the wasm32 port used is **blocked** on bare metal — `extern crate
   alloc` in a bare-metal arch crate forces `alloc` into the dependency graph of
@@ -1021,8 +1022,20 @@ and fail-closed (§24.4) — this work must not loosen them.
   per-hart timer slots are a caller-sized `preempt::PreemptStorage<N>` published
   as `&'static [AtomicU64]` slices; both fail closed before registration (§2.9),
   the per-stack 16 KiB size stays a fixed §24.4 bound, and the three riscv64
-  SMP/timer verticals register a right-sized pool/storage. **x86_64 remains**
-  (its AP-trampoline secondary-stack pool + `percpu`/`syscall_entry` statics).
+  SMP/timer verticals register a right-sized pool/storage. **x86_64 done**
+  (L3b): `percpu::MAX_CPUS` is deleted; the per-CPU GDT/IDT/IST arena, the
+  `syscall`-entry TLS, and the AP bootstrap-stack pool are now caller-provided
+  `percpu::PerCpuStorage<N>` / `syscall_entry::SyscallTlsStorage<N>` /
+  `smp::ApStackPool<N>` storages, each published through a set-once `register`
+  and failing closed before it (every index out of range, no panic, §2.9). The
+  Rust-mutated payloads are `UnsafeCell`-backed so the `static` lands in
+  writable memory; unlike aarch64/riscv64 the AP reads its stack top from the
+  per-AP boot slot the BSP stamps, so the Rust `start_secondary` computes it
+  with no assembly `.bss` reserve. Production `rustos-kernel` registers
+  `PerCpuStorage<1>` + `SyscallTlsStorage<1>`; the SMP verticals register a
+  right-sized `PerCpuStorage<N>` (+ `ApStackPool<N>` for the multi-CPU ones,
+  `scheduler_stress_qemu`'s old `MAX_CPUS <= percpu::MAX_CPUS` const-assert
+  deleted).
 - Process/identity capacities — spawn fan-out (`spawn_producer*.rs`
   `MAX_SPAWNS = 8`): convert to grow-or-limit-governed capacities. **Done**
   (L3b): the spawn fan-out itself is now allocator-backed and grows on demand —
@@ -1081,7 +1094,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   suite); the existing aarch64 guard verticals continue to prove the
   mechanism on the now-policy-sized arena. Docs in
   `docs/src/architecture/resource-limits.md`.
-- L3b — **in progress.** Two §24.1 sweep sites are converted (no ABI change):
+- L3b — **DONE.** The §24.1 fixed-capacity sweep is complete (no ABI change):
   the userland-heap free-span table in `lib/rt/src/heap.rs` is now a
   grow-on-demand `SpanStore` capacity — it maps a fresh metadata page when the
   table fills and fails closed only on genuine OOM, with a Vec-backed host
@@ -1171,10 +1184,22 @@ and fail-closed (§24.4) — this work must not loosen them.
   The **riscv64** secondary-bring-up bound is now converted the same way (its
   `smp.s` `SECONDARY_MAX_HARTS` `.skip` pool and `smp::MAX_HARTS` const deleted
   in favour of a caller-sized `SecondaryStackPool<N>` / `PreemptStorage<N>`,
-  the trampoline using a left shift to avoid the `M` multiply extension).
-  **Only the x86_64 secondary-bring-up bound now remains** (its AP-trampoline
-  stack pool + `percpu`/`syscall_entry` statics), with the §17.2/§4 safety
-  invariants preserved.
+  the trampoline using a left shift to avoid the `M` multiply extension). The
+  **x86_64** secondary-bring-up bound is now **also** converted, completing the
+  sweep: `percpu::MAX_CPUS` is deleted and the three per-CPU `[T; MAX_CPUS]`
+  statics it sized — the GDT/IDT/IST arena, the `syscall`-entry TLS, and the AP
+  bootstrap-stack pool — are now caller-provided `percpu::PerCpuStorage<N>` /
+  `syscall_entry::SyscallTlsStorage<N>` / `smp::ApStackPool<N>` storages, each
+  with a set-once `register` and fail-closed accessors (every index out of
+  range → `CpuIndexOutOfRange`/`CpuIdOutOfRange`, no panic, §2.9). The
+  Rust-mutated payloads are `UnsafeCell`-backed so the `static` is writable;
+  the AP reads its stack top from the per-AP boot slot the BSP stamps, so no
+  assembly `.bss` reserve is involved. Production `rustos-kernel` registers
+  `PerCpuStorage<1>` + `SyscallTlsStorage<1>`; the SMP verticals register a
+  right-sized `PerCpuStorage<N>` + `ApStackPool<N>` (the `scheduler_stress_qemu`
+  `MAX_CPUS <= percpu::MAX_CPUS` agreement const-assert is deleted), with the
+  §17.2/§4 safety invariants preserved. **No per-arch secondary-bring-up bound
+  remains.**
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
@@ -1358,6 +1383,6 @@ can see *why* a rule exists without diffing the charter's history.
   desktop and server, a capability-gated (`CAP_RLIMIT_RAISE`) `ulimit`/`rlimit`
   equivalent for settable per-process/user limits, and a §24.4 carve-out
   keeping security/format *bounds* on untrusted input deliberately fixed and
-  fail-closed (widening those is a §2.17 regression). Scheduled as the
-  **[DO NEXT]** PLAN §24 stage with the audited sweep of offending constants.
-  Documentation only; the implementation is the scheduled stage.
+  fail-closed (widening those is a §2.17 regression). Implemented as the PLAN
+  §24 stage; the audited sweep of offending constants is now complete.
+  Documentation only.

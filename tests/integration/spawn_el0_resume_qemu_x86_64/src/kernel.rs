@@ -15,7 +15,7 @@ use rustos_arch_x86_64::context_hal::ContextSwitchHal;
 use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use rustos_arch_x86_64::userentry::UserMode;
-use rustos_arch_x86_64::{percpu, qemu_exit, smp, syscall_entry};
+use rustos_arch_x86_64::{qemu_exit, smp, syscall_entry};
 use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
 use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
 use rustos_kernel_core::{
@@ -317,12 +317,15 @@ fn run_resume() -> ! {
     // masked, so dispatch is the cooperative `step` loop below (the spawn-time
     // self-IPI to the LAPIC ICR is latched and never delivered).
     let bsp_id = smp::bsp_lapic_id();
-    let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
-    cpu_to_lapic[0] = Some(bsp_id);
+    // This vertical drives a single CPU (the BSP, dense id 0), so its
+    // per-CPU bookkeeping is sized to one slot (`AGENTS.md` §24.1 —
+    // capacity matches the machine the caller drives, not a baked-in
+    // `MAX_CPUS`).
+    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing (`AGENTS.md` §24.1); `run` runs once, so a
     // function-local `static` is sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(arch) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
         note(TEST_FAIL, "X1 test: X86_64Arch::new failed");
         qemu_exit::exit_failure();

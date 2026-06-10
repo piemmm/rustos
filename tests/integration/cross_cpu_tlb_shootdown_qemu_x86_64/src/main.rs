@@ -48,9 +48,13 @@ mod kernel {
     use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
     use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
     use rustos_arch_x86_64::multiboot2::BootInfo;
-    use rustos_arch_x86_64::percpu::MAX_CPUS;
     use rustos_arch_x86_64::smp;
     use rustos_arch_x86_64::{percpu, preempt, qemu_exit, serial, tlb_shootdown};
+
+    /// Logical CPUs this vertical brings up: the BSP plus a single AP
+    /// (`AGENTS.md` §24.1 — the per-CPU backings are sized to the CPUs the
+    /// caller actually drives, not a baked-in `MAX_CPUS`).
+    const CPUS: usize = 2;
 
     /// A representative page to invalidate. The exact address is
     /// immaterial — a TLB shootdown can only ever *over*-invalidate.
@@ -180,6 +184,14 @@ mod kernel {
         let mut com1 = serial::Serial::init(serial::COM1_BASE);
         let _ = writeln!(com1, "[cross_cpu_tlb_shootdown_qemu_x86_64] BSP boot");
 
+        // Publish the caller-owned per-CPU GDT/IDT/IST arena (covering the
+        // BSP and the one AP) before any `percpu::init`, on the BSP and
+        // before the AP is started so the AP's `percpu::init(1)` sees it
+        // (`AGENTS.md` §24.1). Set-once; this `kernel_main` runs once.
+        static PER_CPU_STORAGE: percpu::PerCpuStorage<CPUS> = percpu::PerCpuStorage::new();
+        if PER_CPU_STORAGE.register().is_err() {
+            qemu_exit::exit_failure();
+        }
         // SAFETY: BSP, once, before interrupts are enabled; installs the
         // BSP per-CPU GDT + IDT.
         unsafe {
@@ -223,14 +235,14 @@ mod kernel {
         // handle with the same two-CPU map.
         preempt::set_cpu_id_for_lapic(bsp_id, 0);
         preempt::set_cpu_id_for_lapic(ap_id, 1);
-        let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
+        let mut cpu_to_lapic: [Option<u8>; CPUS] = [None; CPUS];
         cpu_to_lapic[0] = Some(bsp_id);
         cpu_to_lapic[1] = Some(ap_id);
         // The arch handle borrows its per-CPU bookkeeping from a
         // caller-sized `&'static` backing (`AGENTS.md` §24.1); `kernel_main`
         // runs once, so a function-local `static` is sound and needs no
         // allocator. `shootdown_page` walks exactly this two-CPU map.
-        static ARCH_STORAGE: X86_64ArchStorage<{ MAX_CPUS }> = X86_64ArchStorage::new();
+        static ARCH_STORAGE: X86_64ArchStorage<CPUS> = X86_64ArchStorage::new();
         let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
             Ok(a) => a,
             Err(_) => qemu_exit::exit_failure(),
@@ -243,6 +255,17 @@ mod kernel {
             let _ = writeln!(
                 com1,
                 "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: secondary entry already installed"
+            );
+            qemu_exit::exit_failure();
+        }
+        // Publish the caller-owned AP bootstrap-stack pool (one stack per
+        // application processor) before `start_secondary` (`AGENTS.md`
+        // §24.1). Set-once; fails closed before registration.
+        static AP_STACKS: smp::ApStackPool<{ CPUS - 1 }> = smp::ApStackPool::new();
+        if AP_STACKS.register().is_err() {
+            let _ = writeln!(
+                com1,
+                "[cross_cpu_tlb_shootdown_qemu_x86_64] FAIL: AP stack pool already registered"
             );
             qemu_exit::exit_failure();
         }

@@ -296,7 +296,7 @@ pub fn timer_isr_addr() -> u64 {
 /// # Errors
 ///
 /// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index`
-///   is `>= percpu::MAX_CPUS`.
+///   is outside the registered [`crate::percpu::PerCpuStorage`].
 /// * [`crate::percpu::InitError::NotInitialised`] if
 ///   [`crate::percpu::init`] has not yet run for `cpu_index`.
 ///

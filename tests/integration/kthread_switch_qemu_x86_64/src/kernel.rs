@@ -114,6 +114,20 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // interrupts are enabled (the boot trampoline left IF=0 and the IDTR
     // invalid); installing the per-CPU tables now is the documented
     // sequencing.
+    //
+    // Publish the caller-owned per-CPU GDT/IDT/IST arena before the first
+    // `percpu::init`, sized to this single-CPU vertical (`AGENTS.md` §24.1
+    // — no baked-in `MAX_CPUS`). `register` is set-once; this `kernel_main`
+    // runs once, so a function-local `static` is sound and needs no
+    // allocator.
+    static PER_CPU_STORAGE: percpu::PerCpuStorage<1> = percpu::PerCpuStorage::new();
+    if PER_CPU_STORAGE.register().is_err() {
+        let _ = writeln!(
+            com1,
+            "[kthread_switch_qemu_x86_64] FAIL: PerCpuStorage::register"
+        );
+        qemu_exit::exit_failure();
+    }
     unsafe {
         if percpu::init(0).is_err() {
             let _ = writeln!(com1, "[kthread_switch_qemu_x86_64] FAIL: percpu::init(0)");
@@ -126,12 +140,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // writes to the LAPIC ICR is simply latched and never delivered —
     // dispatch is the cooperative `step` loop below.
     let bsp_id = smp::bsp_lapic_id();
-    let mut cpu_to_lapic: [Option<u8>; percpu::MAX_CPUS] = [None; percpu::MAX_CPUS];
-    cpu_to_lapic[0] = Some(bsp_id);
+    // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
+    // to one slot (`AGENTS.md` §24.1 — no baked-in `MAX_CPUS`).
+    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing (`AGENTS.md` §24.1); `kernel_main` runs once, so
     // a function-local `static` is sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<{ percpu::MAX_CPUS }> = X86_64ArchStorage::new();
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
         Ok(handle) => Arc::new(handle),
         Err(e) => {

@@ -55,7 +55,6 @@ use rustos_arch_x86_64::gdt::PerCpuGdt;
 use rustos_arch_x86_64::irq as arch_irq;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::multiboot2::BootInfo as Mb2BootInfo;
-use rustos_arch_x86_64::percpu::MAX_CPUS;
 use rustos_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
 use rustos_kernel_core::{kernel_main, BootInfo, IrqRouting};
 use rustos_kernel_irq::IrqController;
@@ -106,6 +105,15 @@ const PREEMPT_CALIBRATION_WINDOW_US: u32 = 10_000;
 /// headroom.
 const KERNEL_STACK_BYTES: usize = 64 * 1024;
 
+/// Number of logical CPUs the production `rustos-kernel` boot path
+/// brings up. It runs **single-CPU** (it never drives the
+/// `SecondaryBringup` HAL method — that handshake is proven by the QEMU
+/// verticals), so every per-CPU backing here is sized to one slot
+/// (`AGENTS.md` §24.1 — capacity matches the machine the caller actually
+/// drives, not a baked-in `MAX_CPUS` ceiling). A future AP-bring-up
+/// commit sizes this from the §18-discovered MADT processor count.
+const BOOT_CPUS: usize = 1;
+
 /// 16-byte-aligned kernel-stack slot. Matches the System V AMD64
 /// ABI's 16-byte stack-alignment requirement at function entry.
 #[repr(C, align(16))]
@@ -115,27 +123,37 @@ impl KernelStack {
     const ZERO: Self = Self([0; KERNEL_STACK_BYTES]);
 }
 
-/// Per-CPU kernel stack pool. The (c7-bin) bring-up only initialises
-/// the BSP (`cpu_index = 0`); slots `1..MAX_CPUS` exist so the
-/// Stage 2.7 AP-bring-up commit can populate them without re-laying-
-/// out this static.
+/// Per-CPU kernel stack pool, sized to the [`BOOT_CPUS`] this binary
+/// brings up (the BSP). A future AP-bring-up commit sizes it from the
+/// §18-discovered CPU count (`AGENTS.md` §24.1) rather than re-introducing
+/// a fixed ceiling.
 ///
 /// AGENTS.md §2 — the only `static mut` in the bin crate, justified
 /// in `README.md` as the per-CPU bootstrap-stack arena. Access is
 /// exclusively through [`kernel_stack_top`], which derives a
 /// disjoint pointer per `cpu_index`.
-static mut KERNEL_STACKS: [KernelStack; MAX_CPUS] = {
+static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] = {
     const Z: KernelStack = KernelStack::ZERO;
-    [Z; MAX_CPUS]
+    [Z; BOOT_CPUS]
 };
+
+/// Per-CPU GDT/IDT/IST arena the arch crate's [`percpu`] entry points
+/// index, sized to [`BOOT_CPUS`] and published once by [`try_boot`]
+/// before [`percpu::init`] (`AGENTS.md` §24.1).
+static PER_CPU_STORAGE: percpu::PerCpuStorage<BOOT_CPUS> = percpu::PerCpuStorage::new();
+
+/// Per-CPU `syscall`-entry TLS arena, sized to [`BOOT_CPUS`] and published
+/// once by [`try_boot`] before [`syscall_entry::init_local_syscalls`].
+static SYSCALL_TLS_STORAGE: syscall_entry::SyscallTlsStorage<BOOT_CPUS> =
+    syscall_entry::SyscallTlsStorage::new();
 
 /// One byte past the top of `KERNEL_STACKS[cpu_index]`.
 ///
-/// `cpu_index < MAX_CPUS` is the caller's responsibility; [`boot`]
+/// `cpu_index < BOOT_CPUS` is the caller's responsibility; [`boot`]
 /// satisfies that statically (it only calls with `0`).
 fn kernel_stack_top(cpu_index: usize) -> u64 {
-    debug_assert!(cpu_index < MAX_CPUS);
-    // SAFETY: `cpu_index < MAX_CPUS` per the debug assert above
+    debug_assert!(cpu_index < BOOT_CPUS);
+    // SAFETY: `cpu_index < BOOT_CPUS` per the debug assert above
     // (production callers in this module guarantee the bound at the
     // call site too); `addr_of` reads the static's address without
     // creating a Rust reference.
@@ -172,8 +190,14 @@ pub enum BootError {
     /// Multiboot2-published firmware does, so this is a fatal
     /// discovery defect.
     BspLapicMissing,
+    /// [`percpu::PerCpuStorage::register`] refused the per-CPU arena
+    /// (already registered — a boot-path defect).
+    PercpuStorageRegister,
     /// `percpu::init` rejected the BSP.
     PercpuInit,
+    /// [`syscall_entry::SyscallTlsStorage::register`] refused the per-CPU
+    /// syscall-TLS arena (already registered — a boot-path defect).
+    SyscallTlsStorageRegister,
     /// LAPIC-timer calibration against the PIT failed.
     TimerCalibration,
     /// `preempt::init_local_preempt` rejected the BSP.
@@ -235,7 +259,9 @@ impl BootError {
             Self::NoMadt => "no_madt",
             Self::BadMadt => "bad_madt",
             Self::BspLapicMissing => "bsp_lapic_missing",
+            Self::PercpuStorageRegister => "percpu_storage_register_failed",
             Self::PercpuInit => "percpu_init_failed",
+            Self::SyscallTlsStorageRegister => "syscall_tls_storage_register_failed",
             Self::TimerCalibration => "timer_calibration_failed",
             Self::PreemptInit => "preempt_init_failed",
             Self::SyscallInit => "syscall_init_failed",
@@ -359,6 +385,15 @@ fn try_boot(
 ) -> Result<BootInfo<'static, BinArch>, BootError> {
     // 1. Per-CPU init (BSP).
     //
+    //    Publish the caller-owned per-CPU GDT/IDT/IST arena before the
+    //    first `percpu::init`, so the arch crate indexes a runtime-sized
+    //    slice rather than a baked-in `MAX_CPUS` arena (`AGENTS.md`
+    //    §24.1). `register` is set-once and `boot` runs once, so a second
+    //    publish is a boot-path defect that fails closed.
+    PER_CPU_STORAGE
+        .register()
+        .map_err(|_| BootError::PercpuStorageRegister)?;
+
     // SAFETY: This is the BSP, called exactly once. The boot
     // trampoline (`boot.s`) leaves `IF=0` so interrupts remain
     // disabled, satisfying `percpu::init`'s SAFETY contract.
@@ -482,6 +517,14 @@ fn try_boot(
     //    forever — the same fail-closed posture the (c7-bin) commit
     //    shipped, now coexisting with the live dispatcher.
     syscall_entry::set_dispatch_callback(production_dispatch);
+
+    // 7b. Publish the caller-owned per-CPU syscall-TLS arena before
+    //     `init_local_syscalls` (which writes this CPU's slot and points
+    //     `IA32_KERNEL_GS_BASE` at it). Runtime-sized, set-once, fails
+    //     closed on a second publish (`AGENTS.md` §24.1 / §2.9).
+    SYSCALL_TLS_STORAGE
+        .register()
+        .map_err(|_| BootError::SyscallTlsStorageRegister)?;
 
     // 8. Install the LAPIC timer ISR + program the period. No timer
     //    callback is registered: the timer ISR's null-callback branch
