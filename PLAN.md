@@ -969,9 +969,9 @@ and fail-closed (§24.4) — this work must not loosen them.
   `N` (a `static` for the allocator-free bins, a leaked allocation otherwise);
   the arch crate stays `alloc`-free, every accessor and the shootdown/IPI loops
   bound by the slice length, and the host suite + all nine riscv64 verticals
-  construct through it. `MAX_HARTS`/`MAX_WORKERS` survive only as the
-  `smp.s`/`start_worker` secondary-stack/worker-index bound (the
-  secondary-bring-up item below). **aarch64 done**
+  construct through it. (riscv64's `MAX_HARTS` is now gone entirely — see the
+  secondary-bring-up item below; `MAX_WORKERS` survives only as the wasm32
+  `start_worker` worker-index bound.) **aarch64 done**
   (`kernel/arch/aarch64/src/kernel_arch.rs`): `Aarch64Arch` borrows three
   `&'static` slices — the dense-`CpuId` → `MPIDR_EL1` affinity map (`u64::MAX`
   `NO_MPIDR` sentinel, valid because MPIDR_EL1[63:40] are RES0), the host IPI
@@ -1012,8 +1012,17 @@ and fail-closed (§24.4) — this work must not loosen them.
   (`base + (cpuid+1)*stride`), and the per-CPU timer slots are a caller-sized
   `preempt::PreemptStorage<N>` published as `&'static [AtomicU64]` slices; both
   set-once and fail closed before registration (§2.9), with the §17.2/§4
-  invariants preserved. **riscv64 + x86_64 remain** (their `smp.s`
-  `SECONDARY_MAX_HARTS` / pool + `preempt`/`percpu`/`syscall_entry` statics).
+  invariants preserved. **riscv64 done** (L3b): the `smp.s` `.equ
+  SECONDARY_MAX_HARTS` + `.skip` pool and the `smp::MAX_HARTS` const are deleted;
+  the secondary stack is a caller-sized `smp::SecondaryStackPool<N>` whose
+  set-once `register` publishes the base + per-hart slice log2 size the `smp.s`
+  trampoline computes each hart's stack top from (`base + (hartid+1) << shift` —
+  a left shift, since the stub avoids the `M` multiply extension), and the
+  per-hart timer slots are a caller-sized `preempt::PreemptStorage<N>` published
+  as `&'static [AtomicU64]` slices; both fail closed before registration (§2.9),
+  the per-stack 16 KiB size stays a fixed §24.4 bound, and the three riscv64
+  SMP/timer verticals register a right-sized pool/storage. **x86_64 remains**
+  (its AP-trampoline secondary-stack pool + `percpu`/`syscall_entry` statics).
 - Process/identity capacities — spawn fan-out (`spawn_producer*.rs`
   `MAX_SPAWNS = 8`): convert to grow-or-limit-governed capacities. **Done**
   (L3b): the spawn fan-out itself is now allocator-backed and grows on demand —
@@ -1159,9 +1168,13 @@ and fail-closed (§24.4) — this work must not loosen them.
   §17.2 break-before-make + §4 guard-page invariants hold. The four aarch64 SMP
   / timer verticals register a right-sized pool/storage and stay green on
   `-M virt`; production `rustos-kernel` is single-CPU and registers neither.
-  **Only the riscv64 + x86_64 secondary-bring-up bounds now remain** (their
-  `smp.s` `SECONDARY_MAX_HARTS` / pool + `preempt`/`percpu`/`syscall_entry`
-  statics), with the §17.2/§4 safety invariants preserved.
+  The **riscv64** secondary-bring-up bound is now converted the same way (its
+  `smp.s` `SECONDARY_MAX_HARTS` `.skip` pool and `smp::MAX_HARTS` const deleted
+  in favour of a caller-sized `SecondaryStackPool<N>` / `PreemptStorage<N>`,
+  the trampoline using a left shift to avoid the `M` multiply extension).
+  **Only the x86_64 secondary-bring-up bound now remains** (its AP-trampoline
+  stack pool + `percpu`/`syscall_entry` statics), with the §17.2/§4 safety
+  invariants preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`

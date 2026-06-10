@@ -185,14 +185,25 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
 
+        // Register the secondary-hart stack pool sized to this two-hart
+        // vertical before any `hart_start`; the `smp.s` trampoline reads
+        // its published base/shift to seed the started hart's stack
+        // (`AGENTS.md` §24.1 — the pool scales with the hart count, not a
+        // fixed `const`). The pool covers slots 0 and 1 so either hart can
+        // be the started secondary.
+        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        if SECONDARY_STACKS.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        }
+
         // Start the other hart through the `SecondaryBringup` Arch HAL
         // trait (`plans/WIRING.md` Stage W14/W15) rather than the
         // port-private `smp::start_secondary`, so this vertical exercises
         // the same neutral bring-up surface the x86_64 SMP verticals use.
-        // SAFETY: called on the boot hart after `boot.s` zeroed `.bss`
-        // (clearing the secondary stack pool) and after the secondary
-        // entry was installed; `secondary_hartid` is a real, parked,
-        // distinct hart the handle's topology map covers.
+        // SAFETY: called on the boot hart after the secondary stack pool
+        // was registered (above) and after the secondary entry was
+        // installed; `secondary_hartid` is a real, parked, distinct hart
+        // the handle's topology map covers.
         if unsafe { arch.start_secondary(secondary_hartid) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }

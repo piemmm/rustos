@@ -1,9 +1,9 @@
 //! Host unit tests for the SMP bring-up surface.
 //!
-//! `MAX_HARTS`, the hart-id validity check, the set-once secondary-entry
-//! slot, and the `StartHartError` decode build and run on the host. The
-//! `tp` read, the SBI HSM call, and the secondary trampoline are
-//! exercised by the multi-hart QEMU vertical.
+//! The caller-sized stack pool, the hart-id validity check, the set-once
+//! secondary-entry slot, and the `StartHartError` decode build and run on
+//! the host. The `tp` read, the SBI HSM call, and the secondary
+//! trampoline are exercised by the multi-hart QEMU vertical.
 
 use super::*;
 
@@ -17,12 +17,37 @@ extern "C" fn host_entry(_hartid: CpuId) -> ! {
 }
 
 #[test]
-fn hartid_validity_tracks_the_stack_pool() {
-    let max = CpuId::try_from(MAX_HARTS).expect("MAX_HARTS fits a CpuId");
-    assert!(is_valid_hartid(0));
-    assert!(is_valid_hartid(max - 1));
-    assert!(!is_valid_hartid(max));
+fn hartid_validity_tracks_the_registered_pool() {
+    // A caller-sized pool covers exactly its `N` slots (the §24.1 capacity
+    // is the discovered hart count, not a baked-in `MAX_HARTS`); a second
+    // pool proves registration is set-once. Declared first so they precede
+    // the statements that drive them.
+    static POOL: SecondaryStackPool<3> = SecondaryStackPool::new();
+    static POOL2: SecondaryStackPool<2> = SecondaryStackPool::new();
+
+    reset_secondary_stacks_for_tests();
+
+    // Before any pool is registered every id is invalid (fail closed,
+    // `AGENTS.md` §2.9).
+    assert!(!is_valid_hartid(0));
     assert!(!is_valid_hartid(u32::MAX));
+
+    assert_eq!(POOL.register(), Ok(3));
+    assert!(is_valid_hartid(0));
+    assert!(is_valid_hartid(2));
+    assert!(!is_valid_hartid(3));
+    assert!(!is_valid_hartid(u32::MAX));
+
+    // Registration is set-once: a second pool is refused rather than
+    // silently re-pointing the live trampoline.
+    assert_eq!(
+        POOL2.register(),
+        Err(SecondaryStackError::AlreadyRegistered)
+    );
+
+    reset_secondary_stacks_for_tests();
+    // Cleared again: every id fails closed.
+    assert!(!is_valid_hartid(0));
 }
 
 #[test]

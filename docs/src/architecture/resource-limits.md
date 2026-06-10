@@ -386,10 +386,11 @@ a real hart id is a `u32`, so it can never collide — and the constructor
 populates the map through the shared borrow with atomic stores (no `&'static
 mut` needed). Every per-slot access is bounds-checked against the slice length
 and the cross-CPU shootdown / IPI loops iterate that length, so there is no
-`MAX_HARTS` ceiling in the handle (`MAX_HARTS` survives only for the `smp.s`
-secondary-stack pools — the secondary-bring-up item below). The host suite and
-all nine riscv64 QEMU verticals (single- and two-hart) construct through the
-new backing.
+`MAX_HARTS` ceiling in the handle. (riscv64 no longer has a `MAX_HARTS`
+constant at all — the secondary-bring-up stack pool and per-CPU `preempt`
+statics are *also* now caller-sized; see *Per-arch secondary-bring-up bound*
+below.) The host suite and all nine riscv64 QEMU verticals (single- and
+two-hart) construct through the new backing.
 
 **aarch64 (`Aarch64Arch`) — done.** `Aarch64Arch` no longer holds
 `[T; MAX_CPUS]` arrays; it borrows three `&'static` slices — the dense-`CpuId`
@@ -468,11 +469,31 @@ still bring up and drive their cores on the `virt` board. Production
 `rustos-kernel` runs single-CPU and starts no secondaries, so it registers
 neither.
 
-**riscv64 / x86_64 — planned.** The same redesign is still owed on the other
-bare-metal ports: riscv64's `smp.s` `SECONDARY_MAX_HARTS` `.bss` pool and
-`preempt` per-hart arrays, and x86_64's `smp.s` pool and
-`percpu`/`syscall_entry` per-CPU statics. (wasm32 has no secondary-stack pool;
-its worker contexts are host-provided.)
+**riscv64 — done.** The fixed `.bss` pool (`smp.s` `.equ SECONDARY_MAX_HARTS`
++ `.skip`) and the `smp::MAX_HARTS` constant are gone, exactly as on aarch64.
+The secondary-stack pool is a caller-provided `smp::SecondaryStackPool<N>` (a
+`static` for the allocator-free bins); its `register` publishes the pool base
+and the per-hart slice's log2 size to the `smp.s` trampoline (which computes
+each started hart's stack top as `base + (hartid + 1) << shift` from those
+runtime globals — a left shift, since the freestanding stub avoids the `M`
+multiply extension) and the covered count to `is_valid_hartid`, ordered ahead
+of any SBI `hart_start` by a `fence`. Registration is set-once and an unstarted
+system fails closed (every id invalid until a pool is registered, so a
+`hart_start` for an unbacked hart is refused, §2.9 / §5.4.5). The per-hart
+timer slots are likewise a caller-provided `preempt::PreemptStorage<N>`,
+published as `&'static [AtomicU64]` slices (interval + recorded `CpuId`) through
+a set-once `register`; `init_local_preempt` and the timer trap path index the
+published slices and fail closed when none is registered or the id is out of
+range. The per-stack size (`SECONDARY_STACK_BYTES`, 16 KiB) stays a fixed
+*bound* (§24.4). The two-hart `ipi_smp_qemu_riscv64` and
+`cross_cpu_tlb_shootdown_qemu_riscv64` verticals register a
+`SecondaryStackPool<2>`; the single-hart `timer_preempt_qemu_riscv64` registers
+a `PreemptStorage<1>`.
+
+**x86_64 — planned.** The same redesign is still owed on x86_64: its AP
+trampoline secondary-stack pool and the `percpu`/`syscall_entry` per-CPU
+statics. (wasm32 has no secondary-stack pool; its worker contexts are
+host-provided.)
 
 ## Status
 
@@ -509,14 +530,14 @@ its worker contexts are host-provided.)
   with a one-free-block grace and fail-closed double-/foreign-free) — see
   *Growable and shrinkable kernel-stack arena* above; both aarch64 production
   spawn seams draw through it and reclaim on `ArenaStack` drop. The per-arch
-  **secondary-bring-up** bound is now converted on **aarch64** (the `.bss`
-  pool and `MAX_CPUS` constant are gone; the secondary stack is a
-  caller-sized `SecondaryStackPool<N>` published to the `smp.s` trampoline and
-  the timer slots a caller-sized `PreemptStorage<N>` — see *Per-arch
-  secondary-bring-up bound* above), preserving the §17.2 break-before-make and
-  §4 guard-page invariants. Still planned: the same conversion on **riscv64**
-  (`SECONDARY_MAX_HARTS` + `preempt` arrays) and **x86_64** (`smp.s` pool +
-  `percpu`/`syscall_entry` statics).
+  **secondary-bring-up** bound is now converted on **aarch64** *and*
+  **riscv64** (the `.bss`/`SECONDARY_MAX_*` pool and the `MAX_CPUS` /
+  `MAX_HARTS` constant are gone; the secondary stack is a caller-sized
+  `SecondaryStackPool<N>` published to the `smp.s` trampoline and the timer
+  slots a caller-sized `PreemptStorage<N>` — see *Per-arch secondary-bring-up
+  bound* above), preserving the §17.2 break-before-make and §4 guard-page
+  invariants. Still planned: the same conversion on **x86_64** (the AP
+  trampoline pool + `percpu`/`syscall_entry` statics).
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

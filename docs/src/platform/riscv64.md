@@ -404,6 +404,28 @@ HAL trait — `cross_cpu_tlb_shootdown_qemu_riscv64` and, since
 `plans/WIRING.md` Stage W15, `ipi_smp_qemu_riscv64` — rather than
 calling the port-private `smp::start_secondary` directly.
 
+The freshly-started hart has no stack until the `smp.s` trampoline gives
+it one, and that stack pool is **not** a fixed `.bss` reserve keyed to a
+hand-picked hart count (`AGENTS.md` §24.1). The boot hart registers a
+caller-sized `smp::SecondaryStackPool<N>` (`N` = the hart count it sizes
+for its machine; a `static` for the allocator-free bins per the §24.1
+watch-out), and `register` publishes the pool base and the per-hart
+slice's log2 byte size into the globals the trampoline reads. The
+trampoline computes each started hart's stack top as
+`base + (hartid + 1) << shift` — a left shift, since the freestanding
+stub avoids the `M` multiply extension — and `register` orders the
+publish ahead of any SBI `hart_start` with a `fence`. Registration is
+set-once and an unstarted system fails closed: `is_valid_hartid` reports
+every id invalid until a pool is registered, so a `hart_start` for an
+unbacked hart is refused (`AGENTS.md` §2.9 / §5.4.5). The per-hart
+preemption timer slots are likewise a caller-sized
+`preempt::PreemptStorage<N>` published as `&'static [AtomicU64]` slices.
+The per-stack size (`SECONDARY_STACK_BYTES`, 16 KiB) stays a fixed
+*bound*, not a hart-count capacity (`AGENTS.md` §24.4). The two-hart
+`ipi_smp_qemu_riscv64` and `cross_cpu_tlb_shootdown_qemu_riscv64`
+verticals register a `SecondaryStackPool<2>`; the single-hart
+`timer_preempt_qemu_riscv64` registers a `PreemptStorage<1>`.
+
 ## CC2 `abi-sys` `ecall` round-trip QEMU vertical
 
 `tests/integration/abi_sys_syscall_qemu_riscv64` is the riscv64 half of
@@ -678,8 +700,10 @@ hart id is a `u32`, so it can never collide — and `RiscvArch::new` /
 `with_harts` populate the map through the shared `&'static` borrow with
 atomic stores, so no `&'static mut` is needed. Every accessor and the
 cross-CPU shootdown / IPI loops bound their indices by the slice length,
-so the handle carries no CPU ceiling. (`smp::MAX_HARTS` survives only for
-the `smp.s` secondary-stack pools, a separate later increment.)
+so the handle carries no CPU ceiling. (The `smp::MAX_HARTS` constant is
+gone: the secondary-stack pool is now a caller-sized
+`smp::SecondaryStackPool<N>` and the per-hart timer slots a caller-sized
+`preempt::PreemptStorage<N>` — see *Secondary-CPU bring-up HAL slice*.)
 
 ## Interrupt controller (PLIC)
 
