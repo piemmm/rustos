@@ -181,10 +181,27 @@ hardware), under two knobs:
   front. A RAM window too small to carve even one block degrades to no arena
   and the software-canary `BoxStack` fallback (fail closed, §2.17).
 
-Growing the arena *past* its policy size on genuine exhaustion — chaining a
-fresh, independently block-split arena rather than failing over to a
+Growing the kernel-stack arena *past* its policy size on genuine exhaustion —
+chaining a fresh, independently block-split arena rather than failing over to a
 `BoxStack` — is the staged growable-arena follow-on (L3b), as is sizing the
 per-arch CPU/hart arrays from §18 discovery.
+
+## Userland heap free-span table (grow-on-demand)
+
+The `rustos-rt` `mem_map`-backed heap (`lib/rt/src/heap.rs`) tracks freed
+regions as an address-sorted, coalesced list of free **spans**. The number of
+distinct spans is a *capacity*, not a fixed `const` ceiling (§24.1): the table
+lives in a growable `SpanStore`, and when a fragmenting workload fills it the
+store **grows before it fails** — it maps one more whole metadata page (its own
+fixed virtual window, distinct from the data arena) and continues. Only genuine
+resource exhaustion (`mem_map` can no longer supply a metadata page) makes a
+non-coalescing free drop a span, and an allocation that cannot record its
+residual fails closed with a null pointer — deterministic OOM, never a panic
+(§4 / §2.9). In production the store maps its metadata through the same
+`abi-v1` anonymous-memory syscalls; the host unit tests drive a `Vec`-backed
+store, so the growth and fail-closed logic is exercised entirely on the host.
+This is a §24.1 sweep conversion (replacing the former fixed `MAX_SPANS = 256`
+array), independent of the kernel-stack arena work.
 
 ## Status
 
@@ -203,11 +220,15 @@ per-arch CPU/hart arrays from §18 discovery.
   debug) and the RAM-window-derived guard-arena policy
   (`stack_arena_bytes`, ≈1/64 of RAM clamped to `[2 MiB, 64 MiB]`,
   2 MiB-rounded). See *Discovered-hardware capacity policies* above.
-- **L3b — growable arena + per-arch arrays (planned).** Growing the
-  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
-  fresh, independently block-split arena rather than failing over to a
-  `BoxStack`), and sizing the per-arch CPU/hart arrays from §18 discovery,
-  preserving the §17.2 break-before-make and §4 guard-page invariants.
+- **L3b — growable arena + per-arch arrays (in progress).** The userland-heap
+  free-span table is now a grow-on-demand capacity (see *Userland heap
+  free-span table* above), the first §24.1 sweep site converted. Still planned:
+  growing the kthread-stack arena *past* its policy size on genuine exhaustion
+  (chaining a fresh, independently block-split arena rather than failing over to
+  a `BoxStack`), sizing the per-arch CPU/hart arrays from §18 discovery, and the
+  remaining process/identity capacities (`MAX_SUPPLEMENTARY_GROUPS`,
+  `MAX_SPAWNS`), preserving the §17.2 break-before-make and §4 guard-page
+  invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

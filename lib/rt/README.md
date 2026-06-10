@@ -48,12 +48,18 @@ a coalesced, address-sorted free list held inside the allocator (not as
 intrusive links in user memory), so every returned pointer is bounds-checked
 before it is handed out (`AGENTS.md` §4). When coalescing frees whole trailing
 pages they are returned to the kernel with `mem_unmap` (the arena shrinks).
-Allocation failure (a failed `mem_map`, or an overflowed fixed-capacity free
-table) returns a null pointer per the `GlobalAlloc` contract — deterministic
-OOM, never a panic (`AGENTS.md` §4 / §2.9). The kernel zeroes pages on map and
-on free, so the heap does not re-zero on free; a process reusing its own freed
-bytes is not a security boundary (`AGENTS.md` §2.16). The arena base and the
-free-table capacity are fixed constants documented in `src/heap.rs`.
+The free-span table is **not** a fixed-size array: it is a capacity that grows
+on demand (`AGENTS.md` §24.1 "grow before you fail"). When a workload fragments
+the heap past the table's current capacity, the allocator maps one more whole
+metadata page (its own `SpanStore` window, distinct from the data arena) and
+continues, rather than capping the workload at a hand-picked `const`. Only
+genuine resource exhaustion — `mem_map` can no longer supply an arena page *or*
+a metadata page — returns a null pointer per the `GlobalAlloc` contract:
+deterministic OOM, never a panic (`AGENTS.md` §4 / §2.9). The kernel zeroes
+pages on map and on free, so the heap does not re-zero on free; a process
+reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16). The
+arena and metadata bases are fixed virtual addresses documented in
+`src/heap.rs`.
 
 ## Targets
 
