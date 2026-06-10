@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 & x86_64 per-CPU handle bookkeeping + growable kernel-stack arena done; per-arch secondary-bring-up bound remains)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 & x86_64 per-CPU handle bookkeeping + growable kernel-stack arena done; per-arch secondary-bring-up bound and stack-arena shrink remain)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, the riscv64 `RiscvArch`, aarch64 `Aarch64Arch`, and x86_64 `X86_64Arch` per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` (the no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins), and the growable kernel stack arena now chains a fresh `FrameAllocator`-backed 2 MiB block on genuine exhaustion (`FrameArenaGrow`) bounded to the per-space identity window, failing closed to `BoxStack` only on physical exhaustion; the per-arch secondary-bring-up bound remains).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, the riscv64 `RiscvArch`, aarch64 `Aarch64Arch`, and x86_64 `X86_64Arch` per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` (the no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins), and the growable kernel stack arena now chains a fresh `FrameAllocator`-backed 2 MiB block on genuine exhaustion (`FrameArenaGrow`) bounded to the per-space identity window, failing closed to `BoxStack` only on physical exhaustion; the per-arch secondary-bring-up bound and stack-arena *shrink* — per-block live-count accounting plus a one-free-block grace (hysteresis, amortised, no thrash, no busy loop), returning only chained blocks via `FrameArenaShrink`/`free_order(9)`, zeroed-on-free (§4) and guard-remapped under §17.2 break-before-make, double-/foreign-free failing closed (§2.9) — remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -917,7 +917,39 @@ and fail-closed (§24.4) — this work must not loosen them.
   `alloc_order(9)`), bounded to the per-space identity window, preserving the
   §17.2 break-before-make and §4 guard-page invariants and failing closed to
   `BoxStack` only on physical exhaustion (§2.9); both aarch64 production spawn
-  seams draw through it.
+  seams draw through it. **Planned** (L3b — stack-arena *shrink*): make the
+  capacity fall as well as rise (§24.1 — grow *and* shrink, never a one-way
+  ratchet). Design:
+    - **Per-block live-count accounting.** The arena tracks each block
+      (boot-carved + each chained) with the count of guarded regions currently
+      handed out from it. `free(ArenaStack)` locates the owning block by
+      address range and checked-decrements its count; a foreign address or an
+      already-zero count is rejected and logged, never underflowing — fail
+      closed (§2.9, §19.10 spirit). A block whose count reaches zero is *idle*.
+    - **One-free-block grace (hysteresis).** Exactly one idle block stays
+      resident: a chained block is returned to the frame allocator only when it
+      goes idle *and* another idle block already exists, so an alloc/free
+      oscillation across a block boundary reuses the retained idle block
+      instead of repeatedly free→chain (amortised, no thrash, §2.16).
+    - **O(1), no busy loop.** Reclamation is a checked decrement plus at most
+      one block return per `free` — never a spin/retry (§2.1) — run under the
+      existing `SpinLock` off the hot path (§2.16).
+    - **Boot block is never returned.** The boot-carved first block
+      (`RegionKind::Reserved`, kernel-image-owned, not allocator frames) is
+      never released; only `FrameArenaGrow`-chained blocks are reclaimed,
+      through a symmetric `ArenaShrink`/`FrameArenaShrink` over `free_order(9)`.
+    - **Block list is itself a §24.1 capacity** (no fixed ceiling): keep each
+      block's `{ live, next }` record in a reserved, identity-mapped header
+      slot at the block's own base — outside the guarded regions — so tracking
+      needs no second growable allocation and no hand-picked block cap.
+    - **Secure / attack-safe.** A reclaimed block is fully zeroed before it
+      returns to the `FrameAllocator` (§4 zero-on-free — a kthread kernel stack
+      can hold spilled capability tokens/credentials), and its per-stack guard
+      `split_block` mapping is restored coherently under §17.2
+      break-before-make + TLB invalidation so no stale translation aliases
+      reclaimed RAM into a live space; a block that cannot be safely
+      scrubbed/unmapped is retained rather than released (fail closed, §2.17).
+      Internal kernel bookkeeping only — no new ambient authority (§4).
 - Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`:
   **done** (L3a) — now a release-tuned policy value (32 KiB release / 64 KiB
   debug, §24.2).
@@ -1082,8 +1114,23 @@ and fail-closed (§24.4) — this work must not loosen them.
   (`init_spawn`, `spawn_producer`) draw through it, and it fails closed to the
   software-canary `BoxStack` only on genuine physical exhaustion (§2.9), with
   the §17.2 break-before-make and §4 guard-page invariants preserved (12 host
-  unit tests over a real `FrameAllocator`). Still remaining: the per-arch
-  secondary-bring-up bound, with the §17.2/§4 safety invariants preserved.
+  unit tests over a real `FrameAllocator`). Still remaining: (a) the per-arch
+  secondary-bring-up bound, with the §17.2/§4 safety invariants preserved; and
+  (b) **stack-arena shrink** — symmetric reclamation so the kthread-stack
+  capacity falls as well as grows, via per-block live-count accounting, a
+  one-free-block grace (hysteresis — amortised, no thrash, no busy loop), an
+  intrusive per-block header (so the block list is itself a §24.1 capacity, no
+  fixed ceiling), and a `FrameArenaShrink`/`free_order(9)` return path that
+  never releases the boot-carved block. Safety: the reclaimed block is
+  zeroed-on-free (§4), its guard `split_block` mapping is restored under §17.2
+  break-before-make + TLB invalidation, and double-/foreign-free fails closed
+  without underflow (§2.9). Tests (planned): free decrements the owning block;
+  release fires only on the second idle block (grace held); a
+  boundary-straddling alloc/free oscillation yields zero releases while the
+  grace block is held (no thrash); double-free and foreign-address free fail
+  closed without underflow; the boot block is never released; a reclaimed block
+  is fully zeroed before return; physical exhaustion still fails closed to
+  `BoxStack`.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
