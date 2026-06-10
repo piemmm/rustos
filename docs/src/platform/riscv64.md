@@ -808,10 +808,13 @@ object-safe HAL forwarding on the host.
 
 The deployment form (unmapping the guard page so an overrun faults
 synchronously) is proven end to end on `-M virt` by
-`stack_guard_qemu_riscv64` (below). Wiring `BoxStack`/the kthread stack
-arena through it on riscv64 is the follow-on (the aarch64 G3b-2/G3c
-sibling); until then the port keeps the software-canary guard
-(`AGENTS.md` §2.17).
+`stack_guard_qemu_riscv64` (below), and the *production runtime*
+fault-form — a scheduled kthread overrunning its arena-backed stack — by
+`stack_overrun_qemu_riscv64` (G3c, below). Rewiring the production
+riscv64 boot kthread stacks onto a boot-reserved arena (the aarch64 /
+x86_64 G3b-2-iii seam) is the remaining follow-on, blocked until riscv64
+grows a production kthread-spawning boot path; until then those stacks
+keep the software-canary guard (`AGENTS.md` §2.17).
 
 ### Stack-guard fault-form QEMU vertical
 
@@ -828,3 +831,32 @@ fault (`scause` 13), the handler confirms the cause and that `stval` is
 exactly the guard page, and writes the `SiFive` Test PASS finisher. A
 regression that fails to split, preserve, or unmap either reports FAILURE
 explicitly or never faults (timing out).
+
+### Proving the overrun fault-form (G3c)
+
+`stack_overrun_qemu_riscv64` (the riscv64 sibling of
+`stack_overrun_qemu_{aarch64,x86_64}`, `plans/PI.md` G3c) proves the
+*production* fault-form: an overrunning kthread takes a **synchronous
+store page fault while running** under the live scheduler, not the
+deferred next-reschedule poison-canary detection a heap-backed
+`rustos_kernel_core::BoxStack` falls back to.
+
+It builds an Sv39 `AddressSpace` identity-mapping the low 4 GiB,
+re-expresses a 2 MiB-aligned guard arena at 4 KiB granularity
+(`prepare_guard_arena`, G2), installs the S-mode trap vector + a `fault`
+handler, turns paging on, then `unmap`s + `flush_page`s one kthread
+stack's one-page guard through the Arch HAL — the production guard-page
+mechanism. It then builds the live `rustos-kernel-sched-eevdf`
+`Scheduler` over `RiscvArch` and admits a kthread on that arena-backed
+stack (laid out `[guard page | usable stack]`) via
+`kernel_core::spawn_kthread_with_stack` — the production runtime path,
+not a bare call. The kthread body overruns its stack by writing the
+highest byte of the guard region (the first byte a contiguous downward
+overrun crosses); because that page is unmapped the access raises a
+synchronous store page fault (`scause` 15) *while the kthread runs* — the
+trap is taken on the still-healthy usable stack above the guard, so the
+S-mode trap vector does not nest-fault. The handler confirms the cause
+and that `stval` lies in the guard page, and writes the `SiFive` Test
+PASS finisher. A regression that left the page mapped lets the body
+return cleanly; the cooperative `step` loop then drains the task and the
+test reports FAILURE explicitly (`AGENTS.md` §2.9) rather than passing.

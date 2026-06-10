@@ -343,7 +343,13 @@ impl CrossCpuTlbShootdown for RiscvArch {
             // the caller cannot act on, so it is dropped (over-/under-
             // fencing the *remote* set cannot corrupt the local map).
             let me = SchedulerArch::current_cpu(self);
-            let page = vaddr & !(crate::paging::PAGE_SIZE as u64 - 1);
+            // `usize::try_from` rather than `as`: an address never exceeds
+            // `usize` on riscv64, so the `Err` arm is unreachable, but the
+            // checked conversion keeps the cast lint-clean without an
+            // `#[allow]` (`AGENTS.md` §2.11).
+            let Ok(page) = usize::try_from(vaddr & !(crate::paging::PAGE_SIZE as u64 - 1)) else {
+                return;
+            };
             // Iterate the caller-sized per-CPU map, not a fixed ceiling
             // (`AGENTS.md` §24.1).
             for cpu in 0..self.cpu_to_hartid.len() {
@@ -353,12 +359,8 @@ impl CrossCpuTlbShootdown for RiscvArch {
                 }
                 if let Some(hartid) = self.hartid_of(cpu) {
                     let (mask, base) = crate::sbi::hart_mask_for(hartid);
-                    let _ = crate::sbi::remote_sfence_vma(
-                        mask,
-                        base,
-                        page as usize,
-                        crate::paging::PAGE_SIZE,
-                    );
+                    let _ =
+                        crate::sbi::remote_sfence_vma(mask, base, page, crate::paging::PAGE_SIZE);
                 }
             }
         }

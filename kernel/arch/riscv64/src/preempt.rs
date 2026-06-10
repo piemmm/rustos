@@ -371,6 +371,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// disabled (hardware cleared `sstatus.SIE` on trap entry).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt() {
+    use rustos_arch_api::Timer;
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No registered per-hart slot for this hart: nothing to dispatch
         // or re-arm (fail closed, `AGENTS.md` §2.9).
@@ -385,7 +386,6 @@ pub(crate) fn on_timer_interrupt() {
         // `init_local_preempt`, so the low 32 bits are the whole value.
         #[allow(clippy::cast_possible_truncation)]
         let cpu = cpu as u32;
-        use rustos_arch_api::Timer;
         crate::timer_hal::TimerHal::new().dispatch_tick(cpu);
     }
     // Re-arm (and acknowledge) the timer last so the scheduler runs at

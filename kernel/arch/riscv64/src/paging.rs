@@ -746,7 +746,7 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
 /// `satp`) on a hart whose paging is already on.
 ///
 /// This is the RV-X1 user-kthread `pre_resume` primitive (`plans/PI.md`
-/// §X), the riscv64 sibling of the aarch64/x86_64 `activate_user_root`:
+/// §X), the riscv64 sibling of the `aarch64`/`x86_64` `activate_user_root`:
 /// immediately before the kernel `sret`s back into a user task's U-mode,
 /// that task's own page-table root must be installed so its translations —
 /// and only its — are in force, keeping sibling processes hardware-isolated

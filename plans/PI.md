@@ -1069,11 +1069,35 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     leaf covering a `GUARD_PAGE` static, turn paging on, sentinel
     write/read-back, then `unmap` + `flush_page` the page and read it → load
     page fault (`scause` 13, `stval` == guard page) → PASS. **Verified green
-    under QEMU on `-M virt` on this host.** Wiring `BoxStack`/the kthread stack
-    arena through it on riscv64 (the aarch64 G3b-2/G3c sibling) is the
-    follow-on; until then riscv64 keeps the software-canary guard (§2.17).
-    Doc: `docs/src/platform/riscv64.md` ("Sv39 block split + guard-page
+    under QEMU on `-M virt` on this host.** The production *runtime*
+    fault-form is now proven on riscv64 too (G3c below). Doc:
+    `docs/src/platform/riscv64.md` ("Sv39 block split + guard-page
     fault-form (G1/G2)").
+  - **riscv64 production guard-page fault-form (G3c) `[x]`.** The cross-port
+    sibling of `stack_overrun_qemu_{aarch64,x86_64}`: proves an *overrunning
+    kthread* on riscv64 takes a **synchronous store page fault while running**
+    under the live scheduler — the production runtime payoff, not the deferred
+    next-reschedule poison-canary detection a heap-backed `BoxStack` falls back
+    to. The new `tests/integration/stack_overrun_qemu_riscv64` (enrolled in
+    `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s) builds an Sv39
+    4 GiB-identity space, re-expresses a 2 MiB-aligned guard arena at 4 KiB
+    granularity (`prepare_guard_arena`, G2), installs the S-mode trap vector +
+    a `fault` handler, turns paging on, then `unmap`s + `flush_page`s one
+    kthread stack's one-page guard through the Arch HAL (the production
+    mechanism), builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    `RiscvArch`, and admits a kthread on that arena stack via
+    `spawn_kthread_with_stack` (the **production runtime path**) laid out
+    `[guard | usable]`. The kthread overruns into the unmapped guard page → a
+    synchronous store page fault (`scause` 15, `stval` in the guard page), the
+    `fault` observer confirms the cause + faulting address → PASS; a body that
+    returns without faulting drains the `step` loop and fails loudly (§2.9).
+    **Verified green under QEMU on `-M virt` on this host.** This proves the
+    *mechanism*; rewiring the production riscv64 boot kthread stacks onto a
+    boot-reserved arena (the aarch64/x86_64 G3b-2-iii seam) remains the
+    follow-on, blocked until riscv64 grows a production kthread-spawning boot
+    path — until then those stacks keep the software-canary guard (§2.17).
+    **No ABI change.** Doc: `docs/src/platform/riscv64.md` ("Proving the
+    overrun fault-form (G3c)").
   - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
     `[x]`.** The last `BlockSplit::Pending` port brought to `Supported`, so
     all three bare-metal ports now declare and implement the split.

@@ -2057,6 +2057,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-stack-overrun-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-api",
+ "rustos-arch-riscv64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-sched-eevdf",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-stack-overrun-qemu-x86_64"
 version = "0.0.0"
 dependencies = [

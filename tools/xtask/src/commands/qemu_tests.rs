@@ -1021,6 +1021,40 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
+    // *production* fault-form, the riscv64 sibling of
+    // `rustos-test-stack-overrun-qemu-aarch64`.
+    // `rustos-test-stack-overrun-qemu-riscv64` proves that an overrunning
+    // kthread takes a synchronous store page fault, not a next-reschedule
+    // canary detection. It builds an Sv39 identity `AddressSpace`, prepares
+    // a 2 MiB-aligned guard arena (`AddressSpace::prepare_guard_arena`, G2),
+    // carves one kthread stack region `[guard page | usable stack]` out of
+    // it, installs the S-mode trap vector + a `fault` handler, turns paging
+    // on, then `unmap`s the guard page through the Arch HAL + `flush_page`s
+    // it — the production guard-page mechanism (G3b-2). It then builds the
+    // live `rustos-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, admits a
+    // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
+    // drives the cooperative `step` loop. The kthread body overruns its
+    // stack (writes the highest guard byte, the first byte a contiguous
+    // downward overrun crosses); because the guard page is unmapped the
+    // access raises a synchronous store page fault *while the kthread runs*,
+    // the handler confirms the cause / faulting address, and writes the
+    // `SiFive` Test PASS finisher. A regression that left the page mapped
+    // lets the body return cleanly; the drain loop then reports FAILURE
+    // explicitly rather than passing. Single CPU and a 60-second budget match
+    // the other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-stack-overrun-qemu-riscv64",
+        binary: "rustos-test-stack-overrun-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
     // vertical — boot → build the virtio-MMIO bus from the device tree →
