@@ -40,23 +40,172 @@
 //!
 //! # Host testability
 //!
-//! `MAX_CPUS`, `is_valid_cpu`, the callback slot, and the
+//! `SecondaryStackPool`, `is_valid_cpu`, the callback slot, and the
 //! `StartCpuError` decode build and are unit-tested on the host. The
 //! `MPIDR_EL1` read, the PSCI call, and the secondary trampoline are
 //! gated to the freestanding aarch64 target.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use rustos_arch_api::CpuId;
 
-pub use crate::kernel_arch::MAX_CPUS;
+/// Per-secondary-core kernel stack size, in bytes (64 KiB).
+///
+/// This is a fixed *per-stack bound* (like the kthread kernel stack), not
+/// a CPU-count capacity, so it is a constant and not subject to the §24.1
+/// "no fixed ceiling" rule — that rule governs the *number* of cores, not
+/// the size of one core's stack (`AGENTS.md` §24.4). The number of cores
+/// the pool covers is the caller-sized `N` of [`SecondaryStackPool`].
+pub const SECONDARY_STACK_BYTES: usize = 1 << 16;
 
-/// `true` iff `cpu` indexes a reserved secondary-stack slot (and so the
-/// `smp.s` trampoline selects a stack slice inside the reserved pool).
-/// Must agree with the `SECONDARY_MAX_CPUS` `.equ` in `smp.s`.
+/// Pool base address published to the `smp.s` trampoline (`0` until a
+/// [`SecondaryStackPool`] is registered). Read by the MMU-off secondary
+/// stub by symbol; written once by [`SecondaryStackPool::register`].
+#[no_mangle]
+#[used]
+static SECONDARY_STACK_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Per-core slice stride (bytes) published to the `smp.s` trampoline
+/// (`0` until a pool is registered). Read by the secondary stub by
+/// symbol; written once by [`SecondaryStackPool::register`].
+#[no_mangle]
+#[used]
+static SECONDARY_STACK_STRIDE: AtomicU64 = AtomicU64::new(0);
+
+/// Number of logical CPUs the registered pool covers (`0` until a pool
+/// is registered, so an unstarted system fails closed — every id is
+/// invalid, `AGENTS.md` §2.9 / §5.4.5).
+static SECONDARY_STACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Set-once guard so a second [`SecondaryStackPool::register`] is refused
+/// rather than silently re-pointing the trampoline at a different pool.
+static SECONDARY_STACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Failure mode of [`SecondaryStackPool::register`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SecondaryStackError {
+    /// A pool was already registered; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live trampoline).
+    AlreadyRegistered,
+}
+
+/// One secondary core's kernel stack: a [`SECONDARY_STACK_BYTES`] buffer
+/// aligned for an AArch64 stack pointer (16 bytes).
+#[repr(C, align(16))]
+struct SecondaryStackSlot {
+    bytes: [u8; SECONDARY_STACK_BYTES],
+}
+
+impl SecondaryStackSlot {
+    // A 64 KiB zero array is a deliberately large *static* backing (a
+    // secondary core's whole kernel stack), only ever const-evaluated into a
+    // `static SecondaryStackPool` — never materialised on a runtime stack —
+    // so the large-array lint does not apply (`AGENTS.md` §24.4: a per-stack
+    // size is a fixed bound, not a runtime stack allocation).
+    #[allow(clippy::large_stack_arrays)]
+    const fn new() -> Self {
+        Self {
+            bytes: [0u8; SECONDARY_STACK_BYTES],
+        }
+    }
+}
+
+/// Caller-owned, `&'static` secondary-core stack pool, sized by the
+/// constructing caller for its machine (`AGENTS.md` §24.1 — the
+/// secondary-bring-up stack count is derived from the §18-discovered core
+/// count, never a fixed `const` ceiling baked into the arch crate).
+///
+/// The const parameter `N` is the number of logical CPUs the caller
+/// intends to bring up: a single-CPU boot path needs no pool, a two-core
+/// vertical uses `SecondaryStackPool<2>`, and a multi-core boot path sizes
+/// `N` from the device-tree CPU count. The arch crate stays allocator-free
+/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// which would force a heap into every freestanding bin that links it), so
+/// the caller provides the storage as a `static` (allocator-free bins) or
+/// a leaked allocation (allocator-having callers) and registers it through
+/// [`SecondaryStackPool::register`].
+///
+/// Each secondary core `c` runs on `c`'s [`SECONDARY_STACK_BYTES`] slice;
+/// the `smp.s` trampoline computes the slice top from the registered base
+/// and stride, so the pool memory is reached only by the freshly-started
+/// core that owns it.
+#[repr(C, align(16))]
+pub struct SecondaryStackPool<const N: usize> {
+    stacks: [SecondaryStackSlot; N],
+}
+
+impl<const N: usize> SecondaryStackPool<N> {
+    /// A zeroed pool of `N` per-core stacks. `const` so the
+    /// allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stacks: [const { SecondaryStackSlot::new() }; N],
+        }
+    }
+
+    /// Publish this pool to the secondary-core trampoline and the
+    /// [`is_valid_cpu`] bound, then return the covered CPU count `N`.
+    ///
+    /// Must be called on the boot core, exactly once, before any
+    /// `start_secondary`. The trampoline reads the published base and
+    /// stride with the MMU off, so the pool must stay mapped at its
+    /// physical address for the lifetime of the kernel — the `&'static`
+    /// receiver pins that.
+    ///
+    /// # Errors
+    ///
+    /// [`SecondaryStackError::AlreadyRegistered`] on the second publish
+    /// (set-once per boot — never silently re-points the live trampoline,
+    /// `AGENTS.md` §2.1).
+    pub fn register(&'static self) -> Result<usize, SecondaryStackError> {
+        if SECONDARY_STACKS_REGISTERED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SecondaryStackError::AlreadyRegistered);
+        }
+        let base = self.stacks.as_ptr() as u64;
+        SECONDARY_STACK_BASE.store(base, Ordering::Release);
+        SECONDARY_STACK_STRIDE.store(SECONDARY_STACK_BYTES as u64, Ordering::Release);
+        SECONDARY_STACK_COUNT.store(N, Ordering::Release);
+        // Order the pool publish ahead of any secondary core's MMU-off
+        // read of the globals. The PSCI `CPU_ON` firmware call that starts
+        // a core is itself a barrier, but the explicit `dsb sy` makes the
+        // ordering local and unconditional (`AGENTS.md` §4 — explicit
+        // synchronisation for cross-CPU shared state).
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        // SAFETY: `dsb sy` is a full data-synchronisation barrier with no
+        // operands and no memory effects beyond ordering; it is always
+        // valid at EL1.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+        Ok(N)
+    }
+}
+
+impl<const N: usize> Default for SecondaryStackPool<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `true` iff `cpu` indexes a slot inside the registered secondary-stack
+/// pool, so the `smp.s` trampoline selects a stack slice that lies inside
+/// it. Returns `false` for every id until a [`SecondaryStackPool`] is
+/// registered (fail closed, `AGENTS.md` §2.9).
 #[must_use]
-pub const fn is_valid_cpu(cpu: CpuId) -> bool {
-    (cpu as usize) < MAX_CPUS
+pub fn is_valid_cpu(cpu: CpuId) -> bool {
+    (cpu as usize) < SECONDARY_STACK_COUNT.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn reset_secondary_stacks_for_tests() {
+    SECONDARY_STACKS_REGISTERED.store(false, Ordering::Release);
+    SECONDARY_STACK_COUNT.store(0, Ordering::Release);
+    SECONDARY_STACK_BASE.store(0, Ordering::Release);
+    SECONDARY_STACK_STRIDE.store(0, Ordering::Release);
 }
 
 /// The secondary-core entry the trampoline runs, packed into a `usize`
@@ -75,8 +224,8 @@ pub enum SetEntryError {
 /// Failure modes of `start_secondary`.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum StartCpuError {
-    /// `cpu` was outside `0..MAX_CPUS`, so the trampoline would select a
-    /// stack slice outside the reserved pool.
+    /// `cpu` was outside the registered [`SecondaryStackPool`]'s core
+    /// count, so the trampoline would select a stack slice outside it.
     CpuIdOutOfRange,
     /// No secondary entry was installed via [`set_secondary_entry`];
     /// starting a core that would immediately park is refused so the

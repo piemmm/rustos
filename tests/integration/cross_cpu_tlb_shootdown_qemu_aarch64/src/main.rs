@@ -143,13 +143,22 @@ mod kernel {
             &[BOOT_CPU as u64, SECONDARY_MPIDR],
         );
 
+        // Register the secondary-core stack pool sized to this two-core
+        // vertical before any `CPU_ON`; the `smp.s` trampoline reads its
+        // published base/stride to seed the started core's stack
+        // (`AGENTS.md` §24.1 — the pool scales with the core count, not a
+        // fixed `const`).
+        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        if SECONDARY_STACKS.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        }
+
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
-        // SAFETY: called on the boot core after `boot.s` zeroed `.bss`
-        // (clearing the secondary stack pool) and after the secondary
-        // entry was installed; `SECONDARY_MPIDR` names a real, parked,
-        // distinct core.
+        // SAFETY: called on the boot core after the secondary-stack pool
+        // was registered (above) and the secondary entry was installed;
+        // `SECONDARY_MPIDR` names a real, parked, distinct core.
         if unsafe { smp::start_secondary(VIRT_PSCI_METHOD, SECONDARY_CPU, SECONDARY_MPIDR) }
             .is_err()
         {

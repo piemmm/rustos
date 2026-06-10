@@ -142,14 +142,21 @@ mod kernel {
         }
         let secondary_hartid: CpuId = boot_hartid ^ 1;
 
-        // Install the secondary entry, then start the other hart.
+        // Install the secondary entry, register the stack pool, then start
+        // the other hart. The pool is sized to this two-hart vertical
+        // (slots 0 and 1, so either hart can be the started secondary) and
+        // scales with the hart count, not a fixed `const` (`AGENTS.md`
+        // §24.1); the `smp.s` trampoline reads its published base/shift.
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
-        // SAFETY: called on the boot hart after `boot.s` zeroed `.bss`
-        // (clearing the secondary stack pool) and after the secondary
-        // entry was installed; `secondary_hartid` is a real, parked,
-        // distinct hart.
+        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        if SECONDARY_STACKS.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        }
+        // SAFETY: called on the boot hart after the secondary stack pool
+        // was registered (above) and after the secondary entry was
+        // installed; `secondary_hartid` is a real, parked, distinct hart.
         if unsafe { smp::start_secondary(secondary_hartid) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }

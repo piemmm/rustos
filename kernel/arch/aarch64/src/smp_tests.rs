@@ -1,9 +1,9 @@
 //! Host unit tests for the SMP bring-up surface.
 //!
-//! `MAX_CPUS`, the cpu-id validity check, the set-once secondary-entry
-//! slot, and the `StartCpuError` decode build and run on the host. The
-//! `MPIDR_EL1` read, the PSCI `CPU_ON` call, and the secondary trampoline
-//! are exercised by the multi-core QEMU vertical.
+//! The secondary-stack pool registration, the cpu-id validity check, the
+//! set-once secondary-entry slot, and the `StartCpuError` decode build and
+//! run on the host. The `MPIDR_EL1` read, the PSCI `CPU_ON` call, and the
+//! secondary trampoline are exercised by the multi-core QEMU vertical.
 
 use super::*;
 
@@ -17,12 +17,33 @@ extern "C" fn host_entry(_cpu: CpuId) -> ! {
 }
 
 #[test]
-fn cpu_validity_tracks_the_stack_pool() {
-    let max = CpuId::try_from(MAX_CPUS).expect("MAX_CPUS fits a CpuId");
+fn cpu_validity_tracks_the_registered_pool() {
+    // A caller-sized pool covers exactly its `N` slots (the §24.1 capacity
+    // is the discovered core count, not a baked-in `MAX_CPUS`); a second
+    // pool proves registration is set-once. Declared first so they precede
+    // the statements that drive them.
+    static POOL: SecondaryStackPool<3> = SecondaryStackPool::new();
+    static POOL2: SecondaryStackPool<2> = SecondaryStackPool::new();
+
+    reset_secondary_stacks_for_tests();
+    // Fail closed before any pool is registered: every id is invalid, so
+    // a `start_secondary` cannot select an unbacked stack slice.
+    assert!(!is_valid_cpu(0));
+
+    assert_eq!(POOL.register(), Ok(3));
     assert!(is_valid_cpu(0));
-    assert!(is_valid_cpu(max - 1));
-    assert!(!is_valid_cpu(max));
+    assert!(is_valid_cpu(2));
+    assert!(!is_valid_cpu(3));
     assert!(!is_valid_cpu(u32::MAX));
+
+    // A second pool is refused rather than silently re-pointing the live
+    // trampoline.
+    assert_eq!(
+        POOL2.register(),
+        Err(SecondaryStackError::AlreadyRegistered)
+    );
+
+    reset_secondary_stacks_for_tests();
 }
 
 #[test]

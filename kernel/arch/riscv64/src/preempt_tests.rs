@@ -71,6 +71,54 @@ fn diagnostic_slots_start_clear() {
 }
 
 #[test]
+fn per_hart_slots_track_the_registered_storage() {
+    // A caller-sized backing covers exactly its `N` slots (the §24.1
+    // capacity is the discovered hart count, not a baked-in `MAX_HARTS`);
+    // a second backing proves registration is set-once. Declared first so
+    // they precede the statements that drive them.
+    static STORAGE: PreemptStorage<4> = PreemptStorage::new();
+    static STORAGE2: PreemptStorage<2> = PreemptStorage::new();
+
+    reset_preempt_storage_for_tests();
+
+    // Before any storage is registered the per-hart observers fail closed
+    // (`0` / `u32::MAX`) instead of dereferencing a null base (`AGENTS.md`
+    // §2.9).
+    assert_eq!(per_cpu_index(0), None);
+    assert_eq!(timer_interval_ticks(), 0);
+    assert_eq!(timer_cpu_id(), u32::MAX);
+
+    assert_eq!(STORAGE.register(), Ok(4));
+    assert_eq!(per_cpu_index(0), Some(0));
+    assert_eq!(per_cpu_index(3), Some(3));
+    // An out-of-range id clamps to the last slot rather than indexing past
+    // the slice end.
+    assert_eq!(per_cpu_index(4), Some(3));
+    assert_eq!(per_cpu_index(u32::MAX), Some(3));
+
+    // Recording the calling hart's (host hart 0) interval/id round-trips
+    // through the published slices (the bare-metal `init_local_preempt`
+    // writes the same slots).
+    let idx = per_cpu_index(current_hartid()).expect("registered slot");
+    interval_slot(idx).store(99, Ordering::Relaxed);
+    cpu_id_slot(idx).store(u64::from(0u32), Ordering::Relaxed);
+    assert_eq!(timer_interval_ticks(), 99);
+    assert_eq!(timer_cpu_id(), 0);
+
+    // Registration is set-once: a second backing is refused rather than
+    // silently re-pointing the live slices.
+    assert_eq!(
+        STORAGE2.register(),
+        Err(PreemptStorageError::AlreadyRegistered)
+    );
+
+    clear_for_tests();
+    assert_eq!(timer_interval_ticks(), 0);
+    assert_eq!(timer_cpu_id(), u32::MAX);
+    reset_preempt_storage_for_tests();
+}
+
+#[test]
 fn software_interrupt_enable_bit_and_cause_match_privileged_spec() {
     assert_eq!(SIE_SSIE, 0x2);
     assert_eq!(SIP_SSIP, 0x2);

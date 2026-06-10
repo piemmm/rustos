@@ -28,26 +28,183 @@
 //!
 //! # Host testability
 //!
-//! [`MAX_HARTS`], [`is_valid_hartid`], the callback slot, and the
-//! [`StartHartError`] decode build and are unit-tested on the host. The
-//! `tp` read, the SBI HSM call, and the secondary trampoline are gated
-//! to the freestanding riscv64 target.
+//! [`SecondaryStackPool`], [`is_valid_hartid`], the callback slot, and
+//! the [`StartHartError`] decode build and are unit-tested on the host.
+//! The `tp` read, the SBI HSM call, and the secondary trampoline are
+//! gated to the freestanding riscv64 target.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use rustos_arch_api::CpuId;
 
-/// Maximum number of harts the secondary-stack pool in `smp.s`
-/// reserves. Must equal the `SECONDARY_MAX_HARTS` `.equ` there; the
-/// stack slice the trampoline selects for hart `h` is only inside the
-/// pool when `h < MAX_HARTS`, which `start_secondary` enforces before
-/// issuing the SBI call (`AGENTS.md` §2.9 — fail closed, no OOB stack).
-pub const MAX_HARTS: usize = 8;
+/// Base-2 logarithm of the per-secondary-hart kernel stack size, so the
+/// `smp.s` trampoline can index a hart's slice with a left shift rather
+/// than the `M` multiply extension (which the freestanding stub avoids).
+///
+/// A per-stack size is a fixed *bound* (like the kthread kernel stack),
+/// not a hart-count capacity, so it is a constant and not subject to the
+/// §24.1 "no fixed ceiling" rule — that rule governs the *number* of
+/// harts, not the size of one hart's stack (`AGENTS.md` §24.4). The
+/// number of harts the pool covers is the caller-sized `N` of
+/// [`SecondaryStackPool`].
+pub const SECONDARY_STACK_SHIFT: u32 = 14;
 
-/// `true` iff `hartid` indexes a reserved secondary-stack slot.
+/// Per-secondary-hart kernel stack size, in bytes (16 KiB). A power of
+/// two so the `smp.s` slice index is a shift (see [`SECONDARY_STACK_SHIFT`]).
+pub const SECONDARY_STACK_BYTES: usize = 1 << SECONDARY_STACK_SHIFT;
+
+/// Pool base address published to the `smp.s` trampoline (`0` until a
+/// [`SecondaryStackPool`] is registered). Read by the paging-off
+/// secondary stub by symbol; written once by
+/// [`SecondaryStackPool::register`].
+#[no_mangle]
+#[used]
+static SECONDARY_STACK_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Per-hart slice log2 byte size published to the `smp.s` trampoline
+/// (`0` until a pool is registered). Read by the secondary stub by
+/// symbol; written once by [`SecondaryStackPool::register`] (always
+/// [`SECONDARY_STACK_SHIFT`]).
+#[no_mangle]
+#[used]
+static SECONDARY_STACK_SHIFT_BITS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of harts the registered pool covers (`0` until a pool is
+/// registered, so an unstarted system fails closed — every id is
+/// invalid, `AGENTS.md` §2.9 / §5.4.5).
+static SECONDARY_STACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Set-once guard so a second [`SecondaryStackPool::register`] is refused
+/// rather than silently re-pointing the live trampoline at a different
+/// pool.
+static SECONDARY_STACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Failure mode of [`SecondaryStackPool::register`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SecondaryStackError {
+    /// A pool was already registered; the slot is set-once per boot
+    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live trampoline).
+    AlreadyRegistered,
+}
+
+/// One secondary hart's kernel stack: a [`SECONDARY_STACK_BYTES`] buffer
+/// aligned for a riscv64 stack pointer (16 bytes).
+#[repr(C, align(16))]
+struct SecondaryStackSlot {
+    bytes: [u8; SECONDARY_STACK_BYTES],
+}
+
+impl SecondaryStackSlot {
+    // A 16 KiB zero array is a deliberately large *static* backing (a
+    // secondary hart's whole kernel stack), only ever const-evaluated
+    // into a `static SecondaryStackPool` — never materialised on a
+    // runtime stack — so the large-array lint does not apply (`AGENTS.md`
+    // §24.4: a per-stack size is a fixed bound, not a runtime stack
+    // allocation).
+    #[allow(clippy::large_stack_arrays)]
+    const fn new() -> Self {
+        Self {
+            bytes: [0u8; SECONDARY_STACK_BYTES],
+        }
+    }
+}
+
+/// Caller-owned, `&'static` secondary-hart stack pool, sized by the
+/// constructing caller for its machine (`AGENTS.md` §24.1 — the
+/// secondary-bring-up stack count is derived from the §18-discovered hart
+/// count, never a fixed `const` ceiling baked into the arch crate).
+///
+/// The const parameter `N` is the number of harts the caller intends to
+/// bring up: a single-hart boot path needs no pool, a two-hart vertical
+/// uses `SecondaryStackPool<2>`, and a multi-hart boot path sizes `N`
+/// from the device-tree hart count. The arch crate stays allocator-free
+/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// which would force a heap into every freestanding bin that links it),
+/// so the caller provides the storage as a `static` (allocator-free bins)
+/// or a leaked allocation (allocator-having callers) and registers it
+/// through [`SecondaryStackPool::register`].
+///
+/// Each secondary hart `h` runs on `h`'s [`SECONDARY_STACK_BYTES`] slice;
+/// the `smp.s` trampoline computes the slice top from the registered base
+/// and log2 size, so the pool memory is reached only by the freshly-
+/// started hart that owns it.
+#[repr(C, align(16))]
+pub struct SecondaryStackPool<const N: usize> {
+    stacks: [SecondaryStackSlot; N],
+}
+
+impl<const N: usize> SecondaryStackPool<N> {
+    /// A zeroed pool of `N` per-hart stacks. `const` so the
+    /// allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stacks: [const { SecondaryStackSlot::new() }; N],
+        }
+    }
+
+    /// Publish this pool to the secondary-hart trampoline and the
+    /// [`is_valid_hartid`] bound, then return the covered hart count `N`.
+    ///
+    /// Must be called on the boot hart, exactly once, before any
+    /// `start_secondary`. The trampoline reads the published base and
+    /// log2 size with paging off, so the pool must stay mapped at its
+    /// physical address for the lifetime of the kernel — the `&'static`
+    /// receiver pins that.
+    ///
+    /// # Errors
+    ///
+    /// [`SecondaryStackError::AlreadyRegistered`] on the second publish
+    /// (set-once per boot — never silently re-points the live trampoline,
+    /// `AGENTS.md` §2.1).
+    pub fn register(&'static self) -> Result<usize, SecondaryStackError> {
+        if SECONDARY_STACKS_REGISTERED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SecondaryStackError::AlreadyRegistered);
+        }
+        let base = self.stacks.as_ptr() as u64;
+        SECONDARY_STACK_BASE.store(base, Ordering::Release);
+        SECONDARY_STACK_SHIFT_BITS.store(u64::from(SECONDARY_STACK_SHIFT), Ordering::Release);
+        SECONDARY_STACK_COUNT.store(N, Ordering::Release);
+        // Order the pool publish ahead of any secondary hart's paging-off
+        // read of the globals. The SBI `hart_start` firmware call that
+        // starts a hart is itself a barrier, but the explicit `fence`
+        // makes the ordering local and unconditional (`AGENTS.md` §4 —
+        // explicit synchronisation for cross-CPU shared state).
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        // SAFETY: `fence rw, rw` orders prior stores ahead of later
+        // memory accesses; it has no operands and no effect beyond
+        // ordering, and is always valid in S-mode.
+        unsafe {
+            core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
+        }
+        Ok(N)
+    }
+}
+
+impl<const N: usize> Default for SecondaryStackPool<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `true` iff `hartid` indexes a slot inside the registered secondary-
+/// stack pool, so the `smp.s` trampoline selects a stack slice that lies
+/// inside it. Returns `false` for every id until a [`SecondaryStackPool`]
+/// is registered (fail closed, `AGENTS.md` §2.9).
 #[must_use]
-pub const fn is_valid_hartid(hartid: CpuId) -> bool {
-    (hartid as usize) < MAX_HARTS
+pub fn is_valid_hartid(hartid: CpuId) -> bool {
+    (hartid as usize) < SECONDARY_STACK_COUNT.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn reset_secondary_stacks_for_tests() {
+    SECONDARY_STACKS_REGISTERED.store(false, Ordering::Release);
+    SECONDARY_STACK_COUNT.store(0, Ordering::Release);
+    SECONDARY_STACK_BASE.store(0, Ordering::Release);
+    SECONDARY_STACK_SHIFT_BITS.store(0, Ordering::Release);
 }
 
 /// The secondary-hart entry the trampoline runs, packed into a `usize`
@@ -66,8 +223,8 @@ pub enum SetEntryError {
 /// Failure modes of `start_secondary`.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum StartHartError {
-    /// `hartid` was outside `0..MAX_HARTS`, so the trampoline would
-    /// select a stack slice outside the reserved pool.
+    /// `hartid` was outside the registered [`SecondaryStackPool`]'s hart
+    /// count, so the trampoline would select a stack slice outside it.
     HartIdOutOfRange,
     /// No secondary entry was installed via [`set_secondary_entry`];
     /// starting a hart that would immediately park is refused so the
@@ -129,8 +286,8 @@ fn clear_secondary_entry_for_tests() {
 pub fn current_hartid() -> CpuId {
     let tp: u64;
     // SAFETY: reading `tp` has no side effects. The boot/secondary
-    // trampolines guarantee it holds this hart's id (`< MAX_HARTS`),
-    // which fits a `CpuId` (`u32`).
+    // trampolines guarantee it holds this hart's id (inside the
+    // registered pool's hart count), which fits a `CpuId` (`u32`).
     unsafe {
         core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
     }
@@ -162,10 +319,10 @@ pub fn current_hartid() -> CpuId {
 ///
 /// # Safety
 ///
-/// Must be called from the boot hart after `boot.s` has zeroed `.bss`
-/// (so the secondary stack pool is clear) and after the secondary entry
-/// is installed. `hartid` must name a real, parked hart distinct from
-/// the caller.
+/// Must be called from the boot hart after a [`SecondaryStackPool`] has
+/// been registered (the trampoline reads its published base/shift) and
+/// after the secondary entry is installed. `hartid` must name a real,
+/// parked hart distinct from the caller.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub unsafe fn start_secondary(hartid: CpuId) -> Result<(), StartHartError> {
     if !is_valid_hartid(hartid) {

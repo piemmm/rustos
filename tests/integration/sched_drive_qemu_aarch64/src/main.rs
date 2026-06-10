@@ -347,10 +347,19 @@ mod kernel {
         preempt::set_timer_callback(on_tick);
         preempt::set_ipi_callback(on_ipi);
 
+        // Register the per-CPU preemption backing (sized to this
+        // single-CPU vertical, `AGENTS.md` §24.1) so the timer slot
+        // `init_local_preempt` records exists.
+        static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();
+        if PREEMPT_STORAGE.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SCHED_NEW);
+        }
+
         // 3. Vector table + GIC bring-up, then the IPI SGI enable, the
         //    100 Hz generic timer, and the PE IRQ unmask.
         // SAFETY: called once on the boot core with a stack established and
-        // before any source is armed; both callbacks are installed.
+        // before any source is armed; both callbacks and the per-CPU
+        // preemption storage are installed.
         unsafe {
             exceptions::init_vectors();
             gic::init();

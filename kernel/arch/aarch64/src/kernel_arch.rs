@@ -42,17 +42,6 @@ use rustos_arch_api::{
 
 use crate::fdt::PsciMethod;
 
-/// Maximum number of logical CPUs the *secondary-bring-up* path covers
-/// (the `smp.s` secondary-stack pool, [`crate::smp::is_valid_cpu`], and
-/// the per-CPU `preempt` timer statics).
-///
-/// This is **not** a ceiling on the per-CPU accounting tables in
-/// [`Aarch64Arch`]: those are borrowed from a caller-provided
-/// [`Aarch64ArchStorage`] sized to the machine (`AGENTS.md` §24.1).
-/// Sizing the SMP-bring-up pool itself from §18 discovery is a separate
-/// later increment (an SMP-bring-up redesign, not a bookkeeping resize).
-pub const MAX_CPUS: usize = 8;
-
 /// Sentinel stored in an [`Aarch64ArchStorage::cpu_to_mpidr`] slot that
 /// no CPU maps to — the encoded `None` (`AGENTS.md` §2.9 — an unmapped
 /// slot is unambiguously absent, never a guessed affinity).
@@ -300,8 +289,8 @@ impl Aarch64Arch {
     ///
     /// Two device-tree passes (find the peak, then classify) carry no
     /// fixed-size buffer, so the classification scales to the caller's
-    /// storage length (`AGENTS.md` §24.1) rather than a `MAX_CPUS`
-    /// ceiling.
+    /// storage length (`AGENTS.md` §24.1) rather than a fixed
+    /// compile-time CPU ceiling.
     pub fn classify_from_fdt(&self, fdt: &crate::fdt::Fdt<'_>) {
         // Reset to the homogeneous default so a re-classification leaves
         // no stale efficiency class behind (idempotent, `AGENTS.md` §2.9).

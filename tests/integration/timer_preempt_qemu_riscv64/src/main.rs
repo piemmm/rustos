@@ -128,15 +128,25 @@ mod kernel {
             trap::init_traps();
         }
 
-        // 4. Arm the SBI timer at TICK_HZ and enable `sie.STIE`.
+        // 4. Register the per-hart preemption backing sized to this
+        //    single-hart vertical before arming the timer; the per-hart
+        //    interval/`CpuId` slots are caller-owned storage scaled to the
+        //    hart count, not a fixed `const` (`AGENTS.md` §24.1).
+        static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();
+        if PREEMPT_STORAGE.register().is_err() {
+            halt_current_hart();
+        }
+
+        // 5. Arm the SBI timer at TICK_HZ and enable `sie.STIE`.
         let interval = preempt::interval_for_hz(timebase, TICK_HZ);
         // SAFETY: `cpu` is the boot hart's id, the callback is installed,
-        // and the trap vector is in place (step 3).
+        // the per-hart storage is registered, and the trap vector is in
+        // place (step 3).
         unsafe {
             preempt::init_local_preempt(0, interval);
         }
 
-        // 5. Idle until the timer has driven the callback TARGET_TICKS
+        // 6. Idle until the timer has driven the callback TARGET_TICKS
         //    times, then report PASS.
         while TICKS.load(Ordering::Relaxed) < TARGET_TICKS {
             // SAFETY: `wfi` is a wait-for-interrupt hint with no

@@ -581,15 +581,23 @@ Stage W6), in `kernel/arch/aarch64::smp`:
   mandatory `extern` symbol) keeps secondary bring-up opt-in without a
   Cargo feature, so the single-core boot pipeline and the freestanding
   test bins still link.
-- `smp::start_secondary` validates the dense `CpuId` against the
-  secondary-stack pool, confirms an entry is installed, then issues a
-  PSCI `CPU_ON` (`kernel/arch/aarch64::psci::cpu_on`) through the conduit
-  (`hvc`/`smc`) the `fdt` reader discovers, entering the core at the
-  `smp.s` trampoline. The trampoline masks interrupts, seeds the core's
-  slice of the `.bss` secondary-stack pool (indexed by the dense id PSCI
-  passes as the `context_id`), and tail-calls the installed entry. It
-  fails closed (`StartCpuError`) on an out-of-range id, a missing entry,
-  or a PSCI error rather than assuming the core came up.
+- The secondary-stack pool is **not** a fixed `.bss` reserve (which would
+  cap the machine at a compile-time core count, `AGENTS.md` §24.1). The
+  caller registers a `smp::SecondaryStackPool<N>` sized to its machine's
+  discovered core count (a `static` for the allocator-free bins); its
+  `register` publishes the pool base and per-core stride to the `smp.s`
+  trampoline (ordered ahead of any `CPU_ON` by a `dsb sy`) and the covered
+  count to `smp::is_valid_cpu`. Registration is set-once, and every id is
+  invalid until a pool is registered, so an unstarted system fails closed.
+- `smp::start_secondary` validates the dense `CpuId` against the registered
+  pool's count, confirms an entry is installed, then issues a PSCI `CPU_ON`
+  (`kernel/arch/aarch64::psci::cpu_on`) through the conduit (`hvc`/`smc`)
+  the `fdt` reader discovers, entering the core at the `smp.s` trampoline.
+  The trampoline masks interrupts, computes the core's stack top as
+  `base + (cpuid + 1) * stride` from the published pool globals (indexed by
+  the dense id PSCI passes as the `context_id`), and tail-calls the
+  installed entry. It fails closed (`StartCpuError`) on an out-of-range id,
+  a missing entry, or a PSCI error rather than assuming the core came up.
 - `smp::current_cpu_index` reads the running core's affinity from
   `MPIDR_EL1`; the IRQ path (`exceptions::handle_irq`) forwards it to the
   per-CPU timer slot and the IPI callback (one identity source, §2.2).
@@ -950,7 +958,7 @@ classifies each core's rating against the machine's peak with the pure
 present is the performance tier, and any core rated strictly below it is
 an efficiency core. Two device-tree passes (find the peak, then classify)
 carry no fixed-size buffer, so the classification scales to the
-caller-sized per-CPU table rather than a `MAX_CPUS` ceiling (`AGENTS.md`
+caller-sized per-CPU table rather than a fixed compile-time CPU ceiling (`AGENTS.md`
 §24.1). A homogeneous machine — every rating equal, no ratings at all, or
 a malformed tree — leaves every core a performance core, the safe Arch HAL
 default; a core with no advertised rating is never guessed down. The
