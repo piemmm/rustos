@@ -83,14 +83,62 @@ supervisor-timer preemption surface, and the `ecall` syscall entry
 exist as host-tested arch primitives (Stage 3c — see *Stage 3
 architecture primitives* below). RV-P2 wires the Sv39 identity MMU, the
 trap vector, and the `ecall` dispatch callback into the production boot
-(step 3); enabling asynchronous interrupts (the timer/PLIC) and dropping
-PID 1 into U-mode are the staged RV-P3 follow-up, plus multi-hart SMP
-bring-up. The ring-0 DTB virtio-mmio walk and the full device bring-up
-land in the virtio-MMIO QEMU verticals (below), which now run under the
-paged boot.
+(step 3); RV-P3 (below) drops PID 1 `init` into U-mode after boot
+completes. Enabling asynchronous interrupts (the timer/PLIC) in the
+production boot and multi-hart SMP bring-up are the remaining follow-ups.
+The ring-0 DTB virtio-mmio walk and the full device bring-up land in the
+virtio-MMIO QEMU verticals (below), which now run under the paged boot.
 
 The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
 is what the test bin uses to report its result.
+
+## PID 1 into user mode (RV-P3)
+
+After `kernel_core::kernel_main` emits `AuditEvent::BootCompleted`, the
+production riscv64 boot drops PID 1 `init` into U-mode and lets it
+supervise the `Shell` session — the riscv64 analogue of the aarch64
+`init_spawn`/`spawn_producer` seams. `boot_riscv64::try_boot` installs
+three things on the `BootInfo` hand-off:
+
+- **Console backing (`with_console`).** `RiscvUartConsole` — a zero-sized
+  `kernel_core::ConsoleWrite` over the new verbatim arch-port
+  `serial::write_console_bytes` (no `\n` translation, unlike the boot-log
+  `SbiWriter`) — is the `stream_write` (fd 1) backing PID 1 writes its
+  banner through (`AGENTS.md` §16.4 / §20). No `with_console_read` is
+  installed: the SBI legacy console exposes no non-blocking input drain,
+  so fd 0 reads fail closed this slice (a real input backing is a later
+  increment).
+- **PID 1 spawn seam (`with_init`).** `init_spawn_riscv64::RiscvInitSpawn`
+  builds the embedded `init` (`Run`) program's image in its own Sv39
+  address space (`IDENTITY_GIB = 4`, user bias 64 GiB), switches to it,
+  and dispatches it into U-mode through the capability-checked, audited
+  `kernel_core::spawn_image` + `admit_init` (gated on `CAP_PROC_SPAWN`).
+  Its `pre_resume` hook reactivates PID 1's `satp` root before every
+  switch-in (isolation, §4); the kernel-stack-top argument is unused on
+  riscv64, since `sscratch` is re-armed per-task by `userentry::enter_user`
+  and the trap vector. PID 1's kernel stack is a heap-backed
+  software-canary `BoxStack` (the guarded kthread-stack arena is the later
+  G3b-2 rewire), never an unguarded raw stack (§2.9).
+- **Runtime `spawn` producer (`with_spawn`).**
+  `spawn_producer_riscv64::RiscvProcessSpawn` + a one-entry program
+  registry mapping `/Apps/Shell.app/Run` → the embedded `Shell` `rxe`.
+  When `init` issues the `CAP_PROC_SPAWN`-gated `spawn` syscall, the
+  producer builds the session a *fresh, hardware-isolated* Sv39 space
+  **without** switching the running caller's `satp`, drawing its page
+  tables from the allocator-backed `kernel_mem::FrameTableSource` (no fixed
+  reserve, so the spawn capacity scales with RAM and grows on demand,
+  §24.1) and admits it Ready — a true concurrent spawn.
+
+The embedded `init`/`Shell` `rxe` blobs are built for the riscv64 target
+by the kernel `build.rs` (the same one-build-path the aarch64/x86_64
+images use, §2.2). Proven end-to-end by
+`tests/integration/spawn_init_qemu_riscv64`: it boots the production
+pipeline with only the audit sink swapped and reports `SiFive` PASS once
+it observes `ProcessSpawned` (`EventId(4030)`, PID 1) → the
+`RustOS init: reached user mode` banner → `ProcessSpawned` (`Shell`) →
+`SyscallInvoked` (`EventId(5000)`, `init`'s `spawn`) — proving PID 1
+reached U-mode, wrote its banner over the SBI console backing, and
+trapped back.
 
 ## External-interrupt controller (PLIC) + S-mode trap glue
 

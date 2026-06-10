@@ -166,6 +166,27 @@ pub mod boot_aarch64;
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 pub mod boot_riscv64;
 
+// The riscv64 PID 1 (`init`) spawn seam (`plans/PI.md` RV-P3): the
+// `rustos_kernel_core::InitSpawn` implementation `boot_riscv64` installs into
+// the `BootInfo` hand-off so `kernel_main` drops into U-mode after boot
+// completes — the cross-port sibling of the aarch64 `init_spawn` / x86_64
+// `init_spawn_x86_64`. Freestanding+riscv64-only: it links the riscv64 port's
+// Sv39 page-table / `EnterUser` primitives and `include!`s the build-time
+// `init` `rxe` blob.
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+pub mod init_spawn_riscv64;
+
+// The riscv64 runtime `spawn` producer + embedded-program registry
+// (`plans/PI.md` RV-P3 / `plans/SPAWN.md` SP3b): the
+// `rustos_kernel_core::ProcessSpawn` implementation `boot_riscv64` installs into
+// the `BootInfo` hand-off so the `spawn` syscall can build a fresh,
+// hardware-isolated child Sv39 space and admit it Ready, so PID 1 `init` can
+// launch the user's session. Freestanding+riscv64-only: it links the riscv64
+// port's page-table / `EnterUser` primitives and `include!`s the build-time
+// `Shell` `rxe` blob.
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+pub mod spawn_producer_riscv64;
+
 // The aarch64 PID 1 (`init`) spawn seam (`plans/PI.md` P6c-3): the
 // `rustos_kernel_core::InitSpawn` implementation `boot_aarch64` installs
 // into the `BootInfo` hand-off so `kernel_main` drops into user mode after
@@ -244,7 +265,10 @@ pub use rustos_kernel_virtio::{
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use boot::{boot, BootError};
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
-pub use boot_riscv64::{boot, build_boot_memory_map, try_boot, BootError, RiscvBinArch};
+pub use boot_riscv64::{
+    boot, build_boot_memory_map, try_boot, BootError, RiscvBinArch, RiscvUartConsole,
+    RISCV_UART_CONSOLE,
+};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use panic_ctx::handle_panic_via_kernel_core;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]

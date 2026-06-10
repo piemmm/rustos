@@ -686,6 +686,35 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage RV-P3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-riscv64`
+    // boots the *production* riscv64 `rustos-kernel` pipeline
+    // (`boot_riscv64::boot`) on the `virt` board, then drops into PID 1
+    // (`init`) in U-mode through the `InitSpawn` seam `boot_riscv64` installs
+    // into the `BootInfo` hand-off. After `kernel_core::kernel_main` emits
+    // `AuditEvent::BootCompleted` it builds the embedded `init` (`Run`)
+    // U-mode image through the capability-checked, audited `spawn_image` +
+    // `admit_init` (emitting `ProcessSpawned`, `EventId(4030)`) and dispatches
+    // it; `init` writes its banner through `stream_write` (over the SBI
+    // console backing) and issues the audited `spawn` syscall, whose `ecall`
+    // traps back through the S-mode vector to the production dispatch callback
+    // (emitting `SyscallInvoked`, `EventId(5000)`). The audit sink reports
+    // PASS through the `SiFive` Test finisher once it has seen `ProcessSpawned`
+    // then `SyscallInvoked` — proving PID 1 reached U-mode, wrote its banner,
+    // and trapped back (the riscv64 sibling of the aarch64 / x86_64
+    // `spawn-init-qemu` verticals). Single CPU and a 60-second budget match
+    // the other boot-then-do-fixed-work riscv64 tests.
+    QemuTest {
+        package: "rustos-test-spawn-init-qemu-riscv64",
+        binary: "rustos-test-spawn-init-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
     // per-sub-stage deliverable. It boots the `virt` board, reads the

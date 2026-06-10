@@ -47,33 +47,40 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// Rust target triple of the freestanding x86_64 build.
 const X86_64_TARGET: &str = "x86_64-unknown-none";
 
+/// Rust target triple of the freestanding riscv64 (QEMU `virt` / SiFive)
+/// build.
+const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
+
 /// The `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` environment variable that scopes
 /// the PIE link recipe to a given freestanding target (and to it alone, so
 /// the embedded program's own host build script is never affected).
 ///
-/// Returns `None` for any target that is not one of the two bare-metal
-/// production targets — host builds, clippy, and fmt then emit inert empty
-/// fixtures (the boot-path modules that consume them compile only for a
-/// freestanding production target).
+/// Returns `None` for any target that is not one of the three bare-metal
+/// production targets (x86_64, aarch64, riscv64) — host builds, clippy, and
+/// fmt then emit inert empty fixtures (the boot-path modules that consume
+/// them compile only for a freestanding production target).
 fn program_rustflags_var(target: &str) -> Option<&'static str> {
     match target {
         AARCH64_TARGET => Some("CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS"),
         X86_64_TARGET => Some("CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS"),
+        RISCV64_TARGET => Some("CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS"),
         _ => None,
     }
 }
 
-/// Virtual base each spawned program (`Run`) image is mapped at when the
-/// aarch64 boot path builds it (`plans/PI.md` P6c-3, `plans/SPAWN.md` `SP3b`).
+/// Virtual base each spawned program (`Run`) image is mapped at when a
+/// production boot path builds it (`plans/PI.md` P6c-3 on aarch64, X3a on
+/// x86_64, RV-P3 on riscv64; `plans/SPAWN.md` `SP3b`).
 ///
-/// 64 GiB — far above the boot path's identity map and within the 39-bit
-/// (512 GiB) TTBR0 region — so the program's pages land on freshly walked
-/// stage-1 tables instead of colliding with an identity gigapage block.
-/// The spawn seam / producer passes the same bias to the build caller, and
-/// `elf_to_rxe` relocates the image for it, so the in-memory pointers match
-/// where the image is mapped. Each program lives in its **own** address
-/// space, so every program reuses this one bias (`AGENTS.md` §2.2). Mirrors
-/// the proven `spawn_program_qemu_aarch64` fixture's bias.
+/// 64 GiB — far above each boot path's identity map and within the per-arch
+/// user VA region (the 39-bit aarch64 TTBR0 / x86_64 / Sv39 windows) — so
+/// the program's pages land on freshly walked tables instead of colliding
+/// with an identity gigapage block. The spawn seam / producer passes the
+/// same bias to the build caller, and `elf_to_rxe` relocates the image for
+/// it, so the in-memory pointers match where the image is mapped. Each
+/// program lives in its **own** address space, so every program reuses this
+/// one bias (`AGENTS.md` §2.2). Mirrors the proven per-arch
+/// `spawn_program_qemu_*` fixtures' bias.
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// One embedded `Run` program the boot path builds into an `rxe` image: the
@@ -94,10 +101,11 @@ struct Program {
     rerun: &'static [&'static str],
 }
 
-/// The embedded programs the aarch64 boot path spawns: PID 1 `init`, and the
-/// `Shell` session program `init` launches (`plans/SPAWN.md` `SP3b`). Both are
-/// pure-Rust `Run` bins built the same way (`AGENTS.md` §2.2 — one build
-/// path), differing only in their package/paths.
+/// The embedded programs every production boot path spawns: PID 1 `init`, and
+/// the `Shell` session program `init` launches (`plans/SPAWN.md` `SP3b`). Both
+/// are pure-Rust `Run` bins built the same way for whichever production target
+/// is active (`AGENTS.md` §2.2 — one build path), differing only in their
+/// package/paths.
 const PROGRAMS: &[Program] = &[
     Program {
         pkg: "rustos-init",
@@ -145,8 +153,8 @@ fn main() {
 
 /// Build every embedded [`PROGRAMS`] `Run` PIE and embed its `rxe` image so a
 /// boot path can spawn PID 1 `init` into user mode (`plans/PI.md` P6c-3 on
-/// aarch64, X3a on x86_64) and `init` can launch the session program
-/// (`plans/SPAWN.md` `SP3b`).
+/// aarch64, X3a on x86_64, RV-P3 on riscv64) and `init` can launch the session
+/// program (`plans/SPAWN.md` `SP3b`).
 ///
 /// On a freestanding production target ([`program_rustflags_var`] returns the
 /// target-scoped link var) each program is compiled position-independent

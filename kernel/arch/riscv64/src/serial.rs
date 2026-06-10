@@ -39,6 +39,27 @@ impl core::fmt::Write for SbiWriter {
     }
 }
 
+/// Write `bytes` verbatim to the SBI console, returning the number of
+/// bytes accepted (always `bytes.len()`).
+///
+/// Unlike [`SbiWriter`] — which translates `\n` into `\r\n` so the boot
+/// *log* renders with proper line breaks — this performs **no**
+/// translation: each byte reaches the device exactly as the caller
+/// supplied it. It is the verbatim backing the bin crate's system
+/// console device (`stream_write`, fd 1) forwards through, so a program's
+/// output is byte-for-byte what it wrote (`AGENTS.md` §16.4, §20).
+///
+/// The legacy `console_putchar` SBI call reports no status and the
+/// busy-wait transmit accepts every byte, so the write is total and
+/// never short, and the path cannot panic (`AGENTS.md` §2.9).
+#[must_use]
+pub fn write_console_bytes(bytes: &[u8]) -> usize {
+    for &byte in bytes {
+        sbi::console_putchar(byte);
+    }
+    bytes.len()
+}
+
 /// `Sink` that emits one formatted line per event through the SBI
 /// console.
 #[derive(Debug)]

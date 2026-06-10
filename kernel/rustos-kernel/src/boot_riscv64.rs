@@ -64,8 +64,10 @@ use rustos_arch_api::{CpuId, SchedulerArch};
 use rustos_arch_riscv64::context_hal::ContextSwitchHal;
 use rustos_arch_riscv64::fdt::Fdt;
 use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool};
-use rustos_arch_riscv64::{halt_current_hart, syscall_entry, trap, RiscvArch, RiscvArchStorage};
-use rustos_kernel_core::{kernel_main, BootInfo, KernelArch};
+use rustos_arch_riscv64::{
+    halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage,
+};
+use rustos_kernel_core::{kernel_main, BootInfo, ConsoleWrite, KernelArch};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
@@ -196,6 +198,40 @@ impl KernelArch for RiscvBinArch {
 // the contract at compile time (`AGENTS.md` §2.10).
 const _RISCV_BIN_ARCH_HALT_RETURNS_NEVER: fn(&RiscvBinArch) -> ! =
     <RiscvBinArch as KernelArch>::halt;
+
+/// The system console device the riscv64 boot path installs on
+/// [`rustos_kernel_core::BootInfo`].
+///
+/// A zero-sized [`ConsoleWrite`] adapter over the SBI console: every
+/// `stream_write` byte is forwarded verbatim through the arch port's
+/// [`rustos_arch_riscv64::serial::write_console_bytes`] (no `\n`
+/// translation — the bytes reach the device exactly as the program
+/// wrote them, `AGENTS.md` §16.4). It is the riscv64 analogue of the
+/// aarch64 `UartConsole`'s output half: the "first discovered console"
+/// stream **backing** the spawner attaches to fd 1 (`AGENTS.md` §20),
+/// not a program-facing interface.
+///
+/// No [`rustos_kernel_core::ConsoleRead`] half is installed: the SBI
+/// legacy console exposes no non-blocking input drain, so fd 0 reads
+/// fail closed (`AGENTS.md` §5.4) until a real input backing lands — PID
+/// 1 `init` and the embedded `Shell` `Run` program only *write* (a
+/// banner) and `spawn`, so this slice needs no console input.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct RiscvUartConsole;
+
+impl ConsoleWrite for RiscvUartConsole {
+    fn write(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
+        // The busy-wait SBI transmit accepts every byte, so the write is
+        // total and never short, and performs no `\n` translation.
+        Ok(serial::write_console_bytes(bytes))
+    }
+}
+
+/// The single `'static` [`RiscvUartConsole`] the boot path installs
+/// through [`rustos_kernel_core::BootInfo::with_console`]. Zero-sized, so
+/// it has no `.bss`/`.data` footprint — mirroring
+/// [`rustos_arch_riscv64::SERIAL_SINK`].
+pub static RISCV_UART_CONSOLE: RiscvUartConsole = RiscvUartConsole;
 
 /// Failure modes of [`boot`] and [`build_boot_memory_map`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -486,6 +522,24 @@ pub fn try_boot(
         audit_sink,
         Level::Info,
         &DISPATCH_SLOT,
+    )
+    // Install the SBI console as the `stream_write` (fd 1) backing so PID 1
+    // `init` and its session can write their startup banners
+    // (`AGENTS.md` §20). No `with_console_read`: the SBI legacy console
+    // exposes no non-blocking input drain, so fd 0 fails closed this slice.
+    .with_console(&RISCV_UART_CONSOLE)
+    // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
+    // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
+    // invokes it to build `init`'s U-mode image and drop into user mode.
+    .with_init(&crate::init_spawn_riscv64::RISCV_INIT_SPAWN)
+    // Install the runtime `spawn` producer + embedded-program registry
+    // (`plans/PI.md` RV-P3 / `plans/SPAWN.md` SP3b): the `spawn` syscall
+    // resolves a path against the registry and drives the producer to build
+    // a fresh, hardware-isolated child Sv39 space, so PID 1 `init` can
+    // launch the user's session.
+    .with_spawn(
+        &crate::spawn_producer_riscv64::RISCV_PROGRAM_REGISTRY,
+        &crate::spawn_producer_riscv64::RISCV_PROCESS_SPAWN,
     );
     boot_info
         .validate()

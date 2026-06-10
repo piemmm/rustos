@@ -1541,13 +1541,25 @@ riscv64, mirroring the aarch64 P-stage arc.
   dispatch_installed=true` → `id=4004` → SiFive PASS) and the
   virtio-blk/net + framebuffer verticals (device bring-up MMU-on). **No ABI
   change.** Doc: `docs/src/platform/riscv64.md` ("Kernel boot pipeline").
-- **RV-P3 — user-mode drop + kthread-spawning seam `[ ]`.** Add the riscv64
-  `InitSpawn`/`ProcessSpawn` production seams (the aarch64
-  `init_spawn`/`spawn_producer` analogue) so PID 1 `init` drops into U-mode
-  and supervises the `Shell` session — the precondition for the riscv64
-  timeshare and for the G3b-2-iii guard-arena kthread-stack rewire. The
-  arch primitives all exist and are proven by RV1–RV-X4; this wires them
-  into the production binary.
+- **RV-P3 — user-mode drop + kthread-spawning seam `[x]`.** The riscv64
+  `InitSpawn`/`ProcessSpawn` production seams (`init_spawn_riscv64` /
+  `spawn_producer_riscv64`, the aarch64 `init_spawn`/`spawn_producer`
+  analogue) are installed by `boot_riscv64::try_boot` via
+  `BootInfo::with_init`/`with_spawn`, alongside the SBI-console
+  `with_console` backing (`RiscvUartConsole` over the new verbatim
+  `serial::write_console_bytes`). After `BootCompleted`, `kernel_main`
+  drops PID 1 `init` into U-mode (its own Sv39 root, `IDENTITY_GIB = 4`,
+  `BoxStack` kernel stack — the guarded kthread-stack arena is the
+  G3b-2-iii rewire), `init` writes its banner through `stream_write` and
+  issues the `CAP_PROC_SPAWN`-gated `spawn` for `/Apps/Shell.app/Run`; the
+  producer builds the session a fresh, hardware-isolated space from the
+  allocator-backed `FrameTableSource` (no fixed reserve, §24.1) and admits
+  it Ready. The kernel `build.rs` now also builds the embedded `init`/`Shell`
+  `rxe` blobs for the riscv64 target. Proven by `spawn_init_qemu_riscv64`
+  (`id=4030` PID 1 → `RustOS init: reached user mode` banner → `id=4030`
+  Shell → `id=5000 sc=spawn` → SiFive PASS). The riscv64 timeshare and the
+  G3b-2-iii guard-arena rewire now have their precondition. **No ABI
+  change.** Doc: `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 
