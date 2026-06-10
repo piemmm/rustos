@@ -895,6 +895,75 @@ signature change, so the syscall hash is untouched):
 
 ---
 
+## §24 Resource Limits and Scalability  **[DO NEXT — highest priority]**
+
+**Status: planned (do now).** Implements `AGENTS.md` §24: resource *capacities*
+must scale with discovered hardware (§18.1) and grow on demand, with
+desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
+— never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
+previously noted against `plans/PI.md` (the stack arena is made growable here,
+not patched in place). Security/format *bounds* on untrusted input stay fixed
+and fail-closed (§24.4) — this work must not loosen them.
+
+**Audited fixed-capacity sites to convert (the §24.1 sweep):**
+- Kernel stack arena — `kernel/rustos-kernel/src/mem_map.rs`
+  (`GUARD_ARENA_BYTES`/`GUARD_ARENA_ALIGN`, single 2 MiB block, single-shot
+  carve) and `kernel/rustos-kernel/src/stack_arena.rs`
+  (`StackArena` forward-only bump over a fixed `[base,end)`,
+  `STACK_REGION_BYTES`). Make it size from the discovered RAM window and
+  **chain/grow** a fresh 2 MiB-aligned, independently block-split arena on
+  exhaustion (preserving the §17.2 break-before-make and §4 guard-page
+  invariants), instead of failing over to `BoxStack` at ~30 stacks.
+- Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`
+  (fixed 64 KiB worst-case debug value): make it a release-tuned policy value
+  (§24.2).
+- Per-arch CPU/hart array caps — `kernel/arch/x86_64/src/percpu.rs`
+  (`MAX_CPUS = 16`), `kernel/arch/aarch64/src/kernel_arch.rs` (`MAX_CPUS = 8`),
+  `kernel/arch/riscv64/src/smp.rs` (`MAX_HARTS = 8`),
+  `kernel/arch/wasm32/src/kernel_arch.rs` (`MAX_WORKERS = 8`): size per-CPU
+  storage from §18 discovery with a documented headroom policy, not a hand-
+  picked literal.
+- Process/identity capacities — `kernel/sec/src/identity.rs`
+  (`MAX_SUPPLEMENTARY_GROUPS = 32`), spawn fan-out
+  (`spawn_producer*.rs` `MAX_SPAWNS = 8`), userland heap span table
+  (`lib/rt/src/heap.rs` `MAX_SPANS = 256`): convert to grow-or-limit-governed
+  capacities.
+- (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
+  `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
+  all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,
+  `lib/fdt` `MAX_DEPTH`, `lib/svg` caps, ext4/fat32/rustfs format constants,
+  path/name/command-line/config length caps. These are §24.4 defences.)
+
+**Deliverables**
+- L1 — `lib/abi` resource-limit ABI (`lib/abi/src/rlimit.rs`): closed
+  versioned `LimitKind` enum, `ResourceLimit { soft, hard }`, the get/set
+  syscalls, and the new `CAP_RLIMIT_RAISE` capability id. Held to the §9 ABI
+  discipline (versioned, hashed; regenerate the C header + syscall table).
+- L2 — kernel enforcement: limits stored per task, inherited on spawn,
+  intersected (never widened) on delegation (§5.2); a request exceeding an
+  effective limit is denied as a typed `Result` and logged (§19.4); raising a
+  hard bound requires `CAP_RLIMIT_RAISE` (§24.3).
+- L3 — growable kernel stack arena + discovered-hardware sizing for the stack
+  arena and per-arch CPU/hart arrays (the sweep above), with the §17.2/§4
+  safety invariants preserved and a release-tuned `KTHREAD_STACK_BYTES`.
+- L4 — `ulimit` shell command (`userland/shell/`) over the L1 ABI, plus a
+  `sysinfo` (§16.6) query exposing effective limits + live usage behind the
+  appropriate capability.
+
+**Tests**
+- Default policy yields a workable capacity on both a tiny and a large
+  discovered-hardware fixture; stack arena **grows** past its first block under
+  many-spawn load and still faults on guard-page overrun; physical exhaustion
+  fails closed (no panic, §2.9).
+- soft/hard bound semantics, `CAP_RLIMIT_RAISE` gate on raising a hard bound,
+  and inheritance/intersection across spawn + delegation (§7); `ulimit`
+  round-trips through the ABI; fuzz the new `lib/abi` rlimit decoder (§19.6).
+
+**Docs**
+- `docs/src/architecture/resource-limits.md` (the §24 policy + the `ulimit`
+  model); rustdoc on every new public item; update `docs/src/abi/` for the new
+  syscalls/capability.
+
 ## CURSES — text-mode / TUI stack (`plans/CURSES.md`)
 
 **Status: complete (C1–C5).** The shared text-mode vocabulary and curses
@@ -1024,3 +1093,16 @@ can see *why* a rule exists without diffing the charter's history.
   corpus, §19.6) — there is no path that fixes a bug without its test, and an
   escalated defect (§15.7) carries the test requirement with it until the fix
   lands. Documentation only.
+
+- **2026-06-10 — Resources must scale; no fixed-constant ceilings.** Added §24
+  (Resource Limits and Scalability) after the fixed-2 MiB-stack-arena and
+  fixed-`MAX_CPUS` review found a recurring scaling-cliff pattern: a resource
+  *capacity* hard-wired as a `const` that caps a large machine and wastes a
+  small one. §24 requires capacities to be derived from §18 discovered
+  hardware and to grow on demand, with one default *policy* sensible for both
+  desktop and server, a capability-gated (`CAP_RLIMIT_RAISE`) `ulimit`/`rlimit`
+  equivalent for settable per-process/user limits, and a §24.4 carve-out
+  keeping security/format *bounds* on untrusted input deliberately fixed and
+  fail-closed (widening those is a §2.17 regression). Scheduled as the
+  **[DO NEXT]** PLAN §24 stage with the audited sweep of offending constants.
+  Documentation only; the implementation is the scheduled stage.

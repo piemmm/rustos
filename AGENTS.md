@@ -1803,5 +1803,112 @@ change.
 
 ---
 
+## 24. Resource Limits and Scalability
+
+RustOS must scale with the hardware it runs on. A resource *capacity* — how
+many tasks, threads, CPUs, open handles, memory regions, or stacks the system
+or a process can use — must never be a hard-wired compile-time constant that
+silently caps a large machine or a busy workload. This section is binding and
+as non-negotiable as §2. It builds on the allocator and fail-closed rules (§4),
+the capability model (§5), performance (§2.16), and the System Information API
+(§16.6).
+
+The motivating defect class: a fixed `const` ceiling (e.g. a single 2 MiB kernel
+stack arena holding ~30 stacks, a `MAX_CPUS = 8/16` array, a fixed kthread
+stack size) that is ample on a developer's laptop but becomes a scaling cliff —
+or wasted reservation — on a 128-core server or a 64 MiB embedded board. Such a
+constant is a §2.16 defect, not an acceptable default.
+
+### 24.1 No fixed-constant capacity ceiling
+
+- A resource capacity is **derived**, not hard-coded. It is sized from the
+  hardware actually discovered at boot (the §18.1 hardware tree: RAM window,
+  CPU/hart count) and/or grows on demand, never from a literal `const` that
+  ignores the machine.
+- Where a backing structure must be sized up front (a per-CPU array, an arena),
+  it is sized from the discovered count/quantity with a documented headroom
+  policy — never a magic number that a larger machine outgrows. A static array
+  indexed by CPU id, hart id, or task slot whose length is a hand-picked
+  constant is a defect; size it from §18 discovery or make it grow.
+- **Grow before you fail.** When a capacity is reached and more of the
+  underlying resource exists, the subsystem **grows** (e.g. chain a second
+  arena, reallocate, fine-map another block) rather than degrading or refusing.
+  Growth must preserve every safety invariant of the original allocation
+  (isolation, guard pages §4, break-before-make §17.2, zero-on-free §4) and is
+  paid off the hot path (§2.16), amortised, never busy-looped (§2.1).
+- Exhausting the *physical* resource still **fails closed** as a `Result`,
+  never a panic (§4, §2.9): growth is attempted first, and only a genuine
+  out-of-resource condition (no more RAM, hard limit reached) returns the
+  typed error.
+
+### 24.2 Default profiles, tuned for desktop *and* server
+
+- Every scalable resource has a **default** policy that is sensible for a
+  general-purpose desktop running interactive user tasks *and* for a server
+  running many concurrent services — chosen by measurement/reasoning (§2.16),
+  not guesswork, and documented in the owning crate and its `docs/src/` page.
+- The default is expressed as a *policy* (a function of discovered hardware,
+  e.g. "N per CPU", "a fraction of usable RAM", "grow by one block on
+  exhaustion"), not a frozen scalar. Headless (§17.3), embedded-small, and
+  large-SMP configurations must each get a workable default from the same
+  policy without code changes.
+- A release-tuned value is preferred over a worst-case debug value where the
+  two differ (e.g. stack sizing); the rationale is recorded (§2.16).
+
+### 24.3 Settable limits — the `ulimit`/`rlimit`-equivalent
+
+- Administrators and users can **impose** limits below the system default,
+  per process and per user, through a first-class resource-limit facility — the
+  RustOS equivalent of POSIX `ulimit`/`rlimit`. The shell command is named
+  `ulimit` (`userland/shell/`), backed by a versioned, capability-checked ABI.
+- The limit ABI lives in `lib/abi` under the same discipline as the syscall
+  table (§9) and the System Information API (§16.6): versioned, hashed, and
+  frozen on the first release. Each limit has a soft and a hard bound; a process
+  may lower its own soft bound freely, but **raising a hard bound, or any
+  limit above the inherited ceiling, requires an explicit capability** (e.g.
+  `CAP_RLIMIT_RAISE`) — never ambient authority (§4, §5.2).
+- Limits are inherited across spawn and are intersected, never widened, on
+  delegation (mirrors §5.2). Enforcement is in the kernel resource path and
+  **fails closed** (§5.4): a request that would exceed an effective limit is
+  denied as a typed error, and the decision is logged (§19.4) where
+  security-relevant.
+- Current effective limits and live resource usage are observable through the
+  System Information API (§16.6) behind the appropriate capability — never
+  through a `/proc`-style file (§16.1).
+
+### 24.4 What this does *not* relax — fixed security and format bounds stay fixed
+
+This section governs *resource capacities*. It does **not** apply to, and must
+never be used to loosen, bounds that exist for **security, correctness, or
+format conformance**. These remain deliberately fixed and fail-closed (§5.4,
+§2.17):
+
+- Validation bounds on untrusted input (e.g. parser parameter/byte caps such as
+  `lib/vt`'s `MAX_PARAMS`/`MAX_STRING`, `lib/fdt` `MAX_DEPTH`, SVG vertex/layer
+  caps, command-line/config length caps) — these are defences (§19.5), not
+  capacities; widening them "to be flexible" is a security regression (§2.17).
+- On-disk / wire format constants dictated by an external or native format
+  (ext4/FAT32 block sizes and name lengths, RustFS metadata-block size, ABI
+  record sizes) — fixed by the format, not by us (§2.13, §21).
+- Explicitly charter-blessed fixed defaults, such as the §22 random output
+  reserve (a 2 KiB, preferably per-CPU, default is sanctioned there).
+
+When in doubt whether a constant is a *capacity* (must scale) or a *bound*
+(must stay fixed), stop and ask (§15.7). Turning a security bound into a
+growable capacity, or a capacity into a frozen ceiling, are both defects.
+
+### 24.5 Enforcement
+
+- A new or touched capacity constant is reviewed under §23.2 (performance /
+  scalability): a reviewer rejects a hand-picked ceiling that a larger machine
+  outgrows or a smaller machine wastes, in favour of a discovered/grown policy.
+- The resource-limit facility (§24.3) is exercised by tests covering: default
+  policy on small/large discovered hardware, growth on capacity exhaustion,
+  fail-closed on physical exhaustion, soft/hard bound semantics, the
+  capability gate on raising a hard bound, and inheritance/intersection across
+  spawn and delegation (§7).
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.
