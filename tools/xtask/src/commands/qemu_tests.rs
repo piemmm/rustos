@@ -1463,6 +1463,37 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
+    // fault-form vertical — the proof that an *overrunning kthread* faults
+    // synchronously in hardware under the live scheduler, the sibling of
+    // `stack_overrun_qemu_aarch64`. Like the x86_64 `stack_guard` vertical it
+    // boots the real `rustos-kernel` pipeline (so the GDT, the dedicated
+    // error-code-aware `#PF` entry, and the bump heap are installed) and does
+    // the work on `BootCompleted`: it builds a 4 GiB-identity
+    // `paging::AddressSpace`, activates it (CR3), re-expresses a 2 MiB guard
+    // arena at 4 KiB granularity (`prepare_guard_arena`), `unmap`s +
+    // `flush_page`s one kthread stack's guard page, builds the live
+    // `rustos-kernel-sched-eevdf` `Scheduler` over `X86_64Arch`, and admits a
+    // kthread on that arena stack via `spawn_kthread_with_stack`. The
+    // kthread's overrun into the unmapped guard page raises a supervisor
+    // not-present `#PF`; the `rustos_arch_x86_64::fault` observer confirms the
+    // cause + faulting address and reports PASS. A body that returns without
+    // faulting (guard regression) drains the loop and flips
+    // `qemu_exit::exit_failure`, or times out (fail-loud, `AGENTS.md` §7).
+    // Single CPU and a 60-second budget match the other boot-then-do-fixed-
+    // work x86_64 tests.
+    QemuTest {
+        package: "rustos-test-stack-overrun-qemu-x86_64",
+        binary: "rustos-test-stack-overrun-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
     // vertical — the first proof that a ring-3 task is admitted as a *resumable*
     // user kthread on x86_64 and cooperatively parks/resumes under the live

@@ -1069,11 +1069,40 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     preserved the mapping (sentinel write/read-back), then `unmap`s +
     `flush_page`s the single guard page and reads it → supervisor not-present
     `#PF` (`fault` observer confirms `is_not_present` + `!is_user` + `CR2` in
-    the guard page) → PASS. **Verified green under QEMU on this host.** Wiring
-    the kthread `BoxStack`/stack arena through it (the aarch64 G3b-2/G3c
-    sibling) is the follow-on; until then x86_64 keeps the software-canary
-    guard (§2.17). **No ABI change.** Doc: `docs/src/platform/x86_64.md`
-    ("Block split + guard-page fault-form (G1/G2)").
+    the guard page) → PASS. **Verified green under QEMU on this host.** The
+    production runtime fault-form is now proven on x86_64 too (G3c below);
+    routing the production `init`/`spawn` kernel stacks onto the arena (the
+    aarch64 G3b-2 rewire) is the remaining follow-on, until which x86_64's
+    production seams keep the software-canary guard (§2.17). **No ABI
+    change.** Doc: `docs/src/platform/x86_64.md` ("Block split + guard-page
+    fault-form (G1/G2)").
+  - **x86_64 production guard-page fault-form (G3c) `[x]`.** The cross-port
+    sibling of `stack_overrun_qemu_aarch64`: proves an *overrunning kthread*
+    on x86_64 takes a **synchronous, supervisor-mode not-present `#PF` while
+    running** under the live scheduler — the production runtime payoff, not
+    the deferred next-reschedule poison-canary detection a heap-backed
+    `BoxStack` falls back to. The new
+    `tests/integration/stack_overrun_qemu_x86_64` (enrolled in
+    `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s) boots the
+    production `rustos-kernel` pipeline (GDT + dedicated error-code-aware
+    `#PF` entry + bump heap) and, on `BootCompleted`, builds a 4 GiB-identity
+    space, activates it (`CR3`), re-expresses a 2 MiB-aligned guard arena at
+    4 KiB granularity (`prepare_guard_arena`, G2), `unmap`s + `flush_page`s
+    one kthread stack's one-page guard through the Arch HAL (the production
+    mechanism), builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    `X86_64Arch`, and admits a kthread on that arena stack via
+    `spawn_kthread_with_stack` (the **production runtime path**) laid out
+    `[guard | usable]` on the arena's low-identity alias. The kthread overruns
+    into the unmapped guard page → supervisor not-present `#PF` (the `fault`
+    observer confirms `is_not_present` + `!is_user` + `CR2` in the guard page)
+    → PASS; a body that returns without faulting drains the `step` loop and
+    fails loudly (§2.9). **Verified green under QEMU on this host.** This
+    proves the *mechanism*; routing the production `init_spawn_x86_64` /
+    `spawn_producer_x86_64` kernel stacks onto a boot-reserved arena (the
+    aarch64 G3b-2 rewire — a 2 MiB arena carved in the x86_64 boot memory map,
+    each seam allocating an `ArenaStack` and unmapping its guard in the
+    child's own root) is the remaining follow-on. **No ABI change.** Doc:
+    `docs/src/platform/x86_64.md` ("Proving the overrun fault-form (G3c)").
 
 ### X — x86_64 concurrent user mode: timeshare → spawn → wait (P6 cross-port follow-on) `[x]`
 
