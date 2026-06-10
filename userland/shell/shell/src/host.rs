@@ -16,7 +16,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use rustos_abi::{Errno, LimitKind, ResourceLimit};
 
 use crate::job::{Pid, Signal, WaitOutcome};
 use crate::parser::RedirectionKind;
@@ -107,6 +107,59 @@ pub trait Console {
     /// Write to standard error.
     fn write_stderr(&self, text: &str);
 }
+
+/// Reads and imposes the calling process's resource limits (`AGENTS.md`
+/// §24.3), the seam the `ulimit` builtin drives.
+///
+/// On a running kernel this is backed by the `rlimit_get` / `rlimit_set`
+/// syscalls ([`rustos_abi::SyscallNumber::RLIMIT_GET`] /
+/// [`rustos_abi::SyscallNumber::RLIMIT_SET`]); in tests it is an in-memory
+/// fixture. The shell holds no ambient authority of its own (`AGENTS.md`
+/// §4): reading a limit needs no capability, but *raising* a hard bound is
+/// gated kernel-side on [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3),
+/// which surfaces here as an [`Errno`] the builtin reports rather than
+/// hides (`AGENTS.md` §2.9).
+pub trait LimitStore {
+    /// Read the effective [`ResourceLimit`] for resource `kind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's [`Errno`] if the limit cannot be read (e.g. the
+    /// kernel returned a malformed pair, which fails closed).
+    fn get(&self, kind: LimitKind) -> Result<ResourceLimit, Errno>;
+
+    /// Impose `value` as the limit for resource `kind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's [`Errno`] if the limit cannot be set —
+    /// [`Errno::PermissionDenied`] when raising a hard bound without
+    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3), or
+    /// [`Errno::OutOfRange`] for a malformed pair.
+    fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno>;
+}
+
+/// A fail-closed [`LimitStore`]: every operation reports
+/// [`Errno::NotImplemented`].
+///
+/// A [`Shell`](crate::Shell) built without a real limit seam uses this, so
+/// `ulimit` denies rather than pretending a get or set landed (`AGENTS.md`
+/// §2.9, §5.4). The real seam is installed with
+/// [`Shell::with_limits`](crate::Shell::with_limits).
+pub(crate) struct NullLimitStore;
+
+impl LimitStore for NullLimitStore {
+    fn get(&self, _kind: LimitKind) -> Result<ResourceLimit, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn set(&self, _kind: LimitKind, _value: ResourceLimit) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared fail-closed default limit seam (see [`NullLimitStore`]).
+pub(crate) static NULL_LIMIT_STORE: NullLimitStore = NullLimitStore;
 
 #[cfg(test)]
 mod tests {

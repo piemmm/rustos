@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a landed; L3b–L4 next]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a landed; L3b+L4b next]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) landed; L3b–L4 planned.** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) landed; L3b + L4b planned.** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -977,9 +977,21 @@ and fail-closed (§24.4) — this work must not loosen them.
   failing over to `BoxStack`) + discovered-hardware sizing for the per-arch
   CPU/hart arrays (the remaining sweep above), with the §17.2/§4 safety
   invariants preserved.
-- L4 — `ulimit` shell command (`userland/shell/`) over the L1 ABI, plus a
-  `sysinfo` (§16.6) query exposing effective limits + live usage behind the
-  appropriate capability.
+- L4a — **DONE.** The `ulimit` shell command in the default shell
+  (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
+  seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
+  builder) threads through `Shell`/`BuiltinContext`; the `ulimit` builtin
+  (`userland/shell/shell/src/ulimit.rs`) parses `-a`/`-H`/`-S` + a canonical
+  `LimitKind` name + a decimal/`unlimited` value, reports or imposes the
+  process's own limits, preserves the unchanged bound on a one-sided set, and
+  fails closed on an unknown flag/resource/value or a `soft > hard` request
+  (never writing the store). The real `Run` binary installs `RtLimitStore`
+  over `rustos_rt::rlimit_get`/`rlimit_set`; an in-memory `MemoryLimitStore`
+  double drives 13 host tests. The `CAP_RLIMIT_RAISE` denial surfaces as a
+  reported error (§2.9). Docs: `docs/src/architecture/resource-limits.md`
+  ("The `ulimit` shell command") + the shell `README.md`.
+- L4b — `sysinfo` (§16.6) query exposing effective limits + live usage behind
+  the appropriate capability.
 
 **Tests**
 - Default policy yields a workable capacity on both a tiny and a large

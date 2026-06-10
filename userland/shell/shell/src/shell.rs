@@ -19,7 +19,10 @@ use alloc::vec::Vec;
 use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{assignment_split, Environment};
 use crate::error::ParseError;
-use crate::host::{Console, LaunchSpec, ProcessHost, ResolvedCommand, ResolvedRedirection};
+use crate::host::{
+    Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, ResolvedRedirection,
+    NULL_LIMIT_STORE,
+};
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
 use crate::parser::{parse, Command, ListEntry, Pipeline, RunCondition};
 
@@ -33,6 +36,7 @@ pub struct Shell<'a> {
     jobs: JobTable,
     host: &'a dyn ProcessHost,
     console: &'a dyn Console,
+    limits: &'a dyn LimitStore,
     exit: Option<i32>,
 }
 
@@ -56,8 +60,22 @@ impl<'a> Shell<'a> {
             jobs: JobTable::new(),
             host,
             console,
+            limits: &NULL_LIMIT_STORE,
             exit: None,
         }
+    }
+
+    /// Install the resource-limit seam the `ulimit` builtin drives
+    /// (`AGENTS.md` §24.3).
+    ///
+    /// A shell built without one uses a fail-closed default, so `ulimit`
+    /// reports [`rustos_abi::Errno::NotImplemented`] rather than pretending a
+    /// get or set landed (`AGENTS.md` §2.9). This mirrors the `with_*`
+    /// builder seams the kernel boot path uses.
+    #[must_use]
+    pub fn with_limits(mut self, limits: &'a dyn LimitStore) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The shell's environment.
@@ -172,6 +190,7 @@ impl<'a> Shell<'a> {
             jobs: &mut self.jobs,
             host: self.host,
             console: self.console,
+            limits: self.limits,
             exit: &mut self.exit,
         };
         builtin::dispatch(&mut ctx, argv).unwrap_or(NOT_FOUND_STATUS)

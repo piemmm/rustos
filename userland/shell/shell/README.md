@@ -24,6 +24,10 @@ the outside world are injected seams:
   returns, so the shell invents no parallel error vocabulary
   (`AGENTS.md` §2.2).
 - `Console` — write stdout / stderr.
+- `LimitStore` — read / impose the calling process's resource limits, the
+  seam the `ulimit` builtin drives (`AGENTS.md` §24.3). Backed by
+  `rustos_rt::rlimit_get`/`rlimit_set` on a running kernel; a shell built
+  without one fails closed (`ulimit` reports `NotImplemented`).
 
 On a running kernel these are syscall-backed; in tests they are in-memory
 fixtures. This mirrors `init`'s `Spawner`/`Reaper` design and keeps every
@@ -42,9 +46,19 @@ without a kernel.
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`help`. A builtin runs inside the shell process because it mutates shell
-state (the environment, the working directory, the job table, or the
-exit request); everything else is launched externally.
+`ulimit`, `help`. A builtin runs inside the shell process because it
+mutates or reads shell-side state (the environment, the working
+directory, the job table, the exit request, or the process's own resource
+limits); everything else is launched externally.
+
+`ulimit [-a] [-H | -S] [<resource> [<value>]]` reports and imposes the
+process's own resource limits (`AGENTS.md` §24.3) over the `LimitStore`
+seam: `-a` (or no operand) lists every resource, `-H`/`-S` select the
+hard/soft bound, and a `<value>` (a decimal or `unlimited`) sets it.
+`<resource>` is a canonical `LimitKind` name (`address-space-bytes`,
+`open-streams`, `processes`, `stack-bytes`). Lowering a bound is free;
+raising a hard bound is gated kernel-side on `CAP_RLIMIT_RAISE` and a
+denial is reported, never hidden (§2.9).
 
 ## Failure handling
 

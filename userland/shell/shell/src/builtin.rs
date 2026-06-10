@@ -16,8 +16,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::env::{is_valid_name, Environment};
-use crate::host::{Console, ProcessHost};
+use crate::host::{Console, LimitStore, ProcessHost};
 use crate::job::{JobId, JobState, JobTable, Signal};
+use crate::ulimit;
 
 /// Status returned by a builtin that completed without error.
 const OK: i32 = 0;
@@ -32,6 +33,7 @@ pub(crate) struct BuiltinContext<'a> {
     pub jobs: &'a mut JobTable,
     pub host: &'a dyn ProcessHost,
     pub console: &'a dyn Console,
+    pub limits: &'a dyn LimitStore,
     /// Set to `Some(code)` by `exit` to ask the read-eval loop to stop.
     pub exit: &'a mut Option<i32>,
 }
@@ -40,7 +42,16 @@ pub(crate) struct BuiltinContext<'a> {
 pub(crate) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "cd" | "pwd" | "exit" | "export" | "unset" | "echo" | "jobs" | "fg" | "bg" | "help"
+        "cd" | "pwd"
+            | "exit"
+            | "export"
+            | "unset"
+            | "echo"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "ulimit"
+            | "help"
     )
 }
 
@@ -60,6 +71,7 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
         "jobs" => jobs(ctx),
         "fg" => fg(ctx, operands),
         "bg" => bg(ctx, operands),
+        "ulimit" => ulimit::ulimit(ctx, operands),
         "help" => help(ctx),
         _ => return None,
     };
@@ -257,7 +269,7 @@ fn bg(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 
 fn help(ctx: &mut BuiltinContext<'_>) -> i32 {
     ctx.console
-        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg help\n");
+        .write_stdout("builtins: cd pwd exit export unset echo jobs fg bg ulimit help\n");
     OK
 }
 
@@ -266,7 +278,7 @@ mod tests {
     use super::{is_builtin, BuiltinContext};
     use crate::env::Environment;
     use crate::job::{JobState, JobTable, Pid, Signal, WaitOutcome};
-    use crate::test_support::{RecordingConsole, ScriptedHost};
+    use crate::test_support::{MemoryLimitStore, RecordingConsole, ScriptedHost};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
@@ -279,6 +291,7 @@ mod tests {
         jobs: JobTable,
         host: ScriptedHost,
         console: RecordingConsole,
+        limits: MemoryLimitStore,
         exit: Option<i32>,
     }
 
@@ -289,6 +302,7 @@ mod tests {
                 jobs: JobTable::new(),
                 host: ScriptedHost::new(),
                 console: RecordingConsole::new(),
+                limits: MemoryLimitStore::new(),
                 exit: None,
             }
         }
@@ -299,6 +313,7 @@ mod tests {
                 jobs: &mut self.jobs,
                 host: &self.host,
                 console: &self.console,
+                limits: &self.limits,
                 exit: &mut self.exit,
             };
             super::dispatch(&mut ctx, &argv(words))

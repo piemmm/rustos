@@ -8,9 +8,10 @@ itself or its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
 
 This page describes the binding §24 contract and its staged build-out. The
 ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
-syscalls, and the `CAP_RLIMIT_RAISE` capability) and the **kernel enforcement**
-of it are **landed**; the growable kernel-stack arena and the `ulimit` shell
-command are staged behind them (see *Status* below).
+syscalls, and the `CAP_RLIMIT_RAISE` capability), the **kernel enforcement**
+of it, and the **`ulimit` shell command** are **landed**; the growable
+kernel-stack arena and a System Information limits query are staged behind
+them (see *Status* below).
 
 ## Capacities scale; security bounds stay fixed
 
@@ -95,6 +96,41 @@ second code path.
   so a child can never hold a bound wider than either the parent's ceiling or
   the default — the never-widen rule, mirroring capability delegation (§5.2).
 
+## The `ulimit` shell command
+
+The `ulimit` builtin in the default shell (`userland/shell/shell`) is the
+command-line face of the facility. It reads and imposes the calling
+process's own limits over the L1 ABI through an injected
+`rustos_shell::LimitStore` seam — backed by `rustos_rt::rlimit_get` /
+`rustos_rt::rlimit_set` in the real `Run` binary, and by an in-memory double
+in tests, so the parsing and policy logic is exercised without a kernel (the
+same `ProcessHost`/`Console` seam pattern the rest of the shell uses). The
+shell holds no ambient authority of its own (`AGENTS.md` §4): every check
+stays kernel-side, and the `CAP_RLIMIT_RAISE` denial surfaces as an error the
+builtin reports rather than hides (§2.9).
+
+Usage:
+
+```text
+ulimit [-a] [-H | -S] [<resource> [<value>]]
+```
+
+- `ulimit` or `ulimit -a` reports every resource's soft bound (its hard
+  bound with `-H`), one aligned line each.
+- `ulimit <resource>` reports that resource's soft bound (`-H` for the hard
+  bound).
+- `ulimit <resource> <value>` imposes the limit. With neither flag both
+  bounds are set (POSIX); `-S` sets only the soft bound and `-H` only the
+  hard bound, leaving the other as the current limit reads it. `<value>` is a
+  decimal byte/count or the word `unlimited` (`RLIMIT_INFINITY`).
+
+`<resource>` is one of the canonical `LimitKind` names
+(`LimitKind::name`): `address-space-bytes`, `open-streams`, `processes`,
+`stack-bytes`. An unknown resource, an unknown flag, a malformed value, or a
+soft bound set above its hard ceiling is rejected without touching the
+kernel (fail closed, `AGENTS.md` §2.1/§2.9); the store is never written on a
+rejected request.
+
 ## Discovered-hardware capacity policies
 
 The kthread kernel-stack capacity is the first capacity converted off a
@@ -147,6 +183,10 @@ per-arch CPU/hart arrays from §18 discovery.
   fresh, independently block-split arena rather than failing over to a
   `BoxStack`), and sizing the per-arch CPU/hart arrays from §18 discovery,
   preserving the §17.2 break-before-make and §4 guard-page invariants.
-- **L4 — `ulimit` + `sysinfo` (planned).** The `ulimit` shell command over the
-  L1 ABI and a System Information query (§16.6) exposing effective limits and
-  live usage behind the appropriate capability.
+- **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
+  default shell over the L1 ABI, through the injected `LimitStore` seam
+  (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`
+  binary). See *The `ulimit` shell command* above.
+- **L4b — `sysinfo` limits query (planned).** A System Information query
+  (§16.6) exposing effective limits and live usage behind the appropriate
+  capability.

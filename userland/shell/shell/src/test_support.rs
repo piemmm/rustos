@@ -10,9 +10,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::Errno;
+use rustos_abi::{Errno, LimitKind, ResourceLimit};
 
-use crate::host::{Console, LaunchSpec, ProcessHost, ResolvedCommand};
+use crate::host::{Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand};
 use crate::job::{Pid, Signal, WaitOutcome};
 
 /// A [`Console`] that accumulates everything written to each stream.
@@ -164,5 +164,70 @@ impl ProcessHost for ScriptedHost {
         } else {
             Err(Errno::NotFound)
         }
+    }
+}
+
+/// An in-memory [`LimitStore`]: a per-resource [`ResourceLimit`] map that lets
+/// `ulimit` tests drive the real builtin logic without a kernel.
+///
+/// An unset resource reads back [`ResourceLimit::UNLIMITED`], matching the
+/// kernel's default-unlimited starting point (`AGENTS.md` §24.2). [`put`] and
+/// [`snapshot`] are test-only direct accessors that bypass the gating
+/// [`set`](LimitStore::set) applies, so a test can arrange or inspect state;
+/// [`deny_set`] makes the next [`set`](LimitStore::set) fail with a chosen
+/// [`Errno`] to exercise the kernel-side raise gate (`CAP_RLIMIT_RAISE`,
+/// §24.3).
+///
+/// [`put`]: MemoryLimitStore::put
+/// [`snapshot`]: MemoryLimitStore::snapshot
+/// [`deny_set`]: MemoryLimitStore::deny_set
+pub(crate) struct MemoryLimitStore {
+    limits: RefCell<BTreeMap<u32, ResourceLimit>>,
+    deny: RefCell<Option<Errno>>,
+}
+
+impl MemoryLimitStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            limits: RefCell::new(BTreeMap::new()),
+            deny: RefCell::new(None),
+        }
+    }
+
+    /// Seed the stored limit for `kind` directly (test setup; bypasses the
+    /// raise gate `set` applies).
+    pub(crate) fn put(&self, kind: LimitKind, limit: ResourceLimit) {
+        self.limits.borrow_mut().insert(kind.as_u32(), limit);
+    }
+
+    /// The currently-stored limit for `kind`, or [`ResourceLimit::UNLIMITED`]
+    /// if none was set.
+    pub(crate) fn snapshot(&self, kind: LimitKind) -> ResourceLimit {
+        self.limits
+            .borrow()
+            .get(&kind.as_u32())
+            .copied()
+            .unwrap_or(ResourceLimit::UNLIMITED)
+    }
+
+    /// Make the next [`set`](LimitStore::set) fail closed with `errno`,
+    /// modelling the kernel refusing to raise a hard bound (`AGENTS.md`
+    /// §24.3).
+    pub(crate) fn deny_set(&self, errno: Errno) {
+        *self.deny.borrow_mut() = Some(errno);
+    }
+}
+
+impl LimitStore for MemoryLimitStore {
+    fn get(&self, kind: LimitKind) -> Result<ResourceLimit, Errno> {
+        Ok(self.snapshot(kind))
+    }
+
+    fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno> {
+        if let Some(errno) = *self.deny.borrow() {
+            return Err(errno);
+        }
+        self.put(kind, value);
+        Ok(())
     }
 }

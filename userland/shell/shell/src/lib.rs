@@ -61,13 +61,16 @@ pub mod lexer;
 pub mod parser;
 pub mod repl;
 pub mod shell;
+mod ulimit;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
 pub use env::Environment;
 pub use error::ParseError;
-pub use host::{Console, LaunchSpec, ProcessHost, ResolvedCommand, ResolvedRedirection};
+pub use host::{
+    Console, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, ResolvedRedirection,
+};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};
 pub use repl::{run as run_repl, ReplInput};
 pub use shell::Shell;

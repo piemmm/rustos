@@ -44,9 +44,9 @@ extern crate alloc;
 mod program {
     use alloc::string::String;
 
-    use rustos_abi::Errno;
+    use rustos_abi::{Errno, LimitKind, ResourceLimit};
     use rustos_shell::{
-        Console, LaunchSpec, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
+        Console, LaunchSpec, LimitStore, Pid, ProcessHost, ReplInput, Shell, Signal, WaitOutcome,
     };
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
@@ -174,6 +174,25 @@ mod program {
         }
     }
 
+    /// Reads and imposes resource limits through the `rlimit_get` /
+    /// `rlimit_set` syscalls (`AGENTS.md` §24.3), backing the `ulimit`
+    /// builtin.
+    struct RtLimitStore;
+
+    impl LimitStore for RtLimitStore {
+        fn get(&self, kind: LimitKind) -> Result<ResourceLimit, Errno> {
+            rustos_rt::rlimit_get(kind).map_err(errno_from)
+        }
+
+        fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno> {
+            let ret = rustos_rt::rlimit_set(kind, value);
+            if ret < 0 {
+                return Err(errno_from(ret));
+            }
+            Ok(())
+        }
+    }
+
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -184,8 +203,9 @@ mod program {
     fn main() -> i32 {
         let console = RtConsole;
         let host = RtProcessHost;
+        let limits = RtLimitStore;
         let mut input = RtInput;
-        let mut shell = Shell::new(&host, &console);
+        let mut shell = Shell::new(&host, &console).with_limits(&limits);
         rustos_shell::run_repl(&mut shell, &console, &mut input)
     }
 
