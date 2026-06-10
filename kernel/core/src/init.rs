@@ -601,6 +601,11 @@ fn run_phases<A: KernelArch>(
             console,
             console_read,
             &state.frame_allocator,
+            // The same leaked-`'static` allocator, handed to the spawn
+            // producer as a `'static` page-table frame source so a child's
+            // page tables come from reclaimable RAM that scales with the
+            // machine rather than a fixed `.bss` pool (`AGENTS.md` §24.1).
+            &state.frame_allocator,
             programs,
             spawn_service,
             process_wait,

@@ -48,15 +48,22 @@ use crate::phys::PhysMap;
 /// the port, exactly like the static pool it replaces.
 pub struct FrameTableSource {
     frames: &'static FrameAllocator,
-    phys: &'static dyn PhysMap,
+    phys: &'static (dyn PhysMap + Sync),
 }
 
 impl FrameTableSource {
     /// Build a frame source over the kernel `frames` allocator, mapping
     /// freshly-allocated frames to CPU pointers through the direct map
     /// `phys`.
+    ///
+    /// `phys` is `Sync` because in production the one source is shared,
+    /// immutably, by every CPU's spawn path (it lives behind a `'static`
+    /// shared handle), so the kernel can cache a single `FrameTableSource`
+    /// in a `static` (`AGENTS.md` §2.1). The kernel direct map
+    /// ([`DirectPhysMap`](crate::DirectPhysMap)) is `Copy` plain data, so it
+    /// satisfies the bound.
     #[must_use]
-    pub fn new(frames: &'static FrameAllocator, phys: &'static dyn PhysMap) -> Self {
+    pub fn new(frames: &'static FrameAllocator, phys: &'static (dyn PhysMap + Sync)) -> Self {
         Self { frames, phys }
     }
 }
@@ -137,9 +144,19 @@ mod tests {
         )));
         let source: &'static FrameTableSource = Box::leak(Box::new(FrameTableSource::new(
             frames,
-            sim as &'static dyn PhysMap,
+            sim as &'static (dyn PhysMap + Sync),
         )));
         (source, frames)
+    }
+
+    /// The production source is shared, immutably, by every CPU's spawn
+    /// path, so it must be `Sync` to live behind a `'static` cache
+    /// (`AGENTS.md` §2.1 / §24.1). Asserting it here keeps the `phys: &dyn
+    /// PhysMap + Sync` bound from silently regressing.
+    #[test]
+    fn frame_table_source_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<FrameTableSource>();
     }
 
     #[test]

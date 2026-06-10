@@ -221,6 +221,38 @@ principal can — so a hostile or corrupted on-disk record can never force
 unbounded kernel allocation: the §24.4 anti-DoS bound is preserved while the
 capacity itself becomes settable.
 
+## Spawn page-table capacity (allocator-backed, grow-on-demand)
+
+The runtime `spawn` syscall's fan-out — how many distinct processes can be
+built — was a hard `const MAX_SPAWNS = 8` backing a fixed `[PageTablePool; 8]`
+`.bss` reserve in each production producer (`kernel/rustos-kernel/
+src/spawn_producer.rs` and `…_x86_64.rs`): a §24.1 capacity ceiling that
+wasted RAM on a small machine and starved a large one. It is now a *capacity*
+that scales with discovered RAM and grows on demand. Each child's page-table
+hierarchy is drawn from the kernel's live `FrameAllocator` through
+`kernel/mem`'s `FrameTableSource` (the W5b-3 allocator-backed page-table
+frame source), cached once per boot in a `static Once<FrameTableSource>` over
+the leaked-`'static` allocator the boot path threads through the new
+`KernelSyscallHandlers::with_page_table_frames` seam and exposes to the
+producer as `SpawnCtx::page_table_allocator`. There is no fixed reserve and so
+no hard process cap: the system spawns until physical RAM is genuinely
+exhausted, when `FrameTableSource::alloc_table` returns `None` and the build
+fails closed with `Errno::NoSpace` — deterministic OOM, never a panic (§4 /
+§2.9).
+
+The frame source is backed by an **identity** `DirectPhysMap` covering the
+same low window each child space identity-maps, because every bare-metal
+port recovers an existing child page table by dereferencing its physical
+address directly (`paging::ensure_child`, `phys as *mut`), so the frame view
+the source hands the port must satisfy `virtual == physical`; a frame outside
+that window fails the translate and the spawn fails closed (§2.9) — the same
+window the child's image data frames already resolve under. Page-table frames
+are handed out monotonically and not reclaimed while a child lives (the
+discipline the pool used, §2.1); reclaiming a dead process's page-table
+frames is a later stage. aarch64 and x86_64 (the two ports with a production
+spawn producer) share this conversion; riscv64 has no production spawn
+producer yet, so the capacity does not exist there to convert.
+
 ## Status
 
 - **L1 — ABI (landed).** `lib/abi` `LimitKind` / `ResourceLimit` /
@@ -240,13 +272,15 @@ capacity itself becomes settable.
   2 MiB-rounded). See *Discovered-hardware capacity policies* above.
 - **L3b — growable arena + per-arch arrays (in progress).** The userland-heap
   free-span table is now a grow-on-demand capacity (see *Userland heap
-  free-span table* above), and the `kernel/sec` supplementary-group ceiling is
-  now a capability-raisable capacity (see *Supplementary-group ceiling* above).
-  Still planned: growing the kthread-stack arena *past* its policy size on
-  genuine exhaustion (chaining a fresh, independently block-split arena rather
-  than failing over to a `BoxStack`), sizing the per-arch CPU/hart arrays from
-  §18 discovery, and the remaining spawn fan-out capacity (`MAX_SPAWNS`),
-  preserving the §17.2 break-before-make and §4 guard-page invariants.
+  free-span table* above), the `kernel/sec` supplementary-group ceiling is now
+  a capability-raisable capacity (see *Supplementary-group ceiling* above), and
+  the spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
+  capacity on both production producers (see *Spawn page-table capacity*
+  above). Still planned: growing the kthread-stack arena *past* its policy size
+  on genuine exhaustion (chaining a fresh, independently block-split arena
+  rather than failing over to a `BoxStack`), and sizing the per-arch CPU/hart
+  arrays from §18 discovery, preserving the §17.2 break-before-make and §4
+  guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

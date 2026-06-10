@@ -546,9 +546,11 @@ on its own before the next.
   double + 8 host tests). **SP3b and SP4 are now landed too, so P6d is
   complete:** the real aarch64 `ProcessSpawn` producer
   (`kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh,
-  hardware-isolated 2 GiB-identity address space from a static
-  `PageTablePool` reserve (without switching the spawning caller's
-  `TTBR0_EL1`), drives the audited `spawn_image` + `admit_process`, and is
+  hardware-isolated 2 GiB-identity address space whose page tables come from
+  the kernel's live `FrameAllocator` through a boot-cached `kernel/mem`
+  `FrameTableSource` (§24.1 — no fixed reserve, capacity scales with RAM;
+  without switching the spawning caller's `TTBR0_EL1`), drives the audited
+  `spawn_image` + `admit_process`, and is
   installed via `BootInfo::with_spawn`; the kernel `build.rs` now embeds both
   `init` and the `Shell` session program through one `elf2rxe` helper. PID 1
   `init` (granted `CAP_PROC_SPAWN`) spawns `config.session()`
@@ -1254,15 +1256,17 @@ copy is added on the syscall hot path (§2.16).
   `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
   with the embedded `X86_64_PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
   already bakes for x86_64). On `init`'s `CAP_PROC_SPAWN`-gated `spawn` for
-  `/Apps/Shell.app/Run`, it claims a fresh `PageTablePool` from a `.bss` reserve
-  (fail-closed `NoSpace`), builds a 4 GiB-identity child PML4 with
+  `/Apps/Shell.app/Run`, it draws the child's page tables from the kernel's
+  live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
+  (§24.1 — no fixed `.bss` reserve, capacity scales with RAM, fail-closed
+  `NoSpace` only on genuine OOM), builds a 4 GiB-identity child PML4 with
   `new_identity_first_gib`, drives the audited `spawn_image` + `admit_process`
   (the child gets only `{CAP_CONSOLE_WRITE}`, no ambient authority), and admits
   it **Ready** — returning the PID without entering it (a true concurrent spawn).
   **Key decision:** unlike the X3a PID-1 seam (which switches `CR3` to build the
   image), the producer runs under PID 1's own `CR3` — whose
   `new_identity_first_gib` map covers the low 4 GiB identity (existing-table
-  physical derefs + the `.bss` child pool + the allocator's frames) **and** the
+  physical derefs + the allocator's page-table and image frames) **and** the
   higher-half kernel window (new-table static pointers + the `DirectPhysMap`) —
   so it builds the child's tables **without switching `CR3`**, never moving the
   running parent out from under itself, exactly as the aarch64 producer builds

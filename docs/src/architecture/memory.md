@@ -143,6 +143,15 @@ ordinary reclaimable RAM rather than a fixed `.bss` pool
 `frames::conformance` suite over `FrameTableSource` and assert each
 table is drawn from the allocator, zeroed, and distinct.
 
+The runtime `spawn` producers (aarch64 and x86_64) are the first
+production consumers: each builds a spawned child's page tables over a
+boot-cached `FrameTableSource` rather than a fixed `.bss` `PageTablePool`
+reserve, so the number of processes that can be spawned scales with
+discovered RAM and grows on demand instead of being a hard `const`
+ceiling (`AGENTS.md` §24.1; see
+[the resource-limits page](./resource-limits.md)). The source is shared
+across CPUs, so its direct-map handle is `Sync`.
+
 ## 3a. User-memory copy (`uaccess`)
 
 A syscall handler is handed a raw user pointer (`ptr`, `len`) and must

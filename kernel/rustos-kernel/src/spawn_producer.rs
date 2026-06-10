@@ -25,15 +25,11 @@
 //! intersected with its user's grants (`AGENTS.md` §4, §16.5); this seam only
 //! authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use alloc::boxed::Box;
 
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_arch_aarch64::paging::{
-    activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
-};
+use rustos_arch_aarch64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
 use rustos_arch_aarch64::userentry::UserMode;
 use rustos_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use rustos_arch_api::EnterUser;
@@ -42,8 +38,12 @@ use rustos_kernel_core::{
     spawn_image, AdmitError, BoxStack, EmbeddedProgram, KernelStack, ProcessSpawn, ProgramRegistry,
     SpawnCallerError, SpawnCtx, SpawnRequest,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, PhysMap, UserAddressSpace, UserStack};
+use rustos_kernel_mem::{
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysMap, UserAddressSpace,
+    UserStack,
+};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
+use rustos_sync::Once;
 
 use crate::stack_arena::KTHREAD_STACK_ARENA;
 
@@ -86,40 +86,54 @@ const USER_BLOCK_BASE: u64 = SHELL_USER_BIAS + 0x30_0000;
 /// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
 const CHILD_CANARY: u64 = 0x1117_A5ED_C0DE_5E55;
 
-/// Maximum number of processes the runtime `spawn` syscall can build before
-/// the static page-table-pool reserve is exhausted (`plans/SPAWN.md` `SP3b`).
+/// Identity direct map the page-table frame source translates a freshly
+/// allocated frame's physical address through to a CPU-dereferenceable
+/// pointer (`AGENTS.md` §24.1 / `plans/WIRING.md` W5b-3).
 ///
-/// Each child's stage-1 hierarchy is carved from its own [`PageTablePool`]
-/// (a `.bss` reserve, monotonic and never freed, `AGENTS.md` §2.1), so the
-/// reserve bounds how many distinct processes can be spawned this stage. A
-/// real per-process page-table allocator over `kernel/mem` lifts this bound
-/// later (`plans/WIRING.md`); for the `SP3b` proving ground a small fixed
-/// reserve is enough, and exhausting it fails closed with
-/// [`Errno::NoSpace`] rather than panicking (`AGENTS.md` §2.9, §4).
-const MAX_SPAWNS: usize = 8;
+/// It is the **identity** map (`offset == 0`) covering the same
+/// `[0, IDENTITY_GIB GiB)` window each child space identity-maps, because
+/// the aarch64 page-table walk recovers an existing child table by
+/// dereferencing its physical address directly (`paging::ensure_child`:
+/// `phys as *mut`, identity), so the frame view the source hands the port
+/// must satisfy `virtual == physical`. A frame the allocator draws from
+/// outside this window fails the translate and the spawn fails closed
+/// (`AGENTS.md` §2.9) rather than building tables the walk cannot reach —
+/// the same window the child's image data frames already use (§2.2).
+static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
 
-/// The static page-table-pool reserve backing spawned children's stage-1
-/// hierarchies. Lives in `.bss` for the lifetime of the kernel image, so a
-/// child's `TTBR0_EL1` keeps pointing at valid tables after it is admitted
-/// (`AGENTS.md` §2.1 — monotonic, never freed).
-static SPAWN_PAGE_TABLES: [PageTablePool; MAX_SPAWNS] =
-    [const { PageTablePool::new() }; MAX_SPAWNS];
+/// The single, `'static` allocator-backed page-table frame source every
+/// spawned child's stage-1 hierarchy is built from (`AGENTS.md` §24.1).
+///
+/// This replaces the former fixed `[PageTablePool; 8]` `.bss` reserve that
+/// hard-capped the runtime `spawn` syscall at eight live processes — a
+/// §24.1 capacity ceiling that wasted RAM on a small machine and starved a
+/// large one. Page-table frames now come from the kernel's live
+/// [`FrameAllocator`] through [`FrameTableSource`], so the spawn capacity
+/// **scales with discovered RAM and grows on demand**: each child draws
+/// only the handful of stage-1 tables it needs, and the system spawns
+/// processes until physical RAM is genuinely exhausted, when
+/// [`FrameTableSource::alloc_table`] returns `None` and the build fails
+/// closed with [`Errno::NoSpace`] (`AGENTS.md` §2.9, §4 — deterministic
+/// OOM, never a panic). The frames are never freed while a child lives
+/// (the monotonic discipline the pool used, `AGENTS.md` §2.1); reclaiming
+/// a dead process's page-table frames is a later stage.
+///
+/// Initialised on the first `spawn` from the boot-threaded `'static`
+/// allocator and reused thereafter — the source is stateless (its state
+/// lives in the allocator), so one shared instance serves every CPU.
+static SPAWN_FRAME_SOURCE: Once<FrameTableSource> = Once::new();
 
-/// Monotonic cursor handing out the next free [`SPAWN_PAGE_TABLES`] pool.
-/// `fetch_add` is the same lock-free, hand-out-once discipline
-/// [`PageTablePool`] itself uses (`AGENTS.md` §2.1).
-static SPAWN_POOL_CURSOR: AtomicUsize = AtomicUsize::new(0);
-
-/// Claim the next free page-table pool, or [`None`] when the reserve is
-/// exhausted (fail closed, `AGENTS.md` §2.9).
-fn claim_pool() -> Option<&'static PageTablePool> {
-    let idx = SPAWN_POOL_CURSOR.fetch_add(1, Ordering::SeqCst);
-    if idx >= MAX_SPAWNS {
-        // Saturate so a torrent of failed spawns cannot wrap the cursor.
-        SPAWN_POOL_CURSOR.store(MAX_SPAWNS, Ordering::SeqCst);
-        return None;
-    }
-    Some(&SPAWN_PAGE_TABLES[idx])
+/// Borrow the `'static` allocator-backed page-table frame source,
+/// initialising it from `frames` on the first call (`AGENTS.md` §24.1).
+///
+/// Fails closed with [`Errno::NotImplemented`] if the one-shot initialiser
+/// was poisoned by a panicking earlier attempt — [`FrameTableSource::new`]
+/// cannot panic, so this is unreachable in practice, but it is never
+/// papered over (`AGENTS.md` §2.9).
+fn page_table_source(frames: &'static FrameAllocator) -> Result<&'static FrameTableSource, Errno> {
+    SPAWN_FRAME_SOURCE
+        .call_once_infallible(|| FrameTableSource::new(frames, &SPAWN_TABLE_PHYSMAP))
+        .map_err(|_| Errno::NotImplemented)
 }
 
 /// The embedded programs the `spawn` syscall can resolve: the `Shell`
@@ -169,10 +183,13 @@ pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
 impl ProcessSpawn for Aarch64ProcessSpawn {
     fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-        // Claim a fresh page-table pool for the child's stage-1 hierarchy.
-        // An exhausted reserve fails closed rather than building a process
-        // whose tables alias another's (`AGENTS.md` §2.9, §4).
-        let pool = claim_pool().ok_or(Errno::NoSpace)?;
+        // The child's stage-1 hierarchy is drawn from the kernel's live
+        // frame allocator (`AGENTS.md` §24.1): there is no fixed page-table
+        // reserve and so no hard cap on how many processes can be spawned —
+        // the capacity scales with discovered RAM and grows on demand.
+        // A build with no `'static` allocator wired fails closed
+        // (`AGENTS.md` §2.9), as does genuine RAM exhaustion below.
+        let table_frames = page_table_source(ctx.page_table_allocator().ok_or(Errno::NoSpace)?)?;
 
         // Build a stage-1 address space identity-mapping the kernel + MMIO,
         // and capture its root *without* switching to it: the spawning caller
@@ -182,9 +199,10 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // the caller's active 2 GiB-identity space already maps), so the
         // build does not require the child space to be active. The child's
         // own root is reactivated by its `pre_resume` hook before the
-        // scheduler first resumes it (`plans/SPAWN.md` SP2).
-        let mut arch =
-            ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIB).ok_or(Errno::NoSpace)?;
+        // scheduler first resumes it (`plans/SPAWN.md` SP2). An allocator
+        // exhausted of even the root table fails closed with `NoSpace`.
+        let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
+            .ok_or(Errno::NoSpace)?;
         let child_root_phys = arch.root_phys();
 
         // Build the child's kernel stack (`plans/PI.md` G3b-2-ii, mirroring
@@ -248,9 +266,10 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws identity-mapped RAM frames from
         // the kernel's live allocator. A returning `Err` reclaims nothing
-        // user-visible (the pool/frames are monotonic kernel reserves) and
-        // maps to a stable errno; the cause is already audited by
-        // `spawn_image` (`AGENTS.md` §2.9).
+        // user-visible (the page-table + image frames are handed out
+        // monotonically and not reclaimed this stage) and maps to a stable
+        // errno; the cause is already audited by `spawn_image`
+        // (`AGENTS.md` §2.9).
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(

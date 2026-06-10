@@ -338,9 +338,12 @@ landed first; the real device/producer wired in a following increment).
 
 **Landed.** The real aarch64 `ProcessSpawn` producer lives in the kernel
 binary (`kernel/rustos-kernel/src/spawn_producer.rs`, sibling of
-`init_spawn`): a static `PageTablePool` reserve + monotonic cursor
-(`MAX_SPAWNS = 8`, fail-closed `NoSpace` on exhaustion), builds a fresh
-2 GiB-identity isolated user space **without** switching `TTBR0_EL1` (the
+`init_spawn`): it draws the child's stage-1 page tables from the kernel's
+live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
+(the §24.1 allocator-backed source — no fixed `MAX_SPAWNS` reserve, so the
+spawn capacity scales with discovered RAM and fails closed `NoSpace` only on
+genuine OOM), builds a fresh 2 GiB-identity isolated user space **without**
+switching `TTBR0_EL1` (the
 spawning caller keeps running — the build writes through the identity
 `physmap`, so the child space need not be active), parses the `rxe` against
 `SYSCALL_TABLE_HASH`, calls `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
@@ -353,8 +356,9 @@ was generalised to build **both** `init` and the `Shell` session program
 through one `elf2rxe` helper (§2.2; RustOS stays Rust-only, §1), embedding
 `SHELL_RXE` registered under `/Apps/Shell.app/Run`. `AdmitError`,
 build, and parse failures map onto stable `Errno`s (`NoSpace` /
-`AlreadyExists` / `PermissionDenied` / `BadMagic`); the partial pool/frame
-reserves are monotonic, so a failed spawn leaks nothing user-visible (§2.9).
+`AlreadyExists` / `PermissionDenied` / `BadMagic`); page-table and image
+frames are handed out monotonically (not reclaimed this stage), so a failed
+spawn leaks nothing user-visible (§2.9).
 - `-M virt` vertical landed: `rustos-test-spawn-session-qemu-aarch64` boots
   the production pipeline, PID 1 `init` spawns `/Apps/Shell.app/Run` through
   the `spawn` syscall, both run (proving SP2 timesharing), the session writes

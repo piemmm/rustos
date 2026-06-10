@@ -188,6 +188,18 @@ where
     /// subsystem is not wired). Borrowed for the handler's lifetime,
     /// exactly like the other registries.
     frames: Option<&'a FrameAllocator>,
+    /// The kernel's live frame allocator as a `'static` borrow, handed to
+    /// the spawn producer so it can build a child's **page tables** out of
+    /// reclaimable RAM rather than a fixed-size `.bss` pool (`AGENTS.md`
+    /// §24.1 — the spawn capacity scales with discovered RAM and grows on
+    /// demand). It is the same allocator as [`Self::frames`]; the distinct
+    /// `'static`-typed field exists because a port's `AddressSpace` retains
+    /// its page-table frame source for the child's lifetime. [`None`] until
+    /// the boot path threads it through [`Self::with_page_table_frames`];
+    /// while it is `None` the producer fails closed (`AGENTS.md` §2.9). Held
+    /// `'static` because the kernel allocator lives for the running kernel's
+    /// lifetime, exactly like the other `'static` boot-installed seams.
+    page_table_frames: Option<&'static FrameAllocator>,
     /// The embedded-program registry the `spawn` syscall resolves a path
     /// against (`plans/SPAWN.md` SP3). Defaults to the shared empty
     /// registry, so a `spawn` of any path fails closed with
@@ -278,6 +290,7 @@ where
             // allocator + populated registry + producer (`plans/SPAWN.md`
             // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
             frames: None,
+            page_table_frames: None,
             programs: &EMPTY_PROGRAM_REGISTRY,
             spawn_service: &NULL_PROCESS_SPAWN,
             // Anonymous-memory subsystem unwired until the boot path installs
@@ -341,6 +354,25 @@ where
     #[must_use]
     pub const fn with_frames(mut self, frames: &'a FrameAllocator) -> Self {
         self.frames = Some(frames);
+        self
+    }
+
+    /// Install the live frame allocator as a `'static` borrow the spawn
+    /// producer builds a child's **page tables** out of, consuming and
+    /// returning `self` (`AGENTS.md` §24.1).
+    ///
+    /// This is the same allocator as [`Self::with_frames`]; the distinct
+    /// `'static`-typed seam exists because a port's `AddressSpace` retains
+    /// its page-table frame source for the child's lifetime, so the source
+    /// must be `'static` (the producer caches a single
+    /// [`rustos_kernel_mem::FrameTableSource`] over it). Until this is
+    /// called the handler holds [`None`] and the producer fails closed
+    /// (`AGENTS.md` §2.9), so a build can never over-spawn. The allocator
+    /// is the leaked `KernelState`'s, which lives for the lifetime of the
+    /// running kernel (`AGENTS.md` §2.1).
+    #[must_use]
+    pub const fn with_page_table_frames(mut self, frames: &'static FrameAllocator) -> Self {
+        self.page_table_frames = Some(frames);
         self
     }
 
@@ -1081,6 +1113,7 @@ where
         // authority (`AGENTS.md` §4, §16.5).
         let ctx = HandlerSpawnCtx {
             frames,
+            page_table_frames: self.page_table_frames,
             audit: self.audit,
             sched: self.sched,
             caps: self.caps,
@@ -1247,6 +1280,12 @@ where
     A: KernelArch + 'static,
 {
     frames: &'a FrameAllocator,
+    /// The same allocator as [`Self::frames`], but a `'static` borrow, so
+    /// the producer can build the child's **page tables** out of
+    /// reclaimable RAM that scales with the machine rather than a fixed
+    /// `.bss` pool (`AGENTS.md` §24.1). [`None`] when the boot path wired
+    /// no `'static` allocator, so the producer fails closed (§2.9).
+    page_table_frames: Option<&'static FrameAllocator>,
     audit: &'a (dyn Sink + Sync),
     sched: &'a Scheduler<A>,
     caps: &'a RwLock<CapTable>,
@@ -1270,6 +1309,10 @@ where
 {
     fn frames(&self) -> &FrameAllocator {
         self.frames
+    }
+
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
+        self.page_table_frames
     }
 
     fn audit(&self) -> &(dyn Sink + Sync) {
@@ -1489,6 +1532,7 @@ where
         console: &'static (dyn ConsoleWrite + 'static),
         console_read: &'static (dyn ConsoleRead + 'static),
         frames: &'a FrameAllocator,
+        page_table_frames: &'static FrameAllocator,
         programs: &'static ProgramRegistry,
         spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
@@ -1508,6 +1552,7 @@ where
             .with_console(console)
             .with_console_read(console_read)
             .with_frames(frames)
+            .with_page_table_frames(page_table_frames)
             .with_spawn(programs, spawn_service)
             .with_process_wait(process_wait),
             sched,
@@ -4088,6 +4133,108 @@ mod tests {
             "child address space registered under its pid"
         );
         assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
+    }
+
+    /// A [`ProcessSpawn`] double that records whether the [`SpawnCtx`] it
+    /// is handed exposes a `'static` page-table frame allocator
+    /// (`AGENTS.md` §24.1). It never admits a task — it returns
+    /// `NotImplemented` after recording — so a test can assert the wiring
+    /// without standing up an arch image build.
+    struct PageTableAllocProbeSpawn {
+        saw_static_allocator: core::sync::atomic::AtomicBool,
+    }
+
+    impl PageTableAllocProbeSpawn {
+        fn new() -> Self {
+            Self {
+                saw_static_allocator: core::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl ProcessSpawn for PageTableAllocProbeSpawn {
+        fn spawn(&self, _rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+            self.saw_static_allocator.store(
+                ctx.page_table_allocator().is_some(),
+                core::sync::atomic::Ordering::SeqCst,
+            );
+            Err(Errno::NotImplemented)
+        }
+    }
+
+    /// When the boot path threads a `'static` page-table allocator through
+    /// [`KernelSyscallHandlers::with_page_table_frames`], the producer sees
+    /// it via [`SpawnCtx::page_table_allocator`] — the seam an arch producer
+    /// builds a child's page tables out of reclaimable RAM through
+    /// (`AGENTS.md` §24.1).
+    #[test]
+    fn spawn_threads_the_static_page_table_allocator_to_the_producer() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        // The page-table allocator is a `'static` borrow in production; leak
+        // a test one so the type matches.
+        let ptf: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                },
+            ])))));
+        let probe: &'static PageTableAllocProbeSpawn =
+            Box::leak(Box::new(PageTableAllocProbeSpawn::new()));
+
+        // Wired: the producer must observe `Some`.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_frames(&frames)
+        .with_page_table_frames(ptf)
+        .with_spawn(programs, probe);
+        // The probe records and returns `NotImplemented`; the recording, not
+        // the result, is what proves the wiring.
+        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len());
+        assert!(
+            probe
+                .saw_static_allocator
+                .load(core::sync::atomic::Ordering::SeqCst),
+            "the producer must see the wired `'static` page-table allocator"
+        );
+
+        // Unwired: with no `with_page_table_frames`, the producer sees `None`
+        // and an arch producer fails closed (`AGENTS.md` §2.9).
+        probe
+            .saw_static_allocator
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let h2 = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs, probe,
+        );
+        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len());
+        assert!(
+            !probe
+                .saw_static_allocator
+                .load(core::sync::atomic::Ordering::SeqCst),
+            "with no page-table allocator wired the producer must see None"
+        );
     }
 
     /// A spawned child inherits the parent's effective resource limits,

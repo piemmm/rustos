@@ -483,6 +483,27 @@ pub trait SpawnCtx {
     /// frames the new image's pages are mapped to.
     fn frames(&self) -> &FrameAllocator;
 
+    /// The kernel's live physical-frame allocator as a `'static` borrow,
+    /// when one is wired, so an arch producer can build the child's
+    /// **page tables** out of ordinary reclaimable RAM instead of a
+    /// fixed-size `.bss` pool (`AGENTS.md` §24.1 — a capacity scales with
+    /// discovered RAM and grows on demand, never a hard-wired `const`
+    /// ceiling on how many processes can be spawned).
+    ///
+    /// This is the *same* allocator as [`frames`](Self::frames); the
+    /// distinct accessor exists only because a port's `AddressSpace`
+    /// retains its page-table frame source as a `&'static dyn
+    /// PageTableFrames`, so the source must be `'static` (the elided
+    /// lifetime of [`frames`](Self::frames) is the call only). The default
+    /// returns [`None`] — a build context with no `'static` allocator (a
+    /// host test double) makes the producer fall back / fail closed
+    /// (`AGENTS.md` §2.9) rather than over-spawning. The production
+    /// [`KernelSyscallHandlers`](crate::KernelSyscallHandlers) returns the
+    /// leaked-`'static` kernel allocator.
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
+        None
+    }
+
     /// The boot audit sink the build path records `ProcessSpawn*` events
     /// through.
     fn audit(&self) -> &(dyn Sink + Sync);

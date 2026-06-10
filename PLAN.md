@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling done)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out done; kernel-stack arena + per-arch arrays remain)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore` and the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity; the kernel stack arena + per-arch arrays remain).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, and the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers; the kernel stack arena + per-arch arrays remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -926,10 +926,14 @@ and fail-closed (§24.4) — this work must not loosen them.
   picked literal.
 - Process/identity capacities — spawn fan-out (`spawn_producer*.rs`
   `MAX_SPAWNS = 8`): convert to grow-or-limit-governed capacities. **Done**
-  (L3b): the userland heap span table (`lib/rt/src/heap.rs`) — the former
-  fixed `MAX_SPANS = 256` array is now a grow-on-demand `SpanStore` (maps a
-  fresh metadata page on exhaustion, fails closed only on genuine OOM); and
-  the `kernel/sec` supplementary-group ceiling — the former hard-wired
+  (L3b): the spawn fan-out itself is now allocator-backed and grows on demand —
+  both production producers build a child's page tables over a boot-cached
+  `kernel/mem` `FrameTableSource` (over the live `FrameAllocator`) instead of a
+  fixed `[PageTablePool; 8]` `.bss` reserve, so there is no hard process cap and
+  exhaustion fails closed with `Errno::NoSpace` (§2.9); the `MAX_SPANS = 256`
+  userland heap span table (`lib/rt/src/heap.rs`) is now a grow-on-demand
+  `SpanStore` (maps a fresh metadata page on exhaustion); and the `kernel/sec`
+  supplementary-group ceiling — the former hard-wired
   `MAX_SUPPLEMENTARY_GROUPS = 32` const is now `DEFAULT_MAX_SUPPLEMENTARY_GROUPS`
   (the §24.2 default policy) plus a per-builder, `CAP_RLIMIT_RAISE`-gated
   configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`);
@@ -988,12 +992,22 @@ and fail-closed (§24.4) — this work must not loosen them.
   configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`,
   fail-closed `PermissionDenied`, free to lower), backed by the already-growable
   `Vec` storage and 5 new host tests, with the §24.4 anti-DoS bound preserved
-  (a record can never raise its own ceiling). Still remaining: the growable
-  kernel stack arena (grow *past* the policy size on genuine exhaustion by
-  chaining a fresh, independently block-split arena rather than failing over to
-  `BoxStack`), discovered-hardware sizing for the per-arch CPU/hart arrays, and
-  the spawn fan-out (`MAX_SPAWNS`) capacity, with the §17.2/§4 safety invariants
-  preserved.
+  (a record can never raise its own ceiling). The **spawn fan-out**
+  (`MAX_SPAWNS`) is also converted: both production producers
+  (`kernel/rustos-kernel/src/spawn_producer.rs` and `…_x86_64.rs`) now build a
+  spawned child's page tables out of the kernel's live `FrameAllocator` through
+  a boot-cached `kernel/mem` `FrameTableSource` (the W5b-3 source, backed by an
+  identity `DirectPhysMap` so the port's `phys as *mut` table recovery stays
+  valid), threaded through the new `KernelSyscallHandlers::with_page_table_frames`
+  seam + `SpawnCtx::page_table_allocator`; the former fixed `[PageTablePool; 8]`
+  `.bss` reserve and `MAX_SPAWNS` const are deleted, so the spawn capacity
+  scales with discovered RAM and fails closed (`Errno::NoSpace`) only on genuine
+  OOM (§2.9). `FrameTableSource.phys` was tightened to `&'static (dyn PhysMap +
+  Sync)` so the one source can live in a `static Once`. Still remaining: the
+  growable kernel stack arena (grow *past* the policy size on genuine
+  exhaustion by chaining a fresh, independently block-split arena rather than
+  failing over to `BoxStack`) and discovered-hardware sizing for the per-arch
+  CPU/hart arrays, with the §17.2/§4 safety invariants preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
