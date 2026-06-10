@@ -119,7 +119,7 @@ const PROGRAMS: &[Program] = &[
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(freestanding)");
-    println!("cargo:rustc-check-cfg=cfg(kernel_isa, values(\"x86_64\", \"aarch64\"))");
+    println!("cargo:rustc-check-cfg=cfg(kernel_isa, values(\"x86_64\", \"aarch64\", \"riscv64\"))");
 
     let target = std::env::var("TARGET").unwrap_or_default();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

@@ -1,12 +1,11 @@
 # riscv64
 
-RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. Two
-halves exist today: the kernel-side **boot pipeline** that brings the
-QEMU `virt` board up to `AuditEvent::BootCompleted`, and the host-side
-**QEMU runner** that launches it (and the Stage 4.D virtio-MMIO
-integration tests that build on the same harness). This page documents
-both — the boot pipeline, the on-board boot model, the result protocol,
-and the argv contract.
+RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. The
+production `rustos-kernel` binary boots the QEMU `virt` / SiFive board
+to `AuditEvent::BootCompleted`; the host-side **QEMU runner** launches
+it (and the Stage 4.D virtio-MMIO integration tests that build on the
+same harness). This page documents both — the boot pipeline, the
+on-board boot model, the result protocol, and the argv contract.
 
 ## Kernel boot pipeline
 
@@ -15,13 +14,18 @@ Like x86_64, `kernel/arch/riscv64` is a pure Arch HAL implementation
 monotonic clock, the hart-park primitive, the PLIC register driver, and
 the S-mode trap glue, but it names no concrete kernel subsystem. The
 boot pipeline that *does* name `kernel/{core,mem,sec}` and
-`kernel/sched/api` lives downstream in the
-`tests/integration/riscv64_boot` crate (`rustos-test-riscv64-boot`),
-exactly as x86_64 keeps its boot pipeline and `BinArch` wrapper in the
-downstream `rustos-kernel` crate. It boots to
+`kernel/sched/api` lives in the production `rustos-kernel` crate
+(`rustos_kernel::boot_riscv64`), exactly as x86_64 / aarch64 keep their
+boot pipeline and `BinArch` wrapper there. `kernel_main(hartid, dtb)` in
+the `rustos-kernel` binary forwards to it. It boots to
 `AuditEvent::BootCompleted` and is exercised by the
 `tests/integration/kernel_arch_boot_riscv64` QEMU test — the riscv64
-analogue of the x86_64 `kernel_arch_boot` bin.
+analogue of the x86_64 / aarch64 `kernel_arch_boot` bins. That test
+crate (`rustos-test-riscv64-boot`) is a thin test-side wrapper over the
+same pipeline: it publishes the firmware map + DTB for the device
+verticals (see *Boot-state publication*) and delegates to
+`rustos_kernel::boot_riscv64::boot`, so there is exactly one riscv64
+boot orchestration (`AGENTS.md` §2.2).
 
 Boot sequence:
 
@@ -35,10 +39,10 @@ Boot sequence:
    reader extracts the first `/memory` node's `reg` (base/size) and the
    `/cpus` `timebase-frequency`. It is host-tested against a hand-built
    DTB fixture.
-3. **Boot pipeline (`riscv64_boot::boot`).** Builds a `BootMemoryMap`
-   reserving `[ram_base, __kernel_end)` (firmware + kernel image + boot
-   heap) and marking `[__kernel_end, ram_end)` usable, constructs
-   `RiscvArch` (`kernel_arch.rs`, the arch port's
+3. **Boot pipeline (`rustos_kernel::boot_riscv64::boot`).** Builds a
+   `BootMemoryMap` reserving `[ram_base, __kernel_end)` (firmware +
+   kernel image + boot heap) and marking `[__kernel_end, ram_end)`
+   usable, constructs `RiscvArch` (`kernel_arch.rs`, the arch port's
    `rustos_arch_api::SchedulerArch` impl whose monotonic clock reads the
    `time` CSR via `rdtime`) wrapped in the downstream `RiscvBinArch`
    `kernel_core::KernelArch` adapter (orphan rules), assembles a
@@ -464,16 +468,18 @@ the host-only `cargo xtask ci` gate.
 
 `riscv64_boot::publish` exposes the boot-state a driver-bring-up
 observer needs as set-once slots, the riscv64 analogue of the
-`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64. They live
-beside the boot pipeline in the downstream `riscv64_boot` crate (not the
-arch port) because publishing the firmware `BootMemoryMap` names
-`kernel/mem`, which the HAL-only arch port must not (`AGENTS.md`
-§17.2):
+`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64. They are a
+test-only affordance, so they live in the test-side `riscv64_boot`
+wrapper crate (not in the production `boot_riscv64` pipeline, which
+never carries a test-observer side channel, and not in the HAL-only arch
+port, which must not name `kernel/mem` — `AGENTS.md` §17.2 / §5.4.5):
 
 - `publish_memory_map` / `published_memory_map` — a `'static` clone of
-  the firmware `BootMemoryMap`, published by `boot::try_boot` before the
-  map is moved into the `kernel_core` hand-off, so a vertical can carve a
-  per-device DMA pool from high RAM without re-borrowing the kernel state.
+  the firmware `BootMemoryMap`, published by the `riscv64_boot::boot`
+  wrapper (via the production `boot_riscv64::build_boot_memory_map`)
+  before it delegates to `boot_riscv64::boot`, which moves its own copy
+  into the `kernel_core` hand-off — so a vertical can carve a per-device
+  DMA pool from high RAM without re-borrowing the kernel state.
 - `publish_dtb` / `published_dtb` — the flattened-device-tree pointer
   (`a1`), so a vertical can walk the `virtio_mmio` slots, the PLIC base,
   and each device's `interrupts` cell when it builds the MMIO transport
@@ -812,8 +818,11 @@ synchronously) is proven end to end on `-M virt` by
 fault-form — a scheduled kthread overrunning its arena-backed stack — by
 `stack_overrun_qemu_riscv64` (G3c, below). Rewiring the production
 riscv64 boot kthread stacks onto a boot-reserved arena (the aarch64 /
-x86_64 G3b-2-iii seam) is the remaining follow-on, blocked until riscv64
-grows a production kthread-spawning boot path; until then those stacks
+x86_64 G3b-2-iii seam) is the remaining follow-on: the production
+`rustos_kernel::boot_riscv64` pipeline now boots the board to
+`BootCompleted`, but it has no kthread-spawning seam yet (no
+`init_spawn`/`spawn_producer` analogue), so there are no production
+kthread stacks to rewire. Until that seam lands those (future) stacks
 keep the software-canary guard (`AGENTS.md` §2.17).
 
 ### Stack-guard fault-form QEMU vertical

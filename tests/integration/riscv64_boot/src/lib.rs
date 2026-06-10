@@ -4,10 +4,14 @@
 //! implementation: it implements `rustos_arch_api::SchedulerArch`, the
 //! monotonic clock, the hart-park primitive, and the PLIC register
 //! driver, but it names no concrete kernel subsystem (`AGENTS.md`
-//! §17.2 / §17.4). This crate is where the riscv64 boot pipeline that
-//! *does* name `kernel/{core,mem,sec,irq}` and `kernel/sched/api`
-//! lives, mirroring how x86_64 keeps its `BinArch` wrapper and
-//! `BootInfo` assembly in the downstream `rustos-kernel` crate.
+//! §17.2 / §17.4). The riscv64 boot pipeline that *does* name
+//! `kernel/{core,mem,sec}` and `kernel/sched/api` lives in the
+//! production `rustos-kernel` crate (`rustos_kernel::boot_riscv64`),
+//! mirroring how x86_64 / aarch64 keep their `BinArch` wrapper and
+//! `BootInfo` assembly there. This crate is the test-side wrapper that
+//! consumes that one pipeline (`AGENTS.md` §2.2): it re-exports the
+//! production types and adds the device-bring-up observers + the PLIC
+//! `IrqController` bridge the riscv64 QEMU verticals need.
 //!
 //! It is an integration-test (Tooling) crate, so the §17.4 layering is
 //! relaxed for it; `cargo xtask deps-check` exempts `tests/`.
@@ -17,22 +21,17 @@
 //! | Module       | Role                                                                 |
 //! | ------------ | -------------------------------------------------------------------- |
 //! | [`plic_irq`] | [`PlicIrqController`] — the `kernel/irq` `IrqController` bridge.      |
-//! | `boot`       | `RiscvBinArch` + the `boot()` pipeline + boot-state slots (freestanding). |
+//! | `publish`    | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
+//! | `boot`       | Thin wrapper: publish, then delegate to `rustos_kernel::boot_riscv64` (freestanding). |
 //!
 //! [`plic_irq`] is host-buildable so its mask-before-wake regression
-//! test runs under `cargo test`; `boot` is gated to the freestanding
-//! `virt`-board target because it drives the arch port's
-//! freestanding-only `halt_current_hart` / SBI console and is exercised
-//! by the QEMU boot vertical.
+//! test runs under `cargo test`; `boot` / `publish` are gated to the
+//! freestanding `virt`-board target because they drive the arch port's
+//! freestanding-only `halt_current_hart` / SBI console and are
+//! exercised by the QEMU boot vertical.
 
 #![cfg_attr(freestanding, no_std)]
 #![deny(missing_docs)]
-
-// The boot pipeline builds an `Arc<RiscvBinArch>` for `BootInfo`, so it
-// needs `alloc`. Only the freestanding build links it; the consuming
-// bin provides the `#[global_allocator]`.
-#[cfg(freestanding)]
-extern crate alloc;
 
 // Host tests use `std` (the `plic_irq` mock register file). The crate
 // stays `no_std` for the freestanding build (`AGENTS.md` §1 — no hacks).

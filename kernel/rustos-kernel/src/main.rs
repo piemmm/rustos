@@ -133,6 +133,68 @@ mod kernel {
     }
 }
 
+// --- Freestanding production bin (`riscv64gc-unknown-none-elf`, QEMU
+//     `virt` / SiFive) -------------------------------------------------
+//
+// `plans/PI.md` RV-P1. A thin wrapper around
+// [`rustos_kernel::boot_riscv64::boot`]: it supplies the
+// `#[global_allocator]`, the `#[panic_handler]`, and the
+// `extern "C" fn kernel_main(hartid, dtb)` symbol the riscv64 boot
+// trampoline (`rustos_arch_riscv64`'s `boot.s` → `entry.rs`) calls, then
+// hands off to the boot pipeline with the port's SBI-backed console sink.
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+mod kernel {
+    use core::panic::PanicInfo;
+
+    use rustos_arch_riscv64::{handle_panic_via_serial, SERIAL_SINK};
+    use rustos_kernel::boot_riscv64;
+    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::BumpAllocator;
+
+    /// Static boot heap for the bump allocator.
+    ///
+    /// `static mut` because the bump allocator hands out disjoint slices
+    /// via an `AtomicUsize` cursor; the storage is otherwise never
+    /// aliased. It lives in the linker's NOLOAD `.heap` section
+    /// (`riscv64-virt.ld`), placed after `__bss_end` so the boot
+    /// trampoline neither zeroes nor counts it in the usable
+    /// physical-memory map (which starts at `__kernel_end`). This is the
+    /// boot-heap arena — the one `static mut` the binary needs
+    /// (`AGENTS.md` §2).
+    #[link_section = ".heap"]
+    static mut HEAP: Heap = Heap::ZERO;
+
+    /// Global allocator backed by [`HEAP`].
+    ///
+    /// SAFETY: the allocator is constructed from `HEAP`'s base pointer in
+    /// `const` context; the pointer is page-aligned (`Heap` is
+    /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
+    /// of the binary because `HEAP` is a `static`. The allocator is not
+    /// exposed through any other API, satisfying `BumpAllocator::new`'s
+    /// uniqueness requirement.
+    #[global_allocator]
+    static ALLOCATOR: BumpAllocator =
+        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+
+    /// Forward to the shared riscv64 panic bridge (parks the hart).
+    #[panic_handler]
+    fn rustos_kernel_panic_riscv64(info: &PanicInfo<'_>) -> ! {
+        handle_panic_via_serial(info)
+    }
+
+    /// The symbol the riscv64 boot trampoline calls (via
+    /// `rustos_arch_riscv64_main`). Hands the verbatim `a0`=hartid /
+    /// `a1`=DTB hand-off values and the production SBI-backed log/audit
+    /// sinks to the boot pipeline. In production both the log and audit
+    /// streams go to the same serial console; the boot-completed QEMU
+    /// vertical replaces the audit sink (see
+    /// `tests/integration/kernel_arch_boot_riscv64`).
+    #[no_mangle]
+    pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
+        boot_riscv64::boot(hartid, dtb, &SERIAL_SINK, &SERIAL_SINK)
+    }
+}
+
 // --- Host stub -----------------------------------------------------
 //
 // On host triples (`cargo build --workspace` / `cargo test`) the

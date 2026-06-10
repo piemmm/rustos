@@ -145,6 +145,18 @@ pub mod spawn_producer_x86_64;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub mod boot_aarch64;
 
+// The riscv64 (QEMU `virt` / SiFive) production boot path (`plans/PI.md`
+// RV-P1): boot the BSP to `kernel_core::kernel_main` →
+// `AuditEvent::BootCompleted` over the device-tree-discovered RAM window
+// and timer rate. Freestanding-only: it links the riscv64 port's
+// `halt_current_hart` / SBI console primitives, which exist only on the
+// bare-metal riscv64 target. The riscv64 QEMU verticals
+// (`tests/integration/riscv64_boot` and the bins it backs) consume this
+// very pipeline, so there is exactly one riscv64 boot orchestration
+// (`AGENTS.md` §2.2).
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+pub mod boot_riscv64;
+
 // The aarch64 PID 1 (`init`) spawn seam (`plans/PI.md` P6c-3): the
 // `rustos_kernel_core::InitSpawn` implementation `boot_aarch64` installs
 // into the `BootInfo` hand-off so `kernel_main` drops into user mode after
@@ -222,6 +234,8 @@ pub use rustos_kernel_virtio::{
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use boot::{boot, BootError};
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+pub use boot_riscv64::{boot, build_boot_memory_map, try_boot, BootError, RiscvBinArch};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use panic_ctx::handle_panic_via_kernel_core;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]

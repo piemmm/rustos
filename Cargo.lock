@@ -857,6 +857,7 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
+ "rustos-arch-riscv64",
  "rustos-arch-x86_64",
  "rustos-bumpalloc",
  "rustos-caps",
@@ -1736,13 +1737,11 @@ dependencies = [
 name = "rustos-test-riscv64-boot"
 version = "0.0.0"
 dependencies = [
- "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-itest-harness",
- "rustos-kernel-core",
+ "rustos-kernel",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
- "rustos-kernel-sched-api",
  "rustos-kernel-sec",
  "rustos-log",
  "rustos-sync",

@@ -1094,10 +1094,13 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     **Verified green under QEMU on `-M virt` on this host.** This proves the
     *mechanism*; rewiring the production riscv64 boot kthread stacks onto a
     boot-reserved arena (the aarch64/x86_64 G3b-2-iii seam) remains the
-    follow-on, blocked until riscv64 grows a production kthread-spawning boot
-    path — until then those stacks keep the software-canary guard (§2.17).
-    **No ABI change.** Doc: `docs/src/platform/riscv64.md` ("Proving the
-    overrun fault-form (G3c)").
+    follow-on. The production riscv64 `rustos-kernel` boot path now exists
+    (RV-P1, boot-to-`BootCompleted`), but it has no kthread-spawning seam yet
+    (no `init_spawn`/`spawn_producer` analogue), so there are no production
+    kthread stacks to rewire — that seam (RV-P-series) is the precondition,
+    and until it lands those (future) stacks keep the software-canary guard
+    (§2.17). **No ABI change.** Doc: `docs/src/platform/riscv64.md` ("Proving
+    the overrun fault-form (G3c)").
   - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
     `[x]`.** The last `BlockSplit::Pending` port brought to `Supported`, so
     all three bare-metal ports now declare and implement the split.
@@ -1492,6 +1495,40 @@ parity with the aarch64 and x86_64 ports.
   *user* task (RV1's per-task kernel stack + frame-resident return state).
   No ABI change. Doc: `docs/src/platform/riscv64.md` ("`wait`: blocking reap
   of a child (RV-X4)").
+
+**riscv64 production boot path (RV-P series).** The riscv64 spawn/wait
+arc above proved the concurrent-user-mode *mechanism* in test mini-kernels;
+the RV-P series brings the **production `rustos-kernel` binary** up on
+riscv64, mirroring the aarch64 P-stage arc.
+
+- **RV-P1 — production boot to `BootCompleted` `[x]`.** The production
+  `rustos-kernel` binary now boots the QEMU `virt` / SiFive board
+  (`riscv64gc-unknown-none-elf`, linked with the arch port's
+  `riscv64-virt.ld`) to `AuditEvent::BootCompleted`. The boot pipeline is
+  the new `rustos_kernel::boot_riscv64` (`RiscvBinArch` `KernelArch`
+  adapter, `build_boot_memory_map`, `try_boot`, `boot`): it parses the
+  OpenSBI-handed device tree for the RAM window + `timebase-frequency`,
+  builds the two-region `BootMemoryMap` (`[ram_base, __kernel_end)`
+  reserved, the page-aligned remainder usable), and hands a validated
+  `kernel_core::BootInfo` to `kernel_core::kernel_main` with `satp = 0`
+  (the `virt` board's atomics are well-defined MMU-off, so no Sv39 bring-up
+  is needed to reach `BootCompleted`). This pipeline is the **single**
+  riscv64 boot orchestration (§2.2): the `tests/integration/riscv64_boot`
+  wrapper re-exports it and only adds the test-side firmware-map/DTB
+  observers before delegating, so every riscv64 QEMU vertical
+  (`kernel_arch_boot_riscv64`, the virtio/framebuffer/input bins) runs the
+  production code. Proven by `kernel_arch_boot_riscv64` (`id=4004 kernel
+  boot completed` → SiFive PASS). **No ABI change** (the `lib/abi` types,
+  syscall table, and C header are untouched). Doc:
+  `docs/src/platform/riscv64.md` ("Kernel boot pipeline").
+- **RV-P-series (remaining) — Sv39 MMU enable, user-mode drop, and a
+  kthread-spawning seam `[ ]`.** Enable the Sv39 MMU in the production boot
+  path, install the trap vector + syscall dispatch, and add the riscv64
+  `InitSpawn`/`ProcessSpawn` production seams (the aarch64
+  `init_spawn`/`spawn_producer` analogue) so PID 1 `init` drops into U-mode
+  — the precondition for the riscv64 timeshare and for the G3b-2-iii
+  guard-arena kthread-stack rewire. The arch primitives all exist and are
+  proven by RV1–RV-X4; this arc wires them into the production binary.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

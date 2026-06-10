@@ -116,6 +116,15 @@ rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # console base (`plans/PI.md` P2).
 rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 
+# riscv64: the QEMU `virt` / SiFive production kernel links the riscv64
+# port (`plans/PI.md` RV-P1). `boot_riscv64` reaches
+# `kernel_core::kernel_main` → `AuditEvent::BootCompleted` over the
+# device-tree-discovered RAM window + timer rate; the Sv39 MMU and the
+# PID 1 user-mode drop are staged follow-ups. The port owns its own FDT
+# reader (`rustos_arch_riscv64::fdt`), so no `lib/fdt` dep is added here.
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+rustos-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
+
 [build-dependencies]
 # The aarch64 build script embeds the `init` `Run` rxe so the boot path can
 # spawn PID 1 into EL0 (`plans/PI.md` P6c-3). It compiles the pure-Rust

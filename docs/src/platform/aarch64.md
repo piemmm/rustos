@@ -106,8 +106,9 @@ page-aligned remainder usable — and logs the resulting split
 (`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
 `reserved_bytes_hex`), failing closed to a status string (never a panic,
 `AGENTS.md` §2.9) on an absent or malformed window. The arithmetic is the
-host-tested `rustos_kernel::mem_map` module (the riscv64 boot pipeline's
-`build_memory_map` analogue). Handing that map to
+host-tested `rustos_kernel::mem_map` module (the analogue of the riscv64
+boot pipeline's `rustos_kernel::boot_riscv64::build_boot_memory_map`).
+Handing that map to
 `kernel_core::kernel_main` is P6c-2 — it needs the MMU enabled first, since
 the allocator/scheduler atomics are UNPREDICTABLE on the MMU-off
 Device-memory the boot CPU runs on (a hard-coded map would violate

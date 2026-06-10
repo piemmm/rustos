@@ -31,6 +31,15 @@ const FREESTANDING_TARGETS: &[(&str, &str)] = &[
         "aarch64-unknown-none",
         "../arch/aarch64/link/aarch64-rpi4.ld",
     ),
+    // The riscv64 production image targets the QEMU `virt` / SiFive
+    // board (its only Tier-1 board), so it reuses the arch port's
+    // `riscv64-virt.ld` (load `0x8020_0000` above the OpenSBI firmware
+    // region) rather than a separate per-board script (`AGENTS.md`
+    // §2.2; there is no Pi-equivalent second riscv64 board yet).
+    (
+        "riscv64gc-unknown-none-elf",
+        "../arch/riscv64/link/riscv64-virt.ld",
+    ),
 ];
 
 /// The boot linker script (relative to `CARGO_MANIFEST_DIR`) for a
@@ -56,6 +65,7 @@ pub fn kernel_isa(target_arch: &str) -> Option<&'static str> {
     match target_arch {
         "x86_64" => Some("x86_64"),
         "aarch64" => Some("aarch64"),
+        "riscv64" => Some("riscv64"),
         _ => None,
     }
 }
@@ -103,10 +113,19 @@ mod tests {
     }
 
     #[test]
+    fn riscv64_freestanding_selects_the_virt_linker_script() {
+        assert_eq!(
+            linker_script_for("riscv64gc-unknown-none-elf"),
+            Some("../arch/riscv64/link/riscv64-virt.ld")
+        );
+        assert!(is_freestanding("none", "riscv64"));
+        assert_eq!(kernel_isa("riscv64"), Some("riscv64"));
+    }
+
+    #[test]
     fn unsupported_instruction_sets_have_no_kernel() {
-        assert_eq!(kernel_isa("riscv64"), None);
         assert_eq!(kernel_isa("wasm32"), None);
-        assert!(!is_freestanding("none", "riscv64"));
-        assert_eq!(linker_script_for("riscv64gc-unknown-none-elf"), None);
+        assert!(!is_freestanding("none", "wasm32"));
+        assert_eq!(linker_script_for("wasm32-unknown-unknown"), None);
     }
 }
