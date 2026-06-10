@@ -124,10 +124,18 @@ mod kernel {
             gic::init();
         }
 
-        // 4. Arm the EL1 physical timer at TICK_HZ and unmask IRQs.
+        // 4. Register the per-CPU preemption backing (sized to this
+        //    single-CPU vertical, `AGENTS.md` §24.1) so the timer slot
+        //    `init_local_preempt` records exists, then arm the EL1
+        //    physical timer at TICK_HZ and unmask IRQs.
+        static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();
+        if PREEMPT_STORAGE.register().is_err() {
+            qemu_exit::exit_failure(2);
+        }
         let interval = preempt::interval_for_hz(counter_hz, TICK_HZ);
         // SAFETY: `cpu` is the boot CPU's id, the callback is installed,
-        // the vector table and GIC are up (step 3).
+        // the per-CPU storage is registered, and the vector table and GIC
+        // are up (step 3).
         unsafe {
             preempt::init_local_preempt(0, interval);
             exceptions::enable_irq();

@@ -270,6 +270,16 @@ mod kernel {
             gic::init();
         }
 
+        // Register the secondary-core stack pool sized to this two-core
+        // vertical before any `CPU_ON`; the `smp.s` trampoline reads its
+        // published base/stride to seed each started core's stack
+        // (`AGENTS.md` §24.1 — the pool scales with the machine's core
+        // count, not a fixed `const`).
+        static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
+        if SECONDARY_STACKS.register().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY_START);
+        }
+
         // Install the shared callbacks before starting the secondary
         // core, so it observes them already in place.
         preempt::set_ipi_callback(on_ipi);
@@ -282,10 +292,10 @@ mod kernel {
         // `smp::start_secondary`, so this vertical exercises the same
         // neutral bring-up surface the x86_64 SMP verticals use; the
         // handle issues PSCI `CPU_ON` over the installed conduit.
-        // SAFETY: called on the boot core after `boot.s` zeroed `.bss`
-        // (clearing the secondary stack pool) and after the secondary
-        // entry was installed; `SECONDARY_CPU` maps to a real, parked,
-        // distinct core in the handle's topology.
+        // SAFETY: called on the boot core after the secondary-stack pool
+        // was registered (above) and the secondary entry was installed;
+        // `SECONDARY_CPU` maps to a real, parked, distinct core in the
+        // handle's topology.
         if unsafe { arch.start_secondary(SECONDARY_CPU) }.is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
