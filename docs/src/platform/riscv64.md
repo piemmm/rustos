@@ -658,6 +658,29 @@ in-handle cell solely for the round-trip + isolation conformance
 verticals (`percpu::conformance`), folded into the port's
 `passes_arch_hal_conformance_suite`.
 
+### Per-CPU bookkeeping storage (`RiscvArchStorage`)
+
+`RiscvArch` keeps two pieces of per-CPU bookkeeping — the dense-`CpuId` →
+hart-id map and a host-only IPI ledger — but it does **not** size them
+with a fixed `MAX_HARTS` array (`AGENTS.md` §24.1, the resource-scaling
+charter). Instead the handle borrows two `&'static [AtomicU64]` slices
+from a caller-provided `RiscvArchStorage<N>`, where `N` is the
+logical-CPU count the *caller* sizes for its machine: a single-hart
+vertical declares `static S: RiscvArchStorage<1>`, a two-hart vertical
+`<2>`, and a multi-hart boot path would size `N` from the device-tree
+hart count. The backing is a plain `static` (the allocator-free pattern
+every QEMU vertical uses) or a leaked allocation, so the arch crate
+itself never names `alloc` and the allocator-free Stage-2 paging-only
+bins (which never construct the handle) are untouched.
+
+An unpopulated map slot is the `u64::MAX` (`NO_HARTID`) sentinel — a real
+hart id is a `u32`, so it can never collide — and `RiscvArch::new` /
+`with_harts` populate the map through the shared `&'static` borrow with
+atomic stores, so no `&'static mut` is needed. Every accessor and the
+cross-CPU shootdown / IPI loops bound their indices by the slice length,
+so the handle carries no CPU ceiling. (`smp::MAX_HARTS` survives only for
+the `smp.s` secondary-stack pools, a separate later increment.)
+
 ## Interrupt controller (PLIC)
 
 The riscv64 port implements the Arch HAL `IrqController` and

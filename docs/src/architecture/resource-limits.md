@@ -185,8 +185,7 @@ Growing the kernel-stack arena *past* its policy size on genuine exhaustion —
 chaining a fresh, independently block-split arena rather than failing over to a
 `BoxStack` — is the staged growable-arena follow-on (L3b), as is sizing the
 per-arch CPU/hart bookkeeping from §18 discovery (see *Per-arch CPU/hart handle
-bookkeeping* below — done on wasm32, with a noted constraint on the bare-metal
-ports).
+bookkeeping* below — done on wasm32 and riscv64; aarch64 and x86_64 remain).
 
 ## Userland heap free-span table (grow-on-demand)
 
@@ -275,22 +274,44 @@ and the handle is `Arc`-constructed, so the one-shot allocation is safe (§4).
 the `smp::start_worker` host worker-index bound — the secondary-bring-up item
 below.)
 
-**Bare-metal (`Aarch64Arch` / `RiscvArch` / `X86_64Arch`) — pending, with a
-hard design constraint.** The same conversion cannot use the boxed-slice
-approach directly: introducing `extern crate alloc` into a bare-metal arch
-crate puts the `alloc` crate in the *dependency graph* of **every** freestanding
-binary that links it, so rustc then demands a `#[global_allocator]`. The
-deliberately minimal Stage-2 QEMU bins (e.g. `memory_isolation_qemu_aarch64`,
-which "links only the arch port" and tests page-table isolation without ever
-constructing the arch handle) would be forced to carry a 64 MiB bump heap they
-have no use for — the opposite of the §2.3 / §5.4.5 minimalism those bins were
-built for. The proper, scalable fix is therefore **no `alloc` in the arch
-crate**: the handle holds `&'static` per-CPU slices the caller provides — the
+The bare-metal ports cannot use the boxed-slice approach directly:
+introducing `extern crate alloc` into a bare-metal arch crate puts the
+`alloc` crate in the *dependency graph* of **every** freestanding binary that
+links it, so rustc then demands a `#[global_allocator]`. The deliberately
+minimal Stage-2 QEMU bins (e.g. `memory_isolation_qemu_aarch64`, which "links
+only the arch port" and tests page-table isolation without ever constructing
+the arch handle) would be forced to carry a 64 MiB bump heap they have no use
+for — the opposite of the §2.3 / §5.4.5 minimalism those bins were built for.
+The proper, scalable fix is therefore **no `alloc` in the arch crate**: the
+handle holds `&'static` per-CPU slices the caller provides — the
 allocator-having callers (the production boot path, the `Arc`-using test
-kernels) leak a right-sized backing, while the allocator-free handle-constructing
-bins supply a small `static`; paging-only bins are untouched. This is a
-self-contained but sizable redesign of the three bare-metal constructors and
-their call sites, tracked as the next L3b increment.
+kernels) leak a right-sized backing, while the allocator-free
+handle-constructing bins supply a small `static`; paging-only bins are
+untouched.
+
+**riscv64 (`RiscvArch`) — done.** `RiscvArch` no longer holds
+`[T; MAX_HARTS]` arrays; it borrows two `&'static [AtomicU64]` slices — the
+dense-`CpuId` → hart-id map and the host-only IPI ledger — from a
+caller-provided `RiscvArchStorage<N>` backing, where `N` is the logical-CPU
+count the caller sizes for its machine (a single-hart vertical uses
+`RiscvArchStorage<1>`, a two-hart vertical `<2>`, a multi-hart boot path sizes
+`N` from the device-tree hart count). The storage is a `static` (the
+allocator-free pattern every QEMU vertical uses) or a leaked allocation, so the
+arch crate stays `alloc`-free and the Stage-2 paging-only bins are untouched.
+The map encodes an unpopulated slot as the `u64::MAX` (`NO_HARTID`) sentinel —
+a real hart id is a `u32`, so it can never collide — and the constructor
+populates the map through the shared borrow with atomic stores (no `&'static
+mut` needed). Every per-slot access is bounds-checked against the slice length
+and the cross-CPU shootdown / IPI loops iterate that length, so there is no
+`MAX_HARTS` ceiling in the handle (`MAX_HARTS` survives only for the `smp.s`
+secondary-stack pools — the secondary-bring-up item below). The host suite and
+all nine riscv64 QEMU verticals (single- and two-hart) construct through the
+new backing.
+
+**aarch64 (`Aarch64Arch`) and x86_64 (`X86_64Arch`) — pending.** The same
+`&'static`-slice conversion (plus the `core_classes` table and, on x86_64, the
+`shootdown_page` target buffer) is the next L3b increment, mirroring the
+riscv64 shape.
 
 ## Status
 
@@ -315,16 +336,17 @@ their call sites, tracked as the next L3b increment.
   a capability-raisable capacity (see *Supplementary-group ceiling* above), the
   spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
   capacity on both production producers (see *Spawn page-table capacity*
-  above), and the **wasm32** per-CPU handle bookkeeping is now
-  discovered-count-sized (see *Per-arch CPU/hart handle bookkeeping* above).
-  Still planned: growing the kthread-stack arena *past* its policy size on
-  genuine exhaustion (chaining a fresh, independently block-split arena rather
-  than failing over to a `BoxStack`); the **bare-metal** per-CPU handle
-  bookkeeping via the no-`alloc` caller-provided-`&'static` design (the
-  boxed-slice approach is blocked by the allocator-free Stage-2 bins — see
-  above); and the per-arch **secondary-bring-up** bound (the `smp.s`
-  secondary-stack pools and per-CPU `static` storage), preserving the §17.2
-  break-before-make and §4 guard-page invariants.
+  above), the **wasm32** per-CPU handle bookkeeping is now
+  discovered-count-sized, and the **riscv64** per-CPU handle bookkeeping is now
+  a caller-provided `&'static`-slice capacity via `RiscvArchStorage<N>` (see
+  *Per-arch CPU/hart handle bookkeeping* above). Still planned: growing the
+  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
+  fresh, independently block-split arena rather than failing over to a
+  `BoxStack`); the **aarch64 and x86_64** per-CPU handle bookkeeping via the
+  same no-`alloc` caller-provided-`&'static` design (riscv64 is done); and the
+  per-arch **secondary-bring-up** bound (the `smp.s` secondary-stack pools and
+  per-CPU `static` storage), preserving the §17.2 break-before-make and §4
+  guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

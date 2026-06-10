@@ -18,7 +18,8 @@ use rustos_arch_riscv64::fdt::Fdt;
 use rustos_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use rustos_arch_riscv64::userentry::UserMode;
 use rustos_arch_riscv64::{
-    handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, SERIAL_SINK,
+    handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
+    SERIAL_SINK,
 };
 use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
 use rustos_kernel_core::{
@@ -437,14 +438,22 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     // Build the live scheduler and the process-wait producer, leaking both
     // `'static` so the dispatch callback can reach them.
-    let arch = Arc::new(RiscvArch::new(BOOT_CPU, timebase));
+    // Single-hart slice: one per-CPU slot each, owned by an allocator-free
+    // `static` backing (`AGENTS.md` §24.1).
+    static SCHED_STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+    let arch = Arc::new(RiscvArch::new(&SCHED_STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
     let sched: &'static Scheduler<RiscvArch> = Box::leak(Box::new(sched));
     *SCHED.lock() = Some(sched);
 
-    let producer_arch: &'static RiscvArch = Box::leak(Box::new(RiscvArch::new(BOOT_CPU, timebase)));
+    static PRODUCER_STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+    let producer_arch: &'static RiscvArch = Box::leak(Box::new(RiscvArch::new(
+        &PRODUCER_STORAGE,
+        BOOT_CPU,
+        timebase,
+    )));
     let producer: &'static KernelProcessWait<RiscvArch> =
         Box::leak(Box::new(KernelProcessWait::new(producer_arch)));
     *PRODUCER.lock() = Some(producer);

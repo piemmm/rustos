@@ -40,7 +40,7 @@ use alloc::sync::Arc;
 use rustos_arch_api::{CpuId, SchedulerArch};
 use rustos_arch_riscv64::context_hal::ContextSwitchHal;
 use rustos_arch_riscv64::fdt::Fdt;
-use rustos_arch_riscv64::{halt_current_hart, RiscvArch};
+use rustos_arch_riscv64::{halt_current_hart, RiscvArch, RiscvArchStorage};
 use rustos_kernel_core::{kernel_main, BootInfo, DispatchCallbackSlot, KernelArch};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
@@ -266,7 +266,14 @@ pub fn try_boot(
 
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.
-    let arch = Arc::new(RiscvBinArch::new(RiscvArch::new(BOOT_CPU, timebase_hz)));
+    // Single-hart boot slice: one per-CPU slot, owned by an allocator-free
+    // `static` backing (`AGENTS.md` §24.1).
+    static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+    let arch = Arc::new(RiscvBinArch::new(RiscvArch::new(
+        &STORAGE,
+        BOOT_CPU,
+        timebase_hz,
+    )));
     let boot_info = BootInfo::new(
         BOOT_CPU,
         1,

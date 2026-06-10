@@ -49,7 +49,8 @@ mod kernel {
     use rustos_arch_api::{CpuId, CrossCpuTlbShootdown};
     use rustos_arch_riscv64::fdt::Fdt;
     use rustos_arch_riscv64::{
-        halt_current_hart, handle_panic_via_serial, qemu_exit, sbi, smp, RiscvArch, SERIAL_SINK,
+        halt_current_hart, handle_panic_via_serial, qemu_exit, sbi, smp, RiscvArch,
+        RiscvArchStorage, SERIAL_SINK,
     };
     use rustos_log::{log, Event, EventId, Level};
 
@@ -172,7 +173,10 @@ mod kernel {
         // SBI `remote_sfence_vma` to the secondary hart. Reaching the next
         // line proves the new cross-CPU code path ran on a real two-hart
         // machine without trapping.
-        let arch = RiscvArch::with_harts(boot_hartid, timebase, &[0, 1]);
+        // Two-hart vertical: two per-CPU slots, owned by an allocator-free
+        // `static` backing (`AGENTS.md` §24.1).
+        static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
+        let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
         arch.shootdown_page(SHOOTDOWN_VADDR);
 
         // Confirm the firmware *honours* the remote fence (not a silent

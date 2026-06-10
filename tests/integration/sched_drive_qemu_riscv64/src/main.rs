@@ -65,7 +65,7 @@ mod kernel {
     use rustos_arch_riscv64::fdt::Fdt;
     use rustos_arch_riscv64::{
         context, halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, trap, RiscvArch,
-        SERIAL_SINK,
+        RiscvArchStorage, SERIAL_SINK,
     };
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
@@ -286,7 +286,10 @@ mod kernel {
 
         // 2. Build the live scheduler over the arch port and publish it for
         //    the trap-path callbacks.
-        let arch = Arc::new(RiscvArch::new(BOOT_CPU, timebase));
+        // Single-hart slice: one per-CPU slot, owned by an allocator-free
+        // `static` backing (`AGENTS.md` §24.1).
+        static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+        let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), Arc::clone(&arch)) else {
             qemu_exit::exit_failure(FAIL_SCHED_NEW);
         };

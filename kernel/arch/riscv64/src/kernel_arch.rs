@@ -31,16 +31,66 @@
 //! linked into a kernel image (`AGENTS.md` §1 — no fake primitives in
 //! production).
 
-use core::sync::atomic::AtomicU64;
-// `Ordering` is only referenced on the host path (bare-metal `send_ipi`
-// issues an SBI call without an `Ordering`). Scoping the import avoids a
-// `dead_code`/`unused_imports` warning on `target_os = "none"`.
-#[cfg(any(test, not(target_os = "none")))]
-use core::sync::atomic::Ordering;
+// Both are referenced on every target now: the constructor populates the
+// `&'static` per-CPU map with atomic stores (`AGENTS.md` §24.1), so
+// `Ordering` is live on the bare-metal path too.
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError};
 
-use crate::smp::MAX_HARTS;
+/// Sentinel stored in a [`RiscvArchStorage::cpu_to_hartid`] slot that no
+/// CPU maps to. A real hart id is a [`CpuId`] (a `u32`), so `u64::MAX`
+/// can never collide with a populated entry — it is the encoded `None`
+/// (`AGENTS.md` §2.9 — an unmapped slot is unambiguously absent, never a
+/// guessed id).
+const NO_HARTID: u64 = u64::MAX;
+
+/// Caller-owned, `&'static` per-CPU backing for a [`RiscvArch`] handle
+/// (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the caller from
+/// discovered hardware, never a fixed `const` ceiling baked into the
+/// arch crate).
+///
+/// The const parameter `N` is the number of logical-CPU slots the
+/// constructing caller sizes for its machine: a single-hart vertical
+/// uses `RiscvArchStorage<1>`, a two-hart vertical `RiscvArchStorage<2>`,
+/// and a multi-hart boot path sizes `N` from the device-tree hart count.
+/// The arch crate stays allocator-free (`AGENTS.md` §24.1 watch-out — no
+/// `alloc` in a bare-metal arch crate), so the caller provides the
+/// storage as a `static` (allocator-free bins) or a leaked allocation
+/// (allocator-having callers); [`RiscvArch`] borrows it as `&'static`
+/// slices.
+#[derive(Debug)]
+pub struct RiscvArchStorage<const N: usize> {
+    /// Forward map: dense `CpuId` index → hart id, [`NO_HARTID`] for an
+    /// unpopulated slot. Written once by the constructor through the
+    /// shared `&'static` borrow (atomically, so no `&'static mut` is
+    /// needed) and read-only thereafter.
+    cpu_to_hartid: [AtomicU64; N],
+
+    /// Host-only IPI accounting — incremented on every `send_ipi` with
+    /// an in-range, mapped target. Bare-metal builds never touch it.
+    #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
+    host_ipi_count: [AtomicU64; N],
+}
+
+impl<const N: usize> RiscvArchStorage<N> {
+    /// A zeroed backing: every map slot is the `u64::MAX` unmapped
+    /// sentinel and every IPI counter is `0`. `const` so the
+    /// allocator-free bins can place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cpu_to_hartid: [const { AtomicU64::new(NO_HARTID) }; N],
+            host_ipi_count: [const { AtomicU64::new(0) }; N],
+        }
+    }
+}
+
+impl<const N: usize> Default for RiscvArchStorage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// riscv64 architecture handle the downstream boot consumer wraps for
 /// `kernel_core::kernel_main`.
@@ -52,19 +102,24 @@ use crate::smp::MAX_HARTS;
 /// addresses. Stable for the lifetime of the kernel image (the map is
 /// populated once at construction; the host-only counters exist solely
 /// for deterministic unit tests, mirroring `X86_64Arch`).
+///
+/// The per-CPU bookkeeping is borrowed from a caller-provided
+/// [`RiscvArchStorage`] (`AGENTS.md` §24.1), so the handle itself holds
+/// no fixed-size array and imposes no compile-time CPU ceiling.
 #[derive(Debug)]
 pub struct RiscvArch {
     boot_cpu: CpuId,
     timebase_hz: u64,
 
-    /// Forward map: dense `CpuId` index → hart id of that CPU. `None`
-    /// for unpopulated slots. Set once at construction.
-    cpu_to_hartid: [Option<CpuId>; MAX_HARTS],
+    /// Forward map: dense `CpuId` index → hart id, [`NO_HARTID`] for an
+    /// unpopulated slot. Borrowed from the caller's
+    /// [`RiscvArchStorage`]; its length is the caller's CPU count.
+    cpu_to_hartid: &'static [AtomicU64],
 
     /// Host-only IPI accounting — incremented on every `send_ipi` with
     /// an in-range, mapped target. Bare-metal builds never touch it.
     #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
-    host_ipi_count: [AtomicU64; MAX_HARTS],
+    host_ipi_count: &'static [AtomicU64],
 
     /// Host-only stray-IPI counter for unmapped / out-of-range targets.
     #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
@@ -84,42 +139,65 @@ impl RiscvArch {
     /// boot when it is absent, so [`Self::monotonic_ns`] never
     /// divides by zero.
     #[must_use]
-    pub fn new(boot_cpu: CpuId, timebase_hz: u64) -> Self {
-        let mut cpu_to_hartid = [None; MAX_HARTS];
-        if (boot_cpu as usize) < MAX_HARTS {
-            cpu_to_hartid[boot_cpu as usize] = Some(boot_cpu);
-        }
-        Self::from_map(boot_cpu, timebase_hz, cpu_to_hartid)
+    pub fn new<const N: usize>(
+        storage: &'static RiscvArchStorage<N>,
+        boot_cpu: CpuId,
+        timebase_hz: u64,
+    ) -> Self {
+        let this = Self::from_storage(boot_cpu, timebase_hz, storage);
+        // A slot beyond the caller's `N` cannot be mapped; the handle
+        // then simply has no entry for `boot_cpu` (the conformance
+        // suites never index it) — fail closed, never panic (§2.9).
+        this.store_hartid(boot_cpu, boot_cpu);
+        this
     }
 
     /// Construct a multi-hart handle from a dense `CpuId` → hart-id
     /// slice (`hartids[cpu] == hartid`).
     ///
-    /// Entries beyond [`MAX_HARTS`] are ignored — the secondary-stack
-    /// pool only covers that many harts (`crate::smp`). `boot_cpu` names
-    /// the logical CPU of the boot hart.
+    /// Entries beyond the caller's storage capacity `N` are ignored —
+    /// the caller sizes `N` to its discovered hart count (`AGENTS.md`
+    /// §24.1). `boot_cpu` names the logical CPU of the boot hart.
     #[must_use]
-    pub fn with_harts(boot_cpu: CpuId, timebase_hz: u64, hartids: &[CpuId]) -> Self {
-        let mut cpu_to_hartid = [None; MAX_HARTS];
-        let mut cpu = 0;
-        while cpu < hartids.len() && cpu < MAX_HARTS {
-            cpu_to_hartid[cpu] = Some(hartids[cpu]);
-            cpu += 1;
-        }
-        Self::from_map(boot_cpu, timebase_hz, cpu_to_hartid)
-    }
-
-    fn from_map(
+    pub fn with_harts<const N: usize>(
+        storage: &'static RiscvArchStorage<N>,
         boot_cpu: CpuId,
         timebase_hz: u64,
-        cpu_to_hartid: [Option<CpuId>; MAX_HARTS],
+        hartids: &[CpuId],
+    ) -> Self {
+        let this = Self::from_storage(boot_cpu, timebase_hz, storage);
+        for (cpu, &hartid) in hartids.iter().enumerate() {
+            if let Ok(cpu) = CpuId::try_from(cpu) {
+                this.store_hartid(cpu, hartid);
+            }
+        }
+        this
+    }
+
+    fn from_storage<const N: usize>(
+        boot_cpu: CpuId,
+        timebase_hz: u64,
+        storage: &'static RiscvArchStorage<N>,
     ) -> Self {
         Self {
             boot_cpu,
             timebase_hz,
-            cpu_to_hartid,
-            host_ipi_count: [const { AtomicU64::new(0) }; MAX_HARTS],
+            cpu_to_hartid: &storage.cpu_to_hartid,
+            host_ipi_count: &storage.host_ipi_count,
             host_stray_ipi: AtomicU64::new(0),
+        }
+    }
+
+    /// Populate dense `cpu`'s map slot with `hartid`. An out-of-range
+    /// `cpu` (beyond the caller-sized capacity) is silently ignored, so
+    /// a sparse or undersized storage cannot corrupt memory (§5.4 — fail
+    /// closed). Called only at construction.
+    fn store_hartid(&self, cpu: CpuId, hartid: CpuId) {
+        if let Some(slot) = usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.cpu_to_hartid.get(idx))
+        {
+            slot.store(u64::from(hartid), Ordering::Relaxed);
         }
     }
 
@@ -133,33 +211,34 @@ impl RiscvArch {
     #[must_use]
     pub fn hartid_of(&self, cpu: CpuId) -> Option<CpuId> {
         let idx = usize::try_from(cpu).ok()?;
-        self.cpu_to_hartid.get(idx).copied().flatten()
+        match self.cpu_to_hartid.get(idx)?.load(Ordering::Relaxed) {
+            NO_HARTID => None,
+            raw => u32::try_from(raw).ok(),
+        }
     }
 
     /// Dense `CpuId` whose mapped hart id is `hartid`, or `None` if no
     /// CPU maps to it.
     #[must_use]
     pub fn cpu_for_hartid(&self, hartid: CpuId) -> Option<CpuId> {
-        let mut cpu = 0;
-        while cpu < MAX_HARTS {
-            if self.cpu_to_hartid[cpu] == Some(hartid) {
-                #[allow(clippy::cast_possible_truncation)]
-                return Some(cpu as CpuId);
-            }
-            cpu += 1;
-        }
-        None
+        // `hartid` is a `u32`, so its `u64` form is always below the
+        // `NO_HARTID` (`u64::MAX`) sentinel — an unmapped slot never
+        // matches.
+        let target = u64::from(hartid);
+        self.cpu_to_hartid
+            .iter()
+            .position(|slot| slot.load(Ordering::Relaxed) == target)
+            .and_then(|cpu| u32::try_from(cpu).ok())
     }
 
     /// Host-test accessor: total IPIs dispatched to `target`.
     #[must_use]
     #[cfg(any(test, not(target_os = "none")))]
     pub fn host_ipi_count(&self, target: CpuId) -> u64 {
-        let idx = match usize::try_from(target) {
-            Ok(i) if i < MAX_HARTS => i,
-            _ => return 0,
-        };
-        self.host_ipi_count[idx].load(Ordering::Relaxed)
+        usize::try_from(target)
+            .ok()
+            .and_then(|idx| self.host_ipi_count.get(idx))
+            .map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
     /// Host-test accessor: IPIs whose target was unmapped / out of range.
@@ -233,10 +312,16 @@ impl SchedulerArch for RiscvArch {
 
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
-            // Host: count the IPI against the target CPU; `hartid_of`
-            // already validated the index is in range.
+            // Host: count the IPI against the target CPU. `hartid_of`
+            // already validated the slot is populated, so the index is
+            // in range of the same-length ledger; `get` keeps it total.
             let _ = hartid;
-            self.host_ipi_count[target as usize].fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = usize::try_from(target)
+                .ok()
+                .and_then(|idx| self.host_ipi_count.get(idx))
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -259,7 +344,10 @@ impl CrossCpuTlbShootdown for RiscvArch {
             // fencing the *remote* set cannot corrupt the local map).
             let me = SchedulerArch::current_cpu(self);
             let page = vaddr & !(crate::paging::PAGE_SIZE as u64 - 1);
-            for cpu in 0..MAX_HARTS as u32 {
+            // Iterate the caller-sized per-CPU map, not a fixed ceiling
+            // (`AGENTS.md` §24.1).
+            for cpu in 0..self.cpu_to_hartid.len() {
+                let Ok(cpu) = u32::try_from(cpu) else { break };
                 if cpu == me {
                     continue;
                 }

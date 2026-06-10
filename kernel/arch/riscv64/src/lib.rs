@@ -163,7 +163,7 @@ pub mod serial;
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub use kernel_arch::halt_current_hart;
-pub use kernel_arch::RiscvArch;
+pub use kernel_arch::{RiscvArch, RiscvArchStorage};
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub use panic::handle_panic_via_serial;

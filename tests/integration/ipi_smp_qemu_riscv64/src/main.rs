@@ -52,7 +52,7 @@ mod kernel {
     use rustos_arch_riscv64::fdt::Fdt;
     use rustos_arch_riscv64::{
         halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, smp, trap, RiscvArch,
-        SERIAL_SINK,
+        RiscvArchStorage, SERIAL_SINK,
     };
     use rustos_log::{log, Event, EventId, Level};
 
@@ -173,7 +173,10 @@ mod kernel {
         // the target hart id, `current_cpu` reverse-maps the running
         // hart, and `send_ipi` targets the right hart. The logical CPU
         // map is the identity over hart ids `0` and `1`.
-        let arch = RiscvArch::with_harts(boot_hartid, timebase, &[0, 1]);
+        // Two-hart vertical: two per-CPU slots, owned by an allocator-free
+        // `static` backing (`AGENTS.md` §24.1).
+        static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
+        let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
 
         // Install the shared callbacks before starting the secondary
         // hart, so it observes them already in place.

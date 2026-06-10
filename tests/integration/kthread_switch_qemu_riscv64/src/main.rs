@@ -68,7 +68,9 @@ mod kernel {
     use rustos_arch_api::CpuId;
     use rustos_arch_riscv64::context_hal::ContextSwitchHal;
     use rustos_arch_riscv64::fdt::Fdt;
-    use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, RiscvArch, SERIAL_SINK};
+    use rustos_arch_riscv64::{
+        handle_panic_via_serial, qemu_exit, RiscvArch, RiscvArchStorage, SERIAL_SINK,
+    };
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_core::spawn_kthread;
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -168,7 +170,10 @@ mod kernel {
         }
 
         // Build the live scheduler over the arch port.
-        let arch = Arc::new(RiscvArch::new(BOOT_CPU, timebase));
+        // Single-hart slice: one per-CPU slot, owned by an allocator-free
+        // `static` backing (`AGENTS.md` §24.1).
+        static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+        let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
             qemu_exit::exit_failure(FAIL_SCHED_NEW);
         };

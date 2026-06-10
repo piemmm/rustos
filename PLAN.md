@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 per-CPU handle bookkeeping done; growable kernel-stack arena + bare-metal per-CPU handle bookkeeping + secondary-bring-up bound remain)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 per-CPU handle bookkeeping done; growable kernel-stack arena + aarch64/x86_64 per-CPU handle bookkeeping + secondary-bring-up bound remain)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, and the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized; the growable kernel stack arena + the bare-metal per-CPU handle bookkeeping (a no-`alloc` `&'static`-storage redesign, since the boxed approach is blocked by the allocator-free Stage-2 bins) + the per-arch secondary-bring-up bound remain).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, and the riscv64 `RiscvArch` per-CPU handle bookkeeping is now a caller-provided `&'static`-slice capacity via `RiscvArchStorage<N>`; the growable kernel stack arena + the aarch64/x86_64 per-CPU handle bookkeeping (the same no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins) + the per-arch secondary-bring-up bound remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -923,19 +923,24 @@ and fail-closed (§24.4) — this work must not loosen them.
   **wasm32 done** (`kernel/arch/wasm32/src/kernel_arch.rs`): `WasmArch`'s
   `cpu_to_worker`/`host_ipi_count` are now allocator-backed boxed slices sized
   to the discovered worker count (`worker_storage_len`, floor `boot_cpu+1`,
-  §24.1/§24.2); `MAX_WORKERS` survives only as the `smp::start_worker`
-  host worker-index bound (the secondary-bring-up item below). **Bare-metal
-  pending** (`aarch64`/`riscv64`/`x86_64` `kernel_arch.rs`, `MAX_CPUS`/
-  `MAX_HARTS`): the boxed-slice approach is **blocked** — `extern crate alloc`
-  in a bare-metal arch crate forces `alloc` into the dependency graph of every
-  freestanding bin that links it, so the deliberately allocator-free Stage-2
-  QEMU bins (e.g. `memory_isolation_qemu_aarch64`) would be forced to carry a
-  64 MiB bump heap they never use. The proper fix is **no `alloc` in the arch
-  crate**: the handle holds caller-provided `&'static` per-CPU slices
-  (allocator-having callers leak a right-sized backing; allocator-free
-  handle-constructing bins pass a small `static`; paging-only bins untouched).
-  A self-contained but sizable redesign of the three bare-metal constructors +
-  call sites, tracked as the next L3b increment.
+  §24.1/§24.2). **riscv64 done** (`kernel/arch/riscv64/src/kernel_arch.rs`):
+  `RiscvArch` now borrows two `&'static [AtomicU64]` slices (the dense-`CpuId`
+  → hart-id map, with the `u64::MAX` `NO_HARTID` sentinel, and the host IPI
+  ledger) from a caller-provided `RiscvArchStorage<N>`, where the caller sizes
+  `N` (a `static` for the allocator-free bins, a leaked allocation otherwise);
+  the arch crate stays `alloc`-free, every accessor and the shootdown/IPI loops
+  bound by the slice length, and the host suite + all nine riscv64 verticals
+  construct through it. `MAX_HARTS`/`MAX_WORKERS` survive only as the
+  `smp.s`/`start_worker` secondary-stack/worker-index bound (the
+  secondary-bring-up item below). **aarch64/x86_64 pending**
+  (`MAX_CPUS`): the same `&'static`-slice conversion (plus the `core_classes`
+  table and, on x86_64, the `shootdown_page` target buffer), mirroring the
+  riscv64 shape. The boxed-slice approach the wasm32 port used is **blocked**
+  on bare metal — `extern crate alloc` in a bare-metal arch crate forces
+  `alloc` into the dependency graph of every freestanding bin that links it, so
+  the deliberately allocator-free Stage-2 QEMU bins (e.g.
+  `memory_isolation_qemu_aarch64`) would be forced to carry a 64 MiB bump heap
+  they never use — hence the no-`alloc` caller-provided-`&'static` design.
 - Per-arch secondary-bring-up bound — the assembly secondary-stack pools
   (`smp.s` `SECONDARY_MAX_*`) + per-CPU `static` storage (`preempt`/`percpu`)
   still keyed to `MAX_CPUS`/`MAX_HARTS`/`MAX_WORKERS`: size from §18 discovery
@@ -1019,11 +1024,18 @@ and fail-closed (§24.4) — this work must not loosen them.
   `.bss` reserve and `MAX_SPAWNS` const are deleted, so the spawn capacity
   scales with discovered RAM and fails closed (`Errno::NoSpace`) only on genuine
   OOM (§2.9). `FrameTableSource.phys` was tightened to `&'static (dyn PhysMap +
-  Sync)` so the one source can live in a `static Once`. Still remaining: the
-  growable kernel stack arena (grow *past* the policy size on genuine
-  exhaustion by chaining a fresh, independently block-split arena rather than
-  failing over to `BoxStack`) and discovered-hardware sizing for the per-arch
-  CPU/hart arrays, with the §17.2/§4 safety invariants preserved.
+  Sync)` so the one source can live in a `static Once`. The **riscv64 per-arch
+  CPU/hart handle bookkeeping** is also converted: `RiscvArch` holds two
+  caller-provided `&'static [AtomicU64]` slices via `RiscvArchStorage<N>`
+  instead of `[T; MAX_HARTS]` arrays (no `alloc` in the arch crate; the
+  unmapped-slot sentinel is `u64::MAX`), so the handle imposes no CPU ceiling
+  and the allocator-free Stage-2 bins are untouched (no ABI change; the host
+  suite + all nine riscv64 verticals construct through the backing). Still
+  remaining: the growable kernel stack arena (grow *past* the policy size on
+  genuine exhaustion by chaining a fresh, independently block-split arena
+  rather than failing over to `BoxStack`); the **aarch64/x86_64** per-CPU
+  handle bookkeeping via the same `&'static`-slice design; and the per-arch
+  secondary-bring-up bound, with the §17.2/§4 safety invariants preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
