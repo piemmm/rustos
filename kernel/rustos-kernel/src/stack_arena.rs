@@ -25,9 +25,9 @@
 //! as well as on the aarch64 production build that consumes it, and on no
 //! other configuration, so it is never dead code (`AGENTS.md` §2.3).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use rustos_kernel_core::{KernelStack, KTHREAD_STACK_BYTES};
+use rustos_kernel_mem::FrameAllocator;
+use rustos_sync::SpinLock;
 
 /// Width of a stack's guard region, in bytes: one 4 KiB page.
 ///
@@ -56,6 +56,38 @@ const STACK_REGION_BYTES: u64 = STACK_GUARD_BYTES + KTHREAD_STACK_BYTES as u64;
 /// lands on a clean page boundary the block split can clear.
 const _STACK_REGION_PAGE_ALIGNED: () = {
     assert!(STACK_REGION_BYTES % 4096 == 0);
+};
+
+/// Size **and** alignment of a freshly chained arena block: one 2 MiB
+/// region, matching the boot-carved arena's [`crate::mem_map`] block
+/// granularity.
+///
+/// A 2 MiB-aligned block means every guard page inside it still lands on
+/// its own L3 leaf when the spawn seam re-expresses the covering block at
+/// 4 KiB granularity in the owning task's root
+/// ([`rustos_arch_aarch64::paging::AddressSpace::split_block`]), so a
+/// chained block hosts hardware-guarded stacks exactly as the boot-carved
+/// arena does (`AGENTS.md` §24.1 — the capacity grows on demand without
+/// weakening the §4 guard-page invariant).
+const ARENA_GROW_BLOCK_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Buddy-allocator order whose contiguous block is exactly
+/// [`ARENA_GROW_BLOCK_BYTES`] (`2^9` × 4 KiB = 2 MiB), so
+/// [`FrameAllocator::alloc_order`] returns a 2 MiB-aligned block.
+const ARENA_GROW_BLOCK_ORDER: u32 = 9;
+
+/// The grow order must name exactly the 2 MiB block size above, or a
+/// chained block would be mis-sized or mis-aligned.
+const _ARENA_GROW_BLOCK_ORDER_MATCHES: () = {
+    assert!((1u64 << ARENA_GROW_BLOCK_ORDER) * 4096 == ARENA_GROW_BLOCK_BYTES);
+};
+
+/// A chained block must hold at least one whole guarded region. It does
+/// (2 MiB ≫ a few-page region), which is what makes [`StackArena::alloc`]'s
+/// grow loop provably bounded: a single chained block always satisfies the
+/// pending request, so the loop chains at most once per call.
+const _ARENA_GROW_BLOCK_FITS_A_REGION: () = {
+    assert!(ARENA_GROW_BLOCK_BYTES >= STACK_REGION_BYTES);
 };
 
 /// A kthread kernel stack carved from the reserved guard arena.
@@ -104,24 +136,63 @@ unsafe impl KernelStack for ArenaStack {
     // canary scan (contrast `BoxStack`, the fallback).
 }
 
-/// A forward-only bump allocator over the reserved guard arena.
+/// A source of fresh, 2 MiB-aligned, identity-mapped arena blocks the
+/// [`StackArena`] chains onto when its current block is exhausted
+/// (`AGENTS.md` §24.1 — a capacity that grows on demand, never a frozen
+/// ceiling).
 ///
-/// Installed once at boot with the arena the memory-map builder carved
-/// ([`crate::mem_map`]); thereafter [`Self::alloc`] hands out one
-/// [`ArenaStack`] per call until the arena is exhausted, when it fails
-/// closed with `None` (`AGENTS.md` §2.9). Regions are never reclaimed —
-/// the monotonic, free-list-free discipline the spawn page-table pools use
-/// (`AGENTS.md` §2.1).
+/// A block must be exactly [`ARENA_GROW_BLOCK_BYTES`], 2 MiB-aligned, and
+/// identity-mapped (`virtual == physical`) in *every* address space a
+/// kthread can run under — the spawn seam re-expresses the block in the
+/// task's own root and an overrun must fault there, not read a different
+/// task's memory. Returning `None` (genuine physical exhaustion, or a
+/// block outside the identity window) makes [`StackArena::alloc`] fail
+/// closed to the software-canary [`BoxStack`] fallback rather than ever
+/// hand out an unreachable or unguarded stack (`AGENTS.md` §2.9 / §2.17).
+pub(crate) trait ArenaGrow {
+    /// Hand out a fresh `[base, base + ARENA_GROW_BLOCK_BYTES)` block, or
+    /// `None` on genuine exhaustion. `base` is the block's identity-mapped
+    /// address (`virtual == physical`).
+    fn grow_block(&self) -> Option<u64>;
+}
+
+/// The live cursor over the arena's *current* block, behind the arena's
+/// lock. Chaining a fresh block re-bases `next`/`end` onto it; the prior
+/// block's regions were already handed out and are never reclaimed, so
+/// only the current block's cursor need be tracked.
+struct Cursor {
+    /// Set once the arena has been installed; gates [`StackArena::alloc`]
+    /// and makes [`StackArena::install`] idempotent.
+    installed: bool,
+    /// Base of the next free region in the current block.
+    next: u64,
+    /// One past the current block's last byte; a region whose end exceeds
+    /// this does not fit and triggers a grow (or fails closed).
+    end: u64,
+}
+
+/// A forward-only bump allocator over the kthread-stack guard arena that
+/// **grows on demand** (`AGENTS.md` §24.1).
+///
+/// Installed once at boot with the 2 MiB-aligned block the memory-map
+/// builder carved ([`crate::mem_map`]); thereafter [`Self::alloc`] hands
+/// out one [`ArenaStack`] per call. When the current block has no room for
+/// a whole region it **chains** a fresh 2 MiB block from the supplied
+/// [`ArenaGrow`] source (the live frame allocator in production) and
+/// continues, so the kthread-stack capacity scales with discovered RAM
+/// instead of capping at the boot-carved block. Only genuine physical
+/// exhaustion fails closed with `None`, and the caller then falls back to
+/// a software-canary [`BoxStack`] (`AGENTS.md` §2.9 / §2.17) — never an
+/// unguarded stack.
+///
+/// Regions are never reclaimed — the monotonic, free-list-free discipline
+/// the spawn page-table pools use (`AGENTS.md` §2.1); a chained block is
+/// likewise leaked for the kernel image's lifetime. The whole allocation
+/// is serialised by a [`SpinLock`]: `alloc` is a per-spawn operation, not
+/// a hot path, so a lock is the simplest correct way to chain a fresh
+/// block atomically (`AGENTS.md` §2.16 — locking only off the hot path).
 pub(crate) struct StackArena {
-    /// Set once the arena has been installed; gates [`Self::alloc`] and
-    /// makes [`Self::install`] idempotent (a second install is refused).
-    installed: AtomicBool,
-    /// One past the last arena byte; a region whose end exceeds this does
-    /// not fit and `alloc` returns `None`.
-    end: AtomicU64,
-    /// Base of the next free region; advances by [`STACK_REGION_BYTES`] on
-    /// each successful [`Self::alloc`].
-    next: AtomicU64,
+    cursor: SpinLock<Cursor>,
 }
 
 impl StackArena {
@@ -129,57 +200,119 @@ impl StackArena {
     /// boot-installed instance and for unit tests).
     pub(crate) const fn new() -> Self {
         Self {
-            installed: AtomicBool::new(false),
-            end: AtomicU64::new(0),
-            next: AtomicU64::new(0),
+            cursor: SpinLock::new(Cursor {
+                installed: false,
+                next: 0,
+                end: 0,
+            }),
         }
     }
 
-    /// Install the reserved arena `[base, base + len)`.
+    /// Install the reserved first arena block `[base, base + len)`.
     ///
     /// Called **once**, on the boot CPU, before any task that could
-    /// [`Self::alloc`] is spawned, so no allocation races it. `base` is the
-    /// 2 MiB-aligned arena base the memory-map builder carved. Returns
-    /// `false` if the arena was already installed (a re-entry is refused
-    /// rather than silently re-basing a live cursor, `AGENTS.md` §2.9); the
-    /// field stores precede the `installed` publish, so any later `alloc`
-    /// that observes `installed` also observes a consistent `end`/`next`.
+    /// [`Self::alloc`] is spawned. `base` is the 2 MiB-aligned arena base
+    /// the memory-map builder carved. Returns `false` if the arena was
+    /// already installed (a re-entry is refused rather than silently
+    /// re-basing a live cursor, `AGENTS.md` §2.9) or if `base + len`
+    /// overflows.
     pub(crate) fn install(&self, base: u64, len: u64) -> bool {
-        if self.installed.load(Ordering::Acquire) {
+        let mut cursor = self.cursor.lock();
+        if cursor.installed {
             return false;
         }
         let Some(end) = base.checked_add(len) else {
             return false;
         };
-        self.end.store(end, Ordering::Relaxed);
-        self.next.store(base, Ordering::Relaxed);
-        self.installed.store(true, Ordering::Release);
+        cursor.next = base;
+        cursor.end = end;
+        cursor.installed = true;
         true
     }
 
-    /// Hand out the next guarded stack region, or `None` when the arena is
-    /// not installed or has no room left for a whole region (fail closed —
-    /// the caller falls back to a software-canary [`BoxStack`], never runs
-    /// on an unguarded stack, `AGENTS.md` §2.17).
+    /// Hand out the next guarded stack region, chaining a fresh block from
+    /// `grow` when the current block is exhausted.
+    ///
+    /// Returns `None` only when the arena is not installed or the `grow`
+    /// source is itself exhausted (fail closed — the caller falls back to
+    /// a software-canary [`BoxStack`], never runs on an unguarded stack,
+    /// `AGENTS.md` §2.17).
+    ///
+    /// The loop chains **at most once** per pending region: a chained
+    /// block is [`ARENA_GROW_BLOCK_BYTES`] and a region is far smaller
+    /// (`_ARENA_GROW_BLOCK_FITS_A_REGION`), so the freshly chained block
+    /// always satisfies the request, making the loop provably bounded
+    /// (`AGENTS.md` §2.1 — no retry-until-it-works).
     ///
     /// [`rustos_kernel_core::BoxStack`]: rustos_kernel_core::BoxStack
-    pub(crate) fn alloc(&self) -> Option<ArenaStack> {
-        if !self.installed.load(Ordering::Acquire) {
+    pub(crate) fn alloc(&self, grow: &dyn ArenaGrow) -> Option<ArenaStack> {
+        let mut cursor = self.cursor.lock();
+        if !cursor.installed {
             return None;
         }
-        let end = self.end.load(Ordering::Relaxed);
         loop {
-            let cur = self.next.load(Ordering::Relaxed);
-            let region_end = cur.checked_add(STACK_REGION_BYTES)?;
-            if region_end > end {
-                return None;
+            // Fits in the current block?
+            if let Some(region_end) = cursor.next.checked_add(STACK_REGION_BYTES) {
+                if region_end <= cursor.end {
+                    let guard = cursor.next;
+                    cursor.next = region_end;
+                    return Some(ArenaStack { guard });
+                }
             }
-            if self
-                .next
-                .compare_exchange(cur, region_end, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Some(ArenaStack { guard: cur });
+            // Exhausted: chain a fresh block, or fail closed.
+            let base = grow.grow_block()?;
+            let block_end = base.checked_add(ARENA_GROW_BLOCK_BYTES)?;
+            cursor.next = base;
+            cursor.end = block_end;
+            // The fresh block is whole-2 MiB and a region is far smaller,
+            // so the next iteration's fit check necessarily succeeds.
+        }
+    }
+}
+
+/// An [`ArenaGrow`] that chains fresh blocks out of the kernel's live
+/// [`FrameAllocator`], bounded to the per-space identity window so a
+/// chained kthread stack stays identity-mapped in every address space a
+/// task runs under (`AGENTS.md` §4 / §24.1).
+///
+/// Each grow draws a 2 MiB-aligned [`ARENA_GROW_BLOCK_ORDER`] block from
+/// the buddy allocator. A block whose end exceeds [`Self::identity_limit`]
+/// would be unmapped in some space the task executes under — its guard
+/// page could not fault there, and a stack body byte would be unreachable
+/// — so it is returned to the allocator and the grow fails closed
+/// (`AGENTS.md` §2.9), dropping the caller to the software-canary
+/// [`BoxStack`] fallback rather than handing out an unreachable stack.
+pub(crate) struct FrameArenaGrow<'a> {
+    frames: &'a FrameAllocator,
+    /// Exclusive upper bound: a chained block must lie wholly below this so
+    /// it is covered by every address space's identity map.
+    identity_limit: u64,
+}
+
+impl<'a> FrameArenaGrow<'a> {
+    /// Wrap the live frame allocator, bounding chained blocks to
+    /// `[0, identity_limit)` (the `IDENTITY_GIB`-gigapage window each
+    /// spawned space identity-maps).
+    pub(crate) fn new(frames: &'a FrameAllocator, identity_limit: u64) -> Self {
+        Self {
+            frames,
+            identity_limit,
+        }
+    }
+}
+
+impl ArenaGrow for FrameArenaGrow<'_> {
+    fn grow_block(&self) -> Option<u64> {
+        let frame = self.frames.alloc_order(ARENA_GROW_BLOCK_ORDER).ok()?;
+        let base = frame.start().as_u64();
+        match base.checked_add(ARENA_GROW_BLOCK_BYTES) {
+            Some(block_end) if block_end <= self.identity_limit => Some(base),
+            _ => {
+                // Outside the identity window (or an address overflow):
+                // return the block and fail closed rather than host a
+                // stack the task's translation regime cannot reach.
+                let _ = self.frames.free_order(frame, ARENA_GROW_BLOCK_ORDER);
+                None
             }
         }
     }
@@ -204,14 +337,63 @@ pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 mod tests {
     use super::*;
 
+    use core::cell::Cell;
+
+    use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
+
     /// A page-aligned, plausibly RAM-resident fake arena base for the host
     /// tests (the real one is the 2 MiB-aligned carved arena).
     const FAKE_BASE: u64 = 0x4000_0000;
 
+    /// An [`ArenaGrow`] that never grows: the arena is bounded to its
+    /// installed block. Mirrors a build with no allocator-backed grow
+    /// source, and proves the within-block / exhaustion paths in isolation.
+    struct NoGrow;
+    impl ArenaGrow for NoGrow {
+        fn grow_block(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// An [`ArenaGrow`] that hands out a fixed sequence of block bases, then
+    /// fails closed — a deterministic stand-in for the frame-allocator
+    /// source so the chaining arithmetic is tested without real memory.
+    struct FakeGrow<'a> {
+        bases: &'a [u64],
+        next: Cell<usize>,
+    }
+    impl<'a> FakeGrow<'a> {
+        fn new(bases: &'a [u64]) -> Self {
+            Self {
+                bases,
+                next: Cell::new(0),
+            }
+        }
+    }
+    impl ArenaGrow for FakeGrow<'_> {
+        fn grow_block(&self) -> Option<u64> {
+            let i = self.next.get();
+            let base = *self.bases.get(i)?;
+            self.next.set(i + 1);
+            Some(base)
+        }
+    }
+
+    /// A usable-only [`BootMemoryMap`] of `[base, base + len)`.
+    fn usable_map(base: u64, len: u64) -> BootMemoryMap {
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new(base),
+            length: len,
+        });
+        map
+    }
+
     #[test]
     fn uninstalled_arena_allocates_nothing() {
         let arena = StackArena::new();
-        assert_eq!(arena.alloc(), None);
+        assert_eq!(arena.alloc(&NoGrow), None);
     }
 
     #[test]
@@ -228,7 +410,7 @@ mod tests {
         let arena = StackArena::new();
         assert!(!arena.install(u64::MAX - 1, 16));
         // A refused install leaves the arena uninstalled.
-        assert_eq!(arena.alloc(), None);
+        assert_eq!(arena.alloc(&NoGrow), None);
     }
 
     #[test]
@@ -236,8 +418,8 @@ mod tests {
         let arena = StackArena::new();
         assert!(arena.install(FAKE_BASE, 4 * STACK_REGION_BYTES));
 
-        let first = arena.alloc().expect("first region fits");
-        let second = arena.alloc().expect("second region fits");
+        let first = arena.alloc(&NoGrow).expect("first region fits");
+        let second = arena.alloc(&NoGrow).expect("second region fits");
 
         assert_eq!(first.guard_page(), FAKE_BASE);
         assert_eq!(second.guard_page(), FAKE_BASE + STACK_REGION_BYTES);
@@ -250,7 +432,7 @@ mod tests {
     fn top_is_above_the_guard_and_aligned() {
         let arena = StackArena::new();
         assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES));
-        let stack = arena.alloc().expect("region fits");
+        let stack = arena.alloc(&NoGrow).expect("region fits");
 
         // The usable region sits above the one-page guard; `top` is its
         // exclusive upper bound.
@@ -263,22 +445,139 @@ mod tests {
     }
 
     #[test]
-    fn exhaustion_fails_closed() {
-        // Room for exactly two regions.
+    fn exhaustion_without_a_grow_source_fails_closed() {
+        // Room for exactly two regions and a `NoGrow` source.
         let arena = StackArena::new();
         assert!(arena.install(FAKE_BASE, 2 * STACK_REGION_BYTES));
-        assert!(arena.alloc().is_some());
-        assert!(arena.alloc().is_some());
-        // The third does not fit: fail closed, never overrun the arena.
-        assert_eq!(arena.alloc(), None);
+        assert!(arena.alloc(&NoGrow).is_some());
+        assert!(arena.alloc(&NoGrow).is_some());
+        // The third does not fit and cannot grow: fail closed, never
+        // overrun the arena.
+        assert_eq!(arena.alloc(&NoGrow), None);
     }
 
     #[test]
     fn a_partial_final_region_does_not_fit() {
-        // One region plus a page: the second region cannot fit whole.
+        // One region plus a page: the second region cannot fit whole, and a
+        // `NoGrow` source cannot supply another block.
         let arena = StackArena::new();
         assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES + 4096));
-        assert!(arena.alloc().is_some());
-        assert_eq!(arena.alloc(), None);
+        assert!(arena.alloc(&NoGrow).is_some());
+        assert_eq!(arena.alloc(&NoGrow), None);
+    }
+
+    #[test]
+    fn grows_onto_a_fresh_chained_block_when_the_first_is_exhausted() {
+        // A first block with room for exactly one region, and a fake grow
+        // source offering a single fresh 2 MiB block far away.
+        const SECOND_BLOCK: u64 = FAKE_BASE + 0x1000_0000;
+        let bases = [SECOND_BLOCK];
+        let grow = FakeGrow::new(&bases);
+
+        let arena = StackArena::new();
+        assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES));
+
+        // First region comes from the installed block.
+        let first = arena.alloc(&grow).expect("first region fits");
+        assert_eq!(first.guard_page(), FAKE_BASE);
+
+        // The installed block is now exhausted; the next region is served
+        // from the freshly chained block.
+        let second = arena.alloc(&grow).expect("chained region fits");
+        assert_eq!(second.guard_page(), SECOND_BLOCK);
+        // And a third still comes from the chained block (it is whole-2 MiB,
+        // so it holds many regions).
+        let third = arena.alloc(&grow).expect("chained block holds more");
+        assert_eq!(third.guard_page(), SECOND_BLOCK + STACK_REGION_BYTES);
+
+        // Exactly one block was chained for the run above.
+        assert_eq!(grow.next.get(), 1);
+    }
+
+    #[test]
+    fn fails_closed_when_the_grow_source_is_exhausted() {
+        // First block holds one region; the grow source is empty.
+        let grow = FakeGrow::new(&[]);
+        let arena = StackArena::new();
+        assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES));
+        assert!(arena.alloc(&grow).is_some());
+        // No fresh block to chain: fail closed, never an unguarded stack.
+        assert_eq!(arena.alloc(&grow), None);
+    }
+
+    #[test]
+    fn frame_allocator_grow_chains_a_real_block_past_the_first() {
+        // The installed block is placed above the allocator's window so its
+        // addresses never collide with a chained block in this arithmetic
+        // test.
+        const FIRST_BLOCK: u64 = 0x8000_0000;
+
+        // An 8 MiB usable window the buddy allocator can carve 2 MiB blocks
+        // from, fully inside a generous identity window.
+        let map = usable_map(0, 8 * 1024 * 1024);
+        let frames = FrameAllocator::new(&map).expect("allocator builds");
+        let grow = FrameArenaGrow::new(&frames, 8 * 1024 * 1024);
+
+        // A first block with room for exactly one region forces a grow on
+        // the second allocation.
+        let arena = StackArena::new();
+        assert!(arena.install(FIRST_BLOCK, STACK_REGION_BYTES));
+
+        let first = arena.alloc(&grow).expect("first region fits");
+        assert_eq!(first.guard_page(), FIRST_BLOCK);
+
+        // The second allocation grows by drawing a real 2 MiB block from
+        // the frame allocator; the region lands inside the allocator's
+        // window, distinct from the first block.
+        let second = arena.alloc(&grow).expect("grows onto a real block");
+        assert!(second.guard_page() < 8 * 1024 * 1024);
+        assert_eq!(second.guard_page() % ARENA_GROW_BLOCK_BYTES, 0);
+        assert_ne!(second.guard_page(), first.guard_page());
+    }
+
+    #[test]
+    fn frame_allocator_grow_fails_closed_on_physical_exhaustion() {
+        // A window too small to carve even one 2 MiB block: the grow source
+        // is exhausted, so the arena fails closed once the first block is.
+        let map = usable_map(0, 1024 * 1024); // 1 MiB < a 2 MiB block
+        let frames = FrameAllocator::new(&map).expect("allocator builds");
+        let grow = FrameArenaGrow::new(&frames, 1 << 31);
+
+        let arena = StackArena::new();
+        assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES));
+        assert!(arena.alloc(&grow).is_some());
+        assert_eq!(
+            arena.alloc(&grow),
+            None,
+            "no 2 MiB block to chain: fail closed (§2.9)"
+        );
+    }
+
+    #[test]
+    fn frame_allocator_grow_rejects_a_block_outside_the_identity_window() {
+        // The allocator can carve a 2 MiB block, but the identity window is
+        // below it, so a chained stack would be unmapped in the task's own
+        // root: the grow must fail closed rather than hand out an
+        // unreachable stack (§4 / §2.9).
+        let map = usable_map(0, 8 * 1024 * 1024);
+        let frames = FrameAllocator::new(&map).expect("allocator builds");
+        // Identity limit of 1 MiB: every 2 MiB block ends above it.
+        let grow = FrameArenaGrow::new(&frames, 1024 * 1024);
+
+        let arena = StackArena::new();
+        assert!(arena.install(FAKE_BASE, STACK_REGION_BYTES));
+        assert!(arena.alloc(&grow).is_some());
+        assert_eq!(arena.alloc(&grow), None);
+
+        // The rejected block was returned to the allocator, not leaked: a
+        // grow with a sufficient window still succeeds afterwards.
+        let grow_ok = FrameArenaGrow::new(&frames, 8 * 1024 * 1024);
+        let arena2 = StackArena::new();
+        assert!(arena2.install(FAKE_BASE, STACK_REGION_BYTES));
+        assert!(arena2.alloc(&grow_ok).is_some());
+        assert!(
+            arena2.alloc(&grow_ok).is_some(),
+            "the earlier rejected block was freed, so RAM is still available"
+        );
     }
 }

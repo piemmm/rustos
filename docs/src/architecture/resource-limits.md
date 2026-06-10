@@ -10,8 +10,8 @@ This page describes the binding §24 contract and its staged build-out. The
 ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
 syscalls, and the `CAP_RLIMIT_RAISE` capability), the **kernel enforcement**
 of it, the **`ulimit` shell command**, and the **System Information limits
-query** are **landed**; the growable kernel-stack arena is staged behind them
-(see *Status* below).
+query**, and the **growable kernel-stack arena** are **landed**; only the
+per-arch secondary-bring-up bound is staged behind them (see *Status* below).
 
 ## Capacities scale; security bounds stay fixed
 
@@ -181,11 +181,49 @@ hardware), under two knobs:
   front. A RAM window too small to carve even one block degrades to no arena
   and the software-canary `BoxStack` fallback (fail closed, §2.17).
 
-Growing the kernel-stack arena *past* its policy size on genuine exhaustion —
-chaining a fresh, independently block-split arena rather than failing over to a
-`BoxStack` — is the staged growable-arena follow-on (L3b), as is sizing the
-per-arch CPU/hart bookkeeping from §18 discovery (see *Per-arch CPU/hart handle
-bookkeeping* below — done on wasm32 and riscv64; aarch64 and x86_64 remain).
+## Growable kernel-stack arena (chains on demand)
+
+The boot-carved guard arena above is the *first* block, not a ceiling. When it
+runs out of room for a whole guarded region, `rustos_kernel::stack_arena::
+StackArena` **grows** by chaining a fresh, independently block-split 2 MiB
+block rather than failing over to the software-canary `BoxStack` — so the
+hardware-guarded kthread-stack capacity scales with discovered RAM and grows on
+demand (§24.1), not just with the size of the boot block.
+
+- **The grow source** (`FrameArenaGrow`) draws each fresh block from the
+  kernel's live `FrameAllocator` as a 2 MiB-aligned, contiguous
+  `alloc_order(9)` block — the same block granularity the boot arena uses, so
+  every guard page in a chained block still lands on its own L3 leaf when the
+  spawn seam re-expresses the covering block at 4 KiB granularity
+  (`split_block`) in the owning task's root and unmaps the guard page. A
+  chained block therefore hosts hardware-guarded stacks exactly as the
+  boot-carved block does (§4 — the guard-page invariant is preserved while the
+  capacity grows).
+- **Bounded to the identity window.** A chained block must lie wholly within
+  the `IDENTITY_GIB`-gigapage window every spawned address space identity-maps,
+  so the stack stays mapped — and its guard page faults — in *every* space the
+  task runs under. A block the allocator hands back above that window is
+  returned to the allocator and the grow **fails closed** (`None`), dropping the
+  caller to the `BoxStack` software-canary fallback rather than handing out an
+  unreachable stack (§4 / §2.9).
+- **Fails closed on physical exhaustion.** When the frame allocator can no
+  longer supply a 2 MiB block, the grow returns `None`, and the spawn seam
+  falls back to a software-canary `BoxStack` — deterministic, never a panic
+  (§2.9 / §2.17). Chained blocks (like the boot block) are handed out
+  monotonically and never reclaimed (§2.1).
+- **Serialised, off the hot path.** The whole bump-and-chain is serialised by a
+  `SpinLock`; `alloc` is a per-spawn operation, not a hot path, so a lock is the
+  simplest correct way to chain a fresh block atomically (§2.16). The chaining
+  arithmetic, the frame-allocator-backed grow, the identity-window rejection,
+  and the fail-closed-on-OOM path are all exercised by host unit tests over a
+  real `FrameAllocator`; the per-stack guard-page split/unmap a chained block
+  relies on is the same mechanism the `stack_arena_qemu_aarch64` and
+  `stack_overrun_qemu_aarch64` verticals already prove on a 2 MiB identity
+  block.
+
+Sizing the per-arch CPU/hart bookkeeping from §18 discovery is the remaining
+§24.1 sweep work (see *Per-arch CPU/hart handle bookkeeping* below — done on
+all four arches; only the secondary-bring-up bound remains).
 
 ## Userland heap free-span table (grow-on-demand)
 
@@ -373,12 +411,14 @@ every x86_64 QEMU vertical constructs through a right-sized `static`.
   discovered-count-sized, and the **riscv64**, **aarch64**, and **x86_64**
   per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities
   via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>`
-  (see *Per-arch CPU/hart handle bookkeeping* above). Still planned: growing the
-  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
-  fresh, independently block-split arena rather than failing over to a
-  `BoxStack`); and the per-arch **secondary-bring-up** bound (the `smp.s`
-  secondary-stack pools and per-CPU `static` storage), preserving the §17.2
-  break-before-make and §4 guard-page invariants.
+  (see *Per-arch CPU/hart handle bookkeeping* above), and the kthread-stack
+  arena now **grows** *past* its policy size on genuine exhaustion by chaining a
+  fresh, independently block-split 2 MiB block from the live `FrameAllocator`
+  rather than failing over to a `BoxStack` (see *Growable kernel-stack arena*
+  above; both aarch64 production spawn seams draw through it). Still planned:
+  the per-arch **secondary-bring-up** bound (the `smp.s` secondary-stack pools
+  and per-CPU `static` storage), preserving the §17.2 break-before-make and §4
+  guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

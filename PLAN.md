@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 & x86_64 per-CPU handle bookkeeping done; growable kernel-stack arena + secondary-bring-up bound remain)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 & x86_64 per-CPU handle bookkeeping + growable kernel-stack arena done; per-arch secondary-bring-up bound remains)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, and the riscv64 `RiscvArch`, aarch64 `Aarch64Arch`, and x86_64 `X86_64Arch` per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` (the no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins); the growable kernel stack arena + the per-arch secondary-bring-up bound remain).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, the riscv64 `RiscvArch`, aarch64 `Aarch64Arch`, and x86_64 `X86_64Arch` per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>` (the no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins), and the growable kernel stack arena now chains a fresh `FrameAllocator`-backed 2 MiB block on genuine exhaustion (`FrameArenaGrow`) bounded to the per-space identity window, failing closed to `BoxStack` only on physical exhaustion; the per-arch secondary-bring-up bound remains).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -911,10 +911,13 @@ and fail-closed (§24.4) — this work must not loosen them.
   carve) and `kernel/rustos-kernel/src/stack_arena.rs`
   (`StackArena` forward-only bump over a fixed `[base,end)`,
   `STACK_REGION_BYTES`). Sizing from the discovered RAM window is **done**
-  (L3a — `stack_arena_bytes`); the remaining L3b work is to **chain/grow** a
-  fresh 2 MiB-aligned, independently block-split arena on exhaustion
-  (preserving the §17.2 break-before-make and §4 guard-page invariants),
-  instead of failing over to `BoxStack`.
+  (L3a — `stack_arena_bytes`). **Done** (L3b): `StackArena` now **grows** by
+  chaining a fresh 2 MiB-aligned, independently block-split block on genuine
+  exhaustion (`FrameArenaGrow` over the live `FrameAllocator`'s
+  `alloc_order(9)`), bounded to the per-space identity window, preserving the
+  §17.2 break-before-make and §4 guard-page invariants and failing closed to
+  `BoxStack` only on physical exhaustion (§2.9); both aarch64 production spawn
+  seams draw through it.
 - Per-task stack size — `kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`:
   **done** (L3a) — now a release-tuned policy value (32 KiB release / 64 KiB
   debug, §24.2).
@@ -1071,9 +1074,15 @@ and fail-closed (§24.4) — this work must not loosen them.
   `[u8; MAX_CPUS]` buffer, so the handle imposes no CPU ceiling and the
   allocator-free Stage-2 bins are untouched (no ABI change; the host suite + all
   eight x86_64 verticals + the production boot path construct through the
-  backing). Still remaining: the growable kernel stack arena (grow *past* the
-  policy size on genuine exhaustion by chaining a fresh, independently
-  block-split arena rather than failing over to `BoxStack`); and the per-arch
+  backing). The **growable kernel stack arena** is also converted: `StackArena`
+  grows *past* its policy size on genuine exhaustion by chaining a fresh,
+  independently block-split 2 MiB block out of the live `FrameAllocator`
+  (`FrameArenaGrow`, `alloc_order(9)`) bounded to the identity window, instead
+  of failing over to `BoxStack`; both aarch64 production spawn seams
+  (`init_spawn`, `spawn_producer`) draw through it, and it fails closed to the
+  software-canary `BoxStack` only on genuine physical exhaustion (§2.9), with
+  the §17.2 break-before-make and §4 guard-page invariants preserved (12 host
+  unit tests over a real `FrameAllocator`). Still remaining: the per-arch
   secondary-bring-up bound, with the §17.2/§4 safety invariants preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
