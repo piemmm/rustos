@@ -182,8 +182,46 @@ core::arch::global_asm!(include_str!("trap.s"));
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 extern "C" {
     /// S-mode trap vector published by `trap.s`. Installed into `stvec`
-    /// by [`init_traps`]; never called from Rust.
+    /// by [`install_trap_vector`] (and thus by [`init_traps`]); never
+    /// called from Rust.
     fn rustos_riscv64_trap_vector();
+}
+
+/// Point `stvec` at the trap vector (direct mode) **without** enabling
+/// any interrupt source.
+///
+/// This is the synchronous-trap half of [`init_traps`]: it installs the
+/// vector and the `sscratch == 0` S-mode invariant the vector relies on,
+/// so a synchronous trap (a `ecall`, a page fault) is taken to the
+/// handler, but leaves `sie`/`sstatus.SIE` untouched. The production
+/// boot pipeline (`rustos_kernel::boot_riscv64`, `plans/PI.md` RV-P2)
+/// uses it to catch a fault during the paged bring-up and to route the
+/// `ecall` syscall path, mirroring the aarch64 port's vector-only
+/// `exceptions::init_vectors`. A consumer that also wants to take
+/// asynchronous interrupts calls [`init_traps`] instead (`AGENTS.md`
+/// §2.2 — the vector-install logic has one definition).
+///
+/// # Safety
+///
+/// Must be called on the boot hart after a stack is established. Writing
+/// `stvec`/`sscratch` has no memory side effects beyond the named CSRs.
+/// The caller must have installed the syscall dispatch callback
+/// ([`crate::syscall_entry::set_dispatch_callback`]) before user code
+/// can `ecall`, or the handler fails closed (`AGENTS.md` §5.4.5).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub unsafe fn install_trap_vector() {
+    let base = rustos_riscv64_trap_vector as *const () as usize;
+    // SAFETY: `base` is the 4-byte-aligned address of the asm trap
+    // vector (direct mode encodes mode 0 in the low two bits, which are
+    // zero by the `.align 2`). Writing `stvec` and clearing `sscratch`
+    // has no memory side effects beyond those CSRs.
+    unsafe {
+        core::arch::asm!("csrw stvec, {}", in(reg) base, options(nomem, nostack));
+        // Establish the S-mode `sscratch == 0` invariant the trap vector
+        // relies on to recognise a nested S-mode trap before any
+        // interrupt source is armed (`trap.s`).
+        core::arch::asm!("csrw sscratch, zero", options(nomem, nostack));
+    }
 }
 
 /// Point `stvec` at the trap vector (direct mode) and enable supervisor
@@ -198,18 +236,16 @@ extern "C" {
 /// first (this function installs the latter).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub unsafe fn init_traps() {
-    let base = rustos_riscv64_trap_vector as *const () as usize;
-    // SAFETY: `base` is the 4-byte-aligned address of the asm trap
-    // vector (direct mode encodes mode 0 in the low two bits, which are
-    // zero by the `.align 2`). Writing `stvec`, setting `sie.SEIE`, and
-    // setting `sstatus.SIE` are the documented S-mode interrupt-enable
-    // sequence; none has memory side effects beyond the CSRs named.
+    // SAFETY: contract forwarded to the caller (boot hart, stack
+    // established). `install_trap_vector` writes `stvec`/`sscratch`.
     unsafe {
-        core::arch::asm!("csrw stvec, {}", in(reg) base, options(nomem, nostack));
-        // Establish the S-mode `sscratch == 0` invariant the trap vector
-        // relies on to recognise a nested S-mode trap before any
-        // interrupt source is armed (`trap.s`).
-        core::arch::asm!("csrw sscratch, zero", options(nomem, nostack));
+        install_trap_vector();
+    }
+    // SAFETY: setting `sie.SEIE` and `sstatus.SIE` is the documented
+    // S-mode interrupt-enable sequence; neither has memory side effects
+    // beyond the named CSRs, and the caller asserts the dispatcher is
+    // installed before any source is armed.
+    unsafe {
         core::arch::asm!("csrs sie, {}", in(reg) SIE_SEIE, options(nomem, nostack));
         core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
     }

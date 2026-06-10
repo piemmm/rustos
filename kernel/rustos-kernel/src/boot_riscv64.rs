@@ -1,30 +1,39 @@
 //! Bare-metal boot pipeline for the riscv64 (QEMU `virt` / SiFive)
-//! `rustos-kernel` binary — `plans/PI.md` RV-P1.
+//! `rustos-kernel` binary — `plans/PI.md` RV-P1 / RV-P2.
 //!
 //! [`boot`] is the single entry point. The binary's
 //! `extern "C" fn kernel_main(hartid, dtb)` (called from the arch
 //! port's [`rustos_arch_riscv64::entry`] trampoline, `boot.s` →
 //! `entry.rs`) forwards to it after `boot.s` has established the boot
-//! stack and zeroed `.bss` on the boot hart. It performs the minimum
-//! BSP bring-up the boot-to-`BootCompleted` slice needs and hands a
-//! validated [`rustos_kernel_core::BootInfo`] to
+//! stack and zeroed `.bss` on the boot hart. It performs the BSP
+//! bring-up the paged boot slice needs and hands a validated
+//! [`rustos_kernel_core::BootInfo`] to
 //! [`rustos_kernel_core::kernel_main`]:
 //!
-//! 1. Parse the flattened device tree (`a1`) for the first `/memory`
+//! 1. Enable the Sv39 identity MMU and install the S-mode trap vector
+//!    ([`enable_mmu_and_vectors`]) so the `kernel_core` allocator /
+//!    scheduler atomics run on Normal cacheable memory and a fault
+//!    during bring-up is taken to a handler — the riscv64 analogue of
+//!    the aarch64 P6c-2 step. Install the production `ecall` dispatch
+//!    callback ([`crate::dispatch_riscv64::production_dispatch`]) before
+//!    any user thread can run.
+//! 2. Parse the flattened device tree (`a1`) for the first `/memory`
 //!    node and the `/cpus` `timebase-frequency`.
-//! 2. Build a [`rustos_kernel_mem::BootMemoryMap`] that reserves the
+//! 3. Build a [`rustos_kernel_mem::BootMemoryMap`] that reserves the
 //!    firmware + kernel-image + boot-heap span `[ram_base,
 //!    __kernel_end)` and marks `[__kernel_end, ram_end)` usable
 //!    ([`build_boot_memory_map`]).
-//! 3. Construct the [`RiscvBinArch`] handle (boot hart + timebase) and
+//! 4. Construct the [`RiscvBinArch`] handle (boot hart + timebase) and
 //!    assemble the `BootInfo`.
 //!
-//! No paging or trap setup is required to reach `BootCompleted`: the
-//! `virt` board enters S-mode with `satp = 0` (bare addressing), RISC-V
-//! atomics are well-defined on it, and the init pipeline never faults.
-//! Enabling the Sv39 MMU and dropping PID 1 into user mode are staged
-//! follow-ups (`plans/PI.md` RV-P-series), exactly as the aarch64 port
-//! reached its boot-init point before P4–P6 wired user mode.
+//! RV-P2 runs the production path **paged**: the boot identity-maps the
+//! whole low Sv39 window with 1 GiB leaves, so every physical address
+//! the board uses (the kernel image, the firmware DTB, the PLIC, the
+//! `virt` MMIO window, and the carved DMA regions the device-bring-up
+//! verticals read) keeps its address under translation. Enabling
+//! asynchronous interrupts (the timer/PLIC) and dropping PID 1 into
+//! user mode are staged follow-ups (`plans/PI.md` RV-P3), exactly as the
+//! aarch64 port reached this point before P6c-3 wired user mode.
 //!
 //! # Why this lives in the bin crate, not the arch port
 //!
@@ -54,12 +63,15 @@ use alloc::sync::Arc;
 use rustos_arch_api::{CpuId, SchedulerArch};
 use rustos_arch_riscv64::context_hal::ContextSwitchHal;
 use rustos_arch_riscv64::fdt::Fdt;
-use rustos_arch_riscv64::{halt_current_hart, RiscvArch, RiscvArchStorage};
-use rustos_kernel_core::{kernel_main, BootInfo, DispatchCallbackSlot, KernelArch};
+use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool};
+use rustos_arch_riscv64::{halt_current_hart, syscall_entry, trap, RiscvArch, RiscvArchStorage};
+use rustos_kernel_core::{kernel_main, BootInfo, KernelArch};
 use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
+
+use crate::dispatch_riscv64::{production_dispatch, DISPATCH_SLOT};
 
 /// Logical CPU id of the boot hart for the single-hart slice.
 const BOOT_CPU: CpuId = 0;
@@ -71,11 +83,46 @@ const BOOT_CPU: CpuId = 0;
 /// arches (`AGENTS.md` §5.4.4).
 const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 
-/// Bin-crate [`DispatchCallbackSlot`] handed to [`BootInfo`]. Set-once
-/// via its internal `OnceCell`; the riscv64 boot-to-`BootCompleted`
-/// slice does not enable a syscall trampoline, so nothing reads it
-/// before `BootCompleted` (`AGENTS.md` §2.1).
-static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
+/// Audit event: the riscv64 production kernel reached its RV-P2 paged
+/// boot init point (Sv39 MMU enabled, trap vector + `ecall` dispatch
+/// installed). Shares the `kernel/core`-owned `4000..5000` range and the
+/// `4097` "reached" slot the aarch64 boot pipeline uses; only one arch's
+/// boot module compiles per image, so the id never collides at runtime
+/// (`AGENTS.md` §5.4.4).
+const KERNEL_BOOT_RISCV64_REACHED: EventId = EventId(4097);
+
+/// Number of 1 GiB identity gigapages the boot address space maps.
+///
+/// 512 covers the whole Sv39 low VA range (`[0, 512 GiB)`) in a single
+/// root table, so the kernel image, stack, the firmware DTB, the PLIC,
+/// and the `virt`-board MMIO window all keep their physical addresses
+/// once the MMU is on — whatever their addresses, with no `cfg(board)`
+/// fork (`AGENTS.md` §17.2). Identity mapping makes physical == virtual,
+/// so the device-bring-up verticals that read MMIO/DMA at physical
+/// addresses keep working under the paged regime.
+const IDENTITY_GIGABYTES: usize = 512;
+
+/// Boot-time page-table frame source for the Sv39 identity map.
+///
+/// A single root table holds all 512 gigapage leaves, so the pool only
+/// ever hands out one frame here. It lives in `.bss` for the lifetime of
+/// the kernel image, so `satp` keeps pointing at a valid table after
+/// [`enable_mmu_and_vectors`] returns even though the transient
+/// [`AddressSpace`] handle is dropped (`AGENTS.md` §2.1 — the pool is
+/// monotonic and never freed). The real per-process page tables are
+/// built over the `kernel/mem` frame allocator at a later stage.
+static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
+
+/// Stable `"true"`/`"false"` audit-field value for a boolean condition.
+/// Keeping the boot log to `&'static str` fields means the path takes no
+/// allocation and cannot panic (`AGENTS.md` §2.9).
+const fn yes_no(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
 
 extern "C" {
     /// One byte past the end of the kernel image (including the boot
@@ -164,6 +211,9 @@ pub enum BootError {
     NoTimebase,
     /// The kernel image plus heap left no usable RAM above it.
     UsableRegionEmpty,
+    /// The boot page-table pool could not satisfy the Sv39 identity
+    /// map, so the MMU could not be enabled (`plans/PI.md` RV-P2).
+    MmuEnableFailed,
     /// `BootInfo::validate` rejected the assembled hand-off.
     BootInfoInvalid,
 }
@@ -178,6 +228,7 @@ impl BootError {
             Self::NoMemoryMap => "no_memory_map",
             Self::NoTimebase => "no_timebase_frequency",
             Self::UsableRegionEmpty => "usable_region_empty",
+            Self::MmuEnableFailed => "mmu_enable_failed",
             Self::BootInfoInvalid => "bootinfo_invalid",
         }
     }
@@ -232,6 +283,46 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
     Ok(memory_map)
 }
 
+/// Enable the Sv39 identity MMU and install the S-mode trap vector on
+/// the boot hart, returning `true` when the MMU is live.
+///
+/// Returns `false` (leaving `satp == 0`) when the boot page-table pool
+/// cannot satisfy the identity map — a fail-closed signal the caller
+/// logs and parks on rather than running `kernel_main` unpaged
+/// (`AGENTS.md` §2.9). The trap vector is installed only on success, so
+/// `stvec` is never left pointing at a handler the paged regime did not
+/// reach.
+///
+/// This is the riscv64 analogue of the aarch64 `enable_mmu_and_vectors`
+/// (`plans/PI.md` P6c-2 → RV-P2): it makes RAM Normal/cacheable so the
+/// `kernel_core` allocator and scheduler atomics run on well-defined
+/// memory, and points `stvec` at the handler so a fault during the
+/// remaining bring-up is taken rather than silently looping.
+///
+/// The transient [`AddressSpace`] handle is dropped on return; `satp`
+/// keeps pointing at [`BOOT_PAGE_TABLES`]' root table, which lives for
+/// the kernel's lifetime (`AGENTS.md` §2.1).
+fn enable_mmu_and_vectors() -> bool {
+    let Some(space) = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)
+    else {
+        return false;
+    };
+    // SAFETY: `new_identity_gigapages` identity-maps `[0, 512 GiB)`, so
+    // the executing `pc`, the boot stack, the firmware DTB, the PLIC,
+    // and the `virt` MMIO window all keep their physical addresses —
+    // enabling the MMU does not move the ground under the running code,
+    // exactly as `AddressSpace::switch`'s contract requires.
+    // `install_trap_vector` then points `stvec` at the handler (without
+    // enabling any interrupt source) so a synchronous fault during the
+    // remaining bring-up is taken to a handler. Both run once, here, on
+    // the boot hart.
+    unsafe {
+        space.switch();
+        trap::install_trap_vector();
+    }
+    true
+}
+
 /// Boot the kernel on the boot hart and forward to
 /// [`rustos_kernel_core::kernel_main`].
 ///
@@ -240,6 +331,15 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
 /// [`rustos_arch_riscv64::SERIAL_SINK`]; a QEMU integration test
 /// substitutes an audit sink that flips the `SiFive` Test device on
 /// `AuditEvent::BootCompleted`.
+///
+/// RV-P2: enables the Sv39 identity MMU and installs the trap vector +
+/// the production `ecall` dispatch callback before handing off, so the
+/// production path runs paged with syscall dispatch wired
+/// (`plans/PI.md` RV-P2). No user space exists yet, so nothing `ecall`s
+/// before user mode is wired (RV-P3); installing the callback here keeps
+/// the ordering identical to the aarch64 / x86_64 boot paths
+/// (`AGENTS.md` §5.4.5). A failure to enable the MMU is fatal — the boot
+/// path fails closed rather than running `kernel_main` unpaged.
 ///
 /// Returns the bottom type. On failure it logs one
 /// `KERNEL_BOOT_INIT_FAILED` record and parks the hart forever
@@ -256,6 +356,23 @@ pub fn boot(
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
 ) -> ! {
+    // RV-P2: enable the Sv39 identity MMU + S-mode trap vector before
+    // any allocator/scheduler work, then install the production `ecall`
+    // dispatch callback. The arch port's `ecall` trap path fails closed
+    // if it fires before a callback is installed, so pin it before any
+    // user thread can run (`AGENTS.md` §5.4.5).
+    let mmu_on = enable_mmu_and_vectors();
+    syscall_entry::set_dispatch_callback(production_dispatch);
+
+    log_reached(log_sink, hartid, dtb, mmu_on);
+
+    if !mmu_on {
+        // The boot page-table pool could not satisfy the identity map;
+        // refuse to run `kernel_main` on un-paged memory (fail closed).
+        log_init_failure(log_sink, BootError::MmuEnableFailed);
+        halt_current_hart()
+    }
+
     match try_boot(hartid, dtb, log_sink, audit_sink) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
@@ -263,6 +380,42 @@ pub fn boot(
             halt_current_hart()
         }
     }
+}
+
+/// Log the RV-P2 paged-boot init line (MMU + dispatch reached).
+fn log_reached(sink: &(dyn Sink + Sync), hartid: u64, dtb: u64, mmu_on: bool) {
+    let level = if mmu_on { Level::Info } else { Level::Warn };
+    log(
+        sink,
+        &Event {
+            level,
+            id: KERNEL_BOOT_RISCV64_REACHED,
+            message:
+                "rustos-kernel riscv64 (qemu virt / sifive): reached rv-p2 paged boot init point",
+            fields: &[
+                Field {
+                    key: "boot_hart_ok",
+                    value: yes_no(hartid == u64::from(BOOT_CPU)),
+                },
+                Field {
+                    key: "dtb_present",
+                    value: yes_no(dtb != 0),
+                },
+                Field {
+                    key: "mmu_enabled",
+                    value: yes_no(mmu_on),
+                },
+                Field {
+                    key: "dispatch_installed",
+                    value: yes_no(syscall_entry::dispatch_callback().is_some()),
+                },
+                Field {
+                    key: "next_stage",
+                    value: "rv_p3_spawn_init_u_mode",
+                },
+            ],
+        },
+    );
 }
 
 fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {

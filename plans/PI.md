@@ -1094,11 +1094,12 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     **Verified green under QEMU on `-M virt` on this host.** This proves the
     *mechanism*; rewiring the production riscv64 boot kthread stacks onto a
     boot-reserved arena (the aarch64/x86_64 G3b-2-iii seam) remains the
-    follow-on. The production riscv64 `rustos-kernel` boot path now exists
-    (RV-P1, boot-to-`BootCompleted`), but it has no kthread-spawning seam yet
-    (no `init_spawn`/`spawn_producer` analogue), so there are no production
-    kthread stacks to rewire — that seam (RV-P-series) is the precondition,
-    and until it lands those (future) stacks keep the software-canary guard
+    follow-on. The production riscv64 `rustos-kernel` boot path now boots
+    paged (RV-P1 boot-to-`BootCompleted`, RV-P2 Sv39 MMU + trap vector +
+    dispatch), but it has no kthread-spawning seam yet (no
+    `init_spawn`/`spawn_producer` analogue), so there are no production
+    kthread stacks to rewire — that seam (RV-P3) is the precondition, and
+    until it lands those (future) stacks keep the software-canary guard
     (§2.17). **No ABI change.** Doc: `docs/src/platform/riscv64.md` ("Proving
     the overrun fault-form (G3c)").
   - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
@@ -1521,14 +1522,32 @@ riscv64, mirroring the aarch64 P-stage arc.
   boot completed` → SiFive PASS). **No ABI change** (the `lib/abi` types,
   syscall table, and C header are untouched). Doc:
   `docs/src/platform/riscv64.md` ("Kernel boot pipeline").
-- **RV-P-series (remaining) — Sv39 MMU enable, user-mode drop, and a
-  kthread-spawning seam `[ ]`.** Enable the Sv39 MMU in the production boot
-  path, install the trap vector + syscall dispatch, and add the riscv64
+- **RV-P2 — Sv39 MMU enable + trap vector + syscall dispatch `[x]`.** The
+  production `boot_riscv64::boot` now runs **paged**:
+  `enable_mmu_and_vectors` identity-maps the whole low Sv39 window
+  (`[0, 512 GiB)`, 1 GiB leaves over a `.bss` `PageTablePool`), writes
+  `satp`, and points `stvec` at the S-mode trap vector via the new
+  `trap::install_trap_vector` (the vector-only half factored out of
+  `init_traps`, so the boot installs the vector **without** enabling
+  asynchronous interrupts — `sie`/`sstatus.SIE` stay clear). The
+  production `ecall` dispatch callback `dispatch_riscv64::production_dispatch`
+  (the riscv64 sibling of `dispatch`/`dispatch_aarch64` over the shared
+  `dispatch_core`) is installed before any user thread can run; a pool that
+  cannot satisfy the identity map fails closed. Because the map is identity
+  (physical == virtual) and full-window, every board address — kernel
+  image, DTB, PLIC, MMIO, the device-bring-up DMA carves — keeps its
+  address under translation, so every riscv64 vertical runs under the paged
+  boot. Proven by `kernel_arch_boot_riscv64` (`mmu_enabled=true
+  dispatch_installed=true` → `id=4004` → SiFive PASS) and the
+  virtio-blk/net + framebuffer verticals (device bring-up MMU-on). **No ABI
+  change.** Doc: `docs/src/platform/riscv64.md` ("Kernel boot pipeline").
+- **RV-P3 — user-mode drop + kthread-spawning seam `[ ]`.** Add the riscv64
   `InitSpawn`/`ProcessSpawn` production seams (the aarch64
   `init_spawn`/`spawn_producer` analogue) so PID 1 `init` drops into U-mode
-  — the precondition for the riscv64 timeshare and for the G3b-2-iii
-  guard-arena kthread-stack rewire. The arch primitives all exist and are
-  proven by RV1–RV-X4; this arc wires them into the production binary.
+  and supervises the `Shell` session — the precondition for the riscv64
+  timeshare and for the G3b-2-iii guard-arena kthread-stack rewire. The
+  arch primitives all exist and are proven by RV1–RV-X4; this wires them
+  into the production binary.
 
 ### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
 

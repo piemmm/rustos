@@ -106,6 +106,15 @@ pub mod dispatch;
 pub mod arch_wrapper_aarch64;
 #[cfg(kernel_isa = "aarch64")]
 pub mod dispatch_aarch64;
+
+// The riscv64 (QEMU `virt` / SiFive) fail-closed `ecall` dispatch callback
+// (`plans/PI.md` RV-P2): the riscv64 sibling of `dispatch`/`dispatch_aarch64`,
+// installed before user space can be entered so the production paged boot
+// routes each syscall through the resident `DispatchHook`. Gated on the
+// riscv64 instruction set so it links the riscv64 port; the arch-neutral
+// dispatch logic it wraps is unit-tested once in `dispatch_core`.
+#[cfg(kernel_isa = "riscv64")]
+pub mod dispatch_riscv64;
 #[cfg(kernel_isa = "x86_64")]
 pub mod ioapic_controller;
 #[cfg(kernel_isa = "x86_64")]

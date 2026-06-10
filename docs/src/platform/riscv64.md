@@ -39,7 +39,18 @@ Boot sequence:
    reader extracts the first `/memory` node's `reg` (base/size) and the
    `/cpus` `timebase-frequency`. It is host-tested against a hand-built
    DTB fixture.
-3. **Boot pipeline (`rustos_kernel::boot_riscv64::boot`).** Builds a
+3. **Sv39 MMU + trap vector + dispatch (RV-P2,
+   `boot_riscv64::enable_mmu_and_vectors`).** Identity-maps the whole low
+   Sv39 window (`[0, 512 GiB)`, 1 GiB leaves) over a `.bss`-resident
+   `PageTablePool`, writes `satp`, and points `stvec` at the S-mode trap
+   vector (`trap::install_trap_vector`, no asynchronous interrupts
+   enabled yet) so the `kernel_core` allocator/scheduler atomics run on
+   Normal cacheable memory and a fault during bring-up is taken to a
+   handler. The production `ecall` dispatch callback
+   (`dispatch_riscv64::production_dispatch`) is installed before any user
+   thread can run. A pool that cannot satisfy the identity map fails
+   closed (the boot parks rather than running `kernel_main` unpaged).
+4. **Boot pipeline (`rustos_kernel::boot_riscv64::boot`).** Builds a
    `BootMemoryMap` reserving `[ram_base, __kernel_end)` (firmware +
    kernel image + boot heap) and marking `[__kernel_end, ram_end)`
    usable, constructs `RiscvArch` (`kernel_arch.rs`, the arch port's
@@ -47,13 +58,18 @@ Boot sequence:
    `time` CSR via `rdtime`) wrapped in the downstream `RiscvBinArch`
    `kernel_core::KernelArch` adapter (orphan rules), assembles a
    `kernel_core::BootInfo`, and hands it to `kernel_core::kernel_main`.
-4. **Console (`sbi.rs`, `serial.rs`).** The boot log and audit records
+5. **Console (`sbi.rs`, `serial.rs`).** The boot log and audit records
    are written through the SBI legacy `console_putchar`, which OpenSBI
    routes to the same UART `-serial stdio` captures.
 
-No Sv39 paging is required to reach `BootCompleted`: the board enters
-S-mode with paging off and the init pipeline never faults. The boot
-heap is a 64 MiB `.heap` (NOLOAD) section the linker places *after*
+RV-P2 runs the production path **paged**. The board enters S-mode with
+paging off; step 3 turns the Sv39 identity MMU on before any
+allocator/scheduler work. Because the map is identity (physical ==
+virtual) and covers the whole low window, every physical address the
+board uses — the kernel image, the firmware DTB, the PLIC, the `virt`
+MMIO window, and the per-device DMA regions the device-bring-up
+verticals carve — keeps its address under translation. The boot heap is
+a 64 MiB `.heap` (NOLOAD) section the linker places *after*
 `__kernel_end`, so the trampoline does not zero it and the usable
 physical-memory map excludes it.
 
@@ -63,14 +79,15 @@ physical-memory map excludes it.
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 
 The Sv39 paging primitives, the context-switch primitive, the
-supervisor-timer preemption surface, and the `ecall` syscall entry now
+supervisor-timer preemption surface, and the `ecall` syscall entry
 exist as host-tested arch primitives (Stage 3c — see *Stage 3
-architecture primitives* below); they are not needed for the
-boot-to-`BootCompleted` slice, which runs with paging off in a single
-hart. Multi-hart SMP bring-up (and wiring the new address space and
-context switch into the live scheduler) remain riscv64 follow-ups. The
-ring-0 DTB virtio-mmio walk and the full device bring-up land in the
-virtio-MMIO QEMU verticals (below).
+architecture primitives* below). RV-P2 wires the Sv39 identity MMU, the
+trap vector, and the `ecall` dispatch callback into the production boot
+(step 3); enabling asynchronous interrupts (the timer/PLIC) and dropping
+PID 1 into U-mode are the staged RV-P3 follow-up, plus multi-hart SMP
+bring-up. The ring-0 DTB virtio-mmio walk and the full device bring-up
+land in the virtio-MMIO QEMU verticals (below), which now run under the
+paged boot.
 
 The kernel-side `SiFive` Test finisher (`kernel/arch/riscv64::qemu_exit`)
 is what the test bin uses to report its result.
@@ -79,11 +96,13 @@ is what the test bin uses to report its result.
 
 `kernel/arch/riscv64::plic` and `kernel/arch/riscv64::trap` land the
 external-IRQ foundation the virtio-mmio verticals build on. They are
-implemented and host-tested; the boot pipeline itself runs with
-interrupts disabled (it neither calls `trap::init_traps` nor builds a
-`PlicController`). The live consumer is the virtio-MMIO QEMU verticals
-(below), which `arm` the device source, install the trap dispatch, and
-`init_traps`.
+implemented and host-tested. RV-P2's production boot installs the trap
+*vector* (`trap::install_trap_vector`) so a synchronous fault / `ecall`
+is taken, but does **not** enable asynchronous interrupts or build a
+`PlicController` — `sie.SEIE`/`sstatus.SIE` stay clear until a consumer
+needs them. The live consumer is the virtio-MMIO QEMU verticals (below),
+which `arm` the device source, install the trap dispatch, and call
+`init_traps` (which re-installs the vector and enables interrupts).
 
 - **PLIC.** `plic::PlicController` wraps a `Plic<M>` register driver
   over the `PlicMmio` access seam (`VolatilePlicMmio` on the

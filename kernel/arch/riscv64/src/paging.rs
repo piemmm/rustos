@@ -1,14 +1,17 @@
-//! Sv39 page-table primitives for the riscv64 memory-isolation test.
+//! Sv39 page-table primitives for the riscv64 port.
 //!
 //! This module is the riscv64 analogue of `kernel/arch/x86_64::paging`.
 //! It implements the Arch HAL page-table surface
 //! ([`rustos_arch_api::mmu::AddressSpace`] +
-//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives: it
-//! supplies the architectural mechanism the memory-isolation QEMU
-//! vertical needs — two Sv39 page-table hierarchies that disagree about
-//! a single virtual address, so the MMU faults a process that reaches
-//! for another's frame (`AGENTS.md` §4, "memory isolation is enforced
-//! by hardware").
+//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives, and it
+//! supplies the inherent [`AddressSpace::new_identity_gigapages`] /
+//! `AddressSpace::switch` the production boot pipeline
+//! (`rustos_kernel::boot_riscv64`, `plans/PI.md` RV-P2) uses to enable
+//! the Sv39 identity MMU. The same primitives back the memory-isolation
+//! QEMU vertical's two Sv39 hierarchies that disagree about a single
+//! virtual address, so the MMU faults a process that reaches for
+//! another's frame (`AGENTS.md` §4, "memory isolation is enforced by
+//! hardware").
 //!
 //! # Sv39
 //!
