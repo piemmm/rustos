@@ -189,7 +189,14 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // the capacity scales with discovered RAM and grows on demand.
         // A build with no `'static` allocator wired fails closed
         // (`AGENTS.md` §2.9), as does genuine RAM exhaustion below.
-        let table_frames = page_table_source(ctx.page_table_allocator().ok_or(Errno::NoSpace)?)?;
+        let pt_frames = ctx.page_table_allocator().ok_or(Errno::NoSpace)?;
+        let table_frames = page_table_source(pt_frames)?;
+        // Publish the same `'static` allocator the kthread-stack arena
+        // returns idle chained blocks to when a spawned task later exits and
+        // its `ArenaStack` is dropped (`AGENTS.md` §24.1 — the capacity
+        // shrinks as well as grows). Idempotent (set-once); the boot path
+        // threads one allocator, so every spawn publishes the same handle.
+        crate::stack_arena::publish_reclaim_frames(pt_frames);
 
         // Build a stage-1 address space identity-mapping the kernel + MMIO,
         // and capture its root *without* switching to it: the spawning caller
@@ -230,19 +237,20 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // the boot block. A chained block is bounded to the identity window
         // so the stack stays mapped in the child's own root.
         let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
-        let kernel_stack: Box<dyn KernelStack + Send> = match KTHREAD_STACK_ARENA.alloc(&grow) {
-            Some(stack) => {
-                let guard = stack.guard_page();
-                match arch
-                    .split_block(guard)
-                    .and_then(|()| arch.unmap(guard).map(|_| ()))
-                {
-                    Ok(()) => Box::new(stack),
-                    Err(_) => Box::new(BoxStack::new()),
+        let kernel_stack: Box<dyn KernelStack + Send> =
+            match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+                Some(stack) => {
+                    let guard = stack.guard_page();
+                    match arch
+                        .split_block(guard)
+                        .and_then(|()| arch.unmap(guard).map(|_| ()))
+                    {
+                        Ok(()) => Box::new(stack),
+                        Err(_) => Box::new(BoxStack::new()),
+                    }
                 }
-            }
-            None => Box::new(BoxStack::new()),
-        };
+                None => Box::new(BoxStack::new()),
+            };
 
         let mut space = AddressSpace::new(arch);
         let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);

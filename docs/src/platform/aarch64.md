@@ -836,14 +836,18 @@ page-table root**, so an overrun of a task's kernel stack takes a
 synchronous data abort under that task's `TTBR0_EL1` rather than a
 next-reschedule poison-canary detection. The pieces:
 
-- A forward-only bump allocator, `stack_arena::KTHREAD_STACK_ARENA`
+- A grow-and-shrink block allocator, `stack_arena::KTHREAD_STACK_ARENA`
   (`rustos-kernel`), hands kthread kernel stacks out of the boot-reserved
   arena (`mem_map`, G2). `boot_aarch64` `install`s it from the carved
   arena `(base, len)`; each `alloc` returns an `ArenaStack` — a one-page
   guard region below the usable `KTHREAD_STACK_BYTES` stack, identical in
-  geometry to the heap-backed `BoxStack`. Regions are never reclaimed (the
-  monotonic, free-list-free discipline of the spawn page-table pools,
-  `AGENTS.md` §2.1).
+  geometry to the heap-backed `BoxStack`. When the boot block is full it
+  chains a fresh 2 MiB block from the live `FrameAllocator`
+  (`FrameArenaGrow`); when a task exits its `ArenaStack` is dropped and the
+  region returns to its owning block (`StackArena::free`), and an idle
+  chained block is zeroed and returned to the allocator (`FrameArenaShrink`)
+  under a one-free-block grace, so the capacity rises *and* falls without
+  thrashing (`AGENTS.md` §24.1). The boot-carved block is never returned.
 - **PID 1 `init` (G3b-2-i):** `init_spawn` allocates one region, then — on
   `init`'s *own* concrete `arch` address space, **before** it is switched
   to — calls `split_block(guard)` (re-expressing the coarse identity block

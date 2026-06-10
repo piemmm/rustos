@@ -296,7 +296,11 @@ pub fn boot(
     // a software-canary `BoxStack` (fail closed, `AGENTS.md` §2.17).
     if let Ok(layout) = &layout_result {
         if let Some(arena) = layout.arena {
-            crate::stack_arena::KTHREAD_STACK_ARENA.install(arena.base, arena.len);
+            crate::stack_arena::KTHREAD_STACK_ARENA.install(
+                arena.base,
+                arena.len,
+                &crate::stack_arena::IdentityBlockStore,
+            );
         }
     }
 

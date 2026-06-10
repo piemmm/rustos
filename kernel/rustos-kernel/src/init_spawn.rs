@@ -173,19 +173,20 @@ impl InitSpawn for Aarch64InitSpawn {
         // exhausted (`AGENTS.md` §24.1); a chained block is bounded to the
         // identity window so the stack stays mapped in PID 1's own root.
         let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
-        let kernel_stack: Box<dyn KernelStack + Send> = match KTHREAD_STACK_ARENA.alloc(&grow) {
-            Some(stack) => {
-                let guard = stack.guard_page();
-                match arch
-                    .split_block(guard)
-                    .and_then(|()| arch.unmap(guard).map(|_| ()))
-                {
-                    Ok(()) => Box::new(stack),
-                    Err(_) => Box::new(BoxStack::new()),
+        let kernel_stack: Box<dyn KernelStack + Send> =
+            match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+                Some(stack) => {
+                    let guard = stack.guard_page();
+                    match arch
+                        .split_block(guard)
+                        .and_then(|()| arch.unmap(guard).map(|_| ()))
+                    {
+                        Ok(()) => Box::new(stack),
+                        Err(_) => Box::new(BoxStack::new()),
+                    }
                 }
-            }
-            None => Box::new(BoxStack::new()),
-        };
+                None => Box::new(BoxStack::new()),
+            };
         // SAFETY: the identity map covers the kernel's current `pc`, `sp`,
         // the leaked kernel state, the boot heap, and the device MMIO (all
         // within `[0, 2 GiB)` on the proving-ground board), so enabling it

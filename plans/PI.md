@@ -949,12 +949,15 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     the arch spawn seam that builds the root, not generically in
     `kernel/core` (whose `UserAddressSpace` view is read-only by design,
     §2.4). Staged by spawn path:
-    - **G3b-2-i — PID 1 (`init`) path `[x]`.** A forward-only bump
+    - **G3b-2-i — PID 1 (`init`) path `[x]`.** A grow-and-shrink block
       allocator `stack_arena::KTHREAD_STACK_ARENA` (`rustos-kernel`) hands
       kthread kernel stacks out of the boot-reserved arena (`boot_aarch64`
       `install`s it from the carved `(base, len)`); each `ArenaStack` is a
       one-page guard below the usable `KTHREAD_STACK_BYTES` stack, identical
-      in geometry to `BoxStack`, never reclaimed (§2.1). `init_spawn`
+      in geometry to `BoxStack`. The arena chains fresh 2 MiB blocks from the
+      live `FrameAllocator` on exhaustion and returns idle chained blocks on
+      `ArenaStack` drop (grow *and* shrink, §24.1; the boot block is never
+      returned). `init_spawn`
       allocates one region and, on `init`'s *own* concrete `arch` space
       **before** it is switched to, `split_block(guard)` + `unmap(guard)`
       (no live access disturbed, no TLB maintenance), then hands the boxed
