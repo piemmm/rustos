@@ -895,7 +895,7 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 per-CPU handle bookkeeping done; growable kernel-stack arena + aarch64/x86_64 per-CPU handle bookkeeping + secondary-bring-up bound remain)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling + spawn fan-out + wasm32 & riscv64 & aarch64 per-CPU handle bookkeeping done; growable kernel-stack arena + x86_64 per-CPU handle bookkeeping + secondary-bring-up bound remain)]**
 
 **Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`, the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity, the spawn fan-out `MAX_SPAWNS` is now an allocator-backed grow-on-demand page-table capacity on both production producers, the wasm32 `WasmArch` per-CPU handle bookkeeping is now discovered-count-sized, and the riscv64 `RiscvArch` per-CPU handle bookkeeping is now a caller-provided `&'static`-slice capacity via `RiscvArchStorage<N>`; the growable kernel stack arena + the aarch64/x86_64 per-CPU handle bookkeeping (the same no-`alloc` `&'static`-storage design, since the boxed approach is blocked by the allocator-free Stage-2 bins) + the per-arch secondary-bring-up bound remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
@@ -932,10 +932,21 @@ and fail-closed (§24.4) — this work must not loosen them.
   bound by the slice length, and the host suite + all nine riscv64 verticals
   construct through it. `MAX_HARTS`/`MAX_WORKERS` survive only as the
   `smp.s`/`start_worker` secondary-stack/worker-index bound (the
-  secondary-bring-up item below). **aarch64/x86_64 pending**
-  (`MAX_CPUS`): the same `&'static`-slice conversion (plus the `core_classes`
-  table and, on x86_64, the `shootdown_page` target buffer), mirroring the
-  riscv64 shape. The boxed-slice approach the wasm32 port used is **blocked**
+  secondary-bring-up item below). **aarch64 done**
+  (`kernel/arch/aarch64/src/kernel_arch.rs`): `Aarch64Arch` borrows three
+  `&'static` slices — the dense-`CpuId` → `MPIDR_EL1` affinity map (`u64::MAX`
+  `NO_MPIDR` sentinel, valid because MPIDR_EL1[63:40] are RES0), the host IPI
+  ledger, and the per-core `CoreClass` table — from a caller-provided
+  `Aarch64ArchStorage<N>`; `classify_from_fdt` finds the peak and classifies
+  each core in two device-tree passes (the pure `hetcore::class_for_capacity`)
+  with no fixed buffer, and `send_ipi`/every accessor bound by the slice length,
+  so the handle imposes no `MAX_CPUS` ceiling (`MAX_CPUS` survives only for the
+  `smp.s`/`preempt` secondary-bring-up bound). The production boot path supplies
+  a `static Aarch64ArchStorage<1>` and every aarch64 vertical a right-sized
+  `static`. **x86_64 pending** (`MAX_CPUS`): the same `&'static`-slice
+  conversion (plus the `core_classes` table and the `shootdown_page` target
+  buffer), mirroring the riscv64/aarch64 shape. The boxed-slice approach the
+  wasm32 port used is **blocked**
   on bare metal — `extern crate alloc` in a bare-metal arch crate forces
   `alloc` into the dependency graph of every freestanding bin that links it, so
   the deliberately allocator-free Stage-2 QEMU bins (e.g.
@@ -1030,11 +1041,20 @@ and fail-closed (§24.4) — this work must not loosen them.
   instead of `[T; MAX_HARTS]` arrays (no `alloc` in the arch crate; the
   unmapped-slot sentinel is `u64::MAX`), so the handle imposes no CPU ceiling
   and the allocator-free Stage-2 bins are untouched (no ABI change; the host
-  suite + all nine riscv64 verticals construct through the backing). Still
+  suite + all nine riscv64 verticals construct through the backing). The
+  **aarch64 per-arch CPU handle bookkeeping** is also converted: `Aarch64Arch`
+  holds three caller-provided `&'static` slices (the `MPIDR_EL1` affinity map
+  with the `u64::MAX` `NO_MPIDR` sentinel, the host IPI ledger, and the
+  per-core `CoreClass` table) via `Aarch64ArchStorage<N>` instead of
+  `[T; MAX_CPUS]` arrays; `hetcore` became the pure slice-scaling
+  `class_for_capacity` and `classify_from_fdt` does two device-tree passes with
+  no fixed buffer, so the handle imposes no CPU ceiling and the allocator-free
+  Stage-2 bins are untouched (no ABI change; the host suite + all aarch64
+  verticals + the production boot path construct through the backing). Still
   remaining: the growable kernel stack arena (grow *past* the policy size on
   genuine exhaustion by chaining a fresh, independently block-split arena
-  rather than failing over to `BoxStack`); the **aarch64/x86_64** per-CPU
-  handle bookkeeping via the same `&'static`-slice design; and the per-arch
+  rather than failing over to `BoxStack`); the **x86_64** per-CPU handle
+  bookkeeping via the same `&'static`-slice design; and the per-arch
   secondary-bring-up bound, with the §17.2/§4 safety invariants preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`

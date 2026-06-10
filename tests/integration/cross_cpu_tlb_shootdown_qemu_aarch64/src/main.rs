@@ -54,7 +54,7 @@ mod kernel {
 
     use rustos_arch_aarch64::kernel_arch::read_cntfrq;
     use rustos_arch_aarch64::{
-        fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, SERIAL_SINK,
+        fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, CrossCpuTlbShootdown};
     use rustos_log::{log, Event, EventId, Level};
@@ -133,8 +133,15 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_ZERO_FREQ);
         }
 
-        let arch =
-            Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR]);
+        // Per-CPU bookkeeping backing for this two-core vertical
+        // (`AGENTS.md` §24.1).
+        static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(
+            &ARCH_STORAGE,
+            BOOT_CPU,
+            counter_hz,
+            &[BOOT_CPU as u64, SECONDARY_MPIDR],
+        );
 
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);

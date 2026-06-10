@@ -439,7 +439,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // Build the live scheduler over the arch port.
-    let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(BOOT_CPU, counter_hz));
+    // Per-CPU bookkeeping backing for this single-CPU vertical
+    // (`AGENTS.md` §24.1).
+    static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
+        rustos_arch_aarch64::Aarch64ArchStorage::new();
+    let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
+        &ARCH_STORAGE,
+        BOOT_CPU,
+        counter_hz,
+    ));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };

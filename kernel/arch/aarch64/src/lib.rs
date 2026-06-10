@@ -151,7 +151,7 @@ pub mod panic;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod serial;
 
-pub use kernel_arch::Aarch64Arch;
+pub use kernel_arch::{Aarch64Arch, Aarch64ArchStorage};
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use kernel_arch::{enable_fp_el1, halt_current_cpu};

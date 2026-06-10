@@ -139,11 +139,12 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_aarch64::Aarch64Arch;
+    use rustos_arch_aarch64::{Aarch64Arch, Aarch64ArchStorage};
 
     #[test]
     fn bin_arch_delegates_scheduler_arch_to_inner() {
-        let bin = Aarch64BinArch::new(Aarch64Arch::new(2, 1_000));
+        static S: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+        let bin = Aarch64BinArch::new(Aarch64Arch::new(&S, 2, 1_000));
         assert_eq!(bin.current_cpu(), 2);
         // The monotonic clock is the inner handle's; two reads are
         // strictly increasing on the host substitute counter.

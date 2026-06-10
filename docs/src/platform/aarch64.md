@@ -941,15 +941,18 @@ leaf, Arm advertises per-core capacity in the device tree: each
 shared reader's `rustos_fdt::Fdt::each_cpu` (one device-tree parser,
 §2.2), maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
 `CpuId` through the same affinity map `current_cpu`/`send_ipi` use, and
-classifies the collected ratings with the pure
-`kernel/arch/aarch64::hetcore::classify_by_capacity`: the highest rating
+classifies each core's rating against the machine's peak with the pure
+`kernel/arch/aarch64::hetcore::class_for_capacity`: the highest rating
 present is the performance tier, and any core rated strictly below it is
-an efficiency core. A homogeneous machine — every rating equal, no
-ratings at all, or a malformed tree — leaves every core a performance
-core, the safe Arch HAL default; a core with no advertised rating is
-never guessed down. The classified table is read back through the
-`core_class` override, which returns the performance default for an
-out-of-range `CpuId` (totality, never a panic).
+an efficiency core. Two device-tree passes (find the peak, then classify)
+carry no fixed-size buffer, so the classification scales to the
+caller-sized per-CPU table rather than a `MAX_CPUS` ceiling (`AGENTS.md`
+§24.1). A homogeneous machine — every rating equal, no ratings at all, or
+a malformed tree — leaves every core a performance core, the safe Arch HAL
+default; a core with no advertised rating is never guessed down. The
+classified table is read back through the `core_class` override, which
+returns the performance default for an out-of-range `CpuId` (totality,
+never a panic).
 
 The classifier is pure and host-tested (`hetcore`'s unit tests), and the
 device-tree read is host-tested against the shared `rustos_fdt::fixture`

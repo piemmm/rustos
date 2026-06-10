@@ -19,7 +19,7 @@ use rustos_arch_aarch64::paging::{
 use rustos_arch_aarch64::userentry::UserMode;
 use rustos_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
-    SERIAL_SINK,
+    Aarch64ArchStorage, SERIAL_SINK,
 };
 use rustos_arch_api::{CpuId, EnterUser};
 use rustos_bumpalloc::BumpAllocator;
@@ -411,15 +411,22 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Build the live scheduler and the process-wait producer, leaking both
     // `'static` so the dispatch callback can reach them.
-    let arch = Arc::new(Aarch64Arch::new(BOOT_CPU, counter_hz));
+    // Per-CPU bookkeeping backing for this single-CPU vertical
+    // (`AGENTS.md` §24.1).
+    static SCHED_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+    let arch = Arc::new(Aarch64Arch::new(&SCHED_STORAGE, BOOT_CPU, counter_hz));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
     let sched: &'static Scheduler<Aarch64Arch> = Box::leak(Box::new(sched));
     *SCHED.lock() = Some(sched);
 
-    let producer_arch: &'static Aarch64Arch =
-        Box::leak(Box::new(Aarch64Arch::new(BOOT_CPU, counter_hz)));
+    static PRODUCER_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+    let producer_arch: &'static Aarch64Arch = Box::leak(Box::new(Aarch64Arch::new(
+        &PRODUCER_STORAGE,
+        BOOT_CPU,
+        counter_hz,
+    )));
     let producer: &'static KernelProcessWait<Aarch64Arch> =
         Box::leak(Box::new(KernelProcessWait::new(producer_arch)));
     *PRODUCER.lock() = Some(producer);

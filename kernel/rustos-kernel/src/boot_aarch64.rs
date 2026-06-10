@@ -53,6 +53,7 @@ use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
 use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool};
 use rustos_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, Aarch64Arch,
+    Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -221,7 +222,12 @@ pub fn boot(
     // override when present, else the `CNTFRQ_EL0` register value
     // (`discovered.timer_hz`).
     let counter_hz = discovered.timer_hz;
-    let arch = Aarch64Arch::new(BOOT_CPU, counter_hz);
+    // Per-CPU bookkeeping backing (`AGENTS.md` §24.1): the boot/timer
+    // slice brings up only the boot core, so one slot suffices today;
+    // sizing this from the discovered CPU count is the SMP-bring-up
+    // increment that also resizes the `smp.s` secondary-stack pool.
+    static ARCH_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+    let arch = Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz);
     // Install the PSCI conduit discovered from the firmware tree (`hvc`
     // at EL2-hosted, `smc` at EL3-hosted — the Pi 4's `armstub8.bin`
     // exposes `smc`), so the SMP bring-up that follows (`plans/PI.md` P5)

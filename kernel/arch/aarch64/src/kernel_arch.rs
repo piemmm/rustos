@@ -42,10 +42,81 @@ use rustos_arch_api::{
 
 use crate::fdt::PsciMethod;
 
-/// Maximum number of logical CPUs the per-CPU accounting arrays cover.
-/// The boot/timer slice brings up one; the bound is headroom for the
-/// SMP follow-up and keeps the host IPI ledger fixed-size.
+/// Maximum number of logical CPUs the *secondary-bring-up* path covers
+/// (the `smp.s` secondary-stack pool, [`crate::smp::is_valid_cpu`], and
+/// the per-CPU `preempt` timer statics).
+///
+/// This is **not** a ceiling on the per-CPU accounting tables in
+/// [`Aarch64Arch`]: those are borrowed from a caller-provided
+/// [`Aarch64ArchStorage`] sized to the machine (`AGENTS.md` §24.1).
+/// Sizing the SMP-bring-up pool itself from §18 discovery is a separate
+/// later increment (an SMP-bring-up redesign, not a bookkeeping resize).
 pub const MAX_CPUS: usize = 8;
+
+/// Sentinel stored in an [`Aarch64ArchStorage::cpu_to_mpidr`] slot that
+/// no CPU maps to — the encoded `None` (`AGENTS.md` §2.9 — an unmapped
+/// slot is unambiguously absent, never a guessed affinity).
+///
+/// A real `MPIDR_EL1` affinity can never be `u64::MAX`: bits `[63:40]`
+/// are `RES0` (Arm ARM, `MPIDR_EL1`), so an all-ones value never
+/// collides with a populated entry.
+const NO_MPIDR: u64 = u64::MAX;
+
+/// Caller-owned, `&'static` per-CPU backing for an [`Aarch64Arch`]
+/// handle (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the
+/// caller from discovered hardware, never a fixed `const` ceiling baked
+/// into the arch crate).
+///
+/// The const parameter `N` is the number of logical-CPU slots the
+/// constructing caller sizes for its machine: a single-CPU boot path or
+/// vertical uses `Aarch64ArchStorage<1>`, a two-core vertical
+/// `Aarch64ArchStorage<2>`, and a multi-core boot path sizes `N` from the
+/// device-tree CPU count. The arch crate stays allocator-free (`AGENTS.md`
+/// §24.1 watch-out — no `alloc` in a bare-metal arch crate, which would
+/// force a heap into every freestanding bin linking it), so the caller
+/// provides the storage as a `static` (allocator-free bins) or a leaked
+/// allocation (allocator-having callers); [`Aarch64Arch`] borrows it as
+/// `&'static` slices.
+#[derive(Debug)]
+pub struct Aarch64ArchStorage<const N: usize> {
+    /// Forward map: dense `CpuId` index → `MPIDR_EL1` affinity,
+    /// `NO_MPIDR` for an unpopulated slot. Written once by the
+    /// constructor through the shared `&'static` borrow (atomically, so
+    /// no `&'static mut` is needed) and read-only thereafter.
+    cpu_to_mpidr: [AtomicU64; N],
+
+    /// Host-only IPI accounting — incremented on every `send_ipi` with
+    /// an in-range target. Bare-metal builds never touch it.
+    #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
+    host_ipi_count: [AtomicU64; N],
+
+    /// Static [`CoreClass`] of each CPU, indexed by dense [`CpuId`].
+    /// Initialised to [`CoreClass::Performance`] (a homogeneous machine);
+    /// [`Aarch64Arch::classify_from_fdt`] rewrites it from the device
+    /// tree's per-core `capacity-dmips-mhz` ratings at boot.
+    core_classes: [AtomicU8; N],
+}
+
+impl<const N: usize> Aarch64ArchStorage<N> {
+    /// A backing in which every map slot is the `NO_MPIDR` unmapped
+    /// sentinel, every IPI counter is `0`, and every core defaults to
+    /// [`CoreClass::Performance`]. `const` so the allocator-free bins can
+    /// place it in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cpu_to_mpidr: [const { AtomicU64::new(NO_MPIDR) }; N],
+            host_ipi_count: [const { AtomicU64::new(0) }; N],
+            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; N],
+        }
+    }
+}
+
+impl<const N: usize> Default for Aarch64ArchStorage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// aarch64 architecture handle the downstream boot consumer wraps for
 /// `kernel_core::kernel_main`.
@@ -53,28 +124,34 @@ pub const MAX_CPUS: usize = 8;
 /// Stable for the lifetime of the kernel image. The host-only counters
 /// exist solely for deterministic unit tests, mirroring `X86_64Arch` and
 /// `RiscvArch`.
+///
+/// The per-CPU bookkeeping is borrowed from a caller-provided
+/// [`Aarch64ArchStorage`] (`AGENTS.md` §24.1), so the handle itself holds
+/// no fixed-size array and imposes no compile-time CPU ceiling.
 #[derive(Debug)]
 pub struct Aarch64Arch {
     boot_cpu: CpuId,
     timer_hz: u64,
 
     /// Forward map: dense `CpuId` index → `MPIDR_EL1` affinity of that
-    /// CPU. `None` for unpopulated slots. Set once at construction.
-    /// [`SchedulerArch::current_cpu`] reverse-maps the running core's
-    /// affinity through it, and the SMP launcher forward-maps a dense id
-    /// to the MPIDR PSCI `CPU_ON` addresses.
-    cpu_to_mpidr: [Option<u64>; MAX_CPUS],
+    /// CPU, `NO_MPIDR` for unpopulated slots. Borrowed from the
+    /// caller's [`Aarch64ArchStorage`]; its length is the caller's CPU
+    /// count. [`SchedulerArch::current_cpu`] reverse-maps the running
+    /// core's affinity through it, and the SMP launcher forward-maps a
+    /// dense id to the MPIDR PSCI `CPU_ON` addresses.
+    cpu_to_mpidr: &'static [AtomicU64],
 
     /// Host-only IPI accounting — incremented on every `send_ipi` with
     /// an in-range target. Bare-metal builds never touch it.
     #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
-    host_ipi_count: [AtomicU64; MAX_CPUS],
+    host_ipi_count: &'static [AtomicU64],
 
     /// Host-only stray-IPI counter for out-of-range targets.
     #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
     host_stray_ipi: AtomicU64,
 
     /// Static [`CoreClass`] of each CPU, indexed by dense [`CpuId`].
+    /// Borrowed from the caller's [`Aarch64ArchStorage`].
     ///
     /// Initialised to [`CoreClass::Performance`] (a homogeneous machine).
     /// [`Self::classify_from_fdt`] rewrites the table from the device
@@ -83,7 +160,7 @@ pub struct Aarch64Arch {
     /// override so it can place background work on the efficiency cores of
     /// a `big.LITTLE` part (`AGENTS.md` §17.2 — static per-CPU identity
     /// discovered by the arch port).
-    core_classes: [AtomicU8; MAX_CPUS],
+    core_classes: &'static [AtomicU8],
 
     /// PSCI conduit (`hvc`/`smc`) the [`SecondaryBringup`] path calls
     /// firmware through, discovered from the `/psci` device-tree node
@@ -102,43 +179,74 @@ impl Aarch64Arch {
     /// `timer_hz` must be non-zero; the boot pipeline reads it from
     /// `CNTFRQ_EL0` (see `read_cntfrq`) and refuses to boot when it is
     /// zero, so [`Self::monotonic_ns`] never divides by zero.
+    ///
+    /// The per-CPU bookkeeping is borrowed from the caller-provided
+    /// `storage` (`AGENTS.md` §24.1); a single-CPU caller sizes it
+    /// `Aarch64ArchStorage<1>`. Maps `boot_cpu` to an affinity of the
+    /// same numeric value (the boot/timer slice runs the boot core);
+    /// [`Self::with_cpus`] registers a full multi-core map.
     #[must_use]
-    pub fn new(boot_cpu: CpuId, timer_hz: u64) -> Self {
-        let mut cpu_to_mpidr = [None; MAX_CPUS];
-        if (boot_cpu as usize) < MAX_CPUS {
-            // On the `virt` board the boot core's affinity equals its
-            // dense index; `with_cpus` registers a full multi-core map.
-            cpu_to_mpidr[boot_cpu as usize] = Some(u64::from(boot_cpu));
-        }
-        Self::from_map(boot_cpu, timer_hz, cpu_to_mpidr)
+    pub fn new<const N: usize>(
+        storage: &'static Aarch64ArchStorage<N>,
+        boot_cpu: CpuId,
+        timer_hz: u64,
+    ) -> Self {
+        let this = Self::from_storage(boot_cpu, timer_hz, storage);
+        // A slot beyond the caller's `N` cannot be mapped; the handle
+        // then simply has no entry for `boot_cpu` — fail closed, never
+        // panic (`AGENTS.md` §2.9).
+        this.store_mpidr(boot_cpu, u64::from(boot_cpu));
+        this
     }
 
     /// Construct a multi-core handle from a dense `CpuId` → `MPIDR_EL1`
     /// affinity slice (`mpidrs[cpu] == affinity`).
     ///
-    /// Entries beyond [`MAX_CPUS`] are ignored — the secondary-stack pool
-    /// (`crate::smp`) only covers that many cores. `boot_cpu` names the
-    /// dense id of the boot core.
+    /// Entries beyond the caller's storage capacity `N` are ignored — the
+    /// caller sizes `N` to its discovered core count (`AGENTS.md` §24.1).
+    /// `boot_cpu` names the dense id of the boot core.
     #[must_use]
-    pub fn with_cpus(boot_cpu: CpuId, timer_hz: u64, mpidrs: &[u64]) -> Self {
-        let mut cpu_to_mpidr = [None; MAX_CPUS];
-        let mut cpu = 0;
-        while cpu < mpidrs.len() && cpu < MAX_CPUS {
-            cpu_to_mpidr[cpu] = Some(mpidrs[cpu]);
-            cpu += 1;
+    pub fn with_cpus<const N: usize>(
+        storage: &'static Aarch64ArchStorage<N>,
+        boot_cpu: CpuId,
+        timer_hz: u64,
+        mpidrs: &[u64],
+    ) -> Self {
+        let this = Self::from_storage(boot_cpu, timer_hz, storage);
+        for (cpu, &mpidr) in mpidrs.iter().enumerate() {
+            if let Ok(cpu) = CpuId::try_from(cpu) {
+                this.store_mpidr(cpu, mpidr);
+            }
         }
-        Self::from_map(boot_cpu, timer_hz, cpu_to_mpidr)
+        this
     }
 
-    fn from_map(boot_cpu: CpuId, timer_hz: u64, cpu_to_mpidr: [Option<u64>; MAX_CPUS]) -> Self {
+    fn from_storage<const N: usize>(
+        boot_cpu: CpuId,
+        timer_hz: u64,
+        storage: &'static Aarch64ArchStorage<N>,
+    ) -> Self {
         Self {
             boot_cpu,
             timer_hz,
-            cpu_to_mpidr,
-            host_ipi_count: [const { AtomicU64::new(0) }; MAX_CPUS],
+            cpu_to_mpidr: &storage.cpu_to_mpidr,
+            host_ipi_count: &storage.host_ipi_count,
             host_stray_ipi: AtomicU64::new(0),
-            core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; MAX_CPUS],
+            core_classes: &storage.core_classes,
             psci_method: None,
+        }
+    }
+
+    /// Populate dense `cpu`'s map slot with `mpidr`. An out-of-range
+    /// `cpu` (beyond the caller-sized capacity) is silently ignored, so a
+    /// sparse or undersized storage cannot corrupt memory (`AGENTS.md`
+    /// §5.4 — fail closed). Called only at construction.
+    fn store_mpidr(&self, cpu: CpuId, mpidr: u64) {
+        if let Some(slot) = usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.cpu_to_mpidr.get(idx))
+        {
+            slot.store(mpidr, Ordering::Relaxed);
         }
     }
 
@@ -164,9 +272,10 @@ impl Aarch64Arch {
 
     /// Record the [`CoreClass`] discovered for dense `cpu`.
     ///
-    /// An out-of-range `cpu` is ignored — the table is bounded to
-    /// [`MAX_CPUS`], so a stray call cannot corrupt memory (`AGENTS.md`
-    /// §5.4 fail-closed). Mirrors `X86_64Arch::record_core_class`.
+    /// An out-of-range `cpu` is ignored — the table is bounded to the
+    /// caller-sized [`Aarch64ArchStorage`] length, so a stray call cannot
+    /// corrupt memory (`AGENTS.md` §5.4 fail-closed). Mirrors
+    /// `X86_64Arch::record_core_class`.
     pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
         if let Some(slot) = usize::try_from(cpu)
             .ok()
@@ -180,35 +289,44 @@ impl Aarch64Arch {
     ///
     /// Walks every `/cpus/cpu@*` node (via [`rustos_fdt::Fdt::each_cpu`]),
     /// maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
-    /// [`CpuId`] through this handle's affinity map, and classifies the
-    /// collected `capacity-dmips-mhz` ratings with
-    /// [`crate::hetcore::classify_by_capacity`]. A malformed tree, or a
+    /// [`CpuId`] through this handle's affinity map, and classifies each
+    /// core's `capacity-dmips-mhz` rating against the peak rating with
+    /// [`crate::hetcore::class_for_capacity`]. A malformed tree, or a
     /// CPU node whose affinity is not in the map, leaves that core at the
     /// [`CoreClass::Performance`] default rather than guessing
     /// (`AGENTS.md` §2.9 — fail conservative). The downstream boot
     /// consumer calls this once on the boot core after building the
     /// affinity map.
+    ///
+    /// Two device-tree passes (find the peak, then classify) carry no
+    /// fixed-size buffer, so the classification scales to the caller's
+    /// storage length (`AGENTS.md` §24.1) rather than a `MAX_CPUS`
+    /// ceiling.
     pub fn classify_from_fdt(&self, fdt: &crate::fdt::Fdt<'_>) {
-        let mut capacities: [Option<u64>; MAX_CPUS] = [None; MAX_CPUS];
-        // A malformed tree yields the all-`None` homogeneous default.
+        // Reset to the homogeneous default so a re-classification leaves
+        // no stale efficiency class behind (idempotent, `AGENTS.md` §2.9).
+        for slot in self.core_classes {
+            slot.store(CoreClass::Performance.as_u8(), Ordering::Relaxed);
+        }
+        // Pass 1: the peak capacity over every CPU node whose affinity
+        // maps to an in-range dense id. A malformed tree yields no peak
+        // (the homogeneous default).
+        let mut peak: Option<u64> = None;
         let _ = fdt.each_cpu(|mpidr, capacity| {
-            if let Some(idx) = self
-                .cpu_for_mpidr(mpidr)
-                .and_then(|cpu| usize::try_from(cpu).ok())
-            {
-                if let Some(slot) = capacities.get_mut(idx) {
-                    *slot = capacity;
+            if let (Some(cap), Some(_)) = (capacity, self.cpu_for_mpidr(mpidr)) {
+                peak = Some(peak.map_or(cap, |p| p.max(cap)));
+            }
+        });
+        // Pass 2: a core rated strictly below the peak is an efficiency
+        // core; a peak-rated or unrated core stays the performance
+        // default already stored above.
+        let _ = fdt.each_cpu(|mpidr, capacity| {
+            if let Some(cpu) = self.cpu_for_mpidr(mpidr) {
+                if crate::hetcore::class_for_capacity(capacity, peak).is_efficiency() {
+                    self.record_core_class(cpu, CoreClass::Efficiency);
                 }
             }
         });
-        for (idx, class) in crate::hetcore::classify_by_capacity(&capacities)
-            .into_iter()
-            .enumerate()
-        {
-            if let Ok(cpu) = CpuId::try_from(idx) {
-                self.record_core_class(cpu, class);
-            }
-        }
     }
 
     /// `MPIDR_EL1` affinity mapped to dense `cpu`, or `None` for an
@@ -216,22 +334,25 @@ impl Aarch64Arch {
     #[must_use]
     pub fn mpidr_of(&self, cpu: CpuId) -> Option<u64> {
         let idx = usize::try_from(cpu).ok()?;
-        self.cpu_to_mpidr.get(idx).copied().flatten()
+        match self.cpu_to_mpidr.get(idx)?.load(Ordering::Relaxed) {
+            NO_MPIDR => None,
+            raw => Some(raw),
+        }
     }
 
     /// Dense `CpuId` whose mapped affinity is `mpidr`, or `None` if no
     /// CPU maps to it.
     #[must_use]
     pub fn cpu_for_mpidr(&self, mpidr: u64) -> Option<CpuId> {
-        let mut cpu = 0;
-        while cpu < MAX_CPUS {
-            if self.cpu_to_mpidr[cpu] == Some(mpidr) {
-                #[allow(clippy::cast_possible_truncation)]
-                return Some(cpu as CpuId);
-            }
-            cpu += 1;
+        // The all-ones sentinel (`NO_MPIDR`) is never a real affinity
+        // (MPIDR_EL1[63:40] are RES0), so it matches no populated slot.
+        if mpidr == NO_MPIDR {
+            return None;
         }
-        None
+        self.cpu_to_mpidr
+            .iter()
+            .position(|slot| slot.load(Ordering::Relaxed) == mpidr)
+            .and_then(|cpu| u32::try_from(cpu).ok())
     }
 
     /// The counter frequency this handle converts against.
@@ -244,11 +365,10 @@ impl Aarch64Arch {
     #[must_use]
     #[cfg(any(test, not(target_os = "none")))]
     pub fn host_ipi_count(&self, target: CpuId) -> u64 {
-        let idx = match usize::try_from(target) {
-            Ok(i) if i < MAX_CPUS => i,
-            _ => return 0,
-        };
-        self.host_ipi_count[idx].load(Ordering::Relaxed)
+        usize::try_from(target)
+            .ok()
+            .and_then(|idx| self.host_ipi_count.get(idx))
+            .map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
     /// Host-test accessor: IPIs whose target was out of range.
@@ -310,7 +430,11 @@ impl SchedulerArch for Aarch64Arch {
     }
 
     fn send_ipi(&self, target: CpuId) {
-        if usize::try_from(target).map_or(true, |i| i >= MAX_CPUS) {
+        // Bound by the caller-sized CPU count, not a fixed ceiling
+        // (`AGENTS.md` §24.1). An out-of-range target is dropped rather
+        // than panicking — `send_ipi` is best-effort, and strays are
+        // recorded for host tests.
+        if usize::try_from(target).map_or(true, |i| i >= self.cpu_to_mpidr.len()) {
             #[cfg(any(test, not(target_os = "none")))]
             self.host_stray_ipi.fetch_add(1, Ordering::Relaxed);
             return;
@@ -326,7 +450,14 @@ impl SchedulerArch for Aarch64Arch {
 
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
-            self.host_ipi_count[target as usize].fetch_add(1, Ordering::Relaxed);
+            // The range check above proved the index is in the
+            // same-length ledger; `get` keeps the access total.
+            if let Some(counter) = usize::try_from(target)
+                .ok()
+                .and_then(|idx| self.host_ipi_count.get(idx))
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -531,7 +662,8 @@ mod tests {
         // Host `read_cntpct` increments by one per call; with a 1 GHz
         // frequency one tick is one nanosecond, so successive reads are
         // strictly increasing and scale by the frequency.
-        let arch = Aarch64Arch::new(0, 1_000_000_000);
+        static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 0, 1_000_000_000);
         let a = arch.monotonic_ns();
         let b = arch.monotonic_ns();
         assert!(b > a, "clock must be monotonically increasing");
@@ -539,32 +671,37 @@ mod tests {
 
     #[test]
     fn zero_frequency_does_not_divide_by_zero() {
-        let arch = Aarch64Arch::new(0, 0);
+        static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 0, 0);
         // Must not panic; `max(1)` guards the divide.
         let _ = arch.monotonic_ns();
     }
 
     #[test]
     fn current_cpu_reports_the_boot_cpu_on_host() {
-        let arch = Aarch64Arch::new(3, 1_000);
+        static S: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 3, 1_000);
         assert_eq!(arch.current_cpu(), 3);
     }
 
     #[test]
     fn send_ipi_counts_in_range_targets_and_strays() {
-        let arch = Aarch64Arch::new(0, 1_000);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 0, 1_000);
         arch.send_ipi(1);
         arch.send_ipi(1);
         assert_eq!(arch.host_ipi_count(1), 2);
-        // Out-of-range target is recorded as a stray, never panics.
-        arch.send_ipi(u32::try_from(MAX_CPUS).unwrap());
+        // A target beyond the caller-sized CPU count is recorded as a
+        // stray, never panics.
+        arch.send_ipi(2);
         assert_eq!(arch.host_stray_ipi_count(), 1);
     }
 
     #[test]
     fn with_cpus_round_trips_the_mpidr_map_both_ways() {
         // A two-core `virt` board: dense CpuId 0/1 → affinity 0/1.
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]);
         assert_eq!(arch.mpidr_of(0), Some(0));
         assert_eq!(arch.mpidr_of(1), Some(1));
         assert_eq!(arch.cpu_for_mpidr(0), Some(0));
@@ -578,14 +715,16 @@ mod tests {
     fn with_cpus_supports_a_sparse_affinity_layout() {
         // Affinity need not equal the dense index (a clustered MPIDR):
         // dense 1 maps to affinity 0x100 (Aff1 = 1).
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x000, 0x100]);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0x000, 0x100]);
         assert_eq!(arch.mpidr_of(1), Some(0x100));
         assert_eq!(arch.cpu_for_mpidr(0x100), Some(1));
     }
 
     #[test]
     fn new_maps_the_boot_cpu_to_its_own_affinity() {
-        let arch = Aarch64Arch::new(0, 1_000);
+        static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 0, 1_000);
         assert_eq!(arch.mpidr_of(0), Some(0));
         assert_eq!(arch.cpu_for_mpidr(0), Some(0));
     }
@@ -594,7 +733,8 @@ mod tests {
     fn core_class_defaults_to_performance_before_discovery() {
         // No FDT discovery has run: every CPU, and any out-of-range id,
         // is the safe homogeneous default.
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]);
         assert_eq!(arch.core_class(0), CoreClass::Performance);
         assert_eq!(arch.core_class(1), CoreClass::Performance);
         assert_eq!(arch.core_class(CpuId::MAX), CoreClass::Performance);
@@ -605,7 +745,8 @@ mod tests {
         // A 2+2 big.LITTLE `virt`-shaped tree: affinities 0/1 are the big
         // cores (cap 1024), 0x100/0x101 the LITTLE cores (cap 512). The
         // affinity map places them at dense ids 0..=3.
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x0, 0x1, 0x100, 0x101]);
+        static S: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0x0, 0x1, 0x100, 0x101]);
         let blob = rustos_fdt::fixture::arm_with_cpus(
             0x4000_0000,
             0x2000_0000,
@@ -630,7 +771,8 @@ mod tests {
     fn classify_from_fdt_is_homogeneous_without_capacities() {
         // A tree whose cpu nodes advertise no capacity leaves every core
         // a performance core (a homogeneous machine).
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0x0, 0x1]);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0x0, 0x1]);
         let blob = rustos_fdt::fixture::arm_with_cpus(
             0x4000_0000,
             0x2000_0000,
@@ -650,7 +792,8 @@ mod tests {
     /// proven by `cross_cpu_tlb_shootdown_qemu_aarch64`.
     #[test]
     fn passes_cross_cpu_tlb_shootdown_conformance() {
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]);
         rustos_arch_api::xtlb::conformance::run_all(&arch, 64u64 << 30);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
         rustos_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
@@ -664,7 +807,8 @@ mod tests {
     /// (`ipi_smp_qemu_aarch64`, `cross_cpu_tlb_shootdown_qemu_aarch64`).
     #[test]
     fn passes_secondary_bringup_conformance() {
-        let arch = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+        static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
         rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
         let erased: &dyn SecondaryBringup = &arch;
         rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
@@ -680,9 +824,11 @@ mod tests {
     fn start_secondary_fails_closed_on_unstartable_ids_and_missing_conduit() {
         // SAFETY: every call below is refused before any PSCI action, so
         // the test takes no platform action and touches no shared global.
+        static WITH: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        static WITHOUT: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         unsafe {
             let with_conduit =
-                Aarch64Arch::with_cpus(0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
+                Aarch64Arch::with_cpus(&WITH, 0, 1_000, &[0, 1]).with_psci_method(PsciMethod::Hvc);
             // Boot core: already running.
             assert_eq!(with_conduit.start_secondary(0), Err(SmpError::InvalidCpu));
             // Unmapped dense id.
@@ -693,7 +839,7 @@ mod tests {
             );
             // A mapped secondary on a handle with no PSCI conduit is
             // refused as not-ready, before any firmware call.
-            let no_conduit = Aarch64Arch::with_cpus(0, 1_000, &[0, 1]);
+            let no_conduit = Aarch64Arch::with_cpus(&WITHOUT, 0, 1_000, &[0, 1]);
             assert_eq!(no_conduit.start_secondary(1), Err(SmpError::NotReady));
         }
     }
@@ -704,7 +850,8 @@ mod tests {
     /// (`plans/WIRING.md` Stage W0 / W2).
     #[test]
     fn passes_arch_hal_conformance_suite() {
-        let arch = Aarch64Arch::new(0, 1_000);
+        static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::new(&S, 0, 1_000);
         let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
         let discovery = crate::platform::FdtDiscovery::new(fdt);

@@ -646,15 +646,16 @@ stricter `is_release_ready` gate rejects any `Pending`.
   `arm_with_cpus` `big.LITTLE` fixture. One device-tree parser, shared
   by every arch (§2.2); host-tested.
 - **Pure classifier (`kernel/arch/aarch64::hetcore`).**
-  `classify_by_capacity` maps the highest advertised rating to the
-  performance tier and any core strictly below it to efficiency;
-  homogeneous (equal / absent ratings) and a missing rating fail
-  conservative to performance (§2.9). Pure and host-tested.
-- **Port wiring (`Aarch64Arch`).** A per-CPU `core_classes` table
-  (mirroring `X86_64Arch`), `record_core_class`, `classify_from_fdt`
-  (maps each cpu node's affinity to a dense `CpuId` and records the
-  classified table), and the `core_class` override (out-of-range →
-  performance, never a panic). The boot consumer calls
+  `class_for_capacity` maps a core at the peak advertised rating (or with
+  no rating) to performance and any core strictly below the peak to
+  efficiency; homogeneous (equal / absent ratings) and a missing rating
+  fail conservative to performance (§2.9). Pure and host-tested.
+- **Port wiring (`Aarch64Arch`).** A caller-sized per-CPU `core_classes`
+  table borrowed from `Aarch64ArchStorage<N>` (§24.1, no `MAX_CPUS`
+  ceiling), `record_core_class`, `classify_from_fdt` (two device-tree
+  passes — find the peak, then classify each cpu node's affinity to a
+  dense `CpuId` — no fixed buffer), and the `core_class` override
+  (out-of-range → performance, never a panic). The boot consumer calls
   `classify_from_fdt` once on the boot core.
 - **Deliverable met:** aarch64 reports asymmetric cores where present
   (`classify_from_fdt_reports_big_little_cores`) and the homogeneous

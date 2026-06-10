@@ -308,10 +308,27 @@ secondary-stack pools — the secondary-bring-up item below). The host suite and
 all nine riscv64 QEMU verticals (single- and two-hart) construct through the
 new backing.
 
-**aarch64 (`Aarch64Arch`) and x86_64 (`X86_64Arch`) — pending.** The same
-`&'static`-slice conversion (plus the `core_classes` table and, on x86_64, the
-`shootdown_page` target buffer) is the next L3b increment, mirroring the
-riscv64 shape.
+**aarch64 (`Aarch64Arch`) — done.** `Aarch64Arch` no longer holds
+`[T; MAX_CPUS]` arrays; it borrows three `&'static` slices — the dense-`CpuId`
+→ `MPIDR_EL1` affinity map (`&[AtomicU64]`), the host-only IPI ledger
+(`&[AtomicU64]`), and the per-core `CoreClass` table (`&[AtomicU8]`) — from a
+caller-provided `Aarch64ArchStorage<N>` backing, exactly as riscv64 borrows
+from `RiscvArchStorage<N>`. The affinity map encodes an unpopulated slot as the
+`u64::MAX` (`NO_MPIDR`) sentinel — a real `MPIDR_EL1` affinity can never be all
+ones, since bits `[63:40]` are `RES0` — and the constructor populates the map
+through the shared borrow with atomic stores. Every per-slot access is
+bounds-checked against the slice length, `send_ipi` bounds its target by the
+slice length, and `classify_from_fdt` finds the peak rating and classifies each
+core in two device-tree passes (the pure `hetcore::class_for_capacity`) with no
+fixed-size buffer, so there is no `MAX_CPUS` ceiling in the handle (`MAX_CPUS`
+survives only for the `smp.s` secondary-stack pool and the per-CPU `preempt`
+statics — the secondary-bring-up item below). The production boot path supplies
+a `static Aarch64ArchStorage<1>` (the boot slice brings up the boot core only)
+and every aarch64 QEMU vertical constructs through a right-sized `static`.
+
+**x86_64 (`X86_64Arch`) — pending.** The same `&'static`-slice conversion
+(plus the `core_classes` table and the `shootdown_page` target buffer) is the
+next L3b increment, mirroring the riscv64/aarch64 shape.
 
 ## Status
 
@@ -337,13 +354,14 @@ riscv64 shape.
   spawn fan-out (`MAX_SPAWNS`) is now an allocator-backed grow-on-demand
   capacity on both production producers (see *Spawn page-table capacity*
   above), the **wasm32** per-CPU handle bookkeeping is now
-  discovered-count-sized, and the **riscv64** per-CPU handle bookkeeping is now
-  a caller-provided `&'static`-slice capacity via `RiscvArchStorage<N>` (see
-  *Per-arch CPU/hart handle bookkeeping* above). Still planned: growing the
-  kthread-stack arena *past* its policy size on genuine exhaustion (chaining a
-  fresh, independently block-split arena rather than failing over to a
-  `BoxStack`); the **aarch64 and x86_64** per-CPU handle bookkeeping via the
-  same no-`alloc` caller-provided-`&'static` design (riscv64 is done); and the
+  discovered-count-sized, and the **riscv64** and **aarch64** per-CPU handle
+  bookkeeping are now caller-provided `&'static`-slice capacities via
+  `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` (see *Per-arch CPU/hart handle
+  bookkeeping* above). Still planned: growing the kthread-stack arena *past* its
+  policy size on genuine exhaustion (chaining a fresh, independently
+  block-split arena rather than failing over to a `BoxStack`); the **x86_64**
+  per-CPU handle bookkeeping via the same no-`alloc`
+  caller-provided-`&'static` design (riscv64 and aarch64 are done); and the
   per-arch **secondary-bring-up** bound (the `smp.s` secondary-stack pools and
   per-CPU `static` storage), preserving the §17.2 break-before-make and §4
   guard-page invariants.

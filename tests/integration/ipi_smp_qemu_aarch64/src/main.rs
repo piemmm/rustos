@@ -80,7 +80,7 @@ mod kernel {
     use rustos_arch_aarch64::kernel_arch::read_cntfrq;
     use rustos_arch_aarch64::{
         exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp, Aarch64Arch,
-        SERIAL_SINK,
+        Aarch64ArchStorage, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use rustos_fdt::Fdt;
@@ -234,9 +234,16 @@ mod kernel {
         // targets the right GICv2 CPU interface. Install the *discovered*
         // PSCI conduit so the `SecondaryBringup` HAL trait issues `CPU_ON`
         // over the conduit read from the tree (`plans/PI.md` P5).
-        let arch =
-            Aarch64Arch::with_cpus(BOOT_CPU, counter_hz, &[BOOT_CPU as u64, SECONDARY_MPIDR])
-                .with_psci_method(psci_method);
+        // Per-CPU bookkeeping backing for this two-core vertical
+        // (`AGENTS.md` §24.1).
+        static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
+        let arch = Aarch64Arch::with_cpus(
+            &ARCH_STORAGE,
+            BOOT_CPU,
+            counter_hz,
+            &[BOOT_CPU as u64, SECONDARY_MPIDR],
+        )
+        .with_psci_method(psci_method);
 
         // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
         // the runtime base, then read the GICD/GICC bases from the
