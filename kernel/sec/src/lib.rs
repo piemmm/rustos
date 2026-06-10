@@ -58,7 +58,7 @@ pub use captable::{CapTable, TaskCapabilities, TaskId};
 pub use dma::{alloc_dma, free_dma, DmaGateError};
 pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
-    MAX_SUPPLEMENTARY_GROUPS,
+    DEFAULT_MAX_SUPPLEMENTARY_GROUPS,
 };
 pub use manifest::{is_known_capability, verify_manifest, VerifiedManifest};
 pub use mmio::{map_mmio, unmap_mmio, MmioGateError};

@@ -27,11 +27,22 @@ The builder verifies, in one pass, that:
 | No two users share a `uid`             | `Errno::BadMagic`      |
 | No two groups share a `gid`            | `Errno::BadMagic`      |
 | Every referenced group exists          | `Errno::NotFound`      |
-| `supplementary_gids.len() ≤ MAX_SUPPLEMENTARY_GROUPS` | `Errno::LengthOutOfRange` |
+| `supplementary_gids.len() ≤` the builder's effective ceiling | `Errno::LengthOutOfRange` |
 
 Loading an on-disk record set is the responsibility of userland (see
 `AGENTS.md` §5.1); `kernel/sec` accepts already-parsed records and
 freezes them.
+
+The supplementary-group ceiling is a *capacity*, not a hard-wired
+constant (`AGENTS.md` §24.1). A fresh `IdentityTableBuilder` starts at the
+`DEFAULT_MAX_SUPPLEMENTARY_GROUPS` default policy (§24.2); a deployment
+that needs larger group sets raises the per-builder ceiling with
+`IdentityTableBuilder::with_supplementary_group_limit`. Lowering the
+ceiling is always free, but raising it above the default requires the
+caller to hold `CAP_RLIMIT_RAISE` (§24.3) and otherwise fails closed with
+`Errno::PermissionDenied`. A candidate record can never raise the ceiling
+itself, so a hostile or corrupted record can never force unbounded kernel
+allocation (§24.4).
 
 ### No ambient authority
 

@@ -17,9 +17,12 @@
 //! * Two group records share the same [`GroupId`].
 //! * A user record's primary or supplementary group reference does not
 //!   resolve to a known [`GroupRecord`].
-//! * A user record's supplementary-group set exceeds
-//!   [`MAX_SUPPLEMENTARY_GROUPS`] entries (a hostile or corrupted record
-//!   must never force unbounded kernel allocation).
+//! * A user record's supplementary-group set exceeds the builder's
+//!   effective ceiling — [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`] entries
+//!   unless a [`CapabilityId::RLIMIT_RAISE`] holder raised it via
+//!   [`IdentityTableBuilder::with_supplementary_group_limit`] (a hostile
+//!   or corrupted record can never grow the ceiling itself, so it can
+//!   never force unbounded kernel allocation — `AGENTS.md` §24.1/§24.4).
 //!
 //! # No ambient authority
 //!
@@ -33,20 +36,25 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 
-/// Maximum number of supplementary groups a single user record may carry.
+/// Default ceiling on the number of supplementary groups a single user
+/// record may carry.
 ///
-/// Bounded so the table is `O(users × MAX_SUPPLEMENTARY_GROUPS)` and
-/// never grows in response to a hostile on-disk record. Matches the
-/// hard ceiling enforced by POSIX `NGROUPS_MAX` on long-standing Unix
-/// kernels; if a deployment outgrows it, raising the bound is a
-/// reviewed change here, not a per-call workaround.
-pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
+/// This is the §24.2 *default policy*, not a hard-wired ceiling: it bounds
+/// the table at `O(users × DEFAULT_MAX_SUPPLEMENTARY_GROUPS)` for an
+/// unconfigured builder and is generous for both desktop and server
+/// (it matches POSIX `NGROUPS_MAX` on long-standing Unix kernels). A
+/// deployment that genuinely needs more raises the per-builder ceiling at
+/// runtime through [`IdentityTableBuilder::with_supplementary_group_limit`],
+/// gated on [`CapabilityId::RLIMIT_RAISE`] (`AGENTS.md` §24.1/§24.3) — a
+/// hostile on-disk record can never raise it, so the anti-DoS bound is
+/// preserved (§24.4).
+pub const DEFAULT_MAX_SUPPLEMENTARY_GROUPS: usize = 32;
 
 /// Numeric user identifier.
 ///
@@ -75,7 +83,7 @@ pub struct UserRecord {
     /// Primary group this user is a member of.
     pub primary_gid: GroupId,
     /// Supplementary groups the user is a member of. Bounded length;
-    /// see [`MAX_SUPPLEMENTARY_GROUPS`].
+    /// see [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`].
     pub supplementary_gids: Vec<GroupId>,
     /// The maximum capability set this user may ever exercise. Per
     /// `AGENTS.md` §5.2, a task's effective set is the intersection of
@@ -156,20 +164,73 @@ impl IdentityTable {
 /// Verification is the single point where every invariant from the
 /// module docs is enforced; once it returns `Ok`, no further mutation is
 /// possible.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct IdentityTableBuilder {
     users: Vec<UserRecord>,
     groups: Vec<GroupRecord>,
+    /// Effective ceiling on any user's supplementary-group set. Starts at
+    /// the §24.2 default policy [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`] and is
+    /// only raised by a [`CapabilityId::RLIMIT_RAISE`] holder through
+    /// [`Self::with_supplementary_group_limit`]; the candidate records
+    /// themselves can never widen it (`AGENTS.md` §24.4).
+    max_supplementary_groups: usize,
+}
+
+impl Default for IdentityTableBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IdentityTableBuilder {
-    /// Create an empty builder.
+    /// Create an empty builder with the default supplementary-group
+    /// ceiling ([`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`]).
     #[must_use]
     pub fn new() -> Self {
         Self {
             users: Vec::new(),
             groups: Vec::new(),
+            max_supplementary_groups: DEFAULT_MAX_SUPPLEMENTARY_GROUPS,
         }
+    }
+
+    /// Set this builder's supplementary-group ceiling.
+    ///
+    /// Lowering the ceiling to or below the [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`]
+    /// default needs no privilege (a principal may always tighten its own
+    /// limit — `AGENTS.md` §24.3). Raising it *above* the default grows the
+    /// capacity and therefore requires `authority` to hold
+    /// [`CapabilityId::RLIMIT_RAISE`] (§24.1/§24.3); without it the call
+    /// fails closed and the builder's ceiling is left unchanged
+    /// (`AGENTS.md` §5.4).
+    ///
+    /// The ceiling is purely a validation bound on the records pushed by
+    /// the (privileged) identity loader; a candidate record can never
+    /// change it, so the §24.4 anti-DoS guarantee holds regardless of
+    /// `limit`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::PermissionDenied`] — `limit` exceeds
+    ///   [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`] and `authority` does not hold
+    ///   [`CapabilityId::RLIMIT_RAISE`].
+    pub fn with_supplementary_group_limit<Q: CapabilityQuery + ?Sized>(
+        &mut self,
+        limit: usize,
+        authority: &Q,
+    ) -> Result<(), Errno> {
+        if limit > DEFAULT_MAX_SUPPLEMENTARY_GROUPS && !authority.holds(CapabilityId::RLIMIT_RAISE)
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        self.max_supplementary_groups = limit;
+        Ok(())
+    }
+
+    /// The builder's current effective supplementary-group ceiling.
+    #[must_use]
+    pub fn supplementary_group_limit(&self) -> usize {
+        self.max_supplementary_groups
     }
 
     /// Append a candidate user record.
@@ -200,7 +261,8 @@ impl IdentityTableBuilder {
     /// * [`Errno::NotFound`] — a user references a `gid` that has no
     ///   matching [`GroupRecord`].
     /// * [`Errno::LengthOutOfRange`] — a user's supplementary-group set
-    ///   exceeds [`MAX_SUPPLEMENTARY_GROUPS`].
+    ///   exceeds the builder's effective ceiling (see
+    ///   [`Self::with_supplementary_group_limit`]).
     pub fn verify<S: Sink + ?Sized>(self, audit: &S) -> Result<IdentityTable, Errno> {
         if let Err(err) = self.check_invariants() {
             // One audit record per failed decision, with the failure
@@ -256,8 +318,9 @@ impl IdentityTableBuilder {
             }
         }
         for u in &self.users {
-            // Supplementary cap.
-            if u.supplementary_gids.len() > MAX_SUPPLEMENTARY_GROUPS {
+            // Supplementary cap — the builder's effective ceiling, which a
+            // candidate record can never raise (`AGENTS.md` §24.4).
+            if u.supplementary_gids.len() > self.max_supplementary_groups {
                 return Err(Errno::LengthOutOfRange);
             }
             // Primary group must exist.
@@ -363,7 +426,104 @@ mod tests {
         let sink = RecordingSink::new();
         let mut b = IdentityTableBuilder::new();
         b.push_group(sample_group(0));
-        let upper = u32::try_from(MAX_SUPPLEMENTARY_GROUPS).expect("fits in u32") + 1;
+        let upper = u32::try_from(DEFAULT_MAX_SUPPLEMENTARY_GROUPS).expect("fits in u32") + 1;
+        for g in 1..=upper {
+            b.push_group(sample_group(g));
+        }
+        let sups: Vec<u32> = (1..=upper).collect();
+        b.push_user(sample_user(1, 0, &sups));
+        assert_eq!(b.verify(&sink), Err(Errno::LengthOutOfRange));
+    }
+
+    /// `CapabilityQuery` double granting exactly one capability.
+    struct Grants(CapabilityId);
+    impl CapabilityQuery for Grants {
+        fn holds(&self, cap: CapabilityId) -> bool {
+            cap == self.0
+        }
+    }
+
+    /// `CapabilityQuery` double granting nothing.
+    struct GrantsNothing;
+    impl CapabilityQuery for GrantsNothing {
+        fn holds(&self, _cap: CapabilityId) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn new_builder_starts_at_the_default_ceiling() {
+        let b = IdentityTableBuilder::new();
+        assert_eq!(
+            b.supplementary_group_limit(),
+            DEFAULT_MAX_SUPPLEMENTARY_GROUPS
+        );
+        // `Default` delegates to `new`, so it carries the same ceiling.
+        assert_eq!(
+            IdentityTableBuilder::default().supplementary_group_limit(),
+            DEFAULT_MAX_SUPPLEMENTARY_GROUPS
+        );
+    }
+
+    #[test]
+    fn lowering_the_ceiling_needs_no_capability() {
+        let mut b = IdentityTableBuilder::new();
+        // Tightening one's own limit is always permitted (§24.3), even
+        // with no granted capability.
+        b.with_supplementary_group_limit(4, &GrantsNothing)
+            .expect("lowering is free");
+        assert_eq!(b.supplementary_group_limit(), 4);
+    }
+
+    #[test]
+    fn raising_the_ceiling_without_the_capability_fails_closed() {
+        let mut b = IdentityTableBuilder::new();
+        let raised = DEFAULT_MAX_SUPPLEMENTARY_GROUPS + 1;
+        // No `CAP_RLIMIT_RAISE` even though another capability is held.
+        assert_eq!(
+            b.with_supplementary_group_limit(raised, &Grants(CapabilityId::USER_ADMIN)),
+            Err(Errno::PermissionDenied)
+        );
+        // The ceiling is left unchanged on a denied raise (§5.4).
+        assert_eq!(
+            b.supplementary_group_limit(),
+            DEFAULT_MAX_SUPPLEMENTARY_GROUPS
+        );
+    }
+
+    #[test]
+    fn a_capable_holder_can_grow_the_ceiling_and_a_larger_record_verifies() {
+        let sink = RecordingSink::new();
+        let mut b = IdentityTableBuilder::new();
+        let raised = DEFAULT_MAX_SUPPLEMENTARY_GROUPS + 8;
+        b.with_supplementary_group_limit(raised, &Grants(CapabilityId::RLIMIT_RAISE))
+            .expect("RLIMIT_RAISE holder may grow the ceiling");
+        assert_eq!(b.supplementary_group_limit(), raised);
+
+        // A record with more than the *default* but within the raised
+        // ceiling now verifies — the capacity grew on demand (§24.1).
+        let upper = u32::try_from(raised).expect("fits in u32");
+        b.push_group(sample_group(0));
+        for g in 1..=upper {
+            b.push_group(sample_group(g));
+        }
+        let sups: Vec<u32> = (1..=upper).collect();
+        b.push_user(sample_user(1, 0, &sups));
+        let table = b.verify(&sink).expect("within the raised ceiling");
+        assert_eq!(table.user_count(), 1);
+    }
+
+    #[test]
+    fn record_beyond_the_raised_ceiling_is_still_rejected() {
+        let sink = RecordingSink::new();
+        let mut b = IdentityTableBuilder::new();
+        let raised = DEFAULT_MAX_SUPPLEMENTARY_GROUPS + 2;
+        b.with_supplementary_group_limit(raised, &Grants(CapabilityId::RLIMIT_RAISE))
+            .expect("holder may grow the ceiling");
+        // One past the raised ceiling: a hostile record still cannot
+        // exceed the effective bound (§24.4).
+        let upper = u32::try_from(raised).expect("fits in u32") + 1;
+        b.push_group(sample_group(0));
         for g in 1..=upper {
             b.push_group(sample_group(g));
         }

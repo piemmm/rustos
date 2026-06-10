@@ -203,6 +203,24 @@ store, so the growth and fail-closed logic is exercised entirely on the host.
 This is a §24.1 sweep conversion (replacing the former fixed `MAX_SPANS = 256`
 array), independent of the kernel-stack arena work.
 
+## Supplementary-group ceiling (capability-raisable)
+
+The number of supplementary groups a single user record may carry
+(`kernel/sec`) is a *capacity*, not a hard-wired ceiling (§24.1). A fresh
+`IdentityTableBuilder` starts at the `DEFAULT_MAX_SUPPLEMENTARY_GROUPS`
+default policy (32, matching POSIX `NGROUPS_MAX`; §24.2), and a deployment
+that genuinely needs larger group sets raises the per-builder ceiling at
+runtime with `IdentityTableBuilder::with_supplementary_group_limit`.
+Lowering the ceiling is always free (a principal may tighten its own limit,
+§24.3); raising it above the default grows the capacity and so requires the
+caller to hold `CAP_RLIMIT_RAISE` (§24.3), otherwise it fails closed with
+`Errno::PermissionDenied` and leaves the ceiling unchanged (§5.4). The
+storage was already a growable `Vec`, so only the fixed ceiling changed.
+Crucially, a candidate record can never raise the ceiling — only a capable
+principal can — so a hostile or corrupted on-disk record can never force
+unbounded kernel allocation: the §24.4 anti-DoS bound is preserved while the
+capacity itself becomes settable.
+
 ## Status
 
 - **L1 — ABI (landed).** `lib/abi` `LimitKind` / `ResourceLimit` /
@@ -222,13 +240,13 @@ array), independent of the kernel-stack arena work.
   2 MiB-rounded). See *Discovered-hardware capacity policies* above.
 - **L3b — growable arena + per-arch arrays (in progress).** The userland-heap
   free-span table is now a grow-on-demand capacity (see *Userland heap
-  free-span table* above), the first §24.1 sweep site converted. Still planned:
-  growing the kthread-stack arena *past* its policy size on genuine exhaustion
-  (chaining a fresh, independently block-split arena rather than failing over to
-  a `BoxStack`), sizing the per-arch CPU/hart arrays from §18 discovery, and the
-  remaining process/identity capacities (`MAX_SUPPLEMENTARY_GROUPS`,
-  `MAX_SPAWNS`), preserving the §17.2 break-before-make and §4 guard-page
-  invariants.
+  free-span table* above), and the `kernel/sec` supplementary-group ceiling is
+  now a capability-raisable capacity (see *Supplementary-group ceiling* above).
+  Still planned: growing the kthread-stack arena *past* its policy size on
+  genuine exhaustion (chaining a fresh, independently block-split arena rather
+  than failing over to a `BoxStack`), sizing the per-arch CPU/hart arrays from
+  §18 discovery, and the remaining spawn fan-out capacity (`MAX_SPAWNS`),
+  preserving the §17.2 break-before-make and §4 guard-page invariants.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
   (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`

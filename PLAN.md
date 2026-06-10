@@ -895,9 +895,9 @@ signature change, so the syscall hash is untouched):
 
 ---
 
-## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table done)]**
+## §24 Resource Limits and Scalability  **[IN PROGRESS — L1+L2+L3a+L4a+L4b landed; L3b in progress (heap span table + supplementary-group ceiling done)]**
 
-**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore`; the kernel stack arena + per-arch arrays remain).** Implements `AGENTS.md` §24: resource *capacities*
+**Status: L1 (ABI) + L2 (kernel enforcement) + L3a (discovered-hardware capacity policies) + L4a (`ulimit` shell command) + L4b (`sysinfo` limits query) landed; L3b in progress (the userland-heap free-span table is now a grow-on-demand `SpanStore` and the `kernel/sec` supplementary-group ceiling is now a `CAP_RLIMIT_RAISE`-gated configurable capacity; the kernel stack arena + per-arch arrays remain).** Implements `AGENTS.md` §24: resource *capacities*
 must scale with discovered hardware (§18.1) and grow on demand, with
 desktop-and-server-sensible defaults and a settable `ulimit`/`rlimit`-equivalent
 — never a hard-wired `const` ceiling. This supersedes the fixed-arena follow-ups
@@ -924,13 +924,17 @@ and fail-closed (§24.4) — this work must not loosen them.
   `kernel/arch/wasm32/src/kernel_arch.rs` (`MAX_WORKERS = 8`): size per-CPU
   storage from §18 discovery with a documented headroom policy, not a hand-
   picked literal.
-- Process/identity capacities — `kernel/sec/src/identity.rs`
-  (`MAX_SUPPLEMENTARY_GROUPS = 32`), spawn fan-out
-  (`spawn_producer*.rs` `MAX_SPAWNS = 8`): convert to grow-or-limit-governed
-  capacities. The userland heap span table (`lib/rt/src/heap.rs`) is **done**
-  (L3b) — the former fixed `MAX_SPANS = 256` array is now a grow-on-demand
-  `SpanStore` (maps a fresh metadata page on exhaustion, fails closed only on
-  genuine OOM).
+- Process/identity capacities — spawn fan-out (`spawn_producer*.rs`
+  `MAX_SPAWNS = 8`): convert to grow-or-limit-governed capacities. **Done**
+  (L3b): the userland heap span table (`lib/rt/src/heap.rs`) — the former
+  fixed `MAX_SPANS = 256` array is now a grow-on-demand `SpanStore` (maps a
+  fresh metadata page on exhaustion, fails closed only on genuine OOM); and
+  the `kernel/sec` supplementary-group ceiling — the former hard-wired
+  `MAX_SUPPLEMENTARY_GROUPS = 32` const is now `DEFAULT_MAX_SUPPLEMENTARY_GROUPS`
+  (the §24.2 default policy) plus a per-builder, `CAP_RLIMIT_RAISE`-gated
+  configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`);
+  the supplementary-group store was already a growable `Vec`, and a candidate
+  record can never raise the ceiling, so the §24.4 anti-DoS bound is preserved.
 - (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
   `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
   all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,
@@ -974,16 +978,22 @@ and fail-closed (§24.4) — this work must not loosen them.
   suite); the existing aarch64 guard verticals continue to prove the
   mechanism on the now-policy-sized arena. Docs in
   `docs/src/architecture/resource-limits.md`.
-- L3b — **in progress.** The userland-heap free-span table is converted: the
-  former fixed `MAX_SPANS = 256` array in `lib/rt/src/heap.rs` is now a
-  grow-on-demand `SpanStore` capacity (§24.1) — it maps a fresh metadata page
-  when the table fills and fails closed only on genuine OOM, with a Vec-backed
-  host store exercising the growth/fail-closed paths (no ABI change). Still
-  remaining: the growable kernel stack arena (grow *past* the policy size on
-  genuine exhaustion by chaining a fresh, independently block-split arena
-  rather than failing over to `BoxStack`), discovered-hardware sizing for the
-  per-arch CPU/hart arrays, and the `MAX_SUPPLEMENTARY_GROUPS` / `MAX_SPAWNS`
-  capacities, with the §17.2/§4 safety invariants preserved.
+- L3b — **in progress.** Two §24.1 sweep sites are converted (no ABI change):
+  the userland-heap free-span table in `lib/rt/src/heap.rs` is now a
+  grow-on-demand `SpanStore` capacity — it maps a fresh metadata page when the
+  table fills and fails closed only on genuine OOM, with a Vec-backed host
+  store exercising the growth/fail-closed paths; and the `kernel/sec`
+  supplementary-group ceiling is now `DEFAULT_MAX_SUPPLEMENTARY_GROUPS` (the
+  §24.2 default policy) plus a per-builder, `CAP_RLIMIT_RAISE`-gated
+  configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`,
+  fail-closed `PermissionDenied`, free to lower), backed by the already-growable
+  `Vec` storage and 5 new host tests, with the §24.4 anti-DoS bound preserved
+  (a record can never raise its own ceiling). Still remaining: the growable
+  kernel stack arena (grow *past* the policy size on genuine exhaustion by
+  chaining a fresh, independently block-split arena rather than failing over to
+  `BoxStack`), discovered-hardware sizing for the per-arch CPU/hart arrays, and
+  the spawn fan-out (`MAX_SPAWNS`) capacity, with the §17.2/§4 safety invariants
+  preserved.
 - L4a — **DONE.** The `ulimit` shell command in the default shell
   (`userland/shell/shell`) over the L1 ABI. A new `rustos_shell::LimitStore`
   seam (`get`/`set`, fail-closed `NullLimitStore` default + `Shell::with_limits`
