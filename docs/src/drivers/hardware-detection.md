@@ -108,8 +108,16 @@ The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
 to load decision.
 
+## Match-key emission
+
+On aarch64 the match keys arrive through the **generic** hardware-tree
+walk in `kernel/arch/aarch64::platform`: every `compatible`-carrying
+device-tree node is emitted with its compatible strings as match keys
+(devicetree most-specific-first order) and its translated `reg` /
+`interrupts` as resource requests — no per-device recognition list
+exists to grow (see [aarch64 platform
+discovery](../platform/aarch64.md#platform-discovery-hardware-tree)).
+
 ## Remaining Stage 4.HW work
 
-Generic match-key emission (replacing the hand-grown list of node
-types `kernel/arch/aarch64/src/fdt.rs` recognises) and the
-hotplug/removal runtime path are tracked in `PLAN.md` Stage 4.HW.
+The hotplug/removal runtime path is tracked in `PLAN.md` Stage 4.HW.

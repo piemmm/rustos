@@ -1616,14 +1616,15 @@ property-channel client lives in `drivers/display/rpi_hvs::mailbox`
 **Landed — the metal wiring.**
 
 - `FdtDiscovery` discovers the mailbox node (`brcm,bcm2835-mbox`) and
-  emits it into `rustos_abi::hwtree`: the doorbell window as a
+  emits it into `rustos_abi::hwtree` through the generic Stage 4.HW
+  walk (`kernel/arch/aarch64::platform`): the doorbell window as a
   capability-gated MMIO resource (base/length read from the tree, never
-  a `const`) plus a `HwResource::dma` request for a one-page
-  property-buffer carve bounded by the 30-bit VideoCore aperture
-  (`kernel/arch/aarch64::{fdt::find_mailbox, platform}`; the
-  `lib/fdt` `raspi_like_arm` fixture carries the node). The QEMU
-  `virt` tree has no mailbox, so its hardware tree simply omits the
-  node (§18.4) and the `-M virt` verticals are untouched.
+  a `const`) plus the one per-device augmentation — a `HwResource::dma`
+  request for a one-page property-buffer carve bounded by the 30-bit
+  VideoCore aperture (the `lib/fdt` `raspi_like_arm` fixture carries
+  the node). The QEMU `virt` tree has no mailbox, so its hardware tree
+  simply omits the node (§18.4) and the `-M virt` verticals are
+  untouched.
 - `drivers/display/rpi_hvs::wiring` is the driver-host bring-up seam:
   `open_discovered` checks `CAP_MMIO_MAP`, maps the discovered doorbell
   + the host's property-buffer carve, translates the carve to a bus
@@ -1653,9 +1654,11 @@ photo/UART-log is recorded as the acceptance artefact — pending metal.
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
 `.rxe` process-spawn path), reprioritised to land first — the binding
 below has no mechanism without it. The mechanism is in place: the bind
-table, the drvhost process-spawn path, and the `rustos-devmgr`
-matcher/autoloader are landed; Stage 4.HW increment 4 (generic
-match-key emission in `kernel/arch/aarch64`) remains.
+table, the drvhost process-spawn path, the `rustos-devmgr`
+matcher/autoloader, and the generic match-key emission are all landed —
+the aarch64 walk already emits a `brcm,bcm2711-emmc2` node (Storage
+class, translated MMIO window) from a Pi-shaped tree with no per-device
+code.
 
 - A `drivers/storage` EMMC2 (Arasan/SDHCI-derived) driver for the Pi 4 SD
   host, bound by `devmgr` against its `compatible` string (§18.3). Read

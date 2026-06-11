@@ -501,14 +501,34 @@ order (one fully-gated increment each):
    tests plus the end-to-end `rustos-drvhost --test devmgr_autoload`
    composition test (signed `.rxe` bind tables decoded by the real
    gate, real `Host` loads, missing-`CAP_DRV_LOAD` refusal). Docs:
-   `docs/src/drivers/hardware-detection.md`. Remaining for the stage
-   beyond increment 4: the hotplug/removal runtime path (the
-   `CAP_SYSINFO_HW` read-only exposure already ships via `sysinfod`'s
-   `HARDWARE_TREE` query, Stage 6).
-4. ⭐ **Generic match-key emission (start here)** — replace the
-   hand-grown list of node types `kernel/arch/aarch64/src/fdt.rs`
-   recognises with generic match-key emission into the hardware tree,
-   confined to `kernel/arch/aarch64/` (§18.2).
+   `docs/src/drivers/hardware-detection.md`. Remaining for the stage:
+   the hotplug/removal runtime path (the `CAP_SYSINFO_HW` read-only
+   exposure already ships via `sysinfod`'s `HARDWARE_TREE` query,
+   Stage 6).
+4. **Generic match-key emission — done.** The aarch64
+   `FdtDiscovery::discover` (`kernel/arch/aarch64/src/platform.rs`) is
+   a generic device-tree walk, confined to the port (§18.2): every
+   `compatible`-carrying node is emitted with its compatible strings
+   as match keys (devicetree most-specific-first order, capped by the
+   `HW_NODE_MAX_MATCH_KEYS` ABI bound), `/memory` nodes classified by
+   `device_type`, `reg` decoded with the parent's
+   `#address-cells`/`#size-cells` and translated through ancestor-bus
+   `ranges` into CPU-physical MMIO resources (untranslatable entries
+   dropped, never emitted untranslated), `interrupts` (three-cell GIC
+   specifiers) emitted as IRQ resources, classes derived from
+   `device_type`/`interrupt-controller`/name stem
+   (`rustos_fdt::name_stem`), interior buses emitted as `Bus` parents,
+   and unbindable nodes (no representable key, not memory) omitted.
+   The one per-device augmentation kept is the VideoCore mailbox DMA
+   property-buffer carve request (P7). The orphaned per-device finders
+   (`fdt::find_mailbox`/`DiscoveredMailbox`/`timer_ppi`) are deleted
+   (§2.14); `lib/fdt` exports the shared `read_cells`/`name_stem`
+   helpers (§2.2). Proven by the port's platform unit tests (virt/Pi
+   fixture shapes, nested-`ranges` translation, fail-closed
+   missing-`ranges`/overlong-compatible/depth-bound cases) and the
+   Arch HAL discovery conformance vertical. Docs:
+   `docs/src/platform/aarch64.md`,
+   `docs/src/drivers/hardware-detection.md`.
 
 ---
 

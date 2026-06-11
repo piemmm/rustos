@@ -788,8 +788,15 @@ fn name_is_memory(name: &[u8]) -> bool {
     name == b"memory" || name.starts_with(b"memory@")
 }
 
-/// The portion of a node's unit name before any `@<unit-address>` suffix.
-fn name_stem(name: &[u8]) -> &[u8] {
+/// The portion of a node's unit name before any `@<unit-address>` suffix
+/// (`b"serial@3f201000"` → `b"serial"`).
+///
+/// This is the "generic names" stem the devicetree specification
+/// recommends a node be named with (Devicetree Spec v0.4 §2.2.2), so it
+/// is the role hint a consumer can classify a node by when no more
+/// specific source exists.
+#[must_use]
+pub fn name_stem(name: &[u8]) -> &[u8] {
     match name.iter().position(|&b| b == b'@') {
         Some(at) => &name[..at],
         None => name,
@@ -797,8 +804,15 @@ fn name_stem(name: &[u8]) -> &[u8] {
 }
 
 /// Decode `cells` big-endian `u32` cells starting at `off` into a `u64`.
-/// Returns `None` if the slice is too short.
-fn read_cells(value: &[u8], off: usize, cells: u32) -> Option<u64> {
+///
+/// Returns `None` if the slice is too short, or if `cells` is `0` (there
+/// is no value to read — never an invented `0`) or greater than `2` (the
+/// value cannot be represented in a `u64` — fail closed, never wrap).
+#[must_use]
+pub fn read_cells(value: &[u8], off: usize, cells: u32) -> Option<u64> {
+    if cells == 0 || cells > 2 {
+        return None;
+    }
     let mut acc: u64 = 0;
     let mut o = off;
     for _ in 0..cells {
@@ -810,10 +824,8 @@ fn read_cells(value: &[u8], off: usize, cells: u32) -> Option<u64> {
 }
 
 /// Read the first `(address, size)` pair from a `reg` property value.
+/// Out-of-range cell counts are rejected by [`read_cells`].
 fn read_reg_pair(value: &[u8], addr_cells: u32, size_cells: u32) -> Option<(u64, u64)> {
-    if addr_cells == 0 || addr_cells > 2 || size_cells == 0 || size_cells > 2 {
-        return None;
-    }
     let base = read_cells(value, 0, addr_cells)?;
     let size = read_cells(value, (addr_cells as usize) * 4, size_cells)?;
     Some((base, size))
@@ -1114,5 +1126,28 @@ mod tests {
         corrupt[40..44].copy_from_slice(&0x00ff_ff00u32.to_be_bytes());
         let fdt = Fdt::new(&corrupt).expect("header still valid");
         assert!(matches!(fdt.nodes().next(), Some(Err(FdtError::Malformed))));
+    }
+
+    #[test]
+    fn read_cells_decodes_and_fails_closed() {
+        let v = [0x12u8, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0];
+        assert_eq!(read_cells(&v, 0, 1), Some(0x1234_5678));
+        assert_eq!(read_cells(&v, 4, 1), Some(0x9abc_def0));
+        assert_eq!(read_cells(&v, 0, 2), Some(0x1234_5678_9abc_def0));
+        // Past the end of the value.
+        assert_eq!(read_cells(&v, 8, 1), None);
+        assert_eq!(read_cells(&v, 4, 2), None);
+        // Zero cells carry no value; never invent a `0`.
+        assert_eq!(read_cells(&v, 0, 0), None);
+        // Three or more cells cannot fit a `u64`; never wrap.
+        assert_eq!(read_cells(&v, 0, 3), None);
+    }
+
+    #[test]
+    fn name_stem_strips_the_unit_address() {
+        assert_eq!(name_stem(b"serial@3f201000"), b"serial");
+        assert_eq!(name_stem(b"timer"), b"timer");
+        assert_eq!(name_stem(b""), b"");
+        assert_eq!(name_stem(b"@7e340000"), b"");
     }
 }

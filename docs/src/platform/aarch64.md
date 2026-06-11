@@ -218,9 +218,10 @@ speaks, preferring the PrimeCell **PL011** (`arm,pl011`) over the BCM2835
 AUX **mini-UART** (`brcm,bcm2835-aux-uart`). The two models are one
 console abstraction with two register backends — distinct data/status
 register offsets and opposite-sense transmit-ready bits — not duplication
-(`AGENTS.md` §2.2). `platform::FdtDiscovery` also emits a `serial`-class
-`HwNode` carrying the discovered `compatible` bind key and the UART `reg`
-as a capability-gated MMIO resource.
+(`AGENTS.md` §2.2). The generic `platform::FdtDiscovery` walk emits a
+`serial`-class `HwNode` per UART the tree describes, each carrying its
+`compatible` bind keys and its `reg` as a capability-gated MMIO resource
+— preferring one console is `console` policy, not tree shape.
 
 The runtime walk is safe with the MMU still off: the `lib/fdt` reader
 accesses the blob byte-by-byte, so it takes no multi-byte Device-memory
@@ -276,9 +277,9 @@ GICv2, so only the bases move (`AGENTS.md` §2.2). `gic::find_gic` /
 whose `compatible` names a GICv2-class controller and read its `reg`
 (region 0 = distributor, region 1 = CPU interface); an unrecognised or
 absent controller leaves the fail-safe default in place (`AGENTS.md`
-§2.9). `platform::FdtDiscovery` emits an `InterruptController` `HwNode`
-carrying the discovered `compatible` bind key and both register windows as
-capability-gated MMIO resources.
+§2.9). The generic `platform::FdtDiscovery` walk emits an
+`InterruptController` `HwNode` carrying the discovered `compatible` bind
+keys and both register windows as capability-gated MMIO resources.
 
 The runtime walk is MMU-off-safe for the same byte-wise reason as the
 console (`plans/PI.md` W17), and is CI-proven on `virt`: the
@@ -497,28 +498,41 @@ with virtio-mmio block/net devices and `ramfb` attached on demand
 
 The aarch64 port implements the Arch HAL `PlatformDiscovery` slice
 (`AGENTS.md` §17.2 / §18.2) in `kernel/arch/aarch64::platform`, reading
-the flattened device tree the `virt` board hands the kernel. The
+the flattened device tree the firmware hands the kernel. The
 device-tree *parser* is the shared `lib/fdt` crate (one parser for every
 arch, §2.2); `kernel/arch/aarch64::fdt` layers the aarch64-specific
-queries on it: the first `/memory` region, the `/psci` `method`
-(`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up calls),
-the generic-timer per-CPU interrupt (PPI) number from `/timer` (plus
-that node's optional `clock-frequency` counter-rate override, PI Stage
-P4), and the VideoCore firmware mailbox (`find_mailbox`,
-`brcm,bcm2835-mbox` — PI Stage P7). `FdtDiscovery` emits a root node, a
-`Memory` node carrying the RAM window, a `Timer` node carrying its PPI
-as a capability-gated (`CAP_IRQ_BIND`) IRQ resource, (PI Stage P3) an
-`InterruptController` node carrying the GICv2's `compatible` bind key
-and its GICD/GICC register windows as MMIO resources, (PI Stage P2) a
-`Serial` node carrying the discovered console UART's `compatible` bind
-key and its `reg` as an MMIO resource, and (PI Stage P7, on a board
-that carries one) a mailbox node carrying the discovered doorbell
-window as an MMIO resource plus a `Dma` resource requesting a one-page
-property-buffer carve bounded by the 30-bit VideoCore aperture — the
-node `drivers/display/rpi_hvs::wiring` binds. The reader is host-tested
-against the shared DTB fixtures (including the `raspi_like_arm`
-Pi-shaped tree, which carries GIC-400 and mailbox nodes) and exercised
-by the port's `passes_arch_hal_conformance_suite`.
+boot-path queries on it (the `/psci` `method` — `hvc`/`smc`, the conduit
+the Stage W6 secondary-core bring-up calls — and the `/timer` node's
+optional `clock-frequency` counter-rate override, PI Stage P4).
+
+Hardware-tree emission is **generic** (PLAN.md Stage 4.HW): the walk
+emits a node for every device the tree describes, with no per-device
+list to grow. Every node carrying a `compatible` property becomes a
+hardware-tree node whose match keys are that property's strings in
+devicetree (most-specific-first) order — the keys `devmgr` resolves
+driver bind tables against (`AGENTS.md` §18.3); `/memory` nodes
+(classified by `device_type`) become `Memory` nodes. Each `reg` entry is
+decoded with the parent's `#address-cells`/`#size-cells`, translated
+through every ancestor bus's `ranges` into a CPU-physical address, and
+emitted as a capability-gated MMIO resource — an entry an ancestor
+cannot translate is dropped, never emitted untranslated. Each
+`interrupts` specifier (the three-cell GIC form both supported boards
+use) becomes a capability-gated (`CAP_IRQ_BIND`) IRQ resource. The
+device class is derived from the node's own data (`device_type`, the
+`interrupt-controller` marker, or the spec-recommended generic
+node-name stem), defaulting to `Other`; class is advisory — binding is
+by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
+as `Bus` nodes before their children, so the flat stream reconstructs
+the tree shape, and a node describing nothing bindable (no
+representable match key, not memory) is not emitted. The one per-device
+augmentation is the VideoCore firmware mailbox (`brcm,bcm2835-mbox`,
+PI Stage P7): its node additionally carries a `Dma` resource requesting
+a one-page property-buffer carve bounded by the 30-bit VideoCore
+aperture — only the platform knows the firmware's aperture — which
+`drivers/display/rpi_hvs::wiring` binds. The walker is host-tested
+against the shared DTB fixtures (the `virt`- and Pi-shaped trees, a
+nested `ranges`-translating bus, fail-closed cases) and exercised by
+the port's `passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 
