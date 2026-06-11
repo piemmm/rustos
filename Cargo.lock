@@ -635,6 +635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-devmgr"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-log",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-drv-bus-mmio"
 version = "0.0.0"
 dependencies = [
@@ -750,6 +760,7 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-crypto",
+ "rustos-devmgr",
  "rustos-log",
  "rustos-virtio",
 ]

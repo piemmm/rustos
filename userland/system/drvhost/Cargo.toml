@@ -30,3 +30,9 @@ rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 # sign synthetic `.rxe` manifests with a known keypair; production
 # code in this crate never names `ed25519-dalek` directly.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# Test-only: `tests/devmgr_autoload.rs` proves the device manager's
+# autoload walk drives this host's load gate end-to-end. The production
+# edge points the other way round (devmgr names only its `DriverLoader`
+# seam, `AGENTS.md` §17.4); the dev-dependency lives here so the signed
+# `.rxe` fixtures in `tests/fixtures/` are shared, not duplicated (§2.2).
+rustos-devmgr = { path = "../devmgr", version = "=0.0.0" }

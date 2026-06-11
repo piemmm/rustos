@@ -86,6 +86,14 @@ A driver passes through four states observable to the host:
    and releases capabilities. Forcible unload (`CAP_DRV_LOAD`
    holder, hot-unplug) calls the same path.
 
+## Autoload
+
+Which driver gets loaded for which detected device is decided by the
+user-space device manager (`userland/system/devmgr`): it matches each
+hardware-tree node's keys against the bind table in every driver's
+signed manifest and drives the winners through the host's load gate.
+See [hardware detection and autoload](./hardware-detection.md).
+
 ## Error surface
 
 [`DriverError`] is the single error type returned across the driver

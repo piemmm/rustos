@@ -51,6 +51,7 @@
 
 - [Overview](./drivers/overview.md)
 - [Userland driver host](./drivers/host.md)
+- [Hardware detection and autoload](./drivers/hardware-detection.md)
 - [Driver lifecycle](./drivers/lifecycle.md)
 - [Bus drivers](./drivers/bus.md)
 - [Virtio transport](./drivers/virtio.md)

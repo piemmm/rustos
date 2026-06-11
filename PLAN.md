@@ -485,12 +485,30 @@ order (one fully-gated increment each):
    `ROS_DRIVER_MANIFEST_MAX_BIND_KEYS`, `ROS_DRIVER_BIND_KEY_WIRE_LEN`)
    is regenerated. Docs: `docs/src/abi/driver_traits.md`,
    `docs/src/drivers/{host,lifecycle}.md`.
-3. ⭐ **`userland/system/devmgr`** — the matcher/autoloader as specced
-   above (start here).
-4. **Generic match-key emission** — replace the hand-grown list of node
-   types `kernel/arch/aarch64/src/fdt.rs` recognises with generic
-   match-key emission into the hardware tree, confined to
-   `kernel/arch/aarch64/` (§18.2).
+3. **`userland/system/devmgr` — done.** The matcher/autoloader crate
+   (`rustos-devmgr`, `no_std`, `lib/*` deps only per §17.4):
+   `DeviceManager::autoload` walks the hardware tree, resolves each
+   non-root node against every `DriverCandidate`'s decoded bind table
+   (`matcher::resolve` — strictly highest matched priority wins; an
+   unbroken cross-candidate tie is refused as a packaging defect,
+   §18.3), leaves unmatched nodes unbound-and-logged (§18.4, never an
+   error), loads each winner exactly once through the injected
+   `DriverLoader` seam (implemented by the deployment over the drvhost
+   `Host::load` gate, mapping `HostError::as_errno`), and fails a
+   refused load closed for that node only. Audit: stable `EventId`
+   range `13000..14000` (`NODE_BOUND`/`NODE_UNBOUND`/
+   `NODE_TIE_REJECTED`/`NODE_LOAD_FAILED`). Proven by 16 in-crate unit
+   tests plus the end-to-end `rustos-drvhost --test devmgr_autoload`
+   composition test (signed `.rxe` bind tables decoded by the real
+   gate, real `Host` loads, missing-`CAP_DRV_LOAD` refusal). Docs:
+   `docs/src/drivers/hardware-detection.md`. Remaining for the stage
+   beyond increment 4: the hotplug/removal runtime path (the
+   `CAP_SYSINFO_HW` read-only exposure already ships via `sysinfod`'s
+   `HARDWARE_TREE` query, Stage 6).
+4. ⭐ **Generic match-key emission (start here)** — replace the
+   hand-grown list of node types `kernel/arch/aarch64/src/fdt.rs`
+   recognises with generic match-key emission into the hardware tree,
+   confined to `kernel/arch/aarch64/` (§18.2).
 
 ---
 

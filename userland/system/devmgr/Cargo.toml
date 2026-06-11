@@ -1,0 +1,18 @@
+[package]
+name = "rustos-devmgr"
+description = "RustOS userland device manager: matches hardware-tree nodes against driver bind tables and autoloads the winners through the driver-host load gate (Stage 4.HW — `AGENTS.md` §18.3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }

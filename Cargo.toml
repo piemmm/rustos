@@ -89,6 +89,7 @@ members = [
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in
     # AGENTS.md §3.
+    "userland/system/devmgr",
     "userland/system/drvhost",
     "userland/system/sysinfod",
     "userland/system/init",
