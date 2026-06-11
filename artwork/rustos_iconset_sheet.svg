@@ -1,0 +1,880 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1640" viewBox="0 0 1920 1640" role="img" aria-labelledby="title desc">
+<title id="title">RustOS iconset SVG iconsheet</title>
+<desc id="desc">A dark-mode RustOS vector icon sheet with reusable 24 by 24 symbols for window decorations, iconbar applications, task switcher, menus, brand marks, status and connectivity.</desc>
+<defs>
+<style>
+  .bg { fill: #0E1013; }
+  .panel { fill: #12161A; stroke: #2A2E2F; stroke-width: 1.2; stroke-opacity: .9; }
+  .cell { fill: #171B20; stroke: #2A2E2F; stroke-width: 1; stroke-opacity: .7; }
+  .cell.hot { fill: #1A1715; stroke: #E85A1C; stroke-opacity: .28; }
+  .category { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 22px; font-weight: 700; letter-spacing: .18em; fill: #E85A1C; }
+  .subtitle { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 15px; letter-spacing: .08em; fill: #838991; }
+  .label { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 14px; letter-spacing: .08em; fill: #B9BEC5; text-anchor: middle; }
+  .micro { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 13px; letter-spacing: .12em; fill: #737A83; }
+  .title-rust { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 26px; font-weight: 800; letter-spacing: .2em; fill: #E85A1C; }
+  .title-os { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 26px; font-weight: 700; letter-spacing: .2em; fill: #ECEFF2; }
+  .title-main { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 64px; font-weight: 650; letter-spacing: .08em; fill: #F2E8DD; }
+  .rule { stroke: #E85A1C; stroke-width: 2; stroke-opacity: .75; }
+  .rule-muted { stroke: #2A2E2F; stroke-width: 1; stroke-opacity: .9; }
+  .pill { fill: #15191D; stroke: #2A2E2F; stroke-opacity: .75; }
+  .palette-label { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 12px; letter-spacing: .08em; fill: #AAB0B8; text-anchor: middle; }
+</style>
+
+<symbol id="i-rustos-mark" viewBox="0 0 24 24">
+  <path fill="currentColor" d="M3.1 4.5h3.7v15H3.1z"/>
+  <path fill="currentColor" d="M6.5 4.5h6.1c3.6 0 5.9 2.1 5.9 5.3 0 2.1-1 3.7-2.6 4.5l4.8 5.2h-4.8l-4.1-4.8H9.9v-3.2h2.6c1.4 0 2.3-.7 2.3-1.8S13.9 8 12.5 8h-6z"/>
+  <path fill="currentColor" fill-rule="evenodd" d="M13.1 4.5h1.8c4.1 0 7.1 3.2 7.1 7.5s-3 7.5-7.1 7.5h-1.8v-3.4h1.6c2.1 0 3.8-1.8 3.8-4.1s-1.7-4.1-3.8-4.1h-1.6V4.5zm3.1 5.5a1.55 1.55 0 1 0 0 3.1 1.55 1.55 0 0 0 0-3.1zm-.6 3.2h1.2l.85 3.2h-2.9l.85-3.2z"/>
+</symbol>
+
+<symbol id="i-cinder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.3 8.4 4 4.7 8.2 6.6M18.7 8.4 20 4.7l-4.2 1.9" fill="currentColor" fill-opacity=".16"/>
+  <path d="M4.7 11.2c0-4.2 3.2-7 7.3-7s7.3 2.8 7.3 7c0 4.6-3 7.6-7.3 7.6s-7.3-3-7.3-7.6z" fill="currentColor" fill-opacity=".08"/>
+  <path d="M8 13.1c1.1 1.2 2.2 1.8 4 1.8s2.9-.6 4-1.8"/>
+  <path d="M10.5 12.7h3l-1.5 1.4z" fill="currentColor" stroke="none"/>
+  <circle cx="8.7" cy="10.7" r=".7" fill="currentColor" stroke="none"/>
+  <circle cx="15.3" cy="10.7" r=".7" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-launcher" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="4" width="16" height="16" rx="4" fill="currentColor" fill-opacity=".08"/>
+  <path d="M8 7.8h3.8c2.4 0 4 1.35 4 3.3 0 1.25-.65 2.2-1.7 2.75L17 17h-3.2l-2.45-2.8H10V17H8z"/>
+  <circle cx="15.8" cy="11.2" r="1.1" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-core" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="7.5" fill="currentColor" fill-opacity=".08"/>
+  <circle cx="12" cy="12" r="3.2"/>
+  <path d="M12 4.5v2M12 17.5v2M4.5 12h2M17.5 12h2"/>
+  <path d="M12 9.1v2.5l1.7 1.6"/>
+</symbol>
+
+<symbol id="i-shield-core" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3.8 19 6v5.2c0 4.6-2.6 7.5-7 9-4.4-1.5-7-4.4-7-9V6z" fill="currentColor" fill-opacity=".08"/>
+  <circle cx="12" cy="11" r="2.2"/>
+  <path d="M12 13.2v3"/>
+</symbol>
+
+<symbol id="i-kernel" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3.5 19.4 7.7v8.6L12 20.5l-7.4-4.2V7.7z" fill="currentColor" fill-opacity=".07"/>
+  <circle cx="12" cy="12" r="2" fill="currentColor" fill-opacity=".22"/>
+  <path d="M12 5.8v3.7M12 14.5v3.7M6.7 8.8l3.2 1.9M14.1 13.3l3.2 1.9M17.3 8.8l-3.2 1.9M9.9 13.3l-3.2 1.9"/>
+</symbol>
+
+<symbol id="i-package" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3.8 20 8.2v7.6l-8 4.4-8-4.4V8.2z" fill="currentColor" fill-opacity=".07"/>
+  <path d="M4.3 8.4 12 12.6l7.7-4.2M12 12.6v7.1M8.3 6.1l7.7 4.3"/>
+</symbol>
+
+<symbol id="i-update" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M19 7.4A8 8 0 0 0 5.6 7L4 8.6"/>
+  <path d="M4 4.7v3.9h3.9"/>
+  <path d="M5 16.6A8 8 0 0 0 18.4 17L20 15.4"/>
+  <path d="M20 19.3v-3.9h-3.9"/>
+</symbol>
+
+<symbol id="i-boot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 4v6"/>
+  <path d="M7.7 6.6a7 7 0 1 0 8.6 0"/>
+  <path d="M8.2 18.2h7.6" stroke-opacity=".35"/>
+  <circle cx="8.6" cy="14.8" r=".7" fill="currentColor" stroke="none"/>
+  <circle cx="12" cy="14.8" r=".7" fill="currentColor" fill-opacity=".45" stroke="none"/>
+  <circle cx="15.4" cy="14.8" r=".7" fill="currentColor" fill-opacity=".25" stroke="none"/>
+</symbol>
+
+<symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="8.2" r="3.2" fill="currentColor" fill-opacity=".07"/>
+  <path d="M5.3 20c.9-4 3.2-6 6.7-6s5.8 2 6.7 6"/>
+</symbol>
+
+<symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="5.2" y="10" width="13.6" height="10" rx="2.3" fill="currentColor" fill-opacity=".07"/>
+  <path d="M8.3 10V7.7a3.7 3.7 0 0 1 7.4 0V10"/>
+  <circle cx="12" cy="14.8" r="1.1" fill="currentColor" stroke="none"/>
+  <path d="M12 15.8v1.9"/>
+</symbol>
+
+<symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3.8v7"/>
+  <path d="M7.2 6.5a7 7 0 1 0 9.6 0"/>
+</symbol>
+
+<symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7 7 17 17M17 7 7 17"/>
+</symbol>
+
+<symbol id="i-minimize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6 17h12"/>
+</symbol>
+
+<symbol id="i-maximize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="6" y="6" width="12" height="12" rx="1.8" fill="currentColor" fill-opacity=".05"/>
+</symbol>
+
+<symbol id="i-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="5.5" y="8.5" width="10" height="10" rx="1.6" fill="currentColor" fill-opacity=".05"/>
+  <path d="M8.8 8.5V5.5h9.7v9.7h-3"/>
+</symbol>
+
+<symbol id="i-fullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.8 4.8H4.8v4M15.2 4.8h4v4M19.2 15.2v4h-4M8.8 19.2h-4v-4"/>
+  <path d="M4.8 4.8 9.5 9.5M19.2 4.8l-4.7 4.7M19.2 19.2l-4.7-4.7M4.8 19.2l4.7-4.7" opacity=".5"/>
+</symbol>
+
+<symbol id="i-exit-fullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.2 4.7v4.5H4.7M14.8 4.7v4.5h4.5M19.3 14.8h-4.5v4.5M9.2 19.3v-4.5H4.7"/>
+</symbol>
+
+<symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.6 4.8h6.8l-1.1 5.1 3.4 3.6v1.3H6.3v-1.3l3.4-3.6z" fill="currentColor" fill-opacity=".06"/>
+  <path d="M12 14.8v5M9.4 20h5.2"/>
+</symbol>
+
+<symbol id="i-unpin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.6 4.8h6.8l-1.1 5.1 3.4 3.6v1.3H9.8"/>
+  <path d="M12 14.8v2M4.5 4.5l15 15"/>
+</symbol>
+
+<symbol id="i-dock-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.5" y="5" width="15" height="14" rx="2"/>
+  <path d="M9.3 5v14"/>
+  <path d="M5.6 6.1h3v11.8h-3z" fill="currentColor" fill-opacity=".18" stroke="none"/>
+</symbol>
+
+<symbol id="i-dock-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.5" y="5" width="15" height="14" rx="2"/>
+  <path d="M14.7 5v14"/>
+  <path d="M15.4 6.1h3v11.8h-3z" fill="currentColor" fill-opacity=".18" stroke="none"/>
+</symbol>
+
+<symbol id="i-tile" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="5" width="7" height="6" rx="1.3" fill="currentColor" fill-opacity=".06"/>
+  <rect x="13" y="5" width="7" height="6" rx="1.3"/>
+  <rect x="4" y="13" width="7" height="6" rx="1.3"/>
+  <rect x="13" y="13" width="7" height="6" rx="1.3" fill="currentColor" fill-opacity=".06"/>
+</symbol>
+
+<symbol id="i-shade" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.5" y="5.5" width="15" height="13" rx="2" fill="currentColor" fill-opacity=".04"/>
+  <path d="M4.8 9h14.4M8.7 14.2 12 11l3.3 3.2"/>
+</symbol>
+
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="10.8" cy="10.8" r="5.6" fill="currentColor" fill-opacity=".04"/>
+  <path d="M15.1 15.1 20 20"/>
+</symbol>
+
+<symbol id="i-files" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M3.8 7.5h6.6l1.8 2h8v8.8a2 2 0 0 1-2 2H5.8a2 2 0 0 1-2-2z" fill="currentColor" fill-opacity=".08"/>
+  <path d="M3.8 7.5V6a2 2 0 0 1 2-2h4.4l2 2.1h6a2 2 0 0 1 2 2v1.4"/>
+</symbol>
+
+<symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.8" y="5" width="16.4" height="14" rx="2.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M7 9.2 10 12l-3 2.8M12.5 15h4.5"/>
+</symbol>
+
+<symbol id="i-browser" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="8.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M4.5 12h15M12 3.8c2 2.2 3 5 3 8.2s-1 6-3 8.2M12 3.8c-2 2.2-3 5-3 8.2s1 6 3 8.2"/>
+</symbol>
+
+<symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 4.2 13.4 6.3l2.5.3.7 2.4 2 1.4-.9 2.3.9 2.3-2 1.4-.7 2.4-2.5.3L12 21l-1.4-2.1-2.5-.3-.7-2.4-2-1.4.9-2.3-.9-2.3 2-1.4.7-2.4 2.5-.3z" fill="currentColor" fill-opacity=".05"/>
+  <circle cx="12" cy="12" r="3"/>
+</symbol>
+
+<symbol id="i-editor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 19 6.1 14.7 15.5 5.3a2.2 2.2 0 0 1 3.1 3.1l-9.4 9.4z" fill="currentColor" fill-opacity=".05"/>
+  <path d="M13.7 7.1 16.9 10.3M5 19h4.3"/>
+</symbol>
+
+<symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="5" width="16" height="14" rx="2.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M7 15.2v-3M12 15.2V8.8M17 15.2v-5"/>
+</symbol>
+
+<symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.5" y="5" width="17" height="11.5" rx="2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M9 20h6M12 16.5V20"/>
+</symbol>
+
+<symbol id="i-tasks" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6 7.2h12M6 12h12M6 16.8h12"/>
+  <circle cx="4" cy="7.2" r=".65" fill="currentColor" stroke="none"/>
+  <circle cx="4" cy="12" r=".65" fill="currentColor" stroke="none"/>
+  <circle cx="4" cy="16.8" r=".65" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-store" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.2 9.6h11.6l-.9 10H7.1z" fill="currentColor" fill-opacity=".06"/>
+  <path d="M8.5 9.6V8a3.5 3.5 0 0 1 7 0v1.6M6.2 9.6h11.6"/>
+  <path d="M9.2 14.3h5.6"/>
+</symbol>
+
+<symbol id="i-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="8.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M9.7 9.1a2.5 2.5 0 0 1 4.8 1c0 2-2.5 2.2-2.5 4.1"/>
+  <path d="M12 17.2h.01"/>
+</symbol>
+
+<symbol id="i-log" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7 4.5h8l3 3v12H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z" fill="currentColor" fill-opacity=".05"/>
+  <path d="M15 4.5v3h3M8.5 11h7M8.5 14.5h7M8.5 18h4"/>
+</symbol>
+
+<symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 8h11l-.8 11a2 2 0 0 1-2 1.8H9.3a2 2 0 0 1-2-1.8z" fill="currentColor" fill-opacity=".05"/>
+  <path d="M4.8 8h14.4M9.3 8V5.7h5.4V8M10 11.2v5.5M14 11.2v5.5"/>
+</symbol>
+
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.5 7h13M5.5 12h13M5.5 17h13"/>
+</symbol>
+
+<symbol id="i-more-horizontal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="7" cy="12" r="1.25" fill="currentColor" stroke="none"/>
+  <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none"/>
+  <circle cx="17" cy="12" r="1.25" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-more-vertical" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="7" r="1.25" fill="currentColor" stroke="none"/>
+  <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none"/>
+  <circle cx="12" cy="17" r="1.25" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-chevron-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 14.5 12 9l5.5 5.5"/>
+</symbol>
+
+<symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 9.5 12 15l5.5-5.5"/>
+</symbol>
+
+<symbol id="i-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M14.5 6.5 9 12l5.5 5.5"/>
+</symbol>
+
+<symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.5 6.5 15 12l-5.5 5.5"/>
+</symbol>
+
+<symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M11 6 5 12l6 6"/>
+  <path d="M6 12h13"/>
+</symbol>
+
+<symbol id="i-forward" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13 6 19 12l-6 6"/>
+  <path d="M18 12H5"/>
+</symbol>
+
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.5 12.5 10 17l8.5-10"/>
+</symbol>
+
+<symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 5v14M5 12h14"/>
+</symbol>
+
+<symbol id="i-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 12h14"/>
+</symbol>
+
+<symbol id="i-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 6h15M7 12h10M10 18h4"/>
+  <circle cx="9" cy="6" r="1.2" fill="currentColor" stroke="none"/>
+  <circle cx="15" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-command" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8 8H6.7A2.7 2.7 0 1 1 8 5.3V8zm0 0h8M16 8V5.3A2.7 2.7 0 1 1 17.3 8H16zm0 0v8M16 16h1.3A2.7 2.7 0 1 1 16 18.7V16zm0 0H8M8 16v2.7A2.7 2.7 0 1 1 6.7 16H8zm0 0V8"/>
+</symbol>
+
+<symbol id="i-window" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="5" width="16" height="14" rx="2.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M4 9h16"/>
+  <circle cx="7" cy="7.1" r=".55" fill="currentColor" stroke="none"/>
+  <circle cx="9.3" cy="7.1" r=".55" fill="currentColor" fill-opacity=".5" stroke="none"/>
+</symbol>
+
+<symbol id="i-window-stack" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="5" y="8" width="12" height="10" rx="1.8" fill="currentColor" fill-opacity=".05"/>
+  <path d="M8 6h11v9M10.5 4h10v8"/>
+</symbol>
+
+<symbol id="i-app-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.5" y="4.5" width="5" height="5" rx="1.2" fill="currentColor" fill-opacity=".08"/>
+  <rect x="14.5" y="4.5" width="5" height="5" rx="1.2"/>
+  <rect x="4.5" y="14.5" width="5" height="5" rx="1.2"/>
+  <rect x="14.5" y="14.5" width="5" height="5" rx="1.2" fill="currentColor" fill-opacity=".08"/>
+</symbol>
+
+<symbol id="i-task-switch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="6" width="7.5" height="6.5" rx="1.4" fill="currentColor" fill-opacity=".06"/>
+  <rect x="12.5" y="11.5" width="7.5" height="6.5" rx="1.4"/>
+  <path d="M14.8 6.8h3.8v3.8M18.6 6.8l-4 4M9.2 17.2H5.4v-3.8M5.4 17.2l4-4"/>
+</symbol>
+
+<symbol id="i-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.5" y="4.8" width="17" height="12" rx="2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M8.5 20h7M12 16.8V20"/>
+  <path d="M6.2 8.2h4.3M6.2 11.2h2.5" stroke-opacity=".6"/>
+</symbol>
+
+<symbol id="i-workspace" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.8" y="6" width="7" height="12" rx="1.8" fill="currentColor" fill-opacity=".08"/>
+  <rect x="13.2" y="6" width="7" height="12" rx="1.8"/>
+  <path d="M10.8 12h2.4"/>
+</symbol>
+
+<symbol id="i-workspace-add" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.8" y="6" width="6.8" height="12" rx="1.7"/>
+  <rect x="13.4" y="6" width="6.8" height="12" rx="1.7" fill="currentColor" fill-opacity=".05"/>
+  <path d="M16.8 9.8v4.4M14.6 12h4.4"/>
+</symbol>
+
+<symbol id="i-expose" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="5" width="6.5" height="5" rx="1.1"/>
+  <rect x="13.5" y="4" width="6.5" height="6" rx="1.1" fill="currentColor" fill-opacity=".06"/>
+  <rect x="4" y="13" width="7.5" height="6" rx="1.1" fill="currentColor" fill-opacity=".06"/>
+  <rect x="14" y="13" width="6" height="5" rx="1.1"/>
+</symbol>
+
+<symbol id="i-focus-mode" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="6.5" fill="currentColor" fill-opacity=".05"/>
+  <path d="M12 7.8v3.8l2.7 2.7"/>
+  <path d="M4.5 12H7M17 12h2.5M12 4.5V7M12 17v2.5"/>
+</symbol>
+
+<symbol id="i-snap-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="4.5" width="16" height="15" rx="2"/>
+  <path d="M4 9.5h16M4 14.5h16M9.3 4.5v15M14.7 4.5v15"/>
+  <path d="M5.1 5.6h4.2v3.9H5.1z" fill="currentColor" fill-opacity=".12" stroke="none"/>
+</symbol>
+
+<symbol id="i-recents" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5.2 9a7.5 7.5 0 1 1 1.7 8"/>
+  <path d="M5.2 5.5V9h3.5M12 8.3v4.1l3 2"/>
+</symbol>
+
+<symbol id="i-command-palette" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="6" width="16" height="12" rx="2.3" fill="currentColor" fill-opacity=".05"/>
+  <path d="M7.2 10.2 10 12l-2.8 1.8M12.2 14h4.6"/>
+</symbol>
+
+<symbol id="i-notifications" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 17h11l-1.3-2.2V10a4.2 4.2 0 0 0-8.4 0v4.8z" fill="currentColor" fill-opacity=".06"/>
+  <path d="M10 19a2.2 2.2 0 0 0 4 0"/>
+</symbol>
+
+<symbol id="i-notifications-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6.5 17h11l-1.3-2.2V10a4.2 4.2 0 0 0-5.7-3.9"/>
+  <path d="M10 19a2.2 2.2 0 0 0 4 0M4.5 4.5l15 15"/>
+</symbol>
+
+<symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="5" y="5" width="5" height="5" rx="1.2" fill="currentColor" fill-opacity=".06"/>
+  <rect x="14" y="5" width="5" height="5" rx="1.2"/>
+  <rect x="9.5" y="14" width="5" height="5" rx="1.2" fill="currentColor" fill-opacity=".06"/>
+  <path d="M10 7.5h4M12 10v4"/>
+</symbol>
+
+<symbol id="i-wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.8 9.3a11.5 11.5 0 0 1 14.4 0"/>
+  <path d="M8 12.5a6.4 6.4 0 0 1 8 0"/>
+  <path d="M10.7 15.7a2.2 2.2 0 0 1 2.6 0"/>
+  <circle cx="12" cy="18" r=".8" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 10v4h3.2l4.2 3.5v-11L7.7 10z" fill="currentColor" fill-opacity=".05"/>
+  <path d="M15.2 9.2a4.2 4.2 0 0 1 0 5.6M17.7 6.8a7.6 7.6 0 0 1 0 10.4"/>
+</symbol>
+
+<symbol id="i-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.5 10v4h3.2l4.2 3.5v-11L8.7 9.1"/>
+  <path d="M16.2 10.2 20 14M20 10.2 16.2 14M4.5 4.5l15 15"/>
+</symbol>
+
+<symbol id="i-battery" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.5" y="8" width="16" height="8" rx="2"/>
+  <path d="M20.5 10.5v3"/>
+  <path d="M6 10.5h7.5v3H6z" fill="currentColor" fill-opacity=".18" stroke="none"/>
+</symbol>
+
+<symbol id="i-battery-charge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.5" y="8" width="16" height="8" rx="2"/>
+  <path d="M20.5 10.5v3"/>
+  <path d="M11.5 9.5 9.8 12h2.4l-1.7 2.5 4-3.2h-2.4z" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="i-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7.5 18h9.2a4 4 0 0 0 .2-8A5.5 5.5 0 0 0 6.3 11.2 3.5 3.5 0 0 0 7.5 18z" fill="currentColor" fill-opacity=".05"/>
+</symbol>
+
+<symbol id="i-sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M18.5 8.2A7 7 0 0 0 6.2 8L5 9.4"/>
+  <path d="M5 5.6v3.8h3.8"/>
+  <path d="M5.5 15.8A7 7 0 0 0 17.8 16l1.2-1.4"/>
+  <path d="M19 18.4v-3.8h-3.8"/>
+</symbol>
+
+<symbol id="i-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 4.2 21 19H3z" fill="currentColor" fill-opacity=".08"/>
+  <path d="M12 9.1v4.5M12 16.7h.01"/>
+</symbol>
+
+<symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="8.2" fill="currentColor" fill-opacity=".05"/>
+  <path d="M12 11v5M12 8h.01"/>
+</symbol>
+
+
+<linearGradient id="topGlow" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0" stop-color="#E85A1C" stop-opacity=".20"/>
+  <stop offset=".45" stop-color="#E85A1C" stop-opacity="0"/>
+  <stop offset="1" stop-color="#F0782A" stop-opacity=".08"/>
+</linearGradient>
+<radialGradient id="coreGlow" cx="50%" cy="0%" r="75%">
+  <stop offset="0" stop-color="#E85A1C" stop-opacity=".22"/>
+  <stop offset=".5" stop-color="#E85A1C" stop-opacity=".04"/>
+  <stop offset="1" stop-color="#0E1013" stop-opacity="0"/>
+</radialGradient>
+
+</defs>
+<rect class="bg" width="1920" height="1640"/>
+<rect x="0" y="0" width="1920" height="360" fill="url(#coreGlow)" opacity=".9"/>
+<path d="M0 0H1920V1640H0z" fill="url(#topGlow)" opacity=".75"/>
+<g transform="translate(64,62)">
+<text class="title-rust" x="0" y="0">RUST</text><text class="title-os" x="112" y="0">OS</text>
+<text class="micro" x="0" y="34">SVG ICONSET / SYSTEM PICTOGRAMS / 24PX MASTER GRID</text>
+<text class="title-main" x="0" y="108">SECURE CORE. FEARLESS SYSTEMS.</text>
+<line class="rule" x1="0" y1="132" x2="354" y2="132"/>
+</g>
+<g transform="translate(1580,56)">
+<rect class="pill" x="0" y="0" width="276" height="116" rx="26"/>
+<svg x="28" y="23" width="70" height="70" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-rustos-mark"/></svg>
+<text class="micro" x="118" y="45">REUSABLE SYMBOLS</text>
+<text class="subtitle" x="118" y="73">ids: i-name</text>
+</g>
+<g transform="translate(1110,137)">
+<rect x="0" y="0" width="42" height="42" rx="12" fill="#F0782A" stroke="#2A2E2F"/>
+<text class="palette-label" x="21" y="62">hot</text>
+<rect x="58" y="0" width="42" height="42" rx="12" fill="#E85A1C" stroke="#2A2E2F"/>
+<text class="palette-label" x="79" y="62">rust</text>
+<rect x="116" y="0" width="42" height="42" rx="12" fill="#BB3A10" stroke="#2A2E2F"/>
+<text class="palette-label" x="137" y="62">ember</text>
+<rect x="174" y="0" width="42" height="42" rx="12" fill="#F2E8DD" stroke="#2A2E2F"/>
+<text class="palette-label" x="195" y="62">text</text>
+<rect x="232" y="0" width="42" height="42" rx="12" fill="#BDA18A" stroke="#2A2E2F"/>
+<text class="palette-label" x="253" y="62">sand</text>
+<rect x="290" y="0" width="42" height="42" rx="12" fill="#2A2E2F" stroke="#2A2E2F"/>
+<text class="palette-label" x="311" y="62">edge</text>
+<rect x="348" y="0" width="42" height="42" rx="12" fill="#171B20" stroke="#2A2E2F"/>
+<text class="palette-label" x="369" y="62">cell</text>
+<rect x="406" y="0" width="42" height="42" rx="12" fill="#0E1013" stroke="#40464E"/>
+<text class="palette-label" x="427" y="62">core</text>
+</g>
+<g transform="translate(64,190)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">BRAND / SYSTEM</text>
+<text class="subtitle" x="28" y="68">Identity, core trust, session actions</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-rustos-mark"/></svg>
+<text class="label" x="99.0" y="78">OS MARK</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-cinder"/></svg>
+<text class="label" x="99.0" y="78">CINDER</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-launcher"/></svg>
+<text class="label" x="99.0" y="78">LAUNCHER</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-core"/></svg>
+<text class="label" x="99.0" y="78">CORE</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-shield-core"/></svg>
+<text class="label" x="99.0" y="78">SECURE CORE</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-kernel"/></svg>
+<text class="label" x="99.0" y="78">KERNEL</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-package"/></svg>
+<text class="label" x="99.0" y="78">PACKAGE</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-update"/></svg>
+<text class="label" x="99.0" y="78">UPDATE</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-boot"/></svg>
+<text class="label" x="99.0" y="78">BOOT</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-user"/></svg>
+<text class="label" x="99.0" y="78">USER</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-lock"/></svg>
+<text class="label" x="99.0" y="78">LOCK</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F0782A"><use href="#i-power"/></svg>
+<text class="label" x="99.0" y="78">POWER</text>
+</g>
+</g>
+<g transform="translate(978,190)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">WINDOW DECORATIONS</text>
+<text class="subtitle" x="28" y="68">Fast motor recognition for frame controls</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F0782A"><use href="#i-close"/></svg>
+<text class="label" x="99.0" y="78">CLOSE</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-minimize"/></svg>
+<text class="label" x="99.0" y="78">MINIMIZE</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-maximize"/></svg>
+<text class="label" x="99.0" y="78">MAXIMIZE</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-restore"/></svg>
+<text class="label" x="99.0" y="78">RESTORE</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-fullscreen"/></svg>
+<text class="label" x="99.0" y="78">FULLSCREEN</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-exit-fullscreen"/></svg>
+<text class="label" x="99.0" y="78">EXIT FULL</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-pin"/></svg>
+<text class="label" x="99.0" y="78">PIN</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-unpin"/></svg>
+<text class="label" x="99.0" y="78">UNPIN</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-dock-left"/></svg>
+<text class="label" x="99.0" y="78">SNAP LEFT</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-dock-right"/></svg>
+<text class="label" x="99.0" y="78">SNAP RIGHT</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-tile"/></svg>
+<text class="label" x="99.0" y="78">TILE</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-shade"/></svg>
+<text class="label" x="99.0" y="78">SHADE</text>
+</g>
+</g>
+<g transform="translate(64,656)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">ICONBAR / APPS</text>
+<text class="subtitle" x="28" y="68">High-frequency launch targets</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-search"/></svg>
+<text class="label" x="99.0" y="78">SEARCH</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-files"/></svg>
+<text class="label" x="99.0" y="78">FILES</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-terminal"/></svg>
+<text class="label" x="99.0" y="78">TERMINAL</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-browser"/></svg>
+<text class="label" x="99.0" y="78">BROWSER</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-settings"/></svg>
+<text class="label" x="99.0" y="78">SETTINGS</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-editor"/></svg>
+<text class="label" x="99.0" y="78">EDITOR</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-dashboard"/></svg>
+<text class="label" x="99.0" y="78">DASHBOARD</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-monitor"/></svg>
+<text class="label" x="99.0" y="78">MONITOR</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-tasks"/></svg>
+<text class="label" x="99.0" y="78">TASKS</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-store"/></svg>
+<text class="label" x="99.0" y="78">STORE</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-help"/></svg>
+<text class="label" x="99.0" y="78">HELP</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F0782A"><use href="#i-trash"/></svg>
+<text class="label" x="99.0" y="78">TRASH</text>
+</g>
+</g>
+<g transform="translate(978,656)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">MENUS / NAVIGATION</text>
+<text class="subtitle" x="28" y="68">Predictable direction, hierarchy, selection</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-menu"/></svg>
+<text class="label" x="99.0" y="78">MENU</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-more-horizontal"/></svg>
+<text class="label" x="99.0" y="78">MORE H</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-more-vertical"/></svg>
+<text class="label" x="99.0" y="78">MORE V</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-chevron-up"/></svg>
+<text class="label" x="99.0" y="78">UP</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-chevron-down"/></svg>
+<text class="label" x="99.0" y="78">DOWN</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-chevron-left"/></svg>
+<text class="label" x="99.0" y="78">LEFT</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-chevron-right"/></svg>
+<text class="label" x="99.0" y="78">RIGHT</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-back"/></svg>
+<text class="label" x="99.0" y="78">BACK</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-forward"/></svg>
+<text class="label" x="99.0" y="78">FORWARD</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-check"/></svg>
+<text class="label" x="99.0" y="78">CHECK</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-plus"/></svg>
+<text class="label" x="99.0" y="78">ADD</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-minus"/></svg>
+<text class="label" x="99.0" y="78">REMOVE</text>
+</g>
+</g>
+<g transform="translate(64,1122)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">TASK SWITCHER / WORKSPACES</text>
+<text class="subtitle" x="28" y="68">Spatial memory and app state cues</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-window"/></svg>
+<text class="label" x="99.0" y="78">WINDOW</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-window-stack"/></svg>
+<text class="label" x="99.0" y="78">STACK</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-app-grid"/></svg>
+<text class="label" x="99.0" y="78">APP GRID</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-task-switch"/></svg>
+<text class="label" x="99.0" y="78">SWITCH</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-desktop"/></svg>
+<text class="label" x="99.0" y="78">DESKTOP</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-workspace"/></svg>
+<text class="label" x="99.0" y="78">WORKSPACE</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-workspace-add"/></svg>
+<text class="label" x="99.0" y="78">ADD SPACE</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-expose"/></svg>
+<text class="label" x="99.0" y="78">EXPOSE</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-focus-mode"/></svg>
+<text class="label" x="99.0" y="78">FOCUS</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-snap-grid"/></svg>
+<text class="label" x="99.0" y="78">SNAP GRID</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-recents"/></svg>
+<text class="label" x="99.0" y="78">RECENTS</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-command-palette"/></svg>
+<text class="label" x="99.0" y="78">PALETTE</text>
+</g>
+</g>
+<g transform="translate(978,1122)">
+<rect class="panel" x="0" y="0" width="878" height="430" rx="24"/>
+<text class="category" x="28" y="42">STATUS / CONNECTIVITY</text>
+<text class="subtitle" x="28" y="68">Peripheral awareness without visual noise</text>
+<line class="rule" x1="28" y1="88" x2="164" y2="88"/>
+<g transform="translate(28,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-notifications"/></svg>
+<text class="label" x="99.0" y="78">NOTIFY</text>
+</g>
+<g transform="translate(240,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-notifications-off"/></svg>
+<text class="label" x="99.0" y="78">QUIET</text>
+</g>
+<g transform="translate(452,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-network"/></svg>
+<text class="label" x="99.0" y="78">NETWORK</text>
+</g>
+<g transform="translate(664,108)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-wifi"/></svg>
+<text class="label" x="99.0" y="78">WI-FI</text>
+</g>
+<g transform="translate(28,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-volume"/></svg>
+<text class="label" x="99.0" y="78">VOLUME</text>
+</g>
+<g transform="translate(240,214)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F0782A"><use href="#i-mute"/></svg>
+<text class="label" x="99.0" y="78">MUTE</text>
+</g>
+<g transform="translate(452,214)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-battery"/></svg>
+<text class="label" x="99.0" y="78">BATTERY</text>
+</g>
+<g transform="translate(664,214)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#E85A1C"><use href="#i-battery-charge"/></svg>
+<text class="label" x="99.0" y="78">CHARGE</text>
+</g>
+<g transform="translate(28,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-cloud"/></svg>
+<text class="label" x="99.0" y="78">CLOUD</text>
+</g>
+<g transform="translate(240,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-sync"/></svg>
+<text class="label" x="99.0" y="78">SYNC</text>
+</g>
+<g transform="translate(452,320)">
+<rect class="cell hot" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F0782A"><use href="#i-warning"/></svg>
+<text class="label" x="99.0" y="78">WARNING</text>
+</g>
+<g transform="translate(664,320)">
+<rect class="cell" x="0" y="0" width="198" height="92" rx="18"/>
+<svg x="73.0" y="12" width="52" height="52" viewBox="0 0 24 24" style="color:#F2E8DD"><use href="#i-info"/></svg>
+<text class="label" x="99.0" y="78">INFO</text>
+</g>
+</g>
+<g transform="translate(64,1585)">
+<line class="rule-muted" x1="0" y1="0" x2="1792" y2="0"/>
+<text class="micro" x="0" y="32">PRINCIPLES: silhouette first • familiar metaphors • low-detail 24px masters • orange only for identity, confirmation, critical attention • transparent fills signal active zones without adding clutter</text>
+<text class="micro" x="1378" y="32">RUSTOS ICONSHEET / v0.1</text>
+</g>
+</svg>
