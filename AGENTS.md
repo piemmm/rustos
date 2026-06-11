@@ -420,6 +420,9 @@ rustos/
 │                        #   cargo xtask (scheduling, logging, parallel soaks).
 │                        #   No pipeline logic lives here (that is tools/xtask).
 │
+├── artwork/             # Design concept art/storyboards (reference, not
+│                        #   shipped or built). See docs/src/desktop/artwork.md.
+│
 └── images/              # Output: .iso, .img, .wasm bundles. .gitignored.
 ```
 
