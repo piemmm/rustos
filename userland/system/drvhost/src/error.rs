@@ -34,6 +34,11 @@ pub enum HostError {
     /// A capability identifier inside the manifest body is outside the
     /// ABI's identifier space ([`rustos_abi::CAPABILITY_ID_MAX`]).
     CapabilityOutOfRange,
+    /// A bind-table entry inside the manifest body failed to decode
+    /// (non-zero reserved field, unknown match-key kind, or an
+    /// out-of-bounds `compatible` length). The inner
+    /// [`DriverError`] is the decoder's reason.
+    BindKeyInvalid(DriverError),
     /// The driver requested at least one capability the caller does not
     /// hold. Surfaces the subset-only delegation rule
     /// (`AGENTS.md` §5.2).
@@ -70,7 +75,7 @@ impl HostError {
             Self::SyscallHashMismatch | Self::UntrustedSigner | Self::SignatureInvalid => {
                 Errno::SignatureInvalid
             }
-            Self::CapabilityOutOfRange => Errno::OutOfRange,
+            Self::CapabilityOutOfRange | Self::BindKeyInvalid(_) => Errno::OutOfRange,
             Self::CapabilityEscalation
             | Self::KernelKindForbidden
             | Self::LoadCapabilityMissing => Errno::PermissionDenied,
@@ -90,6 +95,7 @@ impl fmt::Display for HostError {
             Self::UntrustedSigner => "manifest signer pubkey is not on the host trust anchor list",
             Self::SignatureInvalid => "manifest ed25519 signature verification failed",
             Self::CapabilityOutOfRange => "manifest capability id exceeds abi-v1 maximum",
+            Self::BindKeyInvalid(_) => "manifest bind-table entry rejected by abi-v1 decoder",
             Self::CapabilityEscalation => "manifest requests capabilities the caller does not hold",
             Self::KernelKindForbidden => "in-kernel driver requires CAP_DRV_KERNEL",
             Self::LoadCapabilityMissing => "caller does not hold CAP_DRV_LOAD",
@@ -127,6 +133,10 @@ mod tests {
         );
         assert_eq!(
             HostError::CapabilityOutOfRange.as_errno(),
+            Errno::OutOfRange
+        );
+        assert_eq!(
+            HostError::BindKeyInvalid(DriverError::BadMagic).as_errno(),
             Errno::OutOfRange
         );
         assert_eq!(

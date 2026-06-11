@@ -11,7 +11,8 @@ use core::fmt::Write as _;
 
 use rustos_abi::driver::VirtioHost;
 use rustos_abi::{
-    CapabilityId, DriverHandle, DriverHost, DriverKind, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
@@ -249,6 +250,7 @@ impl<'h> Host<'h> {
         self.check_syscall_hash(path, &parsed)?;
         self.verify_signature(path, &parsed)?;
         let requested = self.decode_and_check_caps(path, &parsed, caller_caps)?;
+        self.check_bind_table(path, &parsed)?;
         // 8. Hand the verified image to the spawner for registration.
         // Construct the host view *before* the hand-off so the driver
         // sees the bitmap that is about to be installed.
@@ -364,13 +366,16 @@ impl<'h> Host<'h> {
             self.audit_reject(events::DRIVER_LOAD_REJECTED_TRUST, path, "untrusted signer");
             return Err(HostError::UntrustedSigner);
         }
-        // Compose `header[..signed_end] || cap_body` in a temporary
-        // buffer that is wiped before it leaves scope (`AGENTS.md` §4 —
-        // zero-on-free for any buffer that held capability tokens).
-        let mut signed_message: Vec<u8> =
-            Vec::with_capacity(parsed.signed_bytes.len() + parsed.capability_body.len());
+        // Compose `header[..signed_end] || cap_body || bind_table` in a
+        // temporary buffer that is wiped before it leaves scope
+        // (`AGENTS.md` §4 — zero-on-free for any buffer that held
+        // capability tokens).
+        let mut signed_message: Vec<u8> = Vec::with_capacity(
+            parsed.signed_bytes.len() + parsed.capability_body.len() + parsed.bind_table.len(),
+        );
         signed_message.extend_from_slice(parsed.signed_bytes);
         signed_message.extend_from_slice(parsed.capability_body);
+        signed_message.extend_from_slice(parsed.bind_table);
         let sig = Ed25519Signature::from_bytes(parsed.manifest.signature);
         let result = signer_key.verify(&signed_message, &sig);
         secure_clear(signed_message.as_mut_slice());
@@ -419,6 +424,24 @@ impl<'h> Host<'h> {
             return Err(HostError::CapabilityEscalation);
         }
         Ok(requested)
+    }
+
+    fn check_bind_table(&self, path: &str, parsed: &ParsedImage<'_>) -> Result<(), HostError> {
+        // The decoded entries are not consumed here — matching is the
+        // device manager's job (`AGENTS.md` §18.3) — but every entry is
+        // validated fail-closed at the load gate so a malformed table
+        // never reaches a consumer (§5.4.3).
+        let mut buf =
+            [DriverBindKey::new(0, HwMatchKey::virtio(0)); DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
+        parsed.decode_bind_table(&mut buf).map_err(|e| {
+            self.audit_reject(
+                events::DRIVER_LOAD_REJECTED_BIND_KEY,
+                path,
+                "bind key decode",
+            );
+            e
+        })?;
+        Ok(())
     }
 
     fn next_handle(&mut self) -> DriverHandle {

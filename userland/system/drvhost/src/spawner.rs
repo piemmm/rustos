@@ -121,7 +121,7 @@ mod tests {
             magic: rustos_abi::DRIVER_MANIFEST_MAGIC,
             abi_version: rustos_abi::ABI_VERSION_CURRENT,
             kind: DriverKind::UserSpace,
-            reserved0: 0,
+            bind_key_count: 0,
             capability_count: 0,
             syscall_table_hash: [0u8; 32],
             signer_pubkey: [0u8; 32],

@@ -35,6 +35,8 @@ pub const DRIVER_LOAD_REJECTED_DRV_LOAD: EventId = EventId(7_008);
 pub const DRIVER_LOAD_REJECTED_SPAWN: EventId = EventId(7_009);
 /// A driver image was rejected: driver's own `register` entry point failed.
 pub const DRIVER_LOAD_REJECTED_REGISTER: EventId = EventId(7_010);
+/// A driver image was rejected: a bind-table entry failed to decode.
+pub const DRIVER_LOAD_REJECTED_BIND_KEY: EventId = EventId(7_011);
 /// A driver was unloaded.
 pub const DRIVER_UNLOADED: EventId = EventId(7_020);
 /// A driver was reloaded (re-read, re-verified, re-issued handle).
@@ -57,6 +59,7 @@ mod tests {
             DRIVER_LOAD_REJECTED_DRV_LOAD,
             DRIVER_LOAD_REJECTED_SPAWN,
             DRIVER_LOAD_REJECTED_REGISTER,
+            DRIVER_LOAD_REJECTED_BIND_KEY,
             DRIVER_UNLOADED,
             DRIVER_RELOADED,
         ] {
@@ -77,6 +80,7 @@ mod tests {
             DRIVER_LOAD_REJECTED_DRV_LOAD.0,
             DRIVER_LOAD_REJECTED_SPAWN.0,
             DRIVER_LOAD_REJECTED_REGISTER.0,
+            DRIVER_LOAD_REJECTED_BIND_KEY.0,
             DRIVER_UNLOADED.0,
             DRIVER_RELOADED.0,
         ];

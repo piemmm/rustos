@@ -105,7 +105,13 @@ capability-gated `ipc_send` path while the host side polls
 
 The spawner is *only* invoked after every other verification gate has
 cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving spawner
-cannot widen the host's authority.
+cannot widen the host's authority. Those gates are, in order: image
+parse, syscall-table hash, signature (over header, capability body,
+*and* bind table), capability subset/kind checks, and a fail-closed
+decode of every
+[`DriverBindKey`](../abi/driver_traits.md#driverbindkey) bind-table
+entry — a malformed table never reaches the device manager
+(`AGENTS.md` §18.3).
 
 ### Virtio host factory
 
@@ -169,6 +175,7 @@ stable `EventId` from `rustos_drvhost::events`:
 | `7008`    | load rejected — caller lacks `CAP_DRV_LOAD`          |
 | `7009`    | load rejected — spawner has no driver for manifest   |
 | `7010`    | load rejected — driver `register()` returned an error |
+| `7011`    | load rejected — bind-table entry failed to decode    |
 | `7020`    | driver unloaded                                      |
 | `7021`    | driver reloaded                                      |
 
@@ -185,9 +192,9 @@ behind a syscall surface the result without inventing new error codes.
 ## Stability tier
 
 `experimental` (`AGENTS.md` §6). The wire formats consumed (manifest
-header and capability body) are already frozen by `lib/abi`'s
-`DriverManifest`; the host's own public Rust API freezes once Stage 4
-lands its first real driver.
+header, capability body, and bind table) are pinned by `lib/abi`'s
+`DriverManifest` / `DriverBindKey`; the host's own public Rust API
+freezes once Stage 4 lands its first real driver.
 
 ## Security model
 

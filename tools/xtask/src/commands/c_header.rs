@@ -42,22 +42,23 @@
 use std::path::Path;
 
 use rustos_abi::{
-    AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
-    DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno, HwDeviceClass, HwMatchKey,
-    HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput,
-    LibraryScope, LimitKind, LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord,
-    NamedKeyCode, NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
-    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit,
-    ResourceLimitRecord, RxePermission, Segment, Severity, StdInfoKind, StringSlot, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
-    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK,
-    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
-    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
-    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverBindKey, DriverError,
+    DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
+    HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
+    KernelMemoryStats, KeyInput, LibraryScope, LimitKind, LoadHeader, ManifestHeader, MapFlags,
+    MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, PointerButtonCode, PointerInput,
+    PortName, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
+    ResourceLimit, ResourceLimitRecord, RxePermission, Segment, Severity, StdInfoKind, StringSlot,
+    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1,
+    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1,
+    HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE,
+    LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
     MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
@@ -1433,6 +1434,11 @@ fn driver_emit_constants(out: &mut String) {
         out,
         "#define ROS_DRIVER_MANIFEST_MAX_CAPABILITIES {DRIVER_MANIFEST_MAX_CAPABILITIES}u"
     );
+    out.push_str("/* Maximum number of bind-table entries a driver manifest may declare. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_MANIFEST_MAX_BIND_KEYS {DRIVER_MANIFEST_MAX_BIND_KEYS}u"
+    );
     out.push_str("/* Length, in bytes, of the Ed25519 signer public key. */\n");
     let _ = writeln!(
         out,
@@ -1448,6 +1454,12 @@ fn driver_emit_constants(out: &mut String) {
         out,
         "#define ROS_DRIVER_MANIFEST_WIRE_LEN {}u",
         DriverManifest::WIRE_LEN
+    );
+    out.push_str("/* Packed little-endian wire size of one bind-table entry, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_BIND_KEY_WIRE_LEN {}u",
+        DriverBindKey::WIRE_LEN
     );
     out.push('\n');
 
@@ -1678,12 +1690,16 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 ///
 /// `ros_driver_manifest_t` mirrors the `#[repr(C)]` layout of
 /// [`DriverManifest`] (the signed driver-manifest prefix; naturally aligned,
-/// so the struct size equals the wire size), and `ros_driver_register_reply_t`
+/// so the struct size equals the wire size), `ros_driver_bind_key_t` mirrors
+/// [`DriverBindKey`] (one bind-table entry: a `ros_hw_match_key_t` from
+/// `rustos_hwtree.h` plus the bind priority, `AGENTS.md` §18.3), and
+/// `ros_driver_register_reply_t`
 /// mirrors [`DriverRegisterReply`] (the register-handshake outcome a spawned
 /// driver process reports to its host over IPC) with its
 /// `ROS_DRIVER_REGISTER_REPLY_MAGIC` / `_STATUS_OK` / `_WIRE_LEN` constants.
 /// Alongside them the header declares
-/// the `ROS_DRIVER_MANIFEST_MAGIC` / `_MAX_CAPABILITIES` / `_WIRE_LEN` and
+/// the `ROS_DRIVER_MANIFEST_MAGIC` / `_MAX_CAPABILITIES` / `_MAX_BIND_KEYS` /
+/// `_WIRE_LEN` / `ROS_DRIVER_BIND_KEY_WIRE_LEN` and
 /// signer-key/signature length constants, the [`DriverKind`] / [`BufferClass`]
 /// `#[repr(u8)]` and [`DriverError`] `#[repr(i32)]` discriminant sets, and the
 /// [`DriverHandle`] `ROS_DRIVER_HANDLE_NONE` sentinel (a live driver handle
@@ -1710,6 +1726,7 @@ fn generate_driver() -> String {
         banner("Driver-class ABI core: manifest, kinds, errors (AGENTS.md sec.8, sec.9).");
     out.push_str("#ifndef ROS_DRIVER_H\n#define ROS_DRIVER_H\n\n");
     out.push_str("#include <stdint.h>\n");
+    out.push_str("#include \"rustos_hwtree.h\"\n");
     out.push_str("#include \"rustos_manifest.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n\n");
 
@@ -1724,12 +1741,23 @@ fn generate_driver() -> String {
          \x20   uint32_t magic;\n\
          \x20   uint32_t abi_version;\n\
          \x20   uint8_t kind;\n\
-         \x20   uint8_t reserved0;\n\
+         \x20   uint8_t bind_key_count;\n\
          \x20   uint16_t capability_count;\n\
          \x20   uint8_t syscall_table_hash[ROS_SYSCALL_TABLE_HASH_LEN];\n\
          \x20   uint8_t signer_pubkey[ROS_DRIVER_SIGNER_PUBKEY_LEN];\n\
          \x20   uint8_t signature[ROS_DRIVER_SIGNATURE_LEN];\n\
          } ros_driver_manifest_t;\n\n",
+    );
+
+    out.push_str(
+        "/* One bind-table entry: a hardware-tree match key plus the manifest's\n\
+         \x20* bind priority (AGENTS.md sec.18.3). bind_key_count entries follow the\n\
+         \x20* capability body; all are covered by the manifest signature. */\n\
+         typedef struct ros_driver_bind_key {\n\
+         \x20   uint16_t priority;\n\
+         \x20   uint16_t reserved0;\n\
+         \x20   ros_hw_match_key_t key;\n\
+         } ros_driver_bind_key_t;\n\n",
     );
 
     out.push_str(
@@ -2925,17 +2953,32 @@ mod tests {
             h.contains("typedef struct ros_driver_manifest {"),
             "manifest struct mirror: {h}"
         );
+        // The bind-table entry embeds the hwtree match key, so the header
+        // pulls in rustos_hwtree.h (AGENTS.md sec.2.2: no re-declaration).
+        assert!(
+            h.contains("#include \"rustos_hwtree.h\""),
+            "hwtree header included for ros_hw_match_key_t: {h}"
+        );
+        assert!(
+            h.contains("typedef struct ros_driver_bind_key {"),
+            "bind-key struct mirror: {h}"
+        );
         // Values are read from lib/abi, never re-typed: assert they match.
         let expected = [
             format!("#define ROS_DRIVER_MANIFEST_MAGIC {DRIVER_MANIFEST_MAGIC:#x}u"),
             format!(
                 "#define ROS_DRIVER_MANIFEST_MAX_CAPABILITIES {DRIVER_MANIFEST_MAX_CAPABILITIES}u"
             ),
+            format!("#define ROS_DRIVER_MANIFEST_MAX_BIND_KEYS {DRIVER_MANIFEST_MAX_BIND_KEYS}u"),
             format!("#define ROS_DRIVER_SIGNER_PUBKEY_LEN {DRIVER_SIGNER_PUBKEY_LEN}u"),
             format!("#define ROS_DRIVER_SIGNATURE_LEN {DRIVER_SIGNATURE_LEN}u"),
             format!(
                 "#define ROS_DRIVER_MANIFEST_WIRE_LEN {}u",
                 DriverManifest::WIRE_LEN
+            ),
+            format!(
+                "#define ROS_DRIVER_BIND_KEY_WIRE_LEN {}u",
+                DriverBindKey::WIRE_LEN
             ),
             format!(
                 "#define ROS_DRIVER_KIND_USER_SPACE ((uint8_t){}u)",
@@ -2986,6 +3029,11 @@ mod tests {
             core::mem::size_of::<DriverRegisterReply>(),
             DriverRegisterReply::WIRE_LEN,
             "DriverRegisterReply repr(C) size == wire size"
+        );
+        assert_eq!(
+            core::mem::size_of::<DriverBindKey>(),
+            DriverBindKey::WIRE_LEN,
+            "DriverBindKey repr(C) size == wire size"
         );
     }
 
@@ -3079,8 +3127,8 @@ mod tests {
         use rustos_abi::driver::input::InputEvent;
         use rustos_abi::driver::net::MacAddress;
         use rustos_abi::{
-            AppInfoHeader, DriverManifest, Duration64, IpcMessageHeader, KernelMemoryStats,
-            LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
+            AppInfoHeader, DriverBindKey, DriverManifest, Duration64, IpcMessageHeader,
+            KernelMemoryStats, LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
             ProcessListRequest, ProcessRecord, ProcessStartHeader, ResourceLimit,
             ResourceLimitRecord, StringSlot, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
         };
@@ -3108,6 +3156,7 @@ mod tests {
             ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
             ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 152, align_of::<MountRecord>(), 4),
             ("rustos_driver.h", "} ros_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
+            ("rustos_driver.h", "} ros_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),
             ("rustos_driver.h", "} ros_driver_register_reply_t;", size_of::<DriverRegisterReply>(), 24, align_of::<DriverRegisterReply>(), 8),
             ("rustos_driver.h", "} ros_block_geometry_t;", size_of::<BlockGeometry>(), 16, align_of::<BlockGeometry>(), 8),
             ("rustos_driver.h", "} ros_discard_capability_t;", size_of::<DiscardCapability>(), 24, align_of::<DiscardCapability>(), 8),

@@ -471,10 +471,22 @@ order (one fully-gated increment each):
    `Port::recv` wait host-side decoding the reply fail-closed. In-process
    `DriverSpawner` impls remain only in tests/verticals until the
    `DriverHost` surface (DMA, MMIO) is reachable over IPC.
-2. **Bind table** — add the match-key bind table to `DriverManifest`
-   (`lib/abi/src/driver/mod.rs`) in place (`abi-v1` is unfrozen, §2.13)
-   and regenerate the C header.
-3. **`userland/system/devmgr`** — the matcher/autoloader as specced above.
+2. **Bind table — done.** `DriverManifest` carries `bind_key_count` (in
+   place of the reserved byte, §2.13) and the `.rxe` body is now
+   capability list + bind table + payload, all signature-covered. One
+   entry is a `DriverBindKey` (`lib/abi/src/driver/mod.rs`): an
+   `HwMatchKey` plus the §18.3 deterministic bind `priority`
+   (higher-priority match binds; an unbroken tie is a packaging
+   defect), decoded fail-closed through the single shared
+   `decode_bind_keys` and capped at `DRIVER_MANIFEST_MAX_BIND_KEYS`
+   (16, a validation bound §24.4). drvhost validates every entry at the
+   load gate (`HostError::BindKeyInvalid`, audit `EventId(7011)`)
+   before the spawner hand-off; the C view (`ros_driver_bind_key_t`,
+   `ROS_DRIVER_MANIFEST_MAX_BIND_KEYS`, `ROS_DRIVER_BIND_KEY_WIRE_LEN`)
+   is regenerated. Docs: `docs/src/abi/driver_traits.md`,
+   `docs/src/drivers/{host,lifecycle}.md`.
+3. ⭐ **`userland/system/devmgr`** — the matcher/autoloader as specced
+   above (start here).
 4. **Generic match-key emission** — replace the hand-grown list of node
    types `kernel/arch/aarch64/src/fdt.rs` recognises with generic
    match-key emission into the hardware tree, confined to

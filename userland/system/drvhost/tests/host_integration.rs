@@ -19,12 +19,15 @@
 mod fixtures;
 
 use fixtures::{
-    alternative_signing_key, build_signed_image, mock_register, pubkey_of, register_calls,
-    reset_register_calls, test_signing_key, CapturedEvent, FailingSpawner, MemSource,
-    NoDriverSpawner, RecordingSink, SingleSpawner,
+    alternative_signing_key, build_signed_image, build_signed_image_with_bind_keys, mock_register,
+    pubkey_of, register_calls, reset_register_calls, test_signing_key, CapturedEvent,
+    FailingSpawner, MemSource, NoDriverSpawner, RecordingSink, SingleSpawner,
 };
 
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, ABI_VERSION_CURRENT};
+use rustos_abi::{
+    CapabilityId, DriverBindKey, DriverError, DriverKind, DriverManifest, HwMatchKey,
+    ABI_VERSION_CURRENT,
+};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drvhost::{Host, HostConfig, HostError};
@@ -205,6 +208,82 @@ fn capability_escalation_refused() {
         &trusted,
         HostError::CapabilityEscalation,
         7006, // DRIVER_LOAD_REJECTED_CAPABILITY
+    );
+}
+
+#[test]
+fn bind_table_accepted_and_signed() {
+    reset_register_calls();
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let key = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("compatible fits");
+    let img = build_signed_image_with_bind_keys(
+        &sk,
+        DriverKind::UserSpace,
+        SYS_HASH,
+        &[CapabilityId::FS_MOUNT],
+        &[
+            DriverBindKey::new(10, key),
+            DriverBindKey::new(0, HwMatchKey::virtio(2)),
+        ],
+        b"payload",
+    );
+    let (result, ids) = drive(img, full_caps(), &trusted);
+    assert!(result.is_ok(), "bind-table load failed: {result:?}");
+    assert!(ids.contains(&7001), "DRIVER_LOADED missing: {ids:?}");
+}
+
+#[test]
+fn tampered_bind_table_refused_by_signature() {
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let key = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("compatible fits");
+    let mut img = build_signed_image_with_bind_keys(
+        &sk,
+        DriverKind::UserSpace,
+        SYS_HASH,
+        &[],
+        &[DriverBindKey::new(10, key)],
+        b"",
+    );
+    // Flip the first bind entry's priority byte (it sits right after the
+    // header, the cap body being empty) — the bind table is inside the
+    // signed message, so the signature gate must fire.
+    img[DriverManifest::WIRE_LEN] ^= 0x01;
+    run_negative(
+        img,
+        full_caps(),
+        &trusted,
+        HostError::SignatureInvalid,
+        7005, // DRIVER_LOAD_REJECTED_SIGNATURE
+    );
+}
+
+#[test]
+fn malformed_bind_key_refused() {
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    // A signed-but-malformed entry: non-zero reserved field. The
+    // signature is valid, so the load must die at the bind-table gate.
+    let bad_entry = DriverBindKey {
+        priority: 1,
+        reserved0: 1,
+        key: HwMatchKey::virtio(2),
+    };
+    let img = build_signed_image_with_bind_keys(
+        &sk,
+        DriverKind::UserSpace,
+        SYS_HASH,
+        &[],
+        &[bad_entry],
+        b"",
+    );
+    run_negative(
+        img,
+        full_caps(),
+        &trusted,
+        HostError::BindKeyInvalid(DriverError::BadMagic),
+        7011, // DRIVER_LOAD_REJECTED_BIND_KEY
     );
 }
 

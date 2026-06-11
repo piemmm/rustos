@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signer, SigningKey};
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest,
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest,
     DRIVER_MANIFEST_MAGIC,
 };
 use rustos_crypto::Ed25519PublicKey;
@@ -33,11 +33,12 @@ use rustos_drvhost::{
 };
 
 /// Build a `.rxe` image: signed manifest header + capability body +
-/// optional payload bytes.
+/// optional payload bytes. The bind table is empty.
 ///
 /// `caps` is the requested capability set in declaration order. The
-/// signature is computed with `signing_key` over `header[..WIRE_LEN-64] || cap_body`,
-/// matching the verifier in `crate::host`.
+/// signature is computed with `signing_key` over
+/// `header[..WIRE_LEN-64] || cap_body || bind_table`, matching the
+/// verifier in `crate::host`.
 pub fn build_signed_image(
     signing_key: &SigningKey,
     kind: DriverKind,
@@ -45,16 +46,30 @@ pub fn build_signed_image(
     caps: &[CapabilityId],
     payload: &[u8],
 ) -> Vec<u8> {
+    build_signed_image_with_bind_keys(signing_key, kind, syscall_table_hash, caps, &[], payload)
+}
+
+/// [`build_signed_image`] with an explicit bind table (`AGENTS.md`
+/// §18.3) between the capability body and the payload.
+pub fn build_signed_image_with_bind_keys(
+    signing_key: &SigningKey,
+    kind: DriverKind,
+    syscall_table_hash: [u8; 32],
+    caps: &[CapabilityId],
+    bind_keys: &[DriverBindKey],
+    payload: &[u8],
+) -> Vec<u8> {
     let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
     let mut header_no_sig = Vec::with_capacity(DriverManifest::WIRE_LEN - 64);
     let count = u16::try_from(caps.len()).expect("caps fit in u16");
+    let bind_key_count = u8::try_from(bind_keys.len()).expect("bind keys fit in u8");
     // Build a temporary manifest with a zero signature so we can encode
     // the prefix the signer must cover.
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
         abi_version: rustos_abi::ABI_VERSION_CURRENT,
         kind,
-        reserved0: 0,
+        bind_key_count,
         capability_count: count,
         syscall_table_hash,
         signer_pubkey,
@@ -66,14 +81,23 @@ pub fn build_signed_image(
     for c in caps {
         cap_body.extend_from_slice(&c.as_u16().to_le_bytes());
     }
-    let mut signed_message = Vec::with_capacity(header_no_sig.len() + cap_body.len());
+    let mut bind_table = Vec::with_capacity(bind_keys.len() * DriverBindKey::WIRE_LEN);
+    for k in bind_keys {
+        bind_table.extend_from_slice(&k.to_le_bytes());
+    }
+    let mut signed_message =
+        Vec::with_capacity(header_no_sig.len() + cap_body.len() + bind_table.len());
     signed_message.extend_from_slice(&header_no_sig);
     signed_message.extend_from_slice(&cap_body);
+    signed_message.extend_from_slice(&bind_table);
     let sig = signing_key.sign(&signed_message);
     manifest.signature = sig.to_bytes();
-    let mut out = Vec::with_capacity(DriverManifest::WIRE_LEN + cap_body.len() + payload.len());
+    let mut out = Vec::with_capacity(
+        DriverManifest::WIRE_LEN + cap_body.len() + bind_table.len() + payload.len(),
+    );
     out.extend_from_slice(&manifest.to_le_bytes());
     out.extend_from_slice(&cap_body);
+    out.extend_from_slice(&bind_table);
     out.extend_from_slice(payload);
     out
 }

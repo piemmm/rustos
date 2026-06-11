@@ -94,15 +94,40 @@ module's `rxe` manifest. Wire encoding mirrors
 serves both surfaces. Encoded length is `DriverManifest::WIRE_LEN`
 bytes; the signature byte range is the tail of that buffer
 (`DriverManifest::signed_range()` returns everything *before* the
-signature).
+signature). The body that follows the header is the requested
+capability list (`capability_count` little-endian `u16` ids) followed
+by the driver's bind table (`bind_key_count`
+[`DriverBindKey`](#driverbindkey) records); both halves are covered by
+the signature.
 
 `DriverManifest::from_bytes` rejects:
 
 * short buffers (`DriverError::BufferTooSmall`),
-* wrong magic / non-zero reserved bytes (`DriverError::BadMagic`),
+* wrong magic (`DriverError::BadMagic`),
 * unsupported ABI versions (`DriverError::AbiVersionUnsupported`),
-* oversize capability counts (`DriverError::LengthOutOfRange`),
+* oversize capability or bind-key counts
+  (`DriverError::LengthOutOfRange`),
 * unknown `kind` byte (`DriverError::OutOfRange`).
+
+### DriverBindKey
+
+`#[repr(C)] struct DriverBindKey`. One entry of a driver manifest's
+bind table (`AGENTS.md` §18.3): a hardware-tree
+`rustos_abi::hwtree::HwMatchKey` plus the manifest-declared
+bind `priority`. The device manager matches each hardware-tree node's
+keys against every driver's bind table; when more than one driver
+matches the same node, the higher matched `priority` binds, and an
+unbroken tie is a packaging defect refused deterministically. Encoded
+length is `DriverBindKey::WIRE_LEN` (80) bytes; a manifest may declare
+at most `DRIVER_MANIFEST_MAX_BIND_KEYS` (16) entries — a validation
+bound, not a capacity (`AGENTS.md` §24.4).
+
+`DriverBindKey::from_bytes` rejects short buffers
+(`DriverError::BufferTooSmall`), a non-zero reserved field
+(`DriverError::BadMagic`), an unknown match-key kind
+(`DriverError::OutOfRange`), and an out-of-bounds `compatible` length
+(`DriverError::LengthOutOfRange`); `decode_bind_keys` is the single
+shared decoder for the whole table.
 
 ### DriverRegisterReply
 

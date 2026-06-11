@@ -41,7 +41,8 @@
 //! [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL).
 //! Class traits document their own per-method capability gates.
 
-use crate::le::{read_u16, read_u32};
+use crate::hwtree::HwMatchKey;
+use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
 
@@ -150,6 +151,15 @@ pub const DRIVER_MANIFEST_MAGIC: u32 = u32::from_le_bytes(*b"DRV1");
 /// [`MANIFEST_MAX_CAPABILITIES`](crate::MANIFEST_MAX_CAPABILITIES) so
 /// driver and application binaries share a single budget.
 pub const DRIVER_MANIFEST_MAX_CAPABILITIES: u16 = 64;
+
+/// Maximum number of [`DriverBindKey`] entries a single driver manifest
+/// may declare.
+///
+/// Bounded so that a hostile manifest cannot force unbounded parsing
+/// work (`AGENTS.md` §24.4 — a validation bound, not a capacity). A
+/// driver binds one device class on a handful of buses; sixteen keys is
+/// generous headroom for every in-tree driver.
+pub const DRIVER_MANIFEST_MAX_BIND_KEYS: u8 = 16;
 
 /// Length of the Ed25519 public key embedded in a [`DriverManifest`].
 ///
@@ -368,9 +378,11 @@ impl DriverError {
 
 /// Fixed-size prefix of a signed driver manifest.
 ///
-/// Field order is part of the frozen `abi-v1` contract. The manifest
-/// body that follows the header is a list of [`CapabilityId`] values
-/// the driver requests; both halves are covered by
+/// Field order is part of the frozen `abi-v1` contract. The body that
+/// follows the header is a list of [`CapabilityId`] values the driver
+/// requests (`capability_count` entries) followed by the driver's bind
+/// table (`bind_key_count` [`DriverBindKey`] records, `AGENTS.md`
+/// §18.3); header and body are covered by
 /// [`DriverManifest::signature`]. The signature byte range itself is
 /// excluded from coverage; use [`DriverManifest::signed_range`] when
 /// verifying.
@@ -384,8 +396,9 @@ pub struct DriverManifest {
     pub abi_version: u32,
     /// Whether the driver is loaded into user space or the kernel.
     pub kind: DriverKind,
-    /// Reserved; must be zero in `abi-v1`.
-    pub reserved0: u8,
+    /// Number of [`DriverBindKey`] entries in the body, following the
+    /// capability list. Capped at [`DRIVER_MANIFEST_MAX_BIND_KEYS`].
+    pub bind_key_count: u8,
     /// Number of [`CapabilityId`] entries in the body. Capped at
     /// [`DRIVER_MANIFEST_MAX_CAPABILITIES`].
     pub capability_count: u16,
@@ -405,7 +418,7 @@ impl DriverManifest {
     pub const WIRE_LEN: usize = 4 // magic
         + 4 // abi_version
         + 1 // kind
-        + 1 // reserved0
+        + 1 // bind_key_count
         + 2 // capability_count
         + SYSCALL_TABLE_HASH_LEN
         + DRIVER_SIGNER_PUBKEY_LEN
@@ -418,7 +431,7 @@ impl DriverManifest {
         out[0..4].copy_from_slice(&self.magic.to_le_bytes());
         out[4..8].copy_from_slice(&self.abi_version.to_le_bytes());
         out[8] = self.kind.as_u8();
-        out[9] = self.reserved0;
+        out[9] = self.bind_key_count;
         out[10..12].copy_from_slice(&self.capability_count.to_le_bytes());
         let mut cursor = 12;
         out[cursor..cursor + SYSCALL_TABLE_HASH_LEN].copy_from_slice(&self.syscall_table_hash);
@@ -434,12 +447,12 @@ impl DriverManifest {
     /// # Errors
     ///
     /// * [`DriverError::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`DriverError::BadMagic`] if the magic word does not match
-    ///   or if `reserved0` is non-zero.
+    /// * [`DriverError::BadMagic`] if the magic word does not match.
     /// * [`DriverError::AbiVersionUnsupported`] if `abi_version` is
     ///   not [`crate::ABI_VERSION_CURRENT`].
     /// * [`DriverError::LengthOutOfRange`] if `capability_count`
-    ///   exceeds [`DRIVER_MANIFEST_MAX_CAPABILITIES`].
+    ///   exceeds [`DRIVER_MANIFEST_MAX_CAPABILITIES`] or
+    ///   `bind_key_count` exceeds [`DRIVER_MANIFEST_MAX_BIND_KEYS`].
     /// * [`DriverError::OutOfRange`] if the `kind` byte does not
     ///   name a known [`DriverKind`].
     ///
@@ -461,9 +474,9 @@ impl DriverManifest {
             return Err(DriverError::AbiVersionUnsupported);
         }
         let kind = DriverKind::from_u8(bytes[8])?;
-        let reserved0 = bytes[9];
-        if reserved0 != 0 {
-            return Err(DriverError::BadMagic);
+        let bind_key_count = bytes[9];
+        if bind_key_count > DRIVER_MANIFEST_MAX_BIND_KEYS {
+            return Err(DriverError::LengthOutOfRange);
         }
         let capability_count = read_u16(bytes, 10);
         if capability_count > DRIVER_MANIFEST_MAX_CAPABILITIES {
@@ -482,7 +495,7 @@ impl DriverManifest {
             magic,
             abi_version,
             kind,
-            reserved0,
+            bind_key_count,
             capability_count,
             syscall_table_hash,
             signer_pubkey,
@@ -498,6 +511,129 @@ impl DriverManifest {
     pub const fn signed_range() -> core::ops::Range<usize> {
         0..(Self::WIRE_LEN - DRIVER_SIGNATURE_LEN)
     }
+}
+
+/// One entry of a driver manifest's bind table.
+///
+/// The bind table is how a driver declares the hardware-tree nodes it
+/// can drive (`AGENTS.md` §18.3): each entry pairs one [`HwMatchKey`]
+/// with a manifest-declared bind priority. The device manager compares
+/// a node's match keys against every loaded manifest's table; when more
+/// than one driver matches the same node, the higher matched `priority`
+/// binds. An unbroken tie is a packaging defect the device manager
+/// refuses deterministically — never a coin-flip.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DriverBindKey {
+    /// Bind priority; a higher value binds in preference to a lower
+    /// one when two drivers match the same node.
+    pub priority: u16,
+    /// Reserved; must be zero in `abi-v1`.
+    pub reserved0: u16,
+    /// The hardware-tree match key this entry binds to.
+    pub key: HwMatchKey,
+}
+
+impl DriverBindKey {
+    /// Encoded size of a [`DriverBindKey`] on the wire.
+    pub const WIRE_LEN: usize = 4 + HwMatchKey::WIRE_LEN;
+
+    /// A bind-table entry binding `key` at `priority`.
+    #[must_use]
+    pub const fn new(priority: u16, key: HwMatchKey) -> Self {
+        Self {
+            priority,
+            reserved0: 0,
+            key,
+        }
+    }
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u16(&mut out, 0, self.priority);
+        put_u16(&mut out, 2, self.reserved0);
+        out[4..].copy_from_slice(&self.key.to_le_bytes());
+        out
+    }
+
+    /// Decode `bytes` into a [`DriverBindKey`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`DriverError::BadMagic`] if `reserved0` is non-zero.
+    /// * [`DriverError::OutOfRange`] if the embedded key's kind is
+    ///   unknown.
+    /// * [`DriverError::LengthOutOfRange`] if the embedded key's
+    ///   `compatible` length exceeds its bound.
+    ///
+    /// # Capabilities
+    ///
+    /// None. Parsing is pure; the device manager's load gate enforces
+    /// the capability checks (`AGENTS.md` §18.3).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DriverError> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(DriverError::BufferTooSmall);
+        }
+        let priority = read_u16(bytes, 0);
+        let reserved0 = read_u16(bytes, 2);
+        if reserved0 != 0 {
+            return Err(DriverError::BadMagic);
+        }
+        let key = HwMatchKey::from_bytes(&bytes[4..Self::WIRE_LEN]).map_err(|e| match e {
+            Errno::BufferTooSmall => DriverError::BufferTooSmall,
+            Errno::LengthOutOfRange => DriverError::LengthOutOfRange,
+            _ => DriverError::OutOfRange,
+        })?;
+        Ok(Self {
+            priority,
+            reserved0,
+            key,
+        })
+    }
+}
+
+/// Decode the bind table that follows a driver manifest's capability
+/// body.
+///
+/// The table is `count` consecutive [`DriverBindKey`] records, where
+/// `count` is the manifest's `bind_key_count` field. Decoded entries
+/// are written into `out`; the number written (always `count` on
+/// success) is returned so a fixed-size scratch buffer can be reused
+/// across manifests. This is the single decoder for the table format,
+/// shared by every consumer that turns a signed manifest into a bind
+/// table (`AGENTS.md` §2.2).
+///
+/// # Errors
+///
+/// * [`DriverError::BufferTooSmall`] if `out` cannot hold `count`
+///   entries, or if `body` is shorter than
+///   `count * DriverBindKey::WIRE_LEN` bytes.
+/// * Any [`DriverBindKey::from_bytes`] error for an invalid entry.
+///
+/// # Capabilities
+///
+/// None. Parsing is pure; the load gate enforces capability checks.
+pub fn decode_bind_keys(
+    body: &[u8],
+    count: usize,
+    out: &mut [DriverBindKey],
+) -> Result<usize, DriverError> {
+    if out.len() < count {
+        return Err(DriverError::BufferTooSmall);
+    }
+    let needed = count
+        .checked_mul(DriverBindKey::WIRE_LEN)
+        .ok_or(DriverError::LengthOutOfRange)?;
+    if body.len() < needed {
+        return Err(DriverError::BufferTooSmall);
+    }
+    for (i, slot) in out.iter_mut().enumerate().take(count) {
+        *slot = DriverBindKey::from_bytes(&body[i * DriverBindKey::WIRE_LEN..])?;
+    }
+    Ok(count)
 }
 
 /// Host-supplied environment passed to every driver's `register`
@@ -628,7 +764,7 @@ mod tests {
             magic: DRIVER_MANIFEST_MAGIC,
             abi_version: crate::ABI_VERSION_CURRENT,
             kind: DriverKind::UserSpace,
-            reserved0: 0,
+            bind_key_count: 0,
             capability_count: 3,
             syscall_table_hash: [0xAA; SYSCALL_TABLE_HASH_LEN],
             signer_pubkey: [0xBB; DRIVER_SIGNER_PUBKEY_LEN],
@@ -769,13 +905,21 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_nonzero_reserved() {
+    fn manifest_rejects_excess_bind_keys() {
         let mut bytes = sample().to_le_bytes();
-        bytes[9] = 1;
+        bytes[9] = DRIVER_MANIFEST_MAX_BIND_KEYS + 1;
         assert_eq!(
             DriverManifest::from_bytes(&bytes),
-            Err(DriverError::BadMagic)
+            Err(DriverError::LengthOutOfRange)
         );
+    }
+
+    #[test]
+    fn manifest_round_trips_bind_key_count() {
+        let mut m = sample();
+        m.bind_key_count = DRIVER_MANIFEST_MAX_BIND_KEYS;
+        let bytes = m.to_le_bytes();
+        assert_eq!(DriverManifest::from_bytes(&bytes), Ok(m));
     }
 
     #[test]
@@ -824,5 +968,97 @@ mod tests {
         assert!(host.has_capability(CapabilityId::DRV_LOAD));
         assert!(!host.has_capability(CapabilityId::DRV_KERNEL));
         assert_eq!(host.kind(), DriverKind::UserSpace);
+    }
+
+    fn sample_bind_key() -> DriverBindKey {
+        let Ok(key) = HwMatchKey::compatible(b"brcm,bcm2711-emmc2") else {
+            unreachable!("compatible string fits HW_COMPATIBLE_MAX")
+        };
+        DriverBindKey::new(10, key)
+    }
+
+    #[test]
+    fn bind_key_wire_size_matches_struct() {
+        assert_eq!(
+            DriverBindKey::WIRE_LEN,
+            core::mem::size_of::<DriverBindKey>()
+        );
+        assert_eq!(DriverBindKey::WIRE_LEN, 4 + HwMatchKey::WIRE_LEN);
+    }
+
+    #[test]
+    fn bind_key_round_trips() {
+        let entry = sample_bind_key();
+        let bytes = entry.to_le_bytes();
+        assert_eq!(DriverBindKey::from_bytes(&bytes), Ok(entry));
+        let numeric = DriverBindKey::new(0, HwMatchKey::pci(0x1AF4, 0x1042, 0x0001_0000));
+        let bytes = numeric.to_le_bytes();
+        assert_eq!(DriverBindKey::from_bytes(&bytes), Ok(numeric));
+    }
+
+    #[test]
+    fn bind_key_rejects_short_reserved_and_bad_kind() {
+        let entry = sample_bind_key();
+        let bytes = entry.to_le_bytes();
+        assert_eq!(
+            DriverBindKey::from_bytes(&bytes[..DriverBindKey::WIRE_LEN - 1]),
+            Err(DriverError::BufferTooSmall)
+        );
+        let mut nonzero_reserved = bytes;
+        nonzero_reserved[2] = 1;
+        assert_eq!(
+            DriverBindKey::from_bytes(&nonzero_reserved),
+            Err(DriverError::BadMagic)
+        );
+        let mut bad_kind = bytes;
+        bad_kind[4] = 0xFF;
+        assert_eq!(
+            DriverBindKey::from_bytes(&bad_kind),
+            Err(DriverError::OutOfRange)
+        );
+        let mut overlong = bytes;
+        overlong[6] = 0xFF; // compatible_len beyond HW_COMPATIBLE_MAX
+        assert_eq!(
+            DriverBindKey::from_bytes(&overlong),
+            Err(DriverError::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn decode_bind_keys_round_trips() {
+        let entries = [
+            sample_bind_key(),
+            DriverBindKey::new(2, HwMatchKey::virtio(2)),
+        ];
+        let mut body = [0u8; 2 * DriverBindKey::WIRE_LEN];
+        for (i, e) in entries.iter().enumerate() {
+            body[i * DriverBindKey::WIRE_LEN..(i + 1) * DriverBindKey::WIRE_LEN]
+                .copy_from_slice(&e.to_le_bytes());
+        }
+        let mut out = [DriverBindKey::new(0, HwMatchKey::virtio(0)); 4];
+        assert_eq!(decode_bind_keys(&body, 2, &mut out), Ok(2));
+        assert_eq!(&out[..2], &entries);
+    }
+
+    #[test]
+    fn decode_bind_keys_fails_closed() {
+        let entry = sample_bind_key();
+        let body = entry.to_le_bytes();
+        let mut small_out: [DriverBindKey; 0] = [];
+        assert_eq!(
+            decode_bind_keys(&body, 1, &mut small_out),
+            Err(DriverError::BufferTooSmall)
+        );
+        let mut out = [DriverBindKey::new(0, HwMatchKey::virtio(0)); 2];
+        assert_eq!(
+            decode_bind_keys(&body, 2, &mut out),
+            Err(DriverError::BufferTooSmall)
+        );
+        let mut bad = body;
+        bad[2] = 1;
+        assert_eq!(
+            decode_bind_keys(&bad, 1, &mut out),
+            Err(DriverError::BadMagic)
+        );
     }
 }

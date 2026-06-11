@@ -76,7 +76,7 @@ fn main() {
         magic: DRIVER_MANIFEST_MAGIC,
         abi_version: rustos_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
-        reserved0: 0,
+        bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),
         syscall_table_hash: SYS_HASH,
         signer_pubkey,

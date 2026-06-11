@@ -1,8 +1,9 @@
 # Driver lifecycle
 
-A driver progresses through six observable states between the moment a
-caller hands an image path to `rustos_drvhost::Host::load` and the moment
-the host returns a `DriverHandle`. Each state is a verification gate;
+A driver progresses through a fixed sequence of observable states
+between the moment a caller hands an image path to
+`rustos_drvhost::Host::load` and the moment the host returns a
+`DriverHandle`. Each state is a verification gate;
 a failure at any step yields a typed `HostError`, an audit record on
 the configured `rustos_log::Sink`, and *no* mutation of the host's
 loaded-driver table (`AGENTS.md` §5.4 — fail closed).
@@ -32,14 +33,20 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
 └──────────────────┘ ──────────────────────────────────► reject (7006/7007)
         │
         ▼
+┌──────────────────┐   BindKeyInvalid(_)
+│ 6. bind table    │ ──────────────────────────────────► reject (7011)
+│    decode        │
+└──────────────────┘
+        │
+        ▼
 ┌──────────────────┐   UnknownDriver
-│ 6. spawner       │ ──────────────────────────────────► reject (7009)
+│ 7. spawner       │ ──────────────────────────────────► reject (7009)
 │    hand-off      │
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐   DriverRegisterFailed(_)
-│ 7. register()    │ ──────────────────────────────────► reject (7010)
+│ 8. register()    │ ──────────────────────────────────► reject (7010)
 └──────────────────┘
         │
         ▼
@@ -56,7 +63,7 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
    `caller_caps` does not contain `CAP_DRV_LOAD`.
 2. Reads the image via `ImageSource::read`. A source-supplied
    `Errno::NotFound` surfaces as `HostError::SourceFailed(Errno::NotFound)`.
-3. Runs the seven verification gates in order.
+3. Runs the eight verification gates in order.
 4. Issues a fresh `DriverHandle`, calls the driver's `register()`,
    installs a `LoadedRecord`, and emits the `DRIVER_LOADED` audit
    record.
@@ -66,8 +73,8 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
 1. Locates the record by handle. `HandleNotFound` if absent.
 2. Removes the record from the host's table. Its `Drop` impl runs
    `zeroize::secure_clear` on the stored image bytes — the manifest
-   signature and capability body are guaranteed to be wiped before the
-   underlying allocation is freed (`AGENTS.md` §4).
+   signature, capability body, and bind table are guaranteed to be
+   wiped before the underlying allocation is freed (`AGENTS.md` §4).
 3. Emits the `DRIVER_UNLOADED` audit record.
 
 ### `Host::reload(handle, caller_caps)`
@@ -114,8 +121,8 @@ three such buffers per `load`:
    the end of `Host::load` once the bytes have been copied into the
    `LoadedRecord`.
 2. The transient `Vec<u8>` that holds `header[..signed_end] ||
-   capability_body` for the Ed25519 verifier — wiped between
-   verification and the next pipeline step.
+   capability_body || bind_table` for the Ed25519 verifier — wiped
+   between verification and the next pipeline step.
 3. The `LoadedRecord::image` buffer that backs the live record —
    wiped on `Drop` (i.e. on `Host::unload` or successful
    `Host::reload`).

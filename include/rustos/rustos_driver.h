@@ -16,6 +16,7 @@
 #define ROS_DRIVER_H
 
 #include <stdint.h>
+#include "rustos_hwtree.h"
 #include "rustos_manifest.h"
 #include "rustos_time.h"
 
@@ -23,12 +24,16 @@
 #define ROS_DRIVER_MANIFEST_MAGIC 0x31565244u
 /* Maximum number of capability identifiers a driver manifest may request. */
 #define ROS_DRIVER_MANIFEST_MAX_CAPABILITIES 64u
+/* Maximum number of bind-table entries a driver manifest may declare. */
+#define ROS_DRIVER_MANIFEST_MAX_BIND_KEYS 16u
 /* Length, in bytes, of the Ed25519 signer public key. */
 #define ROS_DRIVER_SIGNER_PUBKEY_LEN 32u
 /* Length, in bytes, of the Ed25519 manifest signature. */
 #define ROS_DRIVER_SIGNATURE_LEN 64u
 /* Packed little-endian wire size of a driver manifest, in bytes. */
 #define ROS_DRIVER_MANIFEST_WIRE_LEN 140u
+/* Packed little-endian wire size of one bind-table entry, in bytes. */
+#define ROS_DRIVER_BIND_KEY_WIRE_LEN 80u
 
 /* Magic word identifying an abi-v1 driver register reply ("DRR1" little-endian). */
 #define ROS_DRIVER_REGISTER_REPLY_MAGIC 0x31525244u
@@ -104,12 +109,21 @@ typedef struct ros_driver_manifest {
     uint32_t magic;
     uint32_t abi_version;
     uint8_t kind;
-    uint8_t reserved0;
+    uint8_t bind_key_count;
     uint16_t capability_count;
     uint8_t syscall_table_hash[ROS_SYSCALL_TABLE_HASH_LEN];
     uint8_t signer_pubkey[ROS_DRIVER_SIGNER_PUBKEY_LEN];
     uint8_t signature[ROS_DRIVER_SIGNATURE_LEN];
 } ros_driver_manifest_t;
+
+/* One bind-table entry: a hardware-tree match key plus the manifest's
+ * bind priority (AGENTS.md sec.18.3). bind_key_count entries follow the
+ * capability body; all are covered by the manifest signature. */
+typedef struct ros_driver_bind_key {
+    uint16_t priority;
+    uint16_t reserved0;
+    ros_hw_match_key_t key;
+} ros_driver_bind_key_t;
 
 /* Outcome of a spawned driver process's register() entry, sent to the
  * driver host over IPC; encoded little-endian on the wire. `status` is
