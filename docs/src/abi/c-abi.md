@@ -181,7 +181,9 @@ than ever indexing out of range (`AGENTS.md` §2.9, §19.5/§19.6).
 > first-party programs are Rust and link the pure-Rust userland runtime
 > `lib/rt` (`rustos-rt`) instead — its own `_start`, stack canary, panic
 > handler, and idiomatic syscall wrappers — over the same shared
-> `lib/abi-trap` trap. A RustOS program never routes through this C path.
+> `lib/abi-trap` trap. `lib/rt` validates the same startup vector and
+> exposes the arguments through `rustos_rt::arg` / `arg_count` (no C
+> `argv` is built). A RustOS program never routes through this C path.
 
 The startup object that consumes the startup vector is `lib/crt0`
 (`rustos-crt0`) — the crt0 half of the curated `/System/Libraries/` *System

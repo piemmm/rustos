@@ -104,6 +104,29 @@ signature).
 * oversize capability counts (`DriverError::LengthOutOfRange`),
 * unknown `kind` byte (`DriverError::OutOfRange`).
 
+### DriverRegisterReply
+
+`#[repr(C)] struct DriverRegisterReply` (`driver::register`). The
+outcome of a spawned driver process's `register()` entry, reported to
+the driver host over IPC (`PLAN.md` Stage 4.HW): `status` is
+`DRIVER_REGISTER_STATUS_OK` (0) or the `DriverError::as_i32` code the
+driver reported, and `handle` carries the driver-reported handle's raw
+value exactly when `status` is OK. Encoded length is
+`DriverRegisterReply::WIRE_LEN` (24) bytes. The record is
+informational only — the host mints its own unforgeable
+[`DriverHandle`](#driverhandle) on success, so a forged reply widens no
+authority.
+
+`DriverRegisterReply::from_bytes` rejects short buffers, wrong magic /
+non-zero reserved words, unsupported ABI versions, unknown `status`
+codes, and a `status`/`handle` pair that is inconsistent (a success
+with the zero sentinel handle, or a failure carrying a handle) — the
+whole record is refused on any failure (fail closed). The spawned
+driver builds the record with `registered(handle)` / `failed(error)`
+and sends it with the `rustos-rt` `ipc_send` wrapper to the reply
+endpoint id its host handed it through its startup arguments
+(`rustos_rt::arg`).
+
 ## Display
 
 `trait Display`. Methods:

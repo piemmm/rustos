@@ -43,30 +43,31 @@ use std::path::Path;
 
 use rustos_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CapabilityId, DriverError, DriverHandle,
-    DriverKind, DriverManifest, Duration64, Errno, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
-    HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryScope,
-    LimitKind, LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord, NamedKeyCode,
-    NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest, ProcessRecord,
-    ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit, ResourceLimitRecord,
-    RxePermission, Segment, Severity, StdInfoKind, StringSlot, SysinfoQueryId,
+    DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno, HwDeviceClass, HwMatchKey,
+    HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput,
+    LibraryScope, LimitKind, LoadHeader, ManifestHeader, MapFlags, MountListRequest, MountRecord,
+    NamedKeyCode, NeededLibrary, PointerButtonCode, PointerInput, PortName, ProcessListRequest,
+    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, ResourceLimit,
+    ResourceLimitRecord, RxePermission, Segment, Severity, StdInfoKind, StringSlot, SysinfoQueryId,
     SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ABI_VERSION_V1, APPINFO_MAGIC,
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
     BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
-    MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
-    PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE,
-    SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT,
-    STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
-    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK,
+    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
+    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
+    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1449,6 +1450,26 @@ fn driver_emit_constants(out: &mut String) {
         DriverManifest::WIRE_LEN
     );
     out.push('\n');
+
+    out.push_str(
+        "/* Magic word identifying an abi-v1 driver register reply (\"DRR1\" little-endian). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_REGISTER_REPLY_MAGIC {DRIVER_REGISTER_REPLY_MAGIC:#x}u"
+    );
+    out.push_str("/* `status` value of a successful register reply; any other value is a\n * ROS_DRIVER_ERROR_* code. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_REGISTER_STATUS_OK ((int32_t){DRIVER_REGISTER_STATUS_OK})"
+    );
+    out.push_str("/* Packed little-endian wire size of a driver register reply, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_DRIVER_REGISTER_REPLY_WIRE_LEN {}u",
+        DriverRegisterReply::WIRE_LEN
+    );
+    out.push('\n');
 }
 
 /// Emit the [`DriverKind`] / [`BufferClass`] / [`DriverError`] discriminants
@@ -1657,7 +1678,11 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 ///
 /// `ros_driver_manifest_t` mirrors the `#[repr(C)]` layout of
 /// [`DriverManifest`] (the signed driver-manifest prefix; naturally aligned,
-/// so the struct size equals the wire size). Alongside it the header declares
+/// so the struct size equals the wire size), and `ros_driver_register_reply_t`
+/// mirrors [`DriverRegisterReply`] (the register-handshake outcome a spawned
+/// driver process reports to its host over IPC) with its
+/// `ROS_DRIVER_REGISTER_REPLY_MAGIC` / `_STATUS_OK` / `_WIRE_LEN` constants.
+/// Alongside them the header declares
 /// the `ROS_DRIVER_MANIFEST_MAGIC` / `_MAX_CAPABILITIES` / `_WIRE_LEN` and
 /// signer-key/signature length constants, the [`DriverKind`] / [`BufferClass`]
 /// `#[repr(u8)]` and [`DriverError`] `#[repr(i32)]` discriminant sets, and the
@@ -1705,6 +1730,21 @@ fn generate_driver() -> String {
          \x20   uint8_t signer_pubkey[ROS_DRIVER_SIGNER_PUBKEY_LEN];\n\
          \x20   uint8_t signature[ROS_DRIVER_SIGNATURE_LEN];\n\
          } ros_driver_manifest_t;\n\n",
+    );
+
+    out.push_str(
+        "/* Outcome of a spawned driver process's register() entry, sent to the\n\
+         \x20* driver host over IPC; encoded little-endian on the wire. `status` is\n\
+         \x20* ROS_DRIVER_REGISTER_STATUS_OK or a ROS_DRIVER_ERROR_* code; `handle` is\n\
+         \x20* non-zero exactly when `status` is OK (informational only — the host\n\
+         \x20* mints its own unforgeable handle). */\n\
+         typedef struct ros_driver_register_reply {\n\
+         \x20   uint32_t magic;\n\
+         \x20   uint32_t abi_version;\n\
+         \x20   int32_t status;\n\
+         \x20   uint32_t reserved0;\n\
+         \x20   uint64_t handle;\n\
+         } ros_driver_register_reply_t;\n\n",
     );
 
     out.push_str(DRIVER_SUBMODULE_TYPEDEFS);
@@ -2925,6 +2965,12 @@ mod tests {
                 "#define ROS_DRIVER_ERROR_NO_SPACE ((int32_t){})",
                 DriverError::NoSpace.as_i32()
             ),
+            format!("#define ROS_DRIVER_REGISTER_REPLY_MAGIC {DRIVER_REGISTER_REPLY_MAGIC:#x}u"),
+            format!("#define ROS_DRIVER_REGISTER_STATUS_OK ((int32_t){DRIVER_REGISTER_STATUS_OK})"),
+            format!(
+                "#define ROS_DRIVER_REGISTER_REPLY_WIRE_LEN {}u",
+                DriverRegisterReply::WIRE_LEN
+            ),
         ];
         for line in &expected {
             assert!(h.contains(line), "missing `{line}` in:\n{h}");
@@ -2935,6 +2981,11 @@ mod tests {
             core::mem::size_of::<DriverManifest>(),
             DriverManifest::WIRE_LEN,
             "DriverManifest repr(C) size == wire size"
+        );
+        assert_eq!(
+            core::mem::size_of::<DriverRegisterReply>(),
+            DriverRegisterReply::WIRE_LEN,
+            "DriverRegisterReply repr(C) size == wire size"
         );
     }
 
@@ -3057,6 +3108,7 @@ mod tests {
             ("rustos_sysinfo.h", "} ros_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
             ("rustos_sysinfo.h", "} ros_mount_record_t;", size_of::<MountRecord>(), 152, align_of::<MountRecord>(), 4),
             ("rustos_driver.h", "} ros_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
+            ("rustos_driver.h", "} ros_driver_register_reply_t;", size_of::<DriverRegisterReply>(), 24, align_of::<DriverRegisterReply>(), 8),
             ("rustos_driver.h", "} ros_block_geometry_t;", size_of::<BlockGeometry>(), 16, align_of::<BlockGeometry>(), 8),
             ("rustos_driver.h", "} ros_discard_capability_t;", size_of::<DiscardCapability>(), 24, align_of::<DiscardCapability>(), 8),
             ("rustos_driver.h", "} ros_health_snapshot_t;", size_of::<HealthSnapshot>(), 64, align_of::<HealthSnapshot>(), 8),

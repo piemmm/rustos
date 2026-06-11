@@ -445,18 +445,25 @@ order (one fully-gated increment each):
    (`userland/system/drvhost/src/spawner.rs`), which completes the
    registration and returns the outcome — no entry pointer crosses back
    into the host; the verification half (signature, ABI version + syscall
-   hashes, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) is unchanged. Remaining: the
+   hashes, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) is unchanged. The IPC
+   register-handshake wire surface is also done: the versioned
+   `DriverRegisterReply` record (`lib/abi/src/driver/register.rs`,
+   fail-closed decode, mirrored into `include/` as
+   `ros_driver_register_reply_t`), the `lib/rt` `ipc_send` wrapper, and
+   the `lib/rt` startup-argument accessors (`rustos_rt::arg` /
+   `arg_count`, published by `_start` from the validated startup vector)
+   the child uses to receive the reply endpoint id. Remaining: the
    kernel-side production spawner — verified `.rxe` from
-   `/System/Drivers/` → `build_process_image` → spawn (`ProcessSpawn`
-   shape) → `register()` handshake over IPC (a versioned `lib/abi` reply
-   record, a `lib/rt` `ipc_send` wrapper, the reply endpoint id handed to
-   the child via its startup args) — proven by a `-M virt` QEMU vertical
+   `/System/Drivers/` → `build_process_image` → spawn (mirror the
+   `spawn_producer` seam shape, parameterising the child's caps/args) →
+   send the `DriverRegisterReply` over `ipc_send`, with a budget-bounded
+   cooperative wait host-side — proven by a `-M virt` QEMU vertical
    spawning a driver-stub program; in-process `DriverSpawner` impls remain
    only in tests/verticals until the `DriverHost` surface (DMA, MMIO) is
    reachable over IPC.
 2. **Bind table** — add the match-key bind table to `DriverManifest`
-   (`lib/abi/src/manifest.rs`) in place (`abi-v1` is unfrozen, §2.13) and
-   regenerate the C header.
+   (`lib/abi/src/driver/mod.rs`) in place (`abi-v1` is unfrozen, §2.13)
+   and regenerate the C header.
 3. **`userland/system/devmgr`** — the matcher/autoloader as specced above.
 4. **Generic match-key emission** — replace the hand-grown list of node
    types `kernel/arch/aarch64/src/fdt.rs` recognises with generic

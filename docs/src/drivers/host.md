@@ -75,6 +75,14 @@ known entry point in-process through `ctx.host`. The seam returns the
 *outcome* of registration rather than an entry point, so the host
 never holds a pointer into the driver image.
 
+The IPC half of that handshake is defined: the spawned driver reads
+the reply endpoint id from its startup arguments (`rustos_rt::arg`),
+encodes a
+[`DriverRegisterReply`](../abi/driver_traits.md#driverregisterreply)
+(`registered(handle)` / `failed(error)`), and sends it with the
+`rustos-rt` `ipc_send` wrapper; the host decodes it fail-closed and
+treats the reported handle as informational only (it mints its own).
+
 The spawner is *only* invoked after every other verification gate has
 cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving spawner
 cannot widen the host's authority.

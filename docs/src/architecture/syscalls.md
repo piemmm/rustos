@@ -293,7 +293,12 @@ user pointer — or a caller with no registered address space (a kernel
 task, or one withdrawn on `exit`) — fails closed with `BadAddress`, the
 RustOS `EFAULT`; the kernel returns that one code for every
 faulting-pointer reason so it cannot be used as a memory-layout oracle
-(`AGENTS.md` §19.1). A failed send enqueues nothing.
+(`AGENTS.md` §19.1). A failed send enqueues nothing. The first-party
+Rust wrapper is `rustos_rt::ipc_send`; a spawned driver process uses it
+to report its `register()` outcome — a
+[`DriverRegisterReply`](../abi/driver_traits.md#driverregisterreply) —
+to the reply endpoint its host handed it through its startup arguments
+(`rustos_rt::arg`, `PLAN.md` Stage 4.HW).
 
 `ipc_recv` is now **fully wired** (increment D.2 of the staged
 user-memory copy path, `PLAN.md` Stage 7). For a bound endpoint it

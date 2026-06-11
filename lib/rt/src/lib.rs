@@ -63,6 +63,10 @@ use rustos_abi_trap::raw_syscall;
 #[cfg(rt_native)]
 mod start;
 
+mod startup;
+
+pub use startup::{arg, arg_count};
+
 // The `mem_map`-backed global allocator. Compiled for the native targets that
 // register it as the `#[global_allocator]`, and for host unit tests of its pure
 // `HeapState` bookkeeping. A plain host build (no allocator to register, no
@@ -95,6 +99,9 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
 /// `wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
+
+/// `ipc_send` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
 
 /// `rlimit_get` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
@@ -408,6 +415,33 @@ pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
     ret as i64
 }
 
+/// Send `payload` to the IPC endpoint `endpoint`
+/// (`SyscallNumber::IPC_SEND`).
+///
+/// The kernel resolves `endpoint` against the live named-port registry,
+/// bounds the payload against the port's advertised maximum, copies it in
+/// through the validated `copy_from_user` boundary, and enforces the
+/// port's required send capability against the **caller's** effective set
+/// before enqueueing (`AGENTS.md` §5.2 / §5.4) — the wrapper adds no
+/// authority. A spawned driver process uses this to report its
+/// `register()` outcome back to the driver host on the reply endpoint
+/// handed to it through its startup args (`PLAN.md` Stage 4.HW).
+///
+/// Returns `0` on success or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`), the standard `abi-v1` signed-result
+/// convention; the wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
+    let ptr = payload.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before
+    // reading it (`AGENTS.md` §5.4). `payload` is a live shared `&[u8]` for
+    // the duration of the call, so the pair denotes readable memory.
+    let ret = unsafe { raw_syscall(NUM_IPC_SEND, [endpoint, ptr, payload.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -481,6 +515,31 @@ mod tests {
         let buffer = [0u8; 16];
         let (_, _) = capture(10, || {
             assert_eq!(stdout(&buffer), 10);
+        });
+    }
+
+    #[test]
+    fn ipc_send_marshals_endpoint_pointer_and_len() {
+        let payload = *b"reply-record";
+        let (number, args) = capture(0, || {
+            assert_eq!(ipc_send(42, &payload), 0);
+        });
+        assert_eq!(number, NUM_IPC_SEND);
+        assert_eq!(args[0], 42);
+        assert_eq!(args[1], payload.as_ptr() as usize as u64);
+        assert_eq!(args[2], payload.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn ipc_send_surfaces_negative_errno_encoding() {
+        // `NotFound` (unbound endpoint) is encoded as the two's-complement
+        // negation; the wrapper hands that signed value back unchanged.
+        let payload = [0u8; 4];
+        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(ipc_send(7, &payload), want);
         });
     }
 

@@ -55,6 +55,7 @@ pub mod mmio;
 pub mod msix;
 pub mod net;
 pub mod port_io;
+pub mod register;
 pub mod virtio;
 pub mod virtio_mmio;
 pub mod virtio_pci;
@@ -63,6 +64,7 @@ pub use dma::{DmaSlab, PoolId, SlabFreeFn};
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};
 pub use port_io::{PortIo, PortIo8};
+pub use register::{DriverRegisterReply, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK};
 pub use virtio::VirtioHost;
 pub use virtio_mmio::VirtioMmioBus;
 pub use virtio_pci::{
@@ -308,6 +310,36 @@ impl DriverError {
     #[must_use]
     pub const fn as_i32(self) -> i32 {
         self as i32
+    }
+
+    /// Construct a [`DriverError`] from its on-ABI numeric value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError::OutOfRange`] if `raw` does not name a
+    /// known variant (failing closed on a forged or future code,
+    /// `AGENTS.md` §5.4).
+    ///
+    /// # Capabilities
+    ///
+    /// None.
+    pub const fn from_i32(raw: i32) -> Result<Self, DriverError> {
+        match raw {
+            1 => Ok(Self::BufferTooSmall),
+            2 => Ok(Self::BadMagic),
+            3 => Ok(Self::AbiVersionUnsupported),
+            4 => Ok(Self::LengthOutOfRange),
+            5 => Ok(Self::OutOfRange),
+            6 => Ok(Self::PermissionDenied),
+            7 => Ok(Self::NotFound),
+            8 => Ok(Self::SignatureInvalid),
+            9 => Ok(Self::Unsupported),
+            10 => Ok(Self::DeviceFault),
+            11 => Ok(Self::Busy),
+            12 => Ok(Self::NotImplemented),
+            13 => Ok(Self::NoSpace),
+            _ => Err(Self::OutOfRange),
+        }
     }
 
     /// Map a [`DriverError`] into a kernel [`Errno`] for syscalls that
@@ -630,6 +662,31 @@ mod tests {
         assert_eq!(DriverError::NotFound.as_errno(), Errno::NotFound);
         assert_eq!(DriverError::Busy.as_errno(), Errno::NotImplemented);
         assert_eq!(DriverError::NoSpace.as_errno(), Errno::NoSpace);
+    }
+
+    #[test]
+    fn driver_error_from_i32_round_trips_and_fails_closed() {
+        let all = [
+            DriverError::BufferTooSmall,
+            DriverError::BadMagic,
+            DriverError::AbiVersionUnsupported,
+            DriverError::LengthOutOfRange,
+            DriverError::OutOfRange,
+            DriverError::PermissionDenied,
+            DriverError::NotFound,
+            DriverError::SignatureInvalid,
+            DriverError::Unsupported,
+            DriverError::DeviceFault,
+            DriverError::Busy,
+            DriverError::NotImplemented,
+            DriverError::NoSpace,
+        ];
+        for err in all {
+            assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
+        }
+        assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(14), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 
     #[test]

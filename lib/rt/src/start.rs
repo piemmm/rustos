@@ -137,13 +137,19 @@ unsafe extern "C" fn rust_rt_start(block_ptr: *const u8) -> ! {
     };
 
     // SAFETY: `read_total_len` validated the header; the contract guarantees
-    // the whole `total_len`-byte block is readable.
-    let block = unsafe { core::slice::from_raw_parts(block_ptr, total_len) };
+    // the whole `total_len`-byte block is readable. The block lives in the
+    // process's own image for the lifetime of the process (the kernel maps
+    // it before `_start` and never unmaps it), so the `'static` borrow is
+    // sound.
+    let block: &'static [u8] = unsafe { core::slice::from_raw_parts(block_ptr, total_len) };
     let Ok(view) = ProcessStart::parse(block) else {
         exit(EXIT_BAD_STARTUP);
     };
 
     install_stack_canary(view.canary());
+    // Publish the validated view so the program can read the arguments its
+    // spawner chose for it (`crate::startup`).
+    crate::startup::install(view);
 
     // SAFETY: `__rustos_rt_main` is the program's entry point, exported with a
     // matching Rust signature by `crate::entry!` and resolved at link time.

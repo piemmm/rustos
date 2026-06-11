@@ -30,6 +30,14 @@
 /* Packed little-endian wire size of a driver manifest, in bytes. */
 #define ROS_DRIVER_MANIFEST_WIRE_LEN 140u
 
+/* Magic word identifying an abi-v1 driver register reply ("DRR1" little-endian). */
+#define ROS_DRIVER_REGISTER_REPLY_MAGIC 0x31525244u
+/* `status` value of a successful register reply; any other value is a
+ * ROS_DRIVER_ERROR_* code. */
+#define ROS_DRIVER_REGISTER_STATUS_OK ((int32_t)0)
+/* Packed little-endian wire size of a driver register reply, in bytes. */
+#define ROS_DRIVER_REGISTER_REPLY_WIRE_LEN 24u
+
 /* Driver execution domain (uint8_t); IN_KERNEL additionally needs CAP_DRV_KERNEL. */
 #define ROS_DRIVER_KIND_USER_SPACE ((uint8_t)0u)
 #define ROS_DRIVER_KIND_IN_KERNEL ((uint8_t)1u)
@@ -102,6 +110,19 @@ typedef struct ros_driver_manifest {
     uint8_t signer_pubkey[ROS_DRIVER_SIGNER_PUBKEY_LEN];
     uint8_t signature[ROS_DRIVER_SIGNATURE_LEN];
 } ros_driver_manifest_t;
+
+/* Outcome of a spawned driver process's register() entry, sent to the
+ * driver host over IPC; encoded little-endian on the wire. `status` is
+ * ROS_DRIVER_REGISTER_STATUS_OK or a ROS_DRIVER_ERROR_* code; `handle` is
+ * non-zero exactly when `status` is OK (informational only — the host
+ * mints its own unforgeable handle). */
+typedef struct ros_driver_register_reply {
+    uint32_t magic;
+    uint32_t abi_version;
+    int32_t status;
+    uint32_t reserved0;
+    uint64_t handle;
+} ros_driver_register_reply_t;
 
 /* Block-device geometry (drivers/storage/*). */
 typedef struct ros_block_geometry {
