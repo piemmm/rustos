@@ -7,8 +7,9 @@
 use super::*;
 use rustos_abi::driver::display::DisplayMode;
 
-/// Geometry every test requests: 640×480 BGRA.
-fn request() -> FramebufferRequest {
+/// Geometry every test requests: 640×480 BGRA. `pub(crate)` so the
+/// wiring tests drive the same geometry (§2.2).
+pub(crate) fn request() -> FramebufferRequest {
     FramebufferRequest {
         width_px: 640,
         height_px: 480,
@@ -26,8 +27,9 @@ const MOCK_FB_PITCH: u32 = 2560;
 
 /// A protocol-faithful mock firmware: walks the request tags, echoes
 /// the geometry, fills the allocate/pitch responses, and stamps the
-/// response codes — exactly what a healthy firmware does.
-struct MockFirmware;
+/// response codes — exactly what a healthy firmware does. `pub(crate)`
+/// so the wiring tests reuse it (§2.2).
+pub(crate) struct MockFirmware;
 
 impl MockFirmware {
     fn respond(message: &mut [u32; PROPERTY_WORDS]) {
@@ -306,6 +308,46 @@ fn bus_translation_fails_closed_on_bad_apertures() {
     );
 }
 
+#[test]
+fn physical_to_bus_round_trips_each_alias() {
+    for alias in [0x0000_0000u32, 0x4000_0000, 0x8000_0000, 0xC000_0000] {
+        let bus = arm_physical_to_bus(0x1000_0000, alias).expect("translate");
+        assert_eq!(bus, alias | 0x1000_0000, "alias {alias:#010x}");
+        assert_eq!(
+            bus_to_arm_physical(bus & !0xF, 0x1000).expect("round trip"),
+            0x1000_0000
+        );
+    }
+}
+
+#[test]
+fn physical_to_bus_fails_closed() {
+    // Zero physical base.
+    assert_eq!(
+        arm_physical_to_bus(0, 0xC000_0000),
+        Err(MailboxError::BadAperture)
+    );
+    // At and beyond the 30-bit aperture limit.
+    assert_eq!(
+        arm_physical_to_bus(0x4000_0000, 0xC000_0000),
+        Err(MailboxError::BadAperture)
+    );
+    assert_eq!(
+        arm_physical_to_bus(u64::MAX, 0xC000_0000),
+        Err(MailboxError::BadAperture)
+    );
+    // Bits outside the 2-bit alias prefix.
+    assert_eq!(
+        arm_physical_to_bus(0x1000_0000, 0x2000_0000),
+        Err(MailboxError::BadAperture)
+    );
+    // The last in-aperture address still translates.
+    assert_eq!(
+        arm_physical_to_bus(0x3FFF_FFF0, 0xC000_0000).expect("translate"),
+        0xFFFF_FFF0
+    );
+}
+
 // --- MMIO doorbell transport ---------------------------------------------
 
 /// RAM backing for a mock register window (4-byte aligned).
@@ -520,7 +562,7 @@ fn discovered_config_opens_the_hvs_driver() {
     use alloc::vec;
 
     use crate::tests::{MockHost, MockMapper};
-    use crate::{HvsConfig, PlaneConfig, RpiHvs, MAX_PLANES};
+    use crate::{PlaneConfig, MAX_PLANES};
     use rustos_abi::driver::display::Display;
 
     const DLIST_PHYS: u64 = 0x1100_0000;
@@ -551,17 +593,16 @@ fn discovered_config_opens_the_hvs_driver() {
         phys_base: PLANE_PHYS,
         len_bytes: 32,
     };
-    let config = HvsConfig {
-        scanout,
+    let regions = crate::wiring::HvsRegions {
         dlist_phys_base: DLIST_PHYS,
         dlist_len_bytes: 256,
         control_phys_base: CONTROL_PHYS,
         planes,
         plane_count: 1,
-        bus_alias: fb.bus_alias(),
     };
 
-    let mut hvs = RpiHvs::open(&host, config).expect("open on discovered config");
+    let mut hvs = crate::wiring::open_with_transport(&host, &mut firmware, &request(), &regions)
+        .expect("open through the wiring");
     assert_eq!(hvs.mode_info().expect("mode"), scanout.mode());
 
     let frame = vec![0xA5u8; surface_len];

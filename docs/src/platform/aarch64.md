@@ -502,18 +502,23 @@ device-tree *parser* is the shared `lib/fdt` crate (one parser for every
 arch, §2.2); `kernel/arch/aarch64::fdt` layers the aarch64-specific
 queries on it: the first `/memory` region, the `/psci` `method`
 (`hvc`/`smc` — the conduit the Stage W6 secondary-core bring-up calls),
-and the generic-timer per-CPU interrupt (PPI) number from `/timer` (plus
+the generic-timer per-CPU interrupt (PPI) number from `/timer` (plus
 that node's optional `clock-frequency` counter-rate override, PI Stage
-P4). `FdtDiscovery` emits a root node, a `Memory` node carrying the
-RAM window, a `Timer` node carrying its PPI as a capability-gated
-(`CAP_IRQ_BIND`) IRQ resource, (PI Stage P3) an `InterruptController`
-node carrying the GICv2's `compatible` bind key and its GICD/GICC
-register windows as MMIO resources, and (PI Stage P2) a `Serial` node
-carrying the discovered console UART's `compatible` bind key and its
-`reg` as an MMIO resource. The reader is host-tested against the shared
-DTB fixtures (including the `raspi_like_arm` Pi-shaped tree, which now
-carries a GIC-400 node) and exercised by the port's
-`passes_arch_hal_conformance_suite`.
+P4), and the VideoCore firmware mailbox (`find_mailbox`,
+`brcm,bcm2835-mbox` — PI Stage P7). `FdtDiscovery` emits a root node, a
+`Memory` node carrying the RAM window, a `Timer` node carrying its PPI
+as a capability-gated (`CAP_IRQ_BIND`) IRQ resource, (PI Stage P3) an
+`InterruptController` node carrying the GICv2's `compatible` bind key
+and its GICD/GICC register windows as MMIO resources, (PI Stage P2) a
+`Serial` node carrying the discovered console UART's `compatible` bind
+key and its `reg` as an MMIO resource, and (PI Stage P7, on a board
+that carries one) a mailbox node carrying the discovered doorbell
+window as an MMIO resource plus a `Dma` resource requesting a one-page
+property-buffer carve bounded by the 30-bit VideoCore aperture — the
+node `drivers/display/rpi_hvs::wiring` binds. The reader is host-tested
+against the shared DTB fixtures (including the `raspi_like_arm`
+Pi-shaped tree, which carries GIC-400 and mailbox nodes) and exercised
+by the port's `passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

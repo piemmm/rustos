@@ -68,6 +68,18 @@ aperture), so emulation proves the full host-side chain against a
 protocol-faithful mock firmware; the real scan-out is the `plans/PI.md`
 P7 metal acceptance item.
 
+## Driver-host wiring (`wiring`)
+
+The `wiring` module brings the driver up from the hardware tree: the
+aarch64 `FdtDiscovery` emits the mailbox node (`brcm,bcm2835-mbox`)
+with the doorbell MMIO window and a `Dma` request for a one-page,
+aperture-bounded property-buffer carve. `wiring::open_discovered`
+checks `CAP_MMIO_MAP`, maps both, translates the carve to a bus address
+(`arm_physical_to_bus`), rings `MmioMailbox`, and delegates to
+`wiring::open_with_transport`, which assembles the full `HvsConfig`
+(firmware scan-out + the host's `HvsRegions`: DLIST RAM, control
+window, plane carves) for `RpiHvs::open`.
+
 ### Pixel formats
 
 `DisplayFormat::Rgba8888` and `DisplayFormat::Bgra8888`. Layer pixels
@@ -121,16 +133,21 @@ and RAM-backed doorbell windows:
   header codes, bad header length, missing response bit, short and
   oversized tag responses, substituted geometry echoes, missing tag,
   inconsistent pitch/size, bad buffer aperture.
-- Bus↔physical translation across all four aliases and its aperture
-  fail-closed cases.
+- Bus↔physical translation in both directions
+  (`bus_to_arm_physical` / `arm_physical_to_bus`) across all four
+  aliases and their aperture fail-closed cases.
 - `MmioMailbox` construction validation, the stage→ring→read-back
   doorbell path, three timeout modes, and rejection of a foreign
   property completion.
-- The full discovery chain: mock firmware → `discover_framebuffer` →
-  `ScanoutConfig` → `RpiHvs::open` → `present` into the discovered
-  surface.
+- The full discovery chain: mock firmware →
+  `wiring::open_with_transport` → `ScanoutConfig` → `RpiHvs::open` →
+  `present` into the discovered surface.
+- The `wiring` fail-closed paths: missing `CAP_MMIO_MAP`, missing
+  mapper, an out-of-aperture property-buffer carve, and a silent
+  firmware timing the exchange out after `open_discovered` staged the
+  request and rang the doorbell.
 
-32/32 host-side tests pass.
+38/38 host-side tests pass.
 
 ## Public surface
 
@@ -142,7 +159,10 @@ construct an instance; the host never reaches into the type beyond the
 the discovery half of that same host hand-off: the host calls
 `discover_framebuffer` over a `MailboxTransport` to *produce* the
 `HvsConfig` it then passes to `RpiHvs::open` — it is not device control
-surface, and nothing in it bypasses the driver's capability gates.
+surface, and nothing in it bypasses the driver's capability gates. The
+`wiring` module composes the two for the host —
+`open_discovered`/`open_with_transport` over the hardware-tree mailbox
+node — and is gated by the same `CAP_MMIO_MAP` check.
 
 ## Tier
 

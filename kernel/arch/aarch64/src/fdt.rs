@@ -13,6 +13,9 @@
 //! * the generic-timer per-CPU interrupt (PPI) number from `/timer`,
 //!   plus the optional `clock-frequency` counter-rate override that node
 //!   may carry (`plans/PI.md` P4);
+//! * the `VideoCore` firmware mailbox doorbell block
+//!   ([`find_mailbox`](crate::fdt::find_mailbox)) the Pi 4's
+//!   framebuffer discovery binds (`plans/PI.md` P7);
 //!
 //! The normalisation of these facts into [`rustos_abi::hwtree`] nodes lives
 //! in [`crate::platform`].
@@ -143,10 +146,60 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
     }
 }
 
+/// `compatible` string of the BCM283x/BCM2711 `VideoCore` firmware
+/// mailbox (the Pi 4 device tree names the BCM2711 doorbell block with
+/// the original BCM2835 binding).
+const MAILBOX_COMPATIBLE: &str = "brcm,bcm2835-mbox";
+
+/// A `VideoCore` firmware mailbox doorbell block located in a flattened
+/// device tree (`plans/PI.md` P7).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct DiscoveredMailbox {
+    /// ARM-physical MMIO base of the doorbell register block (the
+    /// node's first `reg` cell).
+    pub base: u64,
+    /// Length in bytes of the register window (the node's first `reg`
+    /// size cell).
+    pub len: u64,
+}
+
+impl DiscoveredMailbox {
+    /// The `compatible` string that matched this mailbox, used as the
+    /// hardware-tree node's bind key ([`crate::platform`]).
+    #[must_use]
+    pub const fn compatible(&self) -> &'static [u8] {
+        MAILBOX_COMPATIBLE.as_bytes()
+    }
+}
+
+/// Locate the `VideoCore` firmware mailbox in `fdt`.
+///
+/// Matches the first `brcm,bcm2835-mbox` node through the shared
+/// `Fdt::nodes` early-return walk (the same MMU-off-safe traversal
+/// [`psci_method`] and [`timer_clock_frequency`] use, `AGENTS.md` §2.2)
+/// and reads its `reg`: the doorbell block's ARM-physical base and
+/// window length. Returns `None` when the tree is malformed or carries
+/// no mailbox — the QEMU `virt` board has none, so its hardware tree
+/// simply omits the node (fail closed, `AGENTS.md` §2.9; an unbound
+/// node is never an error, §18.4).
+#[must_use]
+pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
+    let node = fdt
+        .nodes()
+        .flatten()
+        .find(|node| node.is_compatible(MAILBOX_COMPATIBLE))?;
+    let reg = node.property("reg")?;
+    let (Ok(base), Ok(len)) = (reg.read_be_u64(0), reg.read_be_u64(8)) else {
+        return None;
+    };
+    Some(DiscoveredMailbox { base, len })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_timer_hz, psci_method, timer_clock_frequency, timer_ppi, Fdt, PsciMethod,
+        effective_timer_hz, find_mailbox, psci_method, timer_clock_frequency, timer_ppi,
+        DiscoveredMailbox, Fdt, PsciMethod,
     };
     use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
 
@@ -248,5 +301,50 @@ mod tests {
         assert_eq!(effective_timer_hz(None, 62_500_000), 62_500_000);
         // A zero override is treated as absent (never a 0 Hz timer).
         assert_eq!(effective_timer_hz(Some(0), 62_500_000), 62_500_000);
+    }
+
+    #[test]
+    fn finds_the_mailbox_in_a_raspi_shaped_tree() {
+        // The Pi-shaped fixture carries the BCM2711 firmware mailbox at
+        // its ARM-physical base with a 0x40-byte doorbell window; the
+        // values are read from the tree, never assumed (`plans/PI.md` §4).
+        let blob = raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mailbox = find_mailbox(&fdt).expect("mailbox discovered");
+        assert_eq!(
+            mailbox,
+            DiscoveredMailbox {
+                base: 0xfe00_b880,
+                len: 0x40,
+            }
+        );
+        assert_eq!(mailbox.compatible(), b"brcm,bcm2835-mbox");
+    }
+
+    #[test]
+    fn mailbox_absent_on_a_virt_shaped_tree() {
+        // The QEMU `virt` board has no VideoCore mailbox; the query
+        // yields `None` and the node is simply not emitted (§18.4).
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(find_mailbox(&fdt), None);
+    }
+
+    #[test]
+    fn mailbox_with_a_short_reg_is_rejected() {
+        // A matching node whose `reg` cannot supply base + length fails
+        // closed rather than inventing a window (`AGENTS.md` §2.9).
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("mailbox@7e00b880");
+        b.prop_str("compatible", "brcm,bcm2835-mbox");
+        b.prop_u32("reg", 0xfe00);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(find_mailbox(&fdt), None);
     }
 }

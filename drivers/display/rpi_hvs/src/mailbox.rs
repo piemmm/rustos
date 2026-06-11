@@ -38,7 +38,7 @@ use crate::dlist::ScanoutConfig;
 
 #[cfg(test)]
 #[path = "mailbox_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// Failure modes of the mailbox property exchange.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -304,6 +304,32 @@ pub fn bus_to_arm_physical(bus_addr: u32, size_bytes: u32) -> Result<u64, Mailbo
         return Err(MailboxError::BadAperture);
     }
     Ok(base)
+}
+
+/// Translate an ARM *physical* address into the `VideoCore` **bus**
+/// address the firmware addresses it through, under `alias` (one of the
+/// 2-bit `VideoCore` alias prefixes, e.g. [`crate::DEFAULT_BUS_ALIAS`]).
+///
+/// The exact inverse of [`bus_to_arm_physical`], used by the driver-host
+/// wiring ([`crate::wiring`]) to post the carved property buffer's
+/// address on the doorbell (`plans/PI.md` P7). Fails closed rather than
+/// aliasing the wrong page.
+///
+/// # Errors
+///
+/// [`MailboxError::BadAperture`] if `phys` is zero or does not fit the
+/// 30-bit `VideoCore` SDRAM aperture, or if `alias` carries bits outside
+/// the 2-bit alias prefix.
+pub fn arm_physical_to_bus(phys: u64, alias: u32) -> Result<u32, MailboxError> {
+    if phys == 0 || phys >= APERTURE_LIMIT {
+        return Err(MailboxError::BadAperture);
+    }
+    if alias & !BUS_ALIAS_MASK != 0 {
+        return Err(MailboxError::BadAperture);
+    }
+    // `phys` is below the 30-bit aperture limit, so the cast is exact.
+    let base = u32::try_from(phys).map_err(|_| MailboxError::BadAperture)?;
+    Ok(base | alias)
 }
 
 /// One decoded tag: its value words within the response message.

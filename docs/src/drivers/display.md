@@ -241,3 +241,23 @@ protocol-faithful mock firmware answers the exchange and the decoded
 `ScanoutConfig` drives `RpiHvs::open` and `present` — while the real
 scan-out (HVS hardware, HDMI) is the `plans/PI.md` P7 metal acceptance
 item.
+
+#### Driver-host wiring (`wiring`)
+
+The `wiring` module is the bring-up seam between the hardware tree and
+the driver. The aarch64 `FdtDiscovery` emits the Pi's mailbox node
+(`brcm,bcm2835-mbox`) with two resources: the discovered doorbell
+window as a capability-gated MMIO resource and a `Dma` resource
+requesting a one-page property-buffer carve bounded by the 30-bit
+VideoCore aperture (`AGENTS.md` §18.1). The host satisfies the carve
+and calls `wiring::open_discovered`, which checks `CAP_MMIO_MAP`, maps
+the doorbell and the carve, translates the carve to a bus address
+(`arm_physical_to_bus`, the exact fail-closed inverse of
+`bus_to_arm_physical`), exchanges the framebuffer request over
+`MmioMailbox`, and assembles the full `HvsConfig` — the firmware's
+scan-out plus the host's `HvsRegions` (DLIST RAM, display-channel
+control, plane carves) — for `RpiHvs::open`. `open_with_transport` is
+the host-provable half below the doorbell; the wiring's fail-closed
+paths (missing capability, missing mapper, out-of-aperture carve, a
+silent firmware timing out after the doorbell was rung) are unit-tested
+on the host.

@@ -1601,26 +1601,39 @@ property-channel client lives in `drivers/display/rpi_hvs::mailbox`
   with a budget-bounded poll (`DEFAULT_POLL_BUDGET`), failing closed
   with `Timeout`/`MalformedResponse` (foreign completion) — never an
   unbounded spin.
-- Host tests (32/32 in the crate) cover framing, every fail-closed
-  decode path, the alias/aperture translation, the doorbell transport,
-  and the full chain: mock firmware → `discover_framebuffer` →
-  `ScanoutConfig` → `RpiHvs::open` → `present` into the discovered
-  surface.
+- Host tests (38/38 in the crate) cover framing, every fail-closed
+  decode path, the alias↔aperture translation in both directions
+  (`bus_to_arm_physical` / `arm_physical_to_bus`), the doorbell
+  transport, the wiring fail-closed paths, and the full chain: mock
+  firmware → `wiring::open_with_transport` → `ScanoutConfig` →
+  `RpiHvs::open` → `present` into the discovered surface.
 - **No QEMU vertical, deliberately.** `virt` RAM begins at
   `0x4000_0000` — outside the BCM2711 30-bit VideoCore aperture — so
   the driver's (correct) aperture validation can never pass there, and
   §0.4 forbids a Pi-board QEMU vertical. The emulation artefact is the
   host-side full-chain test; the real scan-out is the metal item below.
 
-**Remaining — metal wiring + acceptance.**
+**Landed — the metal wiring.**
 
-- Discover the mailbox node (`brcm,bcm2835-mbox`, ARM-physical
-  `0xFE00_B880`) through `FdtDiscovery` into `rustos_abi::hwtree`, and
-  carve the DMA-visible property buffer, mapping both under
-  `CAP_MMIO_MAP` (§4, no ambient authority — never a `const` base).
-- Assemble the full `HvsConfig` (HVS DLIST RAM, display-channel
-  control, plane buffers) for the metal HVS and hand it to
-  `RpiHvs::open` in the driver-host wiring.
+- `FdtDiscovery` discovers the mailbox node (`brcm,bcm2835-mbox`) and
+  emits it into `rustos_abi::hwtree`: the doorbell window as a
+  capability-gated MMIO resource (base/length read from the tree, never
+  a `const`) plus a `HwResource::dma` request for a one-page
+  property-buffer carve bounded by the 30-bit VideoCore aperture
+  (`kernel/arch/aarch64::{fdt::find_mailbox, platform}`; the
+  `lib/fdt` `raspi_like_arm` fixture carries the node). The QEMU
+  `virt` tree has no mailbox, so its hardware tree simply omits the
+  node (§18.4) and the `-M virt` verticals are untouched.
+- `drivers/display/rpi_hvs::wiring` is the driver-host bring-up seam:
+  `open_discovered` checks `CAP_MMIO_MAP`, maps the discovered doorbell
+  + the host's property-buffer carve, translates the carve to a bus
+  address (`arm_physical_to_bus`), rings `MmioMailbox`, and delegates
+  to `open_with_transport`, which assembles the full `HvsConfig`
+  (firmware scan-out + the host's `HvsRegions`: DLIST RAM, control
+  window, plane carves) and calls `RpiHvs::open`.
+
+**Remaining — metal acceptance.**
+
 - Metal bring-up checklist (record each step's UART log): boot the P6
   image with HDMI attached → `MmioMailbox` exchange returns the
   firmware framebuffer (log bus address, size, pitch) →
@@ -1630,9 +1643,9 @@ property-channel client lives in `drivers/display/rpi_hvs::mailbox`
 
 **Done when:** the mailbox property protocol has host unit tests
 (request/response framing, bus↔physical translation, fail-closed on a bad
-aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done in
-the host chain, pending the metal wiring above; and a metal bring-up
-checklist + a captured "framebuffer cleared to theme colour"
+aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
+(hardware-tree mailbox node + `wiring::open_discovered`); and a metal
+bring-up checklist + a captured "framebuffer cleared to theme colour"
 photo/UART-log is recorded as the acceptance artefact — pending metal.
 
 ### P8 — SD-card storage (EMMC2) `[ ]`

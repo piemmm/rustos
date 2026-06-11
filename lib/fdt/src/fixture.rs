@@ -192,7 +192,9 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
 /// A Raspberry-Pi-shaped aarch64 tree carrying the two console UARTs the
 /// Pi exposes — a PrimeCell PL011 (`arm,pl011`) and a BCM2835 AUX
 /// mini-UART (`brcm,bcm2835-aux-uart`) — a GIC-400 interrupt controller
-/// (`arm,gic-400`) at the BCM2711 bases, plus a `/psci` (`smc`) node and a
+/// (`arm,gic-400`) at the BCM2711 bases, the `VideoCore` firmware mailbox
+/// (`brcm,bcm2835-mbox`) at the BCM2711 ARM-physical base `0xFE00_B880`
+/// with a `0x40`-byte doorbell window, plus a `/psci` (`smc`) node and a
 /// 1 GiB `/memory@0` node.
 ///
 /// `pl011_base` and `miniuart_base` are the ARM *physical* MMIO bases the
@@ -229,6 +231,13 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
     let mut gic_reg = reg_pair(0xff84_1000, 0x1000);
     gic_reg.extend_from_slice(&reg_pair(0xff84_2000, 0x2000));
     b.prop("reg", &gic_reg);
+    b.end_node();
+
+    // The VideoCore firmware mailbox doorbell block at the BCM2711
+    // ARM-physical base, the node the HVS framebuffer discovery binds.
+    b.begin_node("mailbox@7e00b880");
+    b.prop_str("compatible", "brcm,bcm2835-mbox");
+    b.prop("reg", &reg_pair(0xfe00_b880, 0x40));
     b.end_node();
 
     if pl011_base != 0 {
