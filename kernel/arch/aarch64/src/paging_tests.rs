@@ -133,13 +133,87 @@ fn identity_gigapages_map_device_then_normal() {
     // SAFETY: `root_phys` is the address of a live table page from the
     // process-static pool; reading the first two entries is sound.
     let (e0, e1) = unsafe { (*root, *root.add(1)) };
-    // GiB 0 is Device, GiB 1 is Normal; both are valid blocks.
+    // Under the default mask GiB 0 is Device, GiB 1 is Normal; both are
+    // valid blocks.
     assert!(is_block(e0));
     assert!(is_block(e1));
     assert_eq!(e0 & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
     assert_eq!(e1 & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
     assert_eq!(phys_from_descriptor(e0), 0);
     assert_eq!(phys_from_descriptor(e1), 1 << 30);
+}
+
+#[test]
+fn identity_device_mask_derives_the_virt_layout() {
+    // QEMU `virt`: PL011 + GICD/GICC in GiB 0, the kernel image in
+    // GiB 1 (`aarch64-virt.ld`, load 0x4020_0000) — the historic
+    // "GiB 0 Device" layout falls out of the derivation.
+    let mask = identity_device_mask(
+        &[0x0900_0000, 0x0800_0000, 0x0801_0000],
+        0x4020_0000,
+        0x4060_0000,
+    );
+    assert_eq!(mask, DEFAULT_DEVICE_GIGAPAGES);
+}
+
+#[test]
+fn identity_device_mask_derives_the_pi4_layout() {
+    // Raspberry Pi 4: the kernel image at 0x8_0000 keeps GiB 0 Normal
+    // (the CPU executes from it), and the discovered PL011/GIC-400
+    // bases put GiB 3 — the BCM2711 high-peripheral window — on the
+    // Device side.
+    let mask = identity_device_mask(
+        &[0xFE20_1000, 0xFF84_1000, 0xFF84_2000],
+        0x8_0000,
+        0x48_0000,
+    );
+    let mut expected = [0u64; GIGAPAGE_MASK_WORDS];
+    expected[0] = 1 << 3;
+    assert_eq!(mask, expected);
+    assert!(gigapage_is_device(&mask, 3));
+    assert!(!gigapage_is_device(&mask, 0));
+}
+
+#[test]
+fn identity_device_mask_keeps_the_kernel_gigapages_normal() {
+    // A discovered MMIO base sharing the kernel image's gigapage cannot
+    // be expressed at 1 GiB granularity; the kernel's gigapages win
+    // (Normal, executable) — including every gigapage the image spans.
+    let mask = identity_device_mask(&[0x0900_0000], 0, 0x8000_0000);
+    assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
+
+    // A base beyond the 512 GiB identity window has no slot to set.
+    let mask = identity_device_mask(&[1u64 << 60], 0x4020_0000, 0x4060_0000);
+    assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
+}
+
+#[test]
+fn configured_device_gigapages_select_the_leaf_attributes() {
+    static POOL: PageTablePool = PageTablePool::new();
+
+    // Add GiB 3 (the Pi 4 high-peripheral window) to the Device set
+    // while keeping the default GiB-0 bit, so concurrently-running
+    // tests that rely on the default "GiB 0 Device / GiB 1 Normal"
+    // layout observe no change.
+    let mut mask = DEFAULT_DEVICE_GIGAPAGES;
+    mask[0] |= 1 << 3;
+    configure_device_gigapages(mask);
+    assert_eq!(device_gigapages(), mask);
+
+    let space = AddressSpace::new_identity_gigapages(&POOL, 4).expect("four gigapages");
+    let root = space.root_phys() as *const u64;
+    // SAFETY: `root_phys` is the address of a live table page from the
+    // process-static pool; reading the first four entries is sound.
+    let entries = unsafe { [*root, *root.add(1), *root.add(2), *root.add(3)] };
+    assert_eq!(entries[0] & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
+    assert_eq!(entries[1] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_eq!(entries[2] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_eq!(entries[3] & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
+
+    // Restore the default so the process-global slot is left as the
+    // other host tests expect.
+    configure_device_gigapages(DEFAULT_DEVICE_GIGAPAGES);
+    assert_eq!(device_gigapages(), DEFAULT_DEVICE_GIGAPAGES);
 }
 
 #[test]

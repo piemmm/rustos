@@ -50,7 +50,9 @@
 use alloc::sync::Arc;
 
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
-use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool};
+use rustos_arch_aarch64::paging::{
+    configure_device_gigapages, identity_device_mask, AddressSpace, PageTablePool,
+};
 use rustos_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, Aarch64Arch,
     Aarch64ArchStorage,
@@ -73,9 +75,12 @@ use crate::mem_map::{build_memory_map, region_byte_totals};
 /// kernel image, stack, the firmware DTB, and the board MMIO window are
 /// all reachable whatever their physical addresses — the QEMU `virt`
 /// board (RAM at `0x4000_0000`, GIC/PL011 in the first GiB) and the
-/// Raspberry Pi 4 alike, with no `cfg(board)` fork (`AGENTS.md` §17.2).
-/// [`AddressSpace::new_identity_gigapages`] maps the first GiB Device
-/// (it holds the `virt` UART + GIC) and the rest Normal.
+/// Raspberry Pi 4 (RAM at `0`, MMIO in gigapage 3) alike, with no
+/// `cfg(board)` fork (`AGENTS.md` §17.2).
+/// [`AddressSpace::new_identity_gigapages`] maps the gigapages holding
+/// the *discovered* console/GIC MMIO Device and the rest — the kernel's
+/// own image included — Normal, per the [`configure_device_gigapages`]
+/// mask [`boot`] derives before enabling the MMU.
 const IDENTITY_GIGABYTES: usize = 512;
 
 /// Boot-time page-table frame source for the stage-1 identity map.
@@ -113,11 +118,24 @@ const fn yes_no(value: bool) -> &'static str {
 }
 
 extern "C" {
+    /// First byte of the kernel image — the board load address — defined
+    /// by the board linker script (`aarch64-rpi4.ld` / `aarch64-virt.ld`).
+    /// With [`__kernel_end`] it brackets the image extent whose identity
+    /// gigapages must stay Normal (executable) whatever the discovered
+    /// MMIO layout says ([`identity_device_mask`]).
+    static __kernel_start: u8;
     /// One byte past the end of the kernel image, including the boot heap,
     /// defined by the board linker script (`aarch64-rpi4.ld` /
     /// `aarch64-virt.ld`). The usable physical-memory region the allocator
     /// receives begins at the next page boundary after this address.
     static __kernel_end: u8;
+}
+
+/// Address of the linker-provided `__kernel_start` symbol.
+fn kernel_start_addr() -> u64 {
+    // `addr_of!` reads the marker's address without forming a reference to
+    // the zero-sized, never-dereferenced symbol.
+    core::ptr::addr_of!(__kernel_start) as u64
 }
 
 /// Address of the linker-provided `__kernel_end` symbol.
@@ -197,22 +215,45 @@ pub fn boot(
         enable_fp_el1();
     }
 
-    // P6c-2: enable the stage-1 identity MMU and EL1 vectors *before* any
+    // P2 + P3, *before* the MMU comes on: point the console at the UART
+    // and the GICv2 driver at the GICD/GICC bases the firmware tree
+    // describes. Both walks early-return at their matched node
+    // (`rustos_arch_aarch64::fdt::scan_translated`), so they are safe
+    // MMU-off (`plans/PI.md` watch-out); a null, unreadable, or
+    // incomplete tree leaves the `virt` defaults in place (fail closed,
+    // `AGENTS.md` §2.9). They must run *before* the identity map is
+    // built, because the discovered bases decide which gigapages the map
+    // types Device: on the Pi 4 the PL011/GIC-400 live in gigapage 3
+    // while the kernel image at `0x8_0000` must keep gigapage 0 Normal —
+    // executable — or the instruction fetch after `switch` faults with
+    // the vectors not yet installed (the `virt`-only "GiB 0 Device"
+    // assumption this replaces).
+    let early = configure_mmio_from_dtb(dtb);
+    let (console_base, _) = console::current();
+    let (gicd_base, gicc_base) = gic::current();
+    let device_mask = identity_device_mask(
+        &[console_base as u64, gicd_base as u64, gicc_base as u64],
+        kernel_start_addr(),
+        kernel_end_addr(),
+    );
+    configure_device_gigapages(device_mask);
+
+    // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
     // read-modify-write instructions, which are UNPREDICTABLE on the
-    // MMU-off Device-typed memory the boot CPU runs on; the identity map
-    // makes RAM Normal/cacheable so they behave (`plans/PI.md` P6c-2). It
-    // also makes the full-tree FDT walk below (`first_memory_region`)
-    // safe, which faults MMU-off under release optimisation
-    // (`plans/PI.md` watch-out).
+    // MMU-off Device-typed memory the boot CPU may run on; the identity
+    // map makes RAM Normal/cacheable so they behave (`plans/PI.md`
+    // P6c-2). It also makes the full-tree FDT walks below
+    // (`first_memory_region`) safe, which fault MMU-off under release
+    // optimisation (`plans/PI.md` watch-out).
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
 
-    // Discover the board from the firmware device tree: point the console
-    // at the UART, the GICv2 driver at the discovered GICD/GICC bases, and
-    // read the `/memory` window, the timer rate, and the PSCI conduit (P2
-    // + P3 + P4 + P5). A null, unreadable, or incomplete tree leaves the
-    // `virt` defaults in place (fail closed, `AGENTS.md` §2.9).
+    // Discover the rest of the board from the firmware device tree: the
+    // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
+    // P5) — full-tree walks that need the MMU on. A null, unreadable, or
+    // incomplete tree leaves the `virt` defaults in place (fail closed,
+    // `AGENTS.md` §2.9).
     let discovered = configure_from_dtb(dtb);
 
     // Construct the architecture handle — the single §17.1/§17.2
@@ -314,6 +355,12 @@ pub fn boot(
     let mut reserved_buf = [0u8; 16];
     let usable_hex = format_hex_u64(usable_bytes, &mut usable_buf);
     let reserved_hex = format_hex_u64(reserved_bytes, &mut reserved_buf);
+    // Low word of the Device gigapage mask (gigapages 0..64 — both
+    // supported boards keep all their MMIO below 64 GiB), recorded so a
+    // metal bring-up log shows which gigapages the identity map typed
+    // Device (`virt`: 0x1; Pi 4: 0x8).
+    let mut device_mask_buf = [0u8; 16];
+    let device_mask_hex = format_hex_u64(device_mask[0], &mut device_mask_buf);
 
     log(
         log_sink,
@@ -336,11 +383,15 @@ pub fn boot(
                 },
                 Field {
                     key: "console_discovered",
-                    value: yes_no(discovered.console),
+                    value: yes_no(early.console),
                 },
                 Field {
                     key: "gic_discovered",
-                    value: yes_no(discovered.gic),
+                    value: yes_no(early.gic),
+                },
+                Field {
+                    key: "device_gigapages_hex",
+                    value: device_mask_hex,
                 },
                 Field {
                     key: "ram_discovered",
@@ -458,13 +509,50 @@ fn enter_kernel_core(
     kernel_main(boot_info)
 }
 
-/// What the boot path resolved from the firmware device tree.
-struct Discovered {
+/// What the pre-MMU boot phase resolved from the firmware device tree:
+/// the MMIO facts the identity map's Device gigapage mask is derived
+/// from ([`identity_device_mask`]).
+struct EarlyDiscovered {
     /// A recognised console UART was found and the console base/model set.
     console: bool,
     /// A GICv2-class interrupt controller was found and its GICD/GICC
     /// bases set.
     gic: bool,
+}
+
+/// Point the console and the GICv2 driver at the bases the firmware tree
+/// describes, before the MMU is enabled.
+///
+/// Both discoveries are early-returning, `ranges`-aware walks
+/// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] over
+/// [`rustos_arch_aarch64::fdt::scan_translated`]), so they are safe with
+/// the MMU off. A null pointer, an unreadable/invalid blob, or a tree
+/// missing a fact leaves the corresponding pre-discovery `virt` default
+/// untouched (fail closed, `AGENTS.md` §2.9).
+fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
+    let mut out = EarlyDiscovered {
+        console: false,
+        gic: false,
+    };
+    if dtb == 0 {
+        return out;
+    }
+    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
+    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
+    // and bounds the blob by its own `totalsize` before any further read,
+    // and every read is a single byte, so the access is valid MMU-off. A
+    // bogus pointer fails the magic check and returns `Err` rather than
+    // faulting on structured data.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+        return out;
+    };
+    out.console = console::configure_from_fdt(&fdt).is_some();
+    out.gic = gic::configure_from_fdt(&fdt).is_some();
+    out
+}
+
+/// What the post-MMU boot phase resolved from the firmware device tree.
+struct Discovered {
     /// The `/memory` window `(base, size)` discovered from the firmware
     /// tree, if any — the RAM extent the `BootMemoryMap` (`plans/PI.md`
     /// P6c-1) reserves the kernel image out of and hands the allocator.
@@ -483,17 +571,16 @@ struct Discovered {
     psci_method: Option<fdt::PsciMethod>,
 }
 
-/// Discover the board from the device tree at `dtb`: point the console
-/// and the GICv2 driver at their discovered bases and read the `/memory`
-/// window. Each field reports whether that fact was found.
+/// Discover the board's post-MMU facts from the device tree at `dtb`:
+/// the `/memory` window, the timer rate, and the PSCI conduit. (The
+/// console and GIC bases are configured MMU-off by
+/// [`configure_mmio_from_dtb`], before the identity map is built.)
 ///
 /// A null pointer, an unreadable/invalid blob, or a tree missing a fact
 /// leaves the corresponding pre-discovery `virt` default untouched (fail
 /// closed, `AGENTS.md` §2.9).
 fn configure_from_dtb(dtb: u64) -> Discovered {
     let mut out = Discovered {
-        console: false,
-        gic: false,
         ram_window: None,
         // With no usable tree the register is the only counter-rate
         // source; P4's tree override (if any) overwrites this below.
@@ -507,14 +594,13 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
     // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
     // and bounds the blob by its own `totalsize` before any further read,
-    // and every read is a single byte, so the access is valid MMU-off. A
-    // bogus pointer fails the magic check and returns `Err` rather than
-    // faulting on structured data.
+    // and every read is a single byte. The full-tree walks below run with
+    // the MMU on (the caller enables it first). A bogus pointer fails the
+    // magic check and returns `Err` rather than faulting on structured
+    // data.
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
         return out;
     };
-    out.console = console::configure_from_fdt(&fdt).is_some();
-    out.gic = gic::configure_from_fdt(&fdt).is_some();
     out.ram_window = fdt.first_memory_region();
     // P4: prefer the board's `/timer` `clock-frequency` over the
     // `CNTFRQ_EL0` register, so the Pi 4's 54 MHz crystal is honoured

@@ -16,8 +16,255 @@
 //! Devices reach [`rustos_abi::hwtree`] through the *generic* walk in
 //! [`crate::platform`] — no per-device query is needed for a node to be
 //! discovered and matched (`AGENTS.md` §18.2/§18.3).
+//!
+//! It also hosts the one bus-aware `reg` decoder the port's tree readers
+//! share (`AGENTS.md` §2.2): per-depth [`crate::fdt::BusLevel`]
+//! cell/`ranges` tracking, the ancestor-bus [`crate::fdt::translate`]
+//! step, the per-entry [`crate::fdt::translated_reg`] reader, and the
+//! early-returning [`crate::fdt::scan_translated`] walk the boot-path
+//! console/GIC discovery and the
+//! [`crate::platform`] hardware-tree walk are built on. Real boards (the
+//! Pi 4's `/soc`) put peripherals behind buses with their own
+//! `#address-cells`/`#size-cells` and `ranges`, so a raw `reg` read is a
+//! *bus* address — never the CPU-physical base a driver may touch.
+
+use rustos_fdt::{read_cells, Node};
 
 pub use rustos_fdt::{Fdt, FdtError};
+
+/// Deepest device-tree nesting the shared walks track per-level state
+/// for.
+///
+/// A validation bound on hostile input (`AGENTS.md` §24.4), not a device
+/// capacity: real boards nest three or four levels deep, so sixteen is
+/// generous, and a deeper tree ends the walk rather than reading state
+/// the walker cannot track (`AGENTS.md` §2.9).
+pub const MAX_WALK_DEPTH: usize = 16;
+
+/// Per-depth walk state: what a node's children need to know about their
+/// ancestor buses to decode and translate their own `reg`.
+#[derive(Copy, Clone)]
+pub struct BusLevel<'a> {
+    /// `#address-cells` governing this node's children's `reg`.
+    pub addr_cells: u32,
+    /// `#size-cells` governing this node's children's `reg`.
+    pub size_cells: u32,
+    /// This node's raw `ranges` value, mapping its children's address
+    /// space into its parent's (`None` when absent — untranslatable).
+    pub ranges: Option<&'a [u8]>,
+}
+
+impl BusLevel<'_> {
+    /// State before any node is visited: the devicetree-spec default cell
+    /// counts (2 address, 1 size) with no `ranges`.
+    pub const DEFAULT: Self = BusLevel {
+        addr_cells: 2,
+        size_cells: 1,
+        ranges: None,
+    };
+}
+
+/// Read `node`'s own bus-level facts — the cell counts and `ranges` that
+/// govern its *children* — applying the devicetree-spec defaults where a
+/// property is absent.
+#[must_use]
+pub fn bus_level<'a>(node: &Node<'a>) -> BusLevel<'a> {
+    BusLevel {
+        addr_cells: cells_property(node, "#address-cells").unwrap_or(2),
+        size_cells: cells_property(node, "#size-cells").unwrap_or(1),
+        ranges: node.property("ranges").map(|p| p.value()),
+    }
+}
+
+/// Read a `#address-cells` / `#size-cells` style single-cell property.
+fn cells_property(node: &Node<'_>, name: &str) -> Option<u32> {
+    node.property(name)?.read_be_u32(0).ok()
+}
+
+/// Translate `addr` from the address space of the node at `depth` into a
+/// CPU-physical address by applying each ancestor bus's `ranges`, child
+/// to root.
+///
+/// An ancestor with an *empty* `ranges` is an identity mapping; an
+/// ancestor with *no* `ranges` cannot translate (the devicetree spec
+/// forbids crossing it), and an address no range entry covers is
+/// likewise refused — `None`, never a guess (`AGENTS.md` §2.9). Nodes
+/// directly under the root need no translation.
+#[must_use]
+pub fn translate(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
+    let mut translated = addr;
+    for bus in (1..depth).rev() {
+        let level = levels.get(bus)?;
+        let ranges = level.ranges?;
+        if ranges.is_empty() {
+            continue;
+        }
+        translated = apply_ranges(
+            ranges,
+            RangeCells {
+                child_address: level.addr_cells,
+                parent_address: levels.get(bus - 1)?.addr_cells,
+                child_size: level.size_cells,
+            },
+            translated,
+        )?;
+    }
+    Some(translated)
+}
+
+/// The three cell counts decoding one `ranges` entry: the child bus's
+/// address cells, the parent bus's address cells, and the child bus's
+/// size cells (Devicetree Spec v0.4 §2.3.8).
+#[derive(Copy, Clone)]
+struct RangeCells {
+    child_address: u32,
+    parent_address: u32,
+    child_size: u32,
+}
+
+/// Map `addr` through one `ranges` value: find the `(child, parent,
+/// size)` entry containing it and rebase it into the parent space.
+fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
+    let RangeCells {
+        child_address,
+        parent_address,
+        child_size,
+    } = cells;
+    if child_address == 0
+        || child_address > 2
+        || parent_address == 0
+        || parent_address > 2
+        || child_size == 0
+        || child_size > 2
+    {
+        return None;
+    }
+    let entry = ((child_address + parent_address + child_size) * 4) as usize;
+    if ranges.len() % entry != 0 {
+        return None;
+    }
+    let mut off = 0;
+    while off + entry <= ranges.len() {
+        let child_base = read_cells(ranges, off, child_address)?;
+        let parent_base = read_cells(ranges, off + (child_address as usize) * 4, parent_address)?;
+        let size = read_cells(
+            ranges,
+            off + ((child_address + parent_address) as usize) * 4,
+            child_size,
+        )?;
+        if let Some(delta) = addr.checked_sub(child_base) {
+            if delta < size {
+                return parent_base.checked_add(delta);
+            }
+        }
+        off += entry;
+    }
+    None
+}
+
+/// Decode `reg` entry `index` of the node at `depth` with its parent
+/// bus's cell counts and translate the base through the ancestor buses'
+/// `ranges`, yielding the CPU-physical `(base, length)` window.
+///
+/// Returns `None` — never an invented or untranslated window
+/// (`AGENTS.md` §2.9) — when the node carries no `reg`, the parent's
+/// cell counts are outside the decodable `1..=2` range, the value is not
+/// a whole number of entries, `index` is past the last entry, or an
+/// ancestor bus cannot translate the base.
+#[must_use]
+pub fn translated_reg(
+    node: &Node<'_>,
+    depth: usize,
+    levels: &[BusLevel<'_>],
+    index: usize,
+) -> Option<(u64, u64)> {
+    let reg = node.property("reg")?;
+    let parent = levels.get(depth.checked_sub(1)?)?;
+    let (ac, sc) = (parent.addr_cells, parent.size_cells);
+    if ac == 0 || ac > 2 || sc == 0 || sc > 2 {
+        return None;
+    }
+    let value = reg.value();
+    let entry = ((ac + sc) * 4) as usize;
+    if value.is_empty() || value.len() % entry != 0 {
+        return None;
+    }
+    let off = index.checked_mul(entry)?;
+    if off + entry > value.len() {
+        return None;
+    }
+    let base = read_cells(value, off, ac)?;
+    let len = read_cells(value, off + (ac as usize) * 4, sc)?;
+    let base = translate(levels, depth, base)?;
+    Some((base, len))
+}
+
+/// Number of whole `reg` entries the node at `depth` carries under its
+/// parent bus's cell counts, so a caller can iterate [`translated_reg`]
+/// over every window while still *skipping* the entries an ancestor
+/// cannot translate (a skipped entry is dropped, never invented —
+/// `AGENTS.md` §2.9).
+///
+/// Returns `None` when the node carries no `reg`, the parent's cell
+/// counts are outside the decodable `1..=2` range, or the value is not
+/// a whole number of entries.
+#[must_use]
+pub fn reg_entry_count(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>]) -> Option<usize> {
+    let reg = node.property("reg")?;
+    let parent = levels.get(depth.checked_sub(1)?)?;
+    let (ac, sc) = (parent.addr_cells, parent.size_cells);
+    if ac == 0 || ac > 2 || sc == 0 || sc > 2 {
+        return None;
+    }
+    let value = reg.value();
+    let entry = ((ac + sc) * 4) as usize;
+    if value.is_empty() || value.len() % entry != 0 {
+        return None;
+    }
+    Some(value.len() / entry)
+}
+
+/// Walk `fdt` in document order, tracking each ancestor bus's cell
+/// counts and `ranges`, handing every non-root node to `visit` together
+/// with the per-depth [`BusLevel`] state and the node's depth (so
+/// `visit` can decode windows via [`translated_reg`]). The walk returns
+/// at the first `Some` `visit` yields.
+///
+/// Like the [`psci_method`] / [`timer_clock_frequency`] queries, this is
+/// an early-returning `Fdt::nodes` traversal that reads only the visited
+/// nodes' own properties, so a caller that returns at its matched node
+/// stays safe with the MMU off (`plans/PI.md` P4/P5 watch-out — a
+/// whole-tree scan faults there once the compiler widens the byte
+/// reads). A malformed token or a tree nested beyond [`MAX_WALK_DEPTH`]
+/// ends the walk — fail closed, never a guess (`AGENTS.md` §2.9).
+pub fn scan_translated<'a, T>(
+    fdt: &Fdt<'a>,
+    mut visit: impl FnMut(&Node<'a>, &[BusLevel<'a>], usize) -> Option<T>,
+) -> Option<T> {
+    let mut levels = [BusLevel::DEFAULT; MAX_WALK_DEPTH];
+    for node in fdt.nodes() {
+        let Ok(node) = node else { break };
+        let depth = node.depth() as usize;
+        if depth >= MAX_WALK_DEPTH {
+            break;
+        }
+        // This node's own cell counts and `ranges` govern its *children*;
+        // record them after the visit so the visited node itself decodes
+        // against its ancestors only.
+        let mut level = bus_level(&node);
+        if depth == 0 {
+            // The root has no parent bus to translate into.
+            level.ranges = None;
+            levels[0] = level;
+            continue;
+        }
+        if let Some(found) = visit(&node, &levels, depth) {
+            return Some(found);
+        }
+        levels[depth] = level;
+    }
+    None
+}
 
 /// The PSCI conduit a platform uses to call firmware (`AGENTS.md` §11 /
 /// `plans/WIRING.md` W6).
@@ -162,7 +409,7 @@ mod tests {
     fn reads_psci_method_from_a_raspi_shaped_tree() {
         // The Raspberry-Pi-shaped fixture carries a `/psci` node with the
         // `smc` conduit an EL3-firmware platform uses (`armstub8.bin`).
-        let blob = raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let blob = raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(psci_method(&fdt), Some(PsciMethod::Smc));
     }

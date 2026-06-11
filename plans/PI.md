@@ -208,7 +208,16 @@ the production binary and the existing aarch64 verticals.
   `rustos_arch_aarch64::console` module (an atomic `(base, model)` pair,
   default = the `virt` PL011 base) that the freestanding `serial` sink
   transmits through on every byte. `console::configure_from_fdt` reads the
-  base + model from the device tree. The BCM2835 **AUX mini-UART** is a
+  base + model from the device tree, decoding the node's `reg` with its
+  parent bus's cell counts and translating it through the ancestor
+  buses' `ranges` (the shared `fdt::scan_translated` /
+  `fdt::translated_reg` machinery, §2.2) — the real Pi tree's UARTs sit
+  under `/soc` with one-cell *bus* `reg` values (`0x7E20_1000`) remapped
+  to CPU-physical space (`0xFE20_1000`); an untranslatable node is
+  skipped, never poked at its raw bus address (§2.9). The
+  `raspi_like_arm` fixture mirrors that real shape (root 2+1 cells,
+  `/soc` simple-bus with 1+1 cells and the three BCM2711 `ranges`,
+  bus-address parameters). The BCM2835 **AUX mini-UART** is a
   second `ConsoleModel` behind the same `rustos_log::Sink` seam (its own
   `AUX_MU_IO`/`AUX_MU_LSR` register offsets + opposite-sense TX-ready bit),
   selected by the `compatible` string — `brcm,bcm2835-aux-uart` vs
@@ -263,16 +272,21 @@ board constants leaked outside the arch crate.
 `virt` GICv2 `0x0800_0000`/`0x0801_0000`) that the freestanding
 `VolatileGicMmio` reads on every access, with `gic::find_gic` /
 `configure_from_fdt` over `lib/fdt` selecting the first GICv2-class
-controller (`arm,gic-400`, `arm,cortex-a15-gic`, …) and reading its two
-`reg` regions. `platform::FdtDiscovery` emits an `InterruptController`
-`HwNode` carrying the discovered `compatible` bind key + both register
-windows (`HwDeviceClass::InterruptController` already existed — no ABI
-change). The `lib/fdt` `virt_like_arm` / `raspi_like_arm` fixtures grew a
-GIC node (virt `arm,cortex-a15-gic`; Pi `arm,gic-400` @ `0xFF84_1000`/
-`0xFF84_2000`); host tests cover the GIC discovery, the `HwNode`, and the
-fail-closed no-GIC path. `boot_aarch64` parses the `x0` DTB once and
-points the console **and** the GIC driver at their discovered bases and
-reads the `/memory` window, logging `gic_discovered` / `ram_discovered`
+controller (`arm,gic-400`, `arm,cortex-a15-gic`, …) and reading its
+first two `reg` regions (GICD, GICC), each decoded with the parent
+bus's cell counts and translated through the ancestor buses' `ranges`
+(`fdt::translated_reg`) — the real Pi tree's GIC-400 sits under `/soc`
+with one-cell bus `reg` values (`0x4004_1000` → `0xFF84_1000`).
+`platform::FdtDiscovery` emits an `InterruptController` `HwNode`
+carrying the discovered `compatible` bind key + every register window
+(`HwDeviceClass::InterruptController` already existed — no ABI change).
+The `lib/fdt` `virt_like_arm` / `raspi_like_arm` fixtures carry a GIC
+node (virt `arm,cortex-a15-gic` at the root; Pi `arm,gic-400` under
+`/soc` with the real four bus-address regions); host tests cover the
+GIC discovery, the `HwNode`, and the fail-closed no-GIC path.
+`boot_aarch64` parses the `x0` DTB and points the console **and** the
+GIC driver at their discovered bases MMU-off, then reads the `/memory`
+window once the MMU is on, logging `gic_discovered` / `ram_discovered`
 (the live allocator + `kernel_core::kernel_main` hand-off over that map is
 deliberately staged to P4/P6 — a hard-coded map would violate §18.5).
 **Runtime proof on `-M virt`:** the `ipi_smp_qemu_aarch64` vertical now
@@ -431,13 +445,21 @@ on its own before the next.
     line now records `mem_map_built` / `mem_map_status` /
     `usable_bytes_hex` / `reserved_bytes_hex`, failing closed to a status
     string (never a panic, §2.9) on an absent or malformed window.
-  - **P6c-2 — MMU + `kernel_main` hand-off `[x]`.** `boot_aarch64` now
-    enables the stage-1 identity MMU (`AddressSpace::new_identity_gigapages`
-    over a static boot `PageTablePool`, 512×1 GiB — first GiB Device, rest
-    Normal — then `switch`) and installs the EL1 vectors *before* any
-    further work, so the `kernel_core` allocator/scheduler atomics run on
-    Normal memory and the full-tree `first_memory_region` FDT walk is
-    MMU-on-safe (the §watch-out hazard). It adds the local `Aarch64BinArch`
+  - **P6c-2 — MMU + `kernel_main` hand-off `[x]`.** `boot_aarch64`
+    discovers the console + GIC bases MMU-off (early-return walks),
+    derives the identity map's Device gigapage mask from them
+    (`paging::identity_device_mask` — discovered MMIO gigapages Device,
+    the kernel image's own gigapages Normal/executable; `virt`: GiB 0
+    Device, Pi 4: GiB 3 Device with the kernel at `0x8_0000` in a Normal
+    GiB 0), installs it via `paging::configure_device_gigapages`, then
+    enables the stage-1 identity MMU
+    (`AddressSpace::new_identity_gigapages` over a static boot
+    `PageTablePool`, 512×1 GiB, then `switch`) and installs the EL1
+    vectors *before* any further work, so the `kernel_core`
+    allocator/scheduler atomics run on Normal memory and the full-tree
+    `first_memory_region` FDT walk is MMU-on-safe (the §watch-out
+    hazard). The boot audit line records `device_gigapages_hex`
+    (`virt`: `0x1`; Pi 4: `0x8`). It adds the local `Aarch64BinArch`
     `KernelArch` wrapper (orphan-rule sibling of the x86_64 `BinArch` /
     riscv64 `RiscvBinArch`), a slot-based aarch64 `production_dispatch` +
     `DISPATCH_SLOT` (the shared arch-neutral frame-read / errno-encode /

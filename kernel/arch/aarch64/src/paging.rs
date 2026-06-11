@@ -29,7 +29,7 @@
 //! gated to the freestanding aarch64 target.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame};
 use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
@@ -237,6 +237,138 @@ pub const fn device_leaf_attrs(block: bool) -> u64 {
     }
 }
 
+/// Number of `u64` words in a gigapage mask covering all
+/// [`ENTRIES_PER_TABLE`] L1 slots (one bit per 1 GiB identity gigapage).
+pub const GIGAPAGE_MASK_WORDS: usize = ENTRIES_PER_TABLE / 64;
+
+/// Gigapage mask in effect before any board discovery runs: bit 0 only —
+/// the QEMU `virt` board keeps its UART, GIC, and the rest of its device
+/// MMIO in the first GiB. A board whose MMIO lives elsewhere (the Pi 4's
+/// high-peripheral window in gigapage 3) replaces this at boot from its
+/// device tree ([`configure_device_gigapages`]); the default is the
+/// `virt` value, never a fabricated per-board constant (`plans/PI.md`
+/// §3).
+pub const DEFAULT_DEVICE_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = {
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    mask[0] = 1;
+    mask
+};
+
+/// Identity gigapages currently mapped Device instead of Normal, one bit
+/// per L1 slot. Defaults to [`DEFAULT_DEVICE_GIGAPAGES`]; overwritten by
+/// [`configure_device_gigapages`] once boot discovery resolves where the
+/// board's MMIO actually lives. Read by [`AddressSpace::new_identity_gigapages`]
+/// for *every* identity space built after configuration (the boot space
+/// and each process space), so the whole system shares one attribute
+/// layout.
+static DEVICE_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] = [
+    AtomicU64::new(DEFAULT_DEVICE_GIGAPAGES[0]),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// Install the identity-map Device gigapage mask.
+///
+/// Called once early in a board's boot path, after device-tree discovery
+/// resolves the board's MMIO bases ([`identity_device_mask`]) and before
+/// the boot address space is built. `Release` ordering pairs with
+/// [`device_gigapages`]' `Acquire` loads so a builder that sees any new
+/// word sees a consistent mask.
+pub fn configure_device_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
+    for (slot, word) in DEVICE_GIGAPAGES.iter().zip(mask) {
+        slot.store(word, Ordering::Release);
+    }
+}
+
+/// The identity-map Device gigapage mask currently in effect.
+#[must_use]
+pub fn device_gigapages() -> [u64; GIGAPAGE_MASK_WORDS] {
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    for (word, slot) in mask.iter_mut().zip(&DEVICE_GIGAPAGES) {
+        *word = slot.load(Ordering::Acquire);
+    }
+    mask
+}
+
+/// `true` if gigapage `index`'s bit is set in `word` (the mask word
+/// covering it) — the one bit test [`gigapage_is_device`] and the
+/// constructor's per-word configured-mask read share.
+const fn mask_word_bit(word: u64, index: usize) -> bool {
+    word & (1 << (index % 64)) != 0
+}
+
+/// `true` if identity gigapage `index` is mapped Device under `mask`.
+#[must_use]
+pub const fn gigapage_is_device(mask: &[u64; GIGAPAGE_MASK_WORDS], index: usize) -> bool {
+    index < ENTRIES_PER_TABLE && mask_word_bit(mask[index / 64], index)
+}
+
+/// `true` if identity gigapage `index` is mapped Device under the
+/// *configured* mask ([`configure_device_gigapages`]), reading exactly
+/// the one mask word covering `index`.
+///
+/// Deliberately scalar: [`AddressSpace::new_identity_gigapages`] runs on
+/// boot paths where FP/SIMD may still be trapped (`CPACR_EL1.FPEN`), and
+/// copying the whole mask into a 64-byte local is exactly the shape the
+/// compiler lowers to vector stores — an EC `0x07` trap with no vectors
+/// installed (a silent hang). One `u64` atomic load per query keeps the
+/// path integer-only.
+fn configured_gigapage_is_device(index: usize) -> bool {
+    index < ENTRIES_PER_TABLE
+        && mask_word_bit(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
+}
+
+/// Derive the identity-map Device gigapage mask from the board's
+/// discovered MMIO bases and the kernel image's own extent.
+///
+/// Each gigapage containing one of `device_bases` is mapped Device so
+/// MMIO reads/writes are not cached, reordered, or speculated
+/// (`AGENTS.md` §2.6 — Device-nGnRE is the only correct attribute for a
+/// register block). The gigapages overlapping `[kernel_start,
+/// kernel_end)` are forced Normal regardless: the CPU executes the
+/// kernel image out of them, and a Device(+PXN) mapping would fault the
+/// instruction fetch the moment the MMU comes on — on the Pi 4 the
+/// kernel at `0x8_0000` shares gigapage 0 with nothing the kernel
+/// drives, while its UART/GIC live in gigapage 3 (`plans/PI.md` §1). On
+/// QEMU `virt` the kernel sits in gigapage 1 and the MMIO in gigapage
+/// 0, reproducing the historic layout. A base beyond the 512 GiB
+/// identity window is ignored (no representable slot).
+#[must_use]
+pub fn identity_device_mask(
+    device_bases: &[u64],
+    kernel_start: u64,
+    kernel_end: u64,
+) -> [u64; GIGAPAGE_MASK_WORDS] {
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    for &base in device_bases {
+        let index = (base >> 30) as usize;
+        if index < ENTRIES_PER_TABLE {
+            mask[index / 64] |= 1 << (index % 64);
+        }
+    }
+    // The kernel image's gigapages stay Normal — executable — even if a
+    // discovered MMIO base lands in one (the conflict is unmappable at
+    // 1 GiB granularity; keeping the CPU running wins).
+    let first = (kernel_start >> 30) as usize;
+    let last_byte = if kernel_end > kernel_start {
+        kernel_end - 1
+    } else {
+        kernel_start
+    };
+    let last = (last_byte >> 30) as usize;
+    let mut index = first;
+    while index <= last && index < ENTRIES_PER_TABLE {
+        mask[index / 64] &= !(1 << (index % 64));
+        index += 1;
+    }
+    mask
+}
+
 /// One page-table page: 512 × u64, naturally aligned.
 #[repr(C, align(4096))]
 struct Table([u64; ENTRIES_PER_TABLE]);
@@ -322,11 +454,12 @@ impl PageTableFrames for PageTablePool {
 ///
 /// The constructor identity-maps the low `gigabytes` GiB of physical
 /// memory with 1 GiB L1 block descriptors so the kernel's own
-/// code/stack/data and the `virt` board's MMIO remain reachable
-/// whichever [`AddressSpace`] is active. The first gigabyte (which holds
-/// the PL011 UART and the GIC) is mapped Device; the rest Normal.
-/// [`Self::map_4k`] adds the finer-grained mappings the
-/// memory-isolation test diverges on.
+/// code/stack/data and the board's MMIO remain reachable whichever
+/// [`AddressSpace`] is active. The gigapages named by the configured
+/// Device mask ([`configure_device_gigapages`] — by default gigapage 0,
+/// which holds the `virt` board's PL011 UART and GIC) are mapped
+/// Device; the rest Normal. [`Self::map_4k`] adds the finer-grained
+/// mappings the memory-isolation test diverges on.
 pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
@@ -362,10 +495,14 @@ impl AddressSpace {
             phys: root_phys,
             entries: root,
         } = frames.alloc_table()?;
+        // The board-configured Device mask says which gigapages hold MMIO
+        // (`virt`: GiB 0; Pi 4: GiB 3); everything else is RAM. The mask
+        // is read one word per slot (`configured_gigapage_is_device`) so
+        // the constructor stays FP/SIMD-free — it runs before some
+        // callers enable `CPACR_EL1.FPEN`.
         for (i, slot) in root.iter_mut().take(gigabytes).enumerate() {
             let paddr = (i as u64) << 30;
-            // GiB 0 holds device MMIO (UART, GIC); the rest is RAM.
-            let leaf = if i == 0 {
+            let leaf = if configured_gigapage_is_device(i) {
                 device_leaf_attrs(true)
             } else {
                 normal_leaf_attrs(true)
@@ -636,7 +773,8 @@ impl AddressSpace {
     /// region the code touches before the next `switch` — otherwise the
     /// CPU faults on the next fetch/access.
     /// [`Self::new_identity_gigapages`] upholds that by identity-mapping
-    /// the kernel's gigapages (RAM Normal, MMIO Device).
+    /// the kernel's gigapages (RAM Normal, MMIO Device per the configured
+    /// [`configure_device_gigapages`] mask).
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     pub unsafe fn switch(&self) {
         // SAFETY: the caller asserts the new mappings cover `pc`, `sp`,

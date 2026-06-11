@@ -120,9 +120,13 @@ pub struct DiscoveredGic<'a> {
     /// device-tree blob. Used as the hardware-tree node's bind key
     /// (`crate::platform`).
     pub compatible: &'a [u8],
-    /// MMIO base of the distributor (the GIC node's first `reg` region).
+    /// CPU-physical MMIO base of the distributor: the GIC node's first
+    /// `reg` region, decoded with its parent bus's cell counts and
+    /// translated through the ancestor buses' `ranges`
+    /// ([`crate::fdt::translated_reg`]).
     pub gicd_base: u64,
-    /// MMIO base of the CPU interface (the node's second `reg` region).
+    /// CPU-physical MMIO base of the CPU interface (the node's second
+    /// `reg` region, decoded and translated likewise).
     pub gicc_base: u64,
 }
 
@@ -130,38 +134,33 @@ pub struct DiscoveredGic<'a> {
 ///
 /// Walks the tree for the first node whose `compatible` names a
 /// GICv2-class controller ([`is_gic_compatible`]) and reads its `reg`:
-/// region 0 is the distributor, region 1 the CPU interface. Both boards
-/// this port serves describe the GIC with 2 address + 2 size cells, so
-/// the distributor base is at byte offset 0 and the CPU-interface base at
-/// offset 16 (the same `reg` layout the console reader assumes). Returns
-/// `None` if the tree is malformed or carries no recognised GIC (the
-/// caller then keeps the [`DEFAULT_GICD_BASE`] / [`DEFAULT_GICC_BASE`]
-/// default — fail closed, `AGENTS.md` §2.9).
+/// region 0 is the distributor, region 1 the CPU interface. Each region
+/// is decoded with the node's parent bus's cell counts and translated
+/// through the ancestor buses' `ranges`
+/// ([`crate::fdt::translated_reg`]) — on the QEMU `virt` board the GIC
+/// sits at the root with 2+2 cells, while the Pi 4's GIC-400 sits under
+/// `/soc` with one-cell *bus* `reg` values (`0x4004_1000`) remapped to
+/// the CPU-physical bases (`0xFF84_1000`). The walk early-returns at
+/// the matched controller, so it stays safe with the MMU off
+/// ([`crate::fdt::scan_translated`]). Returns `None` if the tree is
+/// malformed or carries no recognised, translatable GIC (the caller
+/// then keeps the [`DEFAULT_GICD_BASE`] / [`DEFAULT_GICC_BASE`] default
+/// — fail closed, `AGENTS.md` §2.9).
 #[must_use]
 pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
-    for node in fdt.nodes() {
-        // A malformed token ends enumeration; a GIC found before it still
-        // counts, otherwise we fail closed.
-        let Ok(node) = node else { break };
-        let Some(compatible) = node.property("compatible") else {
-            continue;
-        };
-        let Some(matched) = compatible.iter_strings().find(|s| is_gic_compatible(s)) else {
-            continue;
-        };
-        let Some(reg) = node.property("reg") else {
-            continue;
-        };
-        let (Ok(distributor), Ok(cpu_iface)) = (reg.read_be_u64(0), reg.read_be_u64(16)) else {
-            continue;
-        };
-        return Some(DiscoveredGic {
+    crate::fdt::scan_translated(fdt, |node, levels, depth| {
+        let matched = node
+            .property("compatible")?
+            .iter_strings()
+            .find(|s| is_gic_compatible(s))?;
+        let (distributor, _) = crate::fdt::translated_reg(node, depth, levels, 0)?;
+        let (cpu_iface, _) = crate::fdt::translated_reg(node, depth, levels, 1)?;
+        Some(DiscoveredGic {
             compatible: matched,
             gicd_base: distributor,
             gicc_base: cpu_iface,
-        });
-    }
-    None
+        })
+    })
 }
 
 /// Discover the GIC in `fdt` and point the driver at it.
@@ -738,8 +737,10 @@ mod tests {
 
     #[test]
     fn finds_gic_400_bases_in_a_raspi_tree() {
-        // The Pi-shaped fixture carries a GIC-400 at the BCM2711 bases.
-        let blob = rustos_fdt::fixture::raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        // The Pi-shaped fixture carries a GIC-400 under `/soc` with bus
+        // `reg` values; discovery translates them through the `ranges`
+        // to the BCM2711 CPU-physical bases.
+        let blob = rustos_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let gic = find_gic(&fdt).expect("a GIC is present");
         assert_eq!(gic.gicd_base, 0xff84_1000);
@@ -783,7 +784,7 @@ mod tests {
         // back. This test owns the global GIC base slot for its duration;
         // the other tests here either exercise pure helpers (`find_gic`)
         // or the mock MMIO, so there is no cross-test interference.
-        let blob = rustos_fdt::fixture::raspi_like_arm(0xfe20_1000, 0xfe21_5040);
+        let blob = rustos_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let applied = configure_from_fdt(&fdt).expect("GIC discovered");
         assert_eq!(applied.gicd_base, 0xff84_1000);

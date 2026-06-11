@@ -211,7 +211,10 @@ pub fn current() -> (usize, ConsoleModel) {
 /// A console UART located in a flattened device tree.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DiscoveredConsole {
-    /// MMIO base of the UART register block (the node's first `reg` cell).
+    /// CPU-physical MMIO base of the UART register block: the node's
+    /// first `reg` entry, decoded with its parent bus's cell counts and
+    /// translated through the ancestor buses' `ranges`
+    /// ([`crate::fdt::translated_reg`]).
     pub base: u64,
     /// Length in bytes of the register window (the node's first `reg`
     /// size cell).
@@ -226,44 +229,39 @@ pub struct DiscoveredConsole {
 /// this port speaks ([`ConsoleModel::from_compatible`]), preferring a
 /// PL011 over a mini-UART when a board exposes both (the Pi wires its
 /// primary console — `serial0`/`ttyAMA0` — to the PL011, and that is what
-/// QEMU's `raspi*` models route to `-serial`). Returns `None` if the tree
-/// is malformed or carries no recognised console (the caller then keeps
-/// the [`DEFAULT_CONSOLE_BASE`] default — fail closed, `AGENTS.md` §2.9).
+/// QEMU's `raspi*` models route to `-serial`). The node's `reg` is
+/// decoded with its parent bus's cell counts and translated through the
+/// ancestor buses' `ranges` ([`crate::fdt::translated_reg`]) — on the
+/// real Pi 4 tree the UARTs sit under `/soc`, whose one-cell `reg`
+/// values are *bus* addresses (`0x7E20_1000`) remapped to CPU-physical
+/// space (`0xFE20_1000`). The walk early-returns at the matched PL011,
+/// so it stays safe with the MMU off ([`crate::fdt::scan_translated`]).
+/// Returns `None` if the tree is malformed or carries no recognised,
+/// translatable console (the caller then keeps the
+/// [`DEFAULT_CONSOLE_BASE`] default — fail closed, `AGENTS.md` §2.9).
 #[must_use]
 pub fn find_console(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
     let mut mini_uart: Option<DiscoveredConsole> = None;
-    for node in fdt.nodes() {
-        // A malformed token ends enumeration; a console found before it
-        // still counts, otherwise we fail closed.
-        let Ok(node) = node else { break };
-        let Some(compatible) = node.property("compatible") else {
-            continue;
-        };
-        let Some(model) = compatible
+    let pl011 = crate::fdt::scan_translated(fdt, |node, levels, depth| {
+        let model = node
+            .property("compatible")?
             .iter_strings()
-            .find_map(ConsoleModel::from_compatible)
-        else {
-            continue;
-        };
-        let Some(reg) = node.property("reg") else {
-            continue;
-        };
-        let (Ok(base), Ok(len)) = (reg.read_be_u64(0), reg.read_be_u64(8)) else {
-            continue;
-        };
+            .find_map(ConsoleModel::from_compatible)?;
+        let (base, len) = crate::fdt::translated_reg(node, depth, levels, 0)?;
         let found = DiscoveredConsole { base, len, model };
         match model {
             // A PL011 is the preferred console; take it immediately.
-            ConsoleModel::Pl011 => return Some(found),
+            ConsoleModel::Pl011 => Some(found),
             // Remember the first mini-UART but keep scanning for a PL011.
             ConsoleModel::MiniUart => {
                 if mini_uart.is_none() {
                     mini_uart = Some(found);
                 }
+                None
             }
         }
-    }
-    mini_uart
+    });
+    pl011.or(mini_uart)
 }
 
 /// Discover the console in `fdt` and point the console at it.
@@ -370,24 +368,27 @@ mod tests {
 
     #[test]
     fn finds_pl011_console_in_a_raspi_tree() {
-        // The Pi tree carries both a PL011 and a mini-UART; the PL011 is
-        // the preferred console.
-        let blob = raspi_like_arm(0x3f20_1000, 0x3f21_5040);
+        // The Pi tree carries both a PL011 and a mini-UART under `/soc`;
+        // the PL011 is the preferred console, and its one-cell bus `reg`
+        // (`0x7E20_1000`) is translated through the `/soc` `ranges` to
+        // the CPU-physical base the real BCM2711 maps it at.
+        let blob = raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let console = find_console(&fdt).expect("a console is present");
         assert_eq!(console.model, ConsoleModel::Pl011);
-        assert_eq!(console.base, 0x3f20_1000);
-        assert_eq!(console.len, 0x1000);
+        assert_eq!(console.base, 0xfe20_1000);
+        assert_eq!(console.len, 0x200);
     }
 
     #[test]
     fn falls_back_to_mini_uart_when_no_pl011() {
-        // A tree with only the AUX mini-UART selects it.
-        let blob = raspi_like_arm(0, 0x3f21_5040);
+        // A tree with only the AUX mini-UART selects it, translated
+        // through the `/soc` `ranges` like every other window.
+        let blob = raspi_like_arm(0, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let console = find_console(&fdt).expect("mini-uart present");
         assert_eq!(console.model, ConsoleModel::MiniUart);
-        assert_eq!(console.base, 0x3f21_5040);
+        assert_eq!(console.base, 0xfe21_5040);
         assert_eq!(console.len, 0x40);
     }
 
@@ -405,12 +406,12 @@ mod tests {
         // test owns the global console state for its duration; the other
         // tests in this module do not call `configure`, so there is no
         // cross-test interference (they only exercise pure helpers).
-        let blob = raspi_like_arm(0x3f20_1000, 0x3f21_5040);
+        let blob = raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let applied = configure_from_fdt(&fdt).expect("console discovered");
         assert_eq!(applied.model, ConsoleModel::Pl011);
         let (base, model) = current();
-        assert_eq!(base, 0x3f20_1000);
+        assert_eq!(base, 0xfe20_1000);
         assert_eq!(model, ConsoleModel::Pl011);
 
         // Restore the default so the process-global slot is left as other

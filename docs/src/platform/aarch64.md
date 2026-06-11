@@ -215,7 +215,14 @@ freestanding `serial` sink reads it on every transmitted byte.
 `console::find_console` / `configure_from_fdt` walk the shared `lib/fdt`
 reader for the first node whose `compatible` names a model the port
 speaks, preferring the PrimeCell **PL011** (`arm,pl011`) over the BCM2835
-AUX **mini-UART** (`brcm,bcm2835-aux-uart`). The two models are one
+AUX **mini-UART** (`brcm,bcm2835-aux-uart`). The node's `reg` is decoded
+with its parent bus's cell counts and translated through the ancestor
+buses' `ranges` (the shared `fdt::scan_translated` /
+`fdt::translated_reg` machinery, `AGENTS.md` §2.2) — on the real Pi 4
+tree the UARTs sit under `/soc`, whose one-cell `reg` values are *bus*
+addresses (`0x7E20_1000`) remapped to CPU-physical space
+(`0xFE20_1000`); an untranslatable node is skipped, never poked at its
+raw bus address (`AGENTS.md` §2.9). The two models are one
 console abstraction with two register backends — distinct data/status
 register offsets and opposite-sense transmit-ready bits — not duplication
 (`AGENTS.md` §2.2). The generic `platform::FdtDiscovery` walk emits a
@@ -275,9 +282,13 @@ drives both the `virt` board and the Pi 4's **GIC-400** (`arm,gic-400`,
 GICv2, so only the bases move (`AGENTS.md` §2.2). `gic::find_gic` /
 `configure_from_fdt` walk the shared `lib/fdt` reader for the first node
 whose `compatible` names a GICv2-class controller and read its `reg`
-(region 0 = distributor, region 1 = CPU interface); an unrecognised or
-absent controller leaves the fail-safe default in place (`AGENTS.md`
-§2.9). The generic `platform::FdtDiscovery` walk emits an
+(region 0 = distributor, region 1 = CPU interface), decoding each region
+with the parent bus's cell counts and translating it through the
+ancestor buses' `ranges` (`fdt::translated_reg`) — on the real Pi 4
+tree the GIC-400 sits under `/soc` with one-cell *bus* `reg` values
+(`0x4004_1000`) remapped to the CPU-physical bases; an unrecognised,
+absent, or untranslatable controller leaves the fail-safe default in
+place (`AGENTS.md` §2.9). The generic `platform::FdtDiscovery` walk emits an
 `InterruptController` `HwNode` carrying the discovered `compatible` bind
 keys and both register windows as capability-gated MMIO resources.
 
@@ -336,9 +347,16 @@ system-register/assembly/MMIO operations to the freestanding target.
 - **MMU / page tables** (`paging`). Stage-1, 4 KiB granule, three levels
   (start at L1) covering a 39-bit VA region (`TCR_EL1.T0SZ = 25`) — the
   aarch64 mirror of riscv64's Sv39. `AddressSpace::new_identity_gigapages`
-  identity-maps the low GiBs with 1 GiB L1 block descriptors (GiB 0 as
-  Device for the UART/GIC MMIO, the rest as privileged-executable Normal
-  for the kernel image and stack); `map_4k` adds finer mappings; `switch`
+  identity-maps the low GiBs with 1 GiB L1 block descriptors: the
+  gigapages named by the configured Device mask
+  (`paging::configure_device_gigapages`) are Device for the board's
+  UART/GIC MMIO, the rest privileged-executable Normal for the kernel
+  image and stack. The mask defaults to GiB 0 (the `virt` MMIO window)
+  and is derived at boot from the *discovered* console/GIC bases minus
+  the kernel image's own gigapages (`paging::identity_device_mask`) — on
+  the Pi 4 that types gigapage 3 (the BCM2711 high-peripheral window)
+  Device and keeps gigapage 0, which holds the kernel at `0x8_0000`,
+  Normal and executable. `map_4k` adds finer mappings; `switch`
   programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1` and enables `SCTLR_EL1.M`.
 - **Context switch** (`context` + `context.s`). `TaskCtx { sp }` plus
   `rustos_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
@@ -394,10 +412,12 @@ through the semihosting finisher. They are enrolled in
 
 - `rustos-test-kernel-arch-boot-aarch64` — **boots the production
   pipeline to `BootCompleted`** (PI Stage P6c-2): drives the real
-  `rustos_kernel::boot_aarch64::boot`, which enables the stage-1 identity
-  MMU (512×1 GiB gigapages over a static boot `PageTablePool`, then
-  `switch`) + EL1 vectors, discovers the board from the embedded `virt`
-  device tree, builds the `BootMemoryMap`, installs the discovered-UART
+  `rustos_kernel::boot_aarch64::boot`, which discovers the console + GIC
+  bases MMU-off from the embedded `virt` device tree and derives the
+  identity map's Device gigapage mask from them, enables the stage-1
+  identity MMU (512×1 GiB gigapages over a static boot `PageTablePool`,
+  then `switch`) + EL1 vectors, discovers the rest of the board
+  (`/memory`, timer, PSCI), builds the `BootMemoryMap`, installs the discovered-UART
   `console_write` device + the `svc` dispatch callback, and hands a
   validated `BootInfo` to `kernel_core::kernel_main`; the audit sink
   reports PASS on `AuditEvent::BootCompleted` — the aarch64 analogue of
@@ -1021,8 +1041,9 @@ display vertical (`AGENTS.md` §2.2):
   with `ESR_EL1` EC `0x07`). riscv64 gets the equivalent FP enable from
   its boot pipeline.
 - **Stage-1 MMU.** It brings up a 2 GiB identity map through
-  `paging::AddressSpace::new_identity_gigapages` (GiB 0 Device memory for
-  the GIC/PL011/virtio-MMIO apertures, RAM Normal-cacheable). The MMU-off
+  `paging::AddressSpace::new_identity_gigapages` (under the default
+  Device gigapage mask: GiB 0 Device memory for the GIC/PL011/virtio-MMIO
+  apertures, RAM Normal-cacheable). The MMU-off
   reset state types every access as Device, where the `LDXR`/`STXR`
   atomics the driver/DMA/sync stack relies on abort; mapping RAM as Normal
   memory is the precondition for the rest of the bring-up.

@@ -36,7 +36,7 @@
 //! firmware-call property rather than a device node, so it is exposed
 //! through the reader, not as a tree node.
 
-use crate::fdt::Fdt;
+use crate::fdt::{bus_level, reg_entry_count, translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH};
 use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_fdt::{name_stem, read_cells, Node};
@@ -74,47 +74,19 @@ impl<'a> FdtDiscovery<'a> {
     }
 }
 
-/// Deepest device-tree nesting the walker tracks per-level state for.
-///
-/// A validation bound on hostile input (`AGENTS.md` §24.4), not a device
-/// capacity: real boards nest three or four levels deep, so sixteen is
-/// generous, and a deeper tree is refused as malformed rather than
-/// silently under-enumerated (`AGENTS.md` §2.9).
-const MAX_WALK_DEPTH: usize = 16;
-
-/// Per-depth walk state: what a node's children need to know about their
-/// ancestors to decode and translate their own properties.
-#[derive(Copy, Clone)]
-struct Level<'a> {
-    /// `#address-cells` governing this node's children's `reg`.
-    addr_cells: u32,
-    /// `#size-cells` governing this node's children's `reg`.
-    size_cells: u32,
-    /// Hardware-tree id of the nearest *emitted* ancestor — the parent id
-    /// a child emitted at this depth + 1 names.
-    ancestor: u32,
-    /// This node's raw `ranges` value, mapping its children's address
-    /// space into its parent's (`None` when absent — untranslatable).
-    ranges: Option<&'a [u8]>,
-}
-
-impl Level<'_> {
-    /// State before any node is visited: the devicetree-spec default cell
-    /// counts (2 address, 1 size) under the synthetic root id `0`.
-    const DEFAULT: Self = Level {
-        addr_cells: 2,
-        size_cells: 1,
-        ancestor: 0,
-        ranges: None,
-    };
-}
-
 impl PlatformDiscovery for FdtDiscovery<'_> {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
         // Root first so every later node's parent is already emitted.
         sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
         let mut next_id: u32 = 1;
-        let mut levels = [Level::DEFAULT; MAX_WALK_DEPTH];
+        // The shared per-depth bus state (`crate::fdt`, `AGENTS.md` §2.2)
+        // plus this walk's own per-depth fact: the hardware-tree id of
+        // the nearest *emitted* ancestor — the parent id a child emitted
+        // at depth + 1 names. A tree nested beyond `MAX_WALK_DEPTH` is
+        // refused as malformed rather than silently under-enumerated
+        // (`AGENTS.md` §2.9 / §24.4).
+        let mut levels = [BusLevel::DEFAULT; MAX_WALK_DEPTH];
+        let mut ancestors = [0u32; MAX_WALK_DEPTH];
 
         for node in self.fdt.nodes() {
             let node = node.map_err(|_| DiscoveryError::MalformedSource)?;
@@ -125,26 +97,24 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
 
             // This node's own cell counts and `ranges` govern its
             // *children*; record them whether or not the node is emitted.
-            let mut level = Level {
-                addr_cells: cells_property(&node, "#address-cells").unwrap_or(2),
-                size_cells: cells_property(&node, "#size-cells").unwrap_or(1),
-                ancestor: levels[depth.saturating_sub(1)].ancestor,
-                ranges: node.property("ranges").map(|p| p.value()),
-            };
+            let mut level = bus_level(&node);
             if depth == 0 {
                 level.ranges = None;
                 levels[0] = level;
+                ancestors[0] = 0;
                 continue;
             }
 
-            if let Some(emitted) = build_node(&node, depth, &levels, next_id) {
+            let mut ancestor = ancestors[depth - 1];
+            if let Some(emitted) = build_node(&node, depth, &levels, ancestor, next_id) {
                 sink.emit(emitted)?;
-                level.ancestor = next_id;
+                ancestor = next_id;
                 next_id = next_id
                     .checked_add(1)
                     .ok_or(DiscoveryError::MalformedSource)?;
             }
             levels[depth] = level;
+            ancestors[depth] = ancestor;
         }
 
         Ok(())
@@ -154,10 +124,16 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
 /// Build the hardware-tree node for one device-tree node, or `None` when
 /// the node describes nothing the tree can carry (no representable match
 /// key and not a memory node — the §18.3 matcher could never bind it).
-fn build_node(node: &Node<'_>, depth: usize, levels: &[Level<'_>], id: u32) -> Option<HwNode> {
+fn build_node(
+    node: &Node<'_>,
+    depth: usize,
+    levels: &[BusLevel<'_>],
+    parent: u32,
+    id: u32,
+) -> Option<HwNode> {
     let class = classify(node);
     let compatible = node.property("compatible");
-    let mut hw = HwNode::new(id, levels[depth - 1].ancestor, class);
+    let mut hw = HwNode::new(id, parent, class);
 
     let mut keys = 0usize;
     if let Some(compat) = compatible {
@@ -199,38 +175,25 @@ fn build_node(node: &Node<'_>, depth: usize, levels: &[Level<'_>], id: u32) -> O
 }
 
 /// Decode each `reg` entry with the parent's cell counts, translate it
-/// through the ancestor buses' `ranges`, and push it as an MMIO resource.
+/// through the ancestor buses' `ranges` (the shared
+/// [`crate::fdt::translated_reg`] decoder, `AGENTS.md` §2.2), and push
+/// it as an MMIO resource.
 ///
 /// Entries that cannot be decoded (out-of-range cell counts, a length
 /// that is not a whole number of entries) or translated (an ancestor bus
 /// without usable `ranges`) are dropped — the tree never carries an
 /// invented or untranslated window (`AGENTS.md` §2.9). Entries past the
 /// node's resource capacity are dropped likewise (a §24.4 ABI bound).
-fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[Level<'_>], hw: &mut HwNode) {
-    let Some(reg) = node.property("reg") else {
+fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+    let Some(entries) = reg_entry_count(node, depth, levels) else {
         return;
     };
-    let parent = &levels[depth - 1];
-    let (ac, sc) = (parent.addr_cells, parent.size_cells);
-    if ac == 0 || ac > 2 || sc == 0 || sc > 2 {
-        return;
-    }
-    let value = reg.value();
-    let entry = ((ac + sc) * 4) as usize;
-    if value.is_empty() || value.len() % entry != 0 {
-        return;
-    }
-    let mut off = 0;
-    while off + entry <= value.len() {
-        let decoded = read_cells(value, off, ac)
-            .zip(read_cells(value, off + (ac as usize) * 4, sc))
-            .and_then(|(base, len)| translate(levels, depth, base).map(|base| (base, len)));
-        if let Some((base, len)) = decoded {
+    for index in 0..entries {
+        if let Some((base, len)) = translated_reg(node, depth, levels, index) {
             if hw.push_resource(HwResource::mmio(base, len)).is_err() {
                 return;
             }
         }
-        off += entry;
     }
 }
 
@@ -261,91 +224,6 @@ fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
         }
         off += GIC_SPECIFIER_LEN;
     }
-}
-
-/// Translate `addr` from the address space of the node at `depth` into a
-/// CPU-physical address by applying each ancestor bus's `ranges`, child
-/// to root.
-///
-/// An ancestor with an *empty* `ranges` is an identity mapping; an
-/// ancestor with *no* `ranges` cannot translate (the devicetree spec
-/// forbids crossing it), and an address no range entry covers is
-/// likewise refused — `None`, never a guess (`AGENTS.md` §2.9). Nodes
-/// directly under the root need no translation.
-fn translate(levels: &[Level<'_>], depth: usize, addr: u64) -> Option<u64> {
-    let mut translated = addr;
-    for bus in (1..depth).rev() {
-        let level = &levels[bus];
-        let ranges = level.ranges?;
-        if ranges.is_empty() {
-            continue;
-        }
-        translated = apply_ranges(
-            ranges,
-            RangeCells {
-                child_address: level.addr_cells,
-                parent_address: levels[bus - 1].addr_cells,
-                child_size: level.size_cells,
-            },
-            translated,
-        )?;
-    }
-    Some(translated)
-}
-
-/// The three cell counts decoding one `ranges` entry: the child bus's
-/// address cells, the parent bus's address cells, and the child bus's
-/// size cells (Devicetree Spec v0.4 §2.3.8).
-#[derive(Copy, Clone)]
-struct RangeCells {
-    child_address: u32,
-    parent_address: u32,
-    child_size: u32,
-}
-
-/// Map `addr` through one `ranges` value: find the `(child, parent,
-/// size)` entry containing it and rebase it into the parent space.
-fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
-    let RangeCells {
-        child_address,
-        parent_address,
-        child_size,
-    } = cells;
-    if child_address == 0
-        || child_address > 2
-        || parent_address == 0
-        || parent_address > 2
-        || child_size == 0
-        || child_size > 2
-    {
-        return None;
-    }
-    let entry = ((child_address + parent_address + child_size) * 4) as usize;
-    if ranges.len() % entry != 0 {
-        return None;
-    }
-    let mut off = 0;
-    while off + entry <= ranges.len() {
-        let child_base = read_cells(ranges, off, child_address)?;
-        let parent_base = read_cells(ranges, off + (child_address as usize) * 4, parent_address)?;
-        let size = read_cells(
-            ranges,
-            off + ((child_address + parent_address) as usize) * 4,
-            child_size,
-        )?;
-        if let Some(delta) = addr.checked_sub(child_base) {
-            if delta < size {
-                return parent_base.checked_add(delta);
-            }
-        }
-        off += entry;
-    }
-    None
-}
-
-/// Read a `#address-cells` / `#size-cells` style single-cell property.
-fn cells_property(node: &Node<'_>, name: &str) -> Option<u32> {
-    node.property(name)?.read_be_u32(0).ok()
 }
 
 /// Derive the device class from the node's own data, most authoritative
@@ -483,24 +361,36 @@ mod tests {
 
     #[test]
     fn emits_every_described_device_from_a_raspi_tree() {
-        let nodes = discover_all(&raspi_like_arm(0x3f20_1000, 0x3f21_5040));
-        // root + psci + gic + mailbox + pl011 + mini-uart + memory: the
-        // generic walk emits *both* UARTs — preferring one is console
-        // policy (`crate::console`), not tree shape.
-        assert_eq!(nodes.len(), 7);
+        let nodes = discover_all(&raspi_like_arm(0x7e20_1000, 0x7e21_5040));
+        // root + psci + soc + gic + mailbox + pl011 + mini-uart + memory:
+        // the generic walk emits *both* UARTs — preferring one is console
+        // policy (`crate::console`), not tree shape — and the `/soc`
+        // simple-bus is itself a bindable bus node.
+        assert_eq!(nodes.len(), 8);
 
-        // The Pi 4's GIC-400 is discovered at the BCM2711 bases with the
-        // fixture's declared window lengths.
+        // Every `/soc` child names the emitted bus node as its parent.
+        let soc = by_key(&nodes, b"simple-bus");
+        assert_eq!(soc.class(), Some(HwDeviceClass::Bus));
+
+        // The Pi 4's GIC-400 `reg` carries the real tree's four one-cell
+        // bus regions (GICD/GICC/GICH/GICV), each translated through the
+        // `/soc` `ranges` to its BCM2711 CPU-physical window.
         let gic = by_key(&nodes, b"arm,gic-400");
         assert_eq!(gic.class(), Some(HwDeviceClass::InterruptController));
+        assert_eq!(gic.parent(), soc.id());
         assert_eq!(
             mmio_windows(gic),
-            [(0xff84_1000, 0x1000), (0xff84_2000, 0x2000)]
+            [
+                (0xff84_1000, 0x1000),
+                (0xff84_2000, 0x2000),
+                (0xff84_4000, 0x2000),
+                (0xff84_6000, 0x2000)
+            ]
         );
 
-        // The VideoCore mailbox carries the discovered doorbell window
-        // plus the DMA property-buffer carve request bounded by the
-        // 30-bit aperture (`plans/PI.md` P7).
+        // The VideoCore mailbox carries the discovered (translated)
+        // doorbell window plus the DMA property-buffer carve request
+        // bounded by the 30-bit aperture (`plans/PI.md` P7).
         let mailbox = by_key(&nodes, b"brcm,bcm2835-mbox");
         assert_eq!(mailbox.class(), Some(HwDeviceClass::Other));
         assert_eq!(mmio_windows(mailbox), [(0xfe00_b880, 0x40)]);
@@ -509,13 +399,14 @@ mod tests {
         assert_eq!(dma.base(), 0x4000_0000, "VC aperture limit");
         assert_eq!(dma.length(), 4096, "one-page property carve");
 
-        // Both UARTs are serial-class nodes with their discovered bases.
+        // Both UARTs are serial-class nodes with their bus `reg` values
+        // translated to the CPU-physical bases.
         let pl011 = by_key(&nodes, b"arm,pl011");
         assert_eq!(pl011.class(), Some(HwDeviceClass::Serial));
-        assert_eq!(mmio_windows(pl011), [(0x3f20_1000, 0x1000)]);
+        assert_eq!(mmio_windows(pl011), [(0xfe20_1000, 0x200)]);
         let mini = by_key(&nodes, b"brcm,bcm2835-aux-uart");
         assert_eq!(mini.class(), Some(HwDeviceClass::Serial));
-        assert_eq!(mmio_windows(mini), [(0x3f21_5040, 0x40)]);
+        assert_eq!(mmio_windows(mini), [(0xfe21_5040, 0x40)]);
 
         let memory = nodes
             .iter()
