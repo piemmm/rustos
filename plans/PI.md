@@ -1649,24 +1649,58 @@ aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
 bring-up checklist + a captured "framebuffer cleared to theme colour"
 photo/UART-log is recorded as the acceptance artefact — pending metal.
 
-### P8 — SD-card storage (EMMC2) `[ ]`
+### P8 — SD-card storage (EMMC2) `[~]` (read path code-complete; metal pending)
 
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
-`.rxe` process-spawn path), reprioritised to land first — the binding
-below has no mechanism without it. The mechanism is in place: the bind
-table, the drvhost process-spawn path, the `rustos-devmgr`
-matcher/autoloader, and the generic match-key emission are all landed —
-the aarch64 walk already emits a `brcm,bcm2711-emmc2` node (Storage
-class, translated MMIO window) from a Pi-shaped tree with no per-device
-code.
+`.rxe` process-spawn path) — all landed: the aarch64 walk emits a
+`brcm,bcm2711-emmc2` node (Storage class, translated MMIO window) from a
+Pi-shaped tree with no per-device code, and `devmgr` binds the driver
+against its `compatible` string (§18.3).
 
-- A `drivers/storage` EMMC2 (Arasan/SDHCI-derived) driver for the Pi 4 SD
-  host, bound by `devmgr` against its `compatible` string (§18.3). Read
-  path first (mount the root the installer laid down), then write.
+**Landed — the read-path driver.** `drivers/storage/emmc2`
+(`rustos-drv-storage-emmc2`) is an Arasan / SDHCI-5.1 PIO block driver
+implementing `rustos_abi::driver::block::Block`:
+
+- The SDHCI command/response and block-transfer state machine (`Emmc2`)
+  is written against the `SdhciHost` register seam (the one register
+  read/write boundary): metal drives it over a capability-gated
+  `RegisterWindow` (`SdhciHost` is implemented for it), host tests over a
+  register-level mock controller. This mirrors the `rpi_hvs` mailbox seam
+  (§2.2) — the protocol layer is proven host-side, the register block on
+  metal.
+- `Emmc2::open` runs the standard SD identification (reset → ident clock
+  → `CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`) and
+  derives the geometry from the card CSD (`command::geometry_from_csd`,
+  CSD v2). Only high-capacity, block-addressed (SDHC/SDXC) cards are
+  supported; a byte-addressed, pre-v2, or CSD-v1 card is rejected
+  fail-closed (`Unsupported`, §5.4). The read path is `CMD17`/`CMD18` PIO
+  through the buffer data port — no DMA capability needed. Every
+  controller wait is poll-budget-bounded and fails closed
+  (`DeviceFault`) rather than spinning (§2.1 / §24.4).
+- `wiring::open_discovered` is the host bring-up seam: it checks
+  `CAP_MMIO_MAP`, maps the discovered register window through the host's
+  `MmioMapper` (never a `const` base), and opens the engine over it.
+- The write path is deliberately staged (`Block::write_blocks` returns
+  `Unsupported`); read first matches the "mount the root the installer
+  laid down" milestone.
+- 18 host tests cover `CMDTM`/CSD decode, full identification + geometry,
+  single/multi-block reads, shape/range rejection, the unsupported-card
+  paths, command-error and stalled-controller fail-closed, the staged
+  read-only write, and the `wiring` capability gate. Docs:
+  `docs/src/drivers/block.md`. **No QEMU vertical, deliberately** — QEMU
+  models no Pi EMMC2 controller (§0.4); the emulation artefact is the
+  host state-machine test.
+
+**Remaining — metal acceptance + the write path.** A metal checklist
+(boot the P9 image on a real Pi 4 → read the FAT boot partition and the
+RustFS root from the card → capture the UART log as the acceptance
+artefact); then the SDHCI write path (`CMD24`/`CMD25` PIO over the same
+seam) lands as the next increment.
 
 **Done when:** host unit tests cover the SDHCI command/response + block
-transfer state machine against a mock host; a metal checklist demonstrates
-reading the FAT boot partition and the RustFS root from a real card.
+transfer state machine against a mock host — done; a metal checklist
+demonstrates reading the FAT boot partition and the RustFS root from a
+real card — pending hardware.
 
 ### P9 — Bootable SD image (`tools/mkimage`) `[ ]`
 

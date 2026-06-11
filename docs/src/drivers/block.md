@@ -39,10 +39,36 @@ payload.
 
 ## Shipped drivers
 
-| Driver                                   | Crate                                | Supported buses     | Stage 4 status                          |
+| Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
+| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read path host-tested; metal pending     |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
 DMA, IRQ routing, bus-handle hand-off).
+
+### Raspberry Pi 4 EMMC2 (SDHCI)
+
+`rustos-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
+controller — an Arasan / SDHCI-5.1 SD host — and exposes the card
+through `Block`. The transfer path is programmed-I/O: the SDHCI
+command/response and block-transfer state machine reads one 512-byte
+block at a time through the buffer data port, so the read path needs no
+DMA capability (`plans/PI.md` P8 — read path first; the write path is
+the staged remainder).
+
+The state machine (`Emmc2`) is written against the `SdhciHost` register
+seam, so it is proven host-side against a register-level mock controller
+and runs on metal over a capability-gated `RegisterWindow` mapped by
+`wiring::open_discovered` from the device-tree-discovered
+`brcm,bcm2711-emmc2` node (`AGENTS.md` §2.2 / §18.3). There is no
+Pi-board QEMU vertical (QEMU does not model EMMC2, `plans/PI.md` §0.4);
+the emulation artefact is the host test and metal acceptance is the
+documented bring-up checklist. `Emmc2::open` runs the standard SD
+identification (`CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`)
+and derives geometry from the card CSD; only high-capacity,
+block-addressed (SDHC/SDXC, CSD v2) cards are supported and anything
+else is rejected fail-closed. Every controller wait is bounded by a poll
+budget and fails closed with `DriverError::DeviceFault` rather than
+spinning (`AGENTS.md` §2.1).

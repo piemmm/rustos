@@ -353,7 +353,11 @@ deferred to later stages (not stubbed, §15.1).
   (+ in-kernel `KernelVirtioHost` with the owned-`DmaSlab` DMA shape),
   `storage/virtio_blk`, `network/virtio_net`. Each emulable driver has a
   `load → use → unload → reload` QEMU vertical; the shared `fw_cfg`/ramfb DMA
-  protocol lives once in `rustos-itest-fwcfg` (§2.2).
+  protocol lives once in `rustos-itest-fwcfg` (§2.2). The Pi 4 EMMC2
+  SD-host driver (`drivers/storage/emmc2`, an Arasan/SDHCI-5.1 PIO block
+  driver) ships its read path host-tested against a register-level mock;
+  it has no QEMU vertical (QEMU models no Pi EMMC2) and its metal
+  acceptance is the `plans/PI.md` P8 checklist.
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
 
