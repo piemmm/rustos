@@ -14,21 +14,24 @@ the universal `CAP_DRV_LOAD`.
 use rustos_drvhost::{Host, HostConfig, HostError, ImageSource, DriverSpawner};
 use rustos_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
 
-let cfg = HostConfig {
-    trusted_signers: &[/* Ed25519PublicKey ... */],
-    syscall_table_hash: [/* SHA-256 of the kernel's syscall table */],
-    accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
-    source: &my_source,   // impl ImageSource
-    spawner: &my_spawner, // impl DriverSpawner
-    sink: &my_audit_sink, // impl rustos_log::Sink
-    virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
-};
-let mut host = Host::new(cfg);
+fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
+    let cfg = HostConfig {
+        trusted_signers: &[/* Ed25519PublicKey ... */],
+        syscall_table_hash: [/* SHA-256 of the kernel's syscall table */],
+        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        source: &deps.source,   // impl ImageSource
+        spawner: &deps.spawner, // impl DriverSpawner
+        sink: &deps.audit_sink, // impl rustos_log::Sink
+        virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
+    };
+    let mut host = Host::new(cfg);
 
-let handle = host.load("/d/my-driver", &caller_caps)?;
-// ... driver is now live ...
-let new_handle = host.reload(handle, &caller_caps)?;
-host.unload(new_handle)?;
+    let handle = host.load("/d/my-driver", &deps.caller_caps)?;
+    // ... driver is now live ...
+    let new_handle = host.reload(handle, &deps.caller_caps)?;
+    host.unload(new_handle)?;
+    Ok(())
+}
 ```
 
 The seven types above are the entire public surface; everything else
@@ -82,6 +85,23 @@ encodes a
 (`registered(handle)` / `failed(error)`), and sends it with the
 `rustos-rt` `ipc_send` wrapper; the host decodes it fail-closed and
 treats the reported handle as informational only (it mints its own).
+
+The kernel-side spawn path behind that handshake is in place on
+aarch64: the architecture spawn producer exposes a parameterised
+`Aarch64ProcessSpawn::spawn_with(rxe, ctx, caps, args)`
+(`kernel/rustos-kernel/src/spawn_producer.rs`; the `spawn` syscall path
+delegates to it with the fixed session grant), and `kernel/core`
+exports `KernelSpawnCtx` — the same admit context the `spawn` syscall
+handler uses (scheduler admit, capability-record insert, address-space
++ standard-stream + resource-limit registration, parent/child wait
+link) — so a kernel-side (host-driven) driver spawn drives the
+identical production path. The
+`tests/integration/driver_spawn_qemu_aarch64` vertical proves the full
+chain on the `virt` board: a verified `/System/Drivers/` payload is
+spawned with driver-class capabilities and the reply endpoint id in
+`arg(1)`; the stub completes the register reply over the production,
+capability-gated `ipc_send` path while the host side polls
+`Port::recv` under a bounded cooperative budget.
 
 The spawner is *only* invoked after every other verification gate has
 cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving spawner

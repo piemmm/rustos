@@ -367,11 +367,14 @@ verified, signature-checked image to its `DriverSpawner` seam
 (`userland/system/drvhost/src/spawner.rs`), which completes the driver's
 registration in its own protection domain and reports the outcome — the
 host never holds an entry pointer into the image (the former in-image
-`EntryResolver` is deleted). The production spawner — spawn the verified
-`.rxe` payload from `/System/Drivers/` into its own address space via
-`kernel/mem::build_process_image` and complete `register()` over IPC — is
-the remaining half of the first Stage 4.HW increment; today's deployments
-and QEMU verticals register in-process through the seam.
+`EntryResolver` is deleted). The kernel-side spawn path behind the seam
+is proven (Stage 4.HW increment 1): a verified `/System/Drivers/`
+payload is spawned through the parameterised production producer
+(`Aarch64ProcessSpawn::spawn_with` + the exported `KernelSpawnCtx`) and
+completes the `DriverRegisterReply` handshake over the production
+`ipc_send` path. drvhost deployments and QEMU verticals still register
+in-process through the seam until the `DriverHost` surface (DMA, MMIO)
+is reachable over IPC.
 
 ---
 
@@ -439,28 +442,35 @@ deferral was waiting on have landed: the `rxe` loader
 `EnterUser` HAL primitive on all three native ports, live syscall/IPC
 dispatch, and `lib/abi/src/hwtree.rs` with aarch64 FDT discovery. Delivery
 order (one fully-gated increment each):
-1. **drvhost process spawn** — the host-side half is done: the in-image
+1. **drvhost process spawn — done.** The host side: the in-image
    `EntryResolver` is deleted and `Host` hands the verified manifest +
    payload to the `DriverSpawner` seam
    (`userland/system/drvhost/src/spawner.rs`), which completes the
    registration and returns the outcome — no entry pointer crosses back
    into the host; the verification half (signature, ABI version + syscall
    hashes, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) is unchanged. The IPC
-   register-handshake wire surface is also done: the versioned
-   `DriverRegisterReply` record (`lib/abi/src/driver/register.rs`,
-   fail-closed decode, mirrored into `include/` as
-   `ros_driver_register_reply_t`), the `lib/rt` `ipc_send` wrapper, and
-   the `lib/rt` startup-argument accessors (`rustos_rt::arg` /
-   `arg_count`, published by `_start` from the validated startup vector)
-   the child uses to receive the reply endpoint id. Remaining: the
-   kernel-side production spawner — verified `.rxe` from
-   `/System/Drivers/` → `build_process_image` → spawn (mirror the
-   `spawn_producer` seam shape, parameterising the child's caps/args) →
-   send the `DriverRegisterReply` over `ipc_send`, with a budget-bounded
-   cooperative wait host-side — proven by a `-M virt` QEMU vertical
-   spawning a driver-stub program; in-process `DriverSpawner` impls remain
-   only in tests/verticals until the `DriverHost` surface (DMA, MMIO) is
-   reachable over IPC.
+   register-handshake wire surface: the versioned `DriverRegisterReply`
+   record (`lib/abi/src/driver/register.rs`, fail-closed decode, mirrored
+   into `include/` as `ros_driver_register_reply_t`), the `lib/rt`
+   `ipc_send` wrapper, and the `lib/rt` startup-argument accessors
+   (`rustos_rt::arg` / `arg_count`, published by `_start` from the
+   validated startup vector) the child uses to receive the reply endpoint
+   id. The kernel-side production spawner: the aarch64 producer is
+   parameterised as `Aarch64ProcessSpawn::spawn_with(rxe, ctx, caps,
+   args)` (the `spawn` syscall path delegates with the fixed session
+   grant; `USER_IMAGE_BIAS` pins the image-bias contract for externally
+   converted payloads), and `kernel/core` exports `KernelSpawnCtx` — the
+   same admit context the `spawn` syscall handler uses — so a kernel-side
+   driver spawn drives the identical production admit path. Proven by the
+   `tests/integration/driver_spawn_qemu_aarch64` `-M virt` vertical: a
+   verified `/System/Drivers/` payload spawned with driver-class caps +
+   the reply endpoint id in `arg(1)` (stub:
+   `tests/integration/driver_register_program`), the production
+   `KernelDispatchHook` servicing the stub's syscalls (copy-in +
+   capability-gated `Port::send`), and a budget-bounded cooperative
+   `Port::recv` wait host-side decoding the reply fail-closed. In-process
+   `DriverSpawner` impls remain only in tests/verticals until the
+   `DriverHost` surface (DMA, MMIO) is reachable over IPC.
 2. **Bind table** — add the match-key bind table to `DriverManifest`
    (`lib/abi/src/driver/mod.rs`) in place (`abi-v1` is unfrozen, §2.13)
    and regenerate the C header.

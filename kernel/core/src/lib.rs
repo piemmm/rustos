@@ -127,4 +127,4 @@ pub use spawn::{
     NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,
     EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
-pub use syscalls::{KernelDispatchHook, KernelSyscallHandlers};
+pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};

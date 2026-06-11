@@ -57,6 +57,16 @@ include!(concat!(env!("OUT_DIR"), "/shell_rxe.rs"));
 /// byte-for-byte with no alias resolution (`AGENTS.md` §2.1).
 const SHELL_PATH: &[u8] = b"/Apps/Shell.app/Run";
 
+/// The user virtual base every child image this producer builds is mapped
+/// at — the build-time [`SHELL_USER_BIAS`] (64 GiB) `build.rs` bakes the
+/// embedded programs' relocations for. Exported so a consumer handing
+/// [`Aarch64ProcessSpawn::spawn_with`] an *externally* converted `rxe`
+/// (the Stage 4.HW driver-spawn vertical) can verify its image was
+/// relocated for the same bias and fail closed on a mismatch rather than
+/// admit a child whose pointers do not match where it is mapped
+/// (`AGENTS.md` §2.9).
+pub const USER_IMAGE_BIAS: u64 = SHELL_USER_BIAS;
+
 /// Gigabytes of identity map each spawned child address space provides.
 ///
 /// `[0, 2 GiB)` covers the QEMU `virt` board's device MMIO (GiB 0) and the
@@ -181,8 +191,33 @@ pub struct Aarch64ProcessSpawn;
 /// The single, `'static` [`Aarch64ProcessSpawn`] the boot path borrows.
 pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
-impl ProcessSpawn for Aarch64ProcessSpawn {
-    fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+impl Aarch64ProcessSpawn {
+    /// Build and admit one child process from `rxe`, granting it exactly
+    /// `caps` and handing it `args` as its startup-argument vector.
+    ///
+    /// This is the parameterised core of the aarch64 spawn producer
+    /// (`PLAN.md` Stage 4.HW): the `spawn` syscall path passes the fixed
+    /// session grant ([`child_caps`] + `[b"shell"]`), while a kernel-side
+    /// driver spawn passes the verified driver image's granted set plus
+    /// the reply-endpoint argument the spawned driver reads through
+    /// `rustos_rt::arg`. `caps` is the manifest∩user-grant set the caller
+    /// already derived; this seam never widens it (`AGENTS.md` §5.2, §4 —
+    /// no ambient authority).
+    ///
+    /// # Errors
+    ///
+    /// A stable [`Errno`] for every failure: `NoSpace` on frame/page-table
+    /// exhaustion or a failed build, `BadMagic` on an `rxe` that does not
+    /// parse against the kernel's syscall CFI tag, `AlreadyExists` on an
+    /// address-space registration conflict (`AGENTS.md` §2.9 — fail
+    /// closed, never a panic).
+    pub fn spawn_with(
+        &self,
+        rxe: &[u8],
+        ctx: &dyn SpawnCtx,
+        caps: CapabilitySet,
+        args: &[&[u8]],
+    ) -> Result<u64, Errno> {
         // The child's stage-1 hierarchy is drawn from the kernel's live
         // frame allocator (`AGENTS.md` §24.1): there is no fixed page-table
         // reserve and so no hard cap on how many processes can be spawned —
@@ -270,7 +305,7 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
                 page_count: USER_STACK_PAGES,
             },
             start_block_base: USER_BLOCK_BASE,
-            args: &[b"shell"],
+            args,
             env: &[],
             canary: CHILD_CANARY,
         };
@@ -343,17 +378,16 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // root before it is first entered, and `kernel_stack` is a region
         // exclusive to this child that stays mapped (its unmapped guard page
         // aside) for the task's lifetime — the `admit_process` contract.
-        unsafe {
-            ctx.admit_process(
-                child_caps(),
-                frozen,
-                physmap,
-                kernel_stack,
-                pre_resume,
-                enter,
-            )
-        }
-        .map_err(admit_errno)
+        unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, enter) }
+            .map_err(admit_errno)
+    }
+}
+
+impl ProcessSpawn for Aarch64ProcessSpawn {
+    fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+        // The `spawn` syscall path: the session child receives the fixed
+        // [`child_caps`] grant and the `shell` argument vector.
+        self.spawn_with(rxe, ctx, child_caps(), &[b"shell"])
     }
 }
 

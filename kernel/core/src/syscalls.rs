@@ -1111,21 +1111,21 @@ where
         // `CAP_PROC_SPAWN` gate inside `spawn_image` and audits the
         // decision; the child receives only its manifest∩user-grant
         // authority (`AGENTS.md` §4, §16.5).
-        let ctx = HandlerSpawnCtx {
+        // Record the new child against the spawning caller so a later
+        // `wait` from this parent can reap it (`plans/SPAWN.md` SP6). The
+        // parent is the kernel-trusted caller identity, never a
+        // caller-supplied value (`AGENTS.md` §5.4.1).
+        let ctx = KernelSpawnCtx::new(
             frames,
-            page_table_frames: self.page_table_frames,
-            audit: self.audit,
-            sched: self.sched,
-            caps: self.caps,
-            aspaces: self.aspaces,
-            arch: self.arch,
-            // Record the new child against the spawning caller so a later
-            // `wait` from this parent can reap it (`plans/SPAWN.md` SP6). The
-            // parent is the kernel-trusted caller identity, never a
-            // caller-supplied value (`AGENTS.md` §5.4.1).
-            parent: caller.task_id,
-            process_wait: self.process_wait,
-        };
+            self.page_table_frames,
+            self.audit,
+            self.sched,
+            self.caps,
+            self.aspaces,
+            self.arch,
+            caller.task_id,
+            self.process_wait,
+        );
         self.spawn_service.spawn(rxe, &ctx)
     }
 
@@ -1275,7 +1275,15 @@ where
 /// runtime-spawn analogue of the PID-1 `KernelInitSpawner` (`init.rs`), but
 /// it admits the task **Ready** and does **not** enter user mode or drain
 /// the scheduler (the spawning caller keeps running).
-struct HandlerSpawnCtx<'a, A>
+///
+/// Public so a kernel-side (host-driven) spawn — the drvhost driver-spawn
+/// path and its proving QEMU vertical (`PLAN.md` Stage 4.HW) — can drive
+/// the *same* production admit path (scheduler admit, capability-record
+/// insert, address-space + standard-stream + resource-limit registration,
+/// parent/child wait link) instead of duplicating it (`AGENTS.md` §2.2).
+/// Construct it with [`KernelSpawnCtx::new`]; the fields stay private so
+/// the admit invariants cannot be bypassed.
+pub struct KernelSpawnCtx<'a, A>
 where
     A: KernelArch + 'static,
 {
@@ -1303,7 +1311,50 @@ where
     process_wait: &'static (dyn ProcessWait + 'static),
 }
 
-impl<A> SpawnCtx for HandlerSpawnCtx<'_, A>
+impl<'a, A> KernelSpawnCtx<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    /// Bind a spawn context to the live kernel subsystems.
+    ///
+    /// `parent` is the kernel-trusted identity of the spawning caller
+    /// (`AGENTS.md` §5.4.1) — for a syscall-driven spawn the dispatcher's
+    /// resolved task id, for a kernel-side (host-driven) spawn the
+    /// supervising task the child is recorded against for a later `wait`.
+    /// `page_table_frames` is the `'static` allocator the producer builds
+    /// the child's page tables from; `None` fails the spawn closed
+    /// (`AGENTS.md` §2.9, §24.1).
+    #[must_use]
+    // Mirrors `KernelDispatchHook::new`: the same distinct kernel-state
+    // borrows threaded explicitly (`AGENTS.md` §2.1 / §4), not a one-use
+    // wrapper type (§2.3).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        frames: &'a FrameAllocator,
+        page_table_frames: Option<&'static FrameAllocator>,
+        audit: &'a (dyn Sink + Sync),
+        sched: &'a Scheduler<A>,
+        caps: &'a RwLock<CapTable>,
+        aspaces: &'a RwLock<AddressSpaceRegistry>,
+        arch: &'a A,
+        parent: SecTaskId,
+        process_wait: &'static (dyn ProcessWait + 'static),
+    ) -> Self {
+        Self {
+            frames,
+            page_table_frames,
+            audit,
+            sched,
+            caps,
+            aspaces,
+            arch,
+            parent,
+            process_wait,
+        }
+    }
+}
+
+impl<A> SpawnCtx for KernelSpawnCtx<'_, A>
 where
     A: KernelArch + 'static,
 {

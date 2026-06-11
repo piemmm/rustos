@@ -1294,6 +1294,41 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::None,
         keyboard: None,
     },
+    // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
+    // proving slice of the kernel-side production driver spawner. The build
+    // script compiles the pure-Rust driver-stub fixture
+    // (`rustos-test-driver-register-program`) PIE and converts it to an
+    // `rxe` blob carrying the kernel's syscall CFI tag, registered under a
+    // `/System/Drivers/` path. On boot the test discovers the board from the
+    // embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a
+    // live `kernel/mem` FrameAllocator, binds the reply Port (send-gated on
+    // a driver-class capability) into a live `RwLock<PortRegistry>`,
+    // installs the production `KernelDispatchHook` through a
+    // `DispatchCallbackSlot`, and spawns the stub through the production
+    // parameterised `Aarch64ProcessSpawn::spawn_with` via the exported
+    // `KernelSpawnCtx` admit path — driver-class caps plus the reply
+    // endpoint id in `arg(1)`, exactly the hand-off the driver host gives a
+    // spawned driver. The host side drives the cooperative `step` loop,
+    // polling `Port::recv` under a bounded budget; the stub reads `arg(1)`,
+    // sends `DriverRegisterReply::registered(...)` over the production
+    // `ipc_send` path (caller-context resolution, copy-in, capability-gated
+    // `Port::send`), and exits. PASS once the fail-closed-decoded reply
+    // round-trips the stub's pinned handle; any shortfall writes a distinct
+    // failure finisher or times out (fail-loud, `AGENTS.md` §7). Single CPU
+    // and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
+    QemuTest {
+        package: "rustos-test-driver-spawn-qemu-aarch64",
+        binary: "rustos-test-driver-spawn-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+    },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
     // `mem_unmap` vertical — the first proof that an EL0 process obtains and
     // releases anonymous `RW` memory at runtime via `abi-v1`, on the `virt`

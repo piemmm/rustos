@@ -1,0 +1,27 @@
+[package]
+name = "rustos-test-driver-register-program"
+description = "PLAN.md Stage 4.HW fixture: a minimal, separately-linked pure-Rust EL0 driver-stub program. Spawned by the consuming vertical (tests/integration/driver_spawn_qemu_aarch64) through the production parameterised spawn path (Aarch64ProcessSpawn::spawn_with), it reads the reply endpoint id its spawner placed in arg(1) of the validated startup vector, sends a DriverRegisterReply::registered record over the production ipc_send syscall, and exits 0 — completing the spawned-driver register handshake. Built PIE for the freestanding aarch64 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-driver-register-program"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`),
+# which exists solely for non-Rust programs (`AGENTS.md` §16.4). `rustos-abi`
+# supplies the `DriverRegisterReply` wire record the handshake is defined by
+# (`lib/abi/src/driver/register.rs` — the single wire definition, §2.2). Only
+# on the native Tier-1 targets (`target_os = "none"`); on the host it is an
+# inert stub so `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

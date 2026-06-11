@@ -1,0 +1,62 @@
+[package]
+name = "rustos-test-driver-spawn-qemu-aarch64"
+description = "PLAN.md Stage 4.HW QEMU integration test: prove the kernel-side production driver spawner end to end on the aarch64 virt board. The build script compiles the pure-Rust driver-stub program (tests/integration/driver_register_program) PIE and converts it to an rxe blob registered under /System/Drivers/. The kernel resolves it through a ProgramRegistry, spawns it through the production parameterised Aarch64ProcessSpawn::spawn_with via the exported KernelSpawnCtx admit path (driver-class caps + the reply endpoint id in arg(1)), and drives the cooperative step loop while the production KernelDispatchHook services the stub's syscalls — so its ipc_send runs the production copy-in + capability-gated Port::send path. PASS once the host-side budget-bounded wait polls Port::recv and fail-closed-decodes the stub's DriverRegisterReply::registered record."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `PLAN.md` Stage 4.HW driver-spawn vertical: the proving
+# `-M virt` slice of the kernel-side production spawner (verified `.rxe`
+# payload from `/System/Drivers/` → `build_process_image` → spawn → reply
+# over `ipc_send`, with a budget-bounded cooperative wait host-side). The
+# fixture program (`rustos-test-driver-register-program`) is built
+# position-independent by `build.rs` and converted to an `rxe` blob
+# (`rustos_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
+# CFI tag. On boot the test reads the GICv2 base + timer rate from the
+# embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a live
+# FrameAllocator, publishes the reply Port (send-gated on a driver-class
+# capability) into a live PortRegistry, installs the production
+# KernelDispatchHook through a DispatchCallbackSlot, spawns the stub through
+# Aarch64ProcessSpawn::spawn_with + KernelSpawnCtx, and drains the
+# cooperative `step` loop polling `Port::recv` under a bounded budget. PASS
+# once the decoded DriverRegisterReply round-trips the stub's handle; any
+# shortfall writes a distinct failure finisher or times out (fail-loud,
+# `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it
+# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 —
+# no hacks; §5.4.5 — fail closed), mirroring the timeshare vertical.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-driver-spawn-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
