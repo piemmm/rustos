@@ -1,0 +1,24 @@
+[package]
+name = "rustos-vcmailbox"
+description = "RustOS BCM2711 VideoCore firmware mailbox property-channel client: the one definition of the display-size query and framebuffer-allocation protocol (§2.2), shared by the aarch64 port's framebuffer boot console and the rpi_hvs display driver (plans/PI.md P7/P7b)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The driver ABI types the protocol speaks: `DisplayFormat` for the pixel
+# encoding, `RegisterWindow` for the capability-gated MMIO doorbell and
+# property-buffer windows, and `DriverError` for callers that surface
+# mailbox failures across the driver ABI.
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[features]
+# Expose the protocol-faithful mock firmware (`mock` module) to consumers'
+# host tests. Dev-dependency use only; never enabled by a production build.
+mock-firmware = []
+
+[lints]
+workspace = true
