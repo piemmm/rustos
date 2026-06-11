@@ -2,7 +2,8 @@
 //!
 //! This crate is the single home of the desktop's text rendering: a built-in
 //! monospace bitmap font ([`glyphs`]) and the glyph blitter that draws it onto
-//! a `lib/raster` [`Surface`] ([`font`]). Font rendering is one of the curated
+//! a `lib/raster` `Surface` ([`font`], behind the default-on `render`
+//! feature). Font rendering is one of the curated
 //! shared-library classes (`AGENTS.md` §16.4); like `lib/geometry`,
 //! `lib/theme`, and `lib/raster`, it lives in `lib/*` so the taskbar and the
 //! default apps can draw text without depending on the window manager
@@ -10,21 +11,28 @@
 //!
 //! There is no installed-font machinery yet: a `rustos-theme` font role
 //! selects a font by family name under `/System/Fonts`, but no faces are
-//! installed, so the desktop draws with the built-in [`BitmapFont::mono5x7`]
+//! installed, so the desktop draws with the built-in `BitmapFont::mono5x7`
 //! face. When scalable faces arrive they extend this crate; consumers keep
-//! calling [`BitmapFont::draw_text`].
+//! calling `BitmapFont::draw_text`.
 //!
-//! [`Surface`]: rustos_raster::Surface
+//! The [`glyphs`] atlas is pure `const` data with no dependencies, so a
+//! consumer that brings its own blitter — the aarch64 framebuffer boot
+//! console, which draws into device-coherent memory with no allocator —
+//! depends on this crate with `default-features = false` and stays
+//! `alloc`-free; the `lib/raster`-backed blitter rides the default-on
+//! `render` feature (one font definition either way, `AGENTS.md` §2.2).
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "render")]
 pub mod font;
 pub mod glyphs;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "render")]
 pub use font::BitmapFont;
 pub use glyphs::{Glyph, FIRST_CHAR, GLYPH_HEIGHT, GLYPH_WIDTH, LAST_CHAR};

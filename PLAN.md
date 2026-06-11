@@ -276,6 +276,9 @@ Each sub-stage delivers one architecture. They share the same checklist:
 - [x] 3b — `kernel/arch/aarch64` (QEMU `virt`; GICv2, generic timer, PSCI SMP).
       Full Arch HAL impl; PL011 console, stage-1 MMU, context switch, EL1
       vectors. Real Raspberry Pi 4 (BCM2711) bring-up is staged in `plans/PI.md`.
+      Console output defaults to the attached display (the `video` framebuffer
+      boot console over the shared `lib/vcmailbox` VideoCore mailbox protocol
+      crate, `plans/PI.md` P7b) with the UART as the fallback.
 - [x] 3c — `kernel/arch/riscv64` (QEMU `virt`; PLIC, CLINT, SBI).
 - [x] 3d — `kernel/arch/wasm32` (browser sandbox; cooperative scheduling over
       `requestAnimationFrame` / `MessageChannel`; isolation via WASM linear

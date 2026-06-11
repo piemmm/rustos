@@ -200,10 +200,12 @@ The trampoline:
    `rustos_arch_aarch64_main(dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 
-The console (`serial.rs`) writes the boot log through whatever UART the
-`console` module currently points at; before any discovery runs that is
-the `virt` board's PL011 at `0x0900_0000`, which QEMU routes to
-`-serial stdio`.
+The console (`serial.rs`) writes the boot log to the **video display
+when one is configured** (see [Framebuffer boot
+console](#framebuffer-boot-console-video-first-uart-fallback)) and
+otherwise through whatever UART the `console` module currently points
+at; before any discovery runs that is the `virt` board's PL011 at
+`0x0900_0000`, which QEMU routes to `-serial stdio`.
 
 ## Board-discovered console
 
@@ -268,6 +270,58 @@ decoders are host-unit-tested; the standard-stream layer now binds fd 0 to
 this backing (`plans/PI.md` P6e-3a), so a process's `stream_read` of fd 0
 reaches the discovered UART; real RX over `virt`/Pi silicon remains an
 on-metal acceptance item.
+
+## Framebuffer boot console (video first, UART fallback)
+
+Console **output** defaults to the attached display; the UART is the
+fallback when no video output exists (`plans/PI.md` P7b, `AGENTS.md`
+§10). The `video` module brings the screen console up on boards whose
+display pipeline is owned by the `VideoCore` firmware (the Raspberry
+Pi):
+
+- **Discovery.** `video::find_mailbox` locates the firmware mailbox
+  doorbell (`brcm,bcm2835-mbox`) with the same early-returning,
+  `ranges`-aware walk as the console and GIC (`fdt::scan_translated`,
+  `AGENTS.md` §2.2) — on the Pi 4 tree, bus `0x7E00_B880` →
+  CPU-physical `0xFE00_B880`.
+- **Bring-up (pre-MMU, by design).** `video::configure_from_fdt` runs
+  in the same pre-MMU phase as the console/GIC discovery: with the
+  data caches still off, the CPU↔firmware property exchange over the
+  shared `rustos-vcmailbox` protocol crate is coherent without cache
+  maintenance, and the console state cell is written by the
+  single-threaded boot CPU without an atomic read-modify-write (which
+  is UNPREDICTABLE MMU-off — the constraint that orders this boot).
+  `video::bring_up` first asks the firmware for the display's native
+  EDID-derived size (`query_display_size`; `0×0` means no display →
+  UART keeps the console) and then allocates a 32-bit surface at
+  exactly that size. The doorbell base joins the Device-gigapage mask
+  inputs, and the boot audit line records `video_console=true/false`.
+- **Rendering.** A fixed-grid text console draws the shared 5×7 glyph
+  atlas (`rustos_font::glyphs` — one font definition, `AGENTS.md`
+  §2.2) at an integer scale chosen from the display height
+  (`height / 360`, clamped to 1…4: 480p → 1×, 1080p → 3×). The grid
+  is a ring — the cursor wraps to a cleared top row instead of
+  scroll-copying megabytes per log line (`AGENTS.md` §2.16). After the
+  MMU and caches come on, each write cleans the touched scanlines to
+  the point of coherency (`dc cvac` + `dsb`) so the firmware scan-out
+  sees them; rendering is serialised by a private DAIF-masking
+  spinlock (deliberately not `lib/sync` — feature unification across
+  the single aarch64-none test-matrix build would compile its
+  alloc-backed `epoch` module into the minimal, allocator-free QEMU
+  binaries; the carve-out is documented at the lock).
+- **Routing.** `serial::ConsoleWriter` (the log sink) and
+  `serial::write_console_bytes` (the `stream_write` fd 1/2 backing)
+  both render to the screen when `video::is_active` and fall back to
+  the UART otherwise. Console *input* stays on the UART (the display
+  has no receive side).
+
+Fail closed (`AGENTS.md` §2.9): no mailbox node (QEMU `virt` — the
+UART-backed verticals are unchanged), a detached display, or any
+rejected/malformed firmware answer leaves the UART as the console. The
+discovery, bring-up (over the protocol-faithful mock firmware — QEMU
+does not model the `VideoCore`), geometry policy, and renderer are
+host-unit-tested; rendering on a real HDMI display is an on-metal
+acceptance item like the rest of the Pi peripherals.
 
 ## Board-discovered interrupt controller
 

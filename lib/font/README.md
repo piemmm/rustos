@@ -25,6 +25,12 @@ This crate owns:
   dropped, and off-screen pixels clip rather than panic (`AGENTS.md` §2.9).
   `text_width` gives the tight one-line bounding width for layout.
 
+The `glyphs` atlas is pure `const` data; the `lib/raster`-backed blitter rides
+the default-on `render` cargo feature, so an atlas-only, allocator-free
+consumer (the aarch64 framebuffer boot console, which blits into
+device-coherent memory itself) depends with `default-features = false` — one
+font definition either way (§2.2).
+
 There is no installed-font machinery yet: a `rustos-theme` font role selects a
 font by family name under `/System/Fonts`, but no faces are installed, so the
 desktop draws with the built-in `BitmapFont::mono5x7` face. When scalable faces

@@ -484,7 +484,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-fdt",
+ "rustos-font",
  "rustos-log",
+ "rustos-vcmailbox",
 ]
 
 [[package]]
@@ -687,6 +689,7 @@ name = "rustos-drv-display-rpi-hvs"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-vcmailbox",
 ]
 
 [[package]]
@@ -2413,6 +2416,13 @@ dependencies = [
 [[package]]
 name = "rustos-util"
 version = "0.0.0"
+
+[[package]]
+name = "rustos-vcmailbox"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-virtio"

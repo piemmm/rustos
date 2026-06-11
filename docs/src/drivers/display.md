@@ -214,31 +214,35 @@ Like the other display drivers it runs in user space and is exercised
 by host-side tests against a multi-region mock `MmioMapper` that reads
 back both the uploaded plane pixels and the encoded DLIST words.
 
-#### Firmware framebuffer discovery (`mailbox`)
+#### Firmware framebuffer discovery (`rustos-vcmailbox`)
 
-The scan-out surface itself comes from the Pi's GPU firmware: the
-`rustos_drv_display_rpi_hvs::mailbox` module (the `plans/PI.md` P7
-protocol layer) speaks the BCM2711 **mailbox property channel** to ask
-the firmware for a framebuffer. `FramebufferRequest::encode` builds the
-tag message (set physical/virtual size, depth 32, pixel order from the
-`DisplayFormat`, allocate at page alignment, get pitch);
+The scan-out surface itself comes from the Pi's GPU firmware, spoken to
+over the BCM2711 **mailbox property channel**. That protocol lives once
+in the shared `lib/vcmailbox` crate (`AGENTS.md` §2.2 — the aarch64
+port's framebuffer boot console speaks it too): `FramebufferRequest::encode`
+builds the tag message (set physical/virtual size, depth 32, pixel
+order from the `DisplayFormat`, allocate at page alignment, get pitch);
 `decode_framebuffer_response` validates the firmware's in-place answer
 fail-closed — header code, per-tag response bits and lengths, exact
 geometry echoes, pitch/size consistency — and `bus_to_arm_physical`
 strips the 2-bit VideoCore bus alias, rejecting a zero, unaligned, or
-out-of-aperture buffer. The result feeds `RpiHvs::open` as the
-`ScanoutConfig` (and supplies the bus alias the DLIST pointers use).
+out-of-aperture buffer. The crate also carries the display-size query
+(`query_display_size`, the boot console's "is a display attached, and
+at what resolution" probe). The validated answer feeds `RpiHvs::open`
+as the `ScanoutConfig` (`ScanoutConfig::from_firmware`, which also
+supplies the bus alias the DLIST pointers use).
 
-The doorbell sits behind the `MailboxTransport` seam: `MmioMailbox`
-drives the real register block (`0xFE00_B880` on the BCM2711, reached
-as a discovered `hwtree` resource through `CAP_MMIO_MAP`, never a
-compiled-in constant) with a budget-bounded poll that fails closed with
-`Timeout` instead of spinning forever. QEMU models neither the
-VideoCore firmware nor an in-aperture RAM window (the `virt` board's
-RAM begins at `0x4000_0000`, outside the 30-bit VideoCore aperture), so
-the emulation artefact is the host-side full chain — a
-protocol-faithful mock firmware answers the exchange and the decoded
-`ScanoutConfig` drives `RpiHvs::open` and `present` — while the real
+The doorbell sits behind the crate's `MailboxTransport` seam:
+`MmioMailbox` drives the real register block (`0xFE00_B880` on the
+BCM2711, reached as a discovered `hwtree` resource through
+`CAP_MMIO_MAP`, never a compiled-in constant) with a budget-bounded
+poll that fails closed with `Timeout` instead of spinning forever. QEMU
+models neither the VideoCore firmware nor an in-aperture RAM window
+(the `virt` board's RAM begins at `0x4000_0000`, outside the 30-bit
+VideoCore aperture), so the emulation artefact is the host-side full
+chain — the crate's protocol-faithful `mock::MockFirmware` answers the
+exchange and the decoded `ScanoutConfig` drives `RpiHvs::open` and
+`present` (the `wiring_tests` full-chain test) — while the real
 scan-out (HVS hardware, HDMI) is the `plans/PI.md` P7 metal acceptance
 item.
 

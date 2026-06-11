@@ -54,8 +54,8 @@ use rustos_arch_aarch64::paging::{
     configure_device_gigapages, identity_device_mask, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, Aarch64Arch,
-    Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, video,
+    Aarch64Arch, Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -231,8 +231,19 @@ pub fn boot(
     let early = configure_mmio_from_dtb(dtb);
     let (console_base, _) = console::current();
     let (gicd_base, gicc_base) = gic::current();
+    // The mailbox doorbell the video console rang is an MMIO window the
+    // identity map must type Device like the UART and GIC (on the Pi 4
+    // they all share gigapage 3, but the mask is derived from facts,
+    // never assumed). With no video console the console base stands in
+    // as a harmless duplicate input.
+    let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
     let device_mask = identity_device_mask(
-        &[console_base as u64, gicd_base as u64, gicc_base as u64],
+        &[
+            console_base as u64,
+            gicd_base as u64,
+            gicc_base as u64,
+            video_doorbell,
+        ],
         kernel_start_addr(),
         kernel_end_addr(),
     );
@@ -390,6 +401,10 @@ pub fn boot(
                     value: yes_no(early.gic),
                 },
                 Field {
+                    key: "video_console",
+                    value: yes_no(early.video.is_some()),
+                },
+                Field {
                     key: "device_gigapages_hex",
                     value: device_mask_hex,
                 },
@@ -518,21 +533,32 @@ struct EarlyDiscovered {
     /// A GICv2-class interrupt controller was found and its GICD/GICC
     /// bases set.
     gic: bool,
+    /// The framebuffer boot console came up: a firmware mailbox was
+    /// found, a display is attached, and the scan-out surface was
+    /// allocated — console output now defaults to the screen, with the
+    /// UART as the fallback (`plans/PI.md` P7b, `AGENTS.md` §10).
+    video: Option<video::DiscoveredVideo>,
 }
 
 /// Point the console and the GICv2 driver at the bases the firmware tree
-/// describes, before the MMU is enabled.
+/// describes and bring up the framebuffer boot console, before the MMU
+/// is enabled.
 ///
-/// Both discoveries are early-returning, `ranges`-aware walks
-/// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] over
+/// All three discoveries are early-returning, `ranges`-aware walks
+/// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] /
+/// [`video::configure_from_fdt`] over
 /// [`rustos_arch_aarch64::fdt::scan_translated`]), so they are safe with
-/// the MMU off. A null pointer, an unreadable/invalid blob, or a tree
-/// missing a fact leaves the corresponding pre-discovery `virt` default
-/// untouched (fail closed, `AGENTS.md` §2.9).
+/// the MMU off — and the video bring-up *requires* this phase: with the
+/// data caches off the CPU↔firmware mailbox exchange is coherent without
+/// cache maintenance, and its state cell needs the single-threaded boot
+/// CPU. A null pointer, an unreadable/invalid blob, or a tree missing a
+/// fact leaves the corresponding pre-discovery default untouched — for
+/// video, the UART console (fail closed, `AGENTS.md` §2.9).
 fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     let mut out = EarlyDiscovered {
         console: false,
         gic: false,
+        video: None,
     };
     if dtb == 0 {
         return out;
@@ -548,6 +574,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     };
     out.console = console::configure_from_fdt(&fdt).is_some();
     out.gic = gic::configure_from_fdt(&fdt).is_some();
+    out.video = video::configure_from_fdt(&fdt);
     out
 }
 

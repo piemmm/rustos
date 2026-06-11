@@ -347,6 +347,10 @@ rustos/
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
 │   ├── util/            # Strictly justified utilities.
+│   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox property-channel
+│   │                    #   client (framebuffer + display-size queries), shared
+│   │                    #   by the aarch64 framebuffer boot console and the
+│   │                    #   rpi_hvs display driver (§2.2).
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
 │   │                    #   (Transport trait, queues, DMA slabs).
 │   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):

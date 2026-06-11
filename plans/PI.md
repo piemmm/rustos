@@ -1606,8 +1606,9 @@ riscv64, mirroring the aarch64 P-stage arc.
 ### P7 — VideoCore mailbox + framebuffer (metal) `[~]`
 
 **Landed — the host-provable protocol half.** The BCM2711 mailbox
-property-channel client lives in `drivers/display/rpi_hvs::mailbox`
-(doc: `docs/src/drivers/display.md`, "Firmware framebuffer discovery"):
+property-channel client lives in the shared `lib/vcmailbox` crate
+(§2.2 — the P7b framebuffer boot console speaks the same protocol; doc:
+`docs/src/drivers/display.md`, "Firmware framebuffer discovery"):
 
 - `FramebufferRequest::encode` frames the framebuffer request (set
   physical/virtual size, depth 32, pixel order from the
@@ -1617,17 +1618,21 @@ property-channel client lives in `drivers/display/rpi_hvs::mailbox`
   geometry echoes, pitch/size consistency); `bus_to_arm_physical`
   strips the 2-bit VC alias and rejects a zero, unaligned, or
   out-of-aperture buffer. The decoded `FirmwareFramebuffer` yields the
-  `ScanoutConfig` (and the bus alias) `RpiHvs::open` consumes.
+  `ScanoutConfig` (`ScanoutConfig::from_firmware`, plus the bus alias)
+  `RpiHvs::open` consumes; the crate also carries the display-size
+  query (`query_display_size`) the P7b boot console probes with.
 - The doorbell is behind the `MailboxTransport` seam: `MmioMailbox`
   drives the register block over two capability-gated `RegisterWindow`s
   with a budget-bounded poll (`DEFAULT_POLL_BUDGET`), failing closed
   with `Timeout`/`MalformedResponse` (foreign completion) — never an
   unbounded spin.
-- Host tests (38/38 in the crate) cover framing, every fail-closed
-  decode path, the alias↔aperture translation in both directions
-  (`bus_to_arm_physical` / `arm_physical_to_bus`), the doorbell
-  transport, the wiring fail-closed paths, and the full chain: mock
-  firmware → `wiring::open_with_transport` → `ScanoutConfig` →
+- Host tests cover framing (framebuffer + display-size), every
+  fail-closed decode path, the alias↔aperture translation in both
+  directions (`bus_to_arm_physical` / `arm_physical_to_bus`), and the
+  doorbell transport in `lib/vcmailbox` (against its shared
+  `mock::MockFirmware`, exported behind the `mock-firmware` feature),
+  plus the wiring fail-closed paths and the full chain in `rpi_hvs`:
+  mock firmware → `wiring::open_with_transport` → `ScanoutConfig` →
   `RpiHvs::open` → `present` into the discovered surface.
 - **No QEMU vertical, deliberately.** `virt` RAM begins at
   `0x4000_0000` — outside the BCM2711 30-bit VideoCore aperture — so
@@ -1670,6 +1675,56 @@ aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
 (hardware-tree mailbox node + `wiring::open_discovered`); and a metal
 bring-up checklist + a captured "framebuffer cleared to theme colour"
 photo/UART-log is recorded as the acceptance artefact — pending metal.
+
+### P7b — Framebuffer boot console: video first, UART fallback `[~]`
+
+Console output (boot log and every later phase) defaults to the
+**attached display**; the UART is the last resort when no video output
+exists. Doc: `docs/src/platform/aarch64.md`, "Framebuffer boot
+console".
+
+**Landed — the code-complete console.**
+
+- `kernel/arch/aarch64::video`: `find_mailbox` discovers the
+  `brcm,bcm2835-mbox` doorbell with the shared early-returning
+  `fdt::scan_translated` walk; `bring_up` (over the `lib/vcmailbox`
+  `MailboxTransport` seam) queries the display's EDID-derived native
+  size (`0×0` = no display → UART keeps the console) and allocates a
+  32-bit surface at exactly that size; `Geometry`/`TextConsole` render
+  the shared `rustos_font::glyphs` 5×7 atlas (§2.2) at an integer
+  scale (`height / 360`, clamped 1…4) on a ring grid (wrap-to-cleared
+  top row — no megabyte scroll copies per log line, §2.16).
+- Bring-up runs in the **pre-MMU** phase of
+  `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
+  DMA-coherent with no maintenance; the state cell is written by the
+  single-threaded boot CPU — no atomic RMW MMU-off). Post-MMU rendering
+  serialises on a private DAIF-masking spinlock (not `lib/sync`: feature
+  unification across the aarch64-none test-matrix build would force its
+  alloc-backed `epoch` into the allocator-free minimal QEMU bins) and
+  cleans the touched
+  scanlines (`dc cvac` + `dsb`) so the firmware scan-out sees them. The
+  doorbell base joins the Device-gigapage mask inputs; the boot audit
+  line carries `video_console=true/false`.
+- `serial::ConsoleWriter` (log sink) and `serial::write_console_bytes`
+  (the `stream_write` fd 1/2 backing) render to the screen when
+  `video::is_active`, else fall back to the UART; console input stays
+  on the UART. Everything fails closed to the UART (§2.9): no mailbox
+  node (QEMU `virt` — the UART verticals are unchanged), detached
+  display, or any rejected firmware answer.
+- Host tests: fixture mailbox discovery (translated `0xFE00_B880`),
+  mailboxless-tree fallback, mock-firmware bring-up (native mode,
+  detached display, inconsistent answer), the geometry scale policy and
+  fail-closed surface validation, and the renderer (glyph rows,
+  `?` fallback, `\n`/`\r`, column wrap, ring-row clear, dirty bands).
+
+**Remaining — metal acceptance.** Boot the SD image with HDMI attached
+and capture the boot log **on screen** (photo) plus the
+`video_console=true` audit line; with HDMI detached confirm the UART
+carries the same log (`video_console=false`).
+
+**Done when:** the boot log renders on the attached display on a real
+Pi 4 with the UART fallback proven by the detached-display boot —
+pending metal; everything host-provable is landed and tested — done.
 
 ### P8 — SD-card storage (EMMC2) `[~]` (read path code-complete; metal pending)
 

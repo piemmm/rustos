@@ -1,4 +1,4 @@
-//! UART-backed [`rustos_log::Sink`] for the freestanding aarch64 kernel.
+//! Console-backed [`rustos_log::Sink`] for the freestanding aarch64 kernel.
 //!
 //! Mirrors the riscv64 SBI-console sink (`kernel/arch/riscv64::serial`)
 //! and the x86_64 COM1 sink: one formatted line per event, in the
@@ -9,12 +9,22 @@
 //! [<level>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
+//! # Video first, UART as the fallback (`plans/PI.md` P7b)
+//!
+//! Console output defaults to the **attached display**: when the
+//! framebuffer boot console is configured ([`crate::video::is_active`])
+//! every transmitted byte is rendered on screen through
+//! [`crate::video::write_bytes`], and the UART is used only when no
+//! video output exists (`AGENTS.md` §10 — the screen is the user-facing
+//! console, the serial line is the last resort). Console *input* stays
+//! on the UART either way (the display has no receive side).
+//!
 //! # Board-discovered base and model (`plans/PI.md` P2)
 //!
-//! The transmit path is **board-independent**: it reads the current MMIO
-//! base and register layout from [`crate::console`] on every byte. The
-//! QEMU `virt` board's PrimeCell PL011 is the pre-discovery default; a
-//! board whose console lives elsewhere (the Raspberry Pi — a PL011 or a
+//! The UART transmit path is **board-independent**: it reads the current
+//! MMIO base and register layout from [`crate::console`] on every byte.
+//! The QEMU `virt` board's PrimeCell PL011 is the pre-discovery default;
+//! a board whose console lives elsewhere (the Raspberry Pi — a PL011 or a
 //! BCM2835 AUX mini-UART at the SoC's high peripheral window) overrides
 //! both by calling [`crate::console::configure_from_fdt`] early in boot.
 //! There is one console abstraction with two register backends, not two
@@ -129,9 +139,10 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
     read
 }
 
-/// Write `bytes` verbatim to the currently-configured console UART,
-/// returning the number written (always `bytes.len()` — the busy-wait
-/// transmit path accepts every byte).
+/// Write `bytes` verbatim to the current console — the video console
+/// when one is configured, else the configured UART — returning the
+/// number written (always `bytes.len()`; both backings accept every
+/// byte).
 ///
 /// Unlike [`ConsoleWriter`] this performs **no** `\n` → `\r\n`
 /// translation: it is the raw byte sink the `stream_write` syscall
@@ -145,19 +156,29 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 /// so the host tests of the consuming `ConsoleWrite` adapter observe the
 /// byte count without touching MMIO.
 pub fn write_console_bytes(bytes: &[u8]) -> usize {
-    for &byte in bytes {
-        putchar(byte);
+    if crate::video::is_active() {
+        crate::video::write_bytes(bytes);
+    } else {
+        for &byte in bytes {
+            putchar(byte);
+        }
     }
     bytes.len()
 }
 
 /// [`core::fmt::Write`] adapter that emits each byte through the
-/// configured console, translating `\n` into `\r\n` so terminals
-/// capturing `-serial stdio` render the boot log with proper line breaks.
+/// current console: the video console when configured (its renderer
+/// interprets `\n` itself), else the UART with `\n` → `\r\n`
+/// translation so terminals capturing `-serial stdio` render the boot
+/// log with proper line breaks.
 pub struct ConsoleWriter;
 
 impl core::fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if crate::video::is_active() {
+            crate::video::write_bytes(s.as_bytes());
+            return Ok(());
+        }
         for byte in s.bytes() {
             if byte == b'\n' {
                 putchar(b'\r');

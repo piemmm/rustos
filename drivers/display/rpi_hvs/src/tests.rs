@@ -29,7 +29,7 @@ struct Region {
 
 /// Multi-region mock mapper. Each registered region is backed by a
 /// `u32` buffer (≥ 4-byte aligned) shared with the test for read-back.
-/// `pub(crate)` so the mailbox discovery chain test reuses it (§2.2).
+/// `pub(crate)` so the wiring discovery chain test reuses it (§2.2).
 pub(crate) struct MockMapper {
     regions: Vec<Region>,
     granted: bool,

@@ -56,6 +56,7 @@ members = [
     "lib/termcap",
     "lib/theme",
     "lib/util",
+    "lib/vcmailbox",
     "lib/virtio",
     "lib/vt",
 

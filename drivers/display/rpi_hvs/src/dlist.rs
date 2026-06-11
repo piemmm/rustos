@@ -15,6 +15,7 @@
 use rustos_abi::driver::display::{AccelLayer, DisplayFormat, DisplayMode};
 use rustos_abi::driver::mmio::WindowError;
 use rustos_abi::{DriverError, RegisterWindow};
+use rustos_vcmailbox::{FirmwareFramebuffer, MailboxError};
 
 /// Maximum number of hardware planes (and per-plane source buffers) the
 /// driver tracks. The VC4 HVS exposes a small fixed plane budget; eight
@@ -45,11 +46,6 @@ pub const CONTROL_LEN_BYTES: usize = 8;
 pub const CONTROL_DLIST_HEAD_OFFSET: usize = 0;
 /// Control-window offset of the present generation counter.
 pub const CONTROL_GENERATION_OFFSET: usize = 4;
-
-/// Default `VideoCore` bus alias for L2-cached SDRAM aliasing
-/// (`0xC000_0000`); the HVS DMAs through a bus address, not the ARM
-/// physical address.
-pub const DEFAULT_BUS_ALIAS: u32 = 0xC000_0000;
 
 /// Map a [`DisplayFormat`] to its HVS plane format code.
 fn format_code(format: DisplayFormat) -> u32 {
@@ -95,6 +91,25 @@ impl ScanoutConfig {
             stride_bytes: self.stride_bytes,
             format: self.format,
         }
+    }
+
+    /// Produce the scan-out config from the firmware's validated
+    /// framebuffer answer ([`rustos_vcmailbox::discover_framebuffer`]),
+    /// translating its `VideoCore` bus address to the ARM physical base
+    /// the host maps.
+    ///
+    /// # Errors
+    ///
+    /// [`MailboxError::BadAperture`] on a bad buffer address (see
+    /// [`FirmwareFramebuffer::arm_physical_base`]).
+    pub fn from_firmware(firmware: &FirmwareFramebuffer) -> Result<Self, MailboxError> {
+        Ok(Self {
+            phys_base: firmware.arm_physical_base()?,
+            width_px: firmware.width_px,
+            height_px: firmware.height_px,
+            stride_bytes: firmware.pitch_bytes,
+            format: firmware.format,
+        })
     }
 
     fn validate(&self) -> Result<(), DriverError> {

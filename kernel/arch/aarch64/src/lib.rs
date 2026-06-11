@@ -143,6 +143,10 @@ pub mod timer_hal;
 /// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `eret`
 /// sequence that drops a built process image into EL0.
 pub mod userentry;
+/// Framebuffer boot console (`plans/PI.md` P7b): console output defaults
+/// to the attached display via the `VideoCore` firmware mailbox, with
+/// the UART as the fallback when no display exists (`AGENTS.md` §10).
+pub mod video;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod entry;

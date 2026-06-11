@@ -15,19 +15,19 @@
 //!
 //! The mailbox exchange itself sits behind the
 //! [`MailboxTransport`] seam, so [`open_with_transport`] is the
-//! host-provable half: the crate's tests drive it with a
+//! host-provable half: the crate's tests drive it with the shared
 //! protocol-faithful mock firmware (QEMU does not model the
 //! `VideoCore`, `AGENTS.md` §2.1), and the doorbell below the seam is
 //! the on-metal acceptance item.
 
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
-
-use crate::dlist::PlaneConfig;
-use crate::mailbox::{
+use rustos_vcmailbox::{
     arm_physical_to_bus, discover_framebuffer, FramebufferRequest, MailboxError, MailboxTransport,
     MmioMailbox, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
 };
-use crate::{map, HvsConfig, RpiHvs, MAX_PLANES};
+
+use crate::dlist::PlaneConfig;
+use crate::{map, HvsConfig, RpiHvs, ScanoutConfig, MAX_PLANES};
 
 /// The discovered mailbox doorbell plus the host's property-buffer
 /// carve, both expressed as ARM-physical addresses the host maps under
@@ -47,7 +47,7 @@ pub struct MailboxWiring {
     /// (e.g. [`crate::DEFAULT_BUS_ALIAS`]).
     pub bus_alias: u32,
     /// Doorbell poll budget
-    /// ([`crate::mailbox::DEFAULT_POLL_BUDGET`] unless tuned).
+    /// ([`rustos_vcmailbox::DEFAULT_POLL_BUDGET`] unless tuned).
     pub poll_budget: u32,
 }
 
@@ -132,9 +132,7 @@ pub fn open_with_transport(
 ) -> Result<RpiHvs, DriverError> {
     let firmware =
         discover_framebuffer(transport, request).map_err(MailboxError::as_driver_error)?;
-    let scanout = firmware
-        .scanout_config()
-        .map_err(MailboxError::as_driver_error)?;
+    let scanout = ScanoutConfig::from_firmware(&firmware).map_err(MailboxError::as_driver_error)?;
     let config = HvsConfig {
         scanout,
         dlist_phys_base: regions.dlist_phys_base,

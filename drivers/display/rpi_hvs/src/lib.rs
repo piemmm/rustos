@@ -20,12 +20,12 @@
 //! [`RpiHvs`] is a public *type* re-exported so the driver host can
 //! instantiate it through [`RpiHvs::open`]; the host never reaches into
 //! the type beyond the [`Display`] / [`AcceleratedDisplay`] traits. The
-//! [`mailbox`] module is the firmware property-channel client the
-//! driver host uses to *discover* the [`HvsConfig`] scan-out surface
-//! before calling [`RpiHvs::open`], and the [`wiring`] module is the
-//! host-side bring-up seam that performs that discovery over the
-//! hardware-tree-discovered mailbox and assembles the full
-//! [`HvsConfig`] (`plans/PI.md` P7).
+//! firmware property-channel client the driver host uses to *discover*
+//! the [`HvsConfig`] scan-out surface is the shared [`rustos_vcmailbox`]
+//! crate (§2.2 — the aarch64 port's framebuffer boot console speaks the
+//! same protocol), and the [`wiring`] module is the host-side bring-up
+//! seam that performs that discovery over the hardware-tree-discovered
+//! mailbox and assembles the full [`HvsConfig`] (`plans/PI.md` P7).
 //!
 //! # Capabilities
 //!
@@ -52,10 +52,10 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper
 mod tests;
 
 mod dlist;
-pub mod mailbox;
 pub mod wiring;
 
-pub use dlist::{HvsConfig, PlaneConfig, ScanoutConfig, DEFAULT_BUS_ALIAS, MAX_PLANES};
+pub use dlist::{HvsConfig, PlaneConfig, ScanoutConfig, MAX_PLANES};
+pub use rustos_vcmailbox::DEFAULT_BUS_ALIAS;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///

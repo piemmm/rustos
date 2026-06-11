@@ -36,9 +36,24 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The flattened-device-tree parser is architecture-neutral and shared
 # (`AGENTS.md` §2.2); this port builds its `fdt`/`platform` discovery on it.
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+# The shared 5×7 monospace glyph atlas the framebuffer boot console
+# renders with — one font definition across the desktop and the boot
+# console (`AGENTS.md` §2.2). Atlas-only (`default-features = false`):
+# the boot console blits into device-coherent memory itself, and the
+# minimal QEMU test bins link no global allocator.
+rustos-font = { path = "../../../lib/font", version = "=0.0.0", default-features = false }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared VideoCore firmware mailbox protocol (`AGENTS.md` §2.2):
+# the framebuffer boot console's display probe + surface allocation,
+# also spoken by drivers/display/rpi_hvs.
+rustos-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host
 # tests (off in production builds — `[dev-dependencies]` only).
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
+# The protocol-faithful mock firmware for the video boot-console host
+# tests (QEMU does not model the VideoCore, `AGENTS.md` §2.1).
+rustos-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
+    "mock-firmware",
+] }
