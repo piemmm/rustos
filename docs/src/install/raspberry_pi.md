@@ -20,9 +20,10 @@ drivers.
 profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
 binary the GPU bootloader copies to memory — see the boot-protocol facts
 of record in [aarch64](../platform/aarch64.md). The generated
-`config.txt` sets `arm_64bit=1`, `kernel=kernel8.img`, and
-`enable_uart=1` (plus `armstub=armstub8.bin` only when that optional stub
-is staged).
+`config.txt` sets `arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
+`dtoverlay=disable-bt` (the PL011 `UART0` on the GPIO 14/15 header), and
+`init_uart_baud=9600` — the serial console defaults to **9600 8N1**
+(plus `armstub=armstub8.bin` only when that optional stub is staged).
 
 ## The firmware blobs
 
@@ -84,7 +85,7 @@ sudo dd if=images/rustos-aarch64-rpi.img of=/dev/sdX bs=4M conv=fsync
 ```
 
 Connect a 3.3 V serial adapter to the Pi's UART header (GPIO 14/15,
-115200 8N1), insert the card, and power on. The firmware loads
+9600 8N1), insert the card, and power on. The firmware loads
 `kernel8.img` at `0x8_0000` and enters it at EL2 with the DTB pointer in
 `x0`; the kernel discovers the PL011 console, GIC, timer, and memory map
 from that device tree — the same code path the QEMU `virt` board boots —

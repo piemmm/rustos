@@ -77,6 +77,8 @@ secondaries (`MPIDR_EL1` affinity ≠ 0) until SMP bring-up wants them (P1/P5).
 | `arm_64bit` | `1` | boot the ARM cores in AArch64 |
 | `kernel` | `kernel8.img` | the image the firmware loads at `0x8_0000` |
 | `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
+| `dtoverlay` | `disable-bt` | detach Bluetooth from the PL011 so `UART0` is the primary UART on the GPIO 14/15 header |
+| `init_uart_baud` | `9600` | the firmware programs the PL011 to **9600 baud, 8 data bits, no parity, 1 stop bit** (8,N,1 is the firmware's fixed framing) — the default serial-console line setting |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
 
 The PSCI conduit on the Pi is **`smc`** (via `armstub8.bin`), versus `hvc` on
@@ -312,8 +314,14 @@ Pi):
 - **Routing.** `serial::ConsoleWriter` (the log sink) and
   `serial::write_console_bytes` (the `stream_write` fd 1/2 backing)
   both render to the screen when `video::is_active` and fall back to
-  the UART otherwise. Console *input* stays on the UART (the display
-  has no receive side).
+  the UART otherwise. *Temporarily*, while the Pi 4 on-metal verticals
+  are brought up, both paths also mirror every byte to the discovered
+  UART (the PL011 `UART0`, 9600 8N1 per the `config.txt` knobs above)
+  even when the video console is active, so the boot log is capturable
+  over the serial header alongside the screen; the mirror is removed
+  when bring-up no longer needs it (`kernel/arch/aarch64/src/serial.rs`
+  module docs). Console *input* stays on the UART (the display has no
+  receive side).
 
 Fail closed (`AGENTS.md` §2.9): no mailbox node (QEMU `virt` — the
 UART-backed verticals are unchanged), a detached display, or any

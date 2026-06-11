@@ -23,9 +23,13 @@ pub const CONFIG_TXT_NAME: &str = "config.txt";
 /// Render the `config.txt` the Pi firmware boots RustOS with.
 ///
 /// The knobs are the P0 facts of record (`docs/src/platform/aarch64.md`,
-/// "Boot protocol"): AArch64 cores, the RustOS kernel image, and a held
-/// UART clock for a stable early console. `armstub=armstub8.bin` is
-/// emitted only when the (optional) stub is among the build inputs.
+/// "Boot protocol"): AArch64 cores, the RustOS kernel image, a held UART
+/// clock for a stable early console, the PL011 `UART0` routed to the
+/// GPIO 14/15 header (`dtoverlay=disable-bt`), and a default line
+/// configuration of **9600 baud, 8 data bits, no parity, 1 stop bit**
+/// (`init_uart_baud=9600`; 8,N,1 is the firmware's fixed PL011 framing).
+/// `armstub=armstub8.bin` is emitted only when the (optional) stub is
+/// among the build inputs.
 #[must_use]
 pub fn config_txt(with_armstub: bool) -> String {
     let mut text = String::from(
@@ -33,7 +37,9 @@ pub fn config_txt(with_armstub: bool) -> String {
          # Knobs of record: docs/src/platform/aarch64.md, \"Boot protocol\".\n\
          arm_64bit=1\n\
          kernel=kernel8.img\n\
-         enable_uart=1\n",
+         enable_uart=1\n\
+         dtoverlay=disable-bt\n\
+         init_uart_baud=9600\n",
     );
     if with_armstub {
         text.push_str("armstub=armstub8.bin\n");
@@ -138,6 +144,8 @@ mod tests {
         assert!(config.contains("arm_64bit=1"));
         assert!(config.contains("kernel=kernel8.img"));
         assert!(config.contains("enable_uart=1"));
+        assert!(config.contains("dtoverlay=disable-bt"));
+        assert!(config.contains("init_uart_baud=9600"));
         assert!(!config.contains("armstub="));
     }
 
