@@ -1581,22 +1581,59 @@ riscv64, mirroring the aarch64 P-stage arc.
   Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
   `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
-### P7 — VideoCore mailbox + framebuffer (metal) `[ ]`
+### P7 — VideoCore mailbox + framebuffer (metal) `[~]`
 
-- Implement the BCM2711 **mailbox** property-channel interface (a small
-  `drivers/`-side service or `lib/` helper) to query the firmware
-  framebuffer (set physical/virtual size, depth, get the framebuffer bus
-  address + pitch). Translate the VC bus address to an ARM physical
-  address and map it through a capability (§4, no ambient authority).
-- Feed the resulting `HvsConfig` to the existing
-  `drivers/display/rpi_hvs` driver and add its first **hardware vertical**
-  (mailbox-mocked under emulation; real HDMI capture on metal).
+**Landed — the host-provable protocol half.** The BCM2711 mailbox
+property-channel client lives in `drivers/display/rpi_hvs::mailbox`
+(doc: `docs/src/drivers/display.md`, "Firmware framebuffer discovery"):
+
+- `FramebufferRequest::encode` frames the framebuffer request (set
+  physical/virtual size, depth 32, pixel order from the
+  `DisplayFormat`, allocate at page alignment, get pitch);
+  `decode_framebuffer_response` validates the in-place answer
+  fail-closed (header code, per-tag response bits/lengths, exact
+  geometry echoes, pitch/size consistency); `bus_to_arm_physical`
+  strips the 2-bit VC alias and rejects a zero, unaligned, or
+  out-of-aperture buffer. The decoded `FirmwareFramebuffer` yields the
+  `ScanoutConfig` (and the bus alias) `RpiHvs::open` consumes.
+- The doorbell is behind the `MailboxTransport` seam: `MmioMailbox`
+  drives the register block over two capability-gated `RegisterWindow`s
+  with a budget-bounded poll (`DEFAULT_POLL_BUDGET`), failing closed
+  with `Timeout`/`MalformedResponse` (foreign completion) — never an
+  unbounded spin.
+- Host tests (32/32 in the crate) cover framing, every fail-closed
+  decode path, the alias/aperture translation, the doorbell transport,
+  and the full chain: mock firmware → `discover_framebuffer` →
+  `ScanoutConfig` → `RpiHvs::open` → `present` into the discovered
+  surface.
+- **No QEMU vertical, deliberately.** `virt` RAM begins at
+  `0x4000_0000` — outside the BCM2711 30-bit VideoCore aperture — so
+  the driver's (correct) aperture validation can never pass there, and
+  §0.4 forbids a Pi-board QEMU vertical. The emulation artefact is the
+  host-side full-chain test; the real scan-out is the metal item below.
+
+**Remaining — metal wiring + acceptance.**
+
+- Discover the mailbox node (`brcm,bcm2835-mbox`, ARM-physical
+  `0xFE00_B880`) through `FdtDiscovery` into `rustos_abi::hwtree`, and
+  carve the DMA-visible property buffer, mapping both under
+  `CAP_MMIO_MAP` (§4, no ambient authority — never a `const` base).
+- Assemble the full `HvsConfig` (HVS DLIST RAM, display-channel
+  control, plane buffers) for the metal HVS and hand it to
+  `RpiHvs::open` in the driver-host wiring.
+- Metal bring-up checklist (record each step's UART log): boot the P6
+  image with HDMI attached → `MmioMailbox` exchange returns the
+  firmware framebuffer (log bus address, size, pitch) →
+  `bus_to_arm_physical` + map → `RpiHvs::open` + clear the frame to the
+  theme colour → capture the photo + UART log as the acceptance
+  artefact.
 
 **Done when:** the mailbox property protocol has host unit tests
 (request/response framing, bus↔physical translation, fail-closed on a bad
-aperture), `rpi_hvs` consumes a discovered `HvsConfig`, and a metal
-bring-up checklist + a captured "framebuffer cleared to theme colour"
-photo/UART-log is recorded as the acceptance artefact.
+aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done in
+the host chain, pending the metal wiring above; and a metal bring-up
+checklist + a captured "framebuffer cleared to theme colour"
+photo/UART-log is recorded as the acceptance artefact — pending metal.
 
 ### P8 — SD-card storage (EMMC2) `[ ]`
 

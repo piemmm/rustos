@@ -42,6 +42,32 @@ produced (scan-out geometry, the HVS DLIST RAM, the display-channel
 control register, and the per-plane source buffers). It does not
 enumerate the SoC itself.
 
+## Firmware framebuffer discovery (`mailbox`)
+
+The `mailbox` module (the `plans/PI.md` P7 protocol layer) produces the
+scan-out half of that `HvsConfig` by speaking the BCM2711 **mailbox
+property channel** to the GPU firmware:
+
+- `FramebufferRequest::encode` frames the request (set physical/virtual
+  size, depth 32, pixel order from the `DisplayFormat`, allocate at page
+  alignment, get pitch; end tag).
+- `decode_framebuffer_response` validates the in-place answer
+  fail-closed: header code, per-tag response bits and lengths, exact
+  geometry echoes, and pitch/size consistency.
+- `bus_to_arm_physical` strips the 2-bit VideoCore bus alias and rejects
+  a zero, unaligned, or out-of-aperture buffer; the result becomes the
+  `ScanoutConfig` (and the firmware's alias feeds `HvsConfig.bus_alias`).
+- The doorbell sits behind the `MailboxTransport` seam. `MmioMailbox`
+  drives the real register block (`0xFE00_B880`, reached as a discovered
+  `hwtree` resource under `CAP_MMIO_MAP`) with a budget-bounded poll
+  that fails closed with `Timeout` rather than spinning forever.
+
+QEMU models neither the VideoCore firmware nor an in-aperture RAM
+window (`virt` RAM begins at `0x4000_0000`, beyond the 30-bit
+aperture), so emulation proves the full host-side chain against a
+protocol-faithful mock firmware; the real scan-out is the `plans/PI.md`
+P7 metal acceptance item.
+
 ### Pixel formats
 
 `DisplayFormat::Rgba8888` and `DisplayFormat::Bgra8888`. Layer pixels
@@ -86,15 +112,37 @@ in-process multi-region mock `MmioMapper`:
 - Config validation (zero planes, a too-small DLIST) and bus-address
   aperture bounds.
 
-12/12 host-side tests pass.
+The `mailbox` module adds, against a protocol-faithful mock firmware
+and RAM-backed doorbell windows:
+
+- Request framing (tag order, lengths, pixel-order mapping) and
+  degenerate-geometry rejection.
+- Response validation fail-closed paths: firmware error and unknown
+  header codes, bad header length, missing response bit, short and
+  oversized tag responses, substituted geometry echoes, missing tag,
+  inconsistent pitch/size, bad buffer aperture.
+- Bus↔physical translation across all four aliases and its aperture
+  fail-closed cases.
+- `MmioMailbox` construction validation, the stage→ring→read-back
+  doorbell path, three timeout modes, and rejection of a foreign
+  property completion.
+- The full discovery chain: mock firmware → `discover_framebuffer` →
+  `ScanoutConfig` → `RpiHvs::open` → `present` into the discovered
+  surface.
+
+32/32 host-side tests pass.
 
 ## Public surface
 
-`AGENTS.md` §8 — the only public *function* is `register`. The `RpiHvs`
-type and its config types (`HvsConfig`, `ScanoutConfig`, `PlaneConfig`)
-are re-exported so the driver host can construct an instance; the host
-never reaches into the type beyond the `Display` / `AcceleratedDisplay`
-trait surface.
+`AGENTS.md` §8 — the only public *function* on the driver itself is
+`register`. The `RpiHvs` type and its config types (`HvsConfig`,
+`ScanoutConfig`, `PlaneConfig`) are re-exported so the driver host can
+construct an instance; the host never reaches into the type beyond the
+`Display` / `AcceleratedDisplay` trait surface. The `mailbox` module is
+the discovery half of that same host hand-off: the host calls
+`discover_framebuffer` over a `MailboxTransport` to *produce* the
+`HvsConfig` it then passes to `RpiHvs::open` — it is not device control
+surface, and nothing in it bypasses the driver's capability gates.
 
 ## Tier
 

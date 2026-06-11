@@ -19,7 +19,10 @@
 //! Per `AGENTS.md` §8 the only public *function* is [`register`].
 //! [`RpiHvs`] is a public *type* re-exported so the driver host can
 //! instantiate it through [`RpiHvs::open`]; the host never reaches into
-//! the type beyond the [`Display`] / [`AcceleratedDisplay`] traits.
+//! the type beyond the [`Display`] / [`AcceleratedDisplay`] traits. The
+//! [`mailbox`] module is the firmware property-channel client the
+//! driver host uses to *discover* the [`HvsConfig`] scan-out surface
+//! before calling [`RpiHvs::open`] (`plans/PI.md` P7).
 //!
 //! # Capabilities
 //!
@@ -46,6 +49,7 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper
 mod tests;
 
 mod dlist;
+pub mod mailbox;
 
 pub use dlist::{HvsConfig, PlaneConfig, ScanoutConfig, DEFAULT_BUS_ALIAS, MAX_PLANES};
 

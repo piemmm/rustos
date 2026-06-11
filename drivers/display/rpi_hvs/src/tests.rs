@@ -29,20 +29,21 @@ struct Region {
 
 /// Multi-region mock mapper. Each registered region is backed by a
 /// `u32` buffer (≥ 4-byte aligned) shared with the test for read-back.
-struct MockMapper {
+/// `pub(crate)` so the mailbox discovery chain test reuses it (§2.2).
+pub(crate) struct MockMapper {
     regions: Vec<Region>,
     granted: bool,
 }
 
 impl MockMapper {
-    fn new(granted: bool) -> Self {
+    pub(crate) fn new(granted: bool) -> Self {
         Self {
             regions: Vec::new(),
             granted,
         }
     }
 
-    fn add(&mut self, phys: u64, words: usize) {
+    pub(crate) fn add(&mut self, phys: u64, words: usize) {
         self.regions.push(Region {
             phys,
             backing: Rc::new(RefCell::new(vec![0u32; words])),
@@ -61,7 +62,7 @@ impl MockMapper {
         self.region(phys).borrow()[index]
     }
 
-    fn byte(&self, phys: u64, off: usize) -> u8 {
+    pub(crate) fn byte(&self, phys: u64, off: usize) -> u8 {
         self.region(phys).borrow()[off / 4].to_le_bytes()[off % 4]
     }
 }
@@ -93,10 +94,10 @@ impl MmioMapper for MockMapper {
     }
 }
 
-struct MockHost {
-    drv_load: bool,
-    mmio_map: bool,
-    mapper: Option<MockMapper>,
+pub(crate) struct MockHost {
+    pub(crate) drv_load: bool,
+    pub(crate) mmio_map: bool,
+    pub(crate) mapper: Option<MockMapper>,
 }
 
 impl DriverHost for MockHost {
