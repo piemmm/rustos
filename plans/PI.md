@@ -1650,6 +1650,10 @@ photo/UART-log is recorded as the acceptance artefact — pending metal.
 
 ### P8 — SD-card storage (EMMC2) `[ ]`
 
+**Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
+`.rxe` process-spawn path), which is reprioritised to land first — the
+binding below has no mechanism without it.
+
 - A `drivers/storage` EMMC2 (Arasan/SDHCI-derived) driver for the Pi 4 SD
   host, bound by `devmgr` against its `compatible` string (§18.3). Read
   path first (mount the root the installer laid down), then write.
