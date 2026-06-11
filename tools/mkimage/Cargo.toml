@@ -1,0 +1,31 @@
+[package]
+name = "rustos-mkimage"
+description = "Platform image builders for RustOS (AGENTS.md §12)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustos-mkimage"
+path = "src/main.rs"
+
+# mkimage is a host-side build tool (AGENTS.md §12): it authors the
+# flashable platform images in pure Rust. The partition contents are laid
+# down by the *real* in-tree filesystem drivers — the same code the booted
+# system mounts the volumes with — so the image author and the consumer can
+# never drift (AGENTS.md §2.2). It mirrors how the QEMU vertical fixtures
+# (`tests/integration/{fat32,rustfs}_image`) author their backing disks.
+[dependencies]
+rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
+rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }

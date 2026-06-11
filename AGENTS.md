@@ -409,8 +409,8 @@ rustos/
 │
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
-│   ├── mkimage/         # Image builders per platform (staged: PLAN.md
-│   │                    #   Stage 8 — not yet built).
+│   ├── mkimage/         # Image builders per platform (PLAN.md Stage 8).
+│   │                    #   aarch64-rpi is built; the rest are staged.
 │   ├── cc/              # Audited, version-pinned, checksummed C toolchain
 │   │                    #   wrapper (clang + ld.lld) for the CCOMPAT C-ABI
 │   │                    #   end-to-end test. Host-only build glue (§12);

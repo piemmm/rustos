@@ -1058,6 +1058,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-mkimage"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-crypto",
+ "rustos-drv-fs-fat32",
+ "rustos-drv-fs-rustfs",
+]
+
+[[package]]
 name = "rustos-mount"
 version = "0.0.0"
 dependencies = [
@@ -2440,6 +2450,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-fuzzseed",
  "rustos-kernel-syscall",
+ "rustos-mkimage",
  "rustos-qemu",
  "rustos-test-fat32-image",
  "rustos-test-rustfs-image",

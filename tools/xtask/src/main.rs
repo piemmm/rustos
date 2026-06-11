@@ -8,7 +8,9 @@
 //!
 //! ## Commands
 //!
-//! - `build`        — `cargo build --workspace --all-targets`
+//! - `build`        — `cargo build --workspace --all-targets`;
+//!   `--target aarch64-rpi` instead builds the flashable platform image
+//!   (the `image` pipeline below)
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests (§7), defaulting to one run; `--soak` (tuned by `--secs N`)
@@ -45,6 +47,9 @@
 //!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
 //!   `spec-review`, `abi-check`, `c-header`
 //! - `image`        — build platform images via `tools/mkimage`
+//!   (`--target aarch64-rpi`: the Raspberry Pi 4 SD image; the pinned
+//!   firmware blobs are staged build inputs, see
+//!   `tools/mkimage/firmware.lock` and `docs/src/install/raspberry_pi.md`)
 //!
 //! The set above is closed: every subsystem documented in `AGENTS.md` and
 //! `PLAN.md` is reachable through exactly one of these subcommands. New

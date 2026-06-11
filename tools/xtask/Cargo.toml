@@ -58,3 +58,8 @@ rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", vers
 # seed primitives and the env-var names live in exactly one place
 # (`AGENTS.md` §2.2).
 rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# `image` / `build --target aarch64-rpi` (Stage 8 / plans/PI.md P9) author
+# the flashable platform images through the `tools/mkimage` library, so the
+# image pipeline is ordinary Rust driven by the same xtask entry point as
+# every other build step (AGENTS.md §12).
+rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }

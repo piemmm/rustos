@@ -124,6 +124,7 @@ members = [
     "tools/xtask",
     "tools/qemu",
     "tools/cc",
+    "tools/mkimage",
 
     # Shared host test-support: the per-run PRNG seed / start-of-test seed
     # logging / smoke-iteration + soak-budget seam used by the fuzz (§19.6),

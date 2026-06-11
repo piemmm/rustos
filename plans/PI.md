@@ -103,7 +103,7 @@ under `qemu-system-aarch64 -M virt`.
 | Display | virtio-gpu / ramfb | VideoCore mailbox framebuffer → `drivers/display/rpi_hvs` (HVS) |
 | Storage | virtio-blk-mmio | EMMC2 SD host controller (`drivers/storage`) |
 | Input | virtio-keyboard-mmio | USB HID via the VL805/DWC2 USB host (`drivers/bus/usb`) |
-| Image builder | none (`tools/mkimage` empty) | `images/rustos-aarch64-rpi.img` (FAT boot partition + firmware blobs) |
+| Image builder | `tools/mkimage` emits `images/rustos-aarch64-rpi.img` (P9) | flash + boot the emitted image on metal |
 
 `drivers/display/rpi_hvs` already exists (HVS layer compositor, mock-host
 tested) and consumes an `HvsConfig` the boot capability provides; it has
@@ -1702,24 +1702,65 @@ transfer state machine against a mock host — done; a metal checklist
 demonstrates reading the FAT boot partition and the RustFS root from a
 real card — pending hardware.
 
-### P9 — Bootable SD image (`tools/mkimage`) `[ ]`
+### P9 — Bootable SD image (`tools/mkimage`) `[~]`
 
-- Build `tools/mkimage` (Stage 8 dependency) to emit
-  `images/rustos-aarch64-rpi.img`: a FAT32 boot partition carrying the Pi
-  firmware blobs (`start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`,
-  `armstub8.bin`), `config.txt`, and the `kernel8.img` from P1, plus the
-  RustFS/secure-layout root partition from the §11 installer defaults.
-  Pure Rust + audited wrappers only (§12, no shelling to `parted`/`mkfs`).
-- Firmware blobs are third-party redistributables: pin + checksum them per
-  §19.3; document their provenance. They are **not** committed to the repo
-  unless licensing + supply-chain review (`cargo deny`, §7) clears it —
-  otherwise `mkimage` fetches them from a pinned, checksummed source as a
-  build input (never a post-install network fetch, §19.3).
+The image builder is landed; only the on-metal boot of the emitted image
+remains (pending hardware).
+
+- `tools/mkimage` (`rustos-mkimage`, lib + bin) authors
+  `images/rustos-aarch64-rpi.img` in pure Rust (§12 — no
+  `parted`/`mkfs` shell-outs): an MBR (two 1 MiB-aligned primaries,
+  `0x0C` FAT32 boot @ LBA 2048, `0x7F` RustFS root, 64 MiB each), with
+  both partitions laid down by the **real** in-tree drivers
+  (`Fat32::format` / `RustFs::format` — author and consumer share one
+  on-disk definition, §2.2), mirroring the
+  `tests/integration/{fat32,rustfs}_image` fixture pattern.
+- Boot partition: the verified firmware blobs, a generated `config.txt`
+  (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`;
+  `armstub=armstub8.bin` only when the optional stub is staged), and
+  `kernel8.img` — the P1 release ELF flattened by `mkimage`'s fail-closed
+  converter (`elfflat`: ELF64/LE/`ET_EXEC`/aarch64 only, `PT_LOAD` layout
+  must start *and* enter at `0x8_0000`, overlap/size-bound checks).
+- Firmware blobs stay uncommitted third-party inputs (§19.3):
+  `tools/mkimage/firmware.lock` pins the upstream HTTPS `source`
+  directory plus name + byte length + SHA-256 of `start4.elf` /
+  `fixup4.dat` / `bcm2711-rpi-4-b.dtb` at upstream release `1.20240529`
+  (provenance + licence documented in the manifest); verification fails
+  closed on any mismatch. `cargo xtask image` fetches any blob missing
+  from its `target/pi-firmware/` cache from the pinned source and gates
+  every download on the manifest checksums, so the image build is one
+  step; an operator-staged `--firmware` dir is only verified, never
+  written. `armstub8.bin` is optional and unpinned — no official binary
+  exists and the boot stub parks secondaries itself; it joins the
+  manifest when SMP-on-metal needs it.
+- Root partition: an encrypted RustFS volume (no plaintext mode) carrying
+  the §16 skeleton (`/System` + its twelve subdirectories incl.
+  `Security/{Keys,Policy}`, `/Users`, `/Apps`, `/Storage`); the §11
+  databases/users are the installer's first-boot job. The volume key is
+  drawn per build from host entropy and written to the sibling
+  `…-rpi.rootkey` file (0600) — never stored inside the image;
+  `--root-key` rebuilds under a kept key.
+- Entry points: `cargo xtask image --target aarch64-rpi` and the
+  delegating `cargo xtask build --target aarch64-rpi` (`--headless`
+  accepted; the image content is identical until installable GUI userland
+  ships). A staged firmware dir may come from `--firmware` or
+  `$RUSTOS_PI_FIRMWARE`; otherwise the pinned blobs are fetched
+  automatically. The standalone `rustos-mkimage rpi` CLI mirrors the
+  same flags (with `--firmware` required — no network I/O in mkimage).
+- 33 host tests: MBR encode/validation, ELF→flat layout + every refusal,
+  manifest parse/verify fail-closed (incl. the committed manifest),
+  boot/root partition round-trips re-mounted through the real drivers,
+  wrong-key refusal, full-image assembly with both partitions mounted
+  from their MBR offsets. Docs: `docs/src/install/raspberry_pi.md`.
+
+**Remaining — metal:** boot the emitted image on a real Pi 4 per the
+flashing/first-boot doc and record the UART-log checklist (the P7/P8
+metal items ride the same boot).
 
 **Done when:** `cargo xtask build --target aarch64-rpi` (and `--headless`)
-produces a flashable `.img`; `docs/src/install/raspberry_pi.md` documents
-flashing + first boot; the image boots P6 (user mode) on real hardware per
-a recorded checklist.
+produces a flashable `.img` — done; `docs/src/install/raspberry_pi.md`
+documents flashing + first boot — done; the image boots P6 (user mode) on
+real hardware per a recorded checklist — pending hardware.
 
 ### P10 — USB-HID input + desktop on the Pi `[ ]`
 

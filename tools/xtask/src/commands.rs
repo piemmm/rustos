@@ -5,7 +5,7 @@
 //! never appending hidden behaviour to `ci`.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::Context;
@@ -184,6 +184,19 @@ impl Command {
 }
 
 fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // `--target <image platform>` (e.g. `aarch64-rpi`) asks for a flashable
+    // platform image rather than a host workspace build; that pipeline is
+    // the `image` subcommand's, so delegate the whole argument list there
+    // (PLAN.md Stage 8 / plans/PI.md P9 — `cargo xtask build --target
+    // aarch64-rpi` and `cargo xtask image --target aarch64-rpi` are the
+    // same build).
+    if args
+        .windows(2)
+        .any(|w| w[0] == "--target" && w[1] == "aarch64-rpi")
+    {
+        return run_image(ctx, args);
+    }
+
     // `--headless` builds the first-class headless configuration required
     // by AGENTS.md §17.3 / §17.5: every `userland/gui/*` crate is excluded
     // from the image so the system must remain buildable without the
@@ -804,15 +817,252 @@ fn run_deny(ctx: &Context) -> Result<(), String> {
     ctx.run("deny", cmd)
 }
 
-fn run_image(_ctx: &Context, _args: &[OsString]) -> Result<(), String> {
-    // Image builders live under `tools/mkimage` and are introduced by
-    // Stage 8 of `PLAN.md`. Refusing to silently succeed prevents Stage 0
-    // from shipping a no-op that masks the work still to come.
-    Err(
-        "image: `tools/mkimage` is delivered by Stage 8; no images can be \
-         built yet. See PLAN.md."
-            .to_string(),
+/// Environment variable naming an operator-staged Pi firmware-blob
+/// directory, the hands-free alternative to `--firmware` (air-gapped and
+/// pre-staged builds). When neither is set, `image` fetches the pinned
+/// blobs itself.
+const PI_FIRMWARE_ENV: &str = "RUSTOS_PI_FIRMWARE";
+
+/// Parsed `image` arguments. The flags mirror `tools/mkimage`'s CLI so the
+/// two entry points stay interchangeable.
+struct ImageArgs {
+    /// Operator-staged firmware directory (`--firmware` /
+    /// `$RUSTOS_PI_FIRMWARE`); `None` means fetch into the build cache.
+    firmware_dir: Option<PathBuf>,
+    out: Option<PathBuf>,
+    root_key: Option<PathBuf>,
+}
+
+/// Parse `image` arguments: `--target <name>` (required; only
+/// `aarch64-rpi` exists today), `--firmware <dir>` (or
+/// `$RUSTOS_PI_FIRMWARE`; optional — missing blobs are fetched from the
+/// manifest's pinned source otherwise), `--out <path>`,
+/// `--root-key <file>`, and `--headless`.
+fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
+    let mut target: Option<String> = None;
+    let mut firmware_dir: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut root_key: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let Some(flag) = flag.to_str() else {
+            return Err("image: arguments must be valid UTF-8".to_string());
+        };
+        match flag {
+            "--target" => {
+                target = Some(
+                    it.next()
+                        .and_then(|v| v.to_str().map(str::to_owned))
+                        .ok_or("image: --target requires a value")?,
+                );
+            }
+            "--firmware" => {
+                firmware_dir = Some(PathBuf::from(
+                    it.next().ok_or("image: --firmware requires a value")?,
+                ));
+            }
+            "--out" => {
+                out = Some(PathBuf::from(
+                    it.next().ok_or("image: --out requires a value")?,
+                ));
+            }
+            "--root-key" => {
+                root_key = Some(PathBuf::from(
+                    it.next().ok_or("image: --root-key requires a value")?,
+                ));
+            }
+            // The image carries the kernel and the root skeleton only; the
+            // desktop ships as installable userland later, so the headless
+            // image is byte-identical today. Accepted so the §17.5 headless
+            // invocation works unchanged once the contents diverge.
+            "--headless" => {}
+            other => return Err(format!("image: unknown argument {other}")),
+        }
+    }
+    let target = target.ok_or("image: --target <platform> is required (aarch64-rpi)")?;
+    if target != "aarch64-rpi" {
+        return Err(format!(
+            "image: unsupported target {target}; `aarch64-rpi` is the only \
+             image platform delivered so far (PLAN.md Stage 8 / plans/PI.md P9)"
+        ));
+    }
+    let firmware_dir =
+        firmware_dir.or_else(|| std::env::var_os(PI_FIRMWARE_ENV).map(PathBuf::from));
+    Ok(ImageArgs {
+        firmware_dir,
+        out,
+        root_key,
+    })
+}
+
+/// Fetch every pinned firmware blob missing from `cache` from the
+/// manifest's pinned HTTPS source, then prove the cache complete.
+///
+/// The blobs are third-party build inputs (AGENTS.md §19.3): each download
+/// lands beside the cache as `<name>.part` and is renamed in only after
+/// `missing_in` — the same pinned size + SHA-256 check `load_dir` applies —
+/// stops reporting it. A blob that still mismatches after its fetch is
+/// deleted and the build fails closed.
+fn fetch_missing_firmware(
+    manifest: &rustos_mkimage::firmware::FirmwareManifest,
+    cache: &Path,
+) -> Result<(), String> {
+    let missing = manifest.missing_in(cache);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cache)
+        .map_err(|e| format!("image: cannot create {}: {e}", cache.display()))?;
+    for entry in &missing {
+        let url = format!("{}/{}", manifest.source(), entry.name);
+        let part = cache.join(format!("{}.part", entry.name));
+        eprintln!("xtask: [image] fetching pinned firmware blob {url}");
+        let status = std::process::Command::new("curl")
+            .args(["--fail", "--silent", "--show-error", "--location"])
+            .args(["--proto", "=https", "--max-redirs", "4"])
+            .arg("--output")
+            .arg(&part)
+            .arg(&url)
+            .status()
+            .map_err(|e| {
+                format!(
+                    "image: cannot run curl to fetch {url}: {e}; install curl \
+                     or stage the blobs per tools/mkimage/firmware.lock and \
+                     pass --firmware <dir> (or set ${PI_FIRMWARE_ENV})"
+                )
+            })?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("image: fetching {url} failed ({status})"));
+        }
+        std::fs::rename(&part, cache.join(&entry.name))
+            .map_err(|e| format!("image: cannot stage {}: {e}", entry.name))?;
+    }
+    let still_missing = manifest.missing_in(cache);
+    if !still_missing.is_empty() {
+        for entry in &still_missing {
+            let _ = std::fs::remove_file(cache.join(&entry.name));
+        }
+        let names: Vec<&str> = still_missing.iter().map(|e| e.name.as_str()).collect();
+        return Err(format!(
+            "image: fetched firmware failed the pinned checksum gate \
+             (tools/mkimage/firmware.lock): {}",
+            names.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The root volume key for the image: read from the operator-supplied key
+/// file when given, otherwise drawn fresh from host entropy.
+fn resolve_root_key(root_key: Option<&Path>) -> Result<rustos_mkimage::VolumeKey, String> {
+    if let Some(path) = root_key {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("image: cannot read {}: {e}", path.display()))?;
+        rustos_mkimage::volume_key_from_hex(&text).map_err(|e| format!("image: {e}"))
+    } else {
+        let mut key = [0u8; rustos_mkimage::VOLUME_KEY_LEN];
+        rustos_mkimage::EntropySource::fill(&mut rustos_mkimage::HostEntropy, &mut key)
+            .map_err(|e| format!("image: host entropy unavailable: {e:?}"))?;
+        Ok(key)
+    }
+}
+
+fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let ImageArgs {
+        firmware_dir,
+        out,
+        root_key,
+    } = parse_image_args(args)?;
+
+    // 1. Build the freestanding aarch64 production kernel (PI.md P1).
+    let mut cmd = ctx.cargo();
+    cmd.args([
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "rustos-kernel",
+        "--target",
+        "aarch64-unknown-none",
+    ]);
+    ctx.run("image: kernel build (aarch64-unknown-none, release)", cmd)?;
+
+    // 2. Resolve the pinned firmware inputs — an operator-staged directory
+    //    is verified as-is; otherwise missing blobs are fetched into the
+    //    build cache — then verify them and assemble the image.
+    let manifest_path = ctx
+        .workspace_root
+        .join("tools")
+        .join("mkimage")
+        .join("firmware.lock");
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("image: cannot read {}: {e}", manifest_path.display()))?;
+    let manifest = rustos_mkimage::firmware::FirmwareManifest::parse(&manifest_text)
+        .map_err(|e| format!("image: {e}"))?;
+    let firmware_dir = if let Some(dir) = firmware_dir {
+        dir
+    } else {
+        let cache = ctx.target_dir().join("pi-firmware");
+        fetch_missing_firmware(&manifest, &cache)?;
+        cache
+    };
+    let firmware = manifest
+        .load_dir(&firmware_dir)
+        .map_err(|e| format!("image: {e}"))?;
+
+    let kernel_path = ctx
+        .target_dir()
+        .join("aarch64-unknown-none")
+        .join("release")
+        .join("rustos-kernel");
+    let kernel_elf = std::fs::read(&kernel_path).map_err(|e| {
+        format!(
+            "image: cannot read kernel ELF {}: {e}",
+            kernel_path.display()
+        )
+    })?;
+
+    let key = resolve_root_key(root_key.as_deref())?;
+
+    let built = rustos_mkimage::build_rpi_image(
+        &kernel_elf,
+        &firmware,
+        &key,
+        &mut rustos_mkimage::HostEntropy,
     )
+    .map_err(|e| format!("image: {e}"))?;
+
+    // 3. Write the image and its root volume key (owner-only) under
+    //    `images/` (§3 — built images are output, never committed).
+    let out = out.unwrap_or_else(|| {
+        ctx.workspace_root
+            .join("images")
+            .join("rustos-aarch64-rpi.img")
+    });
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("image: cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&out, &built.image)
+        .map_err(|e| format!("image: cannot write {}: {e}", out.display()))?;
+    let key_out = out.with_extension("rootkey");
+    std::fs::write(&key_out, rustos_mkimage::volume_key_to_hex(&built.root_key))
+        .map_err(|e| format!("image: cannot write {}: {e}", key_out.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_out, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("image: cannot restrict {}: {e}", key_out.display()))?;
+    }
+
+    eprintln!(
+        "xtask: [image] wrote {} ({} bytes); root volume key: {}",
+        out.display(),
+        built.image.len(),
+        key_out.display()
+    );
+    Ok(())
 }
 
 fn mdbook_available() -> bool {

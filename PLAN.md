@@ -846,7 +846,17 @@ transfer, landed in increments:
     backend driver, and the `CAP`-gated activation syscall — all Stage 8.
 - `tools/mkimage` producing:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI).
-  - `images/rustos-aarch64-rpi.img`.
+  - `images/rustos-aarch64-rpi.img` — **DONE (landed ahead of Stage 8 as
+    `plans/PI.md` P9).** `rustos-mkimage` (lib + bin) authors the image
+    in pure Rust via the one-step `cargo xtask image --target aarch64-rpi`
+    (or `build --target aarch64-rpi`): MBR, FAT32 boot partition (pinned,
+    checksummed Pi firmware inputs per `tools/mkimage/firmware.lock` —
+    fetched automatically from the manifest's pinned source when not
+    operator-staged, every download checksum-gated —
+    generated `config.txt`, flattened `kernel8.img`), and an encrypted
+    RustFS root with the §16 skeleton, both laid down by the real
+    in-tree drivers. Docs: `docs/src/install/raspberry_pi.md`. The
+    on-metal boot of the emitted image is tracked in `plans/PI.md` P9.
   - `images/rustos-riscv64.img`.
   - `images/rustos-web/` static tree.
 

@@ -113,3 +113,7 @@
 - [riscv64](./platform/riscv64.md)
 - [aarch64](./platform/aarch64.md)
 - [wasm32](./platform/wasm32.md)
+
+# Install
+
+- [Raspberry Pi 4](./install/raspberry_pi.md)

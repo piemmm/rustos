@@ -1,0 +1,30 @@
+# Pinned Raspberry Pi 4 boot-firmware inputs (AGENTS.md §19.3).
+#
+# The Pi firmware blobs are third-party redistributables (Broadcom /
+# Raspberry Pi Ltd, see `boot/LICENCE.broadcom` in the source repository)
+# and are NOT committed to this tree. `rustos-mkimage` consumes them as
+# build inputs from a caller-supplied directory and refuses — fail closed —
+# any file whose byte length or SHA-256 does not match this manifest.
+#
+# Provenance: https://github.com/raspberrypi/firmware, release 1.20240529,
+# files under `boot/`. The `source` directive below pins the upstream
+# directory: `cargo xtask image` fetches any blob missing from its cache
+# as `<source>/<name>` and verifies it against this manifest before use;
+# an operator-staged directory (`--firmware` / $RUSTOS_PI_FIRMWARE) is
+# only ever verified, never written. Updating the pin means replacing the
+# source line and every blob line below from the new release and
+# re-running the supply-chain review (AGENTS.md §19.3).
+#
+# `armstub8.bin` (the optional PSCI secondary-core stub, built from
+# https://github.com/raspberrypi/tools `armstubs/`) has no official binary
+# distribution. It is not pinned here; the boot stub parks the secondary
+# cores itself, so first boot needs no armstub. When the P5 SMP-on-metal
+# work pins a stub build, its line is added here and `config.txt` gains
+# the `armstub=armstub8.bin` knob.
+#
+# Format: one `source <https url>` directive, then
+# <name> <byte length> <sha256 hex>, one file per line.
+source https://github.com/raspberrypi/firmware/raw/1.20240529/boot
+start4.elf 2257216 451e4320cd2390c28e5c0e79e6e5a704f98fa11670ba57d840d16bcae5aeec2e
+fixup4.dat 5436 21e37b0402974a64779c23621787a37de4706877b78931c94e964db864e8565d
+bcm2711-rpi-4-b.dtb 55804 5bc13e0f663531c374cbf4645e511708e40a0774fc7771ae869c5504dc9e39b3
