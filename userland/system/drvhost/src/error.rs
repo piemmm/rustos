@@ -43,8 +43,8 @@ pub enum HostError {
     KernelKindForbidden,
     /// The caller does not hold [`rustos_abi::CapabilityId::DRV_LOAD`].
     LoadCapabilityMissing,
-    /// The configured [`crate::EntryResolver`] could not turn the verified
-    /// image payload into a driver `register` entry point.
+    /// The configured [`crate::DriverSpawner`] has no driver program for
+    /// the verified image.
     UnknownDriver,
     /// The driver's `register` entry point itself rejected the host.
     DriverRegisterFailed(DriverError),

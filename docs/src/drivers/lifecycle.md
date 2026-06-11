@@ -33,7 +33,8 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
         │
         ▼
 ┌──────────────────┐   UnknownDriver
-│ 6. resolver bind │ ──────────────────────────────────► reject (7009)
+│ 6. spawner       │ ──────────────────────────────────► reject (7009)
+│    hand-off      │
 └──────────────────┘
         │
         ▼

@@ -12,7 +12,7 @@
 //! * capability escalation refused (request widens caller's set),
 //! * in-kernel kind without `CAP_DRV_KERNEL` refused,
 //! * caller lacks `CAP_DRV_LOAD` refused,
-//! * resolver miss refused (unknown driver),
+//! * spawner miss refused (unknown driver),
 //! * driver `register()` failure refused,
 //! * zero-on-free of the manifest signature buffer on unload.
 
@@ -20,8 +20,8 @@ mod fixtures;
 
 use fixtures::{
     alternative_signing_key, build_signed_image, mock_register, pubkey_of, register_calls,
-    reset_register_calls, test_signing_key, CapturedEvent, EmptyResolver, FailingResolver,
-    MemSource, RecordingSink, SingleResolver,
+    reset_register_calls, test_signing_key, CapturedEvent, FailingSpawner, MemSource,
+    NoDriverSpawner, RecordingSink, SingleSpawner,
 };
 
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, ABI_VERSION_CURRENT};
@@ -61,14 +61,14 @@ fn happy_path_load_unload_reload() {
 
     let mut source = MemSource::new();
     source.images.insert("/d/mock".into(), img);
-    let resolver = SingleResolver;
+    let spawner = SingleSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -230,14 +230,14 @@ fn in_kernel_kind_with_cap_drv_kernel_succeeds() {
     let img = build_signed_image(&sk, DriverKind::InKernel, SYS_HASH, &[], b"");
     let mut source = MemSource::new();
     source.images.insert("/d/k".into(), img);
-    let resolver = SingleResolver;
+    let spawner = SingleSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -265,27 +265,27 @@ fn caller_without_cap_drv_load_refused() {
 }
 
 #[test]
-fn unknown_driver_refused_by_resolver() {
+fn unknown_driver_refused_by_spawner() {
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"");
     let mut source = MemSource::new();
     source.images.insert("/d/unknown".into(), img);
-    let resolver = EmptyResolver;
+    let spawner = NoDriverSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
     let mut host = Host::new(cfg);
     let err = host
         .load("/d/unknown", &full_caps())
-        .expect_err("unknown resolver refused");
+        .expect_err("unknown driver refused");
     assert_eq!(err, HostError::UnknownDriver);
     assert!(sink.ids().contains(&7009));
 }
@@ -297,14 +297,14 @@ fn driver_register_failure_refused() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"");
     let mut source = MemSource::new();
     source.images.insert("/d/bad".into(), img);
-    let resolver = FailingResolver;
+    let spawner = FailingSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -324,14 +324,14 @@ fn source_read_failure_propagates() {
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
     let source = MemSource::new(); // no images registered
-    let resolver = SingleResolver;
+    let spawner = SingleSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -362,14 +362,14 @@ fn drive(
 ) -> (Result<rustos_abi::DriverHandle, HostError>, Vec<u32>) {
     let mut source = MemSource::new();
     source.images.insert("/d/img".into(), img);
-    let resolver = SingleResolver;
+    let spawner = SingleSpawner;
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -450,17 +450,16 @@ fn register_uses_virtio_host(
     rustos_abi::DriverHandle::from_raw(0xBEEF)
 }
 
-/// Resolver that pins every manifest to a caller-supplied entry. A
-/// bespoke type is necessary because the existing `SingleResolver`
-/// hard-codes `mock_register`.
-struct PinnedResolver(rustos_drvhost::DriverEntry);
-impl rustos_drvhost::EntryResolver for PinnedResolver {
-    fn resolve(
+/// Spawner that registers every manifest in-process through a
+/// caller-supplied entry. A bespoke type is necessary because the
+/// existing `SingleSpawner` hard-codes `mock_register`.
+struct PinnedSpawner(rustos_drvhost::DriverEntry);
+impl rustos_drvhost::DriverSpawner for PinnedSpawner {
+    fn spawn_and_register(
         &self,
-        _manifest: &DriverManifest,
-        _payload: &[u8],
-    ) -> Option<rustos_drvhost::DriverEntry> {
-        Some(self.0)
+        ctx: &rustos_drvhost::SpawnContext<'_>,
+    ) -> Result<rustos_abi::DriverHandle, rustos_drvhost::SpawnRegisterError> {
+        (self.0)(ctx.host).map_err(rustos_drvhost::SpawnRegisterError::Register)
     }
 }
 
@@ -489,14 +488,14 @@ fn virtio_host_factory_default_none_yields_none() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/probe".into(), img);
-    let resolver = PinnedResolver(register_expects_no_virtio as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_expects_no_virtio as rustos_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
     };
@@ -523,7 +522,7 @@ fn virtio_host_factory_some_yields_virtio_host() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/virtio".into(), img);
-    let resolver = PinnedResolver(register_uses_virtio_host as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_uses_virtio_host as rustos_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let factory = MockVirtioFactory;
     let cfg = HostConfig {
@@ -531,7 +530,7 @@ fn virtio_host_factory_some_yields_virtio_host() {
         syscall_table_hash: SYS_HASH,
         accepted_abi_version: ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &sink,
         virtio_host_factory: Some(&factory),
     };

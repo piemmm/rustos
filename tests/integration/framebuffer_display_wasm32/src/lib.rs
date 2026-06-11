@@ -63,7 +63,9 @@ mod kernel {
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
     use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
-    use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+    use rustos_drvhost::{
+        DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
+    };
 
     use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -210,17 +212,16 @@ mod kernel {
         }
     }
 
-    /// Resolver binding every verified manifest to the framebuffer
-    /// driver's `register` entry point.
+    /// Spawner registering every verified manifest in-process through
+    /// the framebuffer driver's `register` entry point.
     struct ResolveFramebuffer;
 
-    impl EntryResolver for ResolveFramebuffer {
-        fn resolve(
+    impl DriverSpawner for ResolveFramebuffer {
+        fn spawn_and_register(
             &self,
-            _manifest: &rustos_abi::DriverManifest,
-            _payload: &[u8],
-        ) -> Option<DriverEntry> {
-            Some(fb_register as DriverEntry)
+            ctx: &SpawnContext<'_>,
+        ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+            fb_register(ctx.host).map_err(SpawnRegisterError::Register)
         }
     }
 
@@ -362,13 +363,13 @@ mod kernel {
         let mut load_caps = CapabilitySet::empty();
         load_caps.insert(CapabilityId::DRV_LOAD);
         let source = BakedSource;
-        let resolver = ResolveFramebuffer;
+        let spawner = ResolveFramebuffer;
         let mut host = Host::new(HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
             sink: &rustos_arch_wasm32::CONSOLE_SINK,
             virtio_host_factory: None,
         });

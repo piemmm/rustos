@@ -54,14 +54,16 @@ mod kernel {
 
     use alloc::vec::Vec;
     use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-    use rustos_abi::{CapabilityId, DriverManifest, Errno, IrqHandle, PortIo8};
+    use rustos_abi::{CapabilityId, DriverHandle, Errno, IrqHandle, PortIo8};
     use rustos_arch_x86_64::irq as arch_irq;
     use rustos_arch_x86_64::pio::{x86_port_io8, X86PortIo8};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
     use rustos_drv_input_ps2::Ps2Keyboard;
-    use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
+    use rustos_drvhost::{
+        DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
+    };
     use rustos_kernel::arch_wrapper::published_irq_table;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::ioapic_controller::published_typed;
@@ -168,17 +170,16 @@ mod kernel {
         }
     }
 
-    /// Resolver that binds every manifest to the real PS/2 driver entry
-    /// point, so the host's load path runs the production
-    /// `rustos_drv_input_ps2::register` capability gate.
+    /// Spawner that registers every manifest in-process through the real
+    /// PS/2 driver entry point, so the host's load path runs the
+    /// production `rustos_drv_input_ps2::register` capability gate.
     struct ResolvePs2;
-    impl EntryResolver for ResolvePs2 {
-        fn resolve(
+    impl DriverSpawner for ResolvePs2 {
+        fn spawn_and_register(
             &self,
-            _manifest: &DriverManifest,
-            _payload: &[u8],
-        ) -> Option<rustos_drvhost::DriverEntry> {
-            Some(rustos_drv_input_ps2::register as rustos_drvhost::DriverEntry)
+            ctx: &SpawnContext<'_>,
+        ) -> Result<DriverHandle, SpawnRegisterError> {
+            rustos_drv_input_ps2::register(ctx.host).map_err(SpawnRegisterError::Register)
         }
     }
 
@@ -438,13 +439,13 @@ mod kernel {
         caller.insert(CapabilityId::DRV_LOAD);
 
         let source = BakedSource;
-        let resolver = ResolvePs2;
+        let spawner = ResolvePs2;
         let cfg = HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
             sink: &SerialSink::new(),
             // The PS/2 driver consumes no virtio transport.
             virtio_host_factory: None,

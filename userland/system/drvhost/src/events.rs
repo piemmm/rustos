@@ -31,8 +31,8 @@ pub const DRIVER_LOAD_REJECTED_CAPABILITY: EventId = EventId(7_006);
 pub const DRIVER_LOAD_REJECTED_KERNEL_KIND: EventId = EventId(7_007);
 /// A driver image was rejected: caller lacks `CAP_DRV_LOAD`.
 pub const DRIVER_LOAD_REJECTED_DRV_LOAD: EventId = EventId(7_008);
-/// A driver image was rejected: resolver could not bind it to an entry point.
-pub const DRIVER_LOAD_REJECTED_RESOLVER: EventId = EventId(7_009);
+/// A driver image was rejected: the spawner has no driver program for it.
+pub const DRIVER_LOAD_REJECTED_SPAWN: EventId = EventId(7_009);
 /// A driver image was rejected: driver's own `register` entry point failed.
 pub const DRIVER_LOAD_REJECTED_REGISTER: EventId = EventId(7_010);
 /// A driver was unloaded.
@@ -55,7 +55,7 @@ mod tests {
             DRIVER_LOAD_REJECTED_CAPABILITY,
             DRIVER_LOAD_REJECTED_KERNEL_KIND,
             DRIVER_LOAD_REJECTED_DRV_LOAD,
-            DRIVER_LOAD_REJECTED_RESOLVER,
+            DRIVER_LOAD_REJECTED_SPAWN,
             DRIVER_LOAD_REJECTED_REGISTER,
             DRIVER_UNLOADED,
             DRIVER_RELOADED,
@@ -75,7 +75,7 @@ mod tests {
             DRIVER_LOAD_REJECTED_CAPABILITY.0,
             DRIVER_LOAD_REJECTED_KERNEL_KIND.0,
             DRIVER_LOAD_REJECTED_DRV_LOAD.0,
-            DRIVER_LOAD_REJECTED_RESOLVER.0,
+            DRIVER_LOAD_REJECTED_SPAWN.0,
             DRIVER_LOAD_REJECTED_REGISTER.0,
             DRIVER_UNLOADED.0,
             DRIVER_RELOADED.0,

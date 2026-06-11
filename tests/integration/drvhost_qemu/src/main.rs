@@ -33,11 +33,13 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use alloc::vec::Vec;
-    use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, DriverManifest, Errno};
+    use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, Errno};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
-    use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
+    use rustos_drvhost::{
+        DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
+    };
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
@@ -84,15 +86,15 @@ mod kernel {
         DriverHandle::from_raw(0x00C0_FFEE)
     }
 
-    /// Resolver that binds every manifest to [`mock_register`].
+    /// Spawner that registers every manifest in-process through
+    /// [`mock_register`].
     struct AlwaysOk;
-    impl EntryResolver for AlwaysOk {
-        fn resolve(
+    impl DriverSpawner for AlwaysOk {
+        fn spawn_and_register(
             &self,
-            _manifest: &DriverManifest,
-            _payload: &[u8],
-        ) -> Option<rustos_drvhost::DriverEntry> {
-            Some(mock_register as rustos_drvhost::DriverEntry)
+            ctx: &SpawnContext<'_>,
+        ) -> Result<DriverHandle, SpawnRegisterError> {
+            mock_register(ctx.host).map_err(SpawnRegisterError::Register)
         }
     }
 
@@ -109,13 +111,13 @@ mod kernel {
         caller.insert(CapabilityId::DRV_LOAD);
 
         let source = BakedSource;
-        let resolver = AlwaysOk;
+        let spawner = AlwaysOk;
         let cfg = HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
             sink: &SerialSink::new(),
             // Stage 4.D Item 0-tail: this integration runs against a
             // bumpalloc-backed kernel that has no kernel-side

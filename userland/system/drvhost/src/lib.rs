@@ -26,8 +26,9 @@
 //! 7. Reject if the manifest's requested capability set is **not a subset**
 //!    of the caller's set (`AGENTS.md` §5.2 — capabilities can be
 //!    delegated but never widened).
-//! 8. Resolve the driver's `register` entry point via the host's
-//!    [`EntryResolver`].
+//! 8. Hand the verified manifest + payload to the host's
+//!    [`DriverSpawner`], which completes the driver's registration in its
+//!    own protection domain and reports the outcome.
 //! 9. Issue a fresh [`DriverHandle`] and emit a structured log record via
 //!    [`rustos_log`].
 //!
@@ -46,8 +47,8 @@
 //!   buffers.
 //! * [`source`] — [`ImageSource`] trait abstracting file IO so the host
 //!   stays `no_std`.
-//! * [`resolver`] — [`EntryResolver`] trait that turns a verified image
-//!   payload into a driver `register` entry point.
+//! * [`spawner`] — [`DriverSpawner`] trait that completes a verified
+//!   image's registration in its own protection domain.
 //! * [`host`] — the [`Host`] state machine implementing `load` / `unload`
 //!   / `reload`.
 //!
@@ -79,15 +80,15 @@ pub mod error;
 pub mod events;
 pub mod host;
 pub mod image;
-pub mod resolver;
 pub mod source;
+pub mod spawner;
 pub mod zeroize;
 
 pub use error::HostError;
 pub use host::{Host, HostConfig, LoadedSnapshot};
 pub use image::ParsedImage;
-pub use resolver::{DriverEntry, EntryResolver};
 pub use source::ImageSource;
+pub use spawner::{DriverEntry, DriverSpawner, SpawnContext, SpawnRegisterError};
 
 // Re-export the `lib/abi` types that appear in the host's public surface
 // so callers do not need to take a transitive dependency on `rustos-abi`

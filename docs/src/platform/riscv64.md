@@ -620,8 +620,8 @@ aarch64 `input_virtio_mmio_qemu_aarch64` vertical and the MMIO analogue
 of the x86_64 PS/2 vertical. It reuses the exact `imp_mmio` bring-up
 above, then instead of a storage or network round-trip it loads the
 signed virtio-input `.rxe` and decodes a real injected key. The
-device-id (`18`, virtio-input) and the resolver binding the loaded image
-to `rustos_drv_input_virtio_input::register` are the only per-vertical
+device-id (`18`, virtio-input) and the spawner registering the loaded image
+through `rustos_drv_input_virtio_input::register` are the only per-vertical
 specifics; the `virtio_input_keypress` key-decode tail is the same shared
 `virtio_qemu_support` code the aarch64 vertical runs (`AGENTS.md` §2.2).
 

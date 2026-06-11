@@ -4,17 +4,18 @@
 //! The fixtures here build well-formed `.rxe` images on the fly so each
 //! test can exercise exactly one verification gate without re-deriving
 //! the on-wire layout. They also expose a minimal in-memory
-//! [`ImageSource`] (`MemSource`), a single-entry [`EntryResolver`]
-//! (`SingleResolver`), and a recording log [`Sink`] (`RecordingSink`)
+//! [`ImageSource`] (`MemSource`), in-process [`DriverSpawner`]
+//! implementations (`SingleSpawner`, `NoDriverSpawner`,
+//! `FailingSpawner`), and a recording log [`Sink`] (`RecordingSink`)
 //! that drive the host through its lifecycle without touching any real
 //! filesystem.
 //!
 //! These fixtures are **test-only**. They never appear in production
 //! builds (`#[cfg(test)]`-only via the `tests/` integration harness) and
-//! they intentionally hand the host a function-pointer driver — the
-//! resolver layer is the production seam at which a real `.rxe` image
-//! is dlsym'd in a freshly-spawned process; that work belongs to a
-//! later Stage and is out of scope for the Stage 4 host deliverable.
+//! they intentionally register a function-pointer driver in-process —
+//! the spawner layer is the production seam at which a real `.rxe`
+//! image is spawned into its own process and registered over IPC; that
+//! mechanism is the Stage 4.HW process-spawn increment (`PLAN.md`).
 
 #![allow(dead_code)]
 
@@ -27,7 +28,9 @@ use rustos_abi::{
     DRIVER_MANIFEST_MAGIC,
 };
 use rustos_crypto::Ed25519PublicKey;
-use rustos_drvhost::{EntryResolver, Event as LogEvent, Field, ImageSource, Sink};
+use rustos_drvhost::{
+    DriverSpawner, Event as LogEvent, Field, ImageSource, Sink, SpawnContext, SpawnRegisterError,
+};
 
 /// Build a `.rxe` image: signed manifest header + capability body +
 /// optional payload bytes.
@@ -166,39 +169,38 @@ pub fn failing_register(_host: &dyn DriverHost) -> Result<DriverHandle, DriverEr
     Err(DriverError::DeviceFault)
 }
 
-/// Resolver that binds every manifest to [`mock_register`].
-pub struct SingleResolver;
-impl EntryResolver for SingleResolver {
-    fn resolve(
+/// Spawner that registers every verified manifest in-process through
+/// [`mock_register`].
+pub struct SingleSpawner;
+impl DriverSpawner for SingleSpawner {
+    fn spawn_and_register(
         &self,
-        _manifest: &DriverManifest,
-        _payload: &[u8],
-    ) -> Option<rustos_drvhost::DriverEntry> {
-        Some(mock_register as rustos_drvhost::DriverEntry)
+        ctx: &SpawnContext<'_>,
+    ) -> Result<DriverHandle, SpawnRegisterError> {
+        mock_register(ctx.host).map_err(SpawnRegisterError::Register)
     }
 }
 
-/// Resolver that always returns `None` (unknown driver).
-pub struct EmptyResolver;
-impl EntryResolver for EmptyResolver {
-    fn resolve(
+/// Spawner that has no driver program for any manifest.
+pub struct NoDriverSpawner;
+impl DriverSpawner for NoDriverSpawner {
+    fn spawn_and_register(
         &self,
-        _manifest: &DriverManifest,
-        _payload: &[u8],
-    ) -> Option<rustos_drvhost::DriverEntry> {
-        None
+        _ctx: &SpawnContext<'_>,
+    ) -> Result<DriverHandle, SpawnRegisterError> {
+        Err(SpawnRegisterError::NoDriver)
     }
 }
 
-/// Resolver that binds every manifest to [`failing_register`].
-pub struct FailingResolver;
-impl EntryResolver for FailingResolver {
-    fn resolve(
+/// Spawner that registers every verified manifest in-process through
+/// [`failing_register`].
+pub struct FailingSpawner;
+impl DriverSpawner for FailingSpawner {
+    fn spawn_and_register(
         &self,
-        _manifest: &DriverManifest,
-        _payload: &[u8],
-    ) -> Option<rustos_drvhost::DriverEntry> {
-        Some(failing_register as rustos_drvhost::DriverEntry)
+        ctx: &SpawnContext<'_>,
+    ) -> Result<DriverHandle, SpawnRegisterError> {
+        failing_register(ctx.host).map_err(SpawnRegisterError::Register)
     }
 }
 

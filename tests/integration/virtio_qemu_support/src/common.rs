@@ -29,7 +29,7 @@ use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::driver::net::Net;
-use rustos_abi::{CapabilityId, DriverManifest, Errno};
+use rustos_abi::{CapabilityId, DriverHandle, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_fs_fat32::Fat32;
@@ -37,7 +37,9 @@ use rustos_drv_fs_rustfs::RustFs;
 use rustos_drv_input_virtio_input::VirtioInput;
 use rustos_drv_network_virtio_net::VirtioNet;
 use rustos_drv_storage_virtio_blk::VirtioBlk;
-use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+use rustos_drvhost::{
+    DriverEntry, DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
+};
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
 use rustos_net_icmp::{Client, Ipv4Address};
@@ -107,8 +109,9 @@ pub struct ScenarioConfig<'a> {
     pub trusted_pubkey: [u8; 32],
     /// SHA-256 fingerprint of the host's syscall table.
     pub syscall_table_hash: [u8; 32],
-    /// Resolver binding the verified manifest to the driver's `register`.
-    pub resolver: &'a dyn EntryResolver,
+    /// Spawner completing the verified manifest's registration through
+    /// the driver's `register`.
+    pub spawner: &'a dyn DriverSpawner,
     /// Breadcrumb logged at scenario start.
     pub start_msg: &'a str,
 }
@@ -150,7 +153,7 @@ where
         syscall_table_hash: cfg.syscall_table_hash,
         accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
         source: &source,
-        resolver: cfg.resolver,
+        spawner: cfg.spawner,
         sink: env.audit_sink(),
         virtio_host_factory: Some(factory),
     });
@@ -190,26 +193,30 @@ where
     env.succeed()
 }
 
-/// Resolver binding every verified manifest to a fixed driver entry.
+/// Spawner registering every verified manifest in-process through a
+/// fixed driver entry.
 ///
-/// Shared by both verticals of a device class so the per-class resolver
+/// Shared by both verticals of a device class so the per-class spawner
 /// is written once (`AGENTS.md` §2.2). The concrete `register` is
 /// supplied at construction.
-pub struct FixedResolver {
+pub struct FixedSpawner {
     entry: DriverEntry,
 }
 
-impl FixedResolver {
-    /// Bind every verified manifest to `entry`.
+impl FixedSpawner {
+    /// Register every verified manifest through `entry`.
     #[must_use]
     pub const fn new(entry: DriverEntry) -> Self {
         Self { entry }
     }
 }
 
-impl EntryResolver for FixedResolver {
-    fn resolve(&self, _manifest: &DriverManifest, _payload: &[u8]) -> Option<DriverEntry> {
-        Some(self.entry)
+impl DriverSpawner for FixedSpawner {
+    fn spawn_and_register(
+        &self,
+        ctx: &SpawnContext<'_>,
+    ) -> Result<DriverHandle, SpawnRegisterError> {
+        (self.entry)(ctx.host).map_err(SpawnRegisterError::Register)
     }
 }
 

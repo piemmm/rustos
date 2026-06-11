@@ -13,8 +13,8 @@
 //! [`rustos_abi::DriverManifest`]. The body that follows the header is a
 //! little-endian array of [`rustos_abi::CapabilityId`] u16 values whose
 //! length is the manifest's `capability_count` field. Everything beyond
-//! that is opaque payload (in production the ELF half of the binary; in
-//! tests, an arbitrary `&[u8]` keyed by the [`crate::EntryResolver`]).
+//! that is opaque payload (in production the program half of the binary
+//! the [`crate::DriverSpawner`] spawns; in tests, an arbitrary `&[u8]`).
 //!
 //! [`ParsedImage`] is a borrow-only view: it never copies the underlying
 //! bytes, so the caller controls the lifetime (and the wipe) of the
@@ -41,7 +41,7 @@ pub struct ParsedImage<'a> {
     /// `manifest.capability_count * 2`).
     pub capability_body: &'a [u8],
     /// Opaque trailing bytes consumed by the host's
-    /// [`crate::EntryResolver`].
+    /// [`crate::DriverSpawner`].
     pub payload: &'a [u8],
 }
 

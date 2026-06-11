@@ -20,8 +20,8 @@ use rustos_virtio::VirtioHostFactory;
 
 use crate::events;
 use crate::image::ParsedImage;
-use crate::resolver::EntryResolver;
 use crate::source::ImageSource;
+use crate::spawner::{DriverSpawner, SpawnContext, SpawnRegisterError};
 use crate::zeroize::secure_clear;
 use crate::HostError;
 
@@ -61,9 +61,9 @@ pub struct HostConfig<'h> {
     pub accepted_abi_version: u32,
     /// Storage backend supplying `.rxe` image bytes.
     pub source: &'h dyn ImageSource,
-    /// Resolver that turns a verified manifest+payload into a driver
-    /// `register` entry point.
-    pub resolver: &'h dyn EntryResolver,
+    /// Spawner that completes a verified manifest+payload's registration
+    /// in its own protection domain.
+    pub spawner: &'h dyn DriverSpawner,
     /// Sink that receives every structured-log [`Event`] the host
     /// emits.
     pub sink: &'h dyn Sink,
@@ -249,23 +249,14 @@ impl<'h> Host<'h> {
         self.check_syscall_hash(path, &parsed)?;
         self.verify_signature(path, &parsed)?;
         let requested = self.decode_and_check_caps(path, &parsed, caller_caps)?;
-        let Some(entry) = self.cfg.resolver.resolve(&parsed.manifest, parsed.payload) else {
-            self.audit_reject(
-                events::DRIVER_LOAD_REJECTED_RESOLVER,
-                path,
-                "unknown driver",
-            );
-            return Err(HostError::UnknownDriver);
-        };
-        // 9. Issue handle, register, audit.
-        let handle = self.next_handle();
-        // Construct the host view *before* calling register() so the
-        // driver sees the bitmap that is about to be installed.
+        // 8. Hand the verified image to the spawner for registration.
+        // Construct the host view *before* the hand-off so the driver
+        // sees the bitmap that is about to be installed.
         // The virtio host (if the deployment ships one) lives for
-        // exactly the duration of register(): drvhost owns the box,
-        // the view borrows a `&dyn VirtioHost` from it, and the box
-        // is dropped on fall-through (free path) or on the early
-        // return below.
+        // exactly the duration of the registration: drvhost owns the
+        // box, the view borrows a `&dyn VirtioHost` from it, and the
+        // box is dropped on fall-through (free path) or on the early
+        // returns below.
         let virtio_host_owned = self
             .cfg
             .virtio_host_factory
@@ -275,14 +266,23 @@ impl<'h> Host<'h> {
             kind: parsed.manifest.kind,
             virtio_host: virtio_host_owned.as_deref(),
         };
-        match entry(&view) {
-            Ok(_returned) => {
-                // The driver's returned handle is informational; the
+        let spawn_ctx = SpawnContext {
+            manifest: &parsed.manifest,
+            payload: parsed.payload,
+            host: &view,
+        };
+        match self.cfg.spawner.spawn_and_register(&spawn_ctx) {
+            Ok(_reported) => {
+                // The driver's reported handle is informational; the
                 // host's own freshly-minted handle is the unforgeable
                 // proof. We take the host-side handle to avoid trusting
                 // a driver that might issue a colliding value.
             }
-            Err(e) => {
+            Err(SpawnRegisterError::NoDriver) => {
+                self.audit_reject(events::DRIVER_LOAD_REJECTED_SPAWN, path, "unknown driver");
+                return Err(HostError::UnknownDriver);
+            }
+            Err(SpawnRegisterError::Register(e)) => {
                 self.audit_reject(
                     events::DRIVER_LOAD_REJECTED_REGISTER,
                     path,
@@ -295,6 +295,9 @@ impl<'h> Host<'h> {
                 return Err(HostError::DriverRegisterFailed(e));
             }
         }
+        // 9. Issue the handle only after a successful registration, so a
+        // refused load never consumes an identifier.
+        let handle = self.next_handle();
         // Falling through, the view and the boxed virtio host are
         // both dropped at the end of this function: the view borrow
         // ends first (lexical order, view declared after the box),
@@ -529,7 +532,7 @@ fn event_message(id: EventId) -> &'static str {
         x if x == events::DRIVER_LOAD_REJECTED_DRV_LOAD => {
             "driver load rejected: missing CAP_DRV_LOAD"
         }
-        x if x == events::DRIVER_LOAD_REJECTED_RESOLVER => "driver load rejected: unknown driver",
+        x if x == events::DRIVER_LOAD_REJECTED_SPAWN => "driver load rejected: unknown driver",
         x if x == events::DRIVER_LOAD_REJECTED_REGISTER => "driver load rejected: register()",
         _ => "drvhost event",
     }

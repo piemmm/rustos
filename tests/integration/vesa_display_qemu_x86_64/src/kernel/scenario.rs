@@ -21,7 +21,9 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_display_vesa::{
     register as vesa_register, VesaFramebuffer, VBE_MODE_INFO_BLOCK_LEN,
 };
-use rustos_drvhost::{DriverEntry, EntryResolver, Host, HostConfig, ImageSource};
+use rustos_drvhost::{
+    DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
+};
 use rustos_itest_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
 use rustos_kernel::SERIAL_SINK;
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
@@ -167,17 +169,16 @@ impl ImageSource for BakedSource {
     }
 }
 
-/// Resolver binding every verified manifest to the vesa driver's
-/// `register` entry point.
+/// Spawner registering every verified manifest in-process through the
+/// vesa driver's `register` entry point.
 struct ResolveVesa;
 
-impl EntryResolver for ResolveVesa {
-    fn resolve(
+impl DriverSpawner for ResolveVesa {
+    fn spawn_and_register(
         &self,
-        _manifest: &rustos_abi::DriverManifest,
-        _payload: &[u8],
-    ) -> Option<DriverEntry> {
-        Some(vesa_register as DriverEntry)
+        ctx: &SpawnContext<'_>,
+    ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+        vesa_register(ctx.host).map_err(SpawnRegisterError::Register)
     }
 }
 
@@ -342,13 +343,13 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     let mut load_caps = CapabilitySet::empty();
     load_caps.insert(CapabilityId::DRV_LOAD);
     let source = BakedSource;
-    let resolver = ResolveVesa;
+    let spawner = ResolveVesa;
     let mut host = Host::new(HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYSCALL_TABLE_HASH,
         accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
         source: &source,
-        resolver: &resolver,
+        spawner: &spawner,
         sink: &SERIAL_SINK,
         virtio_host_factory: None,
     });

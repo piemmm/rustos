@@ -362,15 +362,16 @@ ps2/virtio wake-ups (polled cooperative shim today), packed virtqueues
 (virtio 1.1 §2.7 — Stage 5 follow-up), the riscv64 virtio QEMU verticals not
 runnable in this environment, and the Stage 4.D acceptance gate.
 
-**Deferred mechanism (delivered by Stage 4.HW):** the drvhost
-`EntryResolver` (`userland/system/drvhost/src/resolver.rs`) currently binds
-a verified, signature-checked manifest to a `register` function pointer
-that is **compiled into the image** — so every loadable driver today is one
-the build linked in. The real path — spawn the verified `.rxe` from
-`/System/Drivers/` into its own address space via
-`kernel/mem::build_process_image` and resolve `register()` over IPC — is
-the first Stage 4.HW increment, which deletes the in-image resolver in the
-same change (§2.14).
+**Deferred mechanism (delivered by Stage 4.HW):** drvhost hands every
+verified, signature-checked image to its `DriverSpawner` seam
+(`userland/system/drvhost/src/spawner.rs`), which completes the driver's
+registration in its own protection domain and reports the outcome — the
+host never holds an entry pointer into the image (the former in-image
+`EntryResolver` is deleted). The production spawner — spawn the verified
+`.rxe` payload from `/System/Drivers/` into its own address space via
+`kernel/mem::build_process_image` and complete `register()` over IPC — is
+the remaining half of the first Stage 4.HW increment; today's deployments
+and QEMU verticals register in-process through the seam.
 
 ---
 
@@ -429,8 +430,8 @@ device list.
 - Update `docs/src/drivers/overview.md` and `docs/src/abi/` for the
   hardware-tree type and the `devmgr` service.
 
-**Status: planned — reprioritised as the next stage of work**, ahead of the
-remaining `plans/PI.md` Arc-C metal items (P8 binds the EMMC2 driver
+**Status: in progress — reprioritised as the next stage of work**, ahead of
+the remaining `plans/PI.md` Arc-C metal items (P8 binds the EMMC2 driver
 through `devmgr`, so it depends on this stage; current direction lives in
 `.junie/next-pi-prompt.md`). The prerequisites the drvhost resolver
 deferral was waiting on have landed: the `rxe` loader
@@ -438,11 +439,21 @@ deferral was waiting on have landed: the `rxe` loader
 `EnterUser` HAL primitive on all three native ports, live syscall/IPC
 dispatch, and `lib/abi/src/hwtree.rs` with aarch64 FDT discovery. Delivery
 order (one fully-gated increment each):
-1. **drvhost process spawn** — replace the in-image `EntryResolver` with
-   verified `.rxe` from `/System/Drivers/` → `build_process_image` → spawn
-   → `register()` over IPC, reusing the existing verification half
-   (signature, ABI version + syscall hashes, `CAP_DRV_LOAD` /
-   `CAP_DRV_KERNEL`) as-is and deleting the in-image resolver (§2.14).
+1. **drvhost process spawn** — the host-side half is done: the in-image
+   `EntryResolver` is deleted and `Host` hands the verified manifest +
+   payload to the `DriverSpawner` seam
+   (`userland/system/drvhost/src/spawner.rs`), which completes the
+   registration and returns the outcome — no entry pointer crosses back
+   into the host; the verification half (signature, ABI version + syscall
+   hashes, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) is unchanged. Remaining: the
+   kernel-side production spawner — verified `.rxe` from
+   `/System/Drivers/` → `build_process_image` → spawn (`ProcessSpawn`
+   shape) → `register()` handshake over IPC (a versioned `lib/abi` reply
+   record, a `lib/rt` `ipc_send` wrapper, the reply endpoint id handed to
+   the child via its startup args) — proven by a `-M virt` QEMU vertical
+   spawning a driver-stub program; in-process `DriverSpawner` impls remain
+   only in tests/verticals until the `DriverHost` surface (DMA, MMIO) is
+   reachable over IPC.
 2. **Bind table** — add the match-key bind table to `DriverManifest`
    (`lib/abi/src/manifest.rs`) in place (`abi-v1` is unfrozen, §2.13) and
    regenerate the C header.

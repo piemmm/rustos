@@ -11,16 +11,16 @@ the universal `CAP_DRV_LOAD`.
 ## Public surface
 
 ```rust
-use rustos_drvhost::{Host, HostConfig, HostError, ImageSource, EntryResolver};
+use rustos_drvhost::{Host, HostConfig, HostError, ImageSource, DriverSpawner};
 use rustos_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
 
 let cfg = HostConfig {
     trusted_signers: &[/* Ed25519PublicKey ... */],
     syscall_table_hash: [/* SHA-256 of the kernel's syscall table */],
     accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
-    source: &my_source,     // impl ImageSource
-    resolver: &my_resolver, // impl EntryResolver
-    sink: &my_audit_sink,   // impl rustos_log::Sink
+    source: &my_source,   // impl ImageSource
+    spawner: &my_spawner, // impl DriverSpawner
+    sink: &my_audit_sink, // impl rustos_log::Sink
     virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
 };
 let mut host = Host::new(cfg);
@@ -61,18 +61,22 @@ opaque `&str` chosen by the caller; the host stores it verbatim so that
 `reload(handle)` can re-fetch the same image without re-deriving its
 location.
 
-### Entry resolver
+### Driver spawner
 
-`EntryResolver::resolve(manifest, payload) -> Option<DriverEntry>` is
-the seam at which a verified manifest becomes an executable
-`register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError>`
-function pointer. In production this resolver loads the image into a
-fresh process and `dlsym`s the `register` symbol; in tests it returns
-a Rust function pointer keyed on whatever subset of the manifest the
-test cares about.
+`DriverSpawner::spawn_and_register(ctx) -> Result<DriverHandle,
+SpawnRegisterError>` is the seam at which a verified manifest's
+registration is completed in its own protection domain. The
+`SpawnContext` carries the verified manifest, the image payload, and
+the granted-capability `DriverHost` view. The production
+implementation (`PLAN.md` Stage 4.HW) spawns the payload into a fresh
+process (`kernel/mem::build_process_image` → spawn) and completes the
+`register()` handshake over IPC; tests and QEMU verticals register a
+known entry point in-process through `ctx.host`. The seam returns the
+*outcome* of registration rather than an entry point, so the host
+never holds a pointer into the driver image.
 
-The resolver is *only* invoked after every other verification gate has
-cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving resolver
+The spawner is *only* invoked after every other verification gate has
+cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving spawner
 cannot widen the host's authority.
 
 ### Virtio host factory
@@ -135,7 +139,7 @@ stable `EventId` from `rustos_drvhost::events`:
 | `7006`    | load rejected — requested capabilities exceed caller |
 | `7007`    | load rejected — `InKernel` without `CAP_DRV_KERNEL`  |
 | `7008`    | load rejected — caller lacks `CAP_DRV_LOAD`          |
-| `7009`    | load rejected — resolver could not bind manifest     |
+| `7009`    | load rejected — spawner has no driver for manifest   |
 | `7010`    | load rejected — driver `register()` returned an error |
 | `7020`    | driver unloaded                                      |
 | `7021`    | driver reloaded                                      |

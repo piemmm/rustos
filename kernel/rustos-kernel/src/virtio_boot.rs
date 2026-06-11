@@ -25,7 +25,7 @@ use rustos_abi::driver::virtio_pci::VirtioPciBus;
 use rustos_abi::{IrqHandle, MsiMessage};
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_virtio::PciTransport;
-use rustos_drvhost::{EntryResolver, Host, HostConfig, ImageSource};
+use rustos_drvhost::{DriverSpawner, Host, HostConfig, ImageSource};
 use rustos_kernel_irq::{IrqTable, IrqWaiter};
 use rustos_kernel_mem::{FrameAllocator, MmioMap, PageTable, PhysMap, VirtAddr};
 use rustos_kernel_sec::captable::TaskCapabilities;
@@ -90,8 +90,8 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
     pub accepted_abi_version: u32,
     /// Storage backend supplying `.rxe` image bytes.
     pub source: &'k dyn ImageSource,
-    /// Resolver turning a verified manifest into a `register` entry.
-    pub resolver: &'k dyn EntryResolver,
+    /// Spawner completing a verified manifest's registration.
+    pub spawner: &'k dyn DriverSpawner,
 }
 
 /// Provision the virtio-PCI device described by `config`, assemble a
@@ -137,7 +137,7 @@ where
         syscall_table_hash,
         accepted_abi_version,
         source,
-        resolver,
+        spawner,
     } = config;
 
     let transport = {
@@ -168,7 +168,7 @@ where
         syscall_table_hash,
         accepted_abi_version,
         source,
-        resolver,
+        spawner,
         sink: audit,
         virtio_host_factory: Some(&factory),
     });
@@ -197,7 +197,7 @@ mod tests {
     };
     use rustos_caps::CapabilitySet;
     use rustos_drv_bus_virtio::transport_pci::common;
-    use rustos_drvhost::{DriverEntry, EntryResolver, ImageSource};
+    use rustos_drvhost::{DriverSpawner, ImageSource, SpawnContext, SpawnRegisterError};
     use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
     use rustos_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
@@ -349,11 +349,15 @@ mod tests {
         }
     }
 
-    /// Resolver binding every manifest to [`virtio_register`].
+    /// Spawner registering every verified manifest in-process through
+    /// [`virtio_register`].
     struct ToVirtioRegister;
-    impl EntryResolver for ToVirtioRegister {
-        fn resolve(&self, _manifest: &DriverManifest, _payload: &[u8]) -> Option<DriverEntry> {
-            Some(virtio_register as DriverEntry)
+    impl DriverSpawner for ToVirtioRegister {
+        fn spawn_and_register(
+            &self,
+            ctx: &SpawnContext<'_>,
+        ) -> Result<DriverHandle, SpawnRegisterError> {
+            virtio_register(ctx.host).map_err(SpawnRegisterError::Register)
         }
     }
 
@@ -455,7 +459,7 @@ mod tests {
         let syscall_hash = [0x5Au8; 32];
         let image = build_signed_image(&signing_key, syscall_hash, &[CapabilityId::MEM_DMA]);
         let source = OneImage { image };
-        let resolver = ToVirtioRegister;
+        let spawner = ToVirtioRegister;
 
         let bus = SimBus::new(alloc::vec![
             dev(0x8086, 0x29C0, 0x0000_0000),
@@ -482,7 +486,7 @@ mod tests {
             syscall_table_hash: syscall_hash,
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
         };
 
         let mut caller_caps = CapabilitySet::empty();
@@ -534,7 +538,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&SEED);
         let trusted = [pubkey_of(&signing_key)];
         let source = OneImage { image: Vec::new() };
-        let resolver = ToVirtioRegister;
+        let spawner = ToVirtioRegister;
 
         // Bus with no virtio function present.
         let bus = SimBus::new(alloc::vec![dev(0x8086, 0x29C0, 0)]);
@@ -559,7 +563,7 @@ mod tests {
             syscall_table_hash: [0x5Au8; 32],
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
         };
 
         let err = provision_and_run(config, HostPageTable::new, |_host, _t| ())
@@ -591,7 +595,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&SEED);
         let trusted = [pubkey_of(&signing_key)];
         let source = OneImage { image: Vec::new() };
-        let resolver = ToVirtioRegister;
+        let spawner = ToVirtioRegister;
 
         // The device is present, but its MSI-X routing is refused.
         let mut bus = SimBus::new(alloc::vec![
@@ -620,7 +624,7 @@ mod tests {
             syscall_table_hash: [0x5Au8; 32],
             accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
             source: &source,
-            resolver: &resolver,
+            spawner: &spawner,
         };
 
         let err = provision_and_run(config, HostPageTable::new, |_host, _t| ())

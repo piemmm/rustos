@@ -83,7 +83,7 @@ fn main() {
     for c in caps {
         image.extend_from_slice(&c.to_le_bytes());
     }
-    // No opaque payload bytes are needed: the resolver in the bin
+    // No opaque payload bytes are needed: the spawner in the bin
     // returns its single registered entry regardless of payload
     // content.
 
