@@ -2,10 +2,11 @@
 //!
 //! [`MockSdhci`] is a register-level model of an SDHCI controller plus a
 //! small backing card: it processes a written command, populates the
-//! response registers, and feeds the buffer data port exactly as the
-//! standard register block does. The [`Emmc2`] command/response and
-//! block-transfer state machine is proven against it host-side (`AGENTS.md`
-//! §2.2 — QEMU has no Pi EMMC2 model, `plans/PI.md` §0.4).
+//! response registers, and moves data through the buffer data port in
+//! both directions exactly as the standard register block does. The
+//! [`Emmc2`] command/response and block-transfer state machine is proven
+//! against it host-side (`AGENTS.md` §2.2 — QEMU has no Pi EMMC2 model,
+//! `plans/PI.md` §0.4).
 //!
 //! [`MockMapper`] / [`MockHost`] cover the `wiring` capability gate; the
 //! full register chain is proven through [`MockSdhci`], not a RAM-backed
@@ -55,11 +56,14 @@ struct MockSdhci {
     acmd41_ready_after: u32,
     acmd41_count: u32,
 
-    // PIO read state.
+    // PIO transfer state.
     store: [u8; STORE_BYTES],
     read_start: usize,
     read_cursor: usize,
     read_end: usize,
+    write_start: usize,
+    write_cursor: usize,
+    write_end: usize,
 
     // Fault injection.
     error_on_index: Option<u8>,
@@ -86,6 +90,9 @@ impl MockSdhci {
             read_start: 0,
             read_cursor: 0,
             read_end: 0,
+            write_start: 0,
+            write_cursor: 0,
+            write_end: 0,
             error_on_index: None,
             stall: false,
         }
@@ -141,6 +148,27 @@ impl MockSdhci {
         value
     }
 
+    /// Accept a data-port word into the backing store, re-asserting
+    /// `WRITE_RDY` at each block boundary and `DATA_DONE` when the
+    /// transfer completes — the behaviour the real controller drives.
+    fn accept_data_word(&mut self, value: u32) {
+        if self.write_cursor >= self.write_end {
+            // A data-port write outside an active transfer is dropped,
+            // as the real controller's buffer logic does.
+            return;
+        }
+        let off = self.write_cursor;
+        self.store[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        self.write_cursor += 4;
+        if (self.write_cursor - self.write_start) % BLOCK_SIZE as usize == 0 {
+            if self.write_cursor < self.write_end {
+                self.interrupt |= regs::INT_WRITE_RDY;
+            } else {
+                self.interrupt |= regs::INT_DATA_DONE;
+            }
+        }
+    }
+
     fn process_command(&mut self, cmdtm: u32) {
         let index = ((cmdtm >> regs::CMD_INDEX_SHIFT) & 0x3F) as u8;
 
@@ -187,6 +215,15 @@ impl MockSdhci {
                 self.resp[0] = 0;
                 self.interrupt |= regs::INT_READ_RDY;
             }
+            24 | 25 => {
+                let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
+                let start = self.arg as usize * BLOCK_SIZE as usize;
+                self.write_start = start;
+                self.write_cursor = start;
+                self.write_end = start + block_count * BLOCK_SIZE as usize;
+                self.resp[0] = 0;
+                self.interrupt |= regs::INT_WRITE_RDY;
+            }
             _ => {}
         }
         self.interrupt |= regs::INT_CMD_DONE;
@@ -227,6 +264,7 @@ impl SdhciHost for MockSdhci {
             regs::REG_ARG1 => self.arg = value,
             regs::REG_BLKSIZECNT => self.blksizecnt = value,
             regs::REG_CMDTM => self.process_command(value),
+            regs::REG_DATA => self.accept_data_word(value),
             _ => {}
         }
         Ok(())
@@ -345,10 +383,89 @@ fn stalled_controller_times_out_closed() {
 }
 
 #[test]
-fn write_path_is_staged_read_only() {
+fn write_single_block_persists_to_card() {
     let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
+    let payload = MockSdhci::expected_block(0x40);
+    dev.write_blocks(3, &payload).expect("write");
+
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    dev.read_blocks(3, &mut buf).expect("read back");
+    assert_eq!(buf.as_slice(), payload.as_slice());
+}
+
+#[test]
+fn write_multiple_blocks_persist_contiguously() {
+    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
+    let bs = BLOCK_SIZE as usize;
+    let mut payload = MockSdhci::expected_block(0x10);
+    payload.extend_from_slice(&MockSdhci::expected_block(0x50));
+    payload.extend_from_slice(&MockSdhci::expected_block(0x90));
+    dev.write_blocks(1, &payload).expect("write");
+
+    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
+    dev.read_blocks(1, &mut buf).expect("read back");
+    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
+    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
+    assert_eq!(
+        &buf[2 * bs..3 * bs],
+        MockSdhci::expected_block(0x90).as_slice()
+    );
+}
+
+#[test]
+fn write_leaves_neighbouring_blocks_untouched() {
+    let mut mock = MockSdhci::healthy(7);
+    mock.fill_block(2, 0x20);
+    mock.fill_block(4, 0x60);
+    let mut dev = Emmc2::open(mock).expect("identification");
+    dev.write_blocks(3, &MockSdhci::expected_block(0xA0))
+        .expect("write");
+
+    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
+    dev.read_blocks(2, &mut buf).expect("read back");
+    let bs = BLOCK_SIZE as usize;
+    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x20).as_slice());
+    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0xA0).as_slice());
+    assert_eq!(
+        &buf[2 * bs..3 * bs],
+        MockSdhci::expected_block(0x60).as_slice()
+    );
+}
+
+#[test]
+fn write_rejects_short_and_misaligned_buffers() {
+    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
+    let empty: [u8; 0] = [];
+    assert_eq!(
+        dev.write_blocks(0, &empty),
+        Err(DriverError::BufferTooSmall)
+    );
+    let partial = [0u8; 200];
+    assert_eq!(
+        dev.write_blocks(0, &partial),
+        Err(DriverError::BufferTooSmall)
+    );
+}
+
+#[test]
+fn write_rejects_out_of_range_lba() {
+    let mut dev = Emmc2::open(MockSdhci::healthy(0)).expect("identification");
+    // c_size 0 → 1024 blocks; LBA 1024 is one past the end.
     let payload = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::Unsupported));
+    assert_eq!(
+        dev.write_blocks(1024, &payload),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn write_command_error_fails_closed() {
+    let mut mock = MockSdhci::healthy(7);
+    // Inject an error response on the single-block write command.
+    mock.error_on_index = Some(24);
+    let mut dev = Emmc2::open(mock).expect("identification");
+    let payload = [0u8; BLOCK_SIZE as usize];
+    assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
 }
 
 // --- `wiring` capability gate ---------------------------------------------

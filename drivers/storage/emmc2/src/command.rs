@@ -1,7 +1,7 @@
 //! SD-protocol command set, response shapes, and CSD decoding.
 //!
-//! These types describe the SD commands the read-path bring-up issues and
-//! the response register layout the SDHCI controller exposes. The block
+//! These types describe the SD commands the driver issues and the
+//! response register layout the SDHCI controller exposes. The block
 //! geometry the driver reports is derived here from the card's CSD, never
 //! assumed (`AGENTS.md` §18.5 / §2.16).
 
@@ -74,8 +74,9 @@ pub struct SdCommand {
     pub index: u8,
     /// Expected response shape.
     pub response: ResponseKind,
-    /// `true` when the command reads data on the DAT lines.
-    pub reads_data: bool,
+    /// `true` when the command transfers data on the DAT lines (the
+    /// direction is carried by the `CMDTM` transfer-mode half).
+    pub transfers_data: bool,
 }
 
 impl SdCommand {
@@ -83,15 +84,15 @@ impl SdCommand {
         Self {
             index,
             response,
-            reads_data: false,
+            transfers_data: false,
         }
     }
 
-    const fn data_read(index: u8, response: ResponseKind) -> Self {
+    const fn data(index: u8, response: ResponseKind) -> Self {
         Self {
             index,
             response,
-            reads_data: true,
+            transfers_data: true,
         }
     }
 
@@ -99,7 +100,7 @@ impl SdCommand {
     /// command, OR-ed with the response-class check bits.
     pub(crate) const fn cmd_word(self) -> u32 {
         let mut word = ((self.index as u32) << regs::CMD_INDEX_SHIFT) | self.response.cmd_flags();
-        if self.reads_data {
+        if self.transfers_data {
             word |= regs::CMD_IS_DATA;
         }
         word
@@ -121,9 +122,13 @@ pub const SEND_CSD: SdCommand = SdCommand::new(9, ResponseKind::Long);
 /// `CMD16` — `SET_BLOCKLEN`: set the block length (R1).
 pub const SET_BLOCKLEN: SdCommand = SdCommand::new(16, ResponseKind::Short);
 /// `CMD17` — `READ_SINGLE_BLOCK` (R1, reads data).
-pub const READ_SINGLE_BLOCK: SdCommand = SdCommand::data_read(17, ResponseKind::Short);
+pub const READ_SINGLE_BLOCK: SdCommand = SdCommand::data(17, ResponseKind::Short);
 /// `CMD18` — `READ_MULTIPLE_BLOCK` (R1, reads data).
-pub const READ_MULTIPLE_BLOCK: SdCommand = SdCommand::data_read(18, ResponseKind::Short);
+pub const READ_MULTIPLE_BLOCK: SdCommand = SdCommand::data(18, ResponseKind::Short);
+/// `CMD24` — `WRITE_BLOCK` (R1, writes data).
+pub const WRITE_BLOCK: SdCommand = SdCommand::data(24, ResponseKind::Short);
+/// `CMD25` — `WRITE_MULTIPLE_BLOCK` (R1, writes data).
+pub const WRITE_MULTIPLE_BLOCK: SdCommand = SdCommand::data(25, ResponseKind::Short);
 /// `CMD55` — `APP_CMD`: the next command is an application command (R1).
 pub const APP_CMD: SdCommand = SdCommand::new(55, ResponseKind::Short);
 /// `ACMD41` — `SD_SEND_OP_COND`: negotiate the operating conditions (R3).

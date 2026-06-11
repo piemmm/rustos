@@ -2,13 +2,14 @@
 
 `plans/PI.md` P8 deliverable. Implements `rustos_abi::driver::block::Block`
 for the Raspberry Pi 4 (BCM2711) EMMC2 controller, an Arasan /
-SDHCI-5.1 SD host. The transfer path is programmed-I/O (PIO): the card is
-read one 512-byte block at a time through the SDHCI buffer data port, so
-the read path needs no DMA capability.
+SDHCI-5.1 SD host. The transfer path is programmed-I/O (PIO): blocks move
+one 512-byte block at a time through the SDHCI buffer data port in both
+directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), so neither
+path needs a DMA capability.
 
-**Stability tier:** `experimental`. The read path is complete; the write
-path is the staged remainder of P8 (`Block::write_blocks` returns
-`DriverError::Unsupported` until it lands).
+**Stability tier:** `experimental`. The read and write paths are both
+complete and host-tested; metal acceptance on a real Pi 4 is the
+remaining P8 item.
 
 ## Layered seam
 
@@ -47,7 +48,7 @@ rather than mis-addressed (`AGENTS.md` §5.4).
 
 | Device                | Board   | Status                              |
 |-----------------------|---------|-------------------------------------|
-| `brcm,bcm2711-emmc2`  | Pi 4    | read path (host-tested); metal pending |
+| `brcm,bcm2711-emmc2`  | Pi 4    | read + write paths (host-tested); metal pending |
 
 The aarch64 `FdtDiscovery` walk emits the `brcm,bcm2711-emmc2` node into
 `rustos_abi::hwtree` (Storage class, translated MMIO window) from a
@@ -79,10 +80,13 @@ budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
 - `CMDTM` command-word encoding and CSD-v2 capacity decode (`command`).
 - Full identification and reported geometry over `MockSdhci`.
 - Single-block and multi-block reads returning the card's data.
-- Range / shape validation (`BufferTooSmall`, `LengthOutOfRange`).
+- Single-block and multi-block writes read back through the same mock
+  card, with neighbouring blocks proven untouched.
+- Range / shape validation (`BufferTooSmall`, `LengthOutOfRange`) on
+  both the read and write paths.
 - Byte-addressed, pre-v2, and CSD-v1 cards rejected `Unsupported`.
-- Command-error and stalled-controller fail-closed (`DeviceFault`).
-- Staged read-only write (`Unsupported`).
+- Command-error (read and write) and stalled-controller fail-closed
+  (`DeviceFault`).
 - The `wiring` capability / mapper gate.
 
 ## Metal acceptance (pending hardware)

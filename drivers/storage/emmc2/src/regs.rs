@@ -2,9 +2,8 @@
 //!
 //! Byte offsets and bit positions follow the SD Host Controller Simplified
 //! Specification (v3.00) standard register block, which the Pi 4 EMMC2
-//! controller implements. Only the registers the read-path bring-up
-//! drives are named; an unused register is not declared (`AGENTS.md`
-//! §2.3).
+//! controller implements. Only the registers the driver drives are
+//! named; an unused register is not declared (`AGENTS.md` §2.3).
 
 /// SDHCI standard register block length, in bytes. The Pi 4 device tree
 /// advertises a `0x100`-byte window for the `brcm,bcm2711-emmc2` node;
@@ -70,6 +69,8 @@ pub const CONTROL1_TIMEOUT_SHIFT: u32 = 16;
 pub const INT_CMD_DONE: u32 = 1 << 0;
 /// Data transfer complete.
 pub const INT_DATA_DONE: u32 = 1 << 1;
+/// Buffer write ready: the data port can accept a block.
+pub const INT_WRITE_RDY: u32 = 1 << 4;
 /// Buffer read ready: a block is available at the data port.
 pub const INT_READ_RDY: u32 = 1 << 5;
 /// An error interrupt is asserted; the error half `[31:16]` is set.
@@ -108,7 +109,8 @@ pub const RESP_48_BUSY: u32 = 0b11;
 
 /// Block-count-enable (multi-block transfers).
 pub const TM_BLKCNT_EN: u32 = 1 << 1;
-/// Auto-CMD12 enable (issue `STOP_TRANSMISSION` after a multi-block read).
+/// Auto-CMD12 enable (issue `STOP_TRANSMISSION` after a multi-block
+/// transfer).
 pub const TM_AUTO_CMD12: u32 = 0b01 << 2;
 /// Data direction: card-to-host (read).
 pub const TM_DAT_DIR_READ: u32 = 1 << 4;

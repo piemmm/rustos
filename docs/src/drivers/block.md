@@ -42,7 +42,7 @@ payload.
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read path host-tested; metal pending     |
+| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write paths host-tested; metal pending |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -53,10 +53,10 @@ DMA, IRQ routing, bus-handle hand-off).
 `rustos-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
 controller — an Arasan / SDHCI-5.1 SD host — and exposes the card
 through `Block`. The transfer path is programmed-I/O: the SDHCI
-command/response and block-transfer state machine reads one 512-byte
-block at a time through the buffer data port, so the read path needs no
-DMA capability (`plans/PI.md` P8 — read path first; the write path is
-the staged remainder).
+command/response and block-transfer state machine moves one 512-byte
+block at a time through the buffer data port in both directions
+(`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), so neither path needs
+a DMA capability (`plans/PI.md` P8).
 
 The state machine (`Emmc2`) is written against the `SdhciHost` register
 seam, so it is proven host-side against a register-level mock controller

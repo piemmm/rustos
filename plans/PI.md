@@ -1726,7 +1726,7 @@ carries the same log (`video_console=false`).
 Pi 4 with the UART fallback proven by the detached-display boot —
 pending metal; everything host-provable is landed and tested — done.
 
-### P8 — SD-card storage (EMMC2) `[~]` (read path code-complete; metal pending)
+### P8 — SD-card storage (EMMC2) `[~]` (read + write paths code-complete; metal pending)
 
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
 `.rxe` process-spawn path) — all landed: the aarch64 walk emits a
@@ -1734,7 +1734,7 @@ pending metal; everything host-provable is landed and tested — done.
 Pi-shaped tree with no per-device code, and `devmgr` binds the driver
 against its `compatible` string (§18.3).
 
-**Landed — the read-path driver.** `drivers/storage/emmc2`
+**Landed — the PIO block driver (read + write).** `drivers/storage/emmc2`
 (`rustos-drv-storage-emmc2`) is an Arasan / SDHCI-5.1 PIO block driver
 implementing `rustos_abi::driver::block::Block`:
 
@@ -1750,34 +1750,32 @@ implementing `rustos_abi::driver::block::Block`:
   derives the geometry from the card CSD (`command::geometry_from_csd`,
   CSD v2). Only high-capacity, block-addressed (SDHC/SDXC) cards are
   supported; a byte-addressed, pre-v2, or CSD-v1 card is rejected
-  fail-closed (`Unsupported`, §5.4). The read path is `CMD17`/`CMD18` PIO
-  through the buffer data port — no DMA capability needed. Every
-  controller wait is poll-budget-bounded and fails closed
-  (`DeviceFault`) rather than spinning (§2.1 / §24.4).
+  fail-closed (`Unsupported`, §5.4). Transfers are PIO through the
+  buffer data port in both directions — `CMD17`/`CMD18` reads,
+  `CMD24`/`CMD25` writes — so no DMA capability is needed. Every
+  controller wait (including the write buffer-ready wait) is
+  poll-budget-bounded and fails closed (`DeviceFault`) rather than
+  spinning (§2.1 / §24.4).
 - `wiring::open_discovered` is the host bring-up seam: it checks
   `CAP_MMIO_MAP`, maps the discovered register window through the host's
   `MmioMapper` (never a `const` base), and opens the engine over it.
-- The write path is deliberately staged (`Block::write_blocks` returns
-  `Unsupported`); read first matches the "mount the root the installer
-  laid down" milestone.
-- 18 host tests cover `CMDTM`/CSD decode, full identification + geometry,
-  single/multi-block reads, shape/range rejection, the unsupported-card
-  paths, command-error and stalled-controller fail-closed, the staged
-  read-only write, and the `wiring` capability gate. Docs:
-  `docs/src/drivers/block.md`. **No QEMU vertical, deliberately** — QEMU
-  models no Pi EMMC2 controller (§0.4); the emulation artefact is the
-  host state-machine test.
+- 23 host tests cover `CMDTM`/CSD decode, full identification + geometry,
+  single/multi-block reads and writes (writes read back through the same
+  mock card, neighbouring blocks proven untouched), shape/range rejection
+  on both paths, the unsupported-card paths, command-error (read and
+  write) and stalled-controller fail-closed, and the `wiring` capability
+  gate. Docs: `docs/src/drivers/block.md`. **No QEMU vertical,
+  deliberately** — QEMU models no Pi EMMC2 controller (§0.4); the
+  emulation artefact is the host state-machine test.
 
-**Remaining — metal acceptance + the write path.** A metal checklist
-(boot the P9 image on a real Pi 4 → read the FAT boot partition and the
-RustFS root from the card → capture the UART log as the acceptance
-artefact); then the SDHCI write path (`CMD24`/`CMD25` PIO over the same
-seam) lands as the next increment.
+**Remaining — metal acceptance.** A metal checklist (boot the P9 image on
+a real Pi 4 → read the FAT boot partition and the RustFS root from the
+card → capture the UART log as the acceptance artefact).
 
 **Done when:** host unit tests cover the SDHCI command/response + block
-transfer state machine against a mock host — done; a metal checklist
-demonstrates reading the FAT boot partition and the RustFS root from a
-real card — pending hardware.
+transfer state machine (both transfer directions) against a mock host —
+done; a metal checklist demonstrates reading the FAT boot partition and
+the RustFS root from a real card — pending hardware.
 
 ### P9 — Bootable SD image (`tools/mkimage`) `[~]`
 

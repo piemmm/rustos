@@ -3,10 +3,11 @@
 //! The Pi 4's EMMC2 controller is an Arasan / SDHCI-5.1 SD host. This
 //! driver brings an SD card up over the standard SDHCI register block and
 //! exposes it through [`rustos_abi::driver::block::Block`] (`AGENTS.md`
-//! §8). The transfer path is programmed-I/O (PIO): the card is read one
-//! 512-byte block at a time through the buffer data port, which needs no
-//! DMA capability and is the correct first bring-up path (`plans/PI.md`
-//! P8 — read path first).
+//! §8). The transfer path is programmed-I/O (PIO): blocks move one
+//! 512-byte block at a time through the buffer data port in both
+//! directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), which
+//! needs no DMA capability and is the correct first bring-up path
+//! (`plans/PI.md` P8).
 //!
 //! # Layered seam
 //!
@@ -123,8 +124,8 @@ impl SdhciHost for RegisterWindow {
 ///
 /// SD identification must run at or below 400 kHz. The exact base clock
 /// is board-specific, so a conservative divisor keeps the identification
-/// clock in range on the Pi 4's EMMC2 base clock; the read path does not
-/// retune (`plans/PI.md` P8 — read path first).
+/// clock in range on the Pi 4's EMMC2 base clock; the PIO bring-up does
+/// not retune (`plans/PI.md` P8).
 const IDENT_CLOCK_DIVISOR: u32 = 0x80;
 
 /// Data-timeout-counter value (`CONTROL1[19:16]`): the controller's
@@ -277,7 +278,7 @@ impl<H: SdhciHost> Emmc2<H> {
         transfer_mode: u32,
     ) -> Result<[u32; 4], DriverError> {
         let mut inhibit = regs::STATUS_CMD_INHIBIT;
-        if cmd.reads_data || cmd.response == ResponseKind::ShortBusy {
+        if cmd.transfers_data || cmd.response == ResponseKind::ShortBusy {
             inhibit |= regs::STATUS_DAT_INHIBIT;
         }
         self.wait_clear(regs::REG_STATUS, inhibit)?;
@@ -356,9 +357,10 @@ impl<H: SdhciHost> Emmc2<H> {
         Ok(())
     }
 
-    /// Validate a block request against the geometry, returning the
-    /// 32-bit block address and 16-bit block count the controller takes.
-    fn validate_read(&self, lba: u64, buf_len: usize) -> Result<(u32, u16), DriverError> {
+    /// Validate a block-transfer request (read or write) against the
+    /// geometry, returning the 32-bit block address and 16-bit block
+    /// count the controller takes.
+    fn validate_transfer(&self, lba: u64, buf_len: usize) -> Result<(u32, u16), DriverError> {
         let bs = BLOCK_SIZE as usize;
         if buf_len == 0 || buf_len % bs != 0 {
             return Err(DriverError::BufferTooSmall);
@@ -388,6 +390,18 @@ impl<H: SdhciHost> Emmc2<H> {
         }
         Ok(())
     }
+
+    /// Push one 512-byte block from `block` into the buffer data port.
+    fn write_block_pio(&mut self, block: &[u8]) -> Result<(), DriverError> {
+        self.wait_interrupt(regs::INT_WRITE_RDY)?;
+        for word in 0..BLOCK_WORDS {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&block[word * 4..word * 4 + 4]);
+            self.host
+                .write32(regs::REG_DATA, u32::from_le_bytes(bytes))?;
+        }
+        Ok(())
+    }
 }
 
 impl<H: SdhciHost> Block for Emmc2<H> {
@@ -396,7 +410,7 @@ impl<H: SdhciHost> Block for Emmc2<H> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let (block_addr, block_count) = self.validate_read(lba, buf.len())?;
+        let (block_addr, block_count) = self.validate_transfer(lba, buf.len())?;
 
         self.host.write32(
             regs::REG_BLKSIZECNT,
@@ -423,9 +437,30 @@ impl<H: SdhciHost> Block for Emmc2<H> {
         Ok(())
     }
 
-    /// Writing is the staged remainder of `plans/PI.md` P8 (read path
-    /// first); until it lands the device is honestly read-only.
-    fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
-        Err(DriverError::Unsupported)
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let (block_addr, block_count) = self.validate_transfer(lba, buf.len())?;
+
+        self.host.write32(
+            regs::REG_BLKSIZECNT,
+            (u32::from(block_count) << 16) | BLOCK_SIZE,
+        )?;
+
+        // Host-to-card direction is the cleared direction bit; only the
+        // multi-block transfer sets the count/auto-CMD12 machinery.
+        let (cmd, transfer_mode) = if block_count == 1 {
+            (command::WRITE_BLOCK, 0)
+        } else {
+            (
+                command::WRITE_MULTIPLE_BLOCK,
+                regs::TM_BLKCNT_EN | regs::TM_MULTI_BLOCK | regs::TM_AUTO_CMD12,
+            )
+        };
+        self.issue(cmd, block_addr, transfer_mode)?;
+
+        for block in buf.chunks(BLOCK_SIZE as usize) {
+            self.write_block_pio(block)?;
+        }
+        self.wait_interrupt(regs::INT_DATA_DONE)?;
+        Ok(())
     }
 }
