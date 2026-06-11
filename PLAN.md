@@ -335,7 +335,8 @@ deferred to later stages (not stubbed, §15.1).
   - `drivers/bus/pci` (x86_64), `drivers/bus/mmio` (aarch64/riscv64),
     `drivers/bus/virtio` (cross-arch).
   - `drivers/storage/virtio_blk`.
-  - `drivers/input/ps2` (x86_64), `drivers/input/usb_hid` (cross-arch later).
+  - `drivers/input/ps2` (x86_64), `drivers/input/usb_hid` (boot-protocol
+    decode landed; xHCI endpoint wiring tracked in `plans/PI.md` P10).
   - `drivers/network/virtio_net`.
 
 **Tests**

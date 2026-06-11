@@ -664,6 +664,9 @@ dependencies = [
 [[package]]
 name = "rustos-drv-bus-usb"
 version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
 
 [[package]]
 name = "rustos-drv-bus-virtio"
@@ -726,6 +729,13 @@ dependencies = [
 
 [[package]]
 name = "rustos-drv-input-ps2"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
+name = "rustos-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",

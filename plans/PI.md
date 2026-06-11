@@ -1837,7 +1837,7 @@ produces a flashable `.img` — done; `docs/src/install/raspberry_pi.md`
 documents flashing + first boot — done; the image boots P6 (user mode) on
 real hardware per a recorded checklist — pending hardware.
 
-### P10 — USB-HID input + desktop on the Pi `[ ]`
+### P10 — USB-HID input + desktop on the Pi `[~]`
 
 - Bring up the Pi 4 USB host (VL805 PCIe → xHCI for the USB-A ports, and
   the DWC2 OTG) far enough to enumerate a USB-HID keyboard + mouse under
@@ -1847,6 +1847,38 @@ real hardware per a recorded checklist — pending hardware.
   build stays first-class (§17.3), and the graphical session is the
   launchable option `userland/session/login` offers when the display +
   input drivers loaded.
+
+**Landed — the host-provable protocol layers** (the `emmc2`/`rpi_hvs`
+seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
+§0.4):
+
+- `drivers/input/usb_hid` (`rustos-drv-input-usb-hid`): HID
+  boot-protocol keyboard + mouse report decode (USB HID 1.11 App. B)
+  into `rustos_abi` `InputEvent`s behind the `ReportSource` seam (on
+  metal: the xHCI interrupt-IN endpoint). Stateful report diffing (one
+  `Key` edge per change; HID usage IDs, modifiers `0xE0..=0xE7`,
+  buttons `0x110..` matching the virtio pointer vocabulary), rollover
+  handling, fail-closed length/forged-source validation (§5.4), an
+  event latch so undersized `poll` buffers lose nothing, and a
+  per-`poll` report budget (§2.1). 21 host tests; docs:
+  `docs/src/drivers/input.md`.
+- `drivers/bus/usb` (`rustos-drv-bus-usb`, placeholder replaced): the
+  xHCI protocol layers over the `XhciHost` register seam
+  (`RegisterWindow` on metal, register-level mock in tests) — `regs`
+  (cap/op/doorbell vocabulary), `trb` (fail-closed
+  `TrbType`/`CompletionCode`), `ring` (`ProducerRing` cycle/Link-TRB
+  wrap/full-refusal/retirement; borrow-free `EventRingCursor`), and
+  `Xhci::open` (§4.2 prologue: capability-block plausibility, CNR
+  wait, halt, reset — poll-budget-bounded, fail-closed), plus
+  bounds-checked `PORTSC` decode and doorbell rings. 22 host tests;
+  docs: `docs/src/drivers/bus.md`.
+
+**Remaining:** xHCI DMA programming (DCBAAP/CRCR, event-ring
+interrupter) + device enumeration (slots, control transfers,
+`SET_PROTOCOL(boot)`, interrupt-IN polling wired to the `ReportSource`
+seam) and the PCI BAR / hwtree wiring for the VL805 (plus the DWC2 OTG
+path if needed); then the WM/taskbar/session on the HVS path and the
+on-metal acceptance.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

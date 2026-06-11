@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-usb"
-description = "RustOS xHCI USB host-controller driver (protocol layers)."
+name = "rustos-drv-input-usb-hid"
+description = "RustOS USB-HID boot-protocol input driver (keyboard + mouse)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

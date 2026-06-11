@@ -25,6 +25,7 @@ maps to `DriverError::BufferTooSmall`.
 | Driver        | Crate                            | Hardware                         | Status                          |
 |---------------|----------------------------------|----------------------------------|---------------------------------|
 | ps2           | `rustos-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
+| usb_hid       | `rustos-drv-input-usb-hid`       | USB-HID boot keyboard / mouse    | host-side tests (P10; xHCI wiring pending) |
 | virtio_input  | `rustos-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
 
 ### `rustos-drv-input-ps2`
@@ -139,3 +140,38 @@ xtask test --qemu`) drives the same driver and the same shared
 (PLIC source + S-mode trap path), so a single driver source covers the
 `input` row of the QEMU matrix on x86_64 (PS/2), aarch64, and riscv64
 (`AGENTS.md` §2.2).
+
+### `rustos-drv-input-usb-hid`
+
+The USB-HID driver decodes the two **boot-protocol** report formats
+(USB HID 1.11 Appendix B) — the fixed 8-byte keyboard report and the
+3-or-more-byte mouse report every USB keyboard/mouse must speak without
+a report-descriptor parse — into platform-neutral `InputEvent`s. It is
+the input path for the Pi 4's USB ports (`plans/PI.md` P10).
+
+The decoders (`BootKeyboard`, `BootMouse`) are written against the
+crate's `ReportSource` seam: on metal the source is the device's
+interrupt-IN endpoint serviced by the xHCI driver
+([bus drivers](bus.md)); host tests drive a mock report queue — the
+`emmc2`/`rpi_hvs` seam shape (`AGENTS.md` §2.2). The xHCI wiring (USB
+enumeration, `SET_PROTOCOL(boot)`, endpoint polling) is the remaining
+P10 work; QEMU models no Pi USB timing, so the host suite is the
+emulation artefact and metal acceptance is a checklist.
+
+The keyboard report carries *state* (every held key appears in every
+report), so the decoder diffs consecutive reports and emits one `Key`
+edge per change — releases, then presses, then modifier-bit edges —
+with `code` the HID usage ID (page `0x07`; modifiers `0xE0..=0xE7`). A
+rollover/POST-error report (an array slot in `0x01..=0x03`) keeps the
+held-key state and diffs only the still-valid modifier byte; a
+duplicated usage in a hostile report presses once. Mouse reports are
+buttons (diffed into `Key` events `0x110`/`0x111`/`0x112` — the same
+codes a virtio pointer device delivers) plus `Pointer` X/Y and `Scroll`
+wheel deltas.
+
+Everything fails closed (`AGENTS.md` §5.4): wrong-length reports are
+rejected whole (`LengthOutOfRange`) without touching the device state,
+a source claiming more bytes than its buffer is a `DeviceFault`, and
+events that overflow the caller's `poll` buffer are latched for the
+next call rather than dropped. A per-`poll` report budget bounds the
+work a flooding device can force (`AGENTS.md` §2.1).

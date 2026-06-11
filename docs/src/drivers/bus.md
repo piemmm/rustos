@@ -13,6 +13,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/pci`        | x86_64                | Shipped  |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
+| `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers (host-proven) |
 
 ## Capability model
 
@@ -134,6 +135,47 @@ register window in which two slots are populated:
 The two trailing slots have `DeviceID == 0` and are skipped — the
 same behaviour `virtio-mmio.c` in QEMU exhibits for unattached
 transports.
+
+## xHCI driver — `drivers/bus/usb`
+
+The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
+(`plans/PI.md` P10). The crate carries the host-provable xHCI protocol
+layers; PCI BAR wiring and device enumeration are the remaining P10
+increments, and QEMU models no Pi USB timing, so the host suite is the
+emulation artefact and metal acceptance stays a checklist.
+
+### Register seam and bring-up
+
+Every controller access goes through the crate's `XhciHost` seam —
+implemented for the kernel-minted `RegisterWindow` on metal, and for a
+register-level mock in tests (the `emmc2` `SdhciHost` shape, `AGENTS.md`
+§2.2). `Xhci::open` runs the xHCI §4.2 prologue: validate the
+capability block (`CAPLENGTH`/`HCIVERSION` plausibility, non-zero
+`MaxSlots`/`MaxPorts`/`DBOFF`/`RTSOFF` — the absent-controller
+all-ones read fails here), wait for Controller-Not-Ready to clear,
+halt a running controller, then issue the self-clearing Host
+Controller Reset. Every wait is poll-budget-bounded and fails closed
+with `DeviceFault` (`AGENTS.md` §2.1); the controller is left halted —
+starting it needs the DMA memory (device context array, command ring)
+the enumeration increment brings. `PORTSC` reads decode through
+`PortStatus` with 1-based port bounds checks, and doorbell rings
+validate both the index (≤ `MaxSlots`) and the §5.6 target rules.
+
+### TRB rings
+
+`trb` defines the 16-byte TRB plus fail-closed `TrbType` /
+`CompletionCode` subsets (an unknown type or completion code is
+`OutOfRange`, never a guess). `ring` carries the §4.9 state machines
+over caller-provided TRB memory — on metal a capability-granted DMA
+region, in tests a plain array — so the cycle/wrap/full logic is
+host-proven: `ProducerRing` stamps the producer cycle state into each
+enqueued TRB, owns the wrap Link TRB (published under the current
+cycle, Toggle Cycle inverts the producer state), refuses caller-set
+cycle bits and caller Link TRBs, reports each slot's device-visible
+address, and fails closed (`Busy`) when full; `EventRingCursor`
+consumes only TRBs whose cycle bit matches its expectation, inverting
+it on each wrap, and holds no borrow of the segment (the controller
+keeps writing it), validating the segment length on every `pop`.
 
 ## Register-window hand-off
 
