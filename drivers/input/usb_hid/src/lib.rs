@@ -12,12 +12,15 @@
 //! # Layered seam
 //!
 //! The decoders ([`BootKeyboard`], [`BootMouse`]) are written against
-//! the [`ReportSource`] seam, not a concrete USB transfer ring. On
-//! metal the source is the device's interrupt-IN endpoint serviced by
-//! the xHCI driver (`drivers/bus/usb`); host tests drive the decoders
-//! over a mock report queue. This mirrors the `emmc2` `SdhciHost` and
-//! `rpi_hvs` mailbox seams (`AGENTS.md` §2.2): the protocol layer is
-//! proven host-side, the transport below it on metal.
+//! the [`ReportSource`] seam, not a concrete USB transfer ring. The
+//! seam is defined in `lib/abi` (`rustos_abi::driver::input`) because
+//! its producer is a sibling driver — the xHCI driver
+//! (`drivers/bus/usb`) servicing the device's interrupt-IN endpoint —
+//! and drivers depend only on `lib/*` (`AGENTS.md` §17.4). Host tests
+//! drive the decoders over a mock report queue. This mirrors the
+//! `emmc2` `SdhciHost` and `rpi_hvs` mailbox seams (`AGENTS.md` §2.2):
+//! the protocol layer is proven host-side, the transport below it on
+//! metal.
 //!
 //! # Event encoding
 //!
@@ -68,6 +71,7 @@ mod tests;
 
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
+pub use rustos_abi::driver::input::ReportSource;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///
@@ -119,29 +123,6 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
         return Err(DriverError::PermissionDenied);
     }
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
-}
-
-/// The HID report-delivery seam.
-///
-/// Every report the decoders consume arrives through this trait, so the
-/// boot-protocol decode is proven host-side against a mock queue
-/// (`AGENTS.md` §2.2). On metal the implementation drains the device's
-/// interrupt-IN endpoint through the xHCI driver's transfer ring
-/// (`drivers/bus/usb`).
-pub trait ReportSource {
-    /// Copy the next pending input report into `buf`.
-    ///
-    /// Returns `Ok(None)` when no report is pending and
-    /// `Ok(Some(len))` — the report's byte length, `<= buf.len()` —
-    /// when one was delivered. A source must never claim more bytes
-    /// than `buf` holds; the decoders reject such a claim as a
-    /// [`DriverError::DeviceFault`] (fail closed, `AGENTS.md` §5.4).
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if the transport reported an
-    /// unrecoverable error.
-    fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError>;
 }
 
 /// The zeroed placeholder event slots of a [`PendingEvents`] hold.

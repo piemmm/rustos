@@ -1,9 +1,9 @@
 //! xHCI register vocabulary (xHCI 1.2 §5).
 //!
-//! Byte offsets and bit masks for the capability, operational, and
-//! doorbell register blocks the bring-up path touches. Only registers
-//! the driver actually reads or writes are defined (`AGENTS.md` §2.3);
-//! the runtime (interrupter) block joins when event-ring wiring lands.
+//! Byte offsets and bit masks for the capability, operational,
+//! runtime (interrupter), and doorbell register blocks the bring-up
+//! and enumeration paths touch. Only registers the driver actually
+//! reads or writes are defined (`AGENTS.md` §2.3).
 //!
 //! All offsets are relative to the start of the register window the
 //! hardware tree reported for the controller — capability offsets from
@@ -51,6 +51,22 @@ pub const USBCMD: usize = 0x00;
 /// `USBSTS` — operational base + `0x04` (§5.4.2).
 pub const USBSTS: usize = 0x04;
 
+/// `CRCR` — command ring control, operational base + `0x18` (§5.4.5).
+/// 64 bits: low dword first, high dword at `+4`.
+pub const CRCR: usize = 0x18;
+
+/// `DCBAAP` — device context base address array pointer, operational
+/// base + `0x30` (§5.4.6). 64 bits: low dword first, high at `+4`.
+pub const DCBAAP: usize = 0x30;
+
+/// `CONFIG` — configure register, operational base + `0x38` (§5.4.7).
+/// Bits 7:0 are `MaxSlotsEn`.
+pub const CONFIG: usize = 0x38;
+
+/// `CRCR` Ring Cycle State: the consumer cycle state the controller
+/// starts the command ring with (§5.4.5).
+pub const CRCR_RCS: u32 = 1 << 0;
+
 /// `USBCMD` Run/Stop: `1` runs the controller, `0` halts it.
 pub const USBCMD_RUN: u32 = 1 << 0;
 
@@ -91,6 +107,32 @@ pub const PORTSC_SPEED_MASK: u32 = 0xF;
 
 /// `PORTSC` Connect Status Change (write-1-to-clear).
 pub const PORTSC_CSC: u32 = 1 << 17;
+
+/// `PORTSC` bits that are write-1-to-clear or reserved-preserve;
+/// masked off before a control write so a read-modify-write never
+/// clears a change bit by accident (§5.4.8).
+pub const PORTSC_RW1C_MASK: u32 = 0x00FE_0002;
+
+/// Byte offset of interrupter 0 within the runtime block (§5.5.2):
+/// the interrupter array starts at `RTSOFF + 0x20`.
+pub const IR0_BASE: usize = 0x20;
+
+/// `ERSTSZ` — event ring segment table size, interrupter base + `0x08`
+/// (§5.5.2.3.1).
+pub const IR_ERSTSZ: usize = 0x08;
+
+/// `ERSTBA` — event ring segment table base address, interrupter base
+/// + `0x10` (§5.5.2.3.2). 64 bits: low dword first, high at `+4`.
+pub const IR_ERSTBA: usize = 0x10;
+
+/// `ERDP` — event ring dequeue pointer, interrupter base + `0x18`
+/// (§5.5.2.3.3). 64 bits: low dword first, high at `+4`.
+pub const IR_ERDP: usize = 0x18;
+
+/// `ERDP` Event Handler Busy (write-1-to-clear, §5.5.2.3.3): set by
+/// the controller when it posts an interrupt, cleared by the driver
+/// when it updates the dequeue pointer.
+pub const ERDP_EHB: u32 = 1 << 3;
 
 /// `HCSPARAMS1` `MaxSlots` field (bits 7:0).
 #[must_use]

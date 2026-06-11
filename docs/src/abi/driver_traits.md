@@ -301,6 +301,16 @@ Buffer sizes must be a positive integer multiple of
 Event records are `InputEvent { kind, reserved0, code, value }`;
 `InputEventKind` is `Key`, `Pointer`, or `Scroll`.
 
+The module also carries `trait ReportSource { next_report(&mut, &mut
+[u8]) }` — the HID report-delivery seam between the bus driver that
+services a device's interrupt-IN endpoint (`drivers/bus/usb`) and the
+input decoder that turns reports into events
+(`drivers/input/usb_hid`). It lives here because its two sides are
+sibling drivers and drivers depend only on `lib/*` (`AGENTS.md`
+§17.4). A source must never claim more bytes than the caller's buffer
+holds; consumers reject such a claim as a `DeviceFault` (`AGENTS.md`
+§5.4).
+
 Legacy x86 input controllers are byte-addressed, so the
 `rustos_abi::driver::port_io` module ships an 8-bit port-access seam,
 `trait PortIo8 { read8, write8 }`, alongside the existing 32-bit

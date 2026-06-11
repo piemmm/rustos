@@ -1854,31 +1854,44 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
 
 - `drivers/input/usb_hid` (`rustos-drv-input-usb-hid`): HID
   boot-protocol keyboard + mouse report decode (USB HID 1.11 App. B)
-  into `rustos_abi` `InputEvent`s behind the `ReportSource` seam (on
-  metal: the xHCI interrupt-IN endpoint). Stateful report diffing (one
-  `Key` edge per change; HID usage IDs, modifiers `0xE0..=0xE7`,
-  buttons `0x110..` matching the virtio pointer vocabulary), rollover
-  handling, fail-closed length/forged-source validation (§5.4), an
-  event latch so undersized `poll` buffers lose nothing, and a
-  per-`poll` report budget (§2.1). 21 host tests; docs:
-  `docs/src/drivers/input.md`.
+  into `rustos_abi` `InputEvent`s behind the `ReportSource` seam,
+  which lives in `lib/abi` (`rustos_abi::driver::input`) because its
+  producer is the sibling xHCI driver and drivers depend only on
+  `lib/*` (§17.4). Stateful report diffing (one `Key` edge per change;
+  HID usage IDs, modifiers `0xE0..=0xE7`, buttons `0x110..` matching
+  the virtio pointer vocabulary), rollover handling, fail-closed
+  length/forged-source validation (§5.4), an event latch so undersized
+  `poll` buffers lose nothing, and a per-`poll` report budget (§2.1).
+  21 host tests; docs: `docs/src/drivers/input.md`.
 - `drivers/bus/usb` (`rustos-drv-bus-usb`, placeholder replaced): the
-  xHCI protocol layers over the `XhciHost` register seam
-  (`RegisterWindow` on metal, register-level mock in tests) — `regs`
-  (cap/op/doorbell vocabulary), `trb` (fail-closed
-  `TrbType`/`CompletionCode`), `ring` (`ProducerRing` cycle/Link-TRB
-  wrap/full-refusal/retirement; borrow-free `EventRingCursor`), and
-  `Xhci::open` (§4.2 prologue: capability-block plausibility, CNR
-  wait, halt, reset — poll-budget-bounded, fail-closed), plus
-  bounds-checked `PORTSC` decode and doorbell rings. 22 host tests;
-  docs: `docs/src/drivers/bus.md`.
+  xHCI protocol layers and the HID enumeration engine over the
+  `XhciHost` register seam (`RegisterWindow` on metal, register-level
+  mock in tests) and the `DmaRegion` memory seam (`lib/abi` `DmaSlab`
+  on metal, a shared in-memory buffer in tests) — `regs`
+  (cap/op/runtime/doorbell vocabulary), `trb` (fail-closed
+  `TrbType`/`CompletionCode`, event-field decode, byte conversion),
+  `ring` (memory-free `ProducerRing` returning `PushOutcome`s the
+  memory owner publishes; borrow-free `EventRingCursor`), `Xhci`
+  (§4.2 `open` prologue; `start` programming
+  `CONFIG`/`DCBAAP`/`CRCR` + interrupter 0's event ring over `RTSOFF`
+  and running the controller; `ack_event`; RW1C-safe `reset_port`),
+  and `device::UsbDevice` — the single-device enumeration engine
+  (64-byte-aligned layout of all device-shared structures; Enable
+  Slot / Address Device / Configure Endpoint command flow; control
+  transfers: fail-closed `GET_DESCRIPTOR(device)`,
+  `SET_CONFIGURATION(1)`, `SET_PROTOCOL(boot)`; a primed interrupt-IN
+  ring) implementing `ReportSource` with end-to-end claim validation
+  (slot/endpoint/code/address/residual, §5.4) and retire/re-arm
+  across the Link-TRB wrap. 38 host tests against the register-level
+  mock plus an in-memory ring model sharing one buffer, including a
+  `BootKeyboard` decoding key events over the mock controller and the
+  fail-closed paths (forged residual, stalled class request, empty
+  port, double enumeration, bad DMA regions); docs:
+  `docs/src/drivers/bus.md`.
 
-**Remaining:** xHCI DMA programming (DCBAAP/CRCR, event-ring
-interrupter) + device enumeration (slots, control transfers,
-`SET_PROTOCOL(boot)`, interrupt-IN polling wired to the `ReportSource`
-seam) and the PCI BAR / hwtree wiring for the VL805 (plus the DWC2 OTG
-path if needed); then the WM/taskbar/session on the HVS path and the
-on-metal acceptance.
+**Remaining:** the PCI BAR / hwtree wiring for the VL805 (register
+window + DMA-region grant; plus the DWC2 OTG path if needed); then the
+WM/taskbar/session on the HVS path and the on-metal acceptance.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

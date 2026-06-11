@@ -13,7 +13,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/pci`        | x86_64                | Shipped  |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
-| `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers (host-proven) |
+| `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers + HID enumeration (host-proven) |
 
 ## Capability model
 
@@ -140,9 +140,10 @@ transports.
 
 The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
 (`plans/PI.md` P10). The crate carries the host-provable xHCI protocol
-layers; PCI BAR wiring and device enumeration are the remaining P10
-increments, and QEMU models no Pi USB timing, so the host suite is the
-emulation artefact and metal acceptance stays a checklist.
+layers and the single-device HID enumeration engine; the PCI BAR /
+hwtree wiring for the VL805 is the remaining P10 increment, and QEMU
+models no Pi USB timing, so the host suite is the emulation artefact
+and metal acceptance stays a checklist.
 
 ### Register seam and bring-up
 
@@ -155,27 +156,81 @@ capability block (`CAPLENGTH`/`HCIVERSION` plausibility, non-zero
 all-ones read fails here), wait for Controller-Not-Ready to clear,
 halt a running controller, then issue the self-clearing Host
 Controller Reset. Every wait is poll-budget-bounded and fails closed
-with `DeviceFault` (`AGENTS.md` §2.1); the controller is left halted —
-starting it needs the DMA memory (device context array, command ring)
-the enumeration increment brings. `PORTSC` reads decode through
-`PortStatus` with 1-based port bounds checks, and doorbell rings
+with `DeviceFault` (`AGENTS.md` §2.1); the controller is left halted.
+`Xhci::start` then programs the DMA structures and runs it: `CONFIG`
+(all reported slots enabled), `DCBAAP`, `CRCR` (consumer cycle state
+1), interrupter 0's single-entry event ring segment table over
+`RTSOFF` (`ERSTSZ`/`ERSTBA`/`ERDP`), and Run/Stop — refusing any
+address that is zero or not 64-byte aligned (`DmaProgram` plausibility,
+§6.1, fail closed). `Xhci::ack_event` advances `ERDP` (clearing Event
+Handler Busy) after each consumed event. `PORTSC` reads decode through
+`PortStatus` with 1-based port bounds checks, `Xhci::reset_port` runs
+the §4.19.5 port reset with the write-1-to-clear bits masked so no
+pending change bit is consumed by accident, and doorbell rings
 validate both the index (≤ `MaxSlots`) and the §5.6 target rules.
 
 ### TRB rings
 
 `trb` defines the 16-byte TRB plus fail-closed `TrbType` /
 `CompletionCode` subsets (an unknown type or completion code is
-`OutOfRange`, never a guess). `ring` carries the §4.9 state machines
-over caller-provided TRB memory — on metal a capability-granted DMA
-region, in tests a plain array — so the cycle/wrap/full logic is
-host-proven: `ProducerRing` stamps the producer cycle state into each
-enqueued TRB, owns the wrap Link TRB (published under the current
-cycle, Toggle Cycle inverts the producer state), refuses caller-set
-cycle bits and caller Link TRBs, reports each slot's device-visible
-address, and fails closed (`Busy`) when full; `EventRingCursor`
-consumes only TRBs whose cycle bit matches its expectation, inverting
-it on each wrap, and holds no borrow of the segment (the controller
-keeps writing it), validating the segment length on every `pop`.
+`OutOfRange`, never a guess), the on-ring little-endian byte
+conversion, and the transfer-event field decoders (slot ID, endpoint
+ID, transfer residual). `ring` carries the §4.9 state machines and
+holds **no memory**: `ProducerRing::push` returns a `PushOutcome` —
+the cycle-stamped TRB, its slot and device-visible address, and (on a
+wrap) the re-cycled Link TRB to publish *after* the data TRB — so the
+owner of the device-shared memory performs every write and the
+cycle/wrap/full logic is host-proven. The ring refuses caller-set
+cycle bits and caller Link TRBs and fails closed (`Busy`) when full;
+`EventRingCursor` consumes only TRBs whose cycle bit matches its
+expectation, inverting it on each wrap, and holds no borrow of the
+segment (the controller keeps writing it), validating the segment
+length on every `pop`.
+
+### Device enumeration and the HID report path
+
+`device` is the single-device enumeration engine. All device-shared
+bytes live in one caller-provided region behind the crate's
+`DmaRegion` seam — implemented for the `lib/abi` `DmaSlab` in
+production and by a plain shared buffer in tests — and the engine
+computes a 64-byte-aligned `Layout` inside it (DCBAA, ERST, command
+ring, event segment, input/output contexts, EP0 and interrupt-IN
+transfer rings, the control data buffer, and per-slot report
+buffers), refusing a region that is misaligned or too small.
+
+`UsbDevice::start` zeroes the region, publishes the ERST entry and
+the rings' Link TRBs, and starts the controller through `Xhci::start`.
+`UsbDevice::enumerate_hid(port)` then brings the device on a root-hub
+port to the configured boot-protocol state (§4.3): port reset when the
+port is not yet enabled, Enable Slot (validating the returned slot
+ID), Address Device (input control context `A0 | A1`, slot context,
+EP0 context with the speed-derived max packet size),
+`GET_DESCRIPTOR(device)` (decoded fail-closed — a forged length, type,
+or zero-configuration descriptor is `BadMagic`), Configure Endpoint
+for the interrupt-IN endpoint (DCI 3), `SET_CONFIGURATION(1)`,
+`SET_PROTOCOL(boot)`, and finally a primed interrupt-IN ring. Control
+transfers carry the SETUP payload as immediate data, set
+Interrupt-on-Short-Packet on the IN data stage, and watch only the
+addresses of their own in-flight TRBs: a completion for a TRB never
+issued, an undecodable completion code, an unexpected event type, or a
+stalled request is a `DeviceFault`, and every wait is bounded by the
+engine's poll budget (`AGENTS.md` §2.1 / §2.9).
+
+`UsbDevice` implements the `rustos_abi::driver::input::ReportSource`
+seam (hoisted into `lib/abi` because its consumer,
+`drivers/input/usb_hid`, is a sibling driver and drivers depend only
+on `lib/*`, `AGENTS.md` §17.4): `next_report` consumes one transfer
+event, validates the controller's claim end to end (slot, endpoint
+ID, completion code, TRB address inside the interrupt ring, residual
+within the TRB length — §5.4), copies the report out of the slot's
+buffer, retires and re-arms the ring, and rings the endpoint doorbell,
+so the boot-protocol decoders poll reports straight off the transfer
+ring. The crate's tests prove the whole chain against the
+register-level mock plus an in-memory ring model sharing the same
+buffer — including a `BootKeyboard` polling decoded key events over
+the mock controller — plus the fail-closed paths (forged residual,
+stalled class request, empty port, double enumeration, undersized or
+misaligned DMA region).
 
 ## Register-window hand-off
 

@@ -19,6 +19,33 @@ pub const CONTROL_CYCLE: u32 = 1 << 0;
 /// Control-word bit 1 on a Link TRB: Toggle Cycle (§6.4.4.1).
 pub const CONTROL_LINK_TOGGLE: u32 = 1 << 1;
 
+/// Control-word bit 2 on a transfer TRB: Interrupt-on-Short-Packet
+/// (§6.4.1.1) — a short transfer posts a [`CompletionCode::ShortPacket`]
+/// event for this TRB.
+pub const CONTROL_ISP: u32 = 1 << 2;
+
+/// Control-word bit 5 on a transfer TRB: Interrupt On Completion
+/// (§6.4.1.1).
+pub const CONTROL_IOC: u32 = 1 << 5;
+
+/// Control-word bit 6 on a Setup Stage TRB: Immediate Data — the
+/// parameter dwords carry the 8 setup bytes themselves (§6.4.1.2.1).
+pub const CONTROL_IDT: u32 = 1 << 6;
+
+/// Control-word bit 16 on Data/Status Stage TRBs: transfer direction
+/// is IN (device to host, §6.4.1.2.2/§6.4.1.2.3).
+pub const CONTROL_DIR_IN: u32 = 1 << 16;
+
+/// Setup Stage TRB Transfer Type field (bits 17:16): no data stage
+/// (§6.4.1.2.1, table 6-26).
+pub const SETUP_TRT_NO_DATA: u32 = 0;
+
+/// Setup Stage TRB Transfer Type field: OUT data stage.
+pub const SETUP_TRT_OUT: u32 = 2 << 16;
+
+/// Setup Stage TRB Transfer Type field: IN data stage.
+pub const SETUP_TRT_IN: u32 = 3 << 16;
+
 /// Shift of the TRB Type field (control-word bits 15:10, §6.4.1).
 const TYPE_SHIFT: u32 = 10;
 
@@ -98,6 +125,52 @@ impl Trb {
     pub const fn slot_id(&self) -> u8 {
         self.control.to_le_bytes()[3]
     }
+
+    /// Endpoint ID (DCI) of a Transfer Event TRB (control bits 20:16,
+    /// §6.4.2.1).
+    #[must_use]
+    pub const fn endpoint_id(&self) -> u8 {
+        ((self.control >> 16) & 0x1F).to_le_bytes()[0]
+    }
+
+    /// Bytes the transfer left undelivered — the Transfer Event's
+    /// transfer-length residual (status bits 23:0, §6.4.2.1).
+    #[must_use]
+    pub const fn transfer_residual(&self) -> u32 {
+        self.status & 0x00FF_FFFF
+    }
+
+    /// The on-ring little-endian byte image of this TRB, for the
+    /// owner of the device-shared memory to publish (§4.11).
+    #[must_use]
+    pub const fn to_bytes(&self) -> [u8; TRB_LEN] {
+        let p = self.parameter.to_le_bytes();
+        let s = self.status.to_le_bytes();
+        let c = self.control.to_le_bytes();
+        [
+            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], s[0], s[1], s[2], s[3], c[0], c[1],
+            c[2], c[3],
+        ]
+    }
+
+    /// Decode a TRB from its on-ring little-endian byte image.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; TRB_LEN]) -> Self {
+        Self {
+            parameter: u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
+            status: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            control: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+        }
+    }
+}
+
+/// Encode a slot ID into the control-word Slot ID field (bits 31:24)
+/// of a command or transfer-event TRB (§6.4.3).
+#[must_use]
+pub const fn control_slot(slot: u8) -> u32 {
+    (slot as u32) << 24
 }
 
 /// TRB types this driver models (§6.4.6, table 6-91).

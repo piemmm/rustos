@@ -25,7 +25,7 @@ maps to `DriverError::BufferTooSmall`.
 | Driver        | Crate                            | Hardware                         | Status                          |
 |---------------|----------------------------------|----------------------------------|---------------------------------|
 | ps2           | `rustos-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
-| usb_hid       | `rustos-drv-input-usb-hid`       | USB-HID boot keyboard / mouse    | host-side tests (P10; xHCI wiring pending) |
+| usb_hid       | `rustos-drv-input-usb-hid`       | USB-HID boot keyboard / mouse    | host-side tests (P10; xHCI report path host-proven, PCI BAR wiring pending) |
 | virtio_input  | `rustos-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
 
 ### `rustos-drv-input-ps2`
@@ -150,13 +150,18 @@ a report-descriptor parse — into platform-neutral `InputEvent`s. It is
 the input path for the Pi 4's USB ports (`plans/PI.md` P10).
 
 The decoders (`BootKeyboard`, `BootMouse`) are written against the
-crate's `ReportSource` seam: on metal the source is the device's
-interrupt-IN endpoint serviced by the xHCI driver
-([bus drivers](bus.md)); host tests drive a mock report queue — the
-`emmc2`/`rpi_hvs` seam shape (`AGENTS.md` §2.2). The xHCI wiring (USB
-enumeration, `SET_PROTOCOL(boot)`, endpoint polling) is the remaining
-P10 work; QEMU models no Pi USB timing, so the host suite is the
-emulation artefact and metal acceptance is a checklist.
+`ReportSource` seam, defined in `lib/abi`
+(`rustos_abi::driver::input`) because its producer is a sibling driver
+and drivers depend only on `lib/*` (`AGENTS.md` §17.4): on metal the
+source is the device's interrupt-IN endpoint serviced by the xHCI
+driver's `UsbDevice` engine ([bus drivers](bus.md)), which enumerates
+the device (`SET_PROTOCOL(boot)` included) and polls the interrupt-IN
+transfer ring; host tests drive a mock report queue — the
+`emmc2`/`rpi_hvs` seam shape (`AGENTS.md` §2.2) — and the usb crate's
+end-to-end test polls a `BootKeyboard` over the mock controller. The
+PCI BAR / hwtree wiring for the VL805 is the remaining P10 work; QEMU
+models no Pi USB timing, so the host suite is the emulation artefact
+and metal acceptance is a checklist.
 
 The keyboard report carries *state* (every held key appears in every
 report), so the decoder diffs consecutive reports and emits one `Key`

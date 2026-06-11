@@ -42,6 +42,7 @@
 use rustos_abi::driver::mmio::WindowError;
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, RegisterWindow};
 
+pub mod device;
 pub mod regs;
 pub mod ring;
 pub mod trb;
@@ -173,13 +174,53 @@ impl PortStatus {
     }
 }
 
+/// The device-shared memory addresses [`Xhci::start`] programs.
+///
+/// Every address is device-visible and 64-byte aligned (the strictest
+/// alignment any of the four structures requires, §6.1); the memory
+/// they point into is owned by the caller's DMA region
+/// ([`device::DmaRegion`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaProgram {
+    /// Device context base address array (§6.1), for `DCBAAP`.
+    pub dcbaap: u64,
+    /// Command ring base, for `CRCR` (consumer cycle state starts 1).
+    pub command_ring: u64,
+    /// Event ring segment table (one entry), for `ERSTSZ`/`ERSTBA`.
+    pub erst: u64,
+    /// First event segment slot, the initial `ERDP`.
+    pub event_segment: u64,
+}
+
+impl DmaProgram {
+    /// `true` when every address is non-zero and 64-byte aligned.
+    #[must_use]
+    pub const fn is_plausible(&self) -> bool {
+        let mut ok = true;
+        let addrs = [
+            self.dcbaap,
+            self.command_ring,
+            self.erst,
+            self.event_segment,
+        ];
+        let mut i = 0;
+        while i < addrs.len() {
+            if addrs[i] == 0 || addrs[i] % 64 != 0 {
+                ok = false;
+            }
+            i += 1;
+        }
+        ok
+    }
+}
+
 /// An `xHCI` controller brought to the halted, freshly reset state.
 ///
 /// [`Xhci::open`] validates the capability block, then runs the §4.2
 /// initialisation prologue: wait for Controller Not Ready to clear,
 /// halt a running controller, and issue a Host Controller Reset. The
-/// controller is left halted; programming DCBAAP/CRCR and starting it
-/// belongs to the enumeration increment that brings the DMA memory.
+/// controller is left halted; [`Xhci::start`] programs the DMA
+/// structures and starts it.
 pub struct Xhci<H: XhciHost> {
     host: H,
     op_base: usize,
@@ -329,10 +370,90 @@ impl<H: XhciHost> Xhci<H> {
     }
 
     /// Byte offset of the runtime register block within the window
-    /// (`RTSOFF`), for the event-ring wiring that follows this slice.
+    /// (`RTSOFF`).
     #[must_use]
     pub const fn runtime_base(&self) -> usize {
         self.rt_base
+    }
+
+    fn write_ir0(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
+        self.host
+            .write32(self.rt_base + regs::IR0_BASE + offset, value)
+    }
+
+    /// Program the DMA structures and start the controller (§4.2
+    /// steps 5–7): `CONFIG` (all reported slots enabled), `DCBAAP`,
+    /// `CRCR` (consumer cycle state 1), interrupter 0's single-entry
+    /// event ring segment table and dequeue pointer, then Run/Stop.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if any `prog` address is zero or
+    ///   not 64-byte aligned (§6.1) — the controller would fault or,
+    ///   worse, DMA somewhere unintended (fail closed, `AGENTS.md`
+    ///   §5.4).
+    /// * [`DriverError::DeviceFault`] if the controller never leaves
+    ///   the halted state within `budget` polls.
+    pub fn start(&mut self, prog: &DmaProgram, budget: u32) -> Result<(), DriverError> {
+        if !prog.is_plausible() {
+            return Err(DriverError::OutOfRange);
+        }
+        self.write_op(regs::CONFIG, u32::from(self.max_slots))?;
+        self.write_op(regs::DCBAAP, low_dword(prog.dcbaap))?;
+        self.write_op(regs::DCBAAP + 4, high_dword(prog.dcbaap))?;
+        self.write_op(regs::CRCR, low_dword(prog.command_ring) | regs::CRCR_RCS)?;
+        self.write_op(regs::CRCR + 4, high_dword(prog.command_ring))?;
+        self.write_ir0(regs::IR_ERSTSZ, 1)?;
+        self.write_ir0(regs::IR_ERSTBA, low_dword(prog.erst))?;
+        self.write_ir0(regs::IR_ERSTBA + 4, high_dword(prog.erst))?;
+        self.write_ir0(regs::IR_ERDP, low_dword(prog.event_segment))?;
+        self.write_ir0(regs::IR_ERDP + 4, high_dword(prog.event_segment))?;
+        let usbcmd = self.read_op(regs::USBCMD)?;
+        self.write_op(regs::USBCMD, usbcmd | regs::USBCMD_RUN)?;
+        self.wait_status(regs::USBSTS_HCH, false, budget)
+    }
+
+    /// Advance interrupter 0's event ring dequeue pointer to `erdp`
+    /// (the device-visible address of the next unconsumed event slot),
+    /// clearing Event Handler Busy (§5.5.2.3.3).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the register window rejects
+    ///   the write.
+    pub fn ack_event(&mut self, erdp: u64) -> Result<(), DriverError> {
+        self.write_ir0(regs::IR_ERDP, low_dword(erdp) | regs::ERDP_EHB)?;
+        self.write_ir0(regs::IR_ERDP + 4, high_dword(erdp))
+    }
+
+    /// Reset a root-hub port and wait for it to come back enabled
+    /// (§4.19.5 — required before a USB2 device can be addressed).
+    ///
+    /// The read-modify-write masks the write-1-to-clear bits
+    /// ([`regs::PORTSC_RW1C_MASK`]) so no pending change bit is
+    /// consumed by accident.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `port` is zero or above
+    ///   [`Self::max_ports`].
+    /// * [`DriverError::DeviceFault`] if no device is connected, the
+    ///   reset never completes within `budget` polls, or the port
+    ///   does not come back enabled.
+    pub fn reset_port(&mut self, port: u8, budget: u32) -> Result<PortStatus, DriverError> {
+        let status = self.port_status(port)?;
+        if !status.connected() {
+            return Err(DriverError::DeviceFault);
+        }
+        let offset = regs::PORTSC_BASE + (usize::from(port) - 1) * regs::PORTSC_STRIDE;
+        let raw = self.read_op(offset)?;
+        self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PR)?;
+        self.wait_op_clear(offset, regs::PORTSC_PR, budget)?;
+        let status = self.port_status(port)?;
+        if !(status.connected() && status.enabled()) {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(status)
     }
 
     /// Read and decode one root-hub port's `PORTSC`.
@@ -377,4 +498,16 @@ impl<H: XhciHost> Xhci<H> {
         self.host
             .write32(self.db_base + usize::from(index) * 4, target)
     }
+}
+
+/// Low 32 bits of a 64-bit register value.
+const fn low_dword(value: u64) -> u32 {
+    let bytes = value.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// High 32 bits of a 64-bit register value.
+const fn high_dword(value: u64) -> u32 {
+    let bytes = value.to_le_bytes();
+    u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
 }

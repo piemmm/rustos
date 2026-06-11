@@ -1,37 +1,51 @@
 # `rustos-drv-bus-usb` — xHCI USB host-controller driver
 
 `plans/PI.md` P10 deliverable (host-provable slice). Carries the xHCI
-protocol layers the Pi 4's USB bring-up builds on:
+protocol layers and the HID enumeration engine the Pi 4's USB
+bring-up builds on:
 
-- `regs` — the capability / operational / doorbell register vocabulary
-  (xHCI 1.2 §5), with only the registers the driver touches defined.
+- `regs` — the capability / operational / runtime (interrupter) /
+  doorbell register vocabulary (xHCI 1.2 §5), with only the registers
+  the driver touches defined.
 - `trb` — the 16-byte TRB vocabulary (§6.4): a fail-closed `TrbType`
-  and `CompletionCode` subset plus event-field decode.
-- `ring` — the ring state machines (§4.9): `ProducerRing` (cycle-bit
-  stamping, Link-TRB wrap with Toggle Cycle, full-ring refusal,
-  completion retirement) and the `EventRingCursor` consumer
-  (cycle-ownership check, wrap toggling) over caller-provided TRB
-  memory.
-- `Xhci::open` — the §4.2 bring-up prologue over the `XhciHost`
-  register seam: validate the capability block (absent/broken
-  controllers fail closed), wait Controller-Not-Ready, halt a running
-  controller, Host Controller Reset; plus bounds-checked `PORTSC`
-  decode and doorbell rings.
+  and `CompletionCode` subset, event-field decode (slot, endpoint ID,
+  transfer residual), and the on-ring byte conversion.
+- `ring` — the memory-free ring state machines (§4.9): `ProducerRing`
+  (cycle-bit stamping, Link-TRB wrap with Toggle Cycle, full-ring
+  refusal, completion retirement) returning `PushOutcome`s the memory
+  owner publishes, and the `EventRingCursor` consumer (cycle-ownership
+  check, wrap toggling) over caller-provided snapshots.
+- `Xhci` — the §4.2 bring-up over the `XhciHost` register seam:
+  `open` validates the capability block (absent/broken controllers
+  fail closed), waits Controller-Not-Ready, halts a running
+  controller, and issues the Host Controller Reset; `start` programs
+  `CONFIG`/`DCBAAP`/`CRCR` and interrupter 0's event ring
+  (`ERSTSZ`/`ERSTBA`/`ERDP` over `RTSOFF`) and runs the controller;
+  plus `ack_event`, the RW1C-safe `reset_port`, bounds-checked
+  `PORTSC` decode, and doorbell rings.
+- `device` — the single-device HID enumeration engine over the
+  `DmaRegion` seam (`DmaSlab` in production, a shared buffer in
+  tests): a 64-byte-aligned layout of every device-shared structure,
+  Enable Slot / Address Device / Configure Endpoint command flow,
+  control transfers (`GET_DESCRIPTOR(device)` decoded fail-closed,
+  `SET_CONFIGURATION(1)`, `SET_PROTOCOL(boot)`), a primed
+  interrupt-IN transfer ring, and the
+  `rustos_abi::driver::input::ReportSource` impl that feeds the
+  `drivers/input/usb_hid` decoders.
 
 ## Supported hardware
 
 | Platform | Controller                   | Status                              |
 |----------|------------------------------|-------------------------------------|
-| Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol layers host-proven; PCI BAR wiring + enumeration pending |
+| Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol layers + HID enumeration host-proven; PCI BAR wiring pending |
 
 The register window arrives through the hardware tree (PCI BAR
 assignment under `CAP_MMIO_MAP`) — never a compiled-in base
-(`AGENTS.md` §18.1). Device enumeration (DCBAAP/CRCR programming,
-slots, control transfers, HID interrupt endpoints feeding
-`drivers/input/usb_hid`) is the remaining P10 work and lands in
-follow-up increments. QEMU models no Pi USB timing, so the emulation
-artefact is the host test suite and metal acceptance stays a checklist
-(`plans/PI.md` §0.4 watch-out).
+(`AGENTS.md` §18.1). The PCI BAR / hwtree wiring for the VL805 (and
+the DMA-region grant it carries) is the remaining P10 work and lands
+in follow-up increments. QEMU models no Pi USB timing, so the
+emulation artefact is the host test suite and metal acceptance stays a
+checklist (`plans/PI.md` §0.4 watch-out).
 
 ## Required capabilities
 
@@ -45,12 +59,12 @@ The driver runs in user space; it does **not** request
 
 ## Limitations
 
-- Bring-up stops at the halted, freshly reset controller: starting it
-  needs the DMA memory (device context array, command ring) the
-  enumeration increment brings.
-- The event-ring consumer models a single segment; the runtime
-  (interrupter) register block is located (`RTSOFF`) but not yet
-  programmed.
+- One enumerated device per engine: `UsbDevice` drives a single HID
+  device's slot, control pipe, and interrupt-IN endpoint. Multi-device
+  topologies (hubs) are out of scope for the boot-input bring-up.
+- The event ring is a single segment serviced by polling; interrupter
+  interrupts (MSI-X) are not enabled — `next_report` is a non-blocking
+  poll, matching the `Input::poll` shape above it.
 
 ## Test surface
 
@@ -65,9 +79,22 @@ mock controller:
 - `PORTSC` decode and port bounds; doorbell index/target bounds and
   write offsets.
 - TRB type / completion-code round-trips failing closed on unknown
-  values.
+  values; byte-image round-trips; transfer-event field decode.
 - Producer ring: cycle stamping, reported TRB addresses, Link-TRB
   publication and cycle toggle across the wrap, full-ring `Busy`,
   retirement underflow.
 - Event cursor: cycle-ownership consumption, wrap-and-toggle, stale
   TRBs ignored, wrong-segment rejection.
+- DMA programming: `CONFIG`/`DCBAAP`/`CRCR`/interrupter registers
+  captured by the mock, run/start, misaligned or undersized regions
+  refused.
+- Enumeration, against the register-level mock plus an in-memory ring
+  model sharing one buffer: the full chain (port reset when disabled,
+  Enable Slot, Address Device, descriptor fetch, Configure Endpoint,
+  `SET_CONFIGURATION`, `SET_PROTOCOL(boot)`), empty-port and
+  double-enumeration refusals, stalled class requests failing closed.
+- The report path: reports (full and short) polled through
+  `ReportSource`, retire/re-arm across the Link-TRB wrap, forged
+  residuals failing closed, and a `BootKeyboard` from
+  `drivers/input/usb_hid` decoding key events end-to-end over the mock
+  controller.

@@ -666,6 +666,7 @@ name = "rustos-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-drv-input-usb-hid",
 ]
 
 [[package]]

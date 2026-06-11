@@ -14,13 +14,17 @@ parse, so this decoder needs no descriptor parsing.
 | USB boot keyboard       | 8-byte input report  | host-proven over a mock source  |
 | USB boot mouse          | 3+-byte input report | host-proven over a mock source  |
 
-The decoders are written against the `ReportSource` seam, not a
-concrete USB transfer ring. On metal the source is the device's
-interrupt-IN endpoint serviced by the xHCI driver (`drivers/bus/usb`);
-that wiring (USB enumeration, `SET_PROTOCOL(boot)`, endpoint polling)
-is the remaining P10 work and lands in follow-up increments. Report
-protocol (descriptor-driven) decoding is out of scope: boot protocol is
-the bring-up path.
+The decoders are written against the `ReportSource` seam (defined in
+`lib/abi` as `rustos_abi::driver::input::ReportSource`, because its
+producer is a sibling driver and drivers depend only on `lib/*`,
+`AGENTS.md` §17.4), not a concrete USB transfer ring. On metal the
+source is the device's interrupt-IN endpoint serviced by the xHCI
+driver's `UsbDevice` engine (`drivers/bus/usb`), which enumerates the
+device — `SET_PROTOCOL(boot)` included — and implements the seam over
+its interrupt-IN transfer ring; the usb crate's end-to-end test polls
+a `BootKeyboard` over its mock controller. Report protocol
+(descriptor-driven) decoding is out of scope: boot protocol is the
+bring-up path.
 
 ### Event encoding
 

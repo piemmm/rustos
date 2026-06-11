@@ -11,5 +11,10 @@ publish.workspace = true
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
+[dev-dependencies]
+# End-to-end seam proof: the boot-protocol decoders polling reports
+# straight off this crate's interrupt-IN transfer ring.
+rustos-drv-input-usb-hid = { path = "../../input/usb_hid", version = "=0.0.0" }
+
 [lints]
 workspace = true
