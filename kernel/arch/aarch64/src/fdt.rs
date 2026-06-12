@@ -162,6 +162,68 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
     None
 }
 
+/// Decode a PCI host bridge's `dma-ranges` into the inbound DMA aperture
+/// it grants devices behind it (Devicetree Spec v0.4 §2.3.9): the
+/// CPU-physical window `[base, base + len)` a device on the bus may DMA
+/// through, returned as `(top, len)` where `top = base + len` is the
+/// *exclusive* upper bound — the same form [`crate::platform`] hands
+/// `HwResource::dma` for the `VideoCore` mailbox carve, so a consumer
+/// reads `top` as "every DMA address must lie below this".
+///
+/// `child_address` is the bridge's own `#address-cells` — `3` for a PCI
+/// bus, the `phys.hi`/`phys.mid`/`phys.lo` triple. Only its *width* is
+/// used to step over the child PCI address; that address is not part of
+/// the CPU-physical aperture and is never read into a `u64` (so the
+/// 3-cell width [`read_cells`] would reject is fine here). `parent_address`
+/// is the parent bus's `#address-cells` and `child_size` the bridge's own
+/// `#size-cells`; both must decode to a `u64` (`1..=2`).
+///
+/// Returns `None` — never an invented aperture (`AGENTS.md` §2.9) — when
+/// the node carries no `dma-ranges`, a cell count is out of range, the
+/// value is not a whole number of entries, or a `base + len` overflows.
+/// With multiple entries the aperture spans the lowest base to the
+/// highest top.
+#[must_use]
+pub fn dma_ranges_aperture(
+    node: &Node<'_>,
+    child_address: u32,
+    parent_address: u32,
+    child_size: u32,
+) -> Option<(u64, u64)> {
+    if child_address == 0
+        || child_address > 3
+        || parent_address == 0
+        || parent_address > 2
+        || child_size == 0
+        || child_size > 2
+    {
+        return None;
+    }
+    let value = node.property("dma-ranges")?.value();
+    let entry = ((child_address + parent_address + child_size) * 4) as usize;
+    if value.is_empty() || value.len() % entry != 0 {
+        return None;
+    }
+    let mut min_base: Option<u64> = None;
+    let mut max_top: u64 = 0;
+    let mut off = 0;
+    while off + entry <= value.len() {
+        let parent_base = read_cells(value, off + (child_address as usize) * 4, parent_address)?;
+        let size = read_cells(
+            value,
+            off + ((child_address + parent_address) as usize) * 4,
+            child_size,
+        )?;
+        let top = parent_base.checked_add(size)?;
+        min_base = Some(min_base.map_or(parent_base, |b| b.min(parent_base)));
+        max_top = max_top.max(top);
+        off += entry;
+    }
+    let base = min_base?;
+    let len = max_top.checked_sub(base)?;
+    Some((max_top, len))
+}
+
 /// Decode `reg` entry `index` of the node at `depth` with its parent
 /// bus's cell counts and translate the base through the ancestor buses'
 /// `ranges`, yielding the CPU-physical `(base, length)` window.
@@ -375,8 +437,116 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_timer_hz, psci_method, timer_clock_frequency, Fdt, PsciMethod};
+    use super::{
+        dma_ranges_aperture, effective_timer_hz, psci_method, timer_clock_frequency, Fdt,
+        PsciMethod,
+    };
     use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
+
+    /// Build a single-node tree whose `pcie` node carries `dma-ranges`,
+    /// then hand that node to `f`. The `PCIe` binding's cells are fixed:
+    /// `#address-cells = 3` (the `phys.hi`/`phys.mid`/`phys.lo` triple),
+    /// `#size-cells = 2`, with the parent root at `2`/`2`.
+    fn with_pcie_dma_ranges(dma_ranges: &[u8], f: impl FnOnce(Option<(u64, u64)>)) {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("pcie@7d500000");
+        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_u32("#address-cells", 3);
+        b.prop_u32("#size-cells", 2);
+        if !dma_ranges.is_empty() {
+            b.prop("dma-ranges", dma_ranges);
+        }
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let pcie = fdt
+            .nodes()
+            .filter_map(Result::ok)
+            .find(|n| n.name() == b"pcie@7d500000")
+            .expect("pcie node");
+        f(dma_ranges_aperture(&pcie, 3, 2, 2));
+    }
+
+    /// One BCM2711-shaped `dma-ranges` entry: 3-cell child PCI address,
+    /// 2-cell parent CPU base, 2-cell size.
+    fn dma_ranges_entry(pci_hi: u32, parent_base: u64, size: u64) -> std::vec::Vec<u8> {
+        let mut v = std::vec::Vec::new();
+        v.extend_from_slice(&pci_hi.to_be_bytes()); // phys.hi
+        v.extend_from_slice(&0u32.to_be_bytes()); // phys.mid
+        v.extend_from_slice(&0u32.to_be_bytes()); // phys.lo
+        v.extend_from_slice(&parent_base.to_be_bytes());
+        v.extend_from_slice(&size.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn reads_the_bcm2711_pcie_inbound_aperture() {
+        // The real Pi 4 tree: PCI 0x0 → CPU 0x0 for 3 GiB, so devices
+        // behind the bridge DMA only the low 3 GiB of SDRAM. The top is
+        // the exclusive upper bound, the len the aperture extent.
+        let dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
+        with_pcie_dma_ranges(&dr, |aperture| {
+            assert_eq!(aperture, Some((0xc000_0000, 0xc000_0000)));
+        });
+    }
+
+    #[test]
+    fn pcie_aperture_spans_multiple_entries() {
+        // Two windows: their union runs from the lowest base to the
+        // highest top.
+        let mut dr = dma_ranges_entry(0x0200_0000, 0x1_0000_0000, 0x4000_0000);
+        dr.extend_from_slice(&dma_ranges_entry(0x0200_0000, 0x8000_0000, 0x4000_0000));
+        with_pcie_dma_ranges(&dr, |aperture| {
+            // base = min(0x8000_0000, 0x1_0000_0000), top = max tops.
+            assert_eq!(aperture, Some((0x1_4000_0000, 0xc000_0000)));
+        });
+    }
+
+    #[test]
+    fn pcie_aperture_absent_without_dma_ranges() {
+        with_pcie_dma_ranges(&[], |aperture| assert_eq!(aperture, None));
+    }
+
+    #[test]
+    fn pcie_aperture_rejects_a_partial_entry() {
+        // A `dma-ranges` value that is not a whole number of 7-cell
+        // entries is refused, never read past its end (`AGENTS.md` §2.9).
+        let mut dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
+        dr.truncate(dr.len() - 4);
+        with_pcie_dma_ranges(&dr, |aperture| assert_eq!(aperture, None));
+    }
+
+    #[test]
+    fn pcie_aperture_rejects_out_of_range_cells() {
+        let dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
+        let blob = {
+            let mut b = DtbBuilder::new();
+            b.begin_node("");
+            b.prop_u32("#address-cells", 2);
+            b.prop_u32("#size-cells", 2);
+            b.begin_node("pcie@7d500000");
+            b.prop_str("compatible", "brcm,bcm2711-pcie");
+            b.prop("dma-ranges", &dr);
+            b.end_node();
+            b.end_node();
+            b.build()
+        };
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let pcie = fdt
+            .nodes()
+            .filter_map(Result::ok)
+            .find(|n| n.name() == b"pcie@7d500000")
+            .expect("pcie node");
+        // A zero or over-wide cell count fails closed.
+        assert_eq!(dma_ranges_aperture(&pcie, 0, 2, 2), None);
+        assert_eq!(dma_ranges_aperture(&pcie, 4, 2, 2), None);
+        assert_eq!(dma_ranges_aperture(&pcie, 3, 3, 2), None);
+        assert_eq!(dma_ranges_aperture(&pcie, 3, 2, 0), None);
+    }
 
     /// Build a minimal tree carrying a `/timer` node with the given
     /// `clock-frequency` (a single big-endian `u32`), used to exercise

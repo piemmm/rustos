@@ -528,8 +528,13 @@ order (one fully-gated increment each):
    `device_type`/`interrupt-controller`/name stem
    (`rustos_fdt::name_stem`), interior buses emitted as `Bus` parents,
    and unbindable nodes (no representable key, not memory) omitted.
-   The one per-device augmentation kept is the VideoCore mailbox DMA
-   property-buffer carve request (P7). The orphaned per-device finders
+   Two per-device augmentations are kept, each a `Dma` capability-grant
+   request only the platform's tree can size: the VideoCore mailbox
+   property-buffer carve (P7) and the BCM2711 PCIe host bridge's
+   inbound-DMA aperture (`brcm,bcm2711-pcie`, P10) — read from the
+   node's `dma-ranges` by `fdt::dma_ranges_aperture` and emitted as
+   `HwResource::dma(top, len)` (the VL805 USB host path). The orphaned
+   per-device finders
    (`fdt::find_mailbox`/`DiscoveredMailbox`/`timer_ppi`) are deleted
    (§2.14); `lib/fdt` exports the shared `read_cells`/`name_stem`
    helpers (§2.2). Proven by the port's platform unit tests (virt/Pi

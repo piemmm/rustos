@@ -760,15 +760,29 @@ node-name stem), defaulting to `Other`; class is advisory — binding is
 by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
 as `Bus` nodes before their children, so the flat stream reconstructs
 the tree shape, and a node describing nothing bindable (no
-representable match key, not memory) is not emitted. The one per-device
-augmentation is the VideoCore firmware mailbox (`brcm,bcm2835-mbox`,
-PI Stage P7): its node additionally carries a `Dma` resource requesting
-a one-page property-buffer carve bounded by the 30-bit VideoCore
-aperture — only the platform knows the firmware's aperture — which
-`drivers/display/rpi_hvs::wiring` binds. The walker is host-tested
-against the shared DTB fixtures (the `virt`- and Pi-shaped trees, a
-nested `ranges`-translating bus, fail-closed cases) and exercised by
-the port's `passes_arch_hal_conformance_suite`.
+representable match key, not memory) is not emitted. Two nodes carry a
+per-device augmentation, each a `Dma` capability-grant request only the
+platform's tree can size:
+
+- the VideoCore firmware mailbox (`brcm,bcm2835-mbox`, PI Stage P7) — a
+  one-page property-buffer carve bounded by the 30-bit VideoCore
+  aperture, which `drivers/display/rpi_hvs::wiring` binds; and
+- the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`, PI Stage P10) — the
+  inbound-DMA aperture it grants devices behind it (the VL805 xHCI for
+  the USB-A ports). The aperture is read from the node's `dma-ranges`
+  (`fdt::dma_ranges_aperture`: the 3-cell child PCI address is stepped
+  over, the 2-cell parent CPU base and size decoded), never a board
+  constant (§18.5). It is emitted as `HwResource::dma(top, len)` where
+  `top` is the *exclusive* upper bound of the reachable CPU-physical
+  window (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4) and
+  `len` its extent; the future VL805 wiring carves its xHCI DMA region
+  below `top`. The bridge's own controller/config (ECAM-access) window
+  flows through the generic translated-`reg` path, not the augmentation.
+
+The walker is host-tested against the shared DTB fixtures (the `virt`-
+and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
+with its `dma-ranges`, fail-closed cases) and exercised by the port's
+`passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

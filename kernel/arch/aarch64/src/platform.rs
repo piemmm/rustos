@@ -36,7 +36,9 @@
 //! firmware-call property rather than a device node, so it is exposed
 //! through the reader, not as a tree node.
 
-use crate::fdt::{bus_level, reg_entry_count, translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH};
+use crate::fdt::{
+    bus_level, dma_ranges_aperture, reg_entry_count, translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
+};
 use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_fdt::{name_stem, read_cells, Node};
@@ -60,6 +62,16 @@ const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
 /// the original BCM2835 binding) — the one node whose emission is
 /// augmented with the DMA property-buffer carve request above.
 const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
+
+/// `compatible` string of the BCM2711 `PCIe` root complex — the host
+/// bridge the Pi 4's USB-A ports sit behind (the VL805 xHCI controller,
+/// `plans/PI.md` P10). Its emission is augmented with the **inbound-DMA
+/// aperture** the bridge grants devices behind it, so a matched bus
+/// driver knows the CPU-physical window its DMA carves must lie within
+/// (`AGENTS.md` §18.1 — a capability-grant request, never an ambient
+/// handle); the aperture is read from the node's `dma-ranges`, never a
+/// board constant (§18.5).
+const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 
 /// Builds the hardware tree from a borrowed flattened device tree.
 pub struct FdtDiscovery<'a> {
@@ -169,6 +181,30 @@ fn build_node(
         // A node with no room left simply carries no carve request; the
         // capacity bound is the ABI's, never a panic (`AGENTS.md` §2.9).
         let _ = hw.push_resource(dma);
+    }
+
+    // The BCM2711 PCIe host bridge additionally *requests* the
+    // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
+    // P10): the CPU-physical window read from its `dma-ranges`, with the
+    // node's own `#address`/`#size`-cells decoding the child PCI triple
+    // and its parent bus's `#address-cells` the CPU base. Declared here
+    // because only the platform's tree knows the aperture (`AGENTS.md`
+    // §18.1); the VL805 wiring carves its xHCI DMA region below the top.
+    if compatible.is_some_and(|c| c.iter_strings().any(|s| s == PCIE_COMPATIBLE)) {
+        let level = bus_level(node);
+        let parent_addr_cells = depth
+            .checked_sub(1)
+            .and_then(|i| levels.get(i))
+            .map_or(2, |l| l.addr_cells);
+        if let Some((aperture_top, aperture_len)) =
+            dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)
+        {
+            // No room left simply carries no aperture request; the
+            // capacity bound is the ABI's, never a panic (§2.9). An
+            // unreadable `dma-ranges` likewise omits it rather than
+            // inventing a window.
+            let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+        }
     }
 
     Some(hw)
@@ -470,6 +506,104 @@ mod tests {
         assert_eq!(emmc2.class(), Some(HwDeviceClass::Storage));
         assert_eq!(emmc2.parent(), soc.id());
         assert_eq!(mmio_windows(emmc2), [(0xfe34_0000, 0x100)]);
+    }
+
+    /// A Pi-4-shaped tree with a `PCIe` host bridge under `/scb`, carrying
+    /// the real BCM2711 `reg`, `ranges`, and `dma-ranges` shapes.
+    fn scb_pcie_tree() -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("scb");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        // <child=0x7c000000 parent=0xfc000000 size=0x03800000>: so
+        // 0x7d500000 translates to 0xfd500000.
+        let mut ranges = Vec::new();
+        ranges.extend_from_slice(&0x7c00_0000u64.to_be_bytes());
+        ranges.extend_from_slice(&0xfc00_0000u64.to_be_bytes());
+        ranges.extend_from_slice(&0x0380_0000u64.to_be_bytes());
+        b.prop("ranges", &ranges);
+        b.begin_node("pcie@7d500000");
+        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_str("device_type", "pci");
+        b.prop_u32("#address-cells", 3);
+        b.prop_u32("#size-cells", 2);
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&0x7d50_0000u64.to_be_bytes());
+        reg.extend_from_slice(&0x9310u64.to_be_bytes());
+        b.prop("reg", &reg);
+        // <pci.hi=0x02000000 pci.mid=0 pci.lo=0  cpu=0x0  size=0xc0000000>
+        let mut dma_ranges = Vec::new();
+        dma_ranges.extend_from_slice(&0x0200_0000u32.to_be_bytes());
+        dma_ranges.extend_from_slice(&0u32.to_be_bytes());
+        dma_ranges.extend_from_slice(&0u32.to_be_bytes());
+        dma_ranges.extend_from_slice(&0u64.to_be_bytes());
+        dma_ranges.extend_from_slice(&0xc000_0000u64.to_be_bytes());
+        b.prop("dma-ranges", &dma_ranges);
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn dma_resources(node: &HwNode) -> Vec<(u64, u64)> {
+        node.resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+            .map(|r| (r.base(), r.length()))
+            .collect()
+    }
+
+    #[test]
+    fn emits_the_pcie_bridge_with_its_inbound_dma_aperture() {
+        let nodes = discover_all(&scb_pcie_tree());
+        let scb = by_key(&nodes, b"simple-bus");
+
+        // The PCIe root complex is a bus node, parented under `/scb`, its
+        // controller `reg` translated through the bus `ranges` (the
+        // ECAM/config-access window the VL805 wiring maps under
+        // `CAP_MMIO_MAP`) — no per-device code on this path.
+        let pcie = by_key(&nodes, b"brcm,bcm2711-pcie");
+        assert_eq!(pcie.class(), Some(HwDeviceClass::Bus));
+        assert_eq!(pcie.parent(), scb.id());
+        assert_eq!(mmio_windows(pcie), [(0xfd50_0000, 0x9310)]);
+
+        // The augmentation: the inbound-DMA aperture from `dma-ranges` —
+        // the low 3 GiB of SDRAM devices behind the bridge may reach.
+        // base is the exclusive top (`AGENTS.md` §18.1).
+        assert_eq!(dma_resources(pcie), [(0xc000_0000, 0xc000_0000)]);
+        let dma = pcie
+            .resources()
+            .iter()
+            .find(|r| r.kind() == Some(HwResourceKind::Dma))
+            .expect("aperture request");
+        assert_eq!(
+            dma.required_capability(),
+            Ok(rustos_abi::CapabilityId::MEM_DMA)
+        );
+    }
+
+    #[test]
+    fn pcie_bridge_without_dma_ranges_carries_no_aperture() {
+        // Strip the `dma-ranges`: the bridge is still emitted with its
+        // translated window, but no aperture is invented (`AGENTS.md`
+        // §2.9).
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("pcie@7d500000");
+        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_u32("#address-cells", 3);
+        b.prop_u32("#size-cells", 2);
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        let pcie = by_key(&nodes, b"brcm,bcm2711-pcie");
+        assert!(dma_resources(pcie).is_empty());
     }
 
     #[test]

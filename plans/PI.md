@@ -1996,11 +1996,31 @@ unchanged (§2.2); host-proven by a flat-ECAM VL805 fixture
 MSI-X capability decode, plus offset/round-trip/sentinel unit tests.
 Docs: `docs/src/drivers/bus.md`, the crate README.
 
-**Remaining:** the Pi PCIe host-bridge (`brcm,bcm2711-pcie`)
-discovery path in the aarch64 `FdtDiscovery` walk (emit the ECAM
-config window + the inbound-DMA aperture as `hwtree` resources), the
-VL805 `wiring::open_discovered` (map the ECAM window, enumerate, map
-the xHCI BAR + DMA-region grant, hand to the xHCI engine; mirror the
+**Landed — PCIe host-bridge discovery** (the aarch64 `FdtDiscovery`
+walk): the `brcm,bcm2711-pcie` node is emitted generically (a `Bus`
+node whose controller/config — ECAM-access — `reg` window translates
+through the bus `ranges` exactly like every other device), with one
+per-device augmentation: the **inbound-DMA aperture** the bridge grants
+devices behind it, read from the node's `dma-ranges` by the new
+`fdt::dma_ranges_aperture` (the 3-cell child PCI address stepped over,
+the 2-cell parent CPU base + size decoded, fail-closed). It is emitted
+as `HwResource::dma(top, len)` — `top` the *exclusive* upper bound of
+the reachable CPU-physical window (`0xC000_0000`, the low 3 GiB of
+SDRAM, on the Pi 4), `len` its extent — matching the mailbox "carve
+below `base`" convention; the bases are discovered, never a board
+constant (§18.5). Host-proven by the platform discovery tests (a
+`/scb`-nested PCIe bridge: translated `reg` window `0xfd50_0000`/`0x9310`
++ aperture `0xC000_0000`; the no-`dma-ranges` fail-closed case) and the
+`fdt::dma_ranges_aperture` unit tests (real Pi value, multi-entry span,
+absent/partial/out-of-range-cell refusals). **No `lib/abi` change** (so
+no C-header regen). Docs: `docs/src/platform/aarch64.md` ("Platform
+discovery").
+
+**Remaining:** the VL805 `wiring::open_discovered` (consume the
+discovered ECAM-access window + the inbound-DMA aperture: map the window
+under `CAP_MMIO_MAP`, build the bus via `mechanism_ecam`, enumerate, map
+the xHCI BAR + a `DmaRegion` carve below the aperture `top` under
+`CAP_MEM_DMA`, hand both to the xHCI engine; mirror the
 `rpi_hvs`/`emmc2` shape); plus the DWC2 OTG path if needed; then the
 WM/taskbar/session on the HVS path and the on-metal acceptance.
 
