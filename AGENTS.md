@@ -294,7 +294,7 @@ rustos/
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # pci, usb, virtio, mmio
+│   └── bus/             # pci, pcie_brcm (BCM2711 RC bring-up), usb, virtio, mmio
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.

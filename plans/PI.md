@@ -2050,13 +2050,46 @@ mastering and reaching the controller hand-off — the inert mock window
 faults, the metal boundary). Docs: `docs/src/drivers/bus.md`,
 `docs/src/abi/driver_traits.md`, the crate README.
 
-**Remaining:** the `devmgr`/host composition that maps the discovered
-`brcm,bcm2711-pcie` ECAM window, builds the bus (`mechanism_ecam`), reads
-the node's `HwResource::dma` aperture `top`, and calls `open_discovered`
-(it rides the same `DriverHost` DMA-over-IPC gap as the Stage 4.HW
-drvhost increment); plus the DWC2 OTG path if needed; then the
-WM/taskbar/session on the HVS path and the on-metal acceptance (a real
-controller's BAR answering a plausible `CAPLENGTH`).
+**Landed — the BCM2711 PCIe root-complex bring-up** (host-provable): the
+VL805 sits behind the BCM2711 root complex, which ships with its link
+**down** and whose configuration space is *not* flat ECAM. Two pieces
+close that gap. `drivers/bus/pci` gained `mechanism_brcm` +
+`BrcmConfigSpace`, the BCM2711 *windowed* (index/data) configuration
+access (`EXT_CFG_INDEX` 0x9000 / `EXT_CFG_DATA` 0x8000): the root-bus
+header is read directly, a downstream function's `(bus<<20)|(devfn<<12)`
+block address is written to the index register, then the dword is reached
+through the 4 KiB data window — the only BCM2711-specific knowledge, the
+enumeration/BAR/cap core unchanged (§2.2). The new
+`drivers/bus/pcie_brcm` crate (`BrcmPcieRc`) performs the link bring-up
+over the BCM2711 root-complex registers: reset + assert `PERST#`, power the SerDes
+(clear `IDDQ`), program `MISC_CTRL`, the inbound `RC_BAR2` viewport from
+the discovered `dma-ranges` (size via `encode_ibar_size`), disable
+`RC_BAR1`/`RC_BAR3`, confirm the root-port role (fail closed otherwise),
+advertise ASPM + the PCI-PCI bridge class, program the outbound `ranges`
+MMIO window, deassert `PERST#`, then poll `MISC_PCIE_STATUS` for link-up
+bounded by `DEFAULT_LINK_POLLS` (100 ms, fail closed). Written against a
+`PcieRegs` (`RegisterWindow` on metal, register mock in tests) + `Delay`
+seam; `wiring::open_discovered` maps the controller window under
+`CAP_MMIO_MAP`. **No `lib/abi`/C-header change.** Host-proven: pci
+`mech_brcm` tests (root-bus direct read, downstream index/data,
+out-of-range/no-device, beyond-window fail-closed) + pcie_brcm tests (full
+reset→SerDes→window→link sequence, reset-before-SerDes ordering, ibar
+encoding, fail-closed link-down + not-root-port, the wiring cap/mapper/
+inert-window paths). Docs: `docs/src/drivers/bus.md`, the crate README.
+
+**Remaining:** the kernel-side composition that maps the discovered
+`brcm,bcm2711-pcie` window, runs `pcie_brcm::wiring::open_discovered` to
+train the link, builds the bus over the same window
+(`mechanism_brcm`), reads the node's `HwResource::dma` aperture `top`,
+and calls `usb::wiring::open_discovered` — plus discovering the outbound
+`ranges` MMIO window into the hardware tree (it is passed in `PcieWindows`
+today), then running `usb_hid::console::pump_once` against the enumerated
+keyboard to feed the video console's `VIDEO_KEYBOARD` queue. The
+composition rides the same `DriverHost` DMA/MMIO-over-IPC gap as the Stage
+4.HW drvhost increment (and the kernel composition needs a generic-timer
+`Delay`). Then the DWC2 OTG path if needed; then the WM/taskbar/session on
+the HVS path and the on-metal acceptance (a real controller's BAR
+answering a plausible `CAPLENGTH`, and a USB keyboard driving the login).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

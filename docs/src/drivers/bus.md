@@ -10,7 +10,8 @@ is `pub(crate)` per `AGENTS.md` §8.
 
 | Crate                    | Platform              | Status   |
 | ------------------------ | --------------------- | -------- |
-| `drivers/bus/pci`        | x86_64 (PIO) / PCIe ECAM | Shipped  |
+| `drivers/bus/pci`        | x86_64 (PIO) / PCIe ECAM / BCM2711 windowed | Shipped  |
+| `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers + HID enumeration (host-proven) |
@@ -45,7 +46,7 @@ The enumeration, capability-walk, BAR-sizing, and window/MSI-X
 hand-off core is parameterised over the `ConfigSpace` trait, so it is
 independent of how configuration space is reached. Two access
 mechanisms implement that trait; the caller picks one at construction
-(`mechanism_one` / `mechanism_ecam`).
+(`mechanism_one` / `mechanism_ecam` / `mechanism_brcm`).
 
 #### Mechanism #1 — legacy I/O ports (x86_64)
 
@@ -85,10 +86,29 @@ check, so the driver never synthesises a pointer (`AGENTS.md` §4).
 An access past the window's length, or a malformed address, resolves
 to the same `0xFFFF_FFFF` sentinel, so an enumeration walk that runs
 off the mapped buses fails closed rather than reading out of bounds
-(`AGENTS.md` §5.4). This is the path the Raspberry Pi 4 (BCM2711)
-root complex uses to reach its VL805 USB host controller, and the
-path any PCIe host bridge without an I/O-port space uses; it carries
-no target-conditional `cfg` (`AGENTS.md` §17.2).
+(`AGENTS.md` §5.4). Flat ECAM is the path any PCIe host bridge with a
+contiguous MMCONFIG region uses; it carries no target-conditional
+`cfg` (`AGENTS.md` §17.2).
+
+#### BCM2711 windowed configuration access (Raspberry Pi 4)
+
+The Raspberry Pi 4's BCM2711 root complex does **not** map
+configuration space flat. Its own root-bus header (`bus 0`, `devfn 0`)
+is read directly at the controller base, but a downstream function
+(`bus >= 1`, e.g. the VL805 xHCI at `01:00.0`) is reached through an
+index/data window pair inside the controller's own register block:
+the function's `(bus << 20) | (devfn << 12)` block address is written
+to the `EXT_CFG_INDEX` register (`0x9000`), then the dword is accessed
+through the 4 KiB `EXT_CFG_DATA` window (`0x8000`) at the register
+byte offset. `BrcmConfigSpace` implements `ConfigSpace` with exactly
+this windowing — the *only* BCM2711-specific knowledge; the
+enumeration, BAR-sizing, and capability walk above it are unchanged.
+`mechanism_brcm(window)` builds the bus over it. An access that lands
+outside the mapped window, or any function but `00.0` on the root bus,
+resolves to the same `0xFFFF_FFFF` sentinel (`AGENTS.md` §5.4). The
+link behind the bridge must be **up** before any downstream access —
+the `drivers/bus/pcie_brcm` root-complex bring-up (below) guarantees
+that before handing its register window here.
 
 ### Enumeration walk
 
@@ -145,6 +165,57 @@ asserting both devices are listed and the VL805's MSI-X capability
 decodes. The BAR *size* probe depends on hardware read-only BAR bits
 and is covered by the mechanism-#1 fixtures, not the plain-memory
 ECAM backing.
+
+## BCM2711 PCIe root-complex bring-up — `drivers/bus/pcie_brcm`
+
+The Pi 4's VL805 xHCI sits behind the BCM2711 PCIe root complex, which
+ships out of reset with its link **down**. Before the windowed
+configuration access above can reach the VL805, the root complex must
+be brought up. `drivers/bus/pcie_brcm` performs that bring-up over the
+BCM2711 root-complex registers.
+
+### Seams
+
+The `BrcmPcieRc` state machine is written against two seams so it is
+proven host-side (`AGENTS.md` §2.2):
+
+- `PcieRegs` — controller register access, implemented for the
+  kernel-minted `RegisterWindow` on metal and a register-level mock in
+  tests (the `emmc2` `SdhciHost` shape).
+- `Delay` — a microsecond busy-delay for the bring-up's hard timing
+  requirements (SerDes settle, the 100 ms post-`PERST#` link-training
+  window), supplied by the kernel composition on metal and a no-op in
+  tests.
+
+### Bring-up sequence
+
+Hold the bridge in reset and assert `PERST#`; release the bridge
+reset; clear the SerDes `IDDQ` power-down and let it settle; program
+`MISC_CTRL` (SCB access, UR config reads, 128-byte burst, RCB modes);
+program the inbound (PCIe→system-memory) viewport `RC_BAR2` from the
+discovered `dma-ranges` (the size encoded by `encode_ibar_size`, the
+size rounded up to a power of two); disable the unused `RC_BAR1` /
+`RC_BAR3` inbound windows; confirm the root-port role (fail closed
+with `DeviceFault` otherwise); advertise ASPM L0s+L1 and present the
+root complex as a PCI-PCI bridge; program the outbound (CPU→PCIe) MMIO
+window from the discovered `ranges`; deassert `PERST#`; then poll
+`MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
+`DEFAULT_LINK_POLLS` (100 ms) and failing closed if the link never
+trains. All windows are device-tree-discovered, never compiled-in
+(`AGENTS.md` §18.1).
+
+### Composition
+
+`wiring::open_discovered` maps the discovered controller window under
+`CAP_MMIO_MAP` and runs the bring-up; the caller then recovers the
+window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate
+the VL805. The crate performs only the link bring-up and so never
+depends on another driver crate (`AGENTS.md` §17.4). The outbound
+`ranges` MMIO window passed in `PcieWindows` is supplied by the
+composition; its discovery into the hardware tree and the kernel-side
+composition itself (which rides the `DriverHost` DMA/MMIO-over-IPC
+gap) are follow-ups tracked in `plans/PI.md` P10. QEMU models no Pi
+PCIe link timing, so metal acceptance is a checklist.
 
 ## MMIO driver — `drivers/bus/mmio`
 

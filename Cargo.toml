@@ -80,6 +80,7 @@ members = [
 
     # Drivers — bus
     "drivers/bus/pci",
+    "drivers/bus/pcie_brcm",
     "drivers/bus/usb",
     "drivers/bus/virtio",
     "drivers/bus/mmio",

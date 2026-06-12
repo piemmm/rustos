@@ -47,6 +47,7 @@ use rustos_abi::{
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
+pub(crate) mod mech_brcm;
 pub(crate) mod mech_ecam;
 pub(crate) mod mech_one;
 
@@ -158,6 +159,38 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 #[must_use]
 pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + PciBus {
     Pci::new(mech_ecam::EcamConfigSpace::new(window))
+}
+
+/// Construct a real-hardware `PCIe` root bus over the BCM2711
+/// **windowed** configuration access mechanism: the Raspberry Pi 4 root
+/// complex does not map configuration space flat like ECAM but reaches a
+/// downstream function through an index/data window pair inside the
+/// controller's own register block (the BCM2711 windowed `ConfigSpace`).
+///
+/// `window` is the kernel-mapped [`RegisterWindow`] over the PCIe
+/// controller's register block — the very window the BCM2711 PCIe
+/// host-bridge bring-up driver (`drivers/bus/pcie_brcm`) trained the
+/// link through — obtained from the MMIO-map facility after a
+/// [`CapabilityId::MMIO_MAP`] check (`AGENTS.md` §4). The link must be
+/// up before any downstream configuration access, or the controller
+/// raises a CPU abort; the bring-up driver guarantees this before
+/// handing the window here.
+///
+/// The returned value is driven through the [`Bus`], [`VirtioPciBus`],
+/// [`MsixBus`], and [`PciBus`] seams identically to [`mechanism_ecam`];
+/// the concrete `Pci` type stays crate-private (`AGENTS.md` §8).
+/// Construction performs **no** I/O.
+///
+/// # Platform
+///
+/// The index/data windowing is BCM2711-specific, but it is expressed
+/// entirely as offsets within the supplied memory window, so this
+/// constructor carries no target-conditional `cfg` gate (`AGENTS.md`
+/// §17.2 / §17.4): an architecture without a BCM2711 root complex
+/// simply never calls it.
+#[must_use]
+pub fn mechanism_brcm(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + PciBus {
+    Pci::new(mech_brcm::BrcmConfigSpace::new(window))
 }
 
 // --- Public re-exports through the `Bus` trait ----------------------------

@@ -354,7 +354,10 @@ deferred to later stages (not stubbed, §15.1).
   §8 load gate.
 - First drivers shipped: `display/vesa` (x86_64 VBE), `display/framebuffer`,
   `input/ps2` (x86_64), `bus/pci` (x86_64 PIO mechanism #1 + cross-arch PCIe
-  ECAM, the latter the Pi 4 VL805 path), `bus/mmio`, `bus/virtio`
+  ECAM, plus the BCM2711 *windowed* index/data config mechanism
+  `mechanism_brcm` for the Pi 4 VL805 path), `bus/pcie_brcm` (the BCM2711
+  PCIe root-complex link bring-up, host-tested; metal pending),
+  `bus/mmio`, `bus/virtio`
   (+ in-kernel `KernelVirtioHost` with the owned-`DmaSlab` DMA shape),
   `storage/virtio_blk`, `network/virtio_net`. Each emulable driver has a
   `load → use → unload → reload` QEMU vertical; the shared `fw_cfg`/ramfb DMA
