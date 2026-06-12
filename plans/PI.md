@@ -2036,27 +2036,40 @@ two users — or the same user twice — can be logged in concurrently.
   random salt, default cost, explicit admin cap ceiling); the **installer**
   image seeds none (the §11 installer authors it on first boot). Proven by
   mkimage host tests mounting the built root and authenticating.
+- **Root-volume read path at boot** (former increment 1):
+  `rustos_kernel_core::users::load_users_db` reads
+  `/System/Security/Users` off the mounted root volume's
+  `FilesystemRead` + `FilesystemSecurity` driver through the VFS's
+  §5.3-checked per-inode delegation — the root mount carries the volume's
+  driver (`MountTable::back_root`, exactly once), the file is bounded
+  against the format's 64 KiB maximum *before* reading, and the bytes go
+  through the fail-closed `rustos-users` parser. The read runs under the
+  kernel bootstrap identity (`uid 0`, **no** capabilities — a
+  capability-gated or unreadable record refuses, §5.1/§5.4); every
+  outcome is audited (`USERS_DB_LOADED` 4040 / `USERS_DB_REJECTED` 4041)
+  and any refusal leaves **no** database. Proven by kernel/core unit
+  tests (every refusal), the `rustfs_image` users-root fixture round
+  trip through the real driver, and the `users_db_qemu_aarch64` `-M
+  virt` vertical (virtio-blk MMIO → rustfs mount → loader →
+  authenticate). The Pi's metal root mount (P8/P9) and the
+  volume-key hand-off to the loader on metal ride the P8/P9 metal
+  items; login consuming the loaded database is increment 2.
 
 **Remaining (next increments, in order):**
 
-1. **Root-volume read path at boot** — the kernel (or an early service)
-   must read `/System/Security/Users` from the mounted RustFS root so the
-   login path can hold a parsed `UsersDb` (blocked on the P8/P9 metal root
-   mount for the Pi; the `virt` boards need an equivalent volume-backed
-   path or a boot-supplied database hand-off).
-2. **The login `Run` binary** — a `rustos-rt` program wiring the real
+1. **The login `Run` binary** — a `rustos-rt` program wiring the real
    seams: `Prompt` over fd 0/1 (un-echoed password — needs an echo-control
    contract on the stream backing), `UsersAuthenticator` over the loaded
    database, and a `SessionLauncher` that spawns the record's shell path
    via `spawn` and `wait`s; registered as `/System/Services/login` in the
    kernel program registry; `init`'s `session` directive points at login,
    which supervises per-console sessions.
-3. **Separate console contexts** — split the aarch64 video console and
+2. **Separate console contexts** — split the aarch64 video console and
    UART into two independent `ConsoleRead`/`ConsoleWrite` stream backings
    with their own descriptor sets, and have `init` spawn one login per
    discovered text console. Keystroke echo / line editing live in the
    stream layer, not in programs.
-4. **Beacon + bring-up debug removal** — delete the boot-progress beacons
+3. **Beacon + bring-up debug removal** — delete the boot-progress beacons
    (`boot_aarch64`) and the serial bring-up mirror
    (`kernel/arch/aarch64/src/serial.rs` module docs carry the removal
    note); keep the boot log echoed to the screen **only** in debug-profile

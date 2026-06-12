@@ -1,0 +1,31 @@
+[package]
+name = "rustos-test-users-db-qemu-aarch64"
+description = "plans/PI.md P11 QEMU integration test: boot the aarch64 virt-board, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, load the signed virtio-blk `.rxe`, mount the planted users-root rustfs volume through the real driver, then drive the kernel's boot-time users-database load (rustos_kernel_core::load_users_db) and prove the parsed database authenticates the planted account — the root-volume read path for /System/Security/Users, end to end on a live (emulated) board."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-users-db-qemu-aarch64"
+path = "src/main.rs"
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+# The device-agnostic bring-up scaffolding (boot harness, DTB MMIO walk,
+# GICv2 + EL1 IRQ wiring, static DMA pool, signed-`.rxe` load) and the
+# users-database device tail both live in the shared support crate; this
+# bin pulls in only the abi and the virtio-blk driver it resolves the
+# loaded image to (`AGENTS.md` §2.2).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

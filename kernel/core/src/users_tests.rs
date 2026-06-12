@@ -1,0 +1,276 @@
+//! Behavioural tests for the boot-time users-database load
+//! ([`crate::users::load_users_db`]): the success path and every
+//! fail-closed refusal, each with its audit record.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use rustos_abi::driver::filesystem::{
+    DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
+};
+use rustos_abi::{CapabilityId, DriverError};
+use rustos_users::{
+    AccountState, Gid, Identity, ParseError, Salt, Uid, UserRecord, UsersDb, MAX_DB_LEN,
+    MIN_ITERATIONS, SALT_LEN,
+};
+
+use crate::fs::VfsError;
+use crate::test_sink::TestSink;
+use crate::users::{load_users_db, UsersLoadError};
+
+const ROOT: u64 = 1;
+const SYSTEM: u64 = 2;
+const SECURITY: u64 = 3;
+const USERS: u64 = 4;
+
+/// Mock root-volume driver: the fixed `/System/Security/Users` tree with
+/// a configurable database node, mirroring what rustfs reports for the
+/// mkimage-authored root volume.
+struct MockRoot {
+    /// Bytes of the `Users` node.
+    content: Vec<u8>,
+    /// Size `node_info` reports for the `Users` node; decoupled from
+    /// `content.len()` so the short-read refusal is reachable.
+    reported_size: u64,
+    /// Whether the `Users` node exists at all.
+    present: bool,
+    /// Whether the `Users` node is a directory.
+    is_dir: bool,
+    /// §5.3 record reported for the `Users` node.
+    security: NodeSecurity,
+    /// Set when `read_at` touches the `Users` node.
+    read_called: bool,
+}
+
+impl MockRoot {
+    fn with_text(text: &str) -> Self {
+        Self {
+            content: text.as_bytes().to_vec(),
+            reported_size: text.len() as u64,
+            present: true,
+            is_dir: false,
+            // The rustfs default for a created file (`AGENTS.md` §5.3).
+            security: NodeSecurity::new(0o644, 0, 0),
+            read_called: false,
+        }
+    }
+}
+
+impl FilesystemRead for MockRoot {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(ROOT)
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        match node.raw() {
+            ROOT | SYSTEM | SECURITY => Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                size: 0,
+            }),
+            USERS if self.present => Ok(NodeInfo {
+                kind: if self.is_dir {
+                    NodeKind::Directory
+                } else {
+                    NodeKind::RegularFile
+                },
+                size: self.reported_size,
+            }),
+            _ => Err(DriverError::NotFound),
+        }
+    }
+
+    fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        match (dir.raw(), name) {
+            (ROOT, b"System") => Ok(NodeId::from_raw(SYSTEM)),
+            (SYSTEM, b"Security") => Ok(NodeId::from_raw(SECURITY)),
+            (SECURITY, b"Users") if self.present => Ok(NodeId::from_raw(USERS)),
+            (ROOT | SYSTEM | SECURITY, _) => Err(DriverError::NotFound),
+            _ => Err(DriverError::Unsupported),
+        }
+    }
+
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        if file.raw() != USERS {
+            return Err(DriverError::Unsupported);
+        }
+        self.read_called = true;
+        let Ok(start) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        if start >= self.content.len() {
+            return Ok(0);
+        }
+        let n = core::cmp::min(buf.len(), self.content.len() - start);
+        buf[..n].copy_from_slice(&self.content[start..start + n]);
+        Ok(n)
+    }
+
+    fn read_dir(
+        &mut self,
+        _dir: NodeId,
+        _index: u64,
+        _name_out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        Ok(None)
+    }
+}
+
+impl FilesystemSecurity for MockRoot {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
+        match node.raw() {
+            ROOT | SYSTEM | SECURITY => Ok(NodeSecurity::new(0o755, 0, 0)),
+            USERS if self.present => Ok(self.security),
+            _ => Err(DriverError::NotFound),
+        }
+    }
+}
+
+/// A valid single-account `users-v1` database, serialised by the same
+/// `lib/users` code the loader parses with.
+fn valid_db_text() -> String {
+    let salt: Salt = [0x11; SALT_LEN];
+    let record = UserRecord::with_password(
+        Identity {
+            username: "ada",
+            uid: Uid(1000),
+            primary_gid: Gid(1000),
+            supplementary_gids: &[],
+            display_name: "Ada Lovelace",
+            home: "/Users/ada",
+            shell: "/Apps/Shell.app/Run",
+            capabilities: rustos_caps::CapabilitySet::empty(),
+            state: AccountState::Active,
+        },
+        b"correct horse",
+        salt,
+        MIN_ITERATIONS,
+    )
+    .expect("valid record");
+    UsersDb::new(alloc::vec![record])
+        .expect("valid db")
+        .serialise()
+}
+
+#[test]
+fn a_valid_database_loads_and_is_audited() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+
+    let db = load_users_db(&mut fs, &sink).expect("valid database loads");
+    assert_eq!(db.records().len(), 1);
+    assert_eq!(db.records()[0].username(), "ada");
+
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 4040);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "records" && v == "1"));
+}
+
+#[test]
+fn a_missing_database_is_not_found_and_audited() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    fs.present = false;
+
+    let err = load_users_db(&mut fs, &sink).expect_err("missing file refused");
+    assert_eq!(err, UsersLoadError::Vfs(VfsError::NotFound));
+
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 4041);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "cause" && v == "not_found"));
+}
+
+#[test]
+fn a_directory_at_the_database_path_is_refused() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    fs.is_dir = true;
+
+    let err = load_users_db(&mut fs, &sink).expect_err("directory refused");
+    assert_eq!(err, UsersLoadError::NotAFile);
+}
+
+#[test]
+fn an_oversize_database_is_refused_before_any_byte_is_read() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    fs.reported_size = (MAX_DB_LEN as u64) + 1;
+
+    let err = load_users_db(&mut fs, &sink).expect_err("oversize refused");
+    assert_eq!(err, UsersLoadError::TooLarge);
+    assert!(!fs.read_called, "no byte may be read past the size bound");
+}
+
+#[test]
+fn a_short_read_is_refused() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    fs.reported_size += 8; // The driver yields fewer bytes than stat said.
+
+    let err = load_users_db(&mut fs, &sink).expect_err("truncated read refused");
+    assert_eq!(err, UsersLoadError::ShortRead);
+}
+
+#[test]
+fn non_utf8_bytes_are_refused() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text("rustos-users-v1\n");
+    fs.content[0] = 0xFF;
+
+    let err = load_users_db(&mut fs, &sink).expect_err("non-UTF-8 refused");
+    assert_eq!(err, UsersLoadError::NotUtf8);
+}
+
+#[test]
+fn an_invalid_database_is_refused_by_the_parser() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text("not-the-users-header\n");
+
+    let err = load_users_db(&mut fs, &sink).expect_err("bad header refused");
+    assert_eq!(err, UsersLoadError::Parse(ParseError::Header));
+
+    let events = sink.snapshot();
+    assert_eq!(events[0].id.0, 4041);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "cause" && v == "parse_rejected"));
+}
+
+#[test]
+fn a_database_unreadable_by_its_stored_record_is_refused() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    // Owned by uid 7, no group/other read: the kernel's uid-0 bootstrap
+    // identity holds no bypass (`AGENTS.md` §5.1).
+    fs.security = NodeSecurity::new(0o600, 7, 7);
+
+    let err = load_users_db(&mut fs, &sink).expect_err("unreadable record refused");
+    assert_eq!(err, UsersLoadError::Vfs(VfsError::PermissionDenied));
+}
+
+#[test]
+fn a_capability_gated_database_is_refused_for_the_capability_less_boot_read() {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    let mut sec = NodeSecurity::new(0o644, 0, 0);
+    sec.required_cap = Some(CapabilityId::AUDIT_READ);
+    fs.security = sec;
+
+    let err = load_users_db(&mut fs, &sink).expect_err("capability gate refused");
+    assert_eq!(err, UsersLoadError::Vfs(VfsError::PermissionDenied));
+
+    let events = sink.snapshot();
+    assert_eq!(events[0].id.0, 4041);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "cause" && v == "permission_denied"));
+}

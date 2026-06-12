@@ -24,4 +24,14 @@ path = "src/lib.rs"
 # through the driver on the host.
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
+
+# The users-root round-trip test drives the kernel's boot-time
+# users-database load (`rustos_kernel_core::users`) against the built
+# image through the real driver, host-side.
+[dev-dependencies]
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }

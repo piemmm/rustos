@@ -102,6 +102,10 @@ enum FsDisk {
     Fat32,
     /// The shared [`rustos_test_rustfs_image`] rustfs volume.
     Rustfs,
+    /// The shared [`rustos_test_rustfs_image`] users-root volume:
+    /// the `§16` tree with `/System/Security/Users` planted
+    /// (`plans/PI.md` P11).
+    UsersRoot,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -1994,6 +1998,32 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: None,
     },
+    // `plans/PI.md` P11 (root-volume read path at boot):
+    // `rustos-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
+    // bring-up above, then instead of a raw sector round-trip it mounts
+    // the planted users-root rustfs volume through the real driver and
+    // drives the kernel's boot-time users-database load
+    // (`rustos_kernel_core::load_users_db`) — /System/Security/Users read
+    // off the volume through the §5.3-checked VFS delegation — then
+    // proves the parsed database authenticates the planted account and
+    // refuses a wrong password before the ARM semihosting PASS. The
+    // backing image is the fixture's users-root volume
+    // (`FsDisk::UsersRoot`) — authored by the real rustfs driver — so its
+    // geometry is the image's own size. Single CPU and a 60-second
+    // budget match the other boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-users-db-qemu-aarch64",
+        binary: "rustos-test-users-db-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::UsersRoot,
+        keyboard: None,
+        serial: None,
+    },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
     // MMIO analogue of the riscv64 virtio-net-mmio vertical — same
@@ -2409,6 +2439,13 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
             "rustfs.img",
             rustos_test_rustfs_image::build_image()
                 .map_err(|e| format!("test --qemu ({}): build rustfs image: {e:?}", t.package))?,
+            rustos_test_rustfs_image::TOTAL_SECTORS,
+        )),
+        FsDisk::UsersRoot => Some((
+            "users.img",
+            rustos_test_rustfs_image::build_users_root_image().map_err(|e| {
+                format!("test --qemu ({}): build users-root image: {e:?}", t.package)
+            })?,
             rustos_test_rustfs_image::TOTAL_SECTORS,
         )),
     };

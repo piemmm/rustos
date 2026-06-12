@@ -103,6 +103,25 @@ impl MountTable {
         Ok(())
     }
 
+    /// Give the permanent root mount a backing filesystem driver — the
+    /// shape of a block-backed root volume (the whole `AGENTS.md` §16
+    /// tree lives on one driver-mounted volume, as the installer lays it
+    /// out). The root mount's flags are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::AlreadyExists`] if the root mount already has
+    /// a backing driver: a second root volume is a wiring defect, never
+    /// a silent re-mount (`AGENTS.md` §5.4 — fail closed).
+    pub fn back_root(&mut self, backing: DriverHandle) -> Result<(), VfsError> {
+        let root = &mut self.mounts[0];
+        if root.backing.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        root.backing = Some(backing);
+        Ok(())
+    }
+
     /// Remove the mount at exactly `path`.
     ///
     /// # Errors
@@ -198,6 +217,21 @@ mod tests {
             table.mount(p("/Storage"), MountFlags::READ_ONLY, None),
             Err(VfsError::AlreadyExists)
         );
+    }
+
+    #[test]
+    fn back_root_attaches_a_driver_exactly_once() {
+        let mut table = MountTable::new(MountFlags::default());
+        assert_eq!(table.resolve(&p("/System")).backing(), None);
+
+        let handle = DriverHandle::from_raw(0x5EC0).expect("non-zero handle");
+        table.back_root(handle).expect("first backing attaches");
+        assert_eq!(table.resolve(&p("/System")).backing(), Some(handle));
+
+        // A second root volume is refused, and the first stays attached.
+        let other = DriverHandle::from_raw(0x5EC1).expect("non-zero handle");
+        assert_eq!(table.back_root(other), Err(VfsError::AlreadyExists));
+        assert_eq!(table.resolve(&p("/System")).backing(), Some(handle));
     }
 
     #[test]

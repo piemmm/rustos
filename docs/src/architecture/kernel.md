@@ -197,6 +197,22 @@ record under the `log` phase and halts.
 | 4030 | Info  | `PROCESS_SPAWNED`            | audit  |
 | 4031 | Error | `PROCESS_SPAWN_DENIED`       | audit  |
 | 4032 | Error | `PROCESS_SPAWN_FAILED`       | audit  |
+| 4040 | Info  | `USERS_DB_LOADED`            | audit  |
+| 4041 | Error | `USERS_DB_REJECTED`          | audit  |
+
+The `USERS_DB_*` pair reports the boot-time users-database load
+(`rustos_kernel_core::users::load_users_db`, `plans/PI.md` P11): given the
+mounted root volume's `FilesystemRead` + `FilesystemSecurity` driver, the
+kernel resolves `/System/Security/Users` through the VFS's §5.3-checked
+per-inode delegation (`Vfs::read_via_secured`, with the root mount backed
+by the volume's driver), bounds the file against the format's 64 KiB
+maximum *before* reading it, and parses it through the fail-closed
+`rustos-users` parser. The read runs under the kernel's bootstrap identity
+— `uid 0`, no capabilities, no bypass (`AGENTS.md` §5.1) — and any refusal
+leaves the system with **no** database, so every login refuses
+(`AGENTS.md` §5.4.5). The `users_db_qemu_aarch64` vertical proves the path
+end to end on the QEMU `virt` board against a real (emulated) virtio-blk
+users-root volume.
 
 The **Sink** column names the `BootInfo`-supplied channel each record
 is emitted on. Audit-class boot lifecycle events

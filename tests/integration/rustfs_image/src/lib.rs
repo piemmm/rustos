@@ -28,13 +28,16 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
+use rustos_caps::CapabilitySet;
 use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_users::{AccountState, Gid, Identity, ParseError, Salt, Uid, UserRecord, UsersDb};
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
@@ -87,6 +90,52 @@ pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
 pub const NEW_FILE_CONTENT: &[u8] = b"RustOS wrote this file to rustfs over virtio-blk.\n";
+
+/// Username of the single account planted on the users-root volume
+/// ([`build_users_root_image`]).
+pub const USERS_FIXTURE_USERNAME: &str = "root";
+
+/// Password of the planted [`USERS_FIXTURE_USERNAME`] account.
+pub const USERS_FIXTURE_PASSWORD: &str = "root";
+
+/// PBKDF2 cost of the planted account's password record: the format's
+/// floor, so the guest-side authentication proof stays fast under QEMU
+/// TCG. Fixture scaffolding only — a real database uses
+/// [`rustos_users::DEFAULT_ITERATIONS`].
+pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
+
+/// Fixed salt of the planted account's password record, keeping the
+/// built image reproducible (`AGENTS.md` §19.3).
+const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
+
+/// Serialise the users-root volume's `/System/Security/Users` database:
+/// the single active [`USERS_FIXTURE_USERNAME`] account with an empty
+/// capability ceiling.
+///
+/// # Errors
+///
+/// Propagates the [`ParseError`] if a fixture constant violates the
+/// `users-v1` bounds — a programming error in this fixture, surfaced
+/// rather than panicked (`AGENTS.md` §2.9).
+pub fn users_db_text() -> Result<String, ParseError> {
+    let record = UserRecord::with_password(
+        Identity {
+            username: USERS_FIXTURE_USERNAME,
+            uid: Uid(0),
+            primary_gid: Gid(0),
+            supplementary_gids: &[],
+            display_name: "System Administrator",
+            home: "/Users/root",
+            shell: "/Apps/Shell.app/Run",
+            capabilities: CapabilitySet::empty(),
+            state: AccountState::Active,
+        },
+        USERS_FIXTURE_PASSWORD.as_bytes(),
+        USERS_FIXTURE_SALT,
+        USERS_FIXTURE_ITERATIONS,
+    )?;
+    Ok(UsersDb::new(alloc::vec![record])?.serialise())
+}
 
 /// In-memory [`Block`] device backing the fixture build and the host
 /// round-trip tests. It addresses [`SECTOR_BYTES`]-byte sectors exactly
@@ -174,6 +223,46 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().into_bytes())
 }
 
+/// Build the users-root volume: a rustfs image carrying the `AGENTS.md`
+/// §16.1 top-level directories with `/System/Security/Users` holding the
+/// [`users_db_text`] database — the on-disk shape the production root
+/// volume gives the kernel's boot-time users-database load
+/// (`rustos_kernel_core::users`, `plans/PI.md` P11).
+///
+/// The volume is keyed by the same [`FIXTURE_VOLUME_KEY`] and geometry as
+/// [`build_image`]; only the planted tree differs.
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from the driver; a fixture users
+/// database that violates the `users-v1` bounds surfaces as
+/// [`DriverError::Unsupported`] (a programming error in this fixture,
+/// surfaced rather than panicked — `AGENTS.md` §2.9).
+pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
+    let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
+    let dev = VecBlock::new(TOTAL_SECTORS);
+    let mut fs = RustFs::format(
+        dev,
+        INODE_COUNT,
+        &FIXTURE_VOLUME_KEY,
+        &mut FixtureEntropy { next: 1 },
+    )?;
+    let root = fs.root();
+    for name in ["System", "Users", "Apps", "Storage"] {
+        let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
+        if name == "System" {
+            let security = fs.create(node, b"Security", NodeKind::Directory)?;
+            fs.create(security, b"Users", NodeKind::RegularFile)?;
+            let written = fs.write_at(security, b"Users", 0, text.as_bytes())?;
+            if written != text.len() {
+                return Err(DriverError::DeviceFault);
+            }
+        }
+    }
+    fs.flush()?;
+    Ok(fs.into_block().into_bytes())
+}
+
 impl VecBlock {
     /// Consume the device, yielding its raw image bytes.
     fn into_bytes(self) -> Vec<u8> {
@@ -229,6 +318,36 @@ mod tests {
         let mut buf = [0u8; 128];
         let n = fs.read_at(node, 0, &mut buf).expect("read new file");
         assert_eq!(&buf[..n], NEW_FILE_CONTENT);
+    }
+
+    /// No-op audit sink: the round-trip test asserts behaviour through
+    /// the returned database, not the audit stream (the audit records
+    /// are covered by kernel/core's own loader tests).
+    struct DiscardSink;
+
+    impl rustos_log::Sink for DiscardSink {
+        fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+    }
+
+    #[test]
+    fn users_root_image_mounts_and_the_kernel_loader_reads_the_database() {
+        let bytes = build_users_root_image().expect("users-root image builds");
+        let dev = VecBlock { store: bytes };
+        let mut fs =
+            RustFs::open(dev, &FIXTURE_VOLUME_KEY).expect("users-root image is a valid volume");
+
+        let sink = DiscardSink;
+        let db = rustos_kernel_core::load_users_db(&mut fs, &sink)
+            .expect("the kernel loader reads /System/Security/Users");
+        assert_eq!(db.records().len(), 1);
+
+        let record = db
+            .authenticate(USERS_FIXTURE_USERNAME, USERS_FIXTURE_PASSWORD.as_bytes())
+            .expect("the planted account authenticates");
+        assert_eq!(record.username(), USERS_FIXTURE_USERNAME);
+
+        db.authenticate(USERS_FIXTURE_USERNAME, b"wrong password")
+            .expect_err("a wrong password is refused");
     }
 
     #[test]

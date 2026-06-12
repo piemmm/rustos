@@ -456,6 +456,57 @@ pub fn rustfs_round_trip<Tr: Transport>(
     Ok(())
 }
 
+/// users-root device tail: open the device over `transport`, mount the
+/// planted users-root volume through the real
+/// [`RustFs`](rustos_drv_fs_rustfs::RustFs) driver, then drive the
+/// kernel's boot-time users-database load
+/// ([`rustos_kernel_core::load_users_db`]) against the mounted root —
+/// the `plans/PI.md` P11 root-volume read path, end to end on a live
+/// (emulated) board. The parsed database must authenticate the planted
+/// account and refuse a wrong password, proving the loaded database is
+/// usable by the login path.
+///
+/// The on-disk layout and the planted account come from the shared
+/// [`rustos_test_rustfs_image`] users-root fixture — the same source of
+/// truth the host harness plants the backing image from (authored by
+/// the real driver), so the two sides cannot drift (`AGENTS.md` §2.2).
+pub fn users_db_load<Tr: Transport>(
+    env: &dyn QemuEnv,
+    transport: Tr,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    use rustos_test_rustfs_image as image;
+
+    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
+    let mut fs = RustFs::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "users-root mount")?;
+    env.log("virtio-qemu: users-root volume mounted");
+
+    let db = rustos_kernel_core::load_users_db(&mut fs, env.audit_sink())
+        .map_err(|_| "users database load")?;
+    if db.records().len() != 1 {
+        return Err("users database record count mismatch");
+    }
+    env.log("virtio-qemu: users database loaded");
+
+    let record = db
+        .authenticate(
+            image::USERS_FIXTURE_USERNAME,
+            image::USERS_FIXTURE_PASSWORD.as_bytes(),
+        )
+        .map_err(|_| "planted account refused")?;
+    if record.username() != image::USERS_FIXTURE_USERNAME {
+        return Err("authenticated record names the wrong account");
+    }
+    if db
+        .authenticate(image::USERS_FIXTURE_USERNAME, b"wrong password")
+        .is_ok()
+    {
+        return Err("a wrong password must be refused");
+    }
+    env.log("virtio-qemu: users database authenticates");
+    Ok(())
+}
+
 /// Fixed guest address under QEMU user-mode (SLIRP) networking — the
 /// same `10.0.2.0/24` topology on every arch's `-netdev user`.
 const GUEST_IP: Ipv4Address = Ipv4Address::new([10, 0, 2, 15]);

@@ -111,14 +111,25 @@ Where that `Metadata` comes from is the one place the two policies differ:
 Both routes feed the *same* `Metadata::authorize` decision, so the policy
 is single-sourced; only the metadata's origin changes.
 
+A driver-backed mount normally sits *below* the root (`/Storage/usb0`,
+…), but the **root mount itself** can also be given a backing driver
+(`MountTable::back_root`, exactly once — a second root volume is refused)
+— the shape of a real installation, whose root volume carries the whole
+`AGENTS.md` §16 tree from its own root directory. The kernel's boot-time
+users-database load (`rustos_kernel_core::users::load_users_db`, see the
+[kernel page](../architecture/kernel.md)) reads
+`/System/Security/Users` through exactly this path.
+
 The whole driver-backed read **and** write path is exercised end-to-end
-under QEMU against a real (emulated) virtio-blk device by two verticals:
+under QEMU against a real (emulated) virtio-blk device by three verticals:
 the `fat32_virtio_blk_pci_x86_64` vertical mounts a planted FAT32 image
-through the FAT32 driver (see [FAT32](./fat32.md)), and the
+through the FAT32 driver (see [FAT32](./fat32.md)), the
 `rustfs_virtio_blk_pci_x86_64` vertical mounts a planted rustfs volume —
 one the rustfs driver itself authored — through the rustfs driver (see
-[rustfs](./rustfs.md)). Both round-trip a read and a write through the
-shared, transport-generic device tail.
+[rustfs](./rustfs.md)), and the `users_db_qemu_aarch64` vertical mounts a
+planted users-root rustfs volume on the aarch64 `virt` board and drives
+the kernel's users-database load against it. The first two round-trip a
+read and a write through the shared, transport-generic device tail.
 
 ## Path resolution
 

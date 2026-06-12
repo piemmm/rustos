@@ -28,6 +28,8 @@
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
 //! | 4031 | Error | `PROCESS_SPAWN_DENIED`        | audit  | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (`AGENTS.md` §5.4 — fail closed). |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
+//! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
+//! | 4041 | Error | `USERS_DB_REJECTED`           | audit  | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (`AGENTS.md` §5.4 — fail closed). The `cause` field names the refusal. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -40,7 +42,7 @@
 //! this file and updating the table in
 //! `docs/src/architecture/kernel.md`.
 
-use rustos_log::EventId;
+use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit event identifiers emitted by `kernel/core`.
 ///
@@ -110,6 +112,13 @@ pub enum AuditEvent {
     /// The partially built address space is discarded by the caller
     /// (`AGENTS.md` §2.9 — fail closed).
     ProcessSpawnFailed,
+    /// The `/System/Security/Users` database was read off the mounted
+    /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
+    UsersDbLoaded,
+    /// The `/System/Security/Users` database could not be read, or
+    /// failed its bounded fail-closed validation; no database is held
+    /// and every login refuses (`AGENTS.md` §5.4).
+    UsersDbRejected,
 }
 
 impl AuditEvent {
@@ -128,6 +137,8 @@ impl AuditEvent {
             Self::ProcessSpawned => 4030,
             Self::ProcessSpawnDenied => 4031,
             Self::ProcessSpawnFailed => 4032,
+            Self::UsersDbLoaded => 4040,
+            Self::UsersDbRejected => 4041,
         })
     }
 
@@ -148,8 +159,23 @@ impl AuditEvent {
             Self::ProcessSpawned => "process spawned",
             Self::ProcessSpawnDenied => "process spawn denied",
             Self::ProcessSpawnFailed => "process spawn failed",
+            Self::UsersDbLoaded => "users database loaded",
+            Self::UsersDbRejected => "users database rejected",
         }
     }
+}
+
+/// Emit one audit record through a `Sink`.
+pub(crate) fn emit(sink: &dyn Sink, level: Level, event: AuditEvent, fields: &[Field<'_>]) {
+    log(
+        sink,
+        &Event {
+            level,
+            id: event.id(),
+            message: event.message(),
+            fields,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -170,6 +196,8 @@ mod tests {
             AuditEvent::ProcessSpawned,
             AuditEvent::ProcessSpawnDenied,
             AuditEvent::ProcessSpawnFailed,
+            AuditEvent::UsersDbLoaded,
+            AuditEvent::UsersDbRejected,
         ] {
             let id = ev.id().0;
             assert!(
@@ -193,6 +221,8 @@ mod tests {
             AuditEvent::ProcessSpawned.id().0,
             AuditEvent::ProcessSpawnDenied.id().0,
             AuditEvent::ProcessSpawnFailed.id().0,
+            AuditEvent::UsersDbLoaded.id().0,
+            AuditEvent::UsersDbRejected.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

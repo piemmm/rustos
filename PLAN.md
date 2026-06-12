@@ -687,9 +687,13 @@ spec §18.
   authentication; `login`'s production `Authenticator`
   (`UsersAuthenticator`) verifies against it. Image profiles
   (`tools/mkimage` `--profile debug|installer`) seed the debug
-  `root`/`root` test account or, for the installer image, none. Console
-  wiring (login binary, per-console sessions) is staged in
-  `plans/PI.md` P11.
+  `root`/`root` test account or, for the installer image, none. The
+  kernel's boot-time root-volume read path
+  (`rustos_kernel_core::users::load_users_db`) loads the database off the
+  mounted root volume through the §5.3-checked VFS delegation, audited
+  and fail-closed (proven on `-M virt` by the `users_db_qemu_aarch64`
+  vertical). Console wiring (login binary, per-console sessions) is
+  staged in `plans/PI.md` P11.
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

@@ -34,11 +34,11 @@ use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use rustos_kernel_sched_api::{Priority, StepOutcome};
 use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
-use rustos_log::{log, set_max_level, Event, Field, Level, Sink};
+use rustos_log::{set_max_level, Field, Level, Sink};
 use rustos_sync::RwLock;
 
 use crate::aspace::AddressSpaceRegistry;
-use crate::audit::AuditEvent;
+use crate::audit::{emit, AuditEvent};
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
 use crate::procwait::KernelProcessWait;
@@ -177,19 +177,6 @@ impl InitError {
             InitError::DispatcherAlreadyInstalled(_) => "syscall_dispatcher_already_installed",
         }
     }
-}
-
-/// Emit a phase event through a `Sink`.
-fn emit(sink: &(dyn Sink + Sync), level: Level, event: AuditEvent, fields: &[Field<'_>]) {
-    log(
-        sink,
-        &Event {
-            level,
-            id: event.id(),
-            message: event.message(),
-            fields,
-        },
-    );
 }
 
 /// Architecture-neutral kernel entry point.

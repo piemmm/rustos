@@ -89,6 +89,7 @@ pub mod rlimit;
 pub(crate) mod sched;
 pub mod spawn;
 pub mod syscalls;
+pub mod users;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
@@ -129,3 +130,4 @@ pub use spawn::{
     EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
+pub use users::{load_users_db, UsersLoadError, USERS_DB_PATH};

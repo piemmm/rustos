@@ -56,6 +56,10 @@ rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The `/System/Security/Users` database format the boot-time root-volume
+# read path (`src/users.rs`) parses and the login path authenticates
+# against (`AGENTS.md` §5.1, `plans/PI.md` P11).
+rustos-users = { path = "../../lib/users", version = "=0.0.0" }
 # The kernel's single cryptographic random subsystem (`AGENTS.md` §22):
 # `KernelState` composes a `rustos_rng::OutputReserve` and the `random_get`
 # syscall serves bytes from it.

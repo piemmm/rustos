@@ -929,6 +929,7 @@ dependencies = [
  "rustos-log",
  "rustos-rng",
  "rustos-sync",
+ "rustos-users",
  "rustos-util",
  "zeroize",
 ]
@@ -1828,7 +1829,12 @@ name = "rustos-test-rustfs-image"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-caps",
  "rustos-drv-fs-rustfs",
+ "rustos-kernel-core",
+ "rustos-kernel-sec",
+ "rustos-log",
+ "rustos-users",
 ]
 
 [[package]]
@@ -2218,6 +2224,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-users-db-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-vesa-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
@@ -2330,6 +2347,7 @@ dependencies = [
  "rustos-fdt",
  "rustos-itest-harness",
  "rustos-kernel",
+ "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sec",

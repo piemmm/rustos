@@ -3,8 +3,10 @@
 The user-account database: the single definition of a RustOS account and of
 the versioned text format persisted at `/System/Security/Users`
 (`AGENTS.md` §5.1, §16.2). The installer (`AGENTS.md` §11) and the image
-builder (`tools/mkimage`) *author* the database; the login path
-(`userland/session/login`) *reads* it — one format, defined once
+builder (`tools/mkimage`) *author* the database; the kernel's boot-time
+root-volume read path (`rustos_kernel_core::users::load_users_db`, see the
+[kernel page](../architecture/kernel.md)) and the login path
+(`userland/session/login`) *read* it — one format, defined once
 (`AGENTS.md` §2.2). The crate is `no_std` + `alloc`, has no `unsafe`, and
 depends only on `rustos-abi`, `rustos-caps`, and `rustos-crypto`.
 
