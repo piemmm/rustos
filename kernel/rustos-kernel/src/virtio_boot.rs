@@ -171,6 +171,7 @@ where
         spawner,
         sink: audit,
         virtio_host_factory: Some(&factory),
+        mmio_mapper: None,
     });
 
     Ok(body(&mut host, &transport))

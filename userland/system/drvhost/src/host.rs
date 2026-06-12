@@ -11,7 +11,7 @@ use core::fmt::Write as _;
 
 use rustos_abi::driver::VirtioHost;
 use rustos_abi::{
-    CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey,
+    CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey, MmioMapper,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
 };
 use rustos_caps::CapabilitySet;
@@ -78,6 +78,24 @@ pub struct HostConfig<'h> {
     /// `KernelVirtioHost` per driver (`AGENTS.md` §4, per-process
     /// heaps).
     pub virtio_host_factory: Option<&'h dyn VirtioHostFactory>,
+    /// Optional MMIO mapper the driver reaches through
+    /// [`DriverHost::mmio_mapper`].
+    ///
+    /// `None` for hosts that do not (yet) ship the MMIO-map facility
+    /// — the [`DriverHost::mmio_mapper`] accessor on the driver view
+    /// then reports `None` and a bus driver's `register()` impl must
+    /// refuse to load (`AGENTS.md` §5.4). The kernel binary wires a
+    /// `KernelMmioMapper` here so an in-kernel bus driver
+    /// (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) can map a
+    /// device's register window through the capability-gated
+    /// `rustos_kernel_sec::map_mmio` path (`AGENTS.md` §4 — no
+    /// pointer the driver synthesises). The mapper enforces
+    /// [`CapabilityId::MMIO_MAP`] at every
+    /// [`map_window`](MmioMapper::map_window) call; the host borrows
+    /// it for the host's lifetime and lends it unchanged to every
+    /// driver load (the mapper's own window bitmap is the per-load
+    /// state, not the host's).
+    pub mmio_mapper: Option<&'h dyn MmioMapper>,
 }
 
 /// One row in the host's loaded-driver table.
@@ -267,6 +285,7 @@ impl<'h> Host<'h> {
             granted: requested,
             kind: parsed.manifest.kind,
             virtio_host: virtio_host_owned.as_deref(),
+            mmio_mapper: self.cfg.mmio_mapper,
         };
         let spawn_ctx = SpawnContext {
             manifest: &parsed.manifest,
@@ -521,6 +540,9 @@ struct LoadedHostView<'v> {
     /// declined to expose one to this driver (for example because
     /// `CAP_MEM_DMA` was not granted).
     virtio_host: Option<&'v dyn VirtioHost>,
+    /// Borrowed MMIO mapper from [`HostConfig::mmio_mapper`], or
+    /// `None` when the host config ships no MMIO-map facility.
+    mmio_mapper: Option<&'v dyn MmioMapper>,
 }
 
 impl DriverHost for LoadedHostView<'_> {
@@ -534,6 +556,10 @@ impl DriverHost for LoadedHostView<'_> {
 
     fn virtio_host(&self) -> Option<&dyn VirtioHost> {
         self.virtio_host
+    }
+
+    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
+        self.mmio_mapper
     }
 }
 

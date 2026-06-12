@@ -156,6 +156,7 @@ where
         spawner: cfg.spawner,
         sink: env.audit_sink(),
         virtio_host_factory: Some(factory),
+        mmio_mapper: None,
     });
     let Ok(first) = host.load(DRIVER_PATH, &load_caps) else {
         env.fail("signed .rxe load");

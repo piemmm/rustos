@@ -126,6 +126,7 @@ mod kernel {
             // pre-Item-0-tail behaviour: the mock driver loaded
             // below does not consume virtio.
             virtio_host_factory: None,
+            mmio_mapper: None,
         };
         let mut host = Host::new(cfg);
 

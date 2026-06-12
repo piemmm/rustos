@@ -2077,19 +2077,37 @@ reset→SerDes→window→link sequence, reset-before-SerDes ordering, ibar
 encoding, fail-closed link-down + not-root-port, the wiring cap/mapper/
 inert-window paths). Docs: `docs/src/drivers/bus.md`, the crate README.
 
-**Remaining:** the kernel-side composition that maps the discovered
-`brcm,bcm2711-pcie` window, runs `pcie_brcm::wiring::open_discovered` to
-train the link, builds the bus over the same window
-(`mechanism_brcm`), reads the node's `HwResource::dma` aperture `top`,
-and calls `usb::wiring::open_discovered` — plus discovering the outbound
-`ranges` MMIO window into the hardware tree (it is passed in `PcieWindows`
-today), then running `usb_hid::console::pump_once` against the enumerated
-keyboard to feed the video console's `VIDEO_KEYBOARD` queue. The
-composition rides the same `DriverHost` DMA/MMIO-over-IPC gap as the Stage
-4.HW drvhost increment (and the kernel composition needs a generic-timer
-`Delay`). Then the DWC2 OTG path if needed; then the WM/taskbar/session on
-the HVS path and the on-metal acceptance (a real controller's BAR
-answering a plausible `CAPLENGTH`, and a USB keyboard driving the login).
+**Landed — the in-kernel `DriverHost` serves both MMIO and DMA**
+(host-provable): the in-kernel host the VL805 chain needs is complete.
+`drvhost::HostConfig` gained an `mmio_mapper: Option<&dyn MmioMapper>`
+seam and `DriverHost::mmio_mapper()` is implemented on the loaded-driver
+view (alongside the existing `virtio_host()` DMA seam), so a loaded bus
+driver maps its own register windows through the capability-gated
+`KernelMmioMapper` *and* carves its DMA region through the per-driver
+`KernelVirtioHost` — both fail closed at the kernel `map_mmio`/`alloc_dma`
+gates (§5.4). `kernel/rustos-kernel/src/driver_host.rs`'s
+`run_with_driver_host` assembles that host on a single boot frame
+(`KernelMmioMapper` + `KernelVirtioFactory`) and lends it to a `body`
+closure; every window and DMA pool is reclaimed when the closure returns
+(§4). **No `lib/abi`/C-header change** (the seam is a trait-method
+addition). Host-proven: drvhost `mmio_mapper_{default_none,some}_yields_*`
+accessor tests + the `driver_host` `host_serves_both_mmio_and_dma_*` /
+`driver_without_mmio_cap_is_refused_fail_closed` composition tests.
+
+**Remaining — the aarch64 boot invocation only:** wire the actual
+metal call into the production aarch64 boot path — map the discovered
+`brcm,bcm2711-pcie` window, run `pcie_brcm::wiring::open_discovered` to
+train the link, build the bus over the same window (`mechanism_brcm`),
+read the node's `HwResource::dma` aperture `top`, call
+`usb::wiring::open_discovered`, then run `usb_hid::console::pump_once`
+against the enumerated keyboard to feed `VIDEO_KEYBOARD`. This needs
+(a) a generic-timer-backed `pcie_brcm::Delay` impl in the aarch64 port,
+and (b) discovering the outbound `ranges` MMIO window into the hardware
+tree (it is passed in `PcieWindows` by the caller today). QEMU models no
+Pi USB (§0.4), so this carries a metal checklist, not a vertical. Then
+the DWC2 OTG path if needed; then the WM/taskbar/session on the HVS path
+and the on-metal acceptance (a real controller's BAR answering a
+plausible `CAPLENGTH`, and a USB keyboard driving the login).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

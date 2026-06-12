@@ -372,6 +372,7 @@ mod kernel {
             spawner: &spawner,
             sink: &rustos_arch_wasm32::CONSOLE_SINK,
             virtio_host_factory: None,
+            mmio_mapper: None,
         });
         let Ok(h1) = host.load("/System/Drivers/framebuffer.rxe", &load_caps) else {
             fail("HARNESS_ERROR signed .rxe load");

@@ -74,6 +74,7 @@ fn happy_path_load_unload_reload() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
 
@@ -319,6 +320,7 @@ fn in_kernel_kind_with_cap_drv_kernel_succeeds() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let caller = full_caps(); // includes CAP_DRV_KERNEL
@@ -360,6 +362,7 @@ fn unknown_driver_refused_by_spawner() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -386,6 +389,7 @@ fn driver_register_failure_refused() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -413,6 +417,7 @@ fn source_read_failure_propagates() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -451,6 +456,7 @@ fn drive(
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let result = host.load("/d/img", &caller_caps);
@@ -487,7 +493,7 @@ fn run_negative(
 // runs them in parallel, so each test owns a *disjoint* latch: a
 // single shared latch would race (one test's reset/observation
 // clobbering the other's) and make the suite flaky.
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 /// Set by `register_uses_virtio_host` when the some-factory test
 /// observes a virtio host. Owned solely by that test.
 static VIRTIO_SEEN: AtomicBool = AtomicBool::new(false);
@@ -577,6 +583,7 @@ fn virtio_host_factory_default_none_yields_none() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: None,
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     host.load("/d/probe", &full_caps()).expect("load ok");
@@ -612,6 +619,7 @@ fn virtio_host_factory_some_yields_virtio_host() {
         spawner: &spawner,
         sink: &sink,
         virtio_host_factory: Some(&factory),
+        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     host.load("/d/virtio", &full_caps()).expect("load ok");
@@ -623,5 +631,135 @@ fn virtio_host_factory_some_yields_virtio_host() {
         VIRTIO_ALLOC_LEN.load(AtomicOrdering::SeqCst),
         64,
         "alloc_dma_zeroed reported the wrong length back to register()"
+    );
+}
+
+// -- MMIO-mapper accessor wiring tests ------------------------------
+
+/// Set by `register_probes_mmio_mapper` to record whether the
+/// none-mapper test saw an MMIO mapper. Disjoint from the some-mapper
+/// latches so the parallel tests never share state.
+static NONE_MAPPER_SAW_MMIO: AtomicBool = AtomicBool::new(false);
+/// Set by `register_uses_mmio_mapper` when the some-mapper test
+/// observes a mapper and reaches it.
+static MMIO_SEEN: AtomicBool = AtomicBool::new(false);
+/// Records the sentinel `phys_base` the host-provided mapper observed,
+/// proving the driver reached the *configured* mapper rather than some
+/// other instance.
+static MMIO_OBSERVED_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Recording [`MmioMapper`]: every `map_window` call latches its
+/// `phys_base` and fails closed with a recognisable sentinel error so
+/// no backing memory has to be conjured in a unit test. The driver's
+/// `register()` asserts it both *saw* the mapper and *reached* it.
+struct MockMapper;
+impl rustos_abi::MmioMapper for MockMapper {
+    fn map_window(
+        &self,
+        phys_base: u64,
+        _len: usize,
+    ) -> Result<rustos_abi::RegisterWindow, rustos_abi::MmioMapError> {
+        MMIO_OBSERVED_PHYS.store(phys_base, AtomicOrdering::SeqCst);
+        // A unit test cannot mint a real `RegisterWindow` without
+        // backing memory; the recognisable refusal proves the call
+        // reached this mapper (the production `KernelMmioMapper`
+        // returns a real window).
+        Err(rustos_abi::MmioMapError::InvalidRegion)
+    }
+}
+
+/// `register` fn for `mmio_mapper_default_none_yields_none`: records
+/// whether the host reports a mapper.
+fn register_probes_mmio_mapper(
+    host: &dyn rustos_abi::DriverHost,
+) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    NONE_MAPPER_SAW_MMIO.store(host.mmio_mapper().is_some(), AtomicOrdering::SeqCst);
+    rustos_abi::DriverHandle::from_raw(0xD0E5)
+}
+
+/// `register` fn for `mmio_mapper_some_yields_mapper`: retrieves the
+/// mapper through the accessor and exercises `map_window` to prove the
+/// wiring is real.
+fn register_uses_mmio_mapper(
+    host: &dyn rustos_abi::DriverHost,
+) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    let Some(mapper) = host.mmio_mapper() else {
+        return Err(rustos_abi::DriverError::Unsupported);
+    };
+    MMIO_SEEN.store(true, AtomicOrdering::SeqCst);
+    // The sentinel refusal is expected; the latch above and the
+    // observed `phys_base` are the proof of reach.
+    let _ = mapper.map_window(0xFEBD_0000, 0x1000);
+    rustos_abi::DriverHandle::from_raw(0xF00D)
+}
+
+#[test]
+fn mmio_mapper_default_none_yields_none() {
+    // With the default `mmio_mapper: None` slot, the driver-visible
+    // `DriverHost::mmio_mapper()` accessor reports `None`.
+    NONE_MAPPER_SAW_MMIO.store(true, AtomicOrdering::SeqCst);
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
+    let mut source = MemSource::new();
+    source.images.insert("/d/nomap".into(), img);
+    let spawner = PinnedSpawner(register_probes_mmio_mapper as rustos_drvhost::DriverEntry);
+    let sink = RecordingSink::new();
+    let cfg = HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: SYS_HASH,
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        source: &source,
+        spawner: &spawner,
+        sink: &sink,
+        virtio_host_factory: None,
+        mmio_mapper: None,
+    };
+    let mut host = Host::new(cfg);
+    host.load("/d/nomap", &full_caps()).expect("load ok");
+    assert!(
+        !NONE_MAPPER_SAW_MMIO.load(AtomicOrdering::SeqCst),
+        "register() saw an MMIO mapper where none was configured"
+    );
+}
+
+#[test]
+fn mmio_mapper_some_yields_mapper() {
+    // With an MMIO mapper wired into `HostConfig`, the driver observes
+    // `Some(&dyn MmioMapper)` from `DriverHost::mmio_mapper` and
+    // reaches the *configured* mapper. This proves the
+    // config → `LoadedHostView` → trait-method wiring the VL805/PCIe
+    // composition (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) needs;
+    // the kernel build wires a `KernelMmioMapper` in the same slot.
+    MMIO_SEEN.store(false, AtomicOrdering::SeqCst);
+    MMIO_OBSERVED_PHYS.store(0, AtomicOrdering::SeqCst);
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
+    let mut source = MemSource::new();
+    source.images.insert("/d/map".into(), img);
+    let spawner = PinnedSpawner(register_uses_mmio_mapper as rustos_drvhost::DriverEntry);
+    let sink = RecordingSink::new();
+    let mapper = MockMapper;
+    let cfg = HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: SYS_HASH,
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        source: &source,
+        spawner: &spawner,
+        sink: &sink,
+        virtio_host_factory: None,
+        mmio_mapper: Some(&mapper),
+    };
+    let mut host = Host::new(cfg);
+    host.load("/d/map", &full_caps()).expect("load ok");
+    assert!(
+        MMIO_SEEN.load(AtomicOrdering::SeqCst),
+        "register() did not observe the MMIO mapper"
+    );
+    assert_eq!(
+        MMIO_OBSERVED_PHYS.load(AtomicOrdering::SeqCst),
+        0xFEBD_0000u64,
+        "the configured mapper did not observe the driver's map_window call"
     );
 }

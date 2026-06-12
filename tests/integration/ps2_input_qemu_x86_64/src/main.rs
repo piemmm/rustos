@@ -449,6 +449,7 @@ mod kernel {
             sink: &SerialSink::new(),
             // The PS/2 driver consumes no virtio transport.
             virtio_host_factory: None,
+            mmio_mapper: None,
         };
         let mut host = Host::new(cfg);
 

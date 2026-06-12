@@ -352,6 +352,7 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
         spawner: &spawner,
         sink: &SERIAL_SINK,
         virtio_host_factory: None,
+        mmio_mapper: None,
     });
     let Ok(h1) = host.load("/System/Drivers/vesa.rxe", &load_caps) else {
         fail("signed .rxe load");

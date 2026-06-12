@@ -289,6 +289,7 @@ fn drive_lifecycle(config: FramebufferConfig) {
         spawner: &spawner,
         sink: &SERIAL_SINK,
         virtio_host_factory: None,
+        mmio_mapper: None,
     });
     let Ok(h1) = host.load("/System/Drivers/framebuffer.rxe", &load_caps) else {
         fail("signed .rxe load");

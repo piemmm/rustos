@@ -273,6 +273,7 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
         spawner: &spawner,
         sink: audit,
         virtio_host_factory: None,
+        mmio_mapper: None,
     });
     let Ok(h1) = host.load("/System/Drivers/framebuffer.rxe", &load_caps) else {
         env.fail("signed .rxe load");

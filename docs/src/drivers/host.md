@@ -23,6 +23,7 @@ fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
         spawner: &deps.spawner, // impl DriverSpawner
         sink: &deps.audit_sink, // impl rustos_log::Sink
         virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
+        mmio_mapper: None,         // or Some(&dyn rustos_abi::MmioMapper)
     };
     let mut host = Host::new(cfg);
 
@@ -157,6 +158,32 @@ reclaimed at that drop. The host that calls `register()` is the
 sole owner of the box — drivers must not retain `&dyn VirtioHost`
 references across the `register()` boundary (the lifetime in the
 trait signature prevents this at compile time).
+
+### MMIO mapper
+
+`HostConfig::mmio_mapper: Option<&dyn rustos_abi::MmioMapper>` is the
+seam at which the host supplies a bus driver the means to map a
+device's register window. A driver retrieves it through the
+`DriverHost::mmio_mapper(&self) -> Option<&dyn MmioMapper>` accessor
+(an `abi-v1` internal addition alongside `virtio_host`; the public
+`register` entry point is unchanged) and maps each window through the
+capability-gated `MmioMapper::map_window` — never a pointer the driver
+synthesises (`AGENTS.md` §4). A host that leaves the slot unset reports
+`None`, and a bus driver's `register()` must then refuse to load
+(`AGENTS.md` §5.4).
+
+The concrete production mapper is `KernelMmioMapper` (`kernel/virtio`),
+which routes every request through the capability-gated
+`rustos_kernel_sec::map_mmio` path; it lives in `kernel/virtio`, not in
+`drvhost`, so the host crate stays free of every `kernel/*` dependency
+and the `MmioMapper` trait it implements lives in `lib/abi` (`AGENTS.md`
+§17.4). Unlike the per-load boxed virtio host, the mapper is borrowed
+for the host's lifetime and lent unchanged to every driver load — its
+own window bitmap is the per-load state. The in-kernel composition that
+wires both seams at once (a bus driver that maps register windows *and*
+carves a DMA region — the VL805 xHCI behind the BCM2711 PCIe root
+complex, `plans/PI.md` P10) is `rustos_kernel::run_with_driver_host`
+(`kernel/rustos-kernel/src/driver_host.rs`).
 
 ### Audit sink
 

@@ -120,6 +120,21 @@ pub mod ioapic_controller;
 #[cfg(kernel_isa = "x86_64")]
 pub mod virtio_boot;
 
+// The in-kernel `DriverHost` composition (`plans/PI.md` P10): assembles a
+// `drvhost::Host` that serves a loaded driver both an MMIO mapper and a
+// per-driver DMA host, so a non-virtio, DMA-driving bus driver (the VL805
+// xHCI behind the BCM2711 PCIe root complex) can map its own register
+// windows and carve its DMA region through the capability-gated kernel
+// facilities. The helper itself is generic over the page-table backend;
+// it is gated on `kernel_isa = "x86_64"` (as `virtio_boot` is) because
+// `rustos-drvhost` / `rustos-kernel-virtio` are target-conditional
+// dependencies of this crate today — the host-only `cargo test`/clippy run
+// (x86_64) exercises and proves it, and the aarch64 metal boot invocation
+// that consumes it lands with its own dependency additions and gate
+// extension (`plans/PI.md` P10 "Remaining").
+#[cfg(kernel_isa = "x86_64")]
+pub mod driver_host;
+
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub mod boot;
 
@@ -256,6 +271,8 @@ pub use arch_wrapper::BinArch;
 pub use arch_wrapper_aarch64::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 #[cfg(kernel_isa = "x86_64")]
 pub use dispatch::{production_dispatch, DISPATCH_SLOT};
+#[cfg(kernel_isa = "x86_64")]
+pub use driver_host::{run_with_driver_host, DriverHostConfig};
 #[cfg(kernel_isa = "x86_64")]
 pub use virtio_boot::{provision_and_run, VirtioBootConfig};
 // The architecture-neutral virtio factory and provisioning walks now
