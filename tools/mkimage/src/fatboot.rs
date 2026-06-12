@@ -5,7 +5,11 @@
 //! system — so the author and the consumer share one on-disk definition
 //! (`AGENTS.md` §2.2). It carries exactly what the Pi GPU bootloader
 //! reads: the verified firmware blobs, the generated `config.txt`, and the
-//! flat `kernel8.img`.
+//! flat `kernel8.img`. It also carries the volume's plaintext
+//! [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor) — the
+//! salt + iteration count the bootstrap reads *before* anything is
+//! decrypted, to turn the operator passphrase into the encrypted root's
+//! volume key (`AGENTS.md` §11).
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_drv_fs_fat32::Fat32;
@@ -19,6 +23,15 @@ pub const KERNEL_IMG_NAME: &str = "kernel8.img";
 
 /// Name of the generated firmware configuration file.
 pub const CONFIG_TXT_NAME: &str = "config.txt";
+
+/// Name of the root volume's plaintext key-derivation descriptor
+/// (`AGENTS.md` §11). The bootstrap reads it off this partition *before*
+/// mounting the encrypted root, derives the volume key from the operator
+/// passphrase under the descriptor's salt + iteration count, and only
+/// then opens the root. It carries no secret — only the public KDF
+/// parameters (see
+/// [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor)).
+pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
 
 /// Render the `config.txt` the Pi firmware boots RustOS with.
 ///
@@ -52,7 +65,10 @@ pub fn config_txt(with_armstub: bool) -> String {
 }
 
 /// Author the FAT32 boot partition: format `sectors` sectors and plant the
-/// firmware blobs, `config.txt`, and `kernel8.img`.
+/// firmware blobs, `config.txt`, `kernel8.img`, and the root volume's
+/// `unlock_descriptor` (the encoded
+/// [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor) bytes, at
+/// [`ROOT_UNLOCK_NAME`]).
 ///
 /// # Errors
 ///
@@ -61,6 +77,7 @@ pub fn build_boot_partition(
     sectors: u64,
     firmware: &[FirmwareFile],
     kernel8: &[u8],
+    unlock_descriptor: &[u8],
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::BootPartition)?;
     let mut fs = Fat32::format(dev).map_err(MkimageError::BootPartition)?;
@@ -73,6 +90,7 @@ pub fn build_boot_partition(
     }
     plant(&mut fs, CONFIG_TXT_NAME, config.as_bytes())?;
     plant(&mut fs, KERNEL_IMG_NAME, kernel8)?;
+    plant(&mut fs, ROOT_UNLOCK_NAME, unlock_descriptor)?;
 
     fs.flush().map_err(MkimageError::BootPartition)?;
     Ok(fs.into_block().into_bytes())
@@ -153,7 +171,8 @@ mod tests {
     #[test]
     fn plants_firmware_config_and_kernel() {
         let kernel8 = vec![0x44u8; 8192];
-        let bytes = build_boot_partition(TEST_SECTORS, &test_firmware(), &kernel8)
+        let unlock = [0x66u8; 28];
+        let bytes = build_boot_partition(TEST_SECTORS, &test_firmware(), &kernel8, &unlock)
             .expect("boot partition builds");
         assert_eq!(
             bytes.len(),
@@ -170,6 +189,7 @@ mod tests {
             vec![0x55; 256]
         );
         assert_eq!(read_back(&mut fs, KERNEL_IMG_NAME), kernel8);
+        assert_eq!(read_back(&mut fs, ROOT_UNLOCK_NAME), unlock.to_vec());
 
         let config = read_back(&mut fs, CONFIG_TXT_NAME);
         let config = core::str::from_utf8(&config).expect("config.txt is UTF-8");
@@ -189,7 +209,7 @@ mod tests {
             name: "armstub8.bin".into(),
             bytes: vec![0x55; 256],
         });
-        let bytes = build_boot_partition(TEST_SECTORS, &firmware, &[0x44u8; 16])
+        let bytes = build_boot_partition(TEST_SECTORS, &firmware, &[0x44u8; 16], &[0x66u8; 28])
             .expect("boot partition builds");
 
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
@@ -203,6 +223,6 @@ mod tests {
     #[test]
     fn fails_closed_when_the_partition_cannot_hold_the_content() {
         // A device too small to even format must error, never panic.
-        assert!(build_boot_partition(8, &test_firmware(), &[0x44u8; 16]).is_err());
+        assert!(build_boot_partition(8, &test_firmware(), &[0x44u8; 16], &[0x66u8; 28]).is_err());
     }
 }

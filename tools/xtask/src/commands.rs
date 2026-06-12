@@ -860,7 +860,6 @@ struct ImageArgs {
     firmware_dir: Option<PathBuf>,
     profile: rustos_mkimage::ImageProfile,
     out: Option<PathBuf>,
-    root_key: Option<PathBuf>,
 }
 
 /// Parse `image` arguments: `--target <name>` (required; only
@@ -868,14 +867,15 @@ struct ImageArgs {
 /// `$RUSTOS_PI_FIRMWARE`; optional — missing blobs are fetched from the
 /// manifest's pinned source otherwise), `--profile debug|installer`
 /// (default `debug` — the development image seeds the test `root` account;
-/// the installer image seeds none), `--out <path>`, `--root-key <file>`,
-/// and `--headless`.
+/// the installer image seeds none), `--out <path>`, and `--headless`. The
+/// root volume key is derived from a blank passphrase
+/// (`rustos_mkimage::IMAGE_PASSPHRASE`, `AGENTS.md` §11); there is no
+/// operator-supplied key.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     let mut target: Option<String> = None;
     let mut firmware_dir: Option<PathBuf> = None;
     let mut profile: Option<rustos_mkimage::ImageProfile> = None;
     let mut out: Option<PathBuf> = None;
-    let mut root_key: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let Some(flag) = flag.to_str() else {
@@ -908,11 +908,6 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
                     it.next().ok_or("image: --out requires a value")?,
                 ));
             }
-            "--root-key" => {
-                root_key = Some(PathBuf::from(
-                    it.next().ok_or("image: --root-key requires a value")?,
-                ));
-            }
             // The image carries the kernel and the root skeleton only; the
             // desktop ships as installable userland later, so the headless
             // image is byte-identical today. Accepted so the §17.5 headless
@@ -934,7 +929,6 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
         firmware_dir,
         profile: profile.unwrap_or(rustos_mkimage::ImageProfile::Debug),
         out,
-        root_key,
     })
 }
 
@@ -1003,21 +997,6 @@ fn fetch_missing_firmware(
     Ok(())
 }
 
-/// The root volume key for the image: read from the operator-supplied key
-/// file when given, otherwise drawn fresh from host entropy.
-fn resolve_root_key(root_key: Option<&Path>) -> Result<rustos_mkimage::VolumeKey, String> {
-    if let Some(path) = root_key {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("image: cannot read {}: {e}", path.display()))?;
-        rustos_mkimage::volume_key_from_hex(&text).map_err(|e| format!("image: {e}"))
-    } else {
-        let mut key = [0u8; rustos_mkimage::VOLUME_KEY_LEN];
-        rustos_mkimage::EntropySource::fill(&mut rustos_mkimage::HostEntropy, &mut key)
-            .map_err(|e| format!("image: host entropy unavailable: {e:?}"))?;
-        Ok(key)
-    }
-}
-
 /// The Cargo build profile the production kernel is compiled with for a
 /// given image profile, as `(extra cargo args, target subdirectory)`.
 ///
@@ -1048,7 +1027,6 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         firmware_dir,
         profile,
         out,
-        root_key,
     } = parse_image_args(args)?;
 
     // 1. Build the freestanding aarch64 production kernel (PI.md P1) in
@@ -1102,12 +1080,10 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         )
     })?;
 
-    let key = resolve_root_key(root_key.as_deref())?;
-
     let built = rustos_mkimage::build_rpi_image(
         &kernel_elf,
         &firmware,
-        &key,
+        rustos_mkimage::IMAGE_PASSPHRASE,
         &mut rustos_mkimage::HostEntropy,
         profile,
     )

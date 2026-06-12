@@ -7,8 +7,14 @@
 //!     [--manifest <firmware.lock>] \
 //!     [--profile debug|installer] \
 //!     [--out images/rustos-aarch64-rpi-<profile>.img] \
-//!     [--root-key <key file>] [--root-key-out <key file>]
+//!     [--root-key-out <key file>]
 //! ```
+//!
+//! The root volume is encrypted under a key **derived** from a blank
+//! passphrase (`rustos_mkimage::IMAGE_PASSPHRASE`, `AGENTS.md` §11); the
+//! unlock descriptor travels on the boot partition. `--root-key-out`
+//! names where the derived key is written for host-side mounting (default
+//! `<out>.rootkey`).
 //!
 //! The normal entry point is `cargo xtask image --target aarch64-rpi`
 //! (or `cargo xtask build --target aarch64-rpi`), which builds the kernel
@@ -22,8 +28,7 @@ use std::process::ExitCode;
 
 use rustos_mkimage::firmware::FirmwareManifest;
 use rustos_mkimage::{
-    build_rpi_image, volume_key_from_hex, volume_key_to_hex, EntropySource, HostEntropy,
-    ImageProfile, VolumeKey,
+    build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile, IMAGE_PASSPHRASE,
 };
 
 fn main() -> ExitCode {
@@ -44,7 +49,6 @@ struct RpiArgs {
     manifest: PathBuf,
     profile: ImageProfile,
     out: PathBuf,
-    root_key_in: Option<PathBuf>,
     root_key_out: Option<PathBuf>,
 }
 
@@ -67,22 +71,10 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     let kernel_elf = std::fs::read(&rpi.kernel)
         .map_err(|e| format!("cannot read kernel ELF {}: {e}", rpi.kernel.display()))?;
 
-    let root_key: VolumeKey = if let Some(path) = &rpi.root_key_in {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read root-key file {}: {e}", path.display()))?;
-        volume_key_from_hex(&text).map_err(|e| e.to_string())?
-    } else {
-        let mut key = [0u8; rustos_mkimage::VOLUME_KEY_LEN];
-        HostEntropy
-            .fill(&mut key)
-            .map_err(|e| format!("host entropy unavailable: {e:?}"))?;
-        key
-    };
-
     let built = build_rpi_image(
         &kernel_elf,
         &firmware,
-        &root_key,
+        IMAGE_PASSPHRASE,
         &mut HostEntropy,
         rpi.profile,
     )
@@ -111,8 +103,11 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
-/// Write the root-key file with owner-only permissions: it is the mount
-/// secret for the image's root volume (`AGENTS.md` §5.4 secret hygiene).
+/// Write the derived root-key file with owner-only permissions: it is the
+/// mount key for the image's root volume (`AGENTS.md` §5.4 secret
+/// hygiene). For these blank-passphrase images it can also be re-derived
+/// from the on-image unlock descriptor; the file is an operator
+/// convenience for mounting the volume on a host.
 fn write_key_file(path: &std::path::Path, body: &str) -> Result<(), String> {
     std::fs::write(path, body)
         .map_err(|e| format!("cannot write root-key file {}: {e}", path.display()))?;
@@ -131,7 +126,6 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
     let mut manifest = None;
     let mut profile = None;
     let mut out = None;
-    let mut root_key_in = None;
     let mut root_key_out = None;
 
     let mut it = rest.iter();
@@ -158,7 +152,6 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
                 })?);
             }
             "--out" => out = Some(value("--out")?),
-            "--root-key" => root_key_in = Some(value("--root-key")?),
             "--root-key-out" => root_key_out = Some(value("--root-key-out")?),
             other => return Err(format!("unknown argument {other}\n{}", usage())),
         }
@@ -175,7 +168,6 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
         out: out.unwrap_or_else(|| {
             PathBuf::from(format!("images/rustos-aarch64-rpi-{}.img", profile.label()))
         }),
-        root_key_in,
         root_key_out,
     })
 }
@@ -183,6 +175,6 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
 fn usage() -> String {
     "usage: rustos-mkimage rpi --kernel <elf> --firmware <dir> \
      [--manifest <firmware.lock>] [--profile debug|installer] [--out <img>] \
-     [--root-key <file>] [--root-key-out <file>]"
+     [--root-key-out <file>]"
         .into()
 }

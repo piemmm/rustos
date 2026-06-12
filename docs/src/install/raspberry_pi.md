@@ -27,8 +27,15 @@ Two image profiles exist (`--profile`, default `debug`):
 | Region | Contents |
 | --- | --- |
 | Sector 0 | MBR: two primary partitions, `0x55AA` signature |
-| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img` |
-| Partition 2 (`0x7F`, RustFS, 64 MiB) | encrypted root volume with the `AGENTS.md` §16 skeleton (`/System`, `/Users`, `/Apps`, `/Storage`) |
+| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, `root.unlock` |
+| Partition 2 (`0x7F`, RustFS, 64 MiB) | encrypted root volume with the `AGENTS.md` §16 skeleton (`/System`, `/Users`, `/Apps`, `/Storage`), unlocked by a passphrase-derived key |
+
+`root.unlock` is the root volume's plaintext key-derivation descriptor
+(`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count
+the bootstrap reads — before anything is decrypted — to turn the
+operator passphrase into the volume key. It is the analogue of a LUKS
+header and carries no secret. The passphrase is never stored on the
+image.
 
 `kernel8.img` is the freestanding aarch64 `rustos-kernel` ELF (release
 profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
@@ -85,15 +92,27 @@ manifest, and writes (for the default `debug` profile; pass
 `--profile installer` for the installer image):
 
 - `images/rustos-aarch64-rpi-debug.img` — the flashable image.
-- `images/rustos-aarch64-rpi-debug.rootkey` — the root volume key (64 hex
-  digits, owner-readable only).
+- `images/rustos-aarch64-rpi-debug.rootkey` — the derived root volume key
+  (64 hex digits, owner-readable only).
 
-RustFS has no plaintext mode, so the root partition is provisioned under
-a fresh random volume key on every build. **Keep the `.rootkey` file**:
-mounting the root volume requires it, and it exists nowhere inside the
-image. Pass `--root-key <file>` to rebuild an image under a previously
-generated key. The first-boot installer (`AGENTS.md` §11, PLAN.md
-Stage 8) re-provisions the volume under the user's own credentials.
+RustFS has no plaintext mode, so the root partition is always encrypted.
+Its volume key is **derived from a passphrase** (`AGENTS.md` §11): the
+build provisions a per-volume `root.unlock` descriptor (random salt +
+PBKDF2 cost), runs the passphrase through it to a 256-bit key, and
+provisions the root under that key. Both `mkimage` profiles use a
+**blank** passphrase — these are special-case images (the debug image
+must never ship; the installer image's root is re-provisioned on first
+boot), so neither prompts and the key is auto-derived. The volume is
+still fully encrypted under a real, salt-derived key. The `.rootkey`
+file is that derived key, written for mounting the volume on a host; it
+can equally be re-derived from the on-image `root.unlock` descriptor and
+the blank passphrase.
+
+A shippable, user-installed root is different: the first-boot installer
+(`AGENTS.md` §11, PLAN.md Stage 8) provisions the volume under a
+passphrase the **user chooses**, writes its `root.unlock` descriptor,
+and the production boot then prompts for that passphrase before mounting.
+A blank default is never used for a user's own data.
 
 ## Flashing and first boot
 

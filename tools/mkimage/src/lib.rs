@@ -16,9 +16,15 @@
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
 //!   aarch64 `rustos-kernel` ELF flattened by [`elfflat`].
 //! - **Root partition** ([`rootfs`], `RustFS`, [`ROOT_PART_SECTORS`]): an
-//!   encrypted volume carrying the `AGENTS.md` §16 directory skeleton.
-//!   The volume key is drawn per image and returned to the operator; it is
-//!   never stored inside the image.
+//!   encrypted volume carrying the `AGENTS.md` §16 directory skeleton. Its
+//!   volume key is **derived from a passphrase** (`AGENTS.md` §11): the
+//!   build provisions an
+//!   [`UnlockDescriptor`] (a
+//!   per-volume random salt + PBKDF2 iteration count), derives the volume
+//!   key from [`IMAGE_PASSPHRASE`] under it, provisions the root with that
+//!   key, and lays the plaintext descriptor on the boot partition
+//!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
+//!   before mounting. The passphrase itself is never stored in the image.
 //!
 //! Two [`ImageProfile`]s exist. **Installer** is the shippable form: the
 //! root carries no user accounts, and the §11 installer authors
@@ -42,7 +48,10 @@ pub mod firmware;
 pub mod mbr;
 pub mod rootfs;
 
-pub use rustos_drv_fs_rustfs::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
+pub use rustos_drv_fs_rustfs::{
+    EntropySource, UnlockDescriptor, VolumeKey, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
+    VOLUME_KEY_LEN,
+};
 
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
@@ -90,8 +99,8 @@ pub enum MkimageError {
     RootPartition(DriverError),
     /// Host randomness for the volume key is unavailable.
     Entropy(String),
-    /// A volume-key file is malformed.
-    VolumeKeyFile(String),
+    /// Provisioning or encoding the passphrase-unlock descriptor failed.
+    Unlock(DriverError),
     /// Authoring the seeded user database failed.
     UsersDb(String),
 }
@@ -106,7 +115,7 @@ impl fmt::Display for MkimageError {
             Self::BootPartition(err) => write!(f, "boot partition: driver error {err:?}"),
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
-            Self::VolumeKeyFile(msg) => write!(f, "volume-key file: {msg}"),
+            Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
         }
     }
@@ -156,6 +165,21 @@ pub const DEBUG_USERNAME: &str = "root";
 /// ship; the installer image seeds no account at all.
 pub const DEBUG_PASSWORD: &str = "root";
 
+/// Passphrase the `rustos-mkimage` images' encrypted root is unlocked
+/// with — **blank** for both profiles (`AGENTS.md` §11).
+///
+/// These are special-case images: the debug image must never ship, and
+/// the installer image's root is **re-provisioned by the §11 installer**,
+/// which sets the user's real, operator-chosen passphrase when it authors
+/// the production root on first boot. Until then a blank passphrase is
+/// auto-entered, so neither image prompts. The volume is still fully
+/// encrypted: a blank passphrase is run through PBKDF2 over the
+/// descriptor's per-volume random salt to derive a real 256-bit
+/// [`VolumeKey`], exactly as a typed one would be. A shippable,
+/// user-installed root MUST be unlocked by a passphrase the operator
+/// chooses at install time — never this blank default.
+pub const IMAGE_PASSPHRASE: &[u8] = b"";
+
 /// Build the debug-profile `/System/Security/Users` text: the single
 /// `root` account, its password salted from `entropy` and hashed at the
 /// default PBKDF2 cost, granted the administrative capability ceiling a
@@ -204,8 +228,16 @@ fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageErro
 pub struct RpiImage {
     /// The flashable image bytes ([`IMAGE_SECTORS`] sectors).
     pub image: Vec<u8>,
-    /// The root volume key the image was provisioned under. Mounting the
-    /// root requires it; it exists nowhere inside the image.
+    /// The passphrase-unlock descriptor the root was provisioned under,
+    /// laid down in the clear on the boot partition
+    /// ([`fatboot::ROOT_UNLOCK_NAME`]). It is not a secret — only the salt
+    /// and iteration count needed to re-derive the volume key from the
+    /// passphrase.
+    pub unlock: UnlockDescriptor,
+    /// The root volume key the image was provisioned under, derived from
+    /// [`IMAGE_PASSPHRASE`] and [`Self::unlock`]. Mounting the root needs
+    /// it; the key itself is stored nowhere inside the image (it can be
+    /// re-derived from the on-image descriptor and the passphrase).
     pub root_key: VolumeKey,
 }
 
@@ -213,21 +245,29 @@ pub struct RpiImage {
 ///
 /// `kernel_elf` is the freestanding aarch64 `rustos-kernel` ELF;
 /// `firmware` is the verified blob set from
-/// [`firmware::FirmwareManifest::load_dir`]; `root_key` is the volume key
-/// to provision the root under (drawn from [`HostEntropy`] by the CLI);
-/// `entropy` seeds the root volume's internal key hierarchy and, on a
-/// debug build, the seeded account's password salt; `profile` selects the
-/// [`ImageProfile`].
+/// [`firmware::FirmwareManifest::load_dir`]; `passphrase` is the operator
+/// passphrase the root's volume key is derived from (blank for both
+/// `rustos-mkimage` profiles — see [`IMAGE_PASSPHRASE`]); `entropy` draws
+/// the unlock descriptor's salt, the root volume's internal key
+/// hierarchy, and, on a debug build, the seeded account's password salt;
+/// `profile` selects the [`ImageProfile`].
+///
+/// The root is encrypted under a [`VolumeKey`] **derived** from
+/// `passphrase` through a freshly provisioned
+/// [`UnlockDescriptor`]; the
+/// plaintext descriptor is laid on the boot partition
+/// ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap re-derives the key
+/// from the passphrase before mounting (`AGENTS.md` §11).
 ///
 /// # Errors
 ///
-/// Any [`MkimageError`] from the kernel conversion, partition authoring,
-/// or assembly; the build fails closed rather than emitting a partial
-/// image.
+/// Any [`MkimageError`] from the kernel conversion, descriptor
+/// provisioning, partition authoring, or assembly; the build fails closed
+/// rather than emitting a partial image.
 pub fn build_rpi_image(
     kernel_elf: &[u8],
     firmware: &[FirmwareFile],
-    root_key: &VolumeKey,
+    passphrase: &[u8],
     entropy: &mut dyn EntropySource,
     profile: ImageProfile,
 ) -> Result<RpiImage, MkimageError> {
@@ -236,10 +276,27 @@ pub fn build_rpi_image(
         ImageProfile::Installer => None,
     };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
-    let boot = fatboot::build_boot_partition(u64::from(BOOT_PART_SECTORS), firmware, &kernel8)?;
+
+    // Derive the root volume key from the passphrase under a fresh
+    // per-volume descriptor, then lay the (non-secret) descriptor beside
+    // the volume on the boot partition so the bootstrap can re-derive it.
+    let unlock = UnlockDescriptor::provision(UNLOCK_DEFAULT_ITERATIONS, entropy)
+        .map_err(MkimageError::Unlock)?;
+    let root_key = unlock.derive_volume_key(passphrase);
+    let mut descriptor = [0u8; UNLOCK_DESCRIPTOR_LEN];
+    unlock
+        .encode(&mut descriptor)
+        .map_err(MkimageError::Unlock)?;
+
+    let boot = fatboot::build_boot_partition(
+        u64::from(BOOT_PART_SECTORS),
+        firmware,
+        &kernel8,
+        &descriptor,
+    )?;
     let root = rootfs::build_root_partition(
         u64::from(ROOT_PART_SECTORS),
-        root_key,
+        &root_key,
         entropy,
         users_db.as_deref(),
     )?;
@@ -266,7 +323,8 @@ pub fn build_rpi_image(
 
     Ok(RpiImage {
         image,
-        root_key: *root_key,
+        unlock,
+        root_key,
     })
 }
 
@@ -296,34 +354,6 @@ pub fn volume_key_to_hex(key: &VolumeKey) -> String {
     }
     text.push('\n');
     text
-}
-
-/// Parse a key file written by [`volume_key_to_hex`].
-///
-/// # Errors
-///
-/// [`MkimageError::VolumeKeyFile`] unless the trimmed body is exactly 64
-/// hex digits.
-pub fn volume_key_from_hex(text: &str) -> Result<VolumeKey, MkimageError> {
-    let body = text.trim();
-    let bytes = body.as_bytes();
-    if bytes.len() != VOLUME_KEY_LEN * 2 {
-        return Err(MkimageError::VolumeKeyFile(
-            "a volume-key file holds exactly 64 hex digits".into(),
-        ));
-    }
-    let mut key = [0u8; VOLUME_KEY_LEN];
-    for (i, pair) in bytes.chunks_exact(2).enumerate() {
-        let hi = (pair[0] as char)
-            .to_digit(16)
-            .ok_or_else(|| MkimageError::VolumeKeyFile("non-hex digit".into()))?;
-        let lo = (pair[1] as char)
-            .to_digit(16)
-            .ok_or_else(|| MkimageError::VolumeKeyFile("non-hex digit".into()))?;
-        key[i] = u8::try_from(hi * 16 + lo)
-            .map_err(|_| MkimageError::VolumeKeyFile("non-hex digit".into()))?;
-    }
-    Ok(key)
 }
 
 #[cfg(test)]
@@ -371,18 +401,35 @@ mod tests {
         ]
     }
 
+    /// Read the encoded unlock descriptor planted on a built image's FAT
+    /// boot partition.
+    fn read_unlock_descriptor(image: &[u8]) -> UnlockDescriptor {
+        let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
+        let boot_len = BOOT_PART_SECTORS as usize * SECTOR_BYTES;
+        let boot = image[boot_at..boot_at + boot_len].to_vec();
+        let mut fat = Fat32::open(MemBlock::from_bytes(boot).expect("whole sectors"))
+            .expect("boot partition mounts");
+        let root = fat.root();
+        let node = fat
+            .lookup(root, fatboot::ROOT_UNLOCK_NAME.as_bytes())
+            .expect("root.unlock present");
+        let mut bytes = [0u8; UNLOCK_DESCRIPTOR_LEN];
+        let n = fat.read_at(node, 0, &mut bytes).expect("descriptor reads");
+        assert_eq!(n, UNLOCK_DESCRIPTOR_LEN);
+        UnlockDescriptor::decode(&bytes).expect("descriptor decodes")
+    }
+
     #[test]
     fn assembles_a_flashable_image_both_partitions_mount() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            &TEST_KEY,
+            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer,
         )
         .expect("image builds");
         assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
-        assert_eq!(built.root_key, TEST_KEY);
 
         // The MBR carries the expected table.
         assert_eq!(built.image[510], 0x55);
@@ -406,13 +453,22 @@ mod tests {
         let info = fat.node_info(node).expect("kernel node info");
         assert_eq!(info.kind, NodeKind::RegularFile);
 
-        // The root partition mounts under the provisioned key.
+        // The on-disk descriptor re-derives exactly the volume key the
+        // image was provisioned under (the bootstrap's path, §11).
+        let descriptor = read_unlock_descriptor(&built.image);
+        assert_eq!(descriptor, built.unlock);
+        assert_eq!(
+            descriptor.derive_volume_key(IMAGE_PASSPHRASE),
+            built.root_key
+        );
+
+        // The root partition mounts under that re-derived key.
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
         let mut rfs = RustFs::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &TEST_KEY,
+            &descriptor.derive_volume_key(IMAGE_PASSPHRASE),
         )
         .expect("root partition mounts");
         let rustfs_root = rfs.root();
@@ -427,11 +483,37 @@ mod tests {
     }
 
     #[test]
+    fn the_root_only_mounts_under_the_passphrase_derived_key() {
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            IMAGE_PASSPHRASE,
+            &mut TestEntropy(9),
+            ImageProfile::Installer,
+        )
+        .expect("image builds");
+        let descriptor = read_unlock_descriptor(&built.image);
+
+        // A wrong passphrase derives a different key, which the volume's
+        // AEAD-wrapped master key rejects — no separate oracle (§5.4).
+        let wrong = descriptor.derive_volume_key(b"not the passphrase");
+        assert_ne!(wrong, built.root_key);
+        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
+        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
+        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        assert!(RustFs::open(
+            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
+            &wrong,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn a_debug_image_seeds_a_root_account_that_authenticates() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            &TEST_KEY,
+            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Debug,
         )
@@ -442,7 +524,7 @@ mod tests {
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
         let mut rfs = RustFs::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &TEST_KEY,
+            &built.root_key,
         )
         .expect("root partition mounts");
         let rustfs_root = rfs.root();
@@ -473,7 +555,7 @@ mod tests {
         assert!(build_rpi_image(
             b"not an elf",
             &test_firmware(),
-            &TEST_KEY,
+            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer
         )
@@ -494,14 +576,12 @@ mod tests {
     }
 
     #[test]
-    fn volume_key_hex_round_trips_and_rejects_garbage() {
+    fn volume_key_renders_as_hex() {
         let text = volume_key_to_hex(&TEST_KEY);
         assert_eq!(text.len(), VOLUME_KEY_LEN * 2 + 1);
-        assert_eq!(volume_key_from_hex(&text).expect("round trip"), TEST_KEY);
-
-        assert!(volume_key_from_hex("too short").is_err());
-        let bad = "zz".repeat(VOLUME_KEY_LEN);
-        assert!(volume_key_from_hex(&bad).is_err());
+        assert!(text.ends_with('\n'));
+        assert!(text.trim().bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(text.starts_with("4242"));
     }
 
     #[test]

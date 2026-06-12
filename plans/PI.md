@@ -1907,9 +1907,17 @@ remains (pending hardware).
   the §16 skeleton (`/System` + its twelve subdirectories incl.
   `Security/{Keys,Policy}`, `/Users`, `/Apps`, `/Storage`); the §11
   databases/users are the installer's first-boot job. The volume key is
-  drawn per build from host entropy and written to the sibling
-  `…-rpi.rootkey` file (0600) — never stored inside the image;
-  `--root-key` rebuilds under a kept key.
+  **passphrase-derived** (§11): the build provisions a per-volume rustfs
+  `UnlockDescriptor` (random salt + PBKDF2 cost), derives the key from
+  `IMAGE_PASSPHRASE` (blank for both profiles — these are special-case
+  images: the debug image never ships, the installer image is
+  re-provisioned on first boot), provisions the root under it, and plants
+  the plaintext descriptor on the FAT boot partition as `root.unlock` (the
+  LUKS-header analogue the bootstrap reads before mounting). The derived
+  key is written to the sibling `…-rpi.rootkey` file (0600) for host
+  mounting — never inside the image, and re-derivable from `root.unlock` +
+  the blank passphrase. A shippable user root is unlocked by an
+  operator-chosen passphrase the installer sets, never a blank default.
 - Entry points: `cargo xtask image --target aarch64-rpi` and the
   delegating `cargo xtask build --target aarch64-rpi` (`--headless`
   accepted; the image content is identical until installable GUI userland
@@ -1917,11 +1925,13 @@ remains (pending hardware).
   `$RUSTOS_PI_FIRMWARE`; otherwise the pinned blobs are fetched
   automatically. The standalone `rustos-mkimage rpi` CLI mirrors the
   same flags (with `--firmware` required — no network I/O in mkimage).
-- 33 host tests: MBR encode/validation, ELF→flat layout + every refusal,
+- 38 host tests: MBR encode/validation, ELF→flat layout + every refusal,
   manifest parse/verify fail-closed (incl. the committed manifest),
   boot/root partition round-trips re-mounted through the real drivers,
-  wrong-key refusal, full-image assembly with both partitions mounted
-  from their MBR offsets. Docs: `docs/src/install/raspberry_pi.md`.
+  the `root.unlock` descriptor planted on FAT re-deriving the exact
+  volume key, a wrong-passphrase mount refusal (no separate oracle, §5.4),
+  and full-image assembly with both partitions mounted from their MBR
+  offsets. Docs: `docs/src/install/raspberry_pi.md`.
 
 **Remaining — metal:** boot the emitted image on a real Pi 4 per the
 flashing/first-boot doc and record the UART-log checklist (the P7/P8
@@ -2309,14 +2319,28 @@ two users — or the same user twice — can be logged in concurrently.
    (incl. the §19.9 TPM/secure-boot future hand-off, which seals the key
    to a measured boot and falls back to the passphrase).
 
+   **Image authoring is landed** (`tools/mkimage`): `build_rpi_image`
+   provisions a per-volume `UnlockDescriptor` (random salt +
+   `UNLOCK_DEFAULT_ITERATIONS`), derives the volume key from the blank
+   `IMAGE_PASSPHRASE` (both profiles — these are special-case images:
+   the debug image never ships, the installer image is re-provisioned at
+   install time), provisions the encrypted root under that derived key,
+   and plants the plaintext descriptor on the FAT boot partition as
+   `root.unlock` (`fatboot::ROOT_UNLOCK_NAME`). The obsolete raw
+   `--root-key` *input* is removed (a supplied key could not match the
+   on-image descriptor); the derived key is still emitted to `.rootkey`
+   for host mounting and is re-derivable from `root.unlock` + the blank
+   passphrase. Host-proven by the mkimage tests (the on-FAT descriptor
+   re-derives the exact key; a wrong passphrase is refused with no
+   separate oracle, §5.4). Docs: `docs/src/install/raspberry_pi.md`.
+
    **Still staged** (each its own increment; the chain end to end is
    gated on these):
-   - **Authoring.** The §11 installer flow provisions the user's
-     encrypted root under their chosen passphrase + writes the
-     descriptor; the debug Pi image bakes a known passphrase (never
-     shipped, like the debug `root` account). A shippable installer
-     image must **not** bake a known passphrase — the installed root is
-     provisioned at install time.
+   - **Installer-authored production root.** The §11 installer first-boot
+     flow provisions the *user's* encrypted root under their **chosen**
+     passphrase and writes its descriptor — a real, operator-set
+     passphrase, never the blank `mkimage` default. (The blank-passphrase
+     `mkimage` images above are the development/first-boot artefacts only.)
    - **Boot mount.** The production boot reads the descriptor from the
      boot partition, prompts for the passphrase on the console, derives
      the key, mounts the discovered root volume (EMMC2 on metal /
